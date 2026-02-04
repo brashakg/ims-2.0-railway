@@ -74,9 +74,9 @@ export interface AuthState {
 }
 
 export interface LoginCredentials {
-  email: string;
+  username: string;
   password: string;
-  storeId?: string;
+  store_id?: string;
   latitude?: number;
   longitude?: number;
 }
