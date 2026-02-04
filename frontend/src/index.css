@@ -37,6 +37,15 @@
 /* Custom font imports */
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
 
+/* Optician Sans - Specialized font for optical/prescription display */
+@font-face {
+  font-family: 'Optician Sans';
+  src: url('/fonts/Optician-Sans.woff') format('woff');
+  font-weight: normal;
+  font-style: normal;
+  font-display: swap;
+}
+
 /* Base styles */
 @layer base {
   html {

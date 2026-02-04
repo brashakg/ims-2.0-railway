@@ -43,6 +43,7 @@ export default {
       },
       fontFamily: {
         sans: ['Inter', 'system-ui', 'sans-serif'],
+        optician: ['"Optician Sans"', 'monospace'],
       },
       screens: {
         // Tablet-first breakpoints
