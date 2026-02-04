@@ -107,7 +107,6 @@ function KpiCard({ icon: Icon, iconBg, value, label, change, changeType, loading
 // ============================================================================
 
 interface ModuleCardProps {
-  moduleId: ModuleId;
   title: string;
   subtitle: string;
   icon: React.ComponentType<{ className?: string }>;
@@ -347,7 +346,6 @@ export default function DashboardPage() {
           {availableModules.map(module => (
             <ModuleCard
               key={module.id}
-              moduleId={module.id}
               title={module.title}
               subtitle={module.subtitle}
               icon={module.icon}
