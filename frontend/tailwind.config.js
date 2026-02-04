@@ -7,19 +7,33 @@ export default {
   theme: {
     extend: {
       colors: {
-        // Better Vision Brand Colors
+        // Better Vision Brand Colors (Gold/Brown - from bettervision.in)
+        'bv-gold': {
+          50: '#fdfaf7',
+          100: '#f9f0e6',
+          200: '#f2dcc8',
+          300: '#e8c3a0',
+          400: '#d4a373',
+          500: '#ba8659', // Primary Better Vision Gold
+          600: '#a67547',
+          700: '#8b5e3a',
+          800: '#6f4a2f',
+          900: '#533724',
+          950: '#2d1d14',
+        },
+        // Legacy alias for backwards compatibility
         'bv-red': {
-          50: '#fef2f2',
-          100: '#fee2e2',
-          200: '#fecaca',
-          300: '#fca5a5',
-          400: '#f87171',
-          500: '#ef4444',
-          600: '#CD201A', // Primary Better Vision Red
-          700: '#b91c1c',
-          800: '#991b1b',
-          900: '#7f1d1d',
-          950: '#450a0a',
+          50: '#fdfaf7',
+          100: '#f9f0e6',
+          200: '#f2dcc8',
+          300: '#e8c3a0',
+          400: '#d4a373',
+          500: '#ba8659',
+          600: '#a67547', // Primary (was #CD201A)
+          700: '#8b5e3a',
+          800: '#6f4a2f',
+          900: '#533724',
+          950: '#2d1d14',
         },
         // WizOpt Brand Colors (Teal/Blue)
         'wz-teal': {
@@ -42,7 +56,8 @@ export default {
         'info': '#3B82F6',
       },
       fontFamily: {
-        sans: ['Inter', 'system-ui', 'sans-serif'],
+        sans: ['Nunito', 'Inter', 'system-ui', 'sans-serif'],
+        optician: ['"Optician Sans"', 'monospace'],
       },
       screens: {
         // Tablet-first breakpoints

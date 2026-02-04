@@ -10,10 +10,22 @@ from contextlib import asynccontextmanager
 import time
 import logging
 import os
+import sys
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Add parent directory to path for database imports
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# Database connection
+try:
+    from database.connection import init_db, close_db, get_db, DatabaseConfig
+    DATABASE_AVAILABLE = True
+except ImportError:
+    DATABASE_AVAILABLE = False
+    logger.warning("Database module not available - running in stub mode")
 
 # Import routers
 from .routers import (
@@ -39,10 +51,29 @@ from .routers import (
 async def lifespan(app: FastAPI):
     # Startup
     logger.info("🚀 Starting IMS 2.0 API Server...")
-    # Initialize database connection here if needed
+
+    # Initialize database connection
+    if DATABASE_AVAILABLE:
+        mongo_url = os.getenv("MONGODB_URL") or os.getenv("MONGO_URL")
+        if mongo_url:
+            config = DatabaseConfig.from_uri(mongo_url, database="ims_2_0")
+        else:
+            config = DatabaseConfig.from_env()
+
+        if init_db(config):
+            logger.info("✅ Database connection established")
+        else:
+            logger.warning("⚠️ Database not connected - running in mock mode")
+    else:
+        logger.info("📦 Running without database (stub mode)")
+
     yield
+
     # Shutdown
     logger.info("🛑 Shutting down IMS 2.0 API Server...")
+    if DATABASE_AVAILABLE:
+        close_db()
+        logger.info("🔌 Database connection closed")
 
 
 # Create FastAPI application
@@ -89,10 +120,12 @@ async def global_exception_handler(request: Request, exc: Exception):
 # Health check endpoint
 @app.get("/health", tags=["Health"])
 async def health_check():
+    db_status = "connected" if DATABASE_AVAILABLE and get_db().is_connected else "disconnected"
     return {
         "status": "healthy",
         "service": "IMS 2.0 API",
-        "version": "2.0.0"
+        "version": "2.0.0",
+        "database": db_status
     }
 
 
