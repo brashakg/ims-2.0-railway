@@ -114,7 +114,7 @@ export function PhotochromicLoader({
         {/* Bridge (center piece connecting lenses) */}
         <path
           d="M 82 24 Q 90 28 98 24"
-          stroke="{`url(#${frameGradientId})`}"
+          stroke={`url(#${frameGradientId})`}
           strokeWidth="5"
           fill="none"
           strokeLinecap="round"
@@ -123,7 +123,7 @@ export function PhotochromicLoader({
         {/* Left Temple Arm (hint) */}
         <path
           d="M 8 22 L 2 20"
-          stroke="{`url(#${frameGradientId})`}"
+          stroke={`url(#${frameGradientId})`}
           strokeWidth="4"
           strokeLinecap="round"
         />
@@ -131,7 +131,7 @@ export function PhotochromicLoader({
         {/* Right Temple Arm (hint) */}
         <path
           d="M 172 22 L 178 20"
-          stroke="{`url(#${frameGradientId})`}"
+          stroke={`url(#${frameGradientId})`}
           strokeWidth="4"
           strokeLinecap="round"
         />
@@ -146,7 +146,7 @@ export function PhotochromicLoader({
              L 24 60
              Q 8 58 8 44
              Z"
-          fill="{`url(#${frameGradientId})`}"
+          fill={`url(#${frameGradientId})`}
           stroke="#1a1a1a"
           strokeWidth="1"
         />
@@ -161,13 +161,13 @@ export function PhotochromicLoader({
              L 26 54
              Q 14 52 14 42
              Z"
-          fill="{`url(#${lensGradientId})`}"
+          fill={`url(#${lensGradientId})`}
           className="transition-all duration-300"
         />
         {/* Left Lens Reflection */}
         <path
           d="M 18 24 L 40 22 Q 45 22 45 26 L 45 32 Q 45 36 40 36 L 18 38 Q 16 38 16 34 Z"
-          fill="{`url(#${lensReflectionId})`}"
+          fill={`url(#${lensReflectionId})`}
         />
 
         {/* Right Lens Frame - Wayfarer shape */}
@@ -180,7 +180,7 @@ export function PhotochromicLoader({
              L 112 58
              Q 98 56 98 42
              Z"
-          fill="{`url(#${frameGradientId})`}"
+          fill={`url(#${frameGradientId})`}
           stroke="#1a1a1a"
           strokeWidth="1"
         />
@@ -195,13 +195,13 @@ export function PhotochromicLoader({
              L 115 52
              Q 104 50 104 40
              Z"
-          fill="{`url(#${lensGradientId})`}"
+          fill={`url(#${lensGradientId})`}
           className="transition-all duration-300"
         />
         {/* Right Lens Reflection */}
         <path
           d="M 110 24 L 135 22 Q 140 22 140 26 L 140 32 Q 140 36 135 36 L 110 38 Q 108 38 108 34 Z"
-          fill="{`url(#${lensReflectionId})`}"
+          fill={`url(#${lensReflectionId})`}
         />
       </svg>
 
