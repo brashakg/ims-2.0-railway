@@ -99,34 +99,344 @@ async def login(request: LoginRequest):
     """
     Authenticate user and return JWT token
     """
-    # TODO: Replace with actual database lookup
-    # Mock user for demonstration
+    # 36 Users across 10 roles for IMS 2.0
+    # Stores: BV-DEL, BV-NOI, BV-GUR, BV-MUM, BV-BLR, WO-MUM
     mock_users = {
+        # ============== SUPERADMIN (2) ==============
         "admin": {
             "user_id": "user-001",
             "username": "admin",
             "password_hash": hash_password("admin123"),
-            "full_name": "Admin User",
-            "roles": ["ADMIN", "SUPERADMIN"],
-            "store_ids": ["store-hq"],
+            "full_name": "System Administrator",
+            "roles": ["SUPERADMIN"],
+            "store_ids": ["BV-DEL", "BV-NOI", "BV-GUR", "BV-MUM", "BV-BLR", "WO-MUM"],
             "is_active": True
         },
-        "manager": {
+        "avinash.ceo": {
             "user_id": "user-002",
-            "username": "manager",
-            "password_hash": hash_password("manager123"),
-            "full_name": "Store Manager",
-            "roles": ["STORE_MANAGER"],
-            "store_ids": ["store-001"],
+            "username": "avinash.ceo",
+            "password_hash": hash_password("Ceo@2024"),
+            "full_name": "Avinash Kumar (CEO)",
+            "roles": ["SUPERADMIN"],
+            "store_ids": ["BV-DEL", "BV-NOI", "BV-GUR", "BV-MUM", "BV-BLR", "WO-MUM"],
             "is_active": True
         },
-        "staff": {
+        # ============== ADMIN / DIRECTORS (2) ==============
+        "director1": {
             "user_id": "user-003",
-            "username": "staff",
-            "password_hash": hash_password("staff123"),
-            "full_name": "Sales Staff",
+            "username": "director1",
+            "password_hash": hash_password("Dir@2024"),
+            "full_name": "Rajiv Sharma (Director - Operations)",
+            "roles": ["ADMIN"],
+            "store_ids": ["BV-DEL", "BV-NOI", "BV-GUR", "BV-MUM", "BV-BLR"],
+            "is_active": True
+        },
+        "director2": {
+            "user_id": "user-004",
+            "username": "director2",
+            "password_hash": hash_password("Dir@2024"),
+            "full_name": "Priya Singh (Director - Finance)",
+            "roles": ["ADMIN"],
+            "store_ids": ["BV-DEL", "BV-NOI", "BV-GUR", "BV-MUM", "BV-BLR"],
+            "is_active": True
+        },
+        # ============== AREA MANAGERS (2) ==============
+        "area.north": {
+            "user_id": "user-005",
+            "username": "area.north",
+            "password_hash": hash_password("Area@2024"),
+            "full_name": "Amit Verma (Area Manager - North)",
+            "roles": ["AREA_MANAGER"],
+            "store_ids": ["BV-DEL", "BV-NOI", "BV-GUR"],
+            "is_active": True
+        },
+        "area.west": {
+            "user_id": "user-006",
+            "username": "area.west",
+            "password_hash": hash_password("Area@2024"),
+            "full_name": "Sneha Patel (Area Manager - West)",
+            "roles": ["AREA_MANAGER"],
+            "store_ids": ["BV-MUM", "WO-MUM"],
+            "is_active": True
+        },
+        # ============== STORE MANAGERS (6) ==============
+        "rajesh.manager": {
+            "user_id": "user-007",
+            "username": "rajesh.manager",
+            "password_hash": hash_password("Store@2024"),
+            "full_name": "Rajesh Kumar",
+            "roles": ["STORE_MANAGER"],
+            "store_ids": ["BV-DEL"],
+            "is_active": True
+        },
+        "neha.manager": {
+            "user_id": "user-008",
+            "username": "neha.manager",
+            "password_hash": hash_password("Store@2024"),
+            "full_name": "Neha Gupta",
+            "roles": ["STORE_MANAGER"],
+            "store_ids": ["BV-NOI"],
+            "is_active": True
+        },
+        "vikram.manager": {
+            "user_id": "user-009",
+            "username": "vikram.manager",
+            "password_hash": hash_password("Store@2024"),
+            "full_name": "Vikram Singh",
+            "roles": ["STORE_MANAGER", "OPTOMETRIST"],
+            "store_ids": ["BV-GUR"],
+            "is_active": True
+        },
+        "pooja.manager": {
+            "user_id": "user-010",
+            "username": "pooja.manager",
+            "password_hash": hash_password("Store@2024"),
+            "full_name": "Pooja Shah",
+            "roles": ["STORE_MANAGER"],
+            "store_ids": ["BV-MUM"],
+            "is_active": True
+        },
+        "arjun.manager": {
+            "user_id": "user-011",
+            "username": "arjun.manager",
+            "password_hash": hash_password("Store@2024"),
+            "full_name": "Arjun Reddy",
+            "roles": ["STORE_MANAGER", "OPTOMETRIST"],
+            "store_ids": ["BV-BLR"],
+            "is_active": True
+        },
+        "deepak.workshop": {
+            "user_id": "user-012",
+            "username": "deepak.workshop",
+            "password_hash": hash_password("Store@2024"),
+            "full_name": "Deepak Mishra (Workshop Manager)",
+            "roles": ["STORE_MANAGER"],
+            "store_ids": ["WO-MUM"],
+            "is_active": True
+        },
+        # ============== ACCOUNTANTS (2) ==============
+        "accountant.delhi": {
+            "user_id": "user-013",
+            "username": "accountant.delhi",
+            "password_hash": hash_password("Acc@2024"),
+            "full_name": "Suresh Agarwal",
+            "roles": ["ACCOUNTANT"],
+            "store_ids": ["BV-DEL"],
+            "is_active": True
+        },
+        "accountant.mumbai": {
+            "user_id": "user-014",
+            "username": "accountant.mumbai",
+            "password_hash": hash_password("Acc@2024"),
+            "full_name": "Meera Joshi",
+            "roles": ["ACCOUNTANT"],
+            "store_ids": ["BV-MUM"],
+            "is_active": True
+        },
+        # ============== CATALOG MANAGER (1) ==============
+        "catalog.admin": {
+            "user_id": "user-015",
+            "username": "catalog.admin",
+            "password_hash": hash_password("Cat@2024"),
+            "full_name": "Rohit Malhotra",
+            "roles": ["CATALOG_MANAGER"],
+            "store_ids": ["BV-DEL", "BV-NOI", "BV-GUR", "BV-MUM", "BV-BLR", "WO-MUM"],
+            "is_active": True
+        },
+        # ============== HEAD OPTOMETRIST (1) ==============
+        "dr.sharma": {
+            "user_id": "user-016",
+            "username": "dr.sharma",
+            "password_hash": hash_password("Opt@2024"),
+            "full_name": "Dr. Anita Sharma (Head Optometrist)",
+            "roles": ["OPTOMETRIST"],
+            "store_ids": ["BV-DEL", "BV-NOI", "BV-GUR", "BV-MUM", "BV-BLR"],
+            "is_active": True
+        },
+        # ============== DELHI SALES STAFF (3) ==============
+        "sales.delhi1": {
+            "user_id": "user-017",
+            "username": "sales.delhi1",
+            "password_hash": hash_password("Staff@2024"),
+            "full_name": "Ravi Sharma",
             "roles": ["SALES_STAFF"],
-            "store_ids": ["store-001"],
+            "store_ids": ["BV-DEL"],
+            "is_active": True
+        },
+        "sales.delhi2": {
+            "user_id": "user-018",
+            "username": "sales.delhi2",
+            "password_hash": hash_password("Staff@2024"),
+            "full_name": "Anjali Verma",
+            "roles": ["SALES_STAFF"],
+            "store_ids": ["BV-DEL"],
+            "is_active": True
+        },
+        "sales.delhi3": {
+            "user_id": "user-019",
+            "username": "sales.delhi3",
+            "password_hash": hash_password("Staff@2024"),
+            "full_name": "Karan Mehta",
+            "roles": ["SALES_STAFF"],
+            "store_ids": ["BV-DEL"],
+            "is_active": True
+        },
+        # ============== NOIDA SALES STAFF (3) ==============
+        "sales.noida1": {
+            "user_id": "user-020",
+            "username": "sales.noida1",
+            "password_hash": hash_password("Staff@2024"),
+            "full_name": "Simran Kaur",
+            "roles": ["SALES_STAFF"],
+            "store_ids": ["BV-NOI"],
+            "is_active": True
+        },
+        "sales.noida2": {
+            "user_id": "user-021",
+            "username": "sales.noida2",
+            "password_hash": hash_password("Staff@2024"),
+            "full_name": "Rahul Jain",
+            "roles": ["SALES_STAFF"],
+            "store_ids": ["BV-NOI"],
+            "is_active": True
+        },
+        "sales.noida3": {
+            "user_id": "user-022",
+            "username": "sales.noida3",
+            "password_hash": hash_password("Staff@2024"),
+            "full_name": "Priyanka Mishra",
+            "roles": ["SALES_STAFF"],
+            "store_ids": ["BV-NOI"],
+            "is_active": True
+        },
+        # ============== GURGAON SALES STAFF (2) ==============
+        "sales.gurgaon1": {
+            "user_id": "user-023",
+            "username": "sales.gurgaon1",
+            "password_hash": hash_password("Staff@2024"),
+            "full_name": "Aditya Singh",
+            "roles": ["SALES_STAFF"],
+            "store_ids": ["BV-GUR"],
+            "is_active": True
+        },
+        "sales.gurgaon2": {
+            "user_id": "user-024",
+            "username": "sales.gurgaon2",
+            "password_hash": hash_password("Staff@2024"),
+            "full_name": "Kavita Rani",
+            "roles": ["SALES_STAFF"],
+            "store_ids": ["BV-GUR"],
+            "is_active": True
+        },
+        # ============== WIZOPT SALES STAFF (2) ==============
+        "sales.wizopt1": {
+            "user_id": "user-025",
+            "username": "sales.wizopt1",
+            "password_hash": hash_password("Staff@2024"),
+            "full_name": "Sanjay Kumar",
+            "roles": ["SALES_STAFF"],
+            "store_ids": ["WO-MUM"],
+            "is_active": True
+        },
+        "sales.wizopt2": {
+            "user_id": "user-026",
+            "username": "sales.wizopt2",
+            "password_hash": hash_password("Staff@2024"),
+            "full_name": "Nisha Patel",
+            "roles": ["SALES_STAFF"],
+            "store_ids": ["WO-MUM"],
+            "is_active": True
+        },
+        # ============== CASHIERS (6) ==============
+        "cashier.delhi": {
+            "user_id": "user-027",
+            "username": "cashier.delhi",
+            "password_hash": hash_password("Staff@2024"),
+            "full_name": "Mohan Lal",
+            "roles": ["CASHIER"],
+            "store_ids": ["BV-DEL"],
+            "is_active": True
+        },
+        "cashier.noida": {
+            "user_id": "user-028",
+            "username": "cashier.noida",
+            "password_hash": hash_password("Staff@2024"),
+            "full_name": "Sunita Devi",
+            "roles": ["CASHIER"],
+            "store_ids": ["BV-NOI"],
+            "is_active": True
+        },
+        "cashier.gurgaon": {
+            "user_id": "user-029",
+            "username": "cashier.gurgaon",
+            "password_hash": hash_password("Staff@2024"),
+            "full_name": "Ramesh Kumar",
+            "roles": ["CASHIER"],
+            "store_ids": ["BV-GUR"],
+            "is_active": True
+        },
+        "cashier.mumbai": {
+            "user_id": "user-030",
+            "username": "cashier.mumbai",
+            "password_hash": hash_password("Staff@2024"),
+            "full_name": "Lakshmi Iyer",
+            "roles": ["CASHIER"],
+            "store_ids": ["BV-MUM"],
+            "is_active": True
+        },
+        "cashier.bangalore": {
+            "user_id": "user-031",
+            "username": "cashier.bangalore",
+            "password_hash": hash_password("Staff@2024"),
+            "full_name": "Venkat Rao",
+            "roles": ["CASHIER"],
+            "store_ids": ["BV-BLR"],
+            "is_active": True
+        },
+        "cashier.wizopt": {
+            "user_id": "user-032",
+            "username": "cashier.wizopt",
+            "password_hash": hash_password("Staff@2024"),
+            "full_name": "Prakash Sharma",
+            "roles": ["CASHIER"],
+            "store_ids": ["WO-MUM"],
+            "is_active": True
+        },
+        # ============== WORKSHOP STAFF (4) ==============
+        "workshop.tech1": {
+            "user_id": "user-033",
+            "username": "workshop.tech1",
+            "password_hash": hash_password("Staff@2024"),
+            "full_name": "Vinod Yadav",
+            "roles": ["WORKSHOP_STAFF"],
+            "store_ids": ["WO-MUM"],
+            "is_active": True
+        },
+        "workshop.tech2": {
+            "user_id": "user-034",
+            "username": "workshop.tech2",
+            "password_hash": hash_password("Staff@2024"),
+            "full_name": "Rajiv Gupta",
+            "roles": ["WORKSHOP_STAFF"],
+            "store_ids": ["WO-MUM"],
+            "is_active": True
+        },
+        "workshop.tech3": {
+            "user_id": "user-035",
+            "username": "workshop.tech3",
+            "password_hash": hash_password("Staff@2024"),
+            "full_name": "Manoj Singh",
+            "roles": ["WORKSHOP_STAFF"],
+            "store_ids": ["WO-MUM"],
+            "is_active": True
+        },
+        "workshop.tech4": {
+            "user_id": "user-036",
+            "username": "workshop.tech4",
+            "password_hash": hash_password("Staff@2024"),
+            "full_name": "Sunil Mishra",
+            "roles": ["WORKSHOP_STAFF"],
+            "store_ids": ["WO-MUM"],
             "is_active": True
         }
     }
