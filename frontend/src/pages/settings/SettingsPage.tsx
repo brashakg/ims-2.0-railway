@@ -292,8 +292,7 @@ export function SettingsPage() {
             } else if (Array.isArray(storesResponse)) {
               setStores(storesResponse.map(transformStore));
             }
-          } catch (err) {
-            console.log('Stores API not available, starting with empty list');
+          } catch {
             setStores([]);
           }
           break;
@@ -306,8 +305,7 @@ export function SettingsPage() {
             } else if (Array.isArray(usersResponse)) {
               setUsers(usersResponse.map(transformUser));
             }
-          } catch (err) {
-            console.log('Users API not available, starting with empty list');
+          } catch {
             setUsers([]);
           }
           break;
@@ -320,8 +318,7 @@ export function SettingsPage() {
             } else if (Array.isArray(brandsResponse)) {
               setBrands(brandsResponse.map(transformBrand));
             }
-          } catch (err) {
-            console.log('Brands API not available, starting with empty list');
+          } catch {
             setBrands([]);
           }
           break;
@@ -338,8 +335,8 @@ export function SettingsPage() {
             setLensIndices(indicesRes?.indices || indicesRes || []);
             setLensCoatings(coatingsRes?.coatings || coatingsRes || []);
             setLensAddons(addonsRes?.addons || addonsRes || []);
-          } catch (err) {
-            console.log('Lens API not available');
+          } catch {
+            // Lens API not available
           }
           break;
 
@@ -355,8 +352,8 @@ export function SettingsPage() {
             if (tierRes?.discounts) {
               setTierDiscounts(tierRes.discounts);
             }
-          } catch (err) {
-            console.log('Discount API not available');
+          } catch {
+            // Discount API not available
           }
           break;
 
@@ -398,7 +395,6 @@ export function SettingsPage() {
           break;
       }
     } catch (err) {
-      console.error('Failed to load data:', err);
       setError(err instanceof Error ? err.message : 'Failed to load data');
     } finally {
       setIsLoading(false);
@@ -489,7 +485,6 @@ export function SettingsPage() {
       setEditingStore(null);
       loadTabData();
     } catch (err) {
-      console.error('Failed to save store:', err);
       toast.error(err instanceof Error ? err.message : 'Failed to save store');
     } finally {
       setIsLoading(false);
@@ -519,7 +514,6 @@ export function SettingsPage() {
       setEditingUser(null);
       loadTabData();
     } catch (err) {
-      console.error('Failed to save user:', err);
       toast.error(err instanceof Error ? err.message : 'Failed to save user');
     } finally {
       setIsLoading(false);
@@ -547,7 +541,6 @@ export function SettingsPage() {
       setEditingBrand(null);
       loadTabData();
     } catch (err) {
-      console.error('Failed to save brand:', err);
       toast.error(err instanceof Error ? err.message : 'Failed to save brand');
     } finally {
       setIsLoading(false);

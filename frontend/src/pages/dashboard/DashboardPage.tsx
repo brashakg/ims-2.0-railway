@@ -215,8 +215,8 @@ export function DashboardPage() {
       }
 
       setAlerts(newAlerts);
-    } catch (error) {
-      console.error('Failed to load dashboard data:', error);
+    } catch {
+      // Error loading dashboard data - fail silently for now
     } finally {
       setIsLoading(false);
     }

@@ -94,8 +94,7 @@ export function ClinicalPage() {
 
       const tests = testsData?.tests || testsData || [];
       setCompletedTests(Array.isArray(tests) ? tests : []);
-    } catch (err) {
-      console.error('Failed to load clinical data:', err);
+    } catch {
       setError('Failed to load data. Please try again.');
     } finally {
       setIsLoading(false);
@@ -107,8 +106,7 @@ export function ClinicalPage() {
     try {
       await clinicalApi.startTest(queueId);
       await loadData();
-    } catch (err) {
-      console.error('Failed to start test:', err);
+    } catch {
       setError('Failed to start test.');
     } finally {
       setActionLoading(null);

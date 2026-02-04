@@ -134,8 +134,7 @@ export function InventoryPage() {
         stock: item.stock || item.quantity || 0,
         lowStockThreshold: item.lowStockThreshold || item.minStock || 5,
       })) : []);
-    } catch (err) {
-      console.error('Failed to load inventory:', err);
+    } catch {
       setError('Failed to load inventory. Please try again.');
     } finally {
       setIsLoading(false);

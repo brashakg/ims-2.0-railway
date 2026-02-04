@@ -45,7 +45,6 @@ export function LoginPage() {
           longitude = position.coords.longitude;
         } catch {
           // Geolocation not available or denied - proceed anyway
-          console.log('Geolocation not available');
         }
       }
 

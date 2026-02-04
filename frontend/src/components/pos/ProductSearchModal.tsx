@@ -166,7 +166,6 @@ export function ProductSearchModal({ onClose, onSelect, category, categoryLabel 
       setBrands(uniqueBrands);
 
     } catch (err) {
-      console.error('Failed to load products:', err);
       setError(err instanceof Error ? err.message : 'Failed to load products');
       setProducts([]);
       setFilteredProducts([]);
@@ -240,8 +239,7 @@ export function ProductSearchModal({ onClose, onSelect, category, categoryLabel 
         );
         setFilteredProducts(filtered);
       }
-    } catch (err) {
-      console.error('Search failed, using local filter:', err);
+    } catch {
       // Fallback to local filter
       const queryLower = query.toLowerCase();
       const filtered = products.filter(p =>

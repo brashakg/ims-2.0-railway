@@ -107,8 +107,7 @@ export function HRPage() {
 
       const leaves = leavesData?.leaves || leavesData || [];
       setLeaveRequests(Array.isArray(leaves) ? leaves : []);
-    } catch (err) {
-      console.error('Failed to load HR data:', err);
+    } catch {
       setError('Failed to load data. Please try again.');
     } finally {
       setIsLoading(false);
@@ -121,8 +120,7 @@ export function HRPage() {
       await hrApi.approveLeave(leaveId, approved);
       // Refresh data
       await loadData();
-    } catch (err) {
-      console.error('Failed to process leave:', err);
+    } catch {
       setError('Failed to process leave request.');
     } finally {
       setActionLoading(null);

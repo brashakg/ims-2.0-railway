@@ -47,8 +47,7 @@ export function PrescriptionSelectModal({
     try {
       const response = await prescriptionApi.getPrescriptions(patient.id);
       setPrescriptions(response.prescriptions || response || []);
-    } catch (err) {
-      console.error('Failed to load prescriptions:', err);
+    } catch {
       setErrorMsg('Failed to load prescriptions. Please try again.');
       setPrescriptions([]);
     } finally {

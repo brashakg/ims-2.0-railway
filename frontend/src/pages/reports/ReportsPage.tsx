@@ -186,8 +186,7 @@ export function ReportsPage() {
           setDailyTrend(response.dailyTrend);
         }
       }
-    } catch (err) {
-      console.error('Failed to load report data:', err);
+    } catch {
       setError('Failed to load report data. Please try again.');
     } finally {
       setIsLoading(false);

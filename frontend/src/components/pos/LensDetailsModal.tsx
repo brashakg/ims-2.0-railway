@@ -113,8 +113,7 @@ export function LensDetailsModal({ onClose, onSave }: LensDetailsModalProps) {
       if (loadedBrands.length === 0 && loadedIndices.length === 0) {
         setError('No lens configuration found. Please configure lens brands and options in Settings first.');
       }
-    } catch (err) {
-      console.error('Failed to load lens data:', err);
+    } catch {
       setError('Failed to load lens configuration. Please try again.');
     } finally {
       setIsLoading(false);

@@ -102,8 +102,7 @@ export function WorkshopPage() {
       const response = await workshopApi.getJobs(user.activeStoreId);
       const jobsData = response?.jobs || response || [];
       setJobs(Array.isArray(jobsData) ? jobsData : []);
-    } catch (err) {
-      console.error('Failed to load jobs:', err);
+    } catch {
       setError('Failed to load workshop jobs. Please try again.');
       setJobs([]);
     } finally {
