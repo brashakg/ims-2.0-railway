@@ -1,257 +1,231 @@
 // ============================================================================
-// IMS 2.0 - Modular Dashboard Page
+// IMS 2.0 - Dashboard Page
 // ============================================================================
-// Role-based module dashboard with context-aware navigation
+// NO MOCK DATA - All data from API
 
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
-import { useModule, MODULE_CONFIGS, type ModuleId } from '../../context/ModuleContext';
-import { reportsApi } from '../../services/api';
+import { reportsApi, orderApi, workshopApi, inventoryApi } from '../../services/api';
 import {
-  TrendingUp,
-  TrendingDown,
-  Clock,
-  Calendar,
-  AlertTriangle,
-  ChevronRight,
-  IndianRupee,
-  FileText,
-  Users,
+  ShoppingCart,
   Package,
+  Users,
+  TrendingUp,
+  AlertTriangle,
+  Wrench,
+  IndianRupee,
+  Target,
+  Loader2,
+  RefreshCw,
 } from 'lucide-react';
-import clsx from 'clsx';
 
-// ============================================================================
 // Types
-// ============================================================================
-
 interface DashboardStats {
   todaySales: number;
-  pendingOrders: number;
-  urgentOrders: number;
-  appointmentsToday: number;
-  upcomingAppointments: number;
+  todayOrders: number;
+  pendingJobs: number;
   lowStockItems: number;
-  salesChange: number;
+  monthSales: number;
+  monthTarget: number;
+  salesChange?: string;
+  pendingDeliveries?: number;
+  urgentJobs?: number;
 }
 
-interface RecentActivity {
+interface RecentOrder {
   id: string;
-  type: 'order' | 'delivery' | 'customer' | 'payment';
+  orderNumber: string;
+  customerName: string;
+  grandTotal: number;
+  orderStatus: string;
+}
+
+interface Alert {
+  type: 'low_stock' | 'jobs_ready' | 'overdue' | 'pending_payment';
+  title: string;
   message: string;
-  time: string;
+  severity: 'warning' | 'info' | 'error';
 }
 
-interface TodaySummary {
-  totalOrders: number;
-  deliveries: number;
-  eyeTests: number;
-  newCustomers: number;
-  paymentsReceived: number;
-}
-
-// ============================================================================
-// KPI Card Component
-// ============================================================================
-
-interface KpiCardProps {
-  icon: React.ComponentType<{ className?: string }>;
-  iconBg: string;
+// Stat Card Component
+interface StatCardProps {
+  title: string;
   value: string | number;
-  label: string;
-  change?: number | string;
+  icon: React.ComponentType<{ className?: string }>;
+  change?: string;
   changeType?: 'positive' | 'negative' | 'neutral';
+  subtitle?: string;
   loading?: boolean;
+}
+
+function StatCard({ title, value, icon: Icon, change, changeType = 'neutral', subtitle, loading }: StatCardProps) {
+  return (
+    <div className="card">
+      <div className="flex items-start justify-between">
+        <div>
+          <p className="text-sm font-medium text-gray-500">{title}</p>
+          {loading ? (
+            <div className="h-8 w-20 bg-gray-200 animate-pulse rounded mt-1" />
+          ) : (
+            <p className="text-2xl font-bold text-gray-900 mt-1">{value}</p>
+          )}
+          {subtitle && <p className="text-xs text-gray-500 mt-1">{subtitle}</p>}
+          {change && (
+            <p
+              className={`text-sm mt-1 ${
+                changeType === 'positive'
+                  ? 'text-green-600'
+                  : changeType === 'negative'
+                  ? 'text-red-600'
+                  : 'text-gray-500'
+              }`}
+            >
+              {change}
+            </p>
+          )}
+        </div>
+        <div className="p-3 bg-bv-red-50 rounded-lg">
+          <Icon className="w-6 h-6 text-bv-red-600" />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Quick Action Button
+interface QuickActionProps {
+  label: string;
+  icon: React.ComponentType<{ className?: string }>;
   onClick?: () => void;
 }
 
-function KpiCard({ icon: Icon, iconBg, value, label, change, changeType, loading, onClick }: KpiCardProps) {
+function QuickAction({ label, icon: Icon, onClick }: QuickActionProps) {
   return (
-    <div
-      className={clsx(
-        'bg-white rounded-xl p-4 flex items-center gap-4 border border-gray-100 shadow-sm',
-        onClick && 'cursor-pointer hover:border-bv-gold-200 transition-colors'
-      )}
+    <button
       onClick={onClick}
+      className="flex flex-col items-center gap-2 p-4 bg-white border border-gray-200 rounded-xl hover:border-bv-red-200 hover:bg-bv-red-50 transition-colors touch-target"
     >
-      <div className={clsx('p-3 rounded-xl', iconBg)}>
-        <Icon className="w-6 h-6" />
+      <div className="p-3 bg-gray-100 rounded-lg">
+        <Icon className="w-6 h-6 text-gray-600" />
       </div>
-      <div className="flex-1">
-        {loading ? (
-          <div className="h-7 w-16 bg-gray-200 animate-pulse rounded" />
-        ) : (
-          <p className="text-2xl font-bold text-gray-900">{value}</p>
-        )}
-        <p className="text-sm text-gray-500">{label}</p>
-      </div>
-      {change !== undefined && (
-        <div className={clsx(
-          'text-sm flex items-center gap-1',
-          changeType === 'positive' ? 'text-green-600' :
-          changeType === 'negative' ? 'text-red-600' :
-          'text-gray-500'
-        )}>
-          {changeType === 'positive' && <TrendingUp className="w-4 h-4" />}
-          {changeType === 'negative' && <TrendingDown className="w-4 h-4" />}
-          {change}
-        </div>
-      )}
-    </div>
+      <span className="text-sm font-medium text-gray-700">{label}</span>
+    </button>
   );
 }
 
-// ============================================================================
-// Module Card Component
-// ============================================================================
-
-interface ModuleCardProps {
-  title: string;
-  subtitle: string;
-  icon: React.ComponentType<{ className?: string }>;
-  color: string;
-  bgColor: string;
-  onClick: () => void;
-}
-
-function ModuleCard({ title, subtitle, icon: Icon, color, bgColor, onClick }: ModuleCardProps) {
-  return (
-    <div
-      className="bg-white rounded-xl p-5 border border-gray-100 shadow-sm cursor-pointer hover:border-bv-gold-300 hover:shadow-md transition-all group"
-      onClick={onClick}
-    >
-      <div className={clsx('w-12 h-12 rounded-xl flex items-center justify-center mb-3', bgColor)}>
-        <Icon className={clsx('w-6 h-6', color)} />
-      </div>
-      <h3 className="font-semibold text-gray-900 group-hover:text-bv-gold-600 transition-colors">{title}</h3>
-      <p className="text-sm text-gray-500 mt-1">{subtitle}</p>
-    </div>
-  );
-}
-
-// ============================================================================
-// Activity Item Component
-// ============================================================================
-
-function ActivityItem({ activity }: { activity: RecentActivity }) {
-  const icons = {
-    order: FileText,
-    delivery: Package,
-    customer: Users,
-    payment: IndianRupee,
-  };
-  const Icon = icons[activity.type];
-
-  return (
-    <div className="flex items-center gap-3 py-3 border-b border-gray-100 last:border-0">
-      <div className="p-2 bg-gray-100 rounded-lg">
-        <Icon className="w-4 h-4 text-gray-500" />
-      </div>
-      <div className="flex-1">
-        <p className="text-sm text-gray-900">{activity.message}</p>
-        <p className="text-xs text-gray-500">{activity.time}</p>
-      </div>
-    </div>
-  );
-}
-
-// ============================================================================
-// Main Dashboard Component
-// ============================================================================
-
-export default function DashboardPage() {
-  const { user } = useAuth();
-  const { setActiveModule, getModulesForRole } = useModule();
+export function DashboardPage() {
+  const { user, hasRole } = useAuth();
   const navigate = useNavigate();
 
-  const [isLoading, setIsLoading] = useState(true);
+  // Data state
   const [stats, setStats] = useState<DashboardStats>({
     todaySales: 0,
-    pendingOrders: 0,
-    urgentOrders: 0,
-    appointmentsToday: 0,
-    upcomingAppointments: 0,
+    todayOrders: 0,
+    pendingJobs: 0,
     lowStockItems: 0,
-    salesChange: 0,
+    monthSales: 0,
+    monthTarget: 0,
   });
+  const [recentOrders, setRecentOrders] = useState<RecentOrder[]>([]);
+  const [alerts, setAlerts] = useState<Alert[]>([]);
 
-  const [recentActivity, setRecentActivity] = useState<RecentActivity[]>([]);
-  const [todaySummary, setTodaySummary] = useState<TodaySummary>({
-    totalOrders: 0,
-    deliveries: 0,
-    eyeTests: 0,
-    newCustomers: 0,
-    paymentsReceived: 0,
-  });
-
-  // Get modules available for user's role
-  const availableModules = user ? getModulesForRole(user.activeRole) : [];
+  // Loading state
+  const [isLoading, setIsLoading] = useState(true);
 
   // Load dashboard data
   useEffect(() => {
     loadDashboardData();
-  }, []);
+  }, [user?.activeStoreId]);
 
   const loadDashboardData = async () => {
+    if (!user?.activeStoreId) return;
+
     setIsLoading(true);
     try {
-      // Try to load real data, fall back to sample data
-      const salesRes = await reportsApi.getDashboardStats(user?.activeStoreId || '').catch(() => null);
+      // Fetch all dashboard data in parallel
+      const [dashboardStats, ordersData, jobsData, lowStockData] = await Promise.all([
+        reportsApi.getDashboardStats(user.activeStoreId).catch(() => null),
+        orderApi.getOrders({ storeId: user.activeStoreId, date: 'today', limit: 5 }).catch(() => ({ orders: [] })),
+        workshopApi.getJobs(user.activeStoreId).catch(() => ({ jobs: [] })),
+        inventoryApi.getLowStock(user.activeStoreId).catch(() => ({ items: [] })),
+      ]);
 
-      if (salesRes) {
+      // Process dashboard stats
+      if (dashboardStats) {
+        setStats({
+          todaySales: dashboardStats.todaySales || 0,
+          todayOrders: dashboardStats.todayOrders || 0,
+          pendingJobs: dashboardStats.pendingJobs || 0,
+          lowStockItems: dashboardStats.lowStockItems || 0,
+          monthSales: dashboardStats.monthSales || 0,
+          monthTarget: dashboardStats.monthTarget || 0,
+          salesChange: dashboardStats.salesChange,
+          pendingDeliveries: dashboardStats.pendingDeliveries,
+          urgentJobs: dashboardStats.urgentJobs,
+        });
+      } else {
+        // Calculate from individual API calls if dashboard stats not available
+        const orders = ordersData?.orders || ordersData || [];
+        const jobs = jobsData?.jobs || jobsData || [];
+        const lowStock = lowStockData?.items || lowStockData || [];
+
+        const todayOrders = Array.isArray(orders) ? orders : [];
+        const todaySales = todayOrders.reduce((sum: number, o: { grandTotal?: number }) => sum + (o.grandTotal || 0), 0);
+        const activeJobs = Array.isArray(jobs) ? jobs.filter((j: { status?: string }) =>
+          !['DELIVERED', 'CANCELLED'].includes(j.status || '')
+        ) : [];
+
         setStats(prev => ({
           ...prev,
-          todaySales: salesRes.total_sales || 45230,
-          salesChange: salesRes.change || 12,
+          todaySales,
+          todayOrders: todayOrders.length,
+          pendingJobs: activeJobs.length,
+          lowStockItems: Array.isArray(lowStock) ? lowStock.length : 0,
         }));
-      } else {
-        // Sample data for demo
-        setStats({
-          todaySales: 45230,
-          pendingOrders: 23,
-          urgentOrders: 5,
-          appointmentsToday: 8,
-          upcomingAppointments: 2,
-          lowStockItems: 12,
-          salesChange: 12,
+      }
+
+      // Set recent orders
+      const orders = ordersData?.orders || ordersData || [];
+      setRecentOrders(Array.isArray(orders) ? orders.slice(0, 3) : []);
+
+      // Build alerts
+      const newAlerts: Alert[] = [];
+      const lowStock = lowStockData?.items || lowStockData || [];
+      if (Array.isArray(lowStock) && lowStock.length > 0) {
+        newAlerts.push({
+          type: 'low_stock',
+          title: 'Low Stock Alert',
+          message: `${lowStock.length} items below minimum stock level`,
+          severity: 'warning',
         });
       }
 
-      // Sample recent activity
-      setRecentActivity([
-        { id: '1', type: 'order', message: 'New order #ORD-1234 created', time: '5 min ago' },
-        { id: '2', type: 'delivery', message: 'Order #ORD-1230 marked delivered', time: '15 min ago' },
-        { id: '3', type: 'customer', message: 'New customer Rahul Sharma added', time: '30 min ago' },
-        { id: '4', type: 'payment', message: 'Payment of Rs.5,000 received from Priya', time: '1 hour ago' },
-      ]);
+      const jobs = jobsData?.jobs || jobsData || [];
+      if (Array.isArray(jobs)) {
+        const readyJobs = jobs.filter((j: { status?: string }) => j.status === 'READY');
+        if (readyJobs.length > 0) {
+          newAlerts.push({
+            type: 'jobs_ready',
+            title: 'Jobs Ready',
+            message: `${readyJobs.length} jobs ready for customer pickup`,
+            severity: 'info',
+          });
+        }
+      }
 
-      // Sample today's summary
-      setTodaySummary({
-        totalOrders: 15,
-        deliveries: 8,
-        eyeTests: 6,
-        newCustomers: 3,
-        paymentsReceived: 32500,
-      });
-
-    } catch (err) {
-      console.error('Failed to load dashboard data:', err);
+      setAlerts(newAlerts);
+    } catch {
+      // Error loading dashboard data - fail silently for now
     } finally {
       setIsLoading(false);
     }
   };
 
-  const handleModuleClick = (moduleId: ModuleId) => {
-    setActiveModule(moduleId);
-    // Navigate to the first item in the module's sidebar
-    const module = MODULE_CONFIGS.find(m => m.id === moduleId);
-    if (module && module.sidebarItems.length > 0) {
-      navigate(module.sidebarItems[0].path);
-    }
-  };
+  const targetAchievement = stats.monthTarget > 0
+    ? Math.round((stats.monthSales / stats.monthTarget) * 100)
+    : 0;
 
-  // Format currency
   const formatCurrency = (amount: number) => {
     return new Intl.NumberFormat('en-IN', {
       style: 'currency',
@@ -260,182 +234,229 @@ export default function DashboardPage() {
     }).format(amount);
   };
 
-  // Get current date
-  const today = new Date();
-  const dateString = today.toLocaleDateString('en-IN', {
-    weekday: 'long',
-    day: 'numeric',
-    month: 'short',
-  });
-
-  // Get financial year
-  const currentMonth = today.getMonth();
-  const currentYear = today.getFullYear();
-  const financialYear = currentMonth >= 3
-    ? `${currentYear}-${(currentYear + 1).toString().slice(-2)}`
-    : `${currentYear - 1}-${currentYear.toString().slice(-2)}`;
+  const getStatusBadge = (status: string) => {
+    const badges: Record<string, string> = {
+      CONFIRMED: 'badge-success',
+      PENDING: 'badge-warning',
+      DRAFT: 'bg-gray-100 text-gray-600',
+      IN_PROGRESS: 'badge-warning',
+      READY: 'badge-success',
+      DELIVERED: 'bg-emerald-100 text-emerald-600',
+      CANCELLED: 'badge-error',
+    };
+    return badges[status] || 'bg-gray-100 text-gray-600';
+  };
 
   return (
     <div className="space-y-6">
-      {/* Welcome Header */}
-      <div className="bg-gradient-to-r from-bv-gold-500 to-bv-gold-600 rounded-2xl p-6 text-white">
-        <div className="flex items-center justify-between">
-          <div>
-            <h1 className="text-2xl font-bold">
-              Welcome back, {user?.name || 'User'}!
-            </h1>
-            <p className="text-bv-gold-100 mt-1">
-              {user?.activeStoreId || 'Main Store'} • Financial Year {financialYear}
-            </p>
-          </div>
-          <div className="text-right">
-            <p className="text-sm text-bv-gold-200">Today</p>
-            <p className="text-xl font-semibold">{dateString}</p>
-          </div>
+      {/* Header */}
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl font-bold text-gray-900">
+            Good {getGreeting()}, {user?.name?.split(' ')[0]}!
+          </h1>
+          <p className="text-gray-500 mt-1">
+            Here's what's happening at your store today
+          </p>
         </div>
+        <button
+          onClick={loadDashboardData}
+          disabled={isLoading}
+          className="btn-outline flex items-center gap-2"
+        >
+          {isLoading ? (
+            <Loader2 className="w-4 h-4 animate-spin" />
+          ) : (
+            <RefreshCw className="w-4 h-4" />
+          )}
+          Refresh
+        </button>
       </div>
 
-      {/* KPI Stats Row */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        <KpiCard
-          icon={IndianRupee}
-          iconBg="bg-green-100 text-green-600"
+      {/* Stats Grid */}
+      <div className="grid grid-cols-2 laptop:grid-cols-4 gap-4">
+        <StatCard
+          title="Today's Sales"
           value={formatCurrency(stats.todaySales)}
-          label="Today's Sales"
-          change={`+${stats.salesChange}%`}
-          changeType="positive"
+          icon={IndianRupee}
+          change={stats.salesChange}
+          changeType={stats.salesChange?.startsWith('+') ? 'positive' : stats.salesChange?.startsWith('-') ? 'negative' : 'neutral'}
           loading={isLoading}
-          onClick={() => handleModuleClick('reports')}
         />
-        <KpiCard
-          icon={Clock}
-          iconBg="bg-orange-100 text-orange-600"
-          value={stats.pendingOrders}
-          label="Pending Orders"
-          change={stats.urgentOrders > 0 ? `${stats.urgentOrders} urgent` : undefined}
-          changeType={stats.urgentOrders > 0 ? 'negative' : 'neutral'}
+        <StatCard
+          title="Today's Orders"
+          value={stats.todayOrders}
+          icon={ShoppingCart}
+          subtitle={stats.pendingDeliveries ? `${stats.pendingDeliveries} pending delivery` : undefined}
           loading={isLoading}
-          onClick={() => handleModuleClick('pos')}
         />
-        <KpiCard
-          icon={Calendar}
-          iconBg="bg-blue-100 text-blue-600"
-          value={stats.appointmentsToday}
-          label="Appointments Today"
-          change={stats.upcomingAppointments > 0 ? `${stats.upcomingAppointments} upcoming` : undefined}
-          changeType="neutral"
+        <StatCard
+          title="Pending Jobs"
+          value={stats.pendingJobs}
+          icon={Wrench}
+          subtitle={stats.urgentJobs ? `${stats.urgentJobs} urgent` : undefined}
           loading={isLoading}
-          onClick={() => handleModuleClick('clinic')}
         />
-        <KpiCard
-          icon={AlertTriangle}
-          iconBg="bg-red-100 text-red-600"
+        <StatCard
+          title="Low Stock Items"
           value={stats.lowStockItems}
-          label="Low Stock Items"
-          change={stats.lowStockItems > 0 ? 'Action needed' : undefined}
-          changeType={stats.lowStockItems > 0 ? 'negative' : 'neutral'}
+          icon={AlertTriangle}
+          changeType={stats.lowStockItems > 10 ? 'negative' : 'neutral'}
           loading={isLoading}
-          onClick={() => handleModuleClick('inventory')}
         />
       </div>
 
-      {/* Modules Section */}
-      <div>
-        <h2 className="text-lg font-semibold text-gray-900 mb-4">Modules</h2>
-        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-4">
-          {availableModules.map(module => (
-            <ModuleCard
-              key={module.id}
-              title={module.title}
-              subtitle={module.subtitle}
-              icon={module.icon}
-              color={module.color}
-              bgColor={module.bgColor}
-              onClick={() => handleModuleClick(module.id)}
+      {/* Target Progress */}
+      {hasRole(['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER']) && (
+        <div className="card">
+          <div className="flex items-center justify-between mb-4">
+            <div className="flex items-center gap-2">
+              <Target className="w-5 h-5 text-bv-red-600" />
+              <h2 className="font-semibold text-gray-900">Monthly Target</h2>
+            </div>
+            {isLoading ? (
+              <div className="h-8 w-16 bg-gray-200 animate-pulse rounded" />
+            ) : (
+              <span className="text-2xl font-bold text-gray-900">{targetAchievement}%</span>
+            )}
+          </div>
+          <div className="h-3 bg-gray-100 rounded-full overflow-hidden">
+            <div
+              className="h-full bg-bv-red-600 rounded-full transition-all duration-500"
+              style={{ width: `${Math.min(targetAchievement, 100)}%` }}
             />
-          ))}
+          </div>
+          <div className="flex justify-between mt-2 text-sm text-gray-500">
+            <span>{formatCurrency(stats.monthSales)} achieved</span>
+            <span>Target: {formatCurrency(stats.monthTarget)}</span>
+          </div>
+        </div>
+      )}
+
+      {/* Quick Actions */}
+      <div>
+        <h2 className="font-semibold text-gray-900 mb-4">Quick Actions</h2>
+        <div className="grid grid-cols-3 tablet:grid-cols-6 gap-3">
+          {hasRole(['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'OPTOMETRIST', 'SALES_CASHIER', 'SALES_STAFF']) && (
+            <QuickAction label="New Sale" icon={ShoppingCart} onClick={() => navigate('/pos')} />
+          )}
+          {hasRole(['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'SALES_CASHIER', 'SALES_STAFF']) && (
+            <QuickAction label="Add Customer" icon={Users} onClick={() => navigate('/customers')} />
+          )}
+          {hasRole(['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'CATALOG_MANAGER']) && (
+            <QuickAction label="Stock In" icon={Package} onClick={() => navigate('/inventory')} />
+          )}
+          {hasRole(['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'WORKSHOP_STAFF']) && (
+            <QuickAction label="Workshop" icon={Wrench} onClick={() => navigate('/workshop')} />
+          )}
+          {hasRole(['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT']) && (
+            <QuickAction label="Reports" icon={TrendingUp} onClick={() => navigate('/reports')} />
+          )}
         </div>
       </div>
 
-      {/* Recent Activity & Summary Row */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Recent Activity */}
-        <div className="lg:col-span-2 bg-white rounded-xl border border-gray-100 shadow-sm">
-          <div className="p-4 border-b border-gray-100 flex items-center justify-between">
-            <h3 className="font-semibold text-gray-900">Recent Activity</h3>
-            <button className="text-sm text-bv-gold-600 hover:underline flex items-center gap-1">
+      {/* Recent Activity / Alerts */}
+      <div className="grid tablet:grid-cols-2 gap-6">
+        {/* Recent Orders */}
+        <div className="card">
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="font-semibold text-gray-900">Recent Orders</h2>
+            <button
+              onClick={() => navigate('/orders')}
+              className="text-sm text-bv-red-600 hover:text-bv-red-700"
+            >
               View All
-              <ChevronRight className="w-4 h-4" />
             </button>
           </div>
-          <div className="p-4">
-            {isLoading ? (
-              <div className="space-y-3">
-                {[1, 2, 3, 4].map(i => (
-                  <div key={i} className="flex items-center gap-3">
-                    <div className="w-10 h-10 bg-gray-200 rounded-lg animate-pulse" />
-                    <div className="flex-1 space-y-2">
-                      <div className="h-4 bg-gray-200 rounded animate-pulse w-3/4" />
-                      <div className="h-3 bg-gray-200 rounded animate-pulse w-1/4" />
+          {isLoading ? (
+            <div className="space-y-3">
+              {[1, 2, 3].map((i) => (
+                <div key={i} className="flex items-center justify-between py-2 border-b border-gray-100 last:border-0">
+                  <div className="space-y-2">
+                    <div className="h-4 w-24 bg-gray-200 animate-pulse rounded" />
+                    <div className="h-3 w-32 bg-gray-200 animate-pulse rounded" />
+                  </div>
+                  <div className="space-y-2 text-right">
+                    <div className="h-4 w-16 bg-gray-200 animate-pulse rounded" />
+                    <div className="h-5 w-20 bg-gray-200 animate-pulse rounded" />
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : recentOrders.length === 0 ? (
+            <p className="text-gray-500 text-center py-6">No orders today</p>
+          ) : (
+            <div className="space-y-3">
+              {recentOrders.map((order) => (
+                <div
+                  key={order.id}
+                  className="flex items-center justify-between py-2 border-b border-gray-100 last:border-0 cursor-pointer hover:bg-gray-50 -mx-2 px-2 rounded"
+                  onClick={() => navigate('/orders')}
+                >
+                  <div>
+                    <p className="font-medium text-gray-900">{order.orderNumber}</p>
+                    <p className="text-sm text-gray-500">{order.customerName}</p>
+                  </div>
+                  <div className="text-right">
+                    <p className="font-medium text-gray-900">{formatCurrency(order.grandTotal)}</p>
+                    <span className={getStatusBadge(order.orderStatus)}>
+                      {order.orderStatus}
+                    </span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Alerts */}
+        <div className="card">
+          <h2 className="font-semibold text-gray-900 mb-4">Alerts</h2>
+          {isLoading ? (
+            <div className="space-y-3">
+              <div className="h-16 bg-gray-200 animate-pulse rounded-lg" />
+              <div className="h-16 bg-gray-200 animate-pulse rounded-lg" />
+            </div>
+          ) : alerts.length === 0 ? (
+            <p className="text-gray-500 text-center py-6">No alerts</p>
+          ) : (
+            <div className="space-y-3">
+              {alerts.map((alert, index) => {
+                const bgColor = alert.severity === 'warning' ? 'bg-yellow-50' :
+                               alert.severity === 'error' ? 'bg-red-50' : 'bg-blue-50';
+                const iconColor = alert.severity === 'warning' ? 'text-yellow-600' :
+                                 alert.severity === 'error' ? 'text-red-600' : 'text-blue-600';
+                const textColor = alert.severity === 'warning' ? 'text-yellow-800' :
+                                 alert.severity === 'error' ? 'text-red-800' : 'text-blue-800';
+                const subTextColor = alert.severity === 'warning' ? 'text-yellow-700' :
+                                    alert.severity === 'error' ? 'text-red-700' : 'text-blue-700';
+                const Icon = alert.type === 'low_stock' ? AlertTriangle :
+                            alert.type === 'jobs_ready' ? Wrench : AlertTriangle;
+
+                return (
+                  <div key={index} className={`flex items-start gap-3 p-3 ${bgColor} rounded-lg`}>
+                    <Icon className={`w-5 h-5 ${iconColor} flex-shrink-0`} />
+                    <div>
+                      <p className={`font-medium ${textColor}`}>{alert.title}</p>
+                      <p className={`text-sm ${subTextColor}`}>{alert.message}</p>
                     </div>
                   </div>
-                ))}
-              </div>
-            ) : recentActivity.length === 0 ? (
-              <p className="text-center text-gray-500 py-8">No recent activity</p>
-            ) : (
-              recentActivity.map(activity => (
-                <ActivityItem key={activity.id} activity={activity} />
-              ))
-            )}
-          </div>
-        </div>
-
-        {/* Today's Summary */}
-        <div className="bg-white rounded-xl border border-gray-100 shadow-sm">
-          <div className="p-4 border-b border-gray-100">
-            <h3 className="font-semibold text-gray-900">Today's Summary</h3>
-          </div>
-          <div className="p-4 space-y-3">
-            {isLoading ? (
-              <div className="space-y-3">
-                {[1, 2, 3, 4, 5].map(i => (
-                  <div key={i} className="flex justify-between">
-                    <div className="h-4 bg-gray-200 rounded animate-pulse w-1/2" />
-                    <div className="h-4 bg-gray-200 rounded animate-pulse w-1/4" />
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <>
-                <div className="flex justify-between py-2 border-b border-gray-100">
-                  <span className="text-gray-600">Total Orders</span>
-                  <span className="font-semibold text-gray-900">{todaySummary.totalOrders}</span>
-                </div>
-                <div className="flex justify-between py-2 border-b border-gray-100">
-                  <span className="text-gray-600">Deliveries</span>
-                  <span className="font-semibold text-gray-900">{todaySummary.deliveries}</span>
-                </div>
-                <div className="flex justify-between py-2 border-b border-gray-100">
-                  <span className="text-gray-600">Eye Tests</span>
-                  <span className="font-semibold text-gray-900">{todaySummary.eyeTests}</span>
-                </div>
-                <div className="flex justify-between py-2 border-b border-gray-100">
-                  <span className="text-gray-600">New Customers</span>
-                  <span className="font-semibold text-gray-900">{todaySummary.newCustomers}</span>
-                </div>
-                <div className="flex justify-between py-2">
-                  <span className="text-gray-600">Payments Received</span>
-                  <span className="font-semibold text-bv-gold-600">{formatCurrency(todaySummary.paymentsReceived)}</span>
-                </div>
-              </>
-            )}
-          </div>
+                );
+              })}
+            </div>
+          )}
         </div>
       </div>
-
-      {/* Quick Actions (hidden on mobile) */}
-      {/* This could be added as floating action buttons on mobile */}
     </div>
   );
 }
+
+// Helper function for greeting
+function getGreeting(): string {
+  const hour = new Date().getHours();
+  if (hour < 12) return 'Morning';
+  if (hour < 17) return 'Afternoon';
+  return 'Evening';
+}
+
+export default DashboardPage;
