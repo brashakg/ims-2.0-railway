@@ -72,7 +72,8 @@
 
   /* Better focus states for accessibility */
   *:focus-visible {
-    @apply outline-none ring-2 ring-bv-gold-500 ring-offset-2;
+    outline: none;
+    box-shadow: 0 0 0 2px white, 0 0 0 4px var(--color-bv-gold-500);
   }
 }
 
@@ -80,10 +81,16 @@
 @layer components {
   /* Primary button - Better Vision Gold */
   .btn-primary {
-    @apply bg-bv-gold-600 text-white px-4 py-2 rounded-lg font-medium
-           hover:bg-bv-gold-700 active:bg-bv-gold-800
+    @apply text-white px-4 py-2 rounded-lg font-medium
            disabled:opacity-50 disabled:cursor-not-allowed
            transition-colors duration-200;
+    background-color: var(--color-bv-gold-600);
+  }
+  .btn-primary:hover {
+    background-color: var(--color-bv-gold-700);
+  }
+  .btn-primary:active {
+    background-color: var(--color-bv-gold-800);
   }
 
   /* Secondary button */
@@ -96,18 +103,28 @@
 
   /* Outline button */
   .btn-outline {
-    @apply border-2 border-bv-gold-600 text-bv-gold-700 px-4 py-2 rounded-lg font-medium
-           hover:bg-bv-gold-50 active:bg-bv-gold-100
+    @apply border-2 px-4 py-2 rounded-lg font-medium
            disabled:opacity-50 disabled:cursor-not-allowed
            transition-colors duration-200;
+    border-color: var(--color-bv-gold-600);
+    color: var(--color-bv-gold-700);
+  }
+  .btn-outline:hover {
+    background-color: var(--color-bv-gold-50);
+  }
+  .btn-outline:active {
+    background-color: var(--color-bv-gold-100);
   }
 
   /* Input field */
   .input-field {
     @apply w-full px-3 py-2 border border-gray-300 rounded-lg
-           focus:border-bv-gold-500 focus:ring-1 focus:ring-bv-gold-500
            disabled:bg-gray-100 disabled:cursor-not-allowed
            transition-colors duration-200;
+  }
+  .input-field:focus {
+    border-color: var(--color-bv-gold-500);
+    box-shadow: 0 0 0 1px var(--color-bv-gold-500);
   }
 
   /* Card */
@@ -138,7 +155,9 @@
 
   /* Better Vision styled badge */
   .badge-bv {
-    @apply inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-bv-gold-100 text-bv-gold-800;
+    @apply inline-flex items-center px-2 py-1 rounded-full text-xs font-medium;
+    background-color: var(--color-bv-gold-100);
+    color: var(--color-bv-gold-800);
   }
 
   /* Table styles */
@@ -199,13 +218,26 @@
 }
 
 [data-brand="wizopt"] .btn-primary {
-  @apply bg-wz-teal-600 hover:bg-wz-teal-700 active:bg-wz-teal-800;
+  background-color: var(--color-wz-teal-600);
+}
+[data-brand="wizopt"] .btn-primary:hover {
+  background-color: var(--color-wz-teal-700);
+}
+[data-brand="wizopt"] .btn-primary:active {
+  background-color: var(--color-wz-teal-800);
 }
 
 [data-brand="wizopt"] .btn-outline {
-  @apply border-wz-teal-600 text-wz-teal-600 hover:bg-wz-teal-50 active:bg-wz-teal-100;
+  border-color: var(--color-wz-teal-600);
+  color: var(--color-wz-teal-600);
+}
+[data-brand="wizopt"] .btn-outline:hover {
+  background-color: var(--color-wz-teal-50);
+}
+[data-brand="wizopt"] .btn-outline:active {
+  background-color: var(--color-wz-teal-100);
 }
 
 [data-brand="wizopt"] *:focus-visible {
-  @apply ring-wz-teal-600;
+  box-shadow: 0 0 0 2px white, 0 0 0 4px var(--color-wz-teal-600);
 }
