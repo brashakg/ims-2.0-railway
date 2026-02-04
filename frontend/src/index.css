@@ -1,0 +1,178 @@
+@import "tailwindcss";
+
+/* Custom theme colors for Tailwind v4 */
+@theme {
+  /* Better Vision Brand Colors */
+  --color-bv-red-50: #fef2f2;
+  --color-bv-red-100: #fee2e2;
+  --color-bv-red-200: #fecaca;
+  --color-bv-red-300: #fca5a5;
+  --color-bv-red-400: #f87171;
+  --color-bv-red-500: #ef4444;
+  --color-bv-red-600: #CD201A;
+  --color-bv-red-700: #b91c1c;
+  --color-bv-red-800: #991b1b;
+  --color-bv-red-900: #7f1d1d;
+  --color-bv-red-950: #450a0a;
+
+  /* WizOpt Brand Colors (Teal) */
+  --color-wz-teal-50: #f0fdfa;
+  --color-wz-teal-100: #ccfbf1;
+  --color-wz-teal-200: #99f6e4;
+  --color-wz-teal-300: #5eead4;
+  --color-wz-teal-400: #2dd4bf;
+  --color-wz-teal-500: #14b8a6;
+  --color-wz-teal-600: #0d9488;
+  --color-wz-teal-700: #0f766e;
+  --color-wz-teal-800: #115e59;
+  --color-wz-teal-900: #134e4a;
+  --color-wz-teal-950: #042f2e;
+
+  /* Custom breakpoints */
+  --breakpoint-tablet: 768px;
+  --breakpoint-laptop: 1024px;
+  --breakpoint-desktop: 1280px;
+}
+
+/* Custom font imports */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+
+/* Base styles */
+@layer base {
+  html {
+    @apply font-sans antialiased;
+  }
+
+  body {
+    @apply bg-gray-50 text-gray-900 min-h-screen;
+  }
+
+  /* Better focus states for accessibility */
+  *:focus-visible {
+    @apply outline-none ring-2 ring-bv-red-600 ring-offset-2;
+  }
+}
+
+/* Component layer for reusable styles */
+@layer components {
+  /* Primary button - Better Vision Red */
+  .btn-primary {
+    @apply bg-bv-red-600 text-white px-4 py-2 rounded-lg font-medium
+           hover:bg-bv-red-700 active:bg-bv-red-800
+           disabled:opacity-50 disabled:cursor-not-allowed
+           transition-colors duration-200;
+  }
+
+  /* Secondary button */
+  .btn-secondary {
+    @apply bg-gray-200 text-gray-800 px-4 py-2 rounded-lg font-medium
+           hover:bg-gray-300 active:bg-gray-400
+           disabled:opacity-50 disabled:cursor-not-allowed
+           transition-colors duration-200;
+  }
+
+  /* Outline button */
+  .btn-outline {
+    @apply border-2 border-bv-red-600 text-bv-red-600 px-4 py-2 rounded-lg font-medium
+           hover:bg-bv-red-50 active:bg-bv-red-100
+           disabled:opacity-50 disabled:cursor-not-allowed
+           transition-colors duration-200;
+  }
+
+  /* Input field */
+  .input-field {
+    @apply w-full px-3 py-2 border border-gray-300 rounded-lg
+           focus:border-bv-red-600 focus:ring-1 focus:ring-bv-red-600
+           disabled:bg-gray-100 disabled:cursor-not-allowed
+           transition-colors duration-200;
+  }
+
+  /* Card */
+  .card {
+    @apply bg-white rounded-xl shadow-sm border border-gray-200 p-4;
+  }
+
+  /* Badge */
+  .badge {
+    @apply inline-flex items-center px-2 py-1 rounded-full text-xs font-medium;
+  }
+
+  .badge-success {
+    @apply inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-green-100 text-green-800;
+  }
+
+  .badge-warning {
+    @apply inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-yellow-100 text-yellow-800;
+  }
+
+  .badge-error {
+    @apply inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-red-100 text-red-800;
+  }
+
+  .badge-info {
+    @apply inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-blue-100 text-blue-800;
+  }
+
+  /* Table styles */
+  .table-container {
+    @apply w-full overflow-x-auto;
+  }
+
+  .table {
+    @apply w-full text-sm text-left;
+  }
+
+  .table th {
+    @apply px-4 py-3 bg-gray-50 font-semibold text-gray-600 uppercase text-xs tracking-wider;
+  }
+
+  .table td {
+    @apply px-4 py-3 border-b border-gray-100;
+  }
+
+  .table tr:hover td {
+    @apply bg-gray-50;
+  }
+}
+
+/* Utility layer */
+@layer utilities {
+  /* Tablet-first layout utilities */
+  .tablet-container {
+    @apply max-w-7xl mx-auto px-4 tablet:px-6 laptop:px-8;
+  }
+
+  /* Hide scrollbar but keep functionality */
+  .scrollbar-hide {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+
+  .scrollbar-hide::-webkit-scrollbar {
+    display: none;
+  }
+
+  /* Touch-friendly tap targets */
+  .touch-target {
+    @apply min-h-[44px] min-w-[44px];
+  }
+}
+
+/* Brand-specific overrides */
+[data-brand="wizopt"] {
+  --color-primary: #0d9488;
+  --color-primary-hover: #0f766e;
+  --color-primary-light: #f0fdfa;
+}
+
+[data-brand="wizopt"] .btn-primary {
+  @apply bg-wz-teal-600 hover:bg-wz-teal-700 active:bg-wz-teal-800;
+}
+
+[data-brand="wizopt"] .btn-outline {
+  @apply border-wz-teal-600 text-wz-teal-600 hover:bg-wz-teal-50 active:bg-wz-teal-100;
+}
+
+[data-brand="wizopt"] *:focus-visible {
+  @apply ring-wz-teal-600;
+}

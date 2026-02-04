@@ -1,0 +1,25 @@
+# IMS 2.0 Backend Dependencies
+# ===============================
+
+# Web Framework
+fastapi==0.115.0
+uvicorn[standard]==0.32.0
+
+# Data Validation
+pydantic==2.9.0
+pydantic-settings==2.5.0
+
+# Authentication & Security
+pyjwt==2.9.0
+passlib[bcrypt]==1.7.4
+python-multipart==0.0.9
+
+# Database
+pymongo==4.10.1
+
+# Utilities
+email-validator==2.2.0
+python-dateutil==2.9.0
+
+# Production Server (optional, uvicorn is primary)
+gunicorn==23.0.0
