@@ -129,7 +129,6 @@ export function StockAcceptance() {
 
   const handlePrintBarcode = (item: PendingStock) => {
     // In production, this would trigger barcode printing
-    console.log('Printing barcode for:', item.sku);
     alert(`Barcode printed for ${item.productName}`);
   };
 

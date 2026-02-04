@@ -3,7 +3,7 @@ IMS 2.0 - Authentication Router
 ================================
 Login, logout, token management
 """
-from fastapi import APIRouter, HTTPException, Depends, status
+from fastapi import APIRouter, HTTPException, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, Field
 from typing import List, Optional
@@ -159,6 +159,7 @@ async def login(request: LoginRequest):
         "area.west": {
             "user_id": "user-006",
             "username": "area.west",
+            "email": "sneha.patel@bettervision.in",
             "password_hash": hash_password("Area@2024"),
             "full_name": "Sneha Patel (Area Manager - West)",
             "roles": ["AREA_MANAGER"],
@@ -169,6 +170,7 @@ async def login(request: LoginRequest):
         "rajesh.manager": {
             "user_id": "user-007",
             "username": "rajesh.manager",
+            "email": "rajesh.kumar@bettervision.in",
             "password_hash": hash_password("Store@2024"),
             "full_name": "Rajesh Kumar",
             "roles": ["STORE_MANAGER"],
@@ -178,6 +180,7 @@ async def login(request: LoginRequest):
         "neha.manager": {
             "user_id": "user-008",
             "username": "neha.manager",
+            "email": "neha.gupta@bettervision.in",
             "password_hash": hash_password("Store@2024"),
             "full_name": "Neha Gupta",
             "roles": ["STORE_MANAGER"],
@@ -187,6 +190,7 @@ async def login(request: LoginRequest):
         "vikram.manager": {
             "user_id": "user-009",
             "username": "vikram.manager",
+            "email": "vikram.singh@bettervision.in",
             "password_hash": hash_password("Store@2024"),
             "full_name": "Vikram Singh",
             "roles": ["STORE_MANAGER", "OPTOMETRIST"],
@@ -196,6 +200,7 @@ async def login(request: LoginRequest):
         "pooja.manager": {
             "user_id": "user-010",
             "username": "pooja.manager",
+            "email": "pooja.shah@bettervision.in",
             "password_hash": hash_password("Store@2024"),
             "full_name": "Pooja Shah",
             "roles": ["STORE_MANAGER"],
@@ -205,6 +210,7 @@ async def login(request: LoginRequest):
         "arjun.manager": {
             "user_id": "user-011",
             "username": "arjun.manager",
+            "email": "arjun.reddy@bettervision.in",
             "password_hash": hash_password("Store@2024"),
             "full_name": "Arjun Reddy",
             "roles": ["STORE_MANAGER", "OPTOMETRIST"],
@@ -214,6 +220,7 @@ async def login(request: LoginRequest):
         "deepak.workshop": {
             "user_id": "user-012",
             "username": "deepak.workshop",
+            "email": "deepak.mishra@wizopt.in",
             "password_hash": hash_password("Store@2024"),
             "full_name": "Deepak Mishra (Workshop Manager)",
             "roles": ["STORE_MANAGER"],
@@ -224,6 +231,7 @@ async def login(request: LoginRequest):
         "accountant.delhi": {
             "user_id": "user-013",
             "username": "accountant.delhi",
+            "email": "suresh.agarwal@bettervision.in",
             "password_hash": hash_password("Acc@2024"),
             "full_name": "Suresh Agarwal",
             "roles": ["ACCOUNTANT"],
@@ -233,6 +241,7 @@ async def login(request: LoginRequest):
         "accountant.mumbai": {
             "user_id": "user-014",
             "username": "accountant.mumbai",
+            "email": "meera.joshi@bettervision.in",
             "password_hash": hash_password("Acc@2024"),
             "full_name": "Meera Joshi",
             "roles": ["ACCOUNTANT"],
@@ -243,6 +252,7 @@ async def login(request: LoginRequest):
         "catalog.admin": {
             "user_id": "user-015",
             "username": "catalog.admin",
+            "email": "rohit.malhotra@bettervision.in",
             "password_hash": hash_password("Cat@2024"),
             "full_name": "Rohit Malhotra",
             "roles": ["CATALOG_MANAGER"],
@@ -253,6 +263,7 @@ async def login(request: LoginRequest):
         "dr.sharma": {
             "user_id": "user-016",
             "username": "dr.sharma",
+            "email": "dr.anita.sharma@bettervision.in",
             "password_hash": hash_password("Opt@2024"),
             "full_name": "Dr. Anita Sharma (Head Optometrist)",
             "roles": ["OPTOMETRIST"],
@@ -263,6 +274,7 @@ async def login(request: LoginRequest):
         "sales.delhi1": {
             "user_id": "user-017",
             "username": "sales.delhi1",
+            "email": "ravi.sharma@bettervision.in",
             "password_hash": hash_password("Staff@2024"),
             "full_name": "Ravi Sharma",
             "roles": ["SALES_STAFF"],
@@ -272,6 +284,7 @@ async def login(request: LoginRequest):
         "sales.delhi2": {
             "user_id": "user-018",
             "username": "sales.delhi2",
+            "email": "anjali.verma@bettervision.in",
             "password_hash": hash_password("Staff@2024"),
             "full_name": "Anjali Verma",
             "roles": ["SALES_STAFF"],
@@ -281,6 +294,7 @@ async def login(request: LoginRequest):
         "sales.delhi3": {
             "user_id": "user-019",
             "username": "sales.delhi3",
+            "email": "karan.mehta@bettervision.in",
             "password_hash": hash_password("Staff@2024"),
             "full_name": "Karan Mehta",
             "roles": ["SALES_STAFF"],
@@ -291,6 +305,7 @@ async def login(request: LoginRequest):
         "sales.noida1": {
             "user_id": "user-020",
             "username": "sales.noida1",
+            "email": "simran.kaur@bettervision.in",
             "password_hash": hash_password("Staff@2024"),
             "full_name": "Simran Kaur",
             "roles": ["SALES_STAFF"],
@@ -300,6 +315,7 @@ async def login(request: LoginRequest):
         "sales.noida2": {
             "user_id": "user-021",
             "username": "sales.noida2",
+            "email": "rahul.jain@bettervision.in",
             "password_hash": hash_password("Staff@2024"),
             "full_name": "Rahul Jain",
             "roles": ["SALES_STAFF"],
@@ -309,6 +325,7 @@ async def login(request: LoginRequest):
         "sales.noida3": {
             "user_id": "user-022",
             "username": "sales.noida3",
+            "email": "priyanka.mishra@bettervision.in",
             "password_hash": hash_password("Staff@2024"),
             "full_name": "Priyanka Mishra",
             "roles": ["SALES_STAFF"],
@@ -319,6 +336,7 @@ async def login(request: LoginRequest):
         "sales.gurgaon1": {
             "user_id": "user-023",
             "username": "sales.gurgaon1",
+            "email": "aditya.singh@bettervision.in",
             "password_hash": hash_password("Staff@2024"),
             "full_name": "Aditya Singh",
             "roles": ["SALES_STAFF"],
@@ -328,6 +346,7 @@ async def login(request: LoginRequest):
         "sales.gurgaon2": {
             "user_id": "user-024",
             "username": "sales.gurgaon2",
+            "email": "kavita.rani@bettervision.in",
             "password_hash": hash_password("Staff@2024"),
             "full_name": "Kavita Rani",
             "roles": ["SALES_STAFF"],
@@ -338,6 +357,7 @@ async def login(request: LoginRequest):
         "sales.wizopt1": {
             "user_id": "user-025",
             "username": "sales.wizopt1",
+            "email": "sanjay.kumar@wizopt.in",
             "password_hash": hash_password("Staff@2024"),
             "full_name": "Sanjay Kumar",
             "roles": ["SALES_STAFF"],
@@ -347,6 +367,7 @@ async def login(request: LoginRequest):
         "sales.wizopt2": {
             "user_id": "user-026",
             "username": "sales.wizopt2",
+            "email": "nisha.patel@wizopt.in",
             "password_hash": hash_password("Staff@2024"),
             "full_name": "Nisha Patel",
             "roles": ["SALES_STAFF"],
@@ -357,6 +378,7 @@ async def login(request: LoginRequest):
         "cashier.delhi": {
             "user_id": "user-027",
             "username": "cashier.delhi",
+            "email": "mohan.lal@bettervision.in",
             "password_hash": hash_password("Staff@2024"),
             "full_name": "Mohan Lal",
             "roles": ["CASHIER"],
@@ -366,6 +388,7 @@ async def login(request: LoginRequest):
         "cashier.noida": {
             "user_id": "user-028",
             "username": "cashier.noida",
+            "email": "sunita.devi@bettervision.in",
             "password_hash": hash_password("Staff@2024"),
             "full_name": "Sunita Devi",
             "roles": ["CASHIER"],
@@ -375,6 +398,7 @@ async def login(request: LoginRequest):
         "cashier.gurgaon": {
             "user_id": "user-029",
             "username": "cashier.gurgaon",
+            "email": "ramesh.kumar@bettervision.in",
             "password_hash": hash_password("Staff@2024"),
             "full_name": "Ramesh Kumar",
             "roles": ["CASHIER"],
@@ -384,6 +408,7 @@ async def login(request: LoginRequest):
         "cashier.mumbai": {
             "user_id": "user-030",
             "username": "cashier.mumbai",
+            "email": "lakshmi.iyer@bettervision.in",
             "password_hash": hash_password("Staff@2024"),
             "full_name": "Lakshmi Iyer",
             "roles": ["CASHIER"],
@@ -393,6 +418,7 @@ async def login(request: LoginRequest):
         "cashier.bangalore": {
             "user_id": "user-031",
             "username": "cashier.bangalore",
+            "email": "venkat.rao@bettervision.in",
             "password_hash": hash_password("Staff@2024"),
             "full_name": "Venkat Rao",
             "roles": ["CASHIER"],
@@ -402,6 +428,7 @@ async def login(request: LoginRequest):
         "cashier.wizopt": {
             "user_id": "user-032",
             "username": "cashier.wizopt",
+            "email": "prakash.sharma@wizopt.in",
             "password_hash": hash_password("Staff@2024"),
             "full_name": "Prakash Sharma",
             "roles": ["CASHIER"],
@@ -412,6 +439,7 @@ async def login(request: LoginRequest):
         "workshop.tech1": {
             "user_id": "user-033",
             "username": "workshop.tech1",
+            "email": "vinod.yadav@wizopt.in",
             "password_hash": hash_password("Staff@2024"),
             "full_name": "Vinod Yadav",
             "roles": ["WORKSHOP_STAFF"],
@@ -421,6 +449,7 @@ async def login(request: LoginRequest):
         "workshop.tech2": {
             "user_id": "user-034",
             "username": "workshop.tech2",
+            "email": "rajiv.gupta@wizopt.in",
             "password_hash": hash_password("Staff@2024"),
             "full_name": "Rajiv Gupta",
             "roles": ["WORKSHOP_STAFF"],
@@ -430,6 +459,7 @@ async def login(request: LoginRequest):
         "workshop.tech3": {
             "user_id": "user-035",
             "username": "workshop.tech3",
+            "email": "manoj.singh@wizopt.in",
             "password_hash": hash_password("Staff@2024"),
             "full_name": "Manoj Singh",
             "roles": ["WORKSHOP_STAFF"],
@@ -439,6 +469,7 @@ async def login(request: LoginRequest):
         "workshop.tech4": {
             "user_id": "user-036",
             "username": "workshop.tech4",
+            "email": "sunil.mishra@wizopt.in",
             "password_hash": hash_password("Staff@2024"),
             "full_name": "Sunil Mishra",
             "roles": ["WORKSHOP_STAFF"],

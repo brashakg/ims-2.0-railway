@@ -91,9 +91,9 @@ export function PaymentCollectionPanel({
       // Show QR code for UPI payment
       setShowQRCode(true);
       // In production, this would integrate with payment gateway
-      console.log('Online payment initiated:', result);
-    } catch (err) {
-      console.error('Failed to initiate online payment:', err);
+      void result; // Payment result handled by onInitiateOnlinePayment
+    } catch {
+      // Payment initiation failed - handled by parent
     } finally {
       setIsProcessingOnline(false);
     }

@@ -165,7 +165,7 @@ export function TasksPage() {
 
   const toggleTaskStatus = (taskId: string) => {
     // In production, this would call an API
-    console.log('Toggle task:', taskId);
+    void taskId; // TODO: Implement task status toggle
   };
 
   return (

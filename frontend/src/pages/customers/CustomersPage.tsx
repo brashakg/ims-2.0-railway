@@ -66,8 +66,7 @@ export function CustomersPage() {
         limit: 100,
       });
       setCustomers(response.customers || response || []);
-    } catch (err) {
-      console.error('Failed to load customers:', err);
+    } catch {
       setError('Failed to load customers. Please try again.');
       setCustomers([]);
     } finally {
@@ -81,8 +80,7 @@ export function CustomersPage() {
     try {
       const response = await prescriptionApi.getPrescriptions(patientId);
       setPrescriptions(response.prescriptions || response || []);
-    } catch (err) {
-      console.error('Failed to load prescriptions:', err);
+    } catch {
       setPrescriptions([]);
     } finally {
       setIsLoadingPrescriptions(false);
@@ -102,8 +100,7 @@ export function CustomersPage() {
         total: order.grandTotal,
         items: order.items?.length || 0,
       })));
-    } catch (err) {
-      console.error('Failed to load purchase history:', err);
+    } catch {
       setPurchaseHistory([]);
     } finally {
       setIsLoadingHistory(false);

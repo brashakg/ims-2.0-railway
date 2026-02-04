@@ -5,49 +5,11 @@
 import { useState, useCallback } from 'react';
 import { Search, UserPlus, Phone, User, ChevronRight } from 'lucide-react';
 import type { Customer } from '../../types';
+import { customerApi } from '../../services/api';
 
 interface CustomerSearchProps {
   onSelect: (customer: Customer) => void;
 }
-
-// Mock customer data for demo
-const mockCustomers: Customer[] = [
-  {
-    id: 'cust-001',
-    name: 'Rajesh Kumar',
-    phone: '9876543210',
-    email: 'rajesh@email.com',
-    customerType: 'B2C',
-    patients: [
-      { id: 'pat-001', customerId: 'cust-001', name: 'Rajesh Kumar', relation: 'Self' },
-      { id: 'pat-002', customerId: 'cust-001', name: 'Priya Kumar', relation: 'Wife' },
-    ],
-    createdAt: '2024-01-15',
-  },
-  {
-    id: 'cust-002',
-    name: 'Sunita Devi',
-    phone: '9123456789',
-    email: 'sunita@email.com',
-    customerType: 'B2C',
-    patients: [
-      { id: 'pat-003', customerId: 'cust-002', name: 'Sunita Devi', relation: 'Self' },
-    ],
-    createdAt: '2024-02-20',
-  },
-  {
-    id: 'cust-003',
-    name: 'Amit Sharma',
-    phone: '9988776655',
-    customerType: 'B2C',
-    patients: [
-      { id: 'pat-004', customerId: 'cust-003', name: 'Amit Sharma', relation: 'Self' },
-      { id: 'pat-005', customerId: 'cust-003', name: 'Ravi Sharma', relation: 'Son' },
-      { id: 'pat-006', customerId: 'cust-003', name: 'Meena Sharma', relation: 'Daughter' },
-    ],
-    createdAt: '2024-03-10',
-  },
-];
 
 export function CustomerSearch({ onSelect }: CustomerSearchProps) {
   const [searchQuery, setSearchQuery] = useState('');
@@ -67,43 +29,73 @@ export function CustomerSearch({ onSelect }: CustomerSearchProps) {
 
     setIsSearching(true);
 
-    // Simulate API call - replace with actual API
-    setTimeout(() => {
-      const results = mockCustomers.filter(
-        c =>
-          c.phone.includes(query) ||
-          c.name.toLowerCase().includes(query.toLowerCase())
-      );
-      setSearchResults(results);
+    try {
+      const response = await customerApi.getCustomers({ search: query, limit: 10 });
+      const customers = response?.customers || response || [];
+      setSearchResults(Array.isArray(customers) ? customers : []);
+    } catch {
+      // If API fails, show empty results
+      setSearchResults([]);
+    } finally {
       setIsSearching(false);
-    }, 300);
+    }
   }, []);
 
   // Create new customer
   const handleCreateCustomer = useCallback(async () => {
     if (!newCustomer.name || !newCustomer.phone) return;
 
-    // Simulate API call - replace with actual API
-    const customer: Customer = {
-      id: `cust-${Date.now()}`,
-      name: newCustomer.name,
-      phone: newCustomer.phone,
-      email: newCustomer.email || undefined,
-      customerType: 'B2C',
-      patients: [
-        {
-          id: `pat-${Date.now()}`,
-          customerId: `cust-${Date.now()}`,
-          name: newCustomer.name,
-          relation: 'Self',
-        },
-      ],
-      createdAt: new Date().toISOString(),
-    };
+    try {
+      const response = await customerApi.createCustomer({
+        name: newCustomer.name,
+        phone: newCustomer.phone,
+        email: newCustomer.email || undefined,
+        customerType: 'B2C',
+      });
 
-    onSelect(customer);
-    setShowCreateForm(false);
-    setNewCustomer({ name: '', phone: '', email: '' });
+      // Use the created customer from API response, or construct one
+      const customer: Customer = response?.customer || response || {
+        id: response?.id || `cust-${Date.now()}`,
+        name: newCustomer.name,
+        phone: newCustomer.phone,
+        email: newCustomer.email || undefined,
+        customerType: 'B2C',
+        patients: response?.patients || [
+          {
+            id: `pat-${Date.now()}`,
+            customerId: response?.id || `cust-${Date.now()}`,
+            name: newCustomer.name,
+            relation: 'Self',
+          },
+        ],
+        createdAt: new Date().toISOString(),
+      };
+
+      onSelect(customer);
+      setShowCreateForm(false);
+      setNewCustomer({ name: '', phone: '', email: '' });
+    } catch {
+      // If API fails, still allow local creation for demo purposes
+      const customer: Customer = {
+        id: `cust-${Date.now()}`,
+        name: newCustomer.name,
+        phone: newCustomer.phone,
+        email: newCustomer.email || undefined,
+        customerType: 'B2C',
+        patients: [
+          {
+            id: `pat-${Date.now()}`,
+            customerId: `cust-${Date.now()}`,
+            name: newCustomer.name,
+            relation: 'Self',
+          },
+        ],
+        createdAt: new Date().toISOString(),
+      };
+      onSelect(customer);
+      setShowCreateForm(false);
+      setNewCustomer({ name: '', phone: '', email: '' });
+    }
   }, [newCustomer, onSelect]);
 
   // Render create form

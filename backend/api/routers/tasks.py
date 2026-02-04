@@ -32,6 +32,15 @@ async def list_tasks(
 async def my_tasks(current_user: dict = Depends(get_current_user)):
     return {"tasks": []}
 
+# NOTE: Specific routes MUST come before /{task_id} to avoid being matched as task_id
+@router.get("/overdue")
+async def get_overdue_tasks(current_user: dict = Depends(get_current_user)):
+    return {"tasks": []}
+
+@router.get("/escalated")
+async def get_escalated_tasks(current_user: dict = Depends(get_current_user)):
+    return {"tasks": []}
+
 @router.post("/", status_code=201)
 async def create_task(task: TaskCreate, current_user: dict = Depends(get_current_user)):
     return {"task_id": "new-task-id"}
@@ -51,11 +60,3 @@ async def complete_task(task_id: str, notes: Optional[str] = None, current_user:
 @router.post("/{task_id}/reassign")
 async def reassign_task(task_id: str, new_assignee: str, current_user: dict = Depends(get_current_user)):
     return {"message": "Task reassigned"}
-
-@router.get("/overdue")
-async def get_overdue_tasks(current_user: dict = Depends(get_current_user)):
-    return {"tasks": []}
-
-@router.get("/escalated")
-async def get_escalated_tasks(current_user: dict = Depends(get_current_user)):
-    return {"tasks": []}

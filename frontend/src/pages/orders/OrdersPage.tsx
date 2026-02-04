@@ -86,8 +86,7 @@ export function OrdersPage() {
       }
       const response = await orderApi.getOrders(params);
       setOrders(response.orders || response || []);
-    } catch (err) {
-      console.error('Failed to load orders:', err);
+    } catch {
       setError('Failed to load orders. Please try again.');
       setOrders([]);
     } finally {

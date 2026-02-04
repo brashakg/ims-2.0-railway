@@ -7,7 +7,6 @@ from fastapi import APIRouter, HTTPException, Depends, Query
 from pydantic import BaseModel, Field
 from typing import List, Optional
 from datetime import datetime, date
-from decimal import Decimal
 from enum import Enum
 
 from .auth import get_current_user
@@ -83,9 +82,43 @@ async def list_orders(
     # Use active store from token if not provided
     if not store_id:
         store_id = current_user.get("active_store_id")
-    
+
     # TODO: Implement with database
     return {"orders": [], "total": 0}
+
+
+# NOTE: Specific routes MUST come before /{order_id} to avoid being matched as order_id
+@router.get("/pending/delivery")
+async def get_pending_deliveries(
+    store_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Get orders pending delivery
+    """
+    return {"orders": []}
+
+
+@router.get("/unpaid/list")
+async def get_unpaid_orders(
+    store_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Get unpaid/partially paid orders
+    """
+    return {"orders": []}
+
+
+@router.get("/overdue/list")
+async def get_overdue_orders(
+    store_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Get overdue orders (past expected delivery)
+    """
+    return {"orders": []}
 
 
 @router.post("/", status_code=201)
@@ -240,36 +273,3 @@ async def get_invoice(
     Get/generate invoice for order
     """
     return {"invoice_number": "BV/INV/2024/0001", "order_id": order_id}
-
-
-@router.get("/pending/delivery")
-async def get_pending_deliveries(
-    store_id: Optional[str] = Query(None),
-    current_user: dict = Depends(get_current_user)
-):
-    """
-    Get orders pending delivery
-    """
-    return {"orders": []}
-
-
-@router.get("/unpaid/list")
-async def get_unpaid_orders(
-    store_id: Optional[str] = Query(None),
-    current_user: dict = Depends(get_current_user)
-):
-    """
-    Get unpaid/partially paid orders
-    """
-    return {"orders": []}
-
-
-@router.get("/overdue/list")
-async def get_overdue_orders(
-    store_id: Optional[str] = Query(None),
-    current_user: dict = Depends(get_current_user)
-):
-    """
-    Get overdue orders (past expected delivery)
-    """
-    return {"orders": []}
