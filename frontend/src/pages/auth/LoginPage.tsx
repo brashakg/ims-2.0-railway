@@ -12,7 +12,7 @@ export function LoginPage() {
   const navigate = useNavigate();
   const location = useLocation();
 
-  const [email, setEmail] = useState('');
+  const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState('');
@@ -23,8 +23,8 @@ export function LoginPage() {
     e.preventDefault();
     setError('');
 
-    if (!email || !password) {
-      setError('Please enter email and password');
+    if (!username || !password) {
+      setError('Please enter username and password');
       return;
     }
 
@@ -50,7 +50,7 @@ export function LoginPage() {
       }
 
       const response = await login({
-        email,
+        username,
         password,
         latitude,
         longitude,
@@ -91,19 +91,19 @@ export function LoginPage() {
           )}
 
           <form onSubmit={handleSubmit} className="space-y-4">
-            {/* Email */}
+            {/* Username */}
             <div>
-              <label htmlFor="email" className="block text-sm font-medium text-gray-700 mb-1">
-                Email
+              <label htmlFor="username" className="block text-sm font-medium text-gray-700 mb-1">
+                Username
               </label>
               <input
-                type="email"
-                id="email"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
+                type="text"
+                id="username"
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
                 className="input-field"
-                placeholder="your@email.com"
-                autoComplete="email"
+                placeholder="Enter username"
+                autoComplete="username"
                 disabled={isLoading}
               />
             </div>
