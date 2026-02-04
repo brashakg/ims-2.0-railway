@@ -18,6 +18,7 @@ import {
   ChevronRight, Plus, Edit2, Trash2, X, Check, AlertCircle,
   RefreshCw, ToggleLeft, ToggleRight, Upload, Download,
   Link, CreditCard, MessageSquare, FileText, Boxes, CircleDot,
+  User, Building2, Receipt, Bell, History, Printer, Lock, Save, Send,
 } from 'lucide-react';
 import clsx from 'clsx';
 import { useAuth } from '../../context/AuthContext';
@@ -30,6 +31,7 @@ import {
   adminDiscountApi,
   adminIntegrationApi,
   adminSystemApi,
+  settingsApi,
 } from '../../services/api';
 
 // ============================================================================
@@ -37,13 +39,19 @@ import {
 // ============================================================================
 
 type SettingsTab =
+  | 'profile'
+  | 'business'
   | 'stores'
   | 'users'
   | 'categories'
   | 'brands'
   | 'lens-master'
   | 'discounts'
+  | 'tax-invoice'
+  | 'notifications'
   | 'integrations'
+  | 'printers'
+  | 'audit-logs'
   | 'system';
 
 interface Store {
@@ -145,13 +153,32 @@ interface Integration {
 // ============================================================================
 
 const SETTINGS_SECTIONS = [
+  // Available to all users
+  { id: 'profile' as SettingsTab, label: 'My Profile', icon: User, description: 'Account settings and preferences', role: ['ALL'] },
+
+  // Business & Administration (SUPERADMIN/ADMIN)
+  { id: 'business' as SettingsTab, label: 'Business Profile', icon: Building2, description: 'Company info and branding', role: ['SUPERADMIN', 'ADMIN'] },
   { id: 'stores' as SettingsTab, label: 'Store Management', icon: Store, description: 'Create and manage stores', role: ['SUPERADMIN', 'ADMIN'] },
   { id: 'users' as SettingsTab, label: 'User Management', icon: Users, description: 'Manage users and roles', role: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER'] },
+
+  // Product & Catalog
   { id: 'categories' as SettingsTab, label: 'Category Master', icon: Tag, description: 'Product categories and attributes', role: ['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER'] },
   { id: 'brands' as SettingsTab, label: 'Brand Master', icon: Boxes, description: 'Brands and subbrands', role: ['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER'] },
   { id: 'lens-master' as SettingsTab, label: 'Lens Master', icon: CircleDot, description: 'Lens brands, indices, coatings', role: ['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER'] },
+
+  // Pricing & Rules
   { id: 'discounts' as SettingsTab, label: 'Discount Rules', icon: Percent, description: 'Role-based discount limits', role: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER'] },
-  { id: 'integrations' as SettingsTab, label: 'Integrations', icon: Link, description: 'Payment, WhatsApp, Tally', role: ['SUPERADMIN', 'ADMIN'] },
+  { id: 'tax-invoice' as SettingsTab, label: 'Tax & Invoice', icon: Receipt, description: 'GST, invoice numbering', role: ['SUPERADMIN', 'ADMIN', 'ACCOUNTANT'] },
+
+  // Communications
+  { id: 'notifications' as SettingsTab, label: 'Notifications', icon: Bell, description: 'SMS, WhatsApp templates', role: ['SUPERADMIN', 'ADMIN'] },
+  { id: 'integrations' as SettingsTab, label: 'Integrations', icon: Link, description: 'Payment, Tally, Shopify', role: ['SUPERADMIN', 'ADMIN'] },
+
+  // Hardware & Technical
+  { id: 'printers' as SettingsTab, label: 'Printers', icon: Printer, description: 'Receipt and label printers', role: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER'] },
+
+  // Security & Audit
+  { id: 'audit-logs' as SettingsTab, label: 'Audit Logs', icon: History, description: 'Activity history and logs', role: ['SUPERADMIN', 'ADMIN'] },
   { id: 'system' as SettingsTab, label: 'System', icon: Database, description: 'Backup, sync, maintenance', role: ['SUPERADMIN', 'ADMIN'] },
 ];
 
@@ -229,7 +256,7 @@ export function SettingsPage() {
   const toast = useToast();
 
   // State
-  const [activeTab, setActiveTab] = useState<SettingsTab>('stores');
+  const [activeTab, setActiveTab] = useState<SettingsTab>('profile');
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -259,6 +286,93 @@ export function SettingsPage() {
   // System state
   const [systemStatus, setSystemStatus] = useState<{ database: string; api: string; version: string } | null>(null);
 
+  // Profile state
+  const [profileData, setProfileData] = useState<{
+    full_name: string;
+    email: string;
+    phone: string;
+  } | null>(null);
+  const [_preferences, setPreferences] = useState<Record<string, any>>({});
+  void _preferences; // Used in future preference display
+  const [showChangePassword, setShowChangePassword] = useState(false);
+
+  // Business state
+  const [businessSettings, setBusinessSettings] = useState<{
+    company_name: string;
+    company_short_name: string;
+    tagline: string;
+    logo_url: string;
+    primary_color: string;
+    secondary_color: string;
+    support_email: string;
+    support_phone: string;
+    website: string;
+    address: string;
+  } | null>(null);
+
+  // Tax & Invoice state
+  const [taxSettings, setTaxSettings] = useState<{
+    gst_enabled: boolean;
+    company_gstin: string;
+    default_gst_rate: number;
+    hsn_validation: boolean;
+    e_invoice_enabled: boolean;
+    e_way_bill_enabled: boolean;
+    e_way_bill_threshold: number;
+  } | null>(null);
+  const [invoiceSettings, setInvoiceSettings] = useState<{
+    invoice_prefix: string;
+    current_invoice_number: number;
+    financial_year: string;
+    show_logo_on_invoice: boolean;
+    show_terms_on_invoice: boolean;
+    default_terms: string;
+    default_warranty_days: number;
+    show_qr_code: boolean;
+  } | null>(null);
+
+  // Notification templates state
+  const [notificationTemplates, setNotificationTemplates] = useState<Array<{
+    template_id: string;
+    template_type: string;
+    trigger_event: string;
+    is_enabled: boolean;
+    subject?: string;
+    content: string;
+    variables: string[];
+  }>>([]);
+  const [_editingTemplate, _setEditingTemplate] = useState<any>(null);
+  void _editingTemplate; // Reserved for template editing modal
+  void _setEditingTemplate;
+
+  // Printer state
+  const [printerSettings, setPrinterSettings] = useState<{
+    receipt_printer_name: string;
+    receipt_printer_width: number;
+    label_printer_name: string;
+    label_size: string;
+    auto_print_receipt: boolean;
+    auto_print_job_card: boolean;
+    copies_per_print: number;
+  } | null>(null);
+  const [availablePrinters, setAvailablePrinters] = useState<Array<{ name: string; type: string; status: string }>>([]);
+
+  // Audit logs state
+  const [auditLogs, setAuditLogs] = useState<Array<{
+    id: string;
+    timestamp: string;
+    user_id: string;
+    user_name: string;
+    action: string;
+    entity_type: string;
+    entity_id?: string;
+    changes?: Record<string, any>;
+    ip_address?: string;
+  }>>([]);
+  const [auditSummary, setAuditSummary] = useState<{
+    today: { total_actions: number; logins: number; orders_created: number };
+  } | null>(null);
+
   // Modal state
   const [showAddStoreModal, setShowAddStoreModal] = useState(false);
   const [showAddUserModal, setShowAddUserModal] = useState(false);
@@ -270,6 +384,8 @@ export function SettingsPage() {
   // Filter sections by user role
   const visibleSections = SETTINGS_SECTIONS.filter(section => {
     if (!user) return false;
+    // 'ALL' role means available to everyone
+    if (section.role.includes('ALL')) return true;
     return section.role.includes(user.activeRole) || user.activeRole === 'SUPERADMIN';
   });
 
@@ -391,6 +507,84 @@ export function SettingsPage() {
             }
           } catch {
             // Ignore
+          }
+          break;
+
+        case 'profile':
+          try {
+            const [profileRes, prefsRes] = await Promise.all([
+              settingsApi.getProfile().catch(() => null),
+              settingsApi.getPreferences().catch(() => ({})),
+            ]);
+            if (profileRes) {
+              setProfileData({
+                full_name: user?.name || profileRes.full_name || '',
+                email: profileRes.email || '',
+                phone: profileRes.phone || '',
+              });
+            }
+            setPreferences(prefsRes || {});
+          } catch {
+            // Use defaults
+          }
+          break;
+
+        case 'business':
+          try {
+            const businessRes = await settingsApi.getBusinessSettings().catch(() => null);
+            if (businessRes) {
+              setBusinessSettings(businessRes);
+            }
+          } catch {
+            // Use defaults
+          }
+          break;
+
+        case 'tax-invoice':
+          try {
+            const [taxRes, invoiceRes] = await Promise.all([
+              settingsApi.getTaxSettings().catch(() => null),
+              settingsApi.getInvoiceSettings().catch(() => null),
+            ]);
+            if (taxRes) setTaxSettings(taxRes);
+            if (invoiceRes) setInvoiceSettings(invoiceRes);
+          } catch {
+            // Use defaults
+          }
+          break;
+
+        case 'notifications':
+          try {
+            const templatesRes = await settingsApi.getNotificationTemplates().catch(() => ({ templates: [] }));
+            setNotificationTemplates(templatesRes.templates || []);
+          } catch {
+            setNotificationTemplates([]);
+          }
+          break;
+
+        case 'printers':
+          try {
+            const [printerRes, availableRes] = await Promise.all([
+              settingsApi.getPrinterSettings().catch(() => null),
+              settingsApi.getAvailablePrinters().catch(() => ({ printers: [] })),
+            ]);
+            if (printerRes) setPrinterSettings(printerRes);
+            setAvailablePrinters(availableRes.printers || []);
+          } catch {
+            // Use defaults
+          }
+          break;
+
+        case 'audit-logs':
+          try {
+            const [logsRes, summaryRes] = await Promise.all([
+              settingsApi.getAuditLogs({ limit: 50 }).catch(() => ({ logs: [] })),
+              settingsApi.getAuditSummary().catch(() => null),
+            ]);
+            setAuditLogs(logsRes.logs || []);
+            if (summaryRes) setAuditSummary(summaryRes);
+          } catch {
+            setAuditLogs([]);
           }
           break;
       }
@@ -1563,6 +1757,689 @@ export function SettingsPage() {
                         </div>
                         <ChevronRight className="w-5 h-5 text-gray-400" />
                       </button>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* ================================================================ */}
+              {/* PROFILE */}
+              {/* ================================================================ */}
+              {activeTab === 'profile' && (
+                <div className="space-y-4">
+                  <div className="card">
+                    <h2 className="text-lg font-semibold text-gray-900 mb-4">My Profile</h2>
+                    <div className="space-y-4">
+                      <div className="flex items-center gap-4 p-4 bg-gray-50 rounded-lg">
+                        <div className="w-16 h-16 rounded-full bg-bv-gold-100 flex items-center justify-center">
+                          <User className="w-8 h-8 text-bv-gold-600" />
+                        </div>
+                        <div>
+                          <h3 className="font-semibold text-gray-900">{user?.name || 'User'}</h3>
+                          <p className="text-sm text-gray-500">@{user?.email?.split('@')[0]}</p>
+                          <div className="flex gap-2 mt-1">
+                            {user?.roles?.map(role => (
+                              <span key={role} className="text-xs bg-bv-gold-100 text-bv-gold-700 px-2 py-0.5 rounded">
+                                {role.replace('_', ' ')}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-4">
+                        <div>
+                          <label className="block text-sm font-medium text-gray-700 mb-1">Full Name</label>
+                          <input
+                            type="text"
+                            value={profileData?.full_name || user?.name || ''}
+                            onChange={e => setProfileData(prev => prev ? { ...prev, full_name: e.target.value } : null)}
+                            className="input-field"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-sm font-medium text-gray-700 mb-1">Email</label>
+                          <input
+                            type="email"
+                            value={profileData?.email || ''}
+                            onChange={e => setProfileData(prev => prev ? { ...prev, email: e.target.value } : null)}
+                            className="input-field"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-sm font-medium text-gray-700 mb-1">Phone</label>
+                          <input
+                            type="tel"
+                            value={profileData?.phone || ''}
+                            onChange={e => setProfileData(prev => prev ? { ...prev, phone: e.target.value } : null)}
+                            className="input-field"
+                          />
+                        </div>
+                      </div>
+
+                      <div className="flex gap-3">
+                        <button
+                          onClick={async () => {
+                            try {
+                              await settingsApi.updateProfile(profileData || {});
+                              toast.success('Profile updated successfully');
+                            } catch {
+                              toast.error('Failed to update profile');
+                            }
+                          }}
+                          className="btn-primary"
+                        >
+                          <Save className="w-4 h-4 mr-2" />
+                          Save Profile
+                        </button>
+                        <button
+                          onClick={() => setShowChangePassword(!showChangePassword)}
+                          className="btn-outline"
+                        >
+                          <Lock className="w-4 h-4 mr-2" />
+                          Change Password
+                        </button>
+                      </div>
+
+                      {showChangePassword && (
+                        <div className="p-4 bg-yellow-50 rounded-lg border border-yellow-200">
+                          <h4 className="font-medium text-gray-900 mb-3">Change Password</h4>
+                          <div className="space-y-3">
+                            <input type="password" placeholder="Current Password" className="input-field" />
+                            <input type="password" placeholder="New Password (min 8 chars)" className="input-field" />
+                            <input type="password" placeholder="Confirm New Password" className="input-field" />
+                            <button className="btn-primary">Update Password</button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="card">
+                    <h2 className="text-lg font-semibold text-gray-900 mb-4">Preferences</h2>
+                    <div className="space-y-4">
+                      <div className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
+                        <div>
+                          <p className="font-medium text-gray-900">Email Notifications</p>
+                          <p className="text-sm text-gray-500">Receive email alerts for important updates</p>
+                        </div>
+                        <ToggleRight className="w-8 h-8 text-green-600 cursor-pointer" />
+                      </div>
+                      <div className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
+                        <div>
+                          <p className="font-medium text-gray-900">SMS Notifications</p>
+                          <p className="text-sm text-gray-500">Receive SMS for urgent alerts</p>
+                        </div>
+                        <ToggleLeft className="w-8 h-8 text-gray-400 cursor-pointer" />
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* ================================================================ */}
+              {/* BUSINESS PROFILE */}
+              {/* ================================================================ */}
+              {activeTab === 'business' && (
+                <div className="space-y-4">
+                  <div className="card">
+                    <h2 className="text-lg font-semibold text-gray-900 mb-4">Company Profile</h2>
+                    <div className="space-y-4">
+                      <div className="flex items-center gap-4 p-4 bg-gray-50 rounded-lg">
+                        <div className="w-20 h-20 rounded-lg bg-white border-2 border-dashed border-gray-300 flex items-center justify-center cursor-pointer hover:border-bv-gold-500">
+                          <Building2 className="w-8 h-8 text-gray-400" />
+                        </div>
+                        <div>
+                          <p className="text-sm text-gray-500">Company Logo</p>
+                          <button className="text-sm text-bv-gold-600 hover:underline">Upload new logo</button>
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-4">
+                        <div>
+                          <label className="block text-sm font-medium text-gray-700 mb-1">Company Name</label>
+                          <input
+                            type="text"
+                            value={businessSettings?.company_name || ''}
+                            onChange={e => setBusinessSettings(prev => prev ? { ...prev, company_name: e.target.value } : null)}
+                            className="input-field"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-sm font-medium text-gray-700 mb-1">Short Name</label>
+                          <input
+                            type="text"
+                            value={businessSettings?.company_short_name || ''}
+                            onChange={e => setBusinessSettings(prev => prev ? { ...prev, company_short_name: e.target.value } : null)}
+                            className="input-field"
+                          />
+                        </div>
+                        <div className="col-span-2">
+                          <label className="block text-sm font-medium text-gray-700 mb-1">Tagline</label>
+                          <input
+                            type="text"
+                            value={businessSettings?.tagline || ''}
+                            onChange={e => setBusinessSettings(prev => prev ? { ...prev, tagline: e.target.value } : null)}
+                            className="input-field"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-sm font-medium text-gray-700 mb-1">Support Email</label>
+                          <input
+                            type="email"
+                            value={businessSettings?.support_email || ''}
+                            onChange={e => setBusinessSettings(prev => prev ? { ...prev, support_email: e.target.value } : null)}
+                            className="input-field"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-sm font-medium text-gray-700 mb-1">Support Phone</label>
+                          <input
+                            type="tel"
+                            value={businessSettings?.support_phone || ''}
+                            onChange={e => setBusinessSettings(prev => prev ? { ...prev, support_phone: e.target.value } : null)}
+                            className="input-field"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-sm font-medium text-gray-700 mb-1">Website</label>
+                          <input
+                            type="url"
+                            value={businessSettings?.website || ''}
+                            onChange={e => setBusinessSettings(prev => prev ? { ...prev, website: e.target.value } : null)}
+                            className="input-field"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-sm font-medium text-gray-700 mb-1">Primary Color</label>
+                          <div className="flex gap-2">
+                            <input
+                              type="color"
+                              value={businessSettings?.primary_color || '#ba8659'}
+                              onChange={e => setBusinessSettings(prev => prev ? { ...prev, primary_color: e.target.value } : null)}
+                              className="w-12 h-10 rounded border cursor-pointer"
+                            />
+                            <input
+                              type="text"
+                              value={businessSettings?.primary_color || '#ba8659'}
+                              onChange={e => setBusinessSettings(prev => prev ? { ...prev, primary_color: e.target.value } : null)}
+                              className="input-field flex-1"
+                            />
+                          </div>
+                        </div>
+                        <div className="col-span-2">
+                          <label className="block text-sm font-medium text-gray-700 mb-1">Address</label>
+                          <textarea
+                            value={businessSettings?.address || ''}
+                            onChange={e => setBusinessSettings(prev => prev ? { ...prev, address: e.target.value } : null)}
+                            rows={2}
+                            className="input-field"
+                          />
+                        </div>
+                      </div>
+
+                      <button
+                        onClick={async () => {
+                          try {
+                            await settingsApi.updateBusinessSettings(businessSettings || {});
+                            toast.success('Business settings saved');
+                          } catch {
+                            toast.error('Failed to save settings');
+                          }
+                        }}
+                        className="btn-primary"
+                      >
+                        <Save className="w-4 h-4 mr-2" />
+                        Save Settings
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* ================================================================ */}
+              {/* TAX & INVOICE */}
+              {/* ================================================================ */}
+              {activeTab === 'tax-invoice' && (
+                <div className="space-y-4">
+                  <div className="card">
+                    <h2 className="text-lg font-semibold text-gray-900 mb-4">Tax Settings</h2>
+                    <div className="space-y-4">
+                      <div className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
+                        <div>
+                          <p className="font-medium text-gray-900">GST Enabled</p>
+                          <p className="text-sm text-gray-500">Apply GST to all transactions</p>
+                        </div>
+                        {taxSettings?.gst_enabled ? (
+                          <ToggleRight className="w-8 h-8 text-green-600 cursor-pointer" onClick={() => setTaxSettings(prev => prev ? { ...prev, gst_enabled: false } : null)} />
+                        ) : (
+                          <ToggleLeft className="w-8 h-8 text-gray-400 cursor-pointer" onClick={() => setTaxSettings(prev => prev ? { ...prev, gst_enabled: true } : null)} />
+                        )}
+                      </div>
+                      <div className="grid grid-cols-2 gap-4">
+                        <div>
+                          <label className="block text-sm font-medium text-gray-700 mb-1">Company GSTIN</label>
+                          <input
+                            type="text"
+                            value={taxSettings?.company_gstin || ''}
+                            onChange={e => setTaxSettings(prev => prev ? { ...prev, company_gstin: e.target.value.toUpperCase() } : null)}
+                            placeholder="19ABCDE1234F1Z5"
+                            className="input-field font-mono"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-sm font-medium text-gray-700 mb-1">Default GST Rate (%)</label>
+                          <input
+                            type="number"
+                            value={taxSettings?.default_gst_rate || 18}
+                            onChange={e => setTaxSettings(prev => prev ? { ...prev, default_gst_rate: parseFloat(e.target.value) } : null)}
+                            className="input-field"
+                          />
+                        </div>
+                      </div>
+                      <div className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
+                        <div>
+                          <p className="font-medium text-gray-900">E-Invoice Enabled</p>
+                          <p className="text-sm text-gray-500">Generate IRN for B2B transactions</p>
+                        </div>
+                        <ToggleLeft className="w-8 h-8 text-gray-400 cursor-pointer" />
+                      </div>
+                      <div className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
+                        <div>
+                          <p className="font-medium text-gray-900">E-Way Bill Auto-Generate</p>
+                          <p className="text-sm text-gray-500">For invoices above threshold</p>
+                        </div>
+                        <ToggleLeft className="w-8 h-8 text-gray-400 cursor-pointer" />
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="card">
+                    <h2 className="text-lg font-semibold text-gray-900 mb-4">Invoice Settings</h2>
+                    <div className="space-y-4">
+                      <div className="grid grid-cols-3 gap-4">
+                        <div>
+                          <label className="block text-sm font-medium text-gray-700 mb-1">Invoice Prefix</label>
+                          <input
+                            type="text"
+                            value={invoiceSettings?.invoice_prefix || 'INV'}
+                            onChange={e => setInvoiceSettings(prev => prev ? { ...prev, invoice_prefix: e.target.value.toUpperCase() } : null)}
+                            className="input-field"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-sm font-medium text-gray-700 mb-1">Current Number</label>
+                          <input
+                            type="number"
+                            value={invoiceSettings?.current_invoice_number || 1}
+                            readOnly
+                            className="input-field bg-gray-100"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-sm font-medium text-gray-700 mb-1">Financial Year</label>
+                          <input
+                            type="text"
+                            value={invoiceSettings?.financial_year || '2024-25'}
+                            onChange={e => setInvoiceSettings(prev => prev ? { ...prev, financial_year: e.target.value } : null)}
+                            className="input-field"
+                          />
+                        </div>
+                      </div>
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-1">Default Terms & Conditions</label>
+                        <textarea
+                          value={invoiceSettings?.default_terms || ''}
+                          onChange={e => setInvoiceSettings(prev => prev ? { ...prev, default_terms: e.target.value } : null)}
+                          rows={3}
+                          className="input-field"
+                        />
+                      </div>
+                      <div className="grid grid-cols-2 gap-4">
+                        <div>
+                          <label className="block text-sm font-medium text-gray-700 mb-1">Default Warranty (days)</label>
+                          <input
+                            type="number"
+                            value={invoiceSettings?.default_warranty_days || 365}
+                            onChange={e => setInvoiceSettings(prev => prev ? { ...prev, default_warranty_days: parseInt(e.target.value) } : null)}
+                            className="input-field"
+                          />
+                        </div>
+                      </div>
+                      <div className="flex gap-4">
+                        <label className="flex items-center gap-2 cursor-pointer">
+                          <input type="checkbox" checked={invoiceSettings?.show_logo_on_invoice} className="rounded border-gray-300" />
+                          <span className="text-sm">Show logo on invoice</span>
+                        </label>
+                        <label className="flex items-center gap-2 cursor-pointer">
+                          <input type="checkbox" checked={invoiceSettings?.show_qr_code} className="rounded border-gray-300" />
+                          <span className="text-sm">Show QR code</span>
+                        </label>
+                      </div>
+                      <button
+                        onClick={async () => {
+                          try {
+                            await Promise.all([
+                              settingsApi.updateTaxSettings(taxSettings || {}),
+                              settingsApi.updateInvoiceSettings(invoiceSettings || {}),
+                            ]);
+                            toast.success('Settings saved');
+                          } catch {
+                            toast.error('Failed to save settings');
+                          }
+                        }}
+                        className="btn-primary"
+                      >
+                        <Save className="w-4 h-4 mr-2" />
+                        Save Tax & Invoice Settings
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* ================================================================ */}
+              {/* NOTIFICATIONS */}
+              {/* ================================================================ */}
+              {activeTab === 'notifications' && (
+                <div className="space-y-4">
+                  <div className="card">
+                    <div className="flex items-center justify-between mb-4">
+                      <h2 className="text-lg font-semibold text-gray-900">Notification Templates</h2>
+                      <button className="btn-primary" onClick={() => toast.info('Create new template')}>
+                        <Plus className="w-4 h-4 mr-2" />
+                        Add Template
+                      </button>
+                    </div>
+
+                    <div className="space-y-3">
+                      {notificationTemplates.length === 0 ? (
+                        <div className="text-center py-12 text-gray-400">
+                          <Bell className="w-12 h-12 mx-auto mb-3 opacity-50" />
+                          <p>No notification templates configured</p>
+                        </div>
+                      ) : (
+                        notificationTemplates.map(template => (
+                          <div key={template.template_id} className="p-4 border border-gray-200 rounded-lg hover:border-bv-gold-200 transition-colors">
+                            <div className="flex items-start justify-between">
+                              <div className="flex-1">
+                                <div className="flex items-center gap-2">
+                                  <span className={clsx(
+                                    'text-xs px-2 py-0.5 rounded',
+                                    template.template_type === 'SMS' ? 'bg-blue-100 text-blue-700' :
+                                    template.template_type === 'WHATSAPP' ? 'bg-green-100 text-green-700' :
+                                    'bg-purple-100 text-purple-700'
+                                  )}>
+                                    {template.template_type}
+                                  </span>
+                                  <span className="text-xs bg-gray-100 px-2 py-0.5 rounded">{template.trigger_event.replace(/_/g, ' ')}</span>
+                                  {template.is_enabled ? (
+                                    <span className="badge-success">Active</span>
+                                  ) : (
+                                    <span className="badge-error">Disabled</span>
+                                  )}
+                                </div>
+                                <p className="text-sm text-gray-600 mt-2 line-clamp-2">{template.content}</p>
+                                <div className="flex flex-wrap gap-1 mt-2">
+                                  {template.variables.map(v => (
+                                    <span key={v} className="text-xs bg-yellow-50 text-yellow-700 px-1.5 py-0.5 rounded font-mono">{`{${v}}`}</span>
+                                  ))}
+                                </div>
+                              </div>
+                              <div className="flex items-center gap-2 ml-4">
+                                <button
+                                  onClick={() => toast.info('Edit template')}
+                                  className="p-2 text-gray-400 hover:text-bv-gold-600 hover:bg-gray-100 rounded"
+                                >
+                                  <Edit2 className="w-4 h-4" />
+                                </button>
+                                <button
+                                  onClick={() => toast.info('Test notification sent')}
+                                  className="p-2 text-gray-400 hover:text-green-600 hover:bg-gray-100 rounded"
+                                  title="Send test"
+                                >
+                                  <Send className="w-4 h-4" />
+                                </button>
+                                {template.is_enabled ? (
+                                  <ToggleRight className="w-6 h-6 text-green-600 cursor-pointer" />
+                                ) : (
+                                  <ToggleLeft className="w-6 h-6 text-gray-400 cursor-pointer" />
+                                )}
+                              </div>
+                            </div>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* ================================================================ */}
+              {/* PRINTERS */}
+              {/* ================================================================ */}
+              {activeTab === 'printers' && (
+                <div className="space-y-4">
+                  <div className="card">
+                    <h2 className="text-lg font-semibold text-gray-900 mb-4">Printer Configuration</h2>
+                    <div className="space-y-4">
+                      <div className="grid grid-cols-2 gap-4">
+                        <div>
+                          <label className="block text-sm font-medium text-gray-700 mb-1">Receipt Printer</label>
+                          <select
+                            value={printerSettings?.receipt_printer_name || ''}
+                            onChange={e => setPrinterSettings(prev => prev ? { ...prev, receipt_printer_name: e.target.value } : null)}
+                            className="input-field"
+                          >
+                            <option value="">Select printer...</option>
+                            {availablePrinters.filter(p => p.type === 'RECEIPT').map(p => (
+                              <option key={p.name} value={p.name}>{p.name} ({p.status})</option>
+                            ))}
+                          </select>
+                        </div>
+                        <div>
+                          <label className="block text-sm font-medium text-gray-700 mb-1">Receipt Width (mm)</label>
+                          <select
+                            value={printerSettings?.receipt_printer_width || 80}
+                            onChange={e => setPrinterSettings(prev => prev ? { ...prev, receipt_printer_width: parseInt(e.target.value) } : null)}
+                            className="input-field"
+                          >
+                            <option value={58}>58mm (2 inch)</option>
+                            <option value={80}>80mm (3 inch)</option>
+                          </select>
+                        </div>
+                        <div>
+                          <label className="block text-sm font-medium text-gray-700 mb-1">Label Printer</label>
+                          <select
+                            value={printerSettings?.label_printer_name || ''}
+                            onChange={e => setPrinterSettings(prev => prev ? { ...prev, label_printer_name: e.target.value } : null)}
+                            className="input-field"
+                          >
+                            <option value="">Select printer...</option>
+                            {availablePrinters.filter(p => p.type === 'LABEL').map(p => (
+                              <option key={p.name} value={p.name}>{p.name} ({p.status})</option>
+                            ))}
+                          </select>
+                        </div>
+                        <div>
+                          <label className="block text-sm font-medium text-gray-700 mb-1">Label Size</label>
+                          <select
+                            value={printerSettings?.label_size || '50x25'}
+                            onChange={e => setPrinterSettings(prev => prev ? { ...prev, label_size: e.target.value } : null)}
+                            className="input-field"
+                          >
+                            <option value="50x25">50 x 25 mm</option>
+                            <option value="50x30">50 x 30 mm</option>
+                            <option value="100x50">100 x 50 mm</option>
+                          </select>
+                        </div>
+                      </div>
+
+                      <div className="space-y-2">
+                        <label className="flex items-center gap-2 cursor-pointer p-2 hover:bg-gray-50 rounded">
+                          <input
+                            type="checkbox"
+                            checked={printerSettings?.auto_print_receipt}
+                            onChange={e => setPrinterSettings(prev => prev ? { ...prev, auto_print_receipt: e.target.checked } : null)}
+                            className="rounded border-gray-300 text-bv-gold-600"
+                          />
+                          <span className="text-sm">Auto-print receipt after payment</span>
+                        </label>
+                        <label className="flex items-center gap-2 cursor-pointer p-2 hover:bg-gray-50 rounded">
+                          <input
+                            type="checkbox"
+                            checked={printerSettings?.auto_print_job_card}
+                            onChange={e => setPrinterSettings(prev => prev ? { ...prev, auto_print_job_card: e.target.checked } : null)}
+                            className="rounded border-gray-300 text-bv-gold-600"
+                          />
+                          <span className="text-sm">Auto-print job card for workshop orders</span>
+                        </label>
+                      </div>
+
+                      <button
+                        onClick={async () => {
+                          try {
+                            await settingsApi.updatePrinterSettings(printerSettings || {});
+                            toast.success('Printer settings saved');
+                          } catch {
+                            toast.error('Failed to save settings');
+                          }
+                        }}
+                        className="btn-primary"
+                      >
+                        <Save className="w-4 h-4 mr-2" />
+                        Save Printer Settings
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="card">
+                    <h2 className="text-lg font-semibold text-gray-900 mb-4">Available Printers</h2>
+                    <div className="space-y-2">
+                      {availablePrinters.length === 0 ? (
+                        <p className="text-gray-500 text-center py-4">No printers detected on network</p>
+                      ) : (
+                        availablePrinters.map(printer => (
+                          <div key={printer.name} className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
+                            <div className="flex items-center gap-3">
+                              <Printer className="w-5 h-5 text-gray-400" />
+                              <div>
+                                <p className="font-medium text-gray-900">{printer.name}</p>
+                                <p className="text-xs text-gray-500">{printer.type}</p>
+                              </div>
+                            </div>
+                            <span className={clsx(
+                              'text-xs px-2 py-1 rounded',
+                              printer.status === 'online' ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'
+                            )}>
+                              {printer.status}
+                            </span>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* ================================================================ */}
+              {/* AUDIT LOGS */}
+              {/* ================================================================ */}
+              {activeTab === 'audit-logs' && (
+                <div className="space-y-4">
+                  {auditSummary && (
+                    <div className="grid grid-cols-4 gap-4">
+                      <div className="card p-4">
+                        <p className="text-sm text-gray-500">Today's Actions</p>
+                        <p className="text-2xl font-bold text-gray-900">{auditSummary.today.total_actions}</p>
+                      </div>
+                      <div className="card p-4">
+                        <p className="text-sm text-gray-500">Logins</p>
+                        <p className="text-2xl font-bold text-green-600">{auditSummary.today.logins}</p>
+                      </div>
+                      <div className="card p-4">
+                        <p className="text-sm text-gray-500">Orders Created</p>
+                        <p className="text-2xl font-bold text-blue-600">{auditSummary.today.orders_created}</p>
+                      </div>
+                      <div className="card p-4">
+                        <p className="text-sm text-gray-500">System Health</p>
+                        <p className="text-2xl font-bold text-green-600">Good</p>
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="card">
+                    <div className="flex items-center justify-between mb-4">
+                      <h2 className="text-lg font-semibold text-gray-900">Activity Log</h2>
+                      <div className="flex gap-2">
+                        <select className="input-field w-40">
+                          <option value="">All Actions</option>
+                          <option value="LOGIN">Logins</option>
+                          <option value="CREATE">Creates</option>
+                          <option value="UPDATE">Updates</option>
+                          <option value="DELETE">Deletes</option>
+                        </select>
+                        <button onClick={loadTabData} className="btn-outline">
+                          <RefreshCw className="w-4 h-4" />
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="overflow-x-auto">
+                      <table className="w-full">
+                        <thead className="bg-gray-50 border-b border-gray-200">
+                          <tr>
+                            <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Time</th>
+                            <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">User</th>
+                            <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Action</th>
+                            <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Entity</th>
+                            <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Details</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-gray-200">
+                          {auditLogs.length === 0 ? (
+                            <tr>
+                              <td colSpan={5} className="px-4 py-12 text-center text-gray-400">
+                                <History className="w-12 h-12 mx-auto mb-3 opacity-50" />
+                                <p>No audit logs found</p>
+                              </td>
+                            </tr>
+                          ) : (
+                            auditLogs.map(log => (
+                              <tr key={log.id} className="hover:bg-gray-50">
+                                <td className="px-4 py-3 text-sm text-gray-500">
+                                  {new Date(log.timestamp).toLocaleString()}
+                                </td>
+                                <td className="px-4 py-3">
+                                  <p className="text-sm font-medium text-gray-900">{log.user_name}</p>
+                                  <p className="text-xs text-gray-500">{log.ip_address}</p>
+                                </td>
+                                <td className="px-4 py-3">
+                                  <span className={clsx(
+                                    'text-xs px-2 py-1 rounded',
+                                    log.action === 'CREATE' ? 'bg-green-100 text-green-700' :
+                                    log.action === 'UPDATE' ? 'bg-blue-100 text-blue-700' :
+                                    log.action === 'DELETE' ? 'bg-red-100 text-red-700' :
+                                    log.action === 'LOGIN' ? 'bg-purple-100 text-purple-700' :
+                                    'bg-gray-100 text-gray-700'
+                                  )}>
+                                    {log.action}
+                                  </span>
+                                </td>
+                                <td className="px-4 py-3">
+                                  <p className="text-sm text-gray-900">{log.entity_type}</p>
+                                  {log.entity_id && (
+                                    <p className="text-xs text-gray-500 font-mono">{log.entity_id}</p>
+                                  )}
+                                </td>
+                                <td className="px-4 py-3 text-sm text-gray-500">
+                                  {log.changes ? JSON.stringify(log.changes).slice(0, 50) + '...' : '-'}
+                                </td>
+                              </tr>
+                            ))
+                          )}
+                        </tbody>
+                      </table>
                     </div>
                   </div>
                 </div>
