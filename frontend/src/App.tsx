@@ -6,12 +6,13 @@ import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { AuthProvider } from './context/AuthContext';
 import { ToastProvider } from './context/ToastContext';
+import { ModuleProvider } from './context/ModuleContext';
 import { AppLayout } from './components/layout/AppLayout';
 import { ProtectedRoute } from './components/layout/ProtectedRoute';
 
 // Page imports
 import { LoginPage } from './pages/auth/LoginPage';
-import { DashboardPage } from './pages/dashboard/DashboardPage';
+import DashboardPage from './pages/dashboard/DashboardPage';
 import { POSPage } from './pages/pos/POSPage';
 import { CustomersPage } from './pages/customers/CustomersPage';
 import { InventoryPage } from './pages/inventory/InventoryPage';
@@ -63,8 +64,9 @@ function App() {
   return (
     <QueryClientProvider client={queryClient}>
       <AuthProvider>
-        <ToastProvider>
-          <BrowserRouter>
+        <ModuleProvider>
+          <ToastProvider>
+            <BrowserRouter>
           <Routes>
             {/* Public routes */}
             <Route path="/login" element={<LoginPage />} />
@@ -198,8 +200,9 @@ function App() {
             {/* 404 */}
             <Route path="*" element={<NotFoundPage />} />
           </Routes>
-        </BrowserRouter>
-        </ToastProvider>
+          </BrowserRouter>
+          </ToastProvider>
+        </ModuleProvider>
       </AuthProvider>
     </QueryClientProvider>
   );
