@@ -67,140 +67,140 @@ function App() {
         <ModuleProvider>
           <ToastProvider>
             <BrowserRouter>
-          <Routes>
-            {/* Public routes */}
-            <Route path="/login" element={<LoginPage />} />
-            <Route path="/unauthorized" element={<UnauthorizedPage />} />
+              <Routes>
+                {/* Public routes */}
+                <Route path="/login" element={<LoginPage />} />
+                <Route path="/unauthorized" element={<UnauthorizedPage />} />
 
-            {/* Protected routes with layout */}
-            <Route
-              path="/"
-              element={
-                <ProtectedRoute>
-                  <AppLayout />
-                </ProtectedRoute>
-              }
-            >
-              {/* Redirect root to dashboard */}
-              <Route index element={<Navigate to="/dashboard" replace />} />
+                {/* Protected routes with layout */}
+                <Route
+                  path="/"
+                  element={
+                    <ProtectedRoute>
+                      <AppLayout />
+                    </ProtectedRoute>
+                  }
+                >
+                  {/* Redirect root to dashboard */}
+                  <Route index element={<Navigate to="/dashboard" replace />} />
 
-              {/* Dashboard */}
-              <Route path="dashboard" element={<DashboardPage />} />
+                  {/* Dashboard */}
+                  <Route path="dashboard" element={<DashboardPage />} />
 
-              {/* POS */}
-              <Route
-                path="pos"
-                element={
-                  <ProtectedRoute
-                    allowedRoles={['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'OPTOMETRIST', 'SALES_CASHIER', 'SALES_STAFF']}
-                  >
-                    <POSPage />
-                  </ProtectedRoute>
-                }
-              />
+                  {/* POS */}
+                  <Route
+                    path="pos"
+                    element={
+                      <ProtectedRoute
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'OPTOMETRIST', 'SALES_CASHIER', 'SALES_STAFF']}
+                      >
+                        <POSPage />
+                      </ProtectedRoute>
+                    }
+                  />
 
-              {/* Customers */}
-              <Route
-                path="customers"
-                element={
-                  <ProtectedRoute
-                    allowedRoles={['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'OPTOMETRIST', 'SALES_CASHIER', 'SALES_STAFF']}
-                  >
-                    <CustomersPage />
-                  </ProtectedRoute>
-                }
-              />
+                  {/* Customers */}
+                  <Route
+                    path="customers"
+                    element={
+                      <ProtectedRoute
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'OPTOMETRIST', 'SALES_CASHIER', 'SALES_STAFF']}
+                      >
+                        <CustomersPage />
+                      </ProtectedRoute>
+                    }
+                  />
 
-              {/* Inventory */}
-              <Route
-                path="inventory"
-                element={
-                  <ProtectedRoute
-                    allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'CATALOG_MANAGER', 'WORKSHOP_STAFF']}
-                  >
-                    <InventoryPage />
-                  </ProtectedRoute>
-                }
-              />
+                  {/* Inventory */}
+                  <Route
+                    path="inventory"
+                    element={
+                      <ProtectedRoute
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'CATALOG_MANAGER', 'WORKSHOP_STAFF']}
+                      >
+                        <InventoryPage />
+                      </ProtectedRoute>
+                    }
+                  />
 
-              {/* Orders */}
-              <Route
-                path="orders"
-                element={
-                  <ProtectedRoute
-                    allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'SALES_CASHIER']}
-                  >
-                    <OrdersPage />
-                  </ProtectedRoute>
-                }
-              />
+                  {/* Orders */}
+                  <Route
+                    path="orders"
+                    element={
+                      <ProtectedRoute
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'SALES_CASHIER']}
+                      >
+                        <OrdersPage />
+                      </ProtectedRoute>
+                    }
+                  />
 
-              {/* Clinical / Eye Tests */}
-              <Route
-                path="clinical"
-                element={
-                  <ProtectedRoute
-                    allowedRoles={['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'OPTOMETRIST']}
-                  >
-                    <ClinicalPage />
-                  </ProtectedRoute>
-                }
-              />
+                  {/* Clinical / Eye Tests */}
+                  <Route
+                    path="clinical"
+                    element={
+                      <ProtectedRoute
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'OPTOMETRIST']}
+                      >
+                        <ClinicalPage />
+                      </ProtectedRoute>
+                    }
+                  />
 
-              {/* Workshop */}
-              <Route
-                path="workshop"
-                element={
-                  <ProtectedRoute
-                    allowedRoles={['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'WORKSHOP_STAFF']}
-                  >
-                    <WorkshopPage />
-                  </ProtectedRoute>
-                }
-              />
+                  {/* Workshop */}
+                  <Route
+                    path="workshop"
+                    element={
+                      <ProtectedRoute
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'WORKSHOP_STAFF']}
+                      >
+                        <WorkshopPage />
+                      </ProtectedRoute>
+                    }
+                  />
 
-              {/* Tasks */}
-              <Route path="tasks" element={<TasksPage />} />
+                  {/* Tasks */}
+                  <Route path="tasks" element={<TasksPage />} />
 
-              {/* HR */}
-              <Route
-                path="hr"
-                element={
-                  <ProtectedRoute
-                    allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT']}
-                  >
-                    <HRPage />
-                  </ProtectedRoute>
-                }
-              />
+                  {/* HR */}
+                  <Route
+                    path="hr"
+                    element={
+                      <ProtectedRoute
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT']}
+                      >
+                        <HRPage />
+                      </ProtectedRoute>
+                    }
+                  />
 
-              {/* Reports */}
-              <Route
-                path="reports"
-                element={
-                  <ProtectedRoute
-                    allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT']}
-                  >
-                    <ReportsPage />
-                  </ProtectedRoute>
-                }
-              />
+                  {/* Reports */}
+                  <Route
+                    path="reports"
+                    element={
+                      <ProtectedRoute
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT']}
+                      >
+                        <ReportsPage />
+                      </ProtectedRoute>
+                    }
+                  />
 
-              {/* Settings */}
-              <Route
-                path="settings"
-                element={
-                  <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN']}>
-                    <SettingsPage />
-                  </ProtectedRoute>
-                }
-              />
-            </Route>
+                  {/* Settings */}
+                  <Route
+                    path="settings"
+                    element={
+                      <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN']}>
+                        <SettingsPage />
+                      </ProtectedRoute>
+                    }
+                  />
+                </Route>
 
-            {/* 404 */}
-            <Route path="*" element={<NotFoundPage />} />
-          </Routes>
-          </BrowserRouter>
+                {/* 404 */}
+                <Route path="*" element={<NotFoundPage />} />
+              </Routes>
+            </BrowserRouter>
           </ToastProvider>
         </ModuleProvider>
       </AuthProvider>
