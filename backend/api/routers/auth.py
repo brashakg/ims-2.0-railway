@@ -97,7 +97,8 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
 @router.post("/login", response_model=LoginResponse)
 async def login(request: LoginRequest):
     """
-    Authenticate user and return JWT token
+    Authenticate user and return JWT token.
+    Accepts either username or email in the username field.
     """
     # 36 Users across 10 roles for IMS 2.0
     # Stores: BV-DEL, BV-NOI, BV-GUR, BV-MUM, BV-BLR, WO-MUM
@@ -106,6 +107,7 @@ async def login(request: LoginRequest):
         "admin": {
             "user_id": "user-001",
             "username": "admin",
+            "email": "admin@bettervision.in",
             "password_hash": hash_password("admin123"),
             "full_name": "System Administrator",
             "roles": ["SUPERADMIN"],
@@ -115,6 +117,7 @@ async def login(request: LoginRequest):
         "avinash.ceo": {
             "user_id": "user-002",
             "username": "avinash.ceo",
+            "email": "avinash@bettervision.in",
             "password_hash": hash_password("Ceo@2024"),
             "full_name": "Avinash Kumar (CEO)",
             "roles": ["SUPERADMIN"],
@@ -125,6 +128,7 @@ async def login(request: LoginRequest):
         "director1": {
             "user_id": "user-003",
             "username": "director1",
+            "email": "rajiv.sharma@bettervision.in",
             "password_hash": hash_password("Dir@2024"),
             "full_name": "Rajiv Sharma (Director - Operations)",
             "roles": ["ADMIN"],
@@ -134,6 +138,7 @@ async def login(request: LoginRequest):
         "director2": {
             "user_id": "user-004",
             "username": "director2",
+            "email": "priya.singh@bettervision.in",
             "password_hash": hash_password("Dir@2024"),
             "full_name": "Priya Singh (Director - Finance)",
             "roles": ["ADMIN"],
@@ -144,6 +149,7 @@ async def login(request: LoginRequest):
         "area.north": {
             "user_id": "user-005",
             "username": "area.north",
+            "email": "amit.verma@bettervision.in",
             "password_hash": hash_password("Area@2024"),
             "full_name": "Amit Verma (Area Manager - North)",
             "roles": ["AREA_MANAGER"],
@@ -441,8 +447,17 @@ async def login(request: LoginRequest):
         }
     }
     
-    user = mock_users.get(request.username)
-    
+    # Find user by username first, then by email
+    login_input = request.username.lower().strip()
+    user = mock_users.get(login_input)
+
+    # If not found by username, search by email
+    if not user:
+        for u in mock_users.values():
+            if u.get("email", "").lower() == login_input:
+                user = u
+                break
+
     if not user:
         raise HTTPException(status_code=401, detail="Invalid username or password")
     

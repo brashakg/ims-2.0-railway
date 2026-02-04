@@ -24,7 +24,7 @@ export function LoginPage() {
     setError('');
 
     if (!username || !password) {
-      setError('Please enter username and password');
+      setError('Please enter username/email and password');
       return;
     }
 
@@ -91,10 +91,10 @@ export function LoginPage() {
           )}
 
           <form onSubmit={handleSubmit} className="space-y-4">
-            {/* Username */}
+            {/* Username or Email */}
             <div>
               <label htmlFor="username" className="block text-sm font-medium text-gray-700 mb-1">
-                Username
+                Username or Email
               </label>
               <input
                 type="text"
@@ -102,7 +102,7 @@ export function LoginPage() {
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
                 className="input-field"
-                placeholder="Enter username"
+                placeholder="Enter username or email"
                 autoComplete="username"
                 disabled={isLoading}
               />
