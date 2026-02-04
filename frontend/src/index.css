@@ -1,5 +1,8 @@
 @import "tailwindcss";
 
+/* Custom font imports - Nunito (from bettervision.in) and Inter */
+@import url('https://fonts.googleapis.com/css2?family=Nunito:ital,wght@0,400;0,500;0,600;0,700;0,800;1,400;1,700&family=Inter:wght@300;400;500;600;700&display=swap');
+
 /* Custom theme colors for Tailwind v4 */
 @theme {
   /* Better Vision Brand Colors (Gold/Brown - from bettervision.in) */
@@ -46,9 +49,6 @@
   --breakpoint-laptop: 1024px;
   --breakpoint-desktop: 1280px;
 }
-
-/* Custom font imports - Nunito (from bettervision.in) and Inter */
-@import url('https://fonts.googleapis.com/css2?family=Nunito:ital,wght@0,400;0,500;0,600;0,700;0,800;1,400;1,700&family=Inter:wght@300;400;500;600;700&display=swap');
 
 /* Optician Sans - Specialized font for optical/prescription display */
 @font-face {
