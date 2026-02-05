@@ -81,6 +81,18 @@ export function TasksPage() {
   const [summary, setSummary] = useState({ pending: 0, today: 0, overdue: 0 });
   const [isUpdating, setIsUpdating] = useState<string | null>(null);
 
+  // New task modal state
+  const [showNewTaskModal, setShowNewTaskModal] = useState(false);
+  const [newTask, setNewTask] = useState({
+    title: '',
+    description: '',
+    category: 'FOLLOW_UP' as TaskCategory,
+    priority: 'P3' as TaskPriority,
+    dueDate: '',
+    dueTime: '17:00',
+  });
+  const [isCreating, setIsCreating] = useState(false);
+
   // Load tasks from API
   const loadTasks = useCallback(async () => {
     setIsLoading(true);
@@ -199,6 +211,48 @@ export function TasksPage() {
     return (status === 'OPEN' || status === 'IN_PROGRESS') && new Date(dueDate) < new Date();
   };
 
+  // Create new task
+  const handleCreateTask = async () => {
+    if (!newTask.title.trim()) {
+      toast.error('Please enter a task title');
+      return;
+    }
+    if (!newTask.dueDate) {
+      toast.error('Please select a due date');
+      return;
+    }
+
+    setIsCreating(true);
+    try {
+      const dueAt = `${newTask.dueDate}T${newTask.dueTime}:00`;
+      await tasksApi.createTask({
+        title: newTask.title,
+        description: newTask.description || undefined,
+        category: newTask.category,
+        priority: newTask.priority,
+        assigned_to: user?.id || '',
+        due_at: dueAt,
+      });
+
+      toast.success('Task created successfully');
+      setShowNewTaskModal(false);
+      setNewTask({
+        title: '',
+        description: '',
+        category: 'FOLLOW_UP',
+        priority: 'P3',
+        dueDate: '',
+        dueTime: '17:00',
+      });
+      await loadTasks();
+    } catch (err) {
+      console.error('Failed to create task:', err);
+      toast.error('Failed to create task');
+    } finally {
+      setIsCreating(false);
+    }
+  };
+
   return (
     <div className="space-y-4">
       {/* Header */}
@@ -219,7 +273,7 @@ export function TasksPage() {
                 Refresh
               </button>
               <button
-                onClick={() => toast.info('New task modal coming soon')}
+                onClick={() => setShowNewTaskModal(true)}
                 className="btn-primary flex items-center gap-2"
               >
                 <Plus className="w-4 h-4" />
@@ -480,6 +534,142 @@ export function TasksPage() {
             </div>
           )}
         </>
+      )}
+
+      {/* New Task Modal */}
+      {showNewTaskModal && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-xl shadow-xl max-w-md w-full max-h-[90vh] overflow-y-auto">
+            <div className="p-6 border-b border-gray-200">
+              <div className="flex items-center justify-between">
+                <h2 className="text-xl font-bold text-gray-900">New Task</h2>
+                <button
+                  onClick={() => setShowNewTaskModal(false)}
+                  className="p-2 text-gray-400 hover:text-gray-600 rounded-lg"
+                >
+                  <span className="sr-only">Close</span>
+                  ×
+                </button>
+              </div>
+            </div>
+
+            <div className="p-6 space-y-4">
+              {/* Title */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Title <span className="text-red-500">*</span>
+                </label>
+                <input
+                  type="text"
+                  value={newTask.title}
+                  onChange={e => setNewTask(prev => ({ ...prev, title: e.target.value }))}
+                  placeholder="e.g., Follow up with customer"
+                  className="input-field w-full"
+                />
+              </div>
+
+              {/* Description */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Description
+                </label>
+                <textarea
+                  value={newTask.description}
+                  onChange={e => setNewTask(prev => ({ ...prev, description: e.target.value }))}
+                  placeholder="Add details about the task..."
+                  rows={3}
+                  className="input-field w-full"
+                />
+              </div>
+
+              {/* Category & Priority */}
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Category
+                  </label>
+                  <select
+                    value={newTask.category}
+                    onChange={e => setNewTask(prev => ({ ...prev, category: e.target.value as TaskCategory }))}
+                    className="input-field w-full"
+                  >
+                    {Object.entries(CATEGORY_CONFIG).map(([type, config]) => (
+                      <option key={type} value={type}>{config.label}</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Priority
+                  </label>
+                  <select
+                    value={newTask.priority}
+                    onChange={e => setNewTask(prev => ({ ...prev, priority: e.target.value as TaskPriority }))}
+                    className="input-field w-full"
+                  >
+                    {Object.entries(PRIORITY_CONFIG).map(([type, config]) => (
+                      <option key={type} value={type}>{config.label}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              {/* Due Date & Time */}
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Due Date <span className="text-red-500">*</span>
+                  </label>
+                  <input
+                    type="date"
+                    value={newTask.dueDate}
+                    onChange={e => setNewTask(prev => ({ ...prev, dueDate: e.target.value }))}
+                    min={new Date().toISOString().split('T')[0]}
+                    className="input-field w-full"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Due Time
+                  </label>
+                  <input
+                    type="time"
+                    value={newTask.dueTime}
+                    onChange={e => setNewTask(prev => ({ ...prev, dueTime: e.target.value }))}
+                    className="input-field w-full"
+                  />
+                </div>
+              </div>
+            </div>
+
+            <div className="p-6 border-t border-gray-200 flex justify-end gap-3">
+              <button
+                onClick={() => setShowNewTaskModal(false)}
+                className="btn-secondary"
+                disabled={isCreating}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleCreateTask}
+                className="btn-primary flex items-center gap-2"
+                disabled={isCreating}
+              >
+                {isCreating ? (
+                  <>
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    Creating...
+                  </>
+                ) : (
+                  <>
+                    <Plus className="w-4 h-4" />
+                    Create Task
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

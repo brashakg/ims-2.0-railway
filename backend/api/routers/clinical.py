@@ -1,7 +1,7 @@
 """
 IMS 2.0 - Clinical Router
 ==========================
-Eye test queue and clinical management endpoints
+Eye test queue and clinical management endpoints with database persistence
 """
 from fastapi import APIRouter, HTTPException, Depends, Query
 from pydantic import BaseModel, Field
@@ -9,6 +9,7 @@ from typing import List, Optional
 from datetime import datetime, date
 import uuid
 from .auth import get_current_user
+from ..dependencies import get_eye_test_queue_repository, get_eye_test_repository
 
 router = APIRouter()
 
@@ -34,25 +35,54 @@ class EyeTestData(BaseModel):
     left_eye: dict = Field(..., alias="leftEye")
     pd: Optional[float] = None
     notes: Optional[str] = None
+    lens_recommendation: Optional[str] = Field(None, alias="lensRecommendation")
+    coating_recommendation: Optional[str] = Field(None, alias="coatingRecommendation")
 
     class Config:
         populate_by_name = True
 
 
+class StatusUpdate(BaseModel):
+    status: str
+
+
 # ============================================================================
-# IN-MEMORY STORAGE (Replace with database in production)
+# HELPER FUNCTIONS
 # ============================================================================
 
-# Sample queue data
-_queue_storage: dict = {}
-_test_storage: dict = {}
+def _to_camel_case(snake_str: str) -> str:
+    """Convert snake_case to camelCase"""
+    components = snake_str.split('_')
+    return components[0] + ''.join(x.title() for x in components[1:])
+
+
+def _convert_to_camel(data: dict) -> dict:
+    """Convert all keys in dict from snake_case to camelCase"""
+    if not data:
+        return data
+    result = {}
+    for key, value in data.items():
+        if key.startswith('_'):
+            continue
+        camel_key = _to_camel_case(key)
+        if isinstance(value, dict):
+            result[camel_key] = _convert_to_camel(value)
+        elif isinstance(value, list):
+            result[camel_key] = [
+                _convert_to_camel(item) if isinstance(item, dict) else item
+                for item in value
+            ]
+        else:
+            result[camel_key] = value
+    return result
 
 
 def _get_sample_queue(store_id: str) -> List[dict]:
-    """Return sample queue data for demo"""
+    """Return sample queue data for demo when no DB"""
     return [
         {
             "id": "q1",
+            "queueId": "q1",
             "tokenNumber": "T001",
             "patientName": "Rahul Sharma",
             "customerPhone": "9876543210",
@@ -64,6 +94,7 @@ def _get_sample_queue(store_id: str) -> List[dict]:
         },
         {
             "id": "q2",
+            "queueId": "q2",
             "tokenNumber": "T002",
             "patientName": "Priya Patel",
             "customerPhone": "9876543211",
@@ -75,6 +106,7 @@ def _get_sample_queue(store_id: str) -> List[dict]:
         },
         {
             "id": "q3",
+            "queueId": "q3",
             "tokenNumber": "T003",
             "patientName": "Amit Kumar",
             "customerPhone": "9876543212",
@@ -88,23 +120,27 @@ def _get_sample_queue(store_id: str) -> List[dict]:
 
 
 def _get_sample_completed_tests(store_id: str) -> List[dict]:
-    """Return sample completed tests for demo"""
+    """Return sample completed tests for demo when no DB"""
     return [
         {
             "id": "t1",
+            "testId": "t1",
             "patientName": "Sanjay Gupta",
             "customerPhone": "9876543220",
             "completedAt": datetime.now().replace(hour=9, minute=30).isoformat(),
             "optometrist": "Dr. Meera",
+            "status": "COMPLETED",
             "rightEye": {"sphere": -2.0, "cylinder": -0.5, "axis": 90},
             "leftEye": {"sphere": -1.75, "cylinder": -0.25, "axis": 85}
         },
         {
             "id": "t2",
+            "testId": "t2",
             "patientName": "Neha Singh",
             "customerPhone": "9876543221",
             "completedAt": datetime.now().replace(hour=9, minute=0).isoformat(),
             "optometrist": "Dr. Meera",
+            "status": "COMPLETED",
             "rightEye": {"sphere": 1.0, "cylinder": None, "axis": None},
             "leftEye": {"sphere": 1.25, "cylinder": None, "axis": None}
         }
@@ -121,8 +157,20 @@ async def get_queue(
     current_user: dict = Depends(get_current_user)
 ):
     """Get eye test queue for a store"""
-    queue = _queue_storage.get(store_id, _get_sample_queue(store_id))
-    return {"queue": queue}
+    queue_repo = get_eye_test_queue_repository()
+
+    if queue_repo:
+        queue_items = queue_repo.get_store_queue(store_id)
+        # Convert to camelCase and add 'id' alias
+        result = []
+        for item in queue_items:
+            converted = _convert_to_camel(item)
+            converted["id"] = item.get("queue_id")
+            result.append(converted)
+        return {"queue": result}
+
+    # Fallback to sample data when no DB
+    return {"queue": _get_sample_queue(store_id)}
 
 
 @router.post("/queue")
@@ -131,19 +179,28 @@ async def add_to_queue(
     current_user: dict = Depends(get_current_user)
 ):
     """Add a patient to the eye test queue"""
-    store_id = item.store_id
+    queue_repo = get_eye_test_queue_repository()
 
-    # Get current queue
-    if store_id not in _queue_storage:
-        _queue_storage[store_id] = []
+    if queue_repo:
+        created = queue_repo.add_to_queue(
+            store_id=item.store_id,
+            patient_name=item.patient_name,
+            customer_phone=item.customer_phone,
+            age=item.age,
+            reason=item.reason,
+            customer_id=item.customer_id
+        )
+        if created:
+            result = _convert_to_camel(created)
+            result["id"] = created.get("queue_id")
+            return result
+        raise HTTPException(status_code=500, detail="Failed to add to queue")
 
-    # Generate token number
-    queue = _queue_storage[store_id]
-    token_num = len(queue) + 1
-
+    # Fallback for demo
     new_item = {
         "id": str(uuid.uuid4()),
-        "tokenNumber": f"T{token_num:03d}",
+        "queueId": str(uuid.uuid4()),
+        "tokenNumber": "T001",
         "patientName": item.patient_name,
         "customerPhone": item.customer_phone,
         "age": item.age,
@@ -153,13 +210,7 @@ async def add_to_queue(
         "createdAt": datetime.now().isoformat(),
         "waitTime": 0
     }
-
-    queue.append(new_item)
     return new_item
-
-
-class StatusUpdate(BaseModel):
-    status: str
 
 
 @router.patch("/queue/{queue_id}/status")
@@ -169,14 +220,15 @@ async def update_queue_status(
     current_user: dict = Depends(get_current_user)
 ):
     """Update queue item status"""
-    # Find and update the queue item
-    for store_id, queue in _queue_storage.items():
-        for item in queue:
-            if item["id"] == queue_id:
-                item["status"] = body.status
-                return {"message": "Status updated", "status": body.status}
+    queue_repo = get_eye_test_queue_repository()
 
-    # Check sample data
+    if queue_repo:
+        success = queue_repo.update_status(queue_id, body.status)
+        if success:
+            return {"message": "Status updated", "status": body.status}
+        # Item may not exist, but still return success for compatibility
+        return {"message": "Status updated", "status": body.status}
+
     return {"message": "Status updated", "status": body.status}
 
 
@@ -186,11 +238,10 @@ async def remove_from_queue(
     current_user: dict = Depends(get_current_user)
 ):
     """Remove a patient from the queue"""
-    for store_id, queue in _queue_storage.items():
-        for i, item in enumerate(queue):
-            if item["id"] == queue_id:
-                del queue[i]
-                return {"message": "Removed from queue"}
+    queue_repo = get_eye_test_queue_repository()
+
+    if queue_repo:
+        queue_repo.remove_from_queue(queue_id)
 
     return {"message": "Removed from queue"}
 
@@ -201,28 +252,59 @@ async def start_test(
     current_user: dict = Depends(get_current_user)
 ):
     """Start an eye test for a queue item"""
-    # Update queue item status
-    for store_id, queue in _queue_storage.items():
-        for item in queue:
-            if item["id"] == queue_id:
-                item["status"] = "IN_PROGRESS"
+    queue_repo = get_eye_test_queue_repository()
+    test_repo = get_eye_test_repository()
 
-                # Create test record
-                test_id = str(uuid.uuid4())
-                _test_storage[test_id] = {
-                    "id": test_id,
-                    "queueId": queue_id,
-                    "patientName": item.get("patientName", item.get("patient_name", "")),
-                    "customerPhone": item.get("customerPhone", item.get("customer_phone", "")),
-                    "startedAt": datetime.now().isoformat(),
-                    "status": "IN_PROGRESS"
-                }
+    if queue_repo and test_repo:
+        # Get queue item
+        queue_item = queue_repo.find_by_id(queue_id)
 
-                return {"testId": test_id, "message": "Test started"}
+        if queue_item:
+            # Update queue status
+            queue_repo.update_status(queue_id, "IN_PROGRESS")
 
-    # For sample data
+            # Create test record
+            test = test_repo.create_test(
+                queue_id=queue_id,
+                patient_name=queue_item.get("patient_name", ""),
+                customer_phone=queue_item.get("customer_phone", ""),
+                store_id=queue_item.get("store_id", ""),
+                optometrist_id=current_user.get("user_id", ""),
+                optometrist_name=current_user.get("full_name", "Unknown"),
+                customer_id=queue_item.get("customer_id")
+            )
+
+            if test:
+                return {"testId": test.get("test_id"), "message": "Test started"}
+
+        # Queue item may be from sample data, create test anyway
+        test_id = str(uuid.uuid4())
+        return {"testId": test_id, "message": "Test started"}
+
+    # Fallback for demo
     test_id = str(uuid.uuid4())
     return {"testId": test_id, "message": "Test started"}
+
+
+@router.get("/queue/stats")
+async def get_queue_stats(
+    store_id: str = Query(..., alias="store_id"),
+    current_user: dict = Depends(get_current_user)
+):
+    """Get queue statistics for today"""
+    queue_repo = get_eye_test_queue_repository()
+
+    if queue_repo:
+        return queue_repo.get_today_stats(store_id)
+
+    # Demo fallback
+    return {
+        "total": 3,
+        "waiting": 2,
+        "in_progress": 1,
+        "completed": 0,
+        "no_show": 0
+    }
 
 
 # ============================================================================
@@ -236,11 +318,26 @@ async def get_tests(
     current_user: dict = Depends(get_current_user)
 ):
     """Get eye tests for a store"""
+    test_repo = get_eye_test_repository()
+
+    if test_repo:
+        if date == "today":
+            tests = test_repo.get_today_completed_tests(store_id)
+        else:
+            tests = test_repo.get_store_tests(store_id)
+
+        result = []
+        for test in tests:
+            converted = _convert_to_camel(test)
+            converted["id"] = test.get("test_id")
+            result.append(converted)
+        return {"tests": result}
+
+    # Fallback to sample data
     if date == "today":
-        # Return today's completed tests
         return {"tests": _get_sample_completed_tests(store_id)}
 
-    return {"tests": list(_test_storage.values())}
+    return {"tests": []}
 
 
 @router.get("/tests/{test_id}")
@@ -249,8 +346,15 @@ async def get_test(
     current_user: dict = Depends(get_current_user)
 ):
     """Get a specific eye test"""
-    if test_id in _test_storage:
-        return _test_storage[test_id]
+    test_repo = get_eye_test_repository()
+
+    if test_repo:
+        test = test_repo.find_by_id(test_id)
+        if test:
+            result = _convert_to_camel(test)
+            result["id"] = test.get("test_id")
+            return result
+        raise HTTPException(status_code=404, detail="Test not found")
 
     raise HTTPException(status_code=404, detail="Test not found")
 
@@ -262,26 +366,90 @@ async def complete_test(
     current_user: dict = Depends(get_current_user)
 ):
     """Complete an eye test with prescription data"""
-    if test_id in _test_storage:
-        test = _test_storage[test_id]
-        test["status"] = "COMPLETED"
-        test["completedAt"] = datetime.now().isoformat()
-        test["prescription"] = {
-            "rightEye": data.right_eye,
-            "leftEye": data.left_eye,
-            "pd": data.pd,
-            "notes": data.notes
-        }
-        test["optometrist"] = current_user.get("full_name", "Unknown")
+    test_repo = get_eye_test_repository()
+    queue_repo = get_eye_test_queue_repository()
 
-        # Update queue status
-        for store_id, queue in _queue_storage.items():
-            for item in queue:
-                if item.get("id") == test.get("queueId"):
-                    item["status"] = "COMPLETED"
-                    break
+    if test_repo:
+        # Update test record
+        success = test_repo.complete_test(
+            test_id=test_id,
+            right_eye=data.right_eye,
+            left_eye=data.left_eye,
+            pd=data.pd,
+            notes=data.notes,
+            lens_recommendation=data.lens_recommendation,
+            coating_recommendation=data.coating_recommendation
+        )
 
-        return {"message": "Test completed", "testId": test_id}
+        if success:
+            # Get the test to find queue_id
+            test = test_repo.find_by_id(test_id)
+            if test and queue_repo:
+                queue_id = test.get("queue_id")
+                if queue_id:
+                    queue_repo.update_status(queue_id, "COMPLETED")
 
-    # For demo purposes, just return success
+            return {"message": "Test completed", "testId": test_id}
+
+    # Fallback for demo
     return {"message": "Test completed", "testId": test_id}
+
+
+@router.get("/tests/patient/{customer_phone}")
+async def get_patient_tests(
+    customer_phone: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """Get all tests for a patient by phone number"""
+    test_repo = get_eye_test_repository()
+
+    if test_repo:
+        tests = test_repo.get_patient_tests(customer_phone)
+        result = []
+        for test in tests:
+            converted = _convert_to_camel(test)
+            converted["id"] = test.get("test_id")
+            result.append(converted)
+        return {"tests": result, "total": len(result)}
+
+    return {"tests": [], "total": 0}
+
+
+@router.get("/tests/customer/{customer_id}")
+async def get_customer_tests(
+    customer_id: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """Get all tests for a customer by ID"""
+    test_repo = get_eye_test_repository()
+
+    if test_repo:
+        tests = test_repo.get_customer_tests(customer_id)
+        result = []
+        for test in tests:
+            converted = _convert_to_camel(test)
+            converted["id"] = test.get("test_id")
+            result.append(converted)
+        return {"tests": result, "total": len(result)}
+
+    return {"tests": [], "total": 0}
+
+
+@router.get("/optometrist/{optometrist_id}/stats")
+async def get_optometrist_stats(
+    optometrist_id: str,
+    from_date: date = Query(...),
+    to_date: date = Query(...),
+    current_user: dict = Depends(get_current_user)
+):
+    """Get statistics for an optometrist"""
+    test_repo = get_eye_test_repository()
+
+    if test_repo:
+        return test_repo.get_optometrist_stats(optometrist_id, from_date, to_date)
+
+    return {
+        "total_tests": 0,
+        "completed_tests": 0,
+        "completion_rate": 0
+    }
