@@ -173,21 +173,59 @@ export function JarvisPage() {
     };
 
     setMessages((prev) => [...prev, userMessage]);
+    const queryText = inputValue;
     setInputValue('');
     setIsLoading(true);
 
-    // Simulate AI response
-    setTimeout(() => {
-      const response = generateResponse(inputValue);
+    try {
+      // Call JARVIS API (powered by Claude)
+      const response = await fetch('/api/jarvis/query', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${localStorage.getItem('token')}`,
+        },
+        body: JSON.stringify({ message: queryText }),
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        const jarvisMessage: Message = {
+          id: (Date.now() + 1).toString(),
+          type: 'jarvis',
+          content: data.response,
+          timestamp: new Date(),
+          data: {
+            ai_powered: data.ai_powered,
+            model: data.model,
+            intent: data.intent_detected,
+          },
+        };
+        setMessages((prev) => [...prev, jarvisMessage]);
+      } else {
+        // Fallback to local response if API fails
+        const fallbackResponse = generateResponse(queryText);
+        const jarvisMessage: Message = {
+          id: (Date.now() + 1).toString(),
+          type: 'jarvis',
+          content: fallbackResponse,
+          timestamp: new Date(),
+        };
+        setMessages((prev) => [...prev, jarvisMessage]);
+      }
+    } catch {
+      // Fallback to local response on error
+      const fallbackResponse = generateResponse(queryText);
       const jarvisMessage: Message = {
         id: (Date.now() + 1).toString(),
         type: 'jarvis',
-        content: response,
+        content: fallbackResponse,
         timestamp: new Date(),
       };
       setMessages((prev) => [...prev, jarvisMessage]);
+    } finally {
       setIsLoading(false);
-    }, 1500);
+    }
   };
 
   const generateResponse = (query: string): string => {
@@ -344,13 +382,15 @@ Is there a specific aspect you'd like me to dive deeper into? I can provide deta
                 JARVIS
                 <Sparkles className="w-4 h-4 text-yellow-400" />
               </h1>
-              <p className="text-sm text-gray-400">AI Business Intelligence System</p>
+              <p className="text-sm text-gray-400">Powered by Claude AI • Business Intelligence System</p>
             </div>
           </div>
           <div className="flex items-center gap-4">
-            <div className="flex items-center gap-2 text-sm">
+            <div className="flex items-center gap-2 text-sm bg-gray-800/50 px-3 py-1 rounded-full">
               <Activity className="w-4 h-4 text-green-400 animate-pulse" />
               <span className="text-green-400">Online</span>
+              <span className="text-gray-500">•</span>
+              <span className="text-cyan-400 text-xs">Claude</span>
             </div>
             <button
               onClick={() => {
@@ -391,6 +431,11 @@ Is there a specific aspect you'd like me to dive deeper into? I can provide deta
                     <div className="flex items-center gap-2 mb-2">
                       <Bot className="w-4 h-4 text-blue-500" />
                       <span className="text-xs font-medium text-blue-500">JARVIS</span>
+                      {(message.data as { ai_powered?: boolean })?.ai_powered && (
+                        <span className="text-xs px-1.5 py-0.5 bg-gradient-to-r from-cyan-500 to-blue-500 text-white rounded-full">
+                          Claude AI
+                        </span>
+                      )}
                     </div>
                   )}
                   <div

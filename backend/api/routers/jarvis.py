@@ -4,6 +4,8 @@ IMS 2.0 - JARVIS AI Agent Router
 SUPERADMIN-EXCLUSIVE AI Control System.
 Like Jarvis to Iron Man - full business intelligence and control.
 
+Powered by Anthropic Claude - the most intelligent AI assistant.
+
 *** STRICTLY SUPERADMIN ONLY - NO EXCEPTIONS ***
 """
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
@@ -14,8 +16,17 @@ from enum import Enum
 import uuid
 import json
 import random
+import os
+import httpx
+import logging
 
 from .auth import get_current_user
+
+logger = logging.getLogger(__name__)
+
+# Anthropic Claude Configuration
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
+CLAUDE_MODEL = os.getenv("JARVIS_MODEL", "claude-sonnet-4-20250514")  # Default to Claude 3.5 Sonnet
 
 router = APIRouter()
 
@@ -460,59 +471,237 @@ class JarvisResponseGenerator:
 
 
 # ============================================================================
+# CLAUDE AI INTEGRATION
+# ============================================================================
+
+class ClaudeClient:
+    """Anthropic Claude API client for JARVIS"""
+
+    JARVIS_SYSTEM_PROMPT = """You are JARVIS (Just A Rather Very Intelligent System), the AI assistant for a premium optical retail business operating multiple stores in India. You serve as the personal AI assistant to the Superadmin, similar to how JARVIS assists Tony Stark in Iron Man.
+
+## Your Personality:
+- Sophisticated, professional, and slightly witty like the movie JARVIS
+- Address the user as "Sir" or "Ma'am" appropriately
+- Be concise but comprehensive
+- Show genuine care for the business's success
+- Use a blend of formal British English with occasional dry humor
+- When delivering bad news, be direct but offer solutions
+
+## Your Capabilities:
+1. **Business Analytics**: Revenue, sales, orders, conversion rates, growth metrics
+2. **Inventory Management**: Stock levels, reorder recommendations, slow/fast movers, expiring items
+3. **Customer Intelligence**: Segments, churn risk, lifetime value, purchase patterns
+4. **Staff Performance**: Attendance, sales performance, training needs, workload distribution
+5. **Predictions & Forecasting**: Sales forecasts, demand predictions, stockout warnings
+6. **Strategic Recommendations**: Actionable insights to improve business performance
+
+## Response Guidelines:
+- Use markdown formatting for clarity (headers, bullet points, bold for emphasis)
+- Include relevant emojis sparingly for visual hierarchy (📊💰🛒⚠️✅)
+- Format currency in Indian Rupees (₹) with L for Lakhs and Cr for Crores
+- Always provide actionable insights, not just data
+- If asked about something outside your scope, politely redirect to business topics
+- Keep responses focused and avoid unnecessary verbosity
+
+## Business Context:
+The business operates premium optical retail stores selling:
+- Eyeglasses (Frames), Sunglasses, Contact Lenses
+- Prescription Lenses (including Progressive)
+- Watches (including Smart Watches), Clocks
+- Hearing Aids, Accessories
+- Smart Eyewear
+
+Current date and time: {current_datetime}
+"""
+
+    @classmethod
+    async def call_claude(cls, message: str, business_data: Dict, conversation_history: List[Dict] = None) -> str:
+        """Call Claude API with business context"""
+        if not ANTHROPIC_API_KEY:
+            logger.warning("ANTHROPIC_API_KEY not set - using fallback response")
+            return None
+
+        # Build system prompt with current datetime
+        system_prompt = cls.JARVIS_SYSTEM_PROMPT.format(
+            current_datetime=datetime.now().strftime("%Y-%m-%d %H:%M:%S IST")
+        )
+
+        # Add business data context
+        system_prompt += f"""
+
+## Current Business Data:
+```json
+{json.dumps(business_data, indent=2, default=str)}
+```
+
+Use this data to provide accurate, data-driven responses. Reference specific numbers and trends when relevant.
+"""
+
+        # Build messages
+        messages = []
+
+        # Add conversation history if provided
+        if conversation_history:
+            for msg in conversation_history[-10:]:  # Last 10 messages for context
+                messages.append({
+                    "role": msg.get("role", "user"),
+                    "content": msg.get("content", "")
+                })
+
+        # Add current message
+        messages.append({
+            "role": "user",
+            "content": message
+        })
+
+        try:
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                response = await client.post(
+                    "https://api.anthropic.com/v1/messages",
+                    headers={
+                        "x-api-key": ANTHROPIC_API_KEY,
+                        "anthropic-version": "2023-06-01",
+                        "content-type": "application/json"
+                    },
+                    json={
+                        "model": CLAUDE_MODEL,
+                        "max_tokens": 2048,
+                        "system": system_prompt,
+                        "messages": messages
+                    }
+                )
+
+                if response.status_code == 200:
+                    result = response.json()
+                    return result["content"][0]["text"]
+                else:
+                    logger.error(f"Claude API error: {response.status_code} - {response.text}")
+                    return None
+
+        except Exception as e:
+            logger.error(f"Claude API call failed: {str(e)}")
+            return None
+
+
+# ============================================================================
 # JARVIS CORE - MAIN INTERFACE
 # ============================================================================
 
 class Jarvis:
-    """Main JARVIS AI Assistant"""
+    """Main JARVIS AI Assistant - Powered by Claude"""
 
     def __init__(self):
         self.analytics = JarvisAnalyticsEngine()
         self.nlp = JarvisNLP()
         self.response_gen = JarvisResponseGenerator()
         self.conversation_history = []
+        self.claude_enabled = bool(ANTHROPIC_API_KEY)
 
-    def process_query(self, query: str, context: Dict = None) -> Dict:
-        """Process a natural language query and return response"""
+    async def process_query_async(self, query: str, context: Dict = None) -> Dict:
+        """Process a natural language query using Claude AI"""
         intent = self.nlp.detect_intent(query)
         entities = self.nlp.extract_entities(query)
 
-        # Get relevant data based on intent
+        # Gather comprehensive business data for Claude
+        business_data = {
+            "overview": self.analytics.get_business_overview(),
+            "sales_insights": self.analytics.get_sales_insights(),
+            "inventory_insights": self.analytics.get_inventory_insights(),
+            "customer_insights": self.analytics.get_customer_insights(),
+            "staff_insights": self.analytics.get_staff_insights(),
+            "predictions": self.analytics.get_predictions(),
+            "recommendations": self.analytics.get_recommendations()
+        }
+
+        # Try Claude first
+        claude_response = None
+        if self.claude_enabled:
+            claude_response = await ClaudeClient.call_claude(
+                message=query,
+                business_data=business_data,
+                conversation_history=self.conversation_history
+            )
+
+        if claude_response:
+            # Store in conversation history
+            self.conversation_history.append({"role": "user", "content": query})
+            self.conversation_history.append({"role": "assistant", "content": claude_response})
+            # Keep only last 20 messages
+            if len(self.conversation_history) > 20:
+                self.conversation_history = self.conversation_history[-20:]
+
+            return {
+                "response": claude_response,
+                "intent": intent,
+                "entities": entities,
+                "data": business_data.get("overview", {}),
+                "ai_powered": True,
+                "model": CLAUDE_MODEL,
+                "timestamp": datetime.now().isoformat()
+            }
+
+        # Fallback to template-based responses if Claude is not available
+        return self._generate_fallback_response(query, intent, entities, business_data)
+
+    def _generate_fallback_response(self, query: str, intent: str, entities: Dict, business_data: Dict) -> Dict:
+        """Generate fallback response when Claude is not available"""
         if intent == "sales":
-            data = self.analytics.get_business_overview()
-            response = self.response_gen.generate_sales_response(data, entities)
-            insights = self.analytics.get_sales_insights()
+            response = self.response_gen.generate_sales_response(business_data["overview"], entities)
+            insights = business_data["sales_insights"]
         elif intent == "inventory":
-            overview = self.analytics.get_business_overview()
-            insights = self.analytics.get_inventory_insights()
-            response = self.response_gen.generate_inventory_response({**overview["inventory"], **insights})
+            overview = business_data["overview"]
+            inv_insights = business_data["inventory_insights"]
+            response = self.response_gen.generate_inventory_response({**overview["inventory"], **inv_insights})
+            insights = inv_insights
         elif intent == "customers":
-            insights = self.analytics.get_customer_insights()
+            insights = business_data["customer_insights"]
             response = self._format_customer_response(insights)
         elif intent == "staff":
-            insights = self.analytics.get_staff_insights()
+            insights = business_data["staff_insights"]
             response = self._format_staff_response(insights)
         elif intent == "predictions":
-            predictions = self.analytics.get_predictions()
-            response = self._format_predictions_response(predictions)
+            insights = business_data["predictions"]
+            response = self._format_predictions_response(insights)
         elif intent == "recommendations":
-            recommendations = self.analytics.get_recommendations()
-            response = self.response_gen.generate_recommendation_response(recommendations)
-            insights = {"recommendations": recommendations}
+            insights = {"recommendations": business_data["recommendations"]}
+            response = self.response_gen.generate_recommendation_response(business_data["recommendations"])
         else:
-            # General query - provide overview
-            overview = self.analytics.get_business_overview()
-            recommendations = self.analytics.get_recommendations()
-            response = self._format_overview_response(overview, recommendations)
+            overview = business_data["overview"]
+            response = self._format_overview_response(overview, business_data["recommendations"])
             insights = overview
 
         return {
             "response": response,
             "intent": intent,
             "entities": entities,
-            "data": insights if 'insights' in dir() else {},
+            "data": insights,
+            "ai_powered": False,
+            "model": "fallback",
             "timestamp": datetime.now().isoformat()
         }
+
+    def process_query(self, query: str, context: Dict = None) -> Dict:
+        """Synchronous wrapper for backwards compatibility"""
+        import asyncio
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                # If already in async context, use fallback
+                business_data = {
+                    "overview": self.analytics.get_business_overview(),
+                    "sales_insights": self.analytics.get_sales_insights(),
+                    "inventory_insights": self.analytics.get_inventory_insights(),
+                    "customer_insights": self.analytics.get_customer_insights(),
+                    "staff_insights": self.analytics.get_staff_insights(),
+                    "predictions": self.analytics.get_predictions(),
+                    "recommendations": self.analytics.get_recommendations()
+                }
+                intent = self.nlp.detect_intent(query)
+                entities = self.nlp.extract_entities(query)
+                return self._generate_fallback_response(query, intent, entities, business_data)
+            return loop.run_until_complete(self.process_query_async(query, context))
+        except RuntimeError:
+            return asyncio.run(self.process_query_async(query, context))
 
     def _format_customer_response(self, data: Dict) -> str:
         response = "**Customer Intelligence Report**\n\n"
@@ -676,6 +865,12 @@ async def get_jarvis_status(current_user: dict = Depends(require_superadmin)):
         "status": "online",
         "version": "2.0.0",
         "name": "JARVIS",
+        "ai_engine": {
+            "provider": "Anthropic",
+            "model": CLAUDE_MODEL,
+            "enabled": jarvis_instance.claude_enabled,
+            "status": "active" if jarvis_instance.claude_enabled else "fallback_mode"
+        },
         "greeting": JarvisResponseGenerator.generate_greeting(),
         "capabilities": [
             "Business Analytics",
@@ -685,7 +880,8 @@ async def get_jarvis_status(current_user: dict = Depends(require_superadmin)):
             "Staff Performance",
             "Predictions & Forecasting",
             "Actionable Recommendations",
-            "Command Execution"
+            "Command Execution",
+            "Natural Language Understanding (Claude AI)" if jarvis_instance.claude_enabled else "Template-based Responses"
         ]
     }
 
@@ -696,7 +892,7 @@ async def query_jarvis(
     current_user: dict = Depends(require_superadmin)
 ):
     """Send a query to JARVIS - SUPERADMIN ONLY"""
-    result = jarvis_instance.process_query(query.message, query.context)
+    result = await jarvis_instance.process_query_async(query.message, query.context)
 
     return {
         "query": query.message,
@@ -704,6 +900,8 @@ async def query_jarvis(
         "intent_detected": result["intent"],
         "entities": result["entities"],
         "data": result.get("data"),
+        "ai_powered": result.get("ai_powered", False),
+        "model": result.get("model", "fallback"),
         "timestamp": result["timestamp"]
     }
 
