@@ -92,14 +92,34 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# CORS Middleware - Get allowed origins from environment
-CORS_ORIGINS = os.getenv("CORS_ORIGINS", "*").split(",")
+# CORS Middleware - Configure allowed origins
+# When allow_credentials=True, we cannot use wildcard "*"
+# Must explicitly list all allowed origins
+DEFAULT_CORS_ORIGINS = [
+    "http://localhost:3000",
+    "http://localhost:5173",
+    "http://127.0.0.1:3000",
+    "http://127.0.0.1:5173",
+    "https://ims-2-0-railway.vercel.app",
+    "https://ims-20-railway.vercel.app",
+    "https://ims-2-0-railway-production.up.railway.app",
+    "https://ims-20-railway-production.up.railway.app",
+]
+
+# Add any custom origins from environment
+env_origins = os.getenv("CORS_ORIGINS", "")
+if env_origins and env_origins != "*":
+    CORS_ORIGINS = DEFAULT_CORS_ORIGINS + [o.strip() for o in env_origins.split(",") if o.strip()]
+else:
+    CORS_ORIGINS = DEFAULT_CORS_ORIGINS
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
     allow_headers=["*"],
+    expose_headers=["X-Process-Time"],
 )
 
 
