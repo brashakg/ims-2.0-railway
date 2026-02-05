@@ -8,6 +8,30 @@ import type { ApiResponse, LoginCredentials, LoginResponse, User } from '../type
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || '/api';
 
+// Retry configuration
+const MAX_RETRIES = 3;
+const RETRY_DELAY_MS = 1000;
+
+// Helper function for delay
+const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+// Check if error is retryable (network errors, timeouts, 5xx errors)
+const isRetryableError = (error: AxiosError): boolean => {
+  // Network errors (no response)
+  if (!error.response) {
+    return true;
+  }
+  // Server errors (5xx)
+  if (error.response.status >= 500) {
+    return true;
+  }
+  // Rate limiting
+  if (error.response.status === 429) {
+    return true;
+  }
+  return false;
+};
+
 // Create axios instance
 const api: AxiosInstance = axios.create({
   baseURL: API_BASE_URL,
@@ -17,38 +41,78 @@ const api: AxiosInstance = axios.create({
   },
 });
 
-// Request interceptor - add auth token
+// Request interceptor - add auth token and retry config
 api.interceptors.request.use(
   (config: InternalAxiosRequestConfig) => {
     const token = localStorage.getItem('ims_token');
     if (token && config.headers) {
       config.headers.Authorization = `Bearer ${token}`;
     }
+    // Initialize retry count
+    if (config.headers) {
+      config.headers['x-retry-count'] = config.headers['x-retry-count'] || '0';
+    }
     return config;
   },
   (error) => Promise.reject(error)
 );
 
-// Response interceptor - handle errors
+// Response interceptor - handle errors with retry logic
 api.interceptors.response.use(
   (response) => response,
-  (error: AxiosError<{ message?: string; detail?: string }>) => {
-    if (error.response?.status === 401) {
-      // Clear auth state on unauthorized
-      localStorage.removeItem('ims_token');
-      localStorage.removeItem('ims_user');
-      window.location.href = '/login';
+  async (error: AxiosError<{ message?: string; detail?: string }>) => {
+    const config = error.config;
+
+    // Don't retry if no config or already exceeded retries
+    if (!config || !config.headers) {
+      return handleFinalError(error);
     }
 
-    const message =
+    const retryCount = parseInt(config.headers['x-retry-count'] as string || '0', 10);
+
+    // Check if we should retry
+    if (isRetryableError(error) && retryCount < MAX_RETRIES) {
+      config.headers['x-retry-count'] = String(retryCount + 1);
+
+      // Exponential backoff: 1s, 2s, 4s
+      const backoffDelay = RETRY_DELAY_MS * Math.pow(2, retryCount);
+      console.log(`Network error, retrying in ${backoffDelay}ms (attempt ${retryCount + 1}/${MAX_RETRIES})...`);
+
+      await delay(backoffDelay);
+      return api.request(config);
+    }
+
+    return handleFinalError(error);
+  }
+);
+
+// Handle final error after retries exhausted
+const handleFinalError = (error: AxiosError<{ message?: string; detail?: string }>) => {
+  if (error.response?.status === 401) {
+    // Clear auth state on unauthorized
+    localStorage.removeItem('ims_token');
+    localStorage.removeItem('ims_user');
+    window.location.href = '/login';
+  }
+
+  // Build user-friendly error message
+  let message: string;
+
+  if (!error.response) {
+    // Network error
+    message = 'Network error. Please check your internet connection and try again.';
+  } else if (error.response.status >= 500) {
+    message = 'Server error. Please try again in a moment.';
+  } else {
+    message =
       error.response?.data?.message ||
       error.response?.data?.detail ||
       error.message ||
       'An error occurred';
-
-    return Promise.reject(new Error(message));
   }
-);
+
+  return Promise.reject(new Error(message));
+};
 
 // ============================================================================
 // Auth API
