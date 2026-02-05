@@ -863,6 +863,301 @@ QUEUE_ITEMS = [
 ]
 
 # ============================================================================
+# DAILY SALES RECORDS (for analytics)
+# ============================================================================
+def generate_daily_sales():
+    """Generate 30 days of sales data for analytics"""
+    sales = []
+    import random
+    random.seed(42)  # Consistent data
+
+    for i in range(30):
+        day = now - timedelta(days=29-i)
+        day_str = day.strftime("%Y-%m-%d")
+
+        # Weekend has lower sales
+        is_weekend = day.weekday() >= 5
+        base_sales = 45000 if is_weekend else 85000
+        variance = random.uniform(0.7, 1.3)
+
+        daily_revenue = round(base_sales * variance)
+        order_count = random.randint(8, 25) if not is_weekend else random.randint(4, 12)
+        avg_order_value = round(daily_revenue / order_count) if order_count > 0 else 0
+
+        # Category breakdown
+        frame_sales = round(daily_revenue * random.uniform(0.35, 0.45))
+        lens_sales = round(daily_revenue * random.uniform(0.30, 0.40))
+        sunglass_sales = round(daily_revenue * random.uniform(0.10, 0.15))
+        accessory_sales = daily_revenue - frame_sales - lens_sales - sunglass_sales
+
+        sales.append({
+            "_id": f"sales-{day_str}",
+            "date": day_str,
+            "store_id": "store-001",
+            "revenue": daily_revenue,
+            "order_count": order_count,
+            "avg_order_value": avg_order_value,
+            "category_breakdown": {
+                "frames": frame_sales,
+                "lenses": lens_sales,
+                "sunglasses": sunglass_sales,
+                "accessories": accessory_sales
+            },
+            "payment_methods": {
+                "cash": round(daily_revenue * random.uniform(0.25, 0.35)),
+                "card": round(daily_revenue * random.uniform(0.30, 0.40)),
+                "upi": round(daily_revenue * random.uniform(0.25, 0.35))
+            },
+            "customers_served": random.randint(order_count, order_count + 5),
+            "new_customers": random.randint(1, 5),
+            "eye_tests_conducted": random.randint(3, 10),
+            "conversion_rate": round(random.uniform(0.55, 0.75), 2),
+            "created_at": day.isoformat()
+        })
+
+    return sales
+
+DAILY_SALES = generate_daily_sales()
+
+# ============================================================================
+# STAFF ATTENDANCE (for HR analytics)
+# ============================================================================
+def generate_attendance():
+    """Generate attendance records for the past 30 days"""
+    attendance = []
+    import random
+    random.seed(43)
+
+    staff_members = [
+        {"user_id": "user-002", "name": "Rajesh Kumar", "role": "STORE_MANAGER"},
+        {"user_id": "user-003", "name": "Neha Gupta", "role": "SALES_STAFF"},
+        {"user_id": "user-004", "name": "Dr. Amit Sharma", "role": "OPTOMETRIST"}
+    ]
+
+    for i in range(30):
+        day = now - timedelta(days=29-i)
+        day_str = day.strftime("%Y-%m-%d")
+        is_weekend = day.weekday() >= 5
+
+        for staff in staff_members:
+            # 90% attendance rate, lower on weekends
+            present = random.random() < (0.7 if is_weekend else 0.92)
+
+            if present:
+                check_in = day.replace(hour=9, minute=random.randint(0, 30))
+                check_out = day.replace(hour=18, minute=random.randint(0, 45))
+                hours_worked = round((check_out - check_in).seconds / 3600, 1)
+
+                # Sales performance for sales staff
+                sales_amount = 0
+                if staff["role"] in ["SALES_STAFF", "STORE_MANAGER"]:
+                    sales_amount = random.randint(15000, 45000)
+
+                attendance.append({
+                    "_id": f"att-{staff['user_id']}-{day_str}",
+                    "user_id": staff["user_id"],
+                    "user_name": staff["name"],
+                    "role": staff["role"],
+                    "store_id": "store-001",
+                    "date": day_str,
+                    "status": "PRESENT",
+                    "check_in": check_in.isoformat(),
+                    "check_out": check_out.isoformat(),
+                    "hours_worked": hours_worked,
+                    "sales_amount": sales_amount,
+                    "created_at": check_in.isoformat()
+                })
+            else:
+                attendance.append({
+                    "_id": f"att-{staff['user_id']}-{day_str}",
+                    "user_id": staff["user_id"],
+                    "user_name": staff["name"],
+                    "role": staff["role"],
+                    "store_id": "store-001",
+                    "date": day_str,
+                    "status": "ABSENT",
+                    "leave_type": random.choice(["CASUAL", "SICK", None]),
+                    "created_at": day.isoformat()
+                })
+
+    return attendance
+
+ATTENDANCE = generate_attendance()
+
+# ============================================================================
+# BUSINESS METRICS (KPIs)
+# ============================================================================
+BUSINESS_METRICS = [
+    {
+        "_id": "metrics-store-001",
+        "store_id": "store-001",
+        "period": "current_month",
+        "revenue": {
+            "total": 2145000,
+            "target": 2500000,
+            "achievement_percent": 85.8,
+            "growth_vs_last_month": 12.5,
+            "growth_vs_last_year": 18.2
+        },
+        "orders": {
+            "total": 342,
+            "completed": 298,
+            "pending": 28,
+            "cancelled": 16,
+            "avg_value": 6272
+        },
+        "inventory": {
+            "total_value": 4850000,
+            "total_items": 1245,
+            "low_stock_items": 23,
+            "out_of_stock_items": 5,
+            "expiring_soon": 12,
+            "turnover_rate": 4.2
+        },
+        "customers": {
+            "total_active": 856,
+            "new_this_month": 67,
+            "repeat_rate": 0.42,
+            "avg_lifetime_value": 18500,
+            "nps_score": 72
+        },
+        "staff": {
+            "total_employees": 8,
+            "present_today": 7,
+            "avg_attendance_rate": 0.91,
+            "top_performer": "Neha Gupta",
+            "top_performer_sales": 485000
+        },
+        "clinical": {
+            "eye_tests_month": 156,
+            "prescriptions_issued": 142,
+            "conversion_rate": 0.68,
+            "avg_wait_time_mins": 18
+        },
+        "updated_at": now.isoformat()
+    }
+]
+
+# ============================================================================
+# CUSTOMER SEGMENTS (for analytics)
+# ============================================================================
+CUSTOMER_SEGMENTS = [
+    {
+        "_id": "seg-vip",
+        "segment_id": "seg-vip",
+        "name": "VIP Customers",
+        "description": "High-value repeat customers",
+        "criteria": {"total_purchases_min": 50000, "visits_min": 3},
+        "customer_count": 45,
+        "total_revenue": 3250000,
+        "avg_order_value": 12500,
+        "characteristics": ["Premium brands preferred", "Progressive lenses", "Multiple prescriptions"]
+    },
+    {
+        "_id": "seg-regular",
+        "segment_id": "seg-regular",
+        "name": "Regular Customers",
+        "description": "Consistent repeat buyers",
+        "criteria": {"total_purchases_min": 15000, "visits_min": 2},
+        "customer_count": 180,
+        "total_revenue": 4850000,
+        "avg_order_value": 6800,
+        "characteristics": ["Mix of brands", "Single vision dominant", "Price sensitive"]
+    },
+    {
+        "_id": "seg-new",
+        "segment_id": "seg-new",
+        "name": "New Customers",
+        "description": "First-time buyers",
+        "criteria": {"visits_max": 1},
+        "customer_count": 320,
+        "total_revenue": 2100000,
+        "avg_order_value": 4500,
+        "characteristics": ["Discovery phase", "Need guidance", "Promotion responsive"]
+    },
+    {
+        "_id": "seg-dormant",
+        "segment_id": "seg-dormant",
+        "name": "Dormant Customers",
+        "description": "No purchase in 6+ months",
+        "criteria": {"last_purchase_days_ago_min": 180},
+        "customer_count": 95,
+        "total_revenue": 850000,
+        "avg_order_value": 5200,
+        "characteristics": ["Reactivation potential", "Contact lens users", "Birthday campaigns"]
+    },
+    {
+        "_id": "seg-b2b",
+        "segment_id": "seg-b2b",
+        "name": "B2B Customers",
+        "description": "Corporate and hospital accounts",
+        "criteria": {"customer_type": "B2B"},
+        "customer_count": 12,
+        "total_revenue": 2450000,
+        "avg_order_value": 25000,
+        "characteristics": ["Bulk orders", "Credit terms", "Regular reorders"]
+    }
+]
+
+# ============================================================================
+# ALERTS & NOTIFICATIONS (for JARVIS)
+# ============================================================================
+ALERTS = [
+    {
+        "_id": "alert-001",
+        "alert_type": "LOW_STOCK",
+        "severity": "WARNING",
+        "title": "Low Stock Alert",
+        "message": "Ray-Ban Aviator Classic has only 5 units remaining",
+        "entity_type": "PRODUCT",
+        "entity_id": "prod-fr-001",
+        "store_id": "store-001",
+        "is_read": False,
+        "is_resolved": False,
+        "created_at": (now - timedelta(hours=2)).isoformat()
+    },
+    {
+        "_id": "alert-002",
+        "alert_type": "PAYMENT_DUE",
+        "severity": "HIGH",
+        "title": "Payment Collection Due",
+        "message": "Order BV-CP-2024-001542 has Rs. 7,431 balance pending for 2 days",
+        "entity_type": "ORDER",
+        "entity_id": "ord-001",
+        "store_id": "store-001",
+        "is_read": False,
+        "is_resolved": False,
+        "created_at": (now - timedelta(hours=6)).isoformat()
+    },
+    {
+        "_id": "alert-003",
+        "alert_type": "DELIVERY_DUE",
+        "severity": "NORMAL",
+        "title": "Delivery Ready",
+        "message": "Order BV-CP-2024-001543 is ready for customer pickup",
+        "entity_type": "ORDER",
+        "entity_id": "ord-002",
+        "store_id": "store-001",
+        "is_read": True,
+        "is_resolved": False,
+        "created_at": (now - timedelta(hours=4)).isoformat()
+    },
+    {
+        "_id": "alert-004",
+        "alert_type": "TARGET_ACHIEVEMENT",
+        "severity": "INFO",
+        "title": "Sales Target Update",
+        "message": "Store has achieved 85.8% of monthly target with 5 days remaining",
+        "entity_type": "STORE",
+        "entity_id": "store-001",
+        "store_id": "store-001",
+        "is_read": False,
+        "is_resolved": False,
+        "created_at": (now - timedelta(hours=1)).isoformat()
+    }
+]
+
+# ============================================================================
 # SEED FUNCTION
 # ============================================================================
 def get_all_seed_data():
@@ -877,7 +1172,12 @@ def get_all_seed_data():
         "workshop_jobs": WORKSHOP_JOBS,
         "prescriptions": PRESCRIPTIONS,
         "tasks": TASKS,
-        "queue": QUEUE_ITEMS
+        "queue": QUEUE_ITEMS,
+        "daily_sales": DAILY_SALES,
+        "attendance": ATTENDANCE,
+        "business_metrics": BUSINESS_METRICS,
+        "customer_segments": CUSTOMER_SEGMENTS,
+        "alerts": ALERTS
     }
 
 
