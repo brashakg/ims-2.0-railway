@@ -1,11 +1,26 @@
 // ============================================================================
 // IMS 2.0 - Product Search Component
 // ============================================================================
+// NO MOCK DATA - Uses real API calls
 
-import { useState, useCallback } from 'react';
-import { Search, Scan, Grid, List, FileText, Tag, Package } from 'lucide-react';
+import { useState, useCallback, useEffect } from 'react';
+import { Search, Scan, Grid, List, FileText, Tag, Package, Loader2, RefreshCw } from 'lucide-react';
 import type { ProductCategory } from '../../types';
+import { inventoryApi } from '../../services/api';
+import { useAuth } from '../../context/AuthContext';
 import clsx from 'clsx';
+
+interface Product {
+  id: string;
+  name: string;
+  sku: string;
+  category: ProductCategory;
+  brand: string;
+  mrp: number;
+  offerPrice: number;
+  stock: number;
+  barcode?: string;
+}
 
 interface ProductSearchProps {
   onAddProduct: (product: {
@@ -38,32 +53,60 @@ const CATEGORIES: { code: ProductCategory; label: string; icon: string; color: s
   { code: 'SERVICES', label: 'Services', icon: '🔧', color: 'bg-teal-100 text-teal-700' },
 ];
 
-// Mock products for demo
-const mockProducts = [
-  { id: 'prod-001', name: 'Ray-Ban RB5154 Clubmaster', sku: 'RB-5154-BLK', category: 'FRAME' as ProductCategory, brand: 'Ray-Ban', mrp: 8990, offerPrice: 6890, stock: 5 },
-  { id: 'prod-002', name: 'Ray-Ban Aviator Classic', sku: 'RB-3025-GLD', category: 'SUNGLASS' as ProductCategory, brand: 'Ray-Ban', mrp: 12990, offerPrice: 9990, stock: 3 },
-  { id: 'prod-003', name: 'Oakley Holbrook', sku: 'OAK-HOL-001', category: 'SUNGLASS' as ProductCategory, brand: 'Oakley', mrp: 15000, offerPrice: 12000, stock: 2 },
-  { id: 'prod-004', name: 'Essilor Crizal Prevencia', sku: 'ESS-CP-STD', category: 'OPTICAL_LENS' as ProductCategory, brand: 'Essilor', mrp: 4500, offerPrice: 3500, stock: 20 },
-  { id: 'prod-005', name: 'Zeiss DriveSafe', sku: 'ZS-DS-PRO', category: 'OPTICAL_LENS' as ProductCategory, brand: 'Zeiss', mrp: 8500, offerPrice: 7500, stock: 15 },
-  { id: 'prod-006', name: 'Acuvue Oasys (6 pack)', sku: 'ACV-OAS-6', category: 'CONTACT_LENS' as ProductCategory, brand: 'Acuvue', mrp: 2100, offerPrice: 1800, stock: 50 },
-  { id: 'prod-007', name: 'Bausch & Lomb SofLens', sku: 'BL-SL-6', category: 'CONTACT_LENS' as ProductCategory, brand: 'Bausch & Lomb', mrp: 1500, offerPrice: 1200, stock: 40 },
-  { id: 'prod-008', name: 'FreshLook Colorblends - Blue', sku: 'FL-CB-BLU', category: 'COLORED_CONTACT_LENS' as ProductCategory, brand: 'FreshLook', mrp: 1800, offerPrice: 1500, stock: 25 },
-  { id: 'prod-009', name: 'Titan Edge Ceramic', sku: 'TIT-EDG-CER', category: 'WATCH' as ProductCategory, brand: 'Titan', mrp: 15995, offerPrice: 13995, stock: 4 },
-  { id: 'prod-010', name: 'Apple Watch Series 9', sku: 'APL-W9-45', category: 'SMARTWATCH' as ProductCategory, brand: 'Apple', mrp: 45900, offerPrice: 42900, stock: 2 },
-  { id: 'prod-011', name: 'Ray-Ban Meta Smart Glasses', sku: 'RB-META-BLK', category: 'SMARTGLASSES' as ProductCategory, brand: 'Ray-Ban', mrp: 32990, offerPrice: 29990, stock: 1 },
-  { id: 'prod-012', name: 'Reading Glasses +1.50', sku: 'RG-150-STD', category: 'READING_GLASSES' as ProductCategory, brand: 'Generic', mrp: 599, offerPrice: 499, stock: 30 },
-  { id: 'prod-013', name: 'Lens Cleaning Kit', sku: 'ACC-LCK-01', category: 'ACCESSORIES' as ProductCategory, brand: 'Generic', mrp: 299, offerPrice: 199, stock: 100 },
-  { id: 'prod-014', name: 'Eye Test Service', sku: 'SVC-EYE-001', category: 'SERVICES' as ProductCategory, brand: 'In-House', mrp: 500, offerPrice: 300, stock: 999 },
-];
-
 export function ProductSearch({ onAddProduct, onAddPrescription, hasPrescription }: ProductSearchProps) {
+  const { user } = useAuth();
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCategory, setSelectedCategory] = useState<ProductCategory | null>(null);
   const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid');
   const [barcodeMode, setBarcodeMode] = useState(false);
 
+  // API state
+  const [products, setProducts] = useState<Product[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  // Load products from API
+  const loadProducts = useCallback(async () => {
+    if (!user?.activeStoreId) return;
+
+    setIsLoading(true);
+    setError(null);
+
+    try {
+      const response = await inventoryApi.getStock(user.activeStoreId);
+
+      if (response?.items && Array.isArray(response.items)) {
+        const stockItems: Product[] = response.items.map((item: any) => ({
+          id: item.stock_id || item.id,
+          name: item.product_name || item.name || 'Unknown Product',
+          sku: item.sku || item.barcode || '',
+          category: item.category || 'ACCESSORIES',
+          brand: item.brand || 'Generic',
+          mrp: item.mrp || item.cost_price || 0,
+          offerPrice: item.selling_price || item.mrp || 0,
+          stock: item.quantity || 0,
+          barcode: item.barcode,
+        }));
+        setProducts(stockItems);
+      } else {
+        setProducts([]);
+      }
+    } catch (err) {
+      console.error('Failed to load products:', err);
+      setError('Failed to load products');
+      setProducts([]);
+    } finally {
+      setIsLoading(false);
+    }
+  }, [user?.activeStoreId]);
+
+  // Load on mount
+  useEffect(() => {
+    loadProducts();
+  }, [loadProducts]);
+
   // Filter products
-  const filteredProducts = mockProducts.filter(product => {
+  const filteredProducts = products.filter(product => {
     const matchesSearch = !searchQuery ||
       product.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
       product.sku.toLowerCase().includes(searchQuery.toLowerCase()) ||
@@ -75,22 +118,42 @@ export function ProductSearch({ onAddProduct, onAddPrescription, hasPrescription
   });
 
   // Handle barcode scan
-  const handleBarcodeScan = useCallback((barcode: string) => {
-    // Find product by SKU (simulating barcode lookup)
-    const product = mockProducts.find(p => p.sku === barcode);
-    if (product) {
-      onAddProduct({
-        id: product.id,
-        name: product.name,
-        sku: product.sku,
-        category: product.category,
-        mrp: product.mrp,
-        offerPrice: product.offerPrice,
-        barcode,
-      });
-      setSearchQuery('');
+  const handleBarcodeScan = useCallback(async (barcode: string) => {
+    if (!user?.activeStoreId) return;
+
+    try {
+      const stockUnit = await inventoryApi.getStockByBarcode(barcode);
+      if (stockUnit) {
+        onAddProduct({
+          id: stockUnit.stock_id || stockUnit.id,
+          name: stockUnit.product_name || stockUnit.name,
+          sku: stockUnit.sku,
+          category: stockUnit.category,
+          mrp: stockUnit.mrp || 0,
+          offerPrice: stockUnit.selling_price || stockUnit.mrp || 0,
+          barcode,
+          stockId: stockUnit.stock_id,
+        });
+        setSearchQuery('');
+      }
+    } catch (err) {
+      console.error('Barcode lookup failed:', err);
+      // Fall back to local search
+      const product = products.find(p => p.sku === barcode || p.barcode === barcode);
+      if (product) {
+        onAddProduct({
+          id: product.id,
+          name: product.name,
+          sku: product.sku,
+          category: product.category,
+          mrp: product.mrp,
+          offerPrice: product.offerPrice,
+          barcode,
+        });
+        setSearchQuery('');
+      }
     }
-  }, [onAddProduct]);
+  }, [user?.activeStoreId, products, onAddProduct]);
 
   // Handle search input (also handles barcode if in barcode mode)
   const handleSearchChange = (value: string) => {
@@ -108,7 +171,7 @@ export function ProductSearch({ onAddProduct, onAddPrescription, hasPrescription
       <div className="flex gap-2 mb-4">
         <div className="relative flex-1">
           {barcodeMode ? (
-            <Scan className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-bv-red-600" />
+            <Scan className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-bv-gold-600" />
           ) : (
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" />
           )}
@@ -118,12 +181,22 @@ export function ProductSearch({ onAddProduct, onAddPrescription, hasPrescription
             onChange={e => handleSearchChange(e.target.value)}
             className={clsx(
               'input-field pl-10',
-              barcodeMode && 'border-bv-red-300 focus:border-bv-red-500'
+              barcodeMode && 'border-bv-gold-300 focus:border-bv-gold-500'
             )}
             placeholder={barcodeMode ? 'Scan barcode...' : 'Search products...'}
             autoFocus={barcodeMode}
           />
         </div>
+
+        {/* Refresh Button */}
+        <button
+          onClick={loadProducts}
+          disabled={isLoading}
+          className="px-3 py-2 rounded-lg border border-gray-300 text-gray-600 hover:bg-gray-50"
+          title="Refresh products"
+        >
+          <RefreshCw className={clsx('w-5 h-5', isLoading && 'animate-spin')} />
+        </button>
 
         {/* Barcode Toggle */}
         <button
@@ -131,7 +204,7 @@ export function ProductSearch({ onAddProduct, onAddPrescription, hasPrescription
           className={clsx(
             'px-3 py-2 rounded-lg border transition-colors',
             barcodeMode
-              ? 'bg-bv-red-50 border-bv-red-300 text-bv-red-600'
+              ? 'bg-bv-gold-50 border-bv-gold-300 text-bv-gold-600'
               : 'border-gray-300 text-gray-600 hover:bg-gray-50'
           )}
           title="Toggle barcode mode"
@@ -185,7 +258,7 @@ export function ProductSearch({ onAddProduct, onAddPrescription, hasPrescription
           className={clsx(
             'px-3 py-1.5 rounded-full text-sm font-medium whitespace-nowrap transition-colors',
             !selectedCategory
-              ? 'bg-bv-red-600 text-white'
+              ? 'bg-bv-gold-600 text-white'
               : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
           )}
         >
@@ -198,7 +271,7 @@ export function ProductSearch({ onAddProduct, onAddPrescription, hasPrescription
             className={clsx(
               'px-3 py-1.5 rounded-full text-sm font-medium whitespace-nowrap transition-colors flex items-center gap-1',
               selectedCategory === cat.code
-                ? 'bg-bv-red-600 text-white'
+                ? 'bg-bv-gold-600 text-white'
                 : `${cat.color} hover:opacity-80`
             )}
           >
@@ -208,93 +281,112 @@ export function ProductSearch({ onAddProduct, onAddPrescription, hasPrescription
         ))}
       </div>
 
-      {/* Products Grid/List */}
-      <div className="flex-1 overflow-y-auto min-h-0">
-        {filteredProducts.length === 0 ? (
-          <div className="flex flex-col items-center justify-center h-full text-gray-400">
-            <Package className="w-12 h-12 mb-2" />
-            <p>No products found</p>
-          </div>
-        ) : viewMode === 'grid' ? (
-          <div className="grid grid-cols-2 tablet:grid-cols-3 laptop:grid-cols-4 gap-3">
-            {filteredProducts.map(product => (
-              <button
-                key={product.id}
-                onClick={() => onAddProduct({
-                  id: product.id,
-                  name: product.name,
-                  sku: product.sku,
-                  category: product.category,
-                  mrp: product.mrp,
-                  offerPrice: product.offerPrice,
-                })}
-                className="card p-3 text-left hover:border-bv-red-300 hover:shadow-md transition-all touch-target"
-              >
-                <div className="flex justify-between items-start mb-2">
-                  <span className="text-xs font-medium text-gray-500">{product.brand}</span>
-                  {product.stock <= 5 && (
-                    <span className="badge-warning text-xs">Low: {product.stock}</span>
-                  )}
-                </div>
-                <p className="font-medium text-gray-900 text-sm line-clamp-2 mb-1">
-                  {product.name}
-                </p>
-                <p className="text-xs text-gray-500 mb-2">{product.sku}</p>
-                <div className="flex items-baseline gap-2">
-                  <span className="font-bold text-bv-red-600">
-                    ₹{product.offerPrice.toLocaleString('en-IN')}
-                  </span>
-                  {product.offerPrice < product.mrp && (
-                    <span className="text-xs text-gray-400 line-through">
-                      ₹{product.mrp.toLocaleString('en-IN')}
+      {/* Loading State */}
+      {isLoading ? (
+        <div className="flex-1 flex flex-col items-center justify-center text-gray-400">
+          <Loader2 className="w-8 h-8 mb-2 animate-spin" />
+          <p>Loading products...</p>
+        </div>
+      ) : error ? (
+        <div className="flex-1 flex flex-col items-center justify-center text-gray-400">
+          <Package className="w-12 h-12 mb-2" />
+          <p>{error}</p>
+          <button onClick={loadProducts} className="text-bv-gold-600 text-sm mt-2 hover:underline">
+            Try again
+          </button>
+        </div>
+      ) : (
+        /* Products Grid/List */
+        <div className="flex-1 overflow-y-auto min-h-0">
+          {filteredProducts.length === 0 ? (
+            <div className="flex flex-col items-center justify-center h-full text-gray-400">
+              <Package className="w-12 h-12 mb-2" />
+              <p>No products found</p>
+              {products.length === 0 && (
+                <p className="text-sm mt-1">Add products in Settings &gt; Inventory</p>
+              )}
+            </div>
+          ) : viewMode === 'grid' ? (
+            <div className="grid grid-cols-2 tablet:grid-cols-3 laptop:grid-cols-4 gap-3">
+              {filteredProducts.map(product => (
+                <button
+                  key={product.id}
+                  onClick={() => onAddProduct({
+                    id: product.id,
+                    name: product.name,
+                    sku: product.sku,
+                    category: product.category,
+                    mrp: product.mrp,
+                    offerPrice: product.offerPrice,
+                  })}
+                  className="card p-3 text-left hover:border-bv-gold-300 hover:shadow-md transition-all touch-target"
+                >
+                  <div className="flex justify-between items-start mb-2">
+                    <span className="text-xs font-medium text-gray-500">{product.brand}</span>
+                    {product.stock <= 5 && (
+                      <span className="badge-warning text-xs">Low: {product.stock}</span>
+                    )}
+                  </div>
+                  <p className="font-medium text-gray-900 text-sm line-clamp-2 mb-1">
+                    {product.name}
+                  </p>
+                  <p className="text-xs text-gray-500 mb-2">{product.sku}</p>
+                  <div className="flex items-baseline gap-2">
+                    <span className="font-bold text-bv-gold-600">
+                      ₹{product.offerPrice.toLocaleString('en-IN')}
                     </span>
-                  )}
-                </div>
-              </button>
-            ))}
-          </div>
-        ) : (
-          <div className="space-y-2">
-            {filteredProducts.map(product => (
-              <button
-                key={product.id}
-                onClick={() => onAddProduct({
-                  id: product.id,
-                  name: product.name,
-                  sku: product.sku,
-                  category: product.category,
-                  mrp: product.mrp,
-                  offerPrice: product.offerPrice,
-                })}
-                className="w-full flex items-center gap-4 p-3 bg-white border border-gray-200 rounded-lg hover:border-bv-red-300 hover:shadow-sm transition-all"
-              >
-                <div className="w-12 h-12 bg-gray-100 rounded-lg flex items-center justify-center">
-                  <Tag className="w-6 h-6 text-gray-400" />
-                </div>
-                <div className="flex-1 text-left min-w-0">
-                  <p className="font-medium text-gray-900 truncate">{product.name}</p>
-                  <p className="text-sm text-gray-500">
-                    {product.brand} • {product.sku}
-                  </p>
-                </div>
-                <div className="text-right">
-                  <p className="font-bold text-bv-red-600">
-                    ₹{product.offerPrice.toLocaleString('en-IN')}
-                  </p>
-                  {product.offerPrice < product.mrp && (
-                    <p className="text-xs text-gray-400 line-through">
-                      ₹{product.mrp.toLocaleString('en-IN')}
+                    {product.offerPrice < product.mrp && (
+                      <span className="text-xs text-gray-400 line-through">
+                        ₹{product.mrp.toLocaleString('en-IN')}
+                      </span>
+                    )}
+                  </div>
+                </button>
+              ))}
+            </div>
+          ) : (
+            <div className="space-y-2">
+              {filteredProducts.map(product => (
+                <button
+                  key={product.id}
+                  onClick={() => onAddProduct({
+                    id: product.id,
+                    name: product.name,
+                    sku: product.sku,
+                    category: product.category,
+                    mrp: product.mrp,
+                    offerPrice: product.offerPrice,
+                  })}
+                  className="w-full flex items-center gap-4 p-3 bg-white border border-gray-200 rounded-lg hover:border-bv-gold-300 hover:shadow-sm transition-all"
+                >
+                  <div className="w-12 h-12 bg-gray-100 rounded-lg flex items-center justify-center">
+                    <Tag className="w-6 h-6 text-gray-400" />
+                  </div>
+                  <div className="flex-1 text-left min-w-0">
+                    <p className="font-medium text-gray-900 truncate">{product.name}</p>
+                    <p className="text-sm text-gray-500">
+                      {product.brand} • {product.sku}
                     </p>
+                  </div>
+                  <div className="text-right">
+                    <p className="font-bold text-bv-gold-600">
+                      ₹{product.offerPrice.toLocaleString('en-IN')}
+                    </p>
+                    {product.offerPrice < product.mrp && (
+                      <p className="text-xs text-gray-400 line-through">
+                        ₹{product.mrp.toLocaleString('en-IN')}
+                      </p>
+                    )}
+                  </div>
+                  {product.stock <= 5 && (
+                    <span className="badge-warning">Stock: {product.stock}</span>
                   )}
-                </div>
-                {product.stock <= 5 && (
-                  <span className="badge-warning">Stock: {product.stock}</span>
-                )}
-              </button>
-            ))}
-          </div>
-        )}
-      </div>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }

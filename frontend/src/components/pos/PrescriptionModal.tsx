@@ -1,11 +1,14 @@
 // ============================================================================
 // IMS 2.0 - Prescription Modal Component
 // ============================================================================
+// NO MOCK DATA - Uses real API calls
 
-import { useState } from 'react';
-import { X, FileText, Plus, Eye, Calendar } from 'lucide-react';
+import { useState, useEffect, useCallback } from 'react';
+import { X, FileText, Plus, Eye, Calendar, Loader2, RefreshCw } from 'lucide-react';
 import type { Patient, Prescription } from '../../types';
 import clsx from 'clsx';
+import { prescriptionApi } from '../../services/api';
+import { useAuth } from '../../context/AuthContext';
 
 interface PrescriptionModalProps {
   patient: Patient;
@@ -13,68 +16,6 @@ interface PrescriptionModalProps {
   onSelect: (prescription: Prescription) => void;
   onClose: () => void;
 }
-
-// Mock prescriptions for demo
-const mockPrescriptions: Prescription[] = [
-  {
-    id: 'rx-001',
-    patientId: 'patient-001',
-    customerId: 'cust-001',
-    storeId: 'BV-KOL-001',
-    optometristId: 'user-optom-001',
-    optometristName: 'Dr. Sharma',
-    testDate: '2025-01-15',
-    rightEye: {
-      sphere: -2.25,
-      cylinder: -0.75,
-      axis: 180,
-      add: null,
-      pd: 32,
-      va: '6/6',
-    },
-    leftEye: {
-      sphere: -2.50,
-      cylinder: -0.50,
-      axis: 175,
-      add: null,
-      pd: 31,
-      va: '6/6',
-    },
-    recommendation: 'Anti-fatigue lenses recommended for computer use',
-    status: 'COMPLETED',
-    createdAt: '2025-01-15T10:30:00Z',
-    updatedAt: '2025-01-15T11:00:00Z',
-  },
-  {
-    id: 'rx-002',
-    patientId: 'patient-001',
-    customerId: 'cust-001',
-    storeId: 'BV-KOL-001',
-    optometristId: 'user-optom-001',
-    optometristName: 'Dr. Sharma',
-    testDate: '2024-07-20',
-    rightEye: {
-      sphere: -2.00,
-      cylinder: -0.50,
-      axis: 180,
-      add: null,
-      pd: 32,
-      va: '6/9',
-    },
-    leftEye: {
-      sphere: -2.25,
-      cylinder: -0.50,
-      axis: 170,
-      add: null,
-      pd: 31,
-      va: '6/9',
-    },
-    recommendation: 'Standard lenses',
-    status: 'COMPLETED',
-    createdAt: '2024-07-20T14:30:00Z',
-    updatedAt: '2024-07-20T15:00:00Z',
-  },
-];
 
 type TabType = 'existing' | 'new';
 
@@ -84,10 +25,15 @@ export function PrescriptionModal({
   onSelect,
   onClose,
 }: PrescriptionModalProps) {
+  const { user } = useAuth();
   const [activeTab, setActiveTab] = useState<TabType>(existingPrescription ? 'existing' : 'existing');
   const [selectedPrescription, setSelectedPrescription] = useState<string | null>(
     existingPrescription?.id || null
   );
+  const [prescriptions, setPrescriptions] = useState<Prescription[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [isSaving, setIsSaving] = useState(false);
 
   // New prescription form state
   const [newRx, setNewRx] = useState({
@@ -96,45 +42,142 @@ export function PrescriptionModal({
     recommendation: '',
   });
 
+  // Load prescriptions from API
+  const loadPrescriptions = useCallback(async () => {
+    if (!patient.id) return;
+
+    setIsLoading(true);
+    setError(null);
+
+    try {
+      const response = await prescriptionApi.getPrescriptions(patient.id);
+
+      if (response?.prescriptions && Array.isArray(response.prescriptions)) {
+        // Transform API response to Prescription type
+        const rxList: Prescription[] = response.prescriptions.map((rx: any) => ({
+          id: rx.prescription_id || rx.id,
+          patientId: rx.patient_id || patient.id,
+          customerId: rx.customer_id || patient.customerId,
+          storeId: rx.store_id || user?.activeStoreId || '',
+          optometristId: rx.optometrist_id || '',
+          optometristName: rx.optometrist_name || 'Unknown',
+          testDate: rx.test_date || rx.created_at?.split('T')[0] || '',
+          rightEye: {
+            sphere: rx.right_eye?.sphere ?? rx.od_sphere ?? 0,
+            cylinder: rx.right_eye?.cylinder ?? rx.od_cylinder ?? null,
+            axis: rx.right_eye?.axis ?? rx.od_axis ?? null,
+            add: rx.right_eye?.add ?? rx.od_add ?? null,
+            pd: rx.right_eye?.pd ?? rx.od_pd ?? 32,
+            va: rx.right_eye?.va ?? rx.od_va ?? '6/6',
+          },
+          leftEye: {
+            sphere: rx.left_eye?.sphere ?? rx.os_sphere ?? 0,
+            cylinder: rx.left_eye?.cylinder ?? rx.os_cylinder ?? null,
+            axis: rx.left_eye?.axis ?? rx.os_axis ?? null,
+            add: rx.left_eye?.add ?? rx.os_add ?? null,
+            pd: rx.left_eye?.pd ?? rx.os_pd ?? 31,
+            va: rx.left_eye?.va ?? rx.os_va ?? '6/6',
+          },
+          recommendation: rx.recommendation || rx.notes || '',
+          status: rx.status || 'COMPLETED',
+          createdAt: rx.created_at || new Date().toISOString(),
+          updatedAt: rx.updated_at || new Date().toISOString(),
+        }));
+
+        setPrescriptions(rxList);
+      } else {
+        setPrescriptions([]);
+      }
+    } catch (err) {
+      console.error('Failed to load prescriptions:', err);
+      setError('Failed to load prescriptions');
+      setPrescriptions([]);
+    } finally {
+      setIsLoading(false);
+    }
+  }, [patient.id, patient.customerId, user?.activeStoreId]);
+
+  // Load on mount
+  useEffect(() => {
+    loadPrescriptions();
+  }, [loadPrescriptions]);
+
   const handleSelectExisting = () => {
-    const rx = mockPrescriptions.find(p => p.id === selectedPrescription);
+    const rx = prescriptions.find(p => p.id === selectedPrescription);
     if (rx) {
       onSelect(rx);
     }
   };
 
-  const handleCreateNew = () => {
-    // In production, this would call the API
-    const newPrescription: Prescription = {
-      id: `rx-${Date.now()}`,
-      patientId: patient.id,
-      customerId: patient.customerId,
-      storeId: 'BV-KOL-001', // Would come from auth context
-      optometristId: 'user-current',
-      optometristName: 'Current User',
-      testDate: new Date().toISOString().split('T')[0],
-      rightEye: {
-        sphere: parseFloat(newRx.rightEye.sphere) || 0,
-        cylinder: parseFloat(newRx.rightEye.cylinder) || null,
-        axis: parseInt(newRx.rightEye.axis) || null,
-        add: parseFloat(newRx.rightEye.add) || null,
-        pd: parseFloat(newRx.rightEye.pd) || 32,
-        va: newRx.rightEye.va || '6/6',
-      },
-      leftEye: {
-        sphere: parseFloat(newRx.leftEye.sphere) || 0,
-        cylinder: parseFloat(newRx.leftEye.cylinder) || null,
-        axis: parseInt(newRx.leftEye.axis) || null,
-        add: parseFloat(newRx.leftEye.add) || null,
-        pd: parseFloat(newRx.leftEye.pd) || 31,
-        va: newRx.leftEye.va || '6/6',
-      },
-      recommendation: newRx.recommendation,
-      status: 'COMPLETED',
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    };
-    onSelect(newPrescription);
+  const handleCreateNew = async () => {
+    setIsSaving(true);
+
+    try {
+      const prescriptionData = {
+        patient_id: patient.id,
+        customer_id: patient.customerId,
+        store_id: user?.activeStoreId || '',
+        test_date: new Date().toISOString().split('T')[0],
+        right_eye: {
+          sphere: parseFloat(newRx.rightEye.sphere) || 0,
+          cylinder: parseFloat(newRx.rightEye.cylinder) || null,
+          axis: parseInt(newRx.rightEye.axis) || null,
+          add: parseFloat(newRx.rightEye.add) || null,
+          pd: parseFloat(newRx.rightEye.pd) || 32,
+          va: newRx.rightEye.va || '6/6',
+        },
+        left_eye: {
+          sphere: parseFloat(newRx.leftEye.sphere) || 0,
+          cylinder: parseFloat(newRx.leftEye.cylinder) || null,
+          axis: parseInt(newRx.leftEye.axis) || null,
+          add: parseFloat(newRx.leftEye.add) || null,
+          pd: parseFloat(newRx.leftEye.pd) || 31,
+          va: newRx.leftEye.va || '6/6',
+        },
+        recommendation: newRx.recommendation,
+        status: 'COMPLETED' as const,
+      };
+
+      const response = await prescriptionApi.createPrescription(prescriptionData as any);
+
+      // Create prescription object to return
+      const newPrescription: Prescription = {
+        id: response?.prescription_id || `rx-${Date.now()}`,
+        patientId: patient.id,
+        customerId: patient.customerId,
+        storeId: user?.activeStoreId || '',
+        optometristId: user?.id || 'user-current',
+        optometristName: user?.name || 'Current User',
+        testDate: new Date().toISOString().split('T')[0],
+        rightEye: {
+          sphere: parseFloat(newRx.rightEye.sphere) || 0,
+          cylinder: parseFloat(newRx.rightEye.cylinder) || null,
+          axis: parseInt(newRx.rightEye.axis) || null,
+          add: parseFloat(newRx.rightEye.add) || null,
+          pd: parseFloat(newRx.rightEye.pd) || 32,
+          va: newRx.rightEye.va || '6/6',
+        },
+        leftEye: {
+          sphere: parseFloat(newRx.leftEye.sphere) || 0,
+          cylinder: parseFloat(newRx.leftEye.cylinder) || null,
+          axis: parseInt(newRx.leftEye.axis) || null,
+          add: parseFloat(newRx.leftEye.add) || null,
+          pd: parseFloat(newRx.leftEye.pd) || 31,
+          va: newRx.leftEye.va || '6/6',
+        },
+        recommendation: newRx.recommendation,
+        status: 'COMPLETED',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+
+      onSelect(newPrescription);
+    } catch (err) {
+      console.error('Failed to create prescription:', err);
+      alert('Failed to save prescription. Please try again.');
+    } finally {
+      setIsSaving(false);
+    }
   };
 
   const formatDate = (dateStr: string) => {
@@ -166,12 +209,22 @@ export function PrescriptionModal({
               </p>
             </div>
           </div>
-          <button
-            onClick={onClose}
-            className="p-2 text-gray-400 hover:text-gray-600 rounded-lg hover:bg-gray-100"
-          >
-            <X className="w-5 h-5" />
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={loadPrescriptions}
+              disabled={isLoading}
+              className="p-2 text-gray-400 hover:text-gray-600 rounded-lg hover:bg-gray-100"
+              title="Refresh"
+            >
+              <RefreshCw className={clsx('w-5 h-5', isLoading && 'animate-spin')} />
+            </button>
+            <button
+              onClick={onClose}
+              className="p-2 text-gray-400 hover:text-gray-600 rounded-lg hover:bg-gray-100"
+            >
+              <X className="w-5 h-5" />
+            </button>
+          </div>
         </div>
 
         {/* Tabs */}
@@ -206,14 +259,27 @@ export function PrescriptionModal({
         <div className="flex-1 overflow-y-auto p-4">
           {activeTab === 'existing' ? (
             <div className="space-y-3">
-              {mockPrescriptions.length === 0 ? (
+              {isLoading ? (
+                <div className="flex flex-col items-center justify-center py-12 text-gray-400">
+                  <Loader2 className="w-8 h-8 mb-2 animate-spin" />
+                  <p>Loading prescriptions...</p>
+                </div>
+              ) : error ? (
+                <div className="flex flex-col items-center justify-center py-12 text-gray-400">
+                  <FileText className="w-12 h-12 mb-2 opacity-50" />
+                  <p>{error}</p>
+                  <button onClick={loadPrescriptions} className="text-bv-gold-600 text-sm mt-2 hover:underline">
+                    Try again
+                  </button>
+                </div>
+              ) : prescriptions.length === 0 ? (
                 <div className="text-center py-8 text-gray-500">
                   <FileText className="w-12 h-12 mx-auto mb-2 opacity-50" />
                   <p>No existing prescriptions found</p>
                   <p className="text-sm">Create a new prescription</p>
                 </div>
               ) : (
-                mockPrescriptions.map(rx => (
+                prescriptions.map(rx => (
                   <div
                     key={rx.id}
                     onClick={() => setSelectedPrescription(rx.id)}
@@ -496,7 +562,7 @@ export function PrescriptionModal({
           {activeTab === 'existing' ? (
             <button
               onClick={handleSelectExisting}
-              disabled={!selectedPrescription}
+              disabled={!selectedPrescription || isLoading}
               className="btn-primary"
             >
               Use Selected Prescription
@@ -504,9 +570,10 @@ export function PrescriptionModal({
           ) : (
             <button
               onClick={handleCreateNew}
-              disabled={!newRx.rightEye.sphere && !newRx.leftEye.sphere}
-              className="btn-primary"
+              disabled={(!newRx.rightEye.sphere && !newRx.leftEye.sphere) || isSaving}
+              className="btn-primary flex items-center gap-2"
             >
+              {isSaving && <Loader2 className="w-4 h-4 animate-spin" />}
               Save & Use Prescription
             </button>
           )}

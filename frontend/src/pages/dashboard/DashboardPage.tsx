@@ -238,15 +238,37 @@ export default function DashboardPage() {
 
       // Sample today's summary
       setTodaySummary({
-        totalOrders: 15,
-        deliveries: 8,
-        eyeTests: 6,
-        newCustomers: 3,
-        paymentsReceived: 32500,
+        totalOrders: dashboardStats.today_orders || 0,
+        deliveries: dashboardStats.today_deliveries || 0,
+        eyeTests: dashboardStats.appointments_today || 0,
+        newCustomers: dashboardStats.new_customers_today || 0,
+        paymentsReceived: dashboardStats.total_sales || 0,
       });
+
+      // Recent activity - this would need a separate API endpoint
+      // For now, show empty if no data
+      setRecentActivity([]);
 
     } catch (err) {
       console.error('Failed to load dashboard data:', err);
+      // On error, set everything to zero rather than showing fake data
+      setStats({
+        todaySales: 0,
+        pendingOrders: 0,
+        urgentOrders: 0,
+        appointmentsToday: 0,
+        upcomingAppointments: 0,
+        lowStockItems: 0,
+        salesChange: 0,
+      });
+      setTodaySummary({
+        totalOrders: 0,
+        deliveries: 0,
+        eyeTests: 0,
+        newCustomers: 0,
+        paymentsReceived: 0,
+      });
+      setRecentActivity([]);
     } finally {
       setIsLoading(false);
     }

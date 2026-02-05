@@ -22,6 +22,8 @@ import {
   Trash2,
 } from 'lucide-react';
 import clsx from 'clsx';
+import { adminUserApi } from '../../services/api';
+import { useAuth } from '../../context/AuthContext';
 
 // Types
 interface PatientInfo {
