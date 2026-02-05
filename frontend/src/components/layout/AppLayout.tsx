@@ -167,19 +167,20 @@ export function AppLayout() {
 
   return (
     <div className="min-h-screen bg-gray-50" data-brand={brandClass}>
-      {/* Mobile sidebar overlay */}
-      {sidebarOpen && (
+      {/* Mobile sidebar overlay - only when module active and sidebar open */}
+      {sidebarOpen && moduleConfig && (
         <div
           className="fixed inset-0 bg-black/50 z-40 tablet:hidden"
           onClick={() => setSidebarOpen(false)}
         />
       )}
 
-      {/* Sidebar */}
+      {/* Sidebar - only visible when a module is active */}
       <aside
         className={clsx(
-          'fixed top-0 left-0 z-50 h-full w-64 bg-white border-r border-gray-200 transition-transform duration-300 tablet:translate-x-0 flex flex-col',
-          sidebarOpen ? 'translate-x-0' : '-translate-x-full'
+          'fixed top-0 left-0 z-50 h-full w-64 bg-white border-r border-gray-200 transition-transform duration-300 flex flex-col',
+          // Only show sidebar when module is active (not on dashboard)
+          moduleConfig ? (sidebarOpen ? 'translate-x-0' : 'tablet:translate-x-0 -translate-x-full') : '-translate-x-full'
         )}
       >
         {/* Logo / Module Header */}
@@ -335,17 +336,21 @@ export function AppLayout() {
         </div>
       </aside>
 
-      {/* Main content */}
-      <div className="tablet:ml-64">
+      {/* Main content - add left margin only when sidebar is visible (module active) */}
+      <div className={clsx(moduleConfig && 'tablet:ml-64')}>
         {/* Top header */}
         <header className="h-16 bg-white border-b border-gray-200 flex items-center justify-between px-4">
-          {/* Mobile menu button */}
-          <button
-            className="tablet:hidden p-2 text-gray-600 hover:text-gray-900"
-            onClick={() => setSidebarOpen(true)}
-          >
-            <Menu className="w-6 h-6" />
-          </button>
+          {/* Mobile menu button - only show when module is active (sidebar exists) */}
+          {moduleConfig ? (
+            <button
+              className="tablet:hidden p-2 text-gray-600 hover:text-gray-900"
+              onClick={() => setSidebarOpen(true)}
+            >
+              <Menu className="w-6 h-6" />
+            </button>
+          ) : (
+            <div className="w-10" />
+          )}
 
           {/* Module breadcrumb (desktop) */}
           {moduleConfig && (
