@@ -53,36 +53,36 @@ def _get_sample_queue(store_id: str) -> List[dict]:
     return [
         {
             "id": "q1",
-            "token_number": "T001",
-            "patient_name": "Rahul Sharma",
-            "customer_phone": "9876543210",
+            "tokenNumber": "T001",
+            "patientName": "Rahul Sharma",
+            "customerPhone": "9876543210",
             "age": 35,
             "reason": "Routine checkup",
             "status": "WAITING",
-            "check_in_time": datetime.now().replace(hour=10, minute=0).isoformat(),
-            "wait_time": 15
+            "createdAt": datetime.now().replace(hour=10, minute=0).isoformat(),
+            "waitTime": 15
         },
         {
             "id": "q2",
-            "token_number": "T002",
-            "patient_name": "Priya Patel",
-            "customer_phone": "9876543211",
+            "tokenNumber": "T002",
+            "patientName": "Priya Patel",
+            "customerPhone": "9876543211",
             "age": 28,
             "reason": "New glasses",
             "status": "IN_PROGRESS",
-            "check_in_time": datetime.now().replace(hour=10, minute=30).isoformat(),
-            "wait_time": 30
+            "createdAt": datetime.now().replace(hour=10, minute=30).isoformat(),
+            "waitTime": 30
         },
         {
             "id": "q3",
-            "token_number": "T003",
-            "patient_name": "Amit Kumar",
-            "customer_phone": "9876543212",
+            "tokenNumber": "T003",
+            "patientName": "Amit Kumar",
+            "customerPhone": "9876543212",
             "age": 45,
             "reason": "Eye strain",
             "status": "WAITING",
-            "check_in_time": datetime.now().replace(hour=11, minute=0).isoformat(),
-            "wait_time": 10
+            "createdAt": datetime.now().replace(hour=11, minute=0).isoformat(),
+            "waitTime": 10
         }
     ]
 
@@ -92,19 +92,21 @@ def _get_sample_completed_tests(store_id: str) -> List[dict]:
     return [
         {
             "id": "t1",
-            "patient_name": "Sanjay Gupta",
-            "customer_phone": "9876543220",
-            "completed_at": datetime.now().replace(hour=9, minute=30).isoformat(),
+            "patientName": "Sanjay Gupta",
+            "customerPhone": "9876543220",
+            "completedAt": datetime.now().replace(hour=9, minute=30).isoformat(),
             "optometrist": "Dr. Meera",
-            "has_prescription": True
+            "rightEye": {"sphere": -2.0, "cylinder": -0.5, "axis": 90},
+            "leftEye": {"sphere": -1.75, "cylinder": -0.25, "axis": 85}
         },
         {
             "id": "t2",
-            "patient_name": "Neha Singh",
-            "customer_phone": "9876543221",
-            "completed_at": datetime.now().replace(hour=9, minute=0).isoformat(),
+            "patientName": "Neha Singh",
+            "customerPhone": "9876543221",
+            "completedAt": datetime.now().replace(hour=9, minute=0).isoformat(),
             "optometrist": "Dr. Meera",
-            "has_prescription": True
+            "rightEye": {"sphere": 1.0, "cylinder": None, "axis": None},
+            "leftEye": {"sphere": 1.25, "cylinder": None, "axis": None}
         }
     ]
 
@@ -141,25 +143,29 @@ async def add_to_queue(
 
     new_item = {
         "id": str(uuid.uuid4()),
-        "token_number": f"T{token_num:03d}",
-        "patient_name": item.patient_name,
-        "customer_phone": item.customer_phone,
+        "tokenNumber": f"T{token_num:03d}",
+        "patientName": item.patient_name,
+        "customerPhone": item.customer_phone,
         "age": item.age,
         "reason": item.reason,
-        "customer_id": item.customer_id,
+        "customerId": item.customer_id,
         "status": "WAITING",
-        "check_in_time": datetime.now().isoformat(),
-        "wait_time": 0
+        "createdAt": datetime.now().isoformat(),
+        "waitTime": 0
     }
 
     queue.append(new_item)
     return new_item
 
 
+class StatusUpdate(BaseModel):
+    status: str
+
+
 @router.patch("/queue/{queue_id}/status")
 async def update_queue_status(
     queue_id: str,
-    status: str = Query(...),
+    body: StatusUpdate,
     current_user: dict = Depends(get_current_user)
 ):
     """Update queue item status"""
@@ -167,11 +173,11 @@ async def update_queue_status(
     for store_id, queue in _queue_storage.items():
         for item in queue:
             if item["id"] == queue_id:
-                item["status"] = status
-                return {"message": "Status updated", "status": status}
+                item["status"] = body.status
+                return {"message": "Status updated", "status": body.status}
 
     # Check sample data
-    return {"message": "Status updated", "status": status}
+    return {"message": "Status updated", "status": body.status}
 
 
 @router.delete("/queue/{queue_id}")
@@ -205,18 +211,18 @@ async def start_test(
                 test_id = str(uuid.uuid4())
                 _test_storage[test_id] = {
                     "id": test_id,
-                    "queue_id": queue_id,
-                    "patient_name": item["patient_name"],
-                    "customer_phone": item["customer_phone"],
-                    "started_at": datetime.now().isoformat(),
+                    "queueId": queue_id,
+                    "patientName": item.get("patientName", item.get("patient_name", "")),
+                    "customerPhone": item.get("customerPhone", item.get("customer_phone", "")),
+                    "startedAt": datetime.now().isoformat(),
                     "status": "IN_PROGRESS"
                 }
 
-                return {"test_id": test_id, "message": "Test started"}
+                return {"testId": test_id, "message": "Test started"}
 
     # For sample data
     test_id = str(uuid.uuid4())
-    return {"test_id": test_id, "message": "Test started"}
+    return {"testId": test_id, "message": "Test started"}
 
 
 # ============================================================================
@@ -259,10 +265,10 @@ async def complete_test(
     if test_id in _test_storage:
         test = _test_storage[test_id]
         test["status"] = "COMPLETED"
-        test["completed_at"] = datetime.now().isoformat()
+        test["completedAt"] = datetime.now().isoformat()
         test["prescription"] = {
-            "right_eye": data.right_eye,
-            "left_eye": data.left_eye,
+            "rightEye": data.right_eye,
+            "leftEye": data.left_eye,
             "pd": data.pd,
             "notes": data.notes
         }
@@ -271,11 +277,11 @@ async def complete_test(
         # Update queue status
         for store_id, queue in _queue_storage.items():
             for item in queue:
-                if item.get("id") == test.get("queue_id"):
+                if item.get("id") == test.get("queueId"):
                     item["status"] = "COMPLETED"
                     break
 
-        return {"message": "Test completed", "test_id": test_id}
+        return {"message": "Test completed", "testId": test_id}
 
     # For demo purposes, just return success
-    return {"message": "Test completed", "test_id": test_id}
+    return {"message": "Test completed", "testId": test_id}

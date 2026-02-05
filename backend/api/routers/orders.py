@@ -17,6 +17,119 @@ router = APIRouter()
 
 
 # ============================================================================
+# HELPER: Convert snake_case to camelCase for frontend compatibility
+# ============================================================================
+
+def to_camel_case(snake_str: str) -> str:
+    """Convert snake_case to camelCase"""
+    components = snake_str.split('_')
+    return components[0] + ''.join(x.title() for x in components[1:])
+
+
+def order_to_frontend(order: dict) -> dict:
+    """Convert order dict from snake_case to camelCase for frontend"""
+    if not order:
+        return order
+
+    # Map of snake_case keys to camelCase
+    key_map = {
+        "order_id": "id",
+        "order_number": "orderNumber",
+        "store_id": "storeId",
+        "customer_id": "customerId",
+        "customer_name": "customerName",
+        "customer_phone": "customerPhone",
+        "patient_id": "patientId",
+        "patient_name": "patientName",
+        "salesperson_id": "salespersonId",
+        "grand_total": "grandTotal",
+        "tax_amount": "taxAmount",
+        "tax_rate": "taxRate",
+        "amount_paid": "amountPaid",
+        "balance_due": "balanceDue",
+        "payment_status": "paymentStatus",
+        "total_discount": "totalDiscount",
+        "expected_delivery": "expectedDelivery",
+        "created_at": "createdAt",
+        "updated_at": "updatedAt",
+        "delivered_at": "deliveredAt",
+        "cancelled_at": "cancelledAt",
+        "cancelled_by": "cancelledBy",
+        "cancellation_reason": "cancellationReason",
+        "invoice_number": "invoiceNumber",
+        "invoice_date": "invoiceDate",
+        "created_by": "createdBy",
+    }
+
+    # Status field needs special handling - backend uses 'status', frontend uses 'orderStatus'
+    result = {}
+    for key, value in order.items():
+        if key == "status":
+            result["orderStatus"] = value
+        elif key == "items" and isinstance(value, list):
+            # Convert item fields
+            result["items"] = [item_to_frontend(item) for item in value]
+        elif key == "payments" and isinstance(value, list):
+            # Convert payment fields
+            result["payments"] = [payment_to_frontend(p) for p in value]
+        elif key in key_map:
+            result[key_map[key]] = value
+        else:
+            # Keep other fields as-is (already camelCase or no mapping needed)
+            result[key] = value
+
+    return result
+
+
+def item_to_frontend(item: dict) -> dict:
+    """Convert order item from snake_case to camelCase"""
+    if not item:
+        return item
+
+    key_map = {
+        "item_id": "id",
+        "item_type": "itemType",
+        "product_id": "productId",
+        "product_name": "productName",
+        "unit_price": "unitPrice",
+        "discount_percent": "discountPercent",
+        "discount_amount": "discountAmount",
+        "item_total": "finalPrice",
+        "final_price": "finalPrice",
+        "prescription_id": "prescriptionId",
+        "lens_options": "lensOptions",
+    }
+
+    result = {}
+    for key, value in item.items():
+        if key in key_map:
+            result[key_map[key]] = value
+        else:
+            result[key] = value
+    return result
+
+
+def payment_to_frontend(payment: dict) -> dict:
+    """Convert payment from snake_case to camelCase"""
+    if not payment:
+        return payment
+
+    key_map = {
+        "payment_id": "id",
+        "received_by": "receivedBy",
+        "received_at": "paidAt",
+    }
+
+    result = {}
+    for key, value in payment.items():
+        if key in key_map:
+            result[key_map[key]] = value
+        else:
+            result[key] = value
+    return result
+
+
+# ============================================================================
 # ENUMS & SCHEMAS
 # ============================================================================
 
@@ -98,7 +211,9 @@ async def list_orders(
                 filter_dict["status"] = status.value
             orders = repo.find_many(filter_dict, skip=skip, limit=limit)
 
-        return {"orders": orders, "total": len(orders)}
+        # Convert to frontend format (camelCase)
+        orders_formatted = [order_to_frontend(o) for o in orders]
+        return {"orders": orders_formatted, "total": len(orders_formatted)}
 
     return {"orders": [], "total": 0}
 
@@ -115,7 +230,8 @@ async def get_pending_deliveries(
 
     if repo:
         orders = repo.find_ready_for_delivery(active_store)
-        return {"orders": orders}
+        orders_formatted = [order_to_frontend(o) for o in orders]
+        return {"orders": orders_formatted}
 
     return {"orders": []}
 
@@ -131,7 +247,8 @@ async def get_unpaid_orders(
 
     if repo:
         orders = repo.find_unpaid(active_store)
-        return {"orders": orders}
+        orders_formatted = [order_to_frontend(o) for o in orders]
+        return {"orders": orders_formatted}
 
     return {"orders": []}
 
@@ -147,7 +264,8 @@ async def get_overdue_orders(
 
     if repo:
         orders = repo.find_overdue(active_store)
-        return {"orders": orders}
+        orders_formatted = [order_to_frontend(o) for o in orders]
+        return {"orders": orders_formatted}
 
     return {"orders": []}
 
@@ -164,7 +282,8 @@ async def search_orders(
 
     if repo:
         orders = repo.search_orders(q, active_store)
-        return {"orders": orders}
+        orders_formatted = [order_to_frontend(o) for o in orders]
+        return {"orders": orders_formatted}
 
     return {"orders": []}
 
@@ -185,11 +304,11 @@ async def get_sales_summary(
         return summary
 
     return {
-        "total_orders": 0,
-        "total_revenue": 0,
-        "total_paid": 0,
-        "avg_order_value": 0,
-        "total_items": 0
+        "totalOrders": 0,
+        "totalRevenue": 0,
+        "totalPaid": 0,
+        "avgOrderValue": 0,
+        "totalItems": 0
     }
 
 
@@ -204,9 +323,9 @@ async def get_status_counts(
 
     if repo:
         counts = repo.get_status_counts(active_store)
-        return {"status_counts": counts}
+        return {"statusCounts": counts}
 
-    return {"status_counts": {}}
+    return {"statusCounts": {}}
 
 
 def generate_order_number(store_id: str) -> str:
@@ -320,10 +439,10 @@ async def get_order(
     if repo:
         order = repo.find_by_id(order_id)
         if order:
-            return order
+            return order_to_frontend(order)
         raise HTTPException(status_code=404, detail="Order not found")
 
-    return {"order_id": order_id}
+    return {"id": order_id}
 
 
 @router.put("/{order_id}")
@@ -634,16 +753,18 @@ async def get_invoice(
             invoice_number = f"BV/INV/{year}/{short_id}"
             repo.set_invoice(order_id, invoice_number)
 
+        # Convert items to camelCase
+        items_formatted = [item_to_frontend(item) for item in order.get("items", [])]
         return {
-            "invoice_number": invoice_number,
-            "order_id": order_id,
-            "order_number": order.get("order_number"),
-            "customer_name": order.get("customer_name"),
-            "grand_total": order.get("grand_total"),
-            "amount_paid": order.get("amount_paid"),
-            "balance_due": order.get("balance_due"),
-            "items": order.get("items", []),
-            "invoice_date": order.get("invoice_date") or datetime.now().isoformat()
+            "invoiceNumber": invoice_number,
+            "orderId": order_id,
+            "orderNumber": order.get("order_number"),
+            "customerName": order.get("customer_name"),
+            "grandTotal": order.get("grand_total"),
+            "amountPaid": order.get("amount_paid"),
+            "balanceDue": order.get("balance_due"),
+            "items": items_formatted,
+            "invoiceDate": order.get("invoice_date") or datetime.now().isoformat()
         }
 
-    return {"invoice_number": "BV/INV/2024/0001", "order_id": order_id}
+    return {"invoiceNumber": "BV/INV/2024/0001", "orderId": order_id}

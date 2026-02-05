@@ -18,19 +18,19 @@ async def dashboard_stats(
     # Return aggregated stats for dashboard
     # In production, this would aggregate data from orders, inventory, appointments etc.
     return {
-        "total_sales": 45230,
+        "totalSales": 45230,
         "change": 12,
-        "pending_orders": 23,
-        "urgent_orders": 5,
-        "appointments_today": 8,
-        "upcoming_appointments": 2,
-        "low_stock_items": 12,
-        "today_summary": {
-            "total_orders": 15,
+        "pendingOrders": 23,
+        "urgentOrders": 5,
+        "appointmentsToday": 8,
+        "upcomingAppointments": 2,
+        "lowStockItems": 12,
+        "todaySummary": {
+            "totalOrders": 15,
             "deliveries": 8,
-            "eye_tests": 6,
-            "new_customers": 3,
-            "payments_received": 32500
+            "eyeTests": 6,
+            "newCustomers": 3,
+            "paymentsReceived": 32500
         }
     }
 
@@ -42,10 +42,10 @@ async def inventory_report(
 ):
     """Get inventory report for a store"""
     return {
-        "total_items": 1250,
-        "total_value": 2500000,
-        "low_stock": 12,
-        "out_of_stock": 3,
+        "totalItems": 1250,
+        "totalValue": 2500000,
+        "lowStock": 12,
+        "outOfStock": 3,
         "categories": []
     }
 

@@ -44,6 +44,50 @@ def generate_job_number() -> str:
     return f"WS-{datetime.now().strftime('%y%m%d')}-{str(uuid.uuid4())[:6].upper()}"
 
 
+def job_to_frontend(job: dict) -> dict:
+    """Convert workshop job from snake_case to camelCase for frontend"""
+    if not job:
+        return job
+
+    key_map = {
+        "job_id": "id",
+        "job_number": "jobNumber",
+        "order_id": "orderId",
+        "order_number": "orderNumber",
+        "store_id": "storeId",
+        "customer_id": "customerId",
+        "customer_name": "customerName",
+        "customer_phone": "customerPhone",
+        "frame_details": "frameDetails",
+        "frame_name": "frameName",
+        "frame_barcode": "frameBarcode",
+        "lens_details": "lensDetails",
+        "lens_type": "lensType",
+        "prescription_id": "prescriptionId",
+        "fitting_instructions": "fittingInstructions",
+        "special_notes": "notes",
+        "technician_id": "assignedTo",
+        "assigned_to": "assignedTo",
+        "expected_date": "expectedDate",
+        "promised_date": "promisedDate",
+        "created_at": "createdAt",
+        "completed_at": "completedAt",
+        "updated_at": "updatedAt",
+        "updated_by": "updatedBy",
+        "created_by": "createdBy",
+    }
+
+    result = {}
+    for key, value in job.items():
+        if key in key_map:
+            result[key_map[key]] = value
+        else:
+            # Keep other fields as-is
+            result[key] = value
+
+    return result
+
+
 # ============================================================================
 # ENDPOINTS
 # ============================================================================
@@ -60,7 +104,8 @@ async def get_pending_jobs(
 
     if repo:
         jobs = repo.find_pending(active_store)
-        return {"jobs": jobs, "total": len(jobs)}
+        jobs_formatted = [job_to_frontend(j) for j in jobs]
+        return {"jobs": jobs_formatted, "total": len(jobs_formatted)}
 
     return {"jobs": [], "total": 0}
 
@@ -76,7 +121,8 @@ async def get_overdue_jobs(
 
     if repo:
         jobs = repo.find_overdue(active_store)
-        return {"jobs": jobs, "total": len(jobs)}
+        jobs_formatted = [job_to_frontend(j) for j in jobs]
+        return {"jobs": jobs_formatted, "total": len(jobs_formatted)}
 
     return {"jobs": [], "total": 0}
 
@@ -92,7 +138,8 @@ async def get_ready_jobs(
 
     if repo:
         jobs = repo.find_ready(active_store)
-        return {"jobs": jobs, "total": len(jobs)}
+        jobs_formatted = [job_to_frontend(j) for j in jobs]
+        return {"jobs": jobs_formatted, "total": len(jobs_formatted)}
 
     return {"jobs": [], "total": 0}
 
@@ -136,7 +183,8 @@ async def list_jobs(
             filter_dict["technician_id"] = technician_id
 
         jobs = repo.find_many(filter_dict, skip=skip, limit=limit, sort=[("created_at", -1)])
-        return {"jobs": jobs, "total": len(jobs)}
+        jobs_formatted = [job_to_frontend(j) for j in jobs]
+        return {"jobs": jobs_formatted, "total": len(jobs_formatted)}
 
     return {"jobs": [], "total": 0}
 
@@ -182,8 +230,8 @@ async def create_job(
         raise HTTPException(status_code=500, detail="Failed to create workshop job")
 
     return {
-        "job_id": str(uuid.uuid4()),
-        "job_number": generate_job_number(),
+        "id": str(uuid.uuid4()),
+        "jobNumber": generate_job_number(),
         "message": "Workshop job created"
     }
 
@@ -199,10 +247,10 @@ async def get_job(
     if repo:
         job = repo.find_by_id(job_id)
         if job:
-            return job
+            return job_to_frontend(job)
         raise HTTPException(status_code=404, detail="Workshop job not found")
 
-    return {"job_id": job_id}
+    return {"id": job_id}
 
 
 @router.put("/jobs/{job_id}")
