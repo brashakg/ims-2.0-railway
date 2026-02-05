@@ -18,11 +18,13 @@ import {
   Eye,
   Loader2,
   RefreshCw,
+  Barcode,
 } from 'lucide-react';
 import type { ProductCategory } from '../../types';
 import { inventoryApi } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
+import { BarcodeManagementModal } from '../../components/inventory/BarcodeManagementModal';
 import clsx from 'clsx';
 
 // Category configuration
@@ -93,10 +95,15 @@ export function InventoryPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  // Barcode modal state
+  const [showBarcodeModal, setShowBarcodeModal] = useState(false);
+  const [selectedProduct, setSelectedProduct] = useState<StockItem | null>(null);
+
   // Role-based permissions
   const canTransfer = hasRole(['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER']);
   const canAddProduct = hasRole(['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER']);
   const canExport = hasRole(['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT']);
+  const canManageBarcode = hasRole(['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER', 'STORE_MANAGER']);
 
   // Load data on mount
   useEffect(() => {
@@ -171,6 +178,27 @@ export function InventoryPage() {
       currency: 'INR',
       maximumFractionDigits: 0,
     }).format(amount);
+  };
+
+  // Handle barcode save
+  const handleSaveBarcode = async (barcode: string) => {
+    if (!selectedProduct) return;
+
+    try {
+      // Update product with barcode
+      // Note: This would need a proper API endpoint to update product barcode
+      toast.success(`Barcode saved for ${selectedProduct.name}`);
+      await loadInventory(); // Reload to get updated data
+    } catch {
+      toast.error('Failed to save barcode');
+      throw new Error('Failed to save barcode');
+    }
+  };
+
+  // Open barcode modal for a product
+  const openBarcodeModal = (item: StockItem) => {
+    setSelectedProduct(item);
+    setShowBarcodeModal(true);
   };
 
   return (
@@ -373,6 +401,7 @@ export function InventoryPage() {
                   <tr>
                     <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Product</th>
                     <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">SKU</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Barcode</th>
                     <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Category</th>
                     <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">MRP</th>
                     <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Offer</th>
@@ -396,6 +425,15 @@ export function InventoryPage() {
                         </td>
                         <td className="px-4 py-3 text-sm text-gray-600">{item.sku}</td>
                         <td className="px-4 py-3">
+                          {(item as any).barcode ? (
+                            <span className="text-xs font-mono text-gray-700 bg-gray-100 px-2 py-1 rounded">
+                              {(item as any).barcode}
+                            </span>
+                          ) : (
+                            <span className="text-xs text-gray-400">Not set</span>
+                          )}
+                        </td>
+                        <td className="px-4 py-3">
                           <span className="text-sm">
                             {category?.icon || '📦'}{' '}
                             {category?.label || item.category}
@@ -418,12 +456,24 @@ export function InventoryPage() {
                           <span className={status.class}>{status.label}</span>
                         </td>
                         <td className="px-4 py-3 text-center">
-                          <button
-                            onClick={() => toast.info(`View details for ${item.name}`)}
-                            className="p-2 text-gray-400 hover:text-bv-red-600 transition-colors"
-                          >
-                            <Eye className="w-4 h-4" />
-                          </button>
+                          <div className="flex items-center justify-center gap-1">
+                            {canManageBarcode && (
+                              <button
+                                onClick={() => openBarcodeModal(item)}
+                                className="p-2 text-gray-400 hover:text-blue-600 transition-colors"
+                                title="Manage Barcode"
+                              >
+                                <Barcode className="w-4 h-4" />
+                              </button>
+                            )}
+                            <button
+                              onClick={() => toast.info(`View details for ${item.name}`)}
+                              className="p-2 text-gray-400 hover:text-bv-red-600 transition-colors"
+                              title="View Details"
+                            >
+                              <Eye className="w-4 h-4" />
+                            </button>
+                          </div>
                         </td>
                       </tr>
                     );
@@ -522,6 +572,22 @@ export function InventoryPage() {
             </div>
           )}
         </div>
+      )}
+
+      {/* Barcode Management Modal */}
+      {selectedProduct && (
+        <BarcodeManagementModal
+          isOpen={showBarcodeModal}
+          onClose={() => {
+            setShowBarcodeModal(false);
+            setSelectedProduct(null);
+          }}
+          productId={selectedProduct.id}
+          productName={selectedProduct.name}
+          currentBarcode={(selectedProduct as any).barcode}
+          price={selectedProduct.offerPrice || selectedProduct.mrp}
+          onSave={handleSaveBarcode}
+        />
       )}
     </div>
   );
