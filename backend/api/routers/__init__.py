@@ -21,6 +21,8 @@ from .clinical import router as clinical_router
 from .admin import router as admin_router
 from .shopify import router as shopify_router
 from .transfers import router as transfers_router
+from .catalog import router as catalog_router
+from .jarvis import router as jarvis_router
 
 __all__ = [
     'auth_router',
@@ -41,5 +43,7 @@ __all__ = [
     'clinical_router',
     'admin_router',
     'shopify_router',
-    'transfers_router'
+    'transfers_router',
+    'catalog_router',
+    'jarvis_router'
 ]

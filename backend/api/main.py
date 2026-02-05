@@ -47,7 +47,9 @@ from .routers import (
     clinical_router,
     admin_router,
     shopify_router,
-    transfers_router
+    transfers_router,
+    catalog_router,
+    jarvis_router
 )
 
 # Lifespan context manager for startup/shutdown
@@ -163,6 +165,8 @@ app.include_router(clinical_router, prefix="/api/v1/clinical", tags=["Clinical"]
 app.include_router(admin_router, prefix="/api/v1/admin", tags=["Admin"])
 app.include_router(shopify_router, prefix="/api/v1/shopify", tags=["Shopify"])
 app.include_router(transfers_router, prefix="/api/v1/transfers", tags=["Stock Transfers"])
+app.include_router(catalog_router, prefix="/api/v1/catalog", tags=["Catalog"])
+app.include_router(jarvis_router, prefix="/api/v1/jarvis", tags=["JARVIS"])
 
 
 if __name__ == "__main__":
