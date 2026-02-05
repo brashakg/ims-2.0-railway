@@ -20,6 +20,7 @@ import {
 import { clinicalApi } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
+import { EyeTestForm, type EyeTestData } from '../../components/clinical/EyeTestForm';
 import clsx from 'clsx';
 
 // Types
@@ -62,6 +63,14 @@ export function ClinicalPage() {
 
   // UI state
   const [activeTab, setActiveTab] = useState<'queue' | 'completed'>('queue');
+  const [showEyeTestForm, setShowEyeTestForm] = useState(false);
+  const [selectedPatient, setSelectedPatient] = useState<{
+    id: string;
+    name: string;
+    phone: string;
+    age?: number;
+    customerId: string;
+  } | null>(null);
 
   // Loading state
   const [isLoading, setIsLoading] = useState(true);
@@ -110,6 +119,30 @@ export function ClinicalPage() {
       setError('Failed to start test.');
     } finally {
       setActionLoading(null);
+    }
+  };
+
+  const handleOpenEyeTest = (item: QueueItem) => {
+    setSelectedPatient({
+      id: item.id,
+      name: item.patientName,
+      phone: item.customerPhone,
+      age: item.age,
+      customerId: item.id, // Using queue ID as customer ID for now
+    });
+    setShowEyeTestForm(true);
+  };
+
+  const handleSaveEyeTest = async (data: EyeTestData) => {
+    try {
+      // TODO: Save eye test data to backend
+      console.log('Eye test data:', data);
+      toast.success('Eye test saved successfully');
+      setShowEyeTestForm(false);
+      setSelectedPatient(null);
+      await loadData();
+    } catch {
+      toast.error('Failed to save eye test');
     }
   };
 
@@ -310,7 +343,10 @@ export function ClinicalPage() {
                       {/* Actions */}
                       {item.status === 'WAITING' && canStartTest && (
                         <button
-                          onClick={() => handleStartTest(item.id)}
+                          onClick={async () => {
+                            await handleStartTest(item.id);
+                            handleOpenEyeTest(item);
+                          }}
                           disabled={isActionLoading}
                           className="btn-primary flex items-center gap-2 disabled:opacity-50"
                         >
@@ -324,7 +360,7 @@ export function ClinicalPage() {
                       )}
                       {item.status === 'IN_PROGRESS' && canStartTest && (
                         <button
-                          onClick={() => toast.info(`Continue eye test for ${item.patientName}`)}
+                          onClick={() => handleOpenEyeTest(item)}
                           className="btn-primary flex items-center gap-2"
                         >
                           <Eye className="w-4 h-4" />
@@ -389,6 +425,18 @@ export function ClinicalPage() {
           )}
         </div>
       )}
+
+      {/* Eye Test Form Modal */}
+      <EyeTestForm
+        isOpen={showEyeTestForm}
+        onClose={() => {
+          setShowEyeTestForm(false);
+          setSelectedPatient(null);
+        }}
+        onSave={handleSaveEyeTest}
+        patient={selectedPatient}
+        optometristName={user?.name}
+      />
     </div>
   );
 }
