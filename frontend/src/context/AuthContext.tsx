@@ -117,16 +117,26 @@ export function AuthProvider({ children }: AuthProviderProps) {
         try {
           // Verify stored user JSON is valid (parsing test)
           JSON.parse(userJson) as User;
-          // Verify token is still valid with API
+
+          // Check if token looks valid (basic JWT format check)
+          const tokenParts = token.split('.');
+          if (tokenParts.length !== 3) {
+            throw new Error('Invalid token format');
+          }
+
+          // Try to verify token is still valid with API
           const profile = await authApi.getProfile();
           dispatch({
             type: 'LOGIN_SUCCESS',
             payload: { user: profile, token },
           });
-        } catch {
-          // Token invalid, clear storage
+        } catch (error) {
+          // Clear storage on any error - force fresh login
+          // This handles both invalid tokens AND network errors with stale data
+          console.log('Auth initialization failed, clearing storage:', error);
           localStorage.removeItem('ims_token');
           localStorage.removeItem('ims_user');
+          localStorage.removeItem('ims_active_module');
           dispatch({ type: 'LOGOUT' });
         }
       } else {
