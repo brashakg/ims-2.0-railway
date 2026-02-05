@@ -74,6 +74,16 @@ export function ClinicalPage() {
   } | null>(null);
   const [currentTestId, setCurrentTestId] = useState<string | null>(null);
 
+  // Add patient modal state
+  const [showAddPatientModal, setShowAddPatientModal] = useState(false);
+  const [newPatient, setNewPatient] = useState({
+    patientName: '',
+    customerPhone: '',
+    age: '',
+    reason: '',
+  });
+  const [isAddingPatient, setIsAddingPatient] = useState(false);
+
   // Loading state
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -181,6 +191,38 @@ export function ClinicalPage() {
     }
   };
 
+  // Add patient to queue
+  const handleAddPatient = async () => {
+    if (!newPatient.patientName.trim()) {
+      toast.error('Please enter patient name');
+      return;
+    }
+    if (!newPatient.customerPhone.trim() || newPatient.customerPhone.length < 10) {
+      toast.error('Please enter valid phone number');
+      return;
+    }
+
+    setIsAddingPatient(true);
+    try {
+      await clinicalApi.addToQueue({
+        storeId: user?.activeStoreId || '',
+        patientName: newPatient.patientName,
+        customerPhone: newPatient.customerPhone,
+        age: newPatient.age ? parseInt(newPatient.age) : undefined,
+        reason: newPatient.reason || undefined,
+      });
+
+      toast.success('Patient added to queue');
+      setShowAddPatientModal(false);
+      setNewPatient({ patientName: '', customerPhone: '', age: '', reason: '' });
+      await loadData();
+    } catch {
+      toast.error('Failed to add patient to queue');
+    } finally {
+      setIsAddingPatient(false);
+    }
+  };
+
   const waitingCount = queue.filter(q => q.status === 'WAITING').length;
   const inProgressCount = queue.filter(q => q.status === 'IN_PROGRESS').length;
   const completedCount = completedTests.length;
@@ -220,7 +262,7 @@ export function ClinicalPage() {
           </button>
           {canAddPatient && (
             <button
-              onClick={() => toast.info('Add patient to queue feature coming soon')}
+              onClick={() => setShowAddPatientModal(true)}
               className="btn-primary flex items-center gap-2"
             >
               <Plus className="w-4 h-4" />
@@ -481,6 +523,116 @@ export function ClinicalPage() {
         patient={selectedPatient}
         optometristName={user?.name}
       />
+
+      {/* Add Patient Modal */}
+      {showAddPatientModal && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-xl shadow-xl max-w-md w-full">
+            <div className="p-6 border-b border-gray-200">
+              <div className="flex items-center justify-between">
+                <h2 className="text-xl font-bold text-gray-900">Add Patient to Queue</h2>
+                <button
+                  onClick={() => setShowAddPatientModal(false)}
+                  className="p-2 text-gray-400 hover:text-gray-600 rounded-lg"
+                >
+                  ×
+                </button>
+              </div>
+            </div>
+
+            <div className="p-6 space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Patient Name <span className="text-red-500">*</span>
+                </label>
+                <input
+                  type="text"
+                  value={newPatient.patientName}
+                  onChange={e => setNewPatient(prev => ({ ...prev, patientName: e.target.value }))}
+                  placeholder="Enter patient name"
+                  className="input-field w-full"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Phone Number <span className="text-red-500">*</span>
+                </label>
+                <input
+                  type="tel"
+                  value={newPatient.customerPhone}
+                  onChange={e => setNewPatient(prev => ({ ...prev, customerPhone: e.target.value }))}
+                  placeholder="10-digit phone number"
+                  maxLength={10}
+                  className="input-field w-full"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Age
+                  </label>
+                  <input
+                    type="number"
+                    value={newPatient.age}
+                    onChange={e => setNewPatient(prev => ({ ...prev, age: e.target.value }))}
+                    placeholder="Age"
+                    min="1"
+                    max="120"
+                    className="input-field w-full"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Reason
+                  </label>
+                  <select
+                    value={newPatient.reason}
+                    onChange={e => setNewPatient(prev => ({ ...prev, reason: e.target.value }))}
+                    className="input-field w-full"
+                  >
+                    <option value="">Select reason</option>
+                    <option value="Routine checkup">Routine checkup</option>
+                    <option value="New glasses">New glasses</option>
+                    <option value="Eye strain">Eye strain</option>
+                    <option value="Vision issues">Vision issues</option>
+                    <option value="Contact lens fitting">Contact lens fitting</option>
+                    <option value="Other">Other</option>
+                  </select>
+                </div>
+              </div>
+            </div>
+
+            <div className="p-6 border-t border-gray-200 flex justify-end gap-3">
+              <button
+                onClick={() => setShowAddPatientModal(false)}
+                className="btn-secondary"
+                disabled={isAddingPatient}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleAddPatient}
+                className="btn-primary flex items-center gap-2"
+                disabled={isAddingPatient}
+              >
+                {isAddingPatient ? (
+                  <>
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    Adding...
+                  </>
+                ) : (
+                  <>
+                    <Plus className="w-4 h-4" />
+                    Add to Queue
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
