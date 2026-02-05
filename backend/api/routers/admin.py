@@ -16,6 +16,46 @@ router = APIRouter()
 
 
 # ============================================================================
+# DATABASE HELPER FUNCTIONS
+# ============================================================================
+
+def _get_integrations_collection():
+    """Get integrations collection from database"""
+    try:
+        from database.connection import get_db
+        db = get_db()
+        if db and db.is_connected:
+            return db.db["integrations"]
+    except Exception:
+        pass
+    return None
+
+
+def _get_integration_config(integration_type: str) -> dict:
+    """Get a specific integration config from database"""
+    collection = _get_integrations_collection()
+    if collection:
+        config = collection.find_one({"type": integration_type.lower()})
+        if config:
+            config.pop("_id", None)
+            return config
+    return {"enabled": False, "config": {}}
+
+
+def _save_integration_config(integration_type: str, config_data: dict) -> bool:
+    """Save integration config to database"""
+    collection = _get_integrations_collection()
+    if collection:
+        collection.update_one(
+            {"type": integration_type.lower()},
+            {"$set": {**config_data, "type": integration_type.lower()}},
+            upsert=True
+        )
+        return True
+    return False
+
+
+# ============================================================================
 # SCHEMAS
 # ============================================================================
 
@@ -83,17 +123,8 @@ class ShopifyOrderSync(BaseModel):
 
 
 # ============================================================================
-# IN-MEMORY CONFIG STORAGE (would be database in production)
+# NOTE: Integration configs are now stored in the database.
 # ============================================================================
-
-INTEGRATION_CONFIGS: Dict[str, Dict] = {
-    "shopify": {"enabled": False, "config": {}},
-    "shiprocket": {"enabled": False, "config": {}, "token": None, "token_expiry": None},
-    "razorpay": {"enabled": False, "config": {}},
-    "whatsapp": {"enabled": False, "config": {}},
-    "tally": {"enabled": False, "config": {}},
-    "sms": {"enabled": True, "config": {"provider": "MSG91"}},
-}
 
 
 # ============================================================================
@@ -103,7 +134,7 @@ INTEGRATION_CONFIGS: Dict[str, Dict] = {
 @router.get("/integrations/shopify")
 async def get_shopify_config(current_user: dict = Depends(get_current_user)):
     """Get Shopify integration configuration"""
-    config = INTEGRATION_CONFIGS.get("shopify", {})
+    config = _get_integration_config("shopify")
     return {
         "type": "SHOPIFY",
         "name": "Shopify",
@@ -127,10 +158,10 @@ async def set_shopify_config(
     if not any(role in current_user.get("roles", []) for role in ["SUPERADMIN", "ADMIN"]):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
-    INTEGRATION_CONFIGS["shopify"] = {
+    _save_integration_config("shopify", {
         "enabled": config.enabled,
         "config": config.model_dump()
-    }
+    })
 
     return {"message": "Shopify configuration saved", "enabled": config.enabled}
 
@@ -138,7 +169,7 @@ async def set_shopify_config(
 @router.post("/integrations/shopify/test")
 async def test_shopify_connection(current_user: dict = Depends(get_current_user)):
     """Test Shopify API connection"""
-    config = INTEGRATION_CONFIGS.get("shopify", {}).get("config", {})
+    config = _get_integration_config("shopify", {}).get("config", {})
 
     if not config.get("shop_url"):
         raise HTTPException(status_code=400, detail="Shopify not configured")
@@ -163,7 +194,7 @@ async def sync_shopify_orders(
     current_user: dict = Depends(get_current_user)
 ):
     """Sync orders from Shopify"""
-    config = INTEGRATION_CONFIGS.get("shopify", {})
+    config = _get_integration_config("shopify", {})
 
     if not config.get("enabled"):
         raise HTTPException(status_code=400, detail="Shopify integration not enabled")
@@ -185,7 +216,7 @@ async def sync_shopify_orders(
 @router.post("/integrations/shopify/sync-inventory")
 async def sync_shopify_inventory(current_user: dict = Depends(get_current_user)):
     """Push inventory updates to Shopify"""
-    config = INTEGRATION_CONFIGS.get("shopify", {})
+    config = _get_integration_config("shopify", {})
 
     if not config.get("enabled"):
         raise HTTPException(status_code=400, detail="Shopify integration not enabled")
@@ -210,7 +241,7 @@ async def sync_shopify_inventory(current_user: dict = Depends(get_current_user))
 @router.get("/integrations/shiprocket")
 async def get_shiprocket_config(current_user: dict = Depends(get_current_user)):
     """Get Shiprocket integration configuration"""
-    config = INTEGRATION_CONFIGS.get("shiprocket", {})
+    config = _get_integration_config("shiprocket", {})
     return {
         "type": "SHIPROCKET",
         "name": "Shiprocket",
@@ -233,12 +264,12 @@ async def set_shiprocket_config(
     if not any(role in current_user.get("roles", []) for role in ["SUPERADMIN", "ADMIN"]):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
-    INTEGRATION_CONFIGS["shiprocket"] = {
+    _save_integration_config("shiprocket", {
         "enabled": config.enabled,
         "config": config.model_dump(),
         "token": None,
         "token_expiry": None
-    }
+    })
 
     return {"message": "Shiprocket configuration saved", "enabled": config.enabled}
 
@@ -246,7 +277,7 @@ async def set_shiprocket_config(
 @router.post("/integrations/shiprocket/test")
 async def test_shiprocket_connection(current_user: dict = Depends(get_current_user)):
     """Test Shiprocket API connection"""
-    config = INTEGRATION_CONFIGS.get("shiprocket", {}).get("config", {})
+    config = _get_integration_config("shiprocket", {}).get("config", {})
 
     if not config.get("email"):
         raise HTTPException(status_code=400, detail="Shiprocket not configured")
@@ -271,7 +302,7 @@ async def create_shiprocket_shipment(
     current_user: dict = Depends(get_current_user)
 ):
     """Create a shipment in Shiprocket"""
-    config = INTEGRATION_CONFIGS.get("shiprocket", {})
+    config = _get_integration_config("shiprocket", {})
 
     if not config.get("enabled"):
         raise HTTPException(status_code=400, detail="Shiprocket integration not enabled")
@@ -302,7 +333,7 @@ async def track_shiprocket_shipment(
     current_user: dict = Depends(get_current_user)
 ):
     """Track a shipment by AWB number"""
-    config = INTEGRATION_CONFIGS.get("shiprocket", {})
+    config = _get_integration_config("shiprocket", {})
 
     if not config.get("enabled"):
         raise HTTPException(status_code=400, detail="Shiprocket integration not enabled")
@@ -335,7 +366,7 @@ async def get_shiprocket_rates(
     current_user: dict = Depends(get_current_user)
 ):
     """Get shipping rates from Shiprocket"""
-    config = INTEGRATION_CONFIGS.get("shiprocket", {})
+    config = _get_integration_config("shiprocket", {})
 
     if not config.get("enabled"):
         raise HTTPException(status_code=400, detail="Shiprocket integration not enabled")
@@ -387,7 +418,7 @@ async def get_shiprocket_rates(
 @router.get("/integrations/razorpay")
 async def get_razorpay_config(current_user: dict = Depends(get_current_user)):
     """Get Razorpay integration configuration"""
-    config = INTEGRATION_CONFIGS.get("razorpay", {})
+    config = _get_integration_config("razorpay", {})
     return {
         "type": "RAZORPAY",
         "name": "Razorpay",
@@ -409,10 +440,10 @@ async def set_razorpay_config(
     if not any(role in current_user.get("roles", []) for role in ["SUPERADMIN", "ADMIN"]):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
-    INTEGRATION_CONFIGS["razorpay"] = {
+    _save_integration_config("razorpay", {
         "enabled": config.enabled,
         "config": config.model_dump()
-    }
+    })
 
     return {"message": "Razorpay configuration saved", "enabled": config.enabled}
 
@@ -420,7 +451,7 @@ async def set_razorpay_config(
 @router.post("/integrations/razorpay/test")
 async def test_razorpay_connection(current_user: dict = Depends(get_current_user)):
     """Test Razorpay API connection"""
-    config = INTEGRATION_CONFIGS.get("razorpay", {}).get("config", {})
+    config = _get_integration_config("razorpay", {}).get("config", {})
 
     if not config.get("key_id"):
         raise HTTPException(status_code=400, detail="Razorpay not configured")
@@ -443,7 +474,7 @@ async def test_razorpay_connection(current_user: dict = Depends(get_current_user
 @router.get("/integrations/whatsapp")
 async def get_whatsapp_config(current_user: dict = Depends(get_current_user)):
     """Get WhatsApp Business integration configuration"""
-    config = INTEGRATION_CONFIGS.get("whatsapp", {})
+    config = _get_integration_config("whatsapp", {})
     return {
         "type": "WHATSAPP",
         "name": "WhatsApp Business",
@@ -466,10 +497,10 @@ async def set_whatsapp_config(
     if not any(role in current_user.get("roles", []) for role in ["SUPERADMIN", "ADMIN"]):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
-    INTEGRATION_CONFIGS["whatsapp"] = {
+    _save_integration_config("whatsapp", {
         "enabled": config.enabled,
         "config": config.model_dump()
-    }
+    })
 
     return {"message": "WhatsApp configuration saved", "enabled": config.enabled}
 
@@ -477,7 +508,7 @@ async def set_whatsapp_config(
 @router.post("/integrations/whatsapp/test")
 async def test_whatsapp_connection(current_user: dict = Depends(get_current_user)):
     """Test WhatsApp Business API connection"""
-    config = INTEGRATION_CONFIGS.get("whatsapp", {}).get("config", {})
+    config = _get_integration_config("whatsapp", {}).get("config", {})
 
     if not config.get("api_key"):
         raise HTTPException(status_code=400, detail="WhatsApp not configured")
@@ -500,7 +531,7 @@ async def test_whatsapp_connection(current_user: dict = Depends(get_current_user
 @router.get("/integrations/tally")
 async def get_tally_config(current_user: dict = Depends(get_current_user)):
     """Get Tally ERP integration configuration"""
-    config = INTEGRATION_CONFIGS.get("tally", {})
+    config = _get_integration_config("tally", {})
     return {
         "type": "TALLY",
         "name": "Tally ERP",
@@ -524,10 +555,10 @@ async def set_tally_config(
     if not any(role in current_user.get("roles", []) for role in ["SUPERADMIN", "ADMIN"]):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
-    INTEGRATION_CONFIGS["tally"] = {
+    _save_integration_config("tally", {
         "enabled": config.enabled,
         "config": config.model_dump()
-    }
+    })
 
     return {"message": "Tally configuration saved", "enabled": config.enabled}
 
@@ -535,7 +566,7 @@ async def set_tally_config(
 @router.post("/integrations/tally/test")
 async def test_tally_connection(current_user: dict = Depends(get_current_user)):
     """Test Tally ERP connection"""
-    config = INTEGRATION_CONFIGS.get("tally", {}).get("config", {})
+    config = _get_integration_config("tally", {}).get("config", {})
 
     if not config.get("server_url"):
         raise HTTPException(status_code=400, detail="Tally not configured")
@@ -558,7 +589,7 @@ async def test_tally_connection(current_user: dict = Depends(get_current_user)):
 @router.get("/integrations/sms")
 async def get_sms_config(current_user: dict = Depends(get_current_user)):
     """Get SMS Gateway configuration"""
-    config = INTEGRATION_CONFIGS.get("sms", {})
+    config = _get_integration_config("sms", {})
     return {
         "type": "SMS",
         "name": "SMS Gateway",
@@ -581,10 +612,10 @@ async def set_sms_config(
     if not any(role in current_user.get("roles", []) for role in ["SUPERADMIN", "ADMIN"]):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
-    INTEGRATION_CONFIGS["sms"] = {
+    _save_integration_config("sms", {
         "enabled": config.enabled,
         "config": config.model_dump()
-    }
+    })
 
     return {"message": "SMS Gateway configuration saved", "enabled": config.enabled}
 
@@ -608,7 +639,7 @@ async def list_all_integrations(current_user: dict = Depends(get_current_user)):
     }
 
     for key, meta in integration_meta.items():
-        config = INTEGRATION_CONFIGS.get(key, {})
+        config = _get_integration_config(key)
         integrations.append({
             "type": key.upper(),
             "name": meta["name"],
