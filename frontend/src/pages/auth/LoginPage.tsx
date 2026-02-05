@@ -2,10 +2,10 @@
 // IMS 2.0 - Login Page
 // ============================================================================
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
-import { Eye, EyeOff, Store, AlertCircle } from 'lucide-react';
+import { Eye, EyeOff, Store, AlertCircle, RefreshCw } from 'lucide-react';
 
 export function LoginPage() {
   const { login, isLoading } = useAuth();
@@ -16,6 +16,28 @@ export function LoginPage() {
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState('');
+
+  // Clear any stale auth data when login page mounts
+  useEffect(() => {
+    // Only clear if there's stale data that might cause issues
+    const token = localStorage.getItem('ims_token');
+    if (token) {
+      console.log('Clearing stale auth data on login page mount');
+      localStorage.removeItem('ims_token');
+      localStorage.removeItem('ims_user');
+      localStorage.removeItem('ims_active_module');
+    }
+  }, []);
+
+  const handleClearCache = () => {
+    localStorage.clear();
+    sessionStorage.clear();
+    setError('');
+    setUsername('');
+    setPassword('');
+    // Reload to clear any in-memory state
+    window.location.reload();
+  };
 
   const from = (location.state as { from?: { pathname: string } })?.from?.pathname || '/dashboard';
 
@@ -157,9 +179,19 @@ export function LoginPage() {
         </div>
 
         {/* Footer */}
-        <p className="text-center text-sm text-gray-500 mt-6">
-          Better Vision Opticals &amp; WizOpt
-        </p>
+        <div className="text-center mt-6 space-y-2">
+          <p className="text-sm text-gray-500">
+            Better Vision Opticals &amp; WizOpt
+          </p>
+          {/* Clear cache button for troubleshooting */}
+          <button
+            onClick={handleClearCache}
+            className="text-xs text-gray-400 hover:text-gray-600 flex items-center gap-1 mx-auto"
+          >
+            <RefreshCw className="w-3 h-3" />
+            Clear Cache
+          </button>
+        </div>
       </div>
     </div>
   );
