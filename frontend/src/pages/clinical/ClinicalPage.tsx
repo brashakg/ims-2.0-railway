@@ -189,7 +189,7 @@ export function ClinicalPage() {
   const handleSaveCustomer = async (customerData: CustomerFormData) => {
     try {
       // Create customer in the system
-      const response = await customerApi.create({
+      await customerApi.createCustomer({
         ...customerData,
         storeId: user?.activeStoreId || '',
       });

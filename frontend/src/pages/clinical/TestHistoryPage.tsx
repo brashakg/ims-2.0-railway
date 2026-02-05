@@ -7,7 +7,6 @@ import { useState, useEffect } from 'react';
 import {
   Eye,
   Search,
-  Calendar,
   User,
   FileText,
   RefreshCw,
@@ -17,7 +16,6 @@ import {
 import { clinicalApi } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
-import clsx from 'clsx';
 
 interface CompletedTest {
   id: string;
