@@ -122,6 +122,7 @@ export interface Store {
 export interface Product {
   id: string;
   sku: string;
+  barcode?: string; // Optional barcode for product
   category: ProductCategory;
   brand: string;
   model: string;

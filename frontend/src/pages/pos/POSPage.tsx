@@ -20,6 +20,7 @@ import { LensDetailsModal } from '../../components/pos/LensDetailsModal';
 import type { LensDetails } from '../../components/pos/LensDetailsModal';
 import { OrderDetailsPanel } from '../../components/pos/OrderDetailsPanel';
 import { PaymentCollectionPanel } from '../../components/pos/PaymentCollectionPanel';
+import { BarcodeScanner } from '../../components/pos/BarcodeScanner';
 import { POS_CATEGORIES, CATEGORY_CONFIG, getCategoryConfigByPOSId } from '../../types/productAttributes';
 import type { Customer, Patient, Prescription, Payment, CartItem, ProductCategory, UserRole } from '../../types';
 import { inventoryApi, orderApi } from '../../services/api';
@@ -293,6 +294,43 @@ export function POSPage() {
       toast.error(errorMessage);
     }
   }, [activeCategory, activeCategoryConfig, categoryRequiresPrescription, categoryCanAddLens, prescription, toast]);
+
+  // Handle barcode scan - search for product and add to cart
+  const handleBarcodeScan = useCallback(async (barcode: string) => {
+    if (!activeCategoryConfig) {
+      toast.error('Please select a product category first');
+      return;
+    }
+
+    try {
+      // Search for product by barcode
+      const response = await inventoryApi.searchByBarcode(barcode, user?.activeStoreId || '');
+
+      if (!response || !response.product) {
+        toast.error(`Product not found with barcode: ${barcode}`);
+        return;
+      }
+
+      const product = response.product;
+
+      // Convert to SearchResultProduct format and add to cart
+      const productForCart: SearchResultProduct = {
+        productId: product.id,
+        productName: product.name,
+        sku: product.sku,
+        brand: product.brand,
+        mrp: product.mrp,
+        offerPrice: product.offerPrice,
+        stockQuantity: response.stockQuantity || 0,
+        attributes: product.attributes || {},
+      };
+
+      handleProductSelect(productForCart);
+      toast.success(`Added: ${product.name}`);
+    } catch (error: any) {
+      toast.error(error?.message || `Failed to find product with barcode: ${barcode}`);
+    }
+  }, [activeCategoryConfig, user?.activeStoreId, toast]);
 
   // Handle product selection from search modal
   const handleProductSelect = useCallback((product: SearchResultProduct) => {
@@ -866,6 +904,15 @@ export function POSPage() {
                 </button>
               );
             })}
+          </div>
+
+          {/* Barcode Scanner - Quick Add Product */}
+          <div className="bg-white border border-gray-200 rounded-lg p-4">
+            <BarcodeScanner
+              onScan={handleBarcodeScan}
+              placeholder="Scan barcode or type to search product..."
+              autoFocus={false}
+            />
           </div>
 
           {/* Main Content Area - 3 Column Layout */}

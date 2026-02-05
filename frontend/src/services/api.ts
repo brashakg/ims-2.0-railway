@@ -251,6 +251,12 @@ export const inventoryApi = {
     return response.data;
   },
 
+  searchByBarcode: async (barcode: string, storeId: string) => {
+    // Search for product by barcode in specific store
+    const response = await api.get(`/inventory/barcode/${barcode}`, { params: { store_id: storeId } });
+    return response.data;
+  },
+
   getLowStock: async (storeId: string) => {
     const response = await api.get('/inventory/low-stock', { params: { store_id: storeId } });
     return response.data;
