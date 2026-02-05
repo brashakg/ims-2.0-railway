@@ -26,6 +26,7 @@ import type { Customer, Patient, Prescription } from '../../types';
 import { customerApi, prescriptionApi, orderApi } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
+import { AddCustomerModal, type CustomerFormData } from '../../components/customers/AddCustomerModal';
 import clsx from 'clsx';
 
 type ViewMode = 'list' | 'detail';
@@ -51,6 +52,9 @@ export function CustomersPage() {
   const [isLoadingPrescriptions, setIsLoadingPrescriptions] = useState(false);
   const [isLoadingHistory, setIsLoadingHistory] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Modal state
+  const [showAddCustomerModal, setShowAddCustomerModal] = useState(false);
 
   // Load customers on mount
   useEffect(() => {
@@ -167,6 +171,38 @@ export function CustomersPage() {
   const canAddCustomer = hasRole(['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'SALES_CASHIER', 'SALES_STAFF']);
   const canEditCustomer = hasRole(['SUPERADMIN', 'ADMIN', 'STORE_MANAGER']);
 
+  // Handle creating new customer
+  const handleCreateCustomer = async (formData: CustomerFormData) => {
+    try {
+      // Transform formData to match Customer type
+      const customerData: Partial<Customer> = {
+        name: formData.fullName,
+        phone: formData.mobileNumber,
+        email: formData.email,
+        customerType: formData.customerType,
+        address: formData.address,
+        city: formData.city,
+        state: formData.state,
+        pincode: formData.pincode,
+        gstNumber: formData.customerType === 'B2B' ? formData.gstNumber : undefined,
+        patients: formData.patients.map(p => ({
+          id: p.id,
+          customerId: '', // Will be set by backend on creation
+          name: p.name,
+          phone: p.mobile,
+          dateOfBirth: p.dateOfBirth,
+          relation: p.relation,
+        })),
+      };
+      await customerApi.createCustomer(customerData);
+      toast.success('Customer created successfully');
+      loadCustomers();
+      setShowAddCustomerModal(false);
+    } catch {
+      toast.error('Failed to create customer');
+    }
+  };
+
   // Customer List View
   if (viewMode === 'list') {
     return (
@@ -179,7 +215,7 @@ export function CustomersPage() {
           </div>
           {canAddCustomer && (
             <button
-              onClick={() => toast.info('Add customer modal coming soon')}
+              onClick={() => setShowAddCustomerModal(true)}
               className="btn-primary flex items-center gap-2"
             >
               <Plus className="w-4 h-4" />
@@ -245,7 +281,7 @@ export function CustomersPage() {
               <p>{searchQuery ? 'No customers found matching your search' : 'No customers yet'}</p>
               {canAddCustomer && !searchQuery && (
                 <button
-                  onClick={() => toast.info('Add customer modal coming soon')}
+                  onClick={() => setShowAddCustomerModal(true)}
                   className="mt-4 text-bv-red-600 hover:text-bv-red-700"
                 >
                   Add your first customer
@@ -303,6 +339,13 @@ export function CustomersPage() {
             </div>
           )}
         </div>
+
+        {/* Add Customer Modal */}
+        <AddCustomerModal
+          isOpen={showAddCustomerModal}
+          onClose={() => setShowAddCustomerModal(false)}
+          onSave={handleCreateCustomer}
+        />
       </div>
     );
   }

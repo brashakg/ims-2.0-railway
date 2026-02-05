@@ -154,6 +154,23 @@ async def search_customers(
     return {"customers": []}
 
 
+@router.get("/search/phone")
+async def search_customer_by_phone(
+    phone: str = Query(...),
+    current_user: dict = Depends(get_current_user)
+):
+    """Search customer by phone number"""
+    repo = get_customer_repository()
+
+    if repo:
+        customer = repo.find_by_mobile(phone)
+        if customer:
+            return customer
+        raise HTTPException(status_code=404, detail="Customer not found")
+
+    return {"phone": phone, "message": "Database not connected"}
+
+
 @router.get("/mobile/{mobile}")
 async def get_customer_by_mobile(
     mobile: str,

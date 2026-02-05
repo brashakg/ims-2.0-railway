@@ -283,6 +283,29 @@ async def update_job(
     return {"job_id": job_id, "message": "Workshop job updated"}
 
 
+@router.patch("/jobs/{job_id}/status")
+async def update_job_status(
+    job_id: str,
+    status: str = Query(...),
+    notes: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user)
+):
+    """Update job status (generic endpoint)"""
+    repo = get_workshop_repository()
+
+    if repo:
+        job = repo.find_by_id(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Workshop job not found")
+
+        if repo.update_status(job_id, status, current_user.get("user_id"), notes):
+            return {"job_id": job_id, "status": status, "message": f"Job status updated to {status}"}
+
+        raise HTTPException(status_code=500, detail="Failed to update job status")
+
+    return {"job_id": job_id, "status": status, "message": f"Job status updated to {status}"}
+
+
 @router.post("/jobs/{job_id}/assign")
 async def assign_job(
     job_id: str,

@@ -163,8 +163,13 @@ function ActivityItem({ activity }: { activity: RecentActivity }) {
 
 export default function DashboardPage() {
   const { user } = useAuth();
-  const { setActiveModule, getModulesForRole } = useModule();
+  const { setActiveModule, getModulesForRole, goToDashboard } = useModule();
   const navigate = useNavigate();
+
+  // Clear active module when dashboard loads (ensures sidebar is hidden on dashboard)
+  useEffect(() => {
+    goToDashboard();
+  }, [goToDashboard]);
 
   const [isLoading, setIsLoading] = useState(true);
   const [stats, setStats] = useState<DashboardStats>({
