@@ -3,8 +3,8 @@
 // ============================================================================
 // Dynamic sidebar navigation with module context awareness
 
-import { useState } from 'react';
-import { Outlet, NavLink, useNavigate } from 'react-router-dom';
+import { useState, useEffect } from 'react';
+import { Outlet, NavLink, useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
 import { useModule, MODULE_CONFIGS, type ModuleId } from '../../context/ModuleContext';
 import {
@@ -115,13 +115,40 @@ const navigationItems: NavItem[] = [
   },
 ];
 
+// Map URL paths to module IDs
+const pathToModule: Record<string, ModuleId> = {
+  '/pos': 'pos',
+  '/customers': 'customers',
+  '/inventory': 'inventory',
+  '/orders': 'pos',
+  '/clinical': 'clinic',
+  '/workshop': 'pos',
+  '/tasks': 'hr',
+  '/hr': 'hr',
+  '/reports': 'reports',
+  '/settings': 'settings',
+};
+
 export function AppLayout() {
   const { user, logout, hasRole, setActiveRole, setActiveStore } = useAuth();
   const { activeModule, setActiveModule, getModuleConfig, goToDashboard } = useModule();
   const navigate = useNavigate();
+  const location = useLocation();
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [roleDropdownOpen, setRoleDropdownOpen] = useState(false);
   const [storeDropdownOpen, setStoreDropdownOpen] = useState(false);
+
+  // Auto-detect module from URL path on mount and route changes
+  useEffect(() => {
+    const path = location.pathname;
+    const moduleId = pathToModule[path];
+
+    if (moduleId && moduleId !== activeModule) {
+      setActiveModule(moduleId);
+    } else if (path === '/dashboard' && activeModule) {
+      goToDashboard();
+    }
+  }, [location.pathname, activeModule, setActiveModule, goToDashboard]);
 
   // Get active module config
   const moduleConfig = activeModule ? getModuleConfig(activeModule) : null;
@@ -167,20 +194,19 @@ export function AppLayout() {
 
   return (
     <div className="min-h-screen bg-gray-50" data-brand={brandClass}>
-      {/* Mobile sidebar overlay - only when module active and sidebar open */}
-      {sidebarOpen && moduleConfig && (
+      {/* Mobile sidebar overlay */}
+      {sidebarOpen && (
         <div
           className="fixed inset-0 bg-black/50 z-40 tablet:hidden"
           onClick={() => setSidebarOpen(false)}
         />
       )}
 
-      {/* Sidebar - only visible when a module is active */}
+      {/* Sidebar - always visible on desktop */}
       <aside
         className={clsx(
           'fixed top-0 left-0 z-50 h-full w-64 bg-white border-r border-gray-200 transition-transform duration-300 flex flex-col',
-          // Only show sidebar when module is active (not on dashboard)
-          moduleConfig ? (sidebarOpen ? 'translate-x-0' : 'tablet:translate-x-0 -translate-x-full') : '-translate-x-full'
+          sidebarOpen ? 'translate-x-0' : 'tablet:translate-x-0 -translate-x-full'
         )}
       >
         {/* Logo / Module Header */}
@@ -336,35 +362,34 @@ export function AppLayout() {
         </div>
       </aside>
 
-      {/* Main content - add left margin only when sidebar is visible (module active) */}
-      <div className={clsx(moduleConfig && 'tablet:ml-64')}>
+      {/* Main content - always add left margin for sidebar on desktop */}
+      <div className="tablet:ml-64">
         {/* Top header */}
         <header className="h-16 bg-white border-b border-gray-200 flex items-center justify-between px-4">
-          {/* Mobile menu button - only show when module is active (sidebar exists) */}
-          {moduleConfig ? (
-            <button
-              className="tablet:hidden p-2 text-gray-600 hover:text-gray-900"
-              onClick={() => setSidebarOpen(true)}
-            >
-              <Menu className="w-6 h-6" />
-            </button>
-          ) : (
-            <div className="w-10" />
-          )}
+          {/* Mobile menu button */}
+          <button
+            className="tablet:hidden p-2 text-gray-600 hover:text-gray-900"
+            onClick={() => setSidebarOpen(true)}
+          >
+            <Menu className="w-6 h-6" />
+          </button>
 
-          {/* Module breadcrumb (desktop) */}
-          {moduleConfig && (
-            <div className="hidden tablet:flex items-center gap-2 text-sm">
-              <button
-                onClick={handleBackToDashboard}
-                className="text-gray-500 hover:text-gray-700 transition-colors"
-              >
-                Dashboard
-              </button>
-              <ChevronDown className="w-4 h-4 text-gray-400 rotate-[-90deg]" />
-              <span className={moduleConfig.color}>{moduleConfig.title}</span>
-            </div>
-          )}
+          {/* Breadcrumb / Page title */}
+          <div className="hidden tablet:flex items-center gap-2 text-sm">
+            <button
+              onClick={handleBackToDashboard}
+              className="text-gray-500 hover:text-gray-700 transition-colors flex items-center gap-1"
+            >
+              <Home className="w-4 h-4" />
+              Dashboard
+            </button>
+            {moduleConfig && (
+              <>
+                <ChevronDown className="w-4 h-4 text-gray-400 rotate-[-90deg]" />
+                <span className={moduleConfig.color}>{moduleConfig.title}</span>
+              </>
+            )}
+          </div>
 
           {/* Role selector */}
           {user && user.roles.length > 1 && (
