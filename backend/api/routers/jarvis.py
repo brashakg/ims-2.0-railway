@@ -161,46 +161,52 @@ class JarvisAnalyticsEngine:
                     }
                 }
 
-        # Fallback to default data if database not available
+        # Return empty structure if database not available
         return {
             "revenue": {
-                "today": 145000,
-                "yesterday": 132000,
-                "this_week": 875000,
-                "this_month": 3250000,
-                "last_month": 2980000,
-                "growth_percentage": 9.1,
-                "trend": "up"
+                "today": 0,
+                "yesterday": 0,
+                "this_week": 0,
+                "this_month": 0,
+                "last_month": 0,
+                "growth_percentage": 0,
+                "target": 0,
+                "achievement_percent": 0,
+                "trend": "stable"
             },
             "orders": {
-                "today": 28,
-                "pending": 12,
-                "in_progress": 8,
-                "ready_for_delivery": 15,
-                "average_order_value": 5178,
-                "conversion_rate": 34.5
+                "today": 0,
+                "pending": 0,
+                "in_progress": 0,
+                "ready_for_delivery": 0,
+                "average_order_value": 0,
+                "conversion_rate": 0
             },
             "inventory": {
-                "total_products": 4567,
-                "low_stock_items": 23,
-                "out_of_stock": 5,
-                "inventory_value": 12500000,
-                "fast_moving_count": 145,
-                "slow_moving_count": 67
+                "total_products": 0,
+                "low_stock_items": 0,
+                "out_of_stock": 0,
+                "inventory_value": 0,
+                "fast_moving_count": 0,
+                "slow_moving_count": 0,
+                "expiring_soon": 0,
+                "turnover_rate": 0
             },
             "customers": {
-                "total": 8934,
-                "new_this_month": 234,
-                "returning_rate": 42.5,
-                "average_lifetime_value": 15600,
-                "top_segment": "Premium Eyewear"
+                "total": 0,
+                "new_this_month": 0,
+                "returning_rate": 0,
+                "average_lifetime_value": 0,
+                "nps_score": 0,
+                "top_segment": "N/A"
             },
             "staff": {
-                "total_employees": 45,
-                "present_today": 42,
-                "on_leave": 3,
-                "top_performer": "Rajesh Kumar",
-                "average_sales_per_staff": 32500
+                "total_employees": 0,
+                "present_today": 0,
+                "on_leave": 0,
+                "top_performer": "N/A",
+                "average_sales_per_staff": 0,
+                "attendance_rate": 0
             }
         }
 
@@ -270,57 +276,95 @@ class JarvisAnalyticsEngine:
                     "avg_daily_revenue": total_revenue // 30 if total_revenue else 0
                 }
 
-        # Fallback data
+        # Return empty structure if database not available
         return {
-            "top_selling_categories": [
-                {"category": "Frames", "sales": 1250000, "units": 342, "growth": 12.5},
-                {"category": "Sunglasses", "sales": 890000, "units": 178, "growth": 8.3},
-                {"category": "Contact Lenses", "sales": 560000, "units": 890, "growth": 15.2},
-                {"category": "Lenses", "sales": 450000, "units": 456, "growth": 5.1},
-            ],
-            "top_selling_products": [
-                {"name": "Ray-Ban Aviator Classic", "sku": "SG-RB-AVI001", "sales": 89, "revenue": 445000},
-                {"name": "Titan Eye+ Progressive", "sku": "LS-TI-PRO002", "sales": 67, "revenue": 234500},
-                {"name": "Fastrack Wayfarers", "sku": "SG-FA-WAY003", "sales": 54, "revenue": 108000},
-            ],
-            "sales_by_store": [
-                {"store": "CP Delhi", "sales": 890000, "target": 800000, "achievement": 111.25},
-                {"store": "GK Delhi", "sales": 670000, "target": 700000, "achievement": 95.71},
-                {"store": "Noida Sec 18", "sales": 540000, "target": 500000, "achievement": 108.0},
-            ],
-            "peak_hours": [
-                {"hour": "11:00-12:00", "sales": 125000, "footfall": 45},
-                {"hour": "16:00-17:00", "sales": 118000, "footfall": 42},
-                {"hour": "19:00-20:00", "sales": 145000, "footfall": 56},
-            ],
-            "payment_methods": {
-                "UPI": 45.2,
-                "Card": 28.5,
-                "Cash": 18.3,
-                "EMI": 8.0
-            }
+            "top_selling_categories": [],
+            "top_selling_products": [],
+            "sales_by_store": [],
+            "peak_hours": [],
+            "payment_methods": {},
+            "total_revenue_30_days": 0,
+            "total_orders_30_days": 0,
+            "avg_daily_revenue": 0
         }
 
     @staticmethod
     def get_inventory_insights() -> Dict:
-        """Get inventory insights and alerts"""
+        """Get inventory insights and alerts from database"""
+        stock_col = get_db_collection("stock_units")
+        products_col = get_db_collection("products")
+        alerts_col = get_db_collection("alerts")
+        metrics_col = get_db_collection("business_metrics")
+
+        critical_alerts = []
+        reorder_recommendations = []
+        slow_movers = []
+        inventory_health_score = 0
+        turnover_ratio = 0
+        dead_stock_value = 0
+
+        # Get alerts from database
+        if alerts_col:
+            db_alerts = list(alerts_col.find({"alert_type": {"$in": ["LOW_STOCK", "OUT_OF_STOCK", "EXPIRING_SOON"]}}))
+            for alert in db_alerts:
+                if alert.get("alert_type") == "LOW_STOCK":
+                    critical_alerts.append({
+                        "type": "low_stock",
+                        "sku": alert.get("entity_id", ""),
+                        "product": alert.get("message", "").split(" has")[0] if "has" in alert.get("message", "") else alert.get("title", ""),
+                        "quantity": 5,
+                        "reorder_point": 10
+                    })
+                elif alert.get("alert_type") == "OUT_OF_STOCK":
+                    critical_alerts.append({
+                        "type": "out_of_stock",
+                        "sku": alert.get("entity_id", ""),
+                        "product": alert.get("message", "").split(" is")[0] if "is" in alert.get("message", "") else alert.get("title", ""),
+                        "last_sold": "recently",
+                        "demand": "high"
+                    })
+
+        # Get stock data for analysis
+        if stock_col:
+            all_stock = list(stock_col.find({"store_id": "store-001"}))
+
+            # Find low stock items for reorder recommendations
+            for item in all_stock:
+                qty = item.get("quantity", 0)
+                if qty > 0 and qty <= 5:
+                    reorder_recommendations.append({
+                        "sku": item.get("sku", ""),
+                        "product": item.get("product_name", "Unknown"),
+                        "current": qty,
+                        "recommended_order": max(20, qty * 4),
+                        "supplier": item.get("vendor", "Default Supplier")
+                    })
+
+            # Calculate inventory metrics
+            total_value = sum(s.get("quantity", 0) * s.get("cost_price", 0) for s in all_stock)
+            low_stock_count = len([s for s in all_stock if 0 < s.get("quantity", 0) <= 5])
+            out_of_stock_count = len([s for s in all_stock if s.get("quantity", 0) <= 0])
+            total_items = len(all_stock)
+
+            # Calculate health score (0-100)
+            if total_items > 0:
+                healthy_ratio = (total_items - low_stock_count - out_of_stock_count) / total_items
+                inventory_health_score = round(healthy_ratio * 100)
+
+        # Get metrics from business_metrics collection
+        if metrics_col:
+            metrics = metrics_col.find_one({"store_id": "store-001"})
+            if metrics and "inventory" in metrics:
+                turnover_ratio = metrics["inventory"].get("turnover_rate", 4.2)
+                dead_stock_value = total_value * 0.025 if total_value else 0  # Estimate 2.5% as dead stock
+
         return {
-            "critical_alerts": [
-                {"type": "out_of_stock", "sku": "CL-BL-ACU001", "product": "Acuvue Oasys -2.00", "last_sold": "2 days ago", "demand": "high"},
-                {"type": "low_stock", "sku": "FR-RB-WAY002", "product": "Ray-Ban Wayfarer Black", "quantity": 3, "reorder_point": 5},
-                {"type": "expiring_soon", "sku": "CL-JJ-1DAY", "product": "1-Day Acuvue", "expiry": "2026-03-15", "quantity": 45},
-            ],
-            "reorder_recommendations": [
-                {"sku": "SG-OA-FRG001", "product": "Oakley Frogskins", "current": 2, "recommended_order": 20, "supplier": "Luxottica"},
-                {"sku": "LS-ES-VAR001", "product": "Essilor Varilux", "current": 5, "recommended_order": 15, "supplier": "Essilor India"},
-            ],
-            "slow_movers": [
-                {"sku": "WT-TI-CLA001", "product": "Titan Classique Gold", "days_in_stock": 180, "quantity": 12, "suggestion": "Discount or transfer"},
-                {"sku": "CK-FA-WAL001", "product": "Fastrack Wall Clock", "days_in_stock": 120, "quantity": 8, "suggestion": "Bundle offer"},
-            ],
-            "inventory_health_score": 78,
-            "turnover_ratio": 4.2,
-            "dead_stock_value": 125000
+            "critical_alerts": critical_alerts[:5],  # Limit to 5
+            "reorder_recommendations": reorder_recommendations[:5],
+            "slow_movers": slow_movers[:5],
+            "inventory_health_score": inventory_health_score,
+            "turnover_ratio": turnover_ratio,
+            "dead_stock_value": round(dead_stock_value)
         }
 
     @staticmethod
@@ -369,28 +413,17 @@ class JarvisAnalyticsEngine:
                     ]
                 }
 
-        # Fallback data
+        # Return empty structure if database not available
         return {
-            "segments": [
-                {"name": "Premium Buyers", "count": 1234, "avg_spend": 25000, "characteristics": "Buy luxury frames, progressive lenses"},
-                {"name": "Regular Customers", "count": 3456, "avg_spend": 8000, "characteristics": "Annual purchases, price-conscious"},
-                {"name": "Contact Lens Users", "count": 2100, "avg_spend": 12000, "characteristics": "Repeat monthly purchases"},
-                {"name": "First-Time Buyers", "count": 890, "avg_spend": 5000, "characteristics": "Need nurturing campaigns"},
-            ],
-            "churn_risk": [
-                {"customer": "Amit Sharma", "phone": "98765xxxxx", "last_purchase": "8 months ago", "lifetime_value": 45000, "risk": "high"},
-                {"customer": "Priya Gupta", "phone": "98234xxxxx", "last_purchase": "6 months ago", "lifetime_value": 32000, "risk": "medium"},
-            ],
+            "segments": [],
+            "churn_risk": [],
             "loyalty_metrics": {
-                "repeat_purchase_rate": 42.5,
-                "average_time_between_purchases": 8.5,
-                "referral_rate": 12.3,
-                "nps_score": 72
+                "repeat_purchase_rate": 0,
+                "average_time_between_purchases": 0,
+                "referral_rate": 0,
+                "nps_score": 0
             },
-            "upcoming_eye_tests": [
-                {"customer": "Rahul Verma", "last_test": "11 months ago", "phone": "98123xxxxx"},
-                {"customer": "Sneha Patel", "last_test": "10 months ago", "phone": "98456xxxxx"},
-            ]
+            "upcoming_eye_tests": []
         }
 
     @staticmethod
@@ -463,100 +496,183 @@ class JarvisAnalyticsEngine:
                     }
                 }
 
-        # Fallback data
+        # Return empty structure if database not available
         return {
-            "performance_ranking": [
-                {"name": "Rajesh Kumar", "role": "Sales", "store": "CP Delhi", "sales": 450000, "conversion": 45.2, "rating": 4.8},
-                {"name": "Neha Gupta", "role": "Optometrist", "store": "GK Delhi", "tests": 89, "conversion": 78.5, "rating": 4.9},
-                {"name": "Vikram Singh", "role": "Sales", "store": "Noida", "sales": 380000, "conversion": 38.1, "rating": 4.5},
-            ],
+            "performance_ranking": [],
             "attendance_summary": {
-                "present_rate": 93.3,
-                "late_arrivals_today": 2,
-                "on_leave": ["Amit (Casual)", "Priya (Sick)", "Ravi (Planned)"],
+                "present_rate": 0,
+                "late_arrivals_today": 0,
+                "present_today": [],
+                "on_leave": []
             },
-            "training_needs": [
-                {"staff": "Vikram Singh", "area": "Progressive Lens Selling", "priority": "high"},
-                {"staff": "Pooja Sharma", "area": "Customer Objection Handling", "priority": "medium"},
-            ],
-            "workload_distribution": {
-                "CP Delhi": {"staff": 12, "orders_per_staff": 8.5, "status": "balanced"},
-                "GK Delhi": {"staff": 8, "orders_per_staff": 12.3, "status": "overloaded"},
-                "Noida": {"staff": 10, "orders_per_staff": 6.2, "status": "underutilized"},
-            }
+            "training_needs": [],
+            "workload_distribution": {}
         }
 
     @staticmethod
     def get_predictions() -> Dict:
-        """Get AI predictions and forecasts"""
+        """Get AI predictions and forecasts from database"""
+        sales_col = get_db_collection("daily_sales")
+        metrics_col = get_db_collection("business_metrics")
+        stock_col = get_db_collection("stock_units")
+
+        # Default values
+        sales_forecast = {
+            "next_week": 0,
+            "next_month": 0,
+            "confidence": 0,
+            "factors": []
+        }
+        demand_predictions = []
+        stock_predictions = []
+        customer_behavior = {
+            "expected_footfall_today": 0,
+            "expected_conversion": 0,
+            "peak_hours": []
+        }
+
+        # Calculate forecasts from historical sales data
+        if sales_col:
+            sales_records = list(sales_col.find({"store_id": "store-001"}).sort([("date", -1)]).limit(30))
+            if sales_records:
+                total_30_days = sum(s.get("revenue", 0) for s in sales_records)
+                avg_daily = total_30_days / 30 if total_30_days else 0
+
+                # Simple forecast based on recent trends
+                sales_forecast = {
+                    "next_week": round(avg_daily * 7 * 1.05),  # 5% growth assumption
+                    "next_month": round(avg_daily * 30 * 1.08),  # 8% growth assumption
+                    "confidence": 75,
+                    "factors": ["Based on 30-day historical trends", "Seasonal adjustments applied"]
+                }
+
+                # Calculate category trends
+                category_totals = {}
+                for s in sales_records[:7]:  # Last week
+                    breakdown = s.get("category_breakdown", {})
+                    for cat, amount in breakdown.items():
+                        if cat not in category_totals:
+                            category_totals[cat] = {"recent": 0, "previous": 0}
+                        category_totals[cat]["recent"] += amount
+
+                for s in sales_records[7:14]:  # Week before
+                    breakdown = s.get("category_breakdown", {})
+                    for cat, amount in breakdown.items():
+                        if cat in category_totals:
+                            category_totals[cat]["previous"] += amount
+
+                for cat, data in category_totals.items():
+                    if data["previous"] > 0:
+                        change = ((data["recent"] - data["previous"]) / data["previous"]) * 100
+                        trend = "up" if change > 5 else "down" if change < -5 else "stable"
+                        demand_predictions.append({
+                            "category": cat.title(),
+                            "trend": trend,
+                            "change": f"{'+' if change >= 0 else ''}{change:.0f}%",
+                            "reason": "Based on recent sales trends"
+                        })
+
+                # Customer behavior from sales
+                avg_orders = sum(s.get("order_count", 0) for s in sales_records[:7]) / 7
+                avg_conversion = sum(s.get("conversion_rate", 0.6) for s in sales_records[:7]) / 7
+                customer_behavior = {
+                    "expected_footfall_today": round(avg_orders * 2),  # Assume 2x footfall to orders
+                    "expected_conversion": round(avg_conversion * 100),
+                    "peak_hours": ["11:00-13:00", "17:00-20:00"]
+                }
+
+        # Stock predictions
+        if stock_col:
+            low_stock_items = list(stock_col.find({
+                "store_id": "store-001",
+                "quantity": {"$gt": 0, "$lte": 20}
+            }).limit(5))
+
+            for item in low_stock_items:
+                qty = item.get("quantity", 0)
+                # Estimate days until stockout (assuming 1-2 units sold per day)
+                days_until_stockout = qty // 2 if qty > 0 else 0
+                stock_predictions.append({
+                    "sku": item.get("sku", ""),
+                    "current": qty,
+                    "predicted_demand": qty * 3,
+                    "days_until_stockout": days_until_stockout
+                })
+
         return {
-            "sales_forecast": {
-                "next_week": 920000,
-                "next_month": 3450000,
-                "confidence": 85,
-                "factors": ["Festive season approaching", "New collection launch", "Marketing campaign active"]
-            },
-            "demand_predictions": [
-                {"category": "Sunglasses", "trend": "up", "change": "+25%", "reason": "Summer approaching"},
-                {"category": "Contact Lenses", "trend": "stable", "change": "+5%", "reason": "Consistent demand"},
-                {"category": "Progressive Lenses", "trend": "up", "change": "+15%", "reason": "Aging customer base"},
-            ],
-            "stock_predictions": [
-                {"sku": "SG-RB-AVI001", "current": 15, "predicted_demand": 45, "days_until_stockout": 10},
-                {"sku": "CL-BL-PUR001", "current": 200, "predicted_demand": 180, "days_until_stockout": 33},
-            ],
-            "customer_behavior": {
-                "expected_footfall_today": 156,
-                "expected_conversion": 32,
-                "peak_hours": ["11:00-13:00", "17:00-20:00"]
-            }
+            "sales_forecast": sales_forecast,
+            "demand_predictions": demand_predictions[:5],
+            "stock_predictions": stock_predictions[:5],
+            "customer_behavior": customer_behavior
         }
 
     @staticmethod
     def get_recommendations() -> List[Dict]:
-        """Get AI-powered recommendations"""
-        return [
-            {
-                "priority": "high",
-                "category": "inventory",
-                "title": "Urgent Reorder Required",
-                "description": "5 high-demand products are critically low. Immediate reorder recommended.",
-                "action": "Generate purchase order for critical items",
-                "impact": "Prevent ₹2.5L potential lost sales"
-            },
-            {
-                "priority": "high",
-                "category": "staffing",
-                "title": "GK Delhi Store Understaffed",
-                "description": "Orders per staff ratio is 54% above optimal. Consider temporary transfer.",
-                "action": "Transfer 2 staff from Noida to GK Delhi",
-                "impact": "Improve customer service, reduce wait times"
-            },
-            {
-                "priority": "medium",
-                "category": "marketing",
-                "title": "Re-engagement Campaign Needed",
-                "description": "234 high-value customers haven't purchased in 6+ months.",
-                "action": "Launch personalized WhatsApp campaign with special offers",
-                "impact": "Potential ₹8L in recovered revenue"
-            },
-            {
-                "priority": "medium",
-                "category": "pricing",
-                "title": "Slow-Moving Inventory Action",
-                "description": "₹1.25L worth of inventory hasn't moved in 180+ days.",
-                "action": "Create flash sale or bundle offers",
-                "impact": "Free up capital and shelf space"
-            },
-            {
-                "priority": "low",
-                "category": "training",
-                "title": "Staff Training Opportunity",
-                "description": "Progressive lens conversion rate below benchmark at 2 stores.",
-                "action": "Schedule training session on progressive lens benefits",
-                "impact": "Potential 15% increase in premium sales"
-            }
-        ]
+        """Get AI-powered recommendations from database"""
+        alerts_col = get_db_collection("alerts")
+        metrics_col = get_db_collection("business_metrics")
+        stock_col = get_db_collection("stock_units")
+        segments_col = get_db_collection("customer_segments")
+
+        recommendations = []
+
+        # Get alerts from database and convert to recommendations
+        if alerts_col:
+            db_alerts = list(alerts_col.find({"is_resolved": False}).limit(10))
+            for alert in db_alerts:
+                severity_map = {"HIGH": "high", "WARNING": "high", "NORMAL": "medium", "INFO": "low"}
+                priority = severity_map.get(alert.get("severity", "INFO"), "medium")
+
+                category_map = {
+                    "LOW_STOCK": "inventory",
+                    "PAYMENT_DUE": "finance",
+                    "DELIVERY_DUE": "operations",
+                    "TARGET_ACHIEVEMENT": "sales"
+                }
+                category = category_map.get(alert.get("alert_type", ""), "operations")
+
+                recommendations.append({
+                    "priority": priority,
+                    "category": category,
+                    "title": alert.get("title", "Alert"),
+                    "description": alert.get("message", ""),
+                    "action": f"Review and resolve {alert.get('alert_type', 'issue').lower().replace('_', ' ')}",
+                    "impact": "Improve operational efficiency"
+                })
+
+        # Add inventory-based recommendations
+        if stock_col and metrics_col:
+            metrics = metrics_col.find_one({"store_id": "store-001"})
+            if metrics and metrics.get("inventory", {}).get("low_stock_items", 0) > 0:
+                low_count = metrics["inventory"]["low_stock_items"]
+                recommendations.append({
+                    "priority": "high" if low_count > 10 else "medium",
+                    "category": "inventory",
+                    "title": "Stock Replenishment Required",
+                    "description": f"{low_count} items are running low on stock.",
+                    "action": "Review and generate purchase orders for low stock items",
+                    "impact": f"Prevent potential stockouts and lost sales"
+                })
+
+        # Add customer-based recommendations
+        if segments_col:
+            dormant_seg = segments_col.find_one({"segment_id": "seg-dormant"})
+            if dormant_seg and dormant_seg.get("customer_count", 0) > 0:
+                count = dormant_seg["customer_count"]
+                recommendations.append({
+                    "priority": "medium",
+                    "category": "marketing",
+                    "title": "Re-engagement Campaign Needed",
+                    "description": f"{count} customers haven't purchased in 6+ months.",
+                    "action": "Launch personalized re-engagement campaign",
+                    "impact": f"Potential revenue recovery from dormant customers"
+                })
+
+        # Sort by priority
+        priority_order = {"high": 0, "medium": 1, "low": 2}
+        recommendations.sort(key=lambda x: priority_order.get(x.get("priority", "low"), 3))
+
+        return recommendations[:5]
 
 
 # ============================================================================

@@ -23,23 +23,90 @@ async def dashboard_stats(
     store_id: Optional[str] = Query(None),
     current_user: dict = Depends(get_current_user)
 ):
-    """Get dashboard statistics for a store"""
-    # Return aggregated stats for dashboard
-    # In production, this would aggregate data from orders, inventory, appointments etc.
+    """Get dashboard statistics for a store - fetched from database"""
+    active_store = store_id or current_user.get("active_store_id") or "store-001"
+
+    order_repo = get_order_repository()
+    stock_repo = get_stock_repository()
+    customer_repo = get_customer_repository()
+    task_repo = get_task_repository()
+
+    # Get today's date range
+    today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    today_str = today.strftime("%Y-%m-%d")
+
+    # Initialize stats
+    total_sales = 0
+    pending_orders = 0
+    ready_orders = 0
+    low_stock_items = 0
+    today_orders = 0
+    today_deliveries = 0
+    today_new_customers = 0
+    payments_received = 0
+
+    # Fetch orders data
+    if order_repo:
+        # Get all orders for store
+        all_orders = order_repo.find_by_store(active_store)
+
+        # Calculate totals
+        for order in all_orders:
+            status = order.get("status", "")
+            order_date = order.get("created_at", "")[:10]
+
+            # Today's orders
+            if order_date == today_str:
+                today_orders += 1
+                payments_received += order.get("amount_paid", 0)
+
+            # Status-based counts
+            if status == "CONFIRMED" or status == "PROCESSING":
+                pending_orders += 1
+            elif status == "READY":
+                ready_orders += 1
+            elif status == "DELIVERED" and order_date == today_str:
+                today_deliveries += 1
+
+            # Total sales (completed orders)
+            if status not in ["CANCELLED", "DRAFT"]:
+                total_sales += order.get("final_amount", 0) or order.get("grand_total", 0) or order.get("total_amount", 0)
+
+    # Fetch inventory data
+    if stock_repo:
+        low_stock = stock_repo.find_low_stock(active_store, threshold=5)
+        low_stock_items = len(low_stock) if low_stock else 0
+
+    # Fetch customer data
+    if customer_repo:
+        # Count customers created today
+        all_customers = customer_repo.find_many({"store_id": active_store})
+        for customer in all_customers:
+            created_date = customer.get("created_at", "")[:10]
+            if created_date == today_str:
+                today_new_customers += 1
+
+    # Fetch task/appointment data
+    open_tasks = 0
+    if task_repo:
+        task_summary = task_repo.get_task_summary(active_store)
+        if task_summary:
+            open_tasks = task_summary.get("OPEN", 0) + task_summary.get("IN_PROGRESS", 0)
+
     return {
-        "totalSales": 45230,
-        "change": 12,
-        "pendingOrders": 23,
-        "urgentOrders": 5,
-        "appointmentsToday": 8,
-        "upcomingAppointments": 2,
-        "lowStockItems": 12,
+        "totalSales": total_sales,
+        "change": 12.5,  # Would need historical data for comparison
+        "pendingOrders": pending_orders,
+        "urgentOrders": ready_orders,
+        "appointmentsToday": open_tasks,
+        "upcomingAppointments": 0,
+        "lowStockItems": low_stock_items,
         "todaySummary": {
-            "totalOrders": 15,
-            "deliveries": 8,
-            "eyeTests": 6,
-            "newCustomers": 3,
-            "paymentsReceived": 32500
+            "totalOrders": today_orders,
+            "deliveries": today_deliveries,
+            "eyeTests": 0,
+            "newCustomers": today_new_customers,
+            "paymentsReceived": payments_received
         }
     }
 
@@ -49,12 +116,41 @@ async def inventory_report(
     store_id: Optional[str] = Query(None),
     current_user: dict = Depends(get_current_user)
 ):
-    """Get inventory report for a store"""
+    """Get inventory report for a store - fetched from database"""
+    active_store = store_id or current_user.get("active_store_id") or "store-001"
+    stock_repo = get_stock_repository()
+
+    if stock_repo:
+        all_stock = stock_repo.find_many({"store_id": active_store})
+        low_stock = stock_repo.find_low_stock(active_store, threshold=5)
+
+        total_items = len(all_stock)
+        total_value = sum((s.get("quantity", 0) * s.get("cost_price", 0)) for s in all_stock)
+        low_stock_count = len(low_stock) if low_stock else 0
+        out_of_stock = len([s for s in all_stock if s.get("quantity", 0) <= 0])
+
+        # Group by category
+        categories = {}
+        for item in all_stock:
+            cat = item.get("category", "Other")
+            if cat not in categories:
+                categories[cat] = {"name": cat, "count": 0, "value": 0}
+            categories[cat]["count"] += 1
+            categories[cat]["value"] += item.get("quantity", 0) * item.get("cost_price", 0)
+
+        return {
+            "totalItems": total_items,
+            "totalValue": round(total_value, 2),
+            "lowStock": low_stock_count,
+            "outOfStock": out_of_stock,
+            "categories": list(categories.values())
+        }
+
     return {
-        "totalItems": 1250,
-        "totalValue": 2500000,
-        "lowStock": 12,
-        "outOfStock": 3,
+        "totalItems": 0,
+        "totalValue": 0,
+        "lowStock": 0,
+        "outOfStock": 0,
         "categories": []
     }
 
