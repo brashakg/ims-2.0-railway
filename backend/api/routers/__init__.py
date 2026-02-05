@@ -18,6 +18,7 @@ from .workshop import router as workshop_router
 from .reports import router as reports_router
 from .settings import router as settings_router
 from .clinical import router as clinical_router
+from .admin import router as admin_router
 
 __all__ = [
     'auth_router',
@@ -35,5 +36,6 @@ __all__ = [
     'workshop_router',
     'reports_router',
     'settings_router',
-    'clinical_router'
+    'clinical_router',
+    'admin_router'
 ]
