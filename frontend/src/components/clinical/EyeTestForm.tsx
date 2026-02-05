@@ -2,10 +2,13 @@
 // IMS 2.0 - Eye Test Entry Form Component
 // ============================================================================
 // Full prescription entry with axis validation (must be 1-180 whole number)
+// NO MOCK DATA - Loads optometrists from API
 
-import { useState } from 'react';
-import { X, Save, AlertTriangle, Eye, FileText } from 'lucide-react';
+import { useState, useEffect, useCallback } from 'react';
+import { X, Save, AlertTriangle, Eye, FileText, Loader2 } from 'lucide-react';
 import clsx from 'clsx';
+import { adminUserApi } from '../../services/api';
+import { useAuth } from '../../context/AuthContext';
 
 interface EyeTestFormProps {
   patientName: string;
@@ -69,14 +72,13 @@ const COATING_RECOMMENDATIONS = [
   'Hydrophobic',
 ];
 
-// Mock optometrists
-const OPTOMETRISTS = [
-  { id: 'opt-001', name: 'Dr. Sharma' },
-  { id: 'opt-002', name: 'Dr. Patel' },
-  { id: 'opt-003', name: 'Dr. Gupta' },
-];
+interface Optometrist {
+  id: string;
+  name: string;
+}
 
 export function EyeTestForm({ patientName, patientId, onSave, onClose }: EyeTestFormProps) {
+  const { user } = useAuth();
   const [source, setSource] = useState<'TESTED_AT_STORE' | 'FROM_DOCTOR'>('TESTED_AT_STORE');
   const [optometristId, setOptometristId] = useState('');
   const [doctorName, setDoctorName] = useState('');
@@ -87,6 +89,48 @@ export function EyeTestForm({ patientName, patientId, onSave, onClose }: EyeTest
   const [validityMonths, setValidityMonths] = useState(12);
   const [remarks, setRemarks] = useState('');
   const [errors, setErrors] = useState<Record<string, string>>({});
+  const [optometrists, setOptometrists] = useState<Optometrist[]>([]);
+  const [loadingOptometrists, setLoadingOptometrists] = useState(true);
+
+  // Load optometrists from API
+  const loadOptometrists = useCallback(async () => {
+    setLoadingOptometrists(true);
+    try {
+      // Get users who can perform eye tests (optometrist role)
+      const response = await adminUserApi.getUsers({
+        storeId: user?.activeStoreId,
+        role: 'optometrist',
+      });
+
+      if (response?.users && Array.isArray(response.users)) {
+        const opts: Optometrist[] = response.users.map((u: any) => ({
+          id: u.user_id || u.id,
+          name: u.full_name || u.name || 'Unknown',
+        }));
+        setOptometrists(opts);
+      } else {
+        // If no optometrists found, use current user as fallback
+        setOptometrists([{
+          id: user?.id || 'current',
+          name: user?.name || 'Current User',
+        }]);
+      }
+    } catch (err) {
+      console.error('Failed to load optometrists:', err);
+      // Fallback to current user
+      setOptometrists([{
+        id: user?.id || 'current',
+        name: user?.name || 'Current User',
+      }]);
+    } finally {
+      setLoadingOptometrists(false);
+    }
+  }, [user?.activeStoreId, user?.id, user?.name]);
+
+  // Load on mount
+  useEffect(() => {
+    loadOptometrists();
+  }, [loadOptometrists]);
 
   // Validate axis (must be whole number 1-180)
   const validateAxis = (value: string, eye: 'right' | 'left'): boolean => {
@@ -381,16 +425,23 @@ export function EyeTestForm({ patientName, patientId, onSave, onClose }: EyeTest
               <label className="block text-sm font-medium text-gray-700 mb-2">
                 Optometrist <span className="text-red-500">*</span>
               </label>
-              <select
-                value={optometristId}
-                onChange={e => setOptometristId(e.target.value)}
-                className={clsx('input-field', errors.optometrist && 'border-red-500')}
-              >
-                <option value="">Select Optometrist</option>
-                {OPTOMETRISTS.map(opt => (
-                  <option key={opt.id} value={opt.id}>{opt.name}</option>
-                ))}
-              </select>
+              {loadingOptometrists ? (
+                <div className="flex items-center gap-2 p-2 text-gray-400">
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                  <span className="text-sm">Loading...</span>
+                </div>
+              ) : (
+                <select
+                  value={optometristId}
+                  onChange={e => setOptometristId(e.target.value)}
+                  className={clsx('input-field', errors.optometrist && 'border-red-500')}
+                >
+                  <option value="">Select Optometrist</option>
+                  {optometrists.map(opt => (
+                    <option key={opt.id} value={opt.id}>{opt.name}</option>
+                  ))}
+                </select>
+              )}
               {errors.optometrist && (
                 <p className="text-xs text-red-500 mt-1">{errors.optometrist}</p>
               )}

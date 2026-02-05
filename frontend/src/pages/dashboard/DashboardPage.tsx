@@ -202,47 +202,53 @@ export default function DashboardPage() {
   const loadDashboardData = async () => {
     setIsLoading(true);
     try {
-      // Try to load real data, fall back to sample data
-      const salesRes = await reportsApi.getDashboardStats(user?.activeStoreId || '').catch(() => null);
+      // Load real data from API
+      const dashboardStats = await reportsApi.getDashboardStats(user?.activeStoreId || '');
 
-      if (salesRes) {
-        setStats(prev => ({
-          ...prev,
-          todaySales: salesRes.total_sales || 45230,
-          salesChange: salesRes.change || 12,
-        }));
-      } else {
-        // Sample data for demo
-        setStats({
-          todaySales: 45230,
-          pendingOrders: 23,
-          urgentOrders: 5,
-          appointmentsToday: 8,
-          upcomingAppointments: 2,
-          lowStockItems: 12,
-          salesChange: 12,
-        });
-      }
-
-      // Sample recent activity
-      setRecentActivity([
-        { id: '1', type: 'order', message: 'New order #ORD-1234 created', time: '5 min ago' },
-        { id: '2', type: 'delivery', message: 'Order #ORD-1230 marked delivered', time: '15 min ago' },
-        { id: '3', type: 'customer', message: 'New customer Rahul Sharma added', time: '30 min ago' },
-        { id: '4', type: 'payment', message: 'Payment of Rs.5,000 received from Priya', time: '1 hour ago' },
-      ]);
-
-      // Sample today's summary
-      setTodaySummary({
-        totalOrders: 15,
-        deliveries: 8,
-        eyeTests: 6,
-        newCustomers: 3,
-        paymentsReceived: 32500,
+      // Update stats from API response
+      setStats({
+        todaySales: dashboardStats.total_sales || 0,
+        pendingOrders: dashboardStats.pending_orders || 0,
+        urgentOrders: dashboardStats.urgent_orders || 0,
+        appointmentsToday: dashboardStats.appointments_today || 0,
+        upcomingAppointments: dashboardStats.upcoming_appointments || 0,
+        lowStockItems: dashboardStats.low_stock_items || 0,
+        salesChange: dashboardStats.sales_change || 0,
       });
+
+      // Update today's summary from API
+      setTodaySummary({
+        totalOrders: dashboardStats.today_orders || 0,
+        deliveries: dashboardStats.today_deliveries || 0,
+        eyeTests: dashboardStats.appointments_today || 0,
+        newCustomers: dashboardStats.new_customers_today || 0,
+        paymentsReceived: dashboardStats.total_sales || 0,
+      });
+
+      // Recent activity - this would need a separate API endpoint
+      // For now, show empty if no data
+      setRecentActivity([]);
 
     } catch (err) {
       console.error('Failed to load dashboard data:', err);
+      // On error, set everything to zero rather than showing fake data
+      setStats({
+        todaySales: 0,
+        pendingOrders: 0,
+        urgentOrders: 0,
+        appointmentsToday: 0,
+        upcomingAppointments: 0,
+        lowStockItems: 0,
+        salesChange: 0,
+      });
+      setTodaySummary({
+        totalOrders: 0,
+        deliveries: 0,
+        eyeTests: 0,
+        newCustomers: 0,
+        paymentsReceived: 0,
+      });
+      setRecentActivity([]);
     } finally {
       setIsLoading(false);
     }
