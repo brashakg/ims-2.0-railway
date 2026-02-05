@@ -4,25 +4,33 @@
 
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { Suspense, lazy } from 'react';
 import { AuthProvider } from './context/AuthContext';
 import { ToastProvider } from './context/ToastContext';
 import { ModuleProvider } from './context/ModuleContext';
 import { AppLayout } from './components/layout/AppLayout';
 import { ProtectedRoute } from './components/layout/ProtectedRoute';
 
-// Page imports
-import { LoginPage } from './pages/auth/LoginPage';
-import DashboardPage from './pages/dashboard/DashboardPage';
-import { POSPage } from './pages/pos/POSPage';
-import { CustomersPage } from './pages/customers/CustomersPage';
-import { InventoryPage } from './pages/inventory/InventoryPage';
-import { OrdersPage } from './pages/orders/OrdersPage';
-import { ClinicalPage } from './pages/clinical/ClinicalPage';
-import { WorkshopPage } from './pages/workshop/WorkshopPage';
-import { TasksPage } from './pages/tasks/TasksPage';
-import { HRPage } from './pages/hr/HRPage';
-import { ReportsPage } from './pages/reports/ReportsPage';
-import { SettingsPage } from './pages/settings/SettingsPage';
+// Lazy load pages for code splitting
+const LoginPage = lazy(() => import('./pages/auth/LoginPage').then(m => ({ default: m.LoginPage })));
+const DashboardPage = lazy(() => import('./pages/dashboard/DashboardPage'));
+const POSPage = lazy(() => import('./pages/pos/POSPage').then(m => ({ default: m.POSPage })));
+const CustomersPage = lazy(() => import('./pages/customers/CustomersPage').then(m => ({ default: m.CustomersPage })));
+const InventoryPage = lazy(() => import('./pages/inventory/InventoryPage').then(m => ({ default: m.InventoryPage })));
+const OrdersPage = lazy(() => import('./pages/orders/OrdersPage').then(m => ({ default: m.OrdersPage })));
+const ClinicalPage = lazy(() => import('./pages/clinical/ClinicalPage').then(m => ({ default: m.ClinicalPage })));
+const WorkshopPage = lazy(() => import('./pages/workshop/WorkshopPage').then(m => ({ default: m.WorkshopPage })));
+const TasksPage = lazy(() => import('./pages/tasks/TasksPage').then(m => ({ default: m.TasksPage })));
+const HRPage = lazy(() => import('./pages/hr/HRPage').then(m => ({ default: m.HRPage })));
+const ReportsPage = lazy(() => import('./pages/reports/ReportsPage').then(m => ({ default: m.ReportsPage })));
+const SettingsPage = lazy(() => import('./pages/settings/SettingsPage').then(m => ({ default: m.SettingsPage })));
+
+// Loading fallback component
+const PageLoader = () => (
+  <div className="flex items-center justify-center h-64">
+    <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
+  </div>
+);
 
 // Create React Query client
 const queryClient = new QueryClient({
@@ -67,10 +75,11 @@ function App() {
         <ModuleProvider>
           <ToastProvider>
             <BrowserRouter>
-              <Routes>
-                {/* Public routes */}
-                <Route path="/login" element={<LoginPage />} />
-                <Route path="/unauthorized" element={<UnauthorizedPage />} />
+              <Suspense fallback={<PageLoader />}>
+                <Routes>
+                  {/* Public routes */}
+                  <Route path="/login" element={<LoginPage />} />
+                  <Route path="/unauthorized" element={<UnauthorizedPage />} />
 
                 {/* Protected routes with layout */}
                 <Route
@@ -197,9 +206,10 @@ function App() {
                   />
                 </Route>
 
-                {/* 404 */}
-                <Route path="*" element={<NotFoundPage />} />
-              </Routes>
+                  {/* 404 */}
+                  <Route path="*" element={<NotFoundPage />} />
+                </Routes>
+              </Suspense>
             </BrowserRouter>
           </ToastProvider>
         </ModuleProvider>
