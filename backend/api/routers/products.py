@@ -14,6 +14,34 @@ router = APIRouter()
 
 
 # ============================================================================
+# DATABASE HELPER FUNCTIONS
+# ============================================================================
+
+def _get_categories_from_db() -> List[str]:
+    """Fetch product categories from database"""
+    try:
+        from database.connection import get_db
+        db = get_db()
+        if db and db.is_connected:
+            # Get categories collection or distinct from products
+            categories_collection = db.db.get_collection("product_categories")
+            if categories_collection:
+                cats = list(categories_collection.find({}, {"name": 1}))
+                if cats:
+                    return [c.get("name") for c in cats if c.get("name")]
+
+            # Fallback: get distinct categories from products collection
+            products_collection = db.db.get_collection("products")
+            if products_collection:
+                categories = products_collection.distinct("category")
+                if categories:
+                    return categories
+    except Exception:
+        pass
+    return []
+
+
+# ============================================================================
 # SCHEMAS
 # ============================================================================
 
@@ -135,13 +163,8 @@ async def list_brands(
 @router.get("/categories/list")
 async def list_categories(current_user: dict = Depends(get_current_user)):
     """List all product categories"""
-    return {
-        "categories": [
-            "FRAME", "SUNGLASS", "READING_GLASSES", "OPTICAL_LENS", "CONTACT_LENS",
-            "COLORED_CONTACT_LENS", "WATCH", "SMARTWATCH", "SMARTGLASSES", "WALL_CLOCK",
-            "HEARING_AID", "ACCESSORIES", "SERVICES"
-        ]
-    }
+    categories = _get_categories_from_db()
+    return {"categories": categories}
 
 
 @router.get("/sku/{sku}")

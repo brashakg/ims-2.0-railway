@@ -77,74 +77,14 @@ def _convert_to_camel(data: dict) -> dict:
     return result
 
 
-def _get_sample_queue(store_id: str) -> List[dict]:
-    """Return sample queue data for demo when no DB"""
-    return [
-        {
-            "id": "q1",
-            "queueId": "q1",
-            "tokenNumber": "T001",
-            "patientName": "Rahul Sharma",
-            "customerPhone": "9876543210",
-            "age": 35,
-            "reason": "Routine checkup",
-            "status": "WAITING",
-            "createdAt": datetime.now().replace(hour=10, minute=0).isoformat(),
-            "waitTime": 15
-        },
-        {
-            "id": "q2",
-            "queueId": "q2",
-            "tokenNumber": "T002",
-            "patientName": "Priya Patel",
-            "customerPhone": "9876543211",
-            "age": 28,
-            "reason": "New glasses",
-            "status": "IN_PROGRESS",
-            "createdAt": datetime.now().replace(hour=10, minute=30).isoformat(),
-            "waitTime": 30
-        },
-        {
-            "id": "q3",
-            "queueId": "q3",
-            "tokenNumber": "T003",
-            "patientName": "Amit Kumar",
-            "customerPhone": "9876543212",
-            "age": 45,
-            "reason": "Eye strain",
-            "status": "WAITING",
-            "createdAt": datetime.now().replace(hour=11, minute=0).isoformat(),
-            "waitTime": 10
-        }
-    ]
+def _get_empty_queue() -> List[dict]:
+    """Return empty queue when database not available"""
+    return []
 
 
-def _get_sample_completed_tests(store_id: str) -> List[dict]:
-    """Return sample completed tests for demo when no DB"""
-    return [
-        {
-            "id": "t1",
-            "testId": "t1",
-            "patientName": "Sanjay Gupta",
-            "customerPhone": "9876543220",
-            "completedAt": datetime.now().replace(hour=9, minute=30).isoformat(),
-            "optometrist": "Dr. Meera",
-            "status": "COMPLETED",
-            "rightEye": {"sphere": -2.0, "cylinder": -0.5, "axis": 90},
-            "leftEye": {"sphere": -1.75, "cylinder": -0.25, "axis": 85}
-        },
-        {
-            "id": "t2",
-            "testId": "t2",
-            "patientName": "Neha Singh",
-            "customerPhone": "9876543221",
-            "completedAt": datetime.now().replace(hour=9, minute=0).isoformat(),
-            "optometrist": "Dr. Meera",
-            "status": "COMPLETED",
-            "rightEye": {"sphere": 1.0, "cylinder": None, "axis": None},
-            "leftEye": {"sphere": 1.25, "cylinder": None, "axis": None}
-        }
-    ]
+def _get_empty_tests() -> List[dict]:
+    """Return empty tests when database not available"""
+    return []
 
 
 # ============================================================================
@@ -169,8 +109,8 @@ async def get_queue(
             result.append(converted)
         return {"queue": result}
 
-    # Fallback to sample data when no DB
-    return {"queue": _get_sample_queue(store_id)}
+    # Return empty queue when no DB available
+    return {"queue": _get_empty_queue()}
 
 
 @router.post("/queue")
@@ -297,11 +237,11 @@ async def get_queue_stats(
     if queue_repo:
         return queue_repo.get_today_stats(store_id)
 
-    # Demo fallback
+    # Return zeros when no DB available
     return {
-        "total": 3,
-        "waiting": 2,
-        "in_progress": 1,
+        "total": 0,
+        "waiting": 0,
+        "in_progress": 0,
         "completed": 0,
         "no_show": 0
     }
@@ -333,11 +273,8 @@ async def get_tests(
             result.append(converted)
         return {"tests": result}
 
-    # Fallback to sample data
-    if date == "today":
-        return {"tests": _get_sample_completed_tests(store_id)}
-
-    return {"tests": []}
+    # Return empty tests when no DB available
+    return {"tests": _get_empty_tests()}
 
 
 @router.get("/tests/{test_id}")

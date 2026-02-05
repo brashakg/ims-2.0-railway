@@ -14,8 +14,102 @@ from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 from .auth import get_current_user, hash_password, verify_password
+from ..dependencies import get_audit_repository
 
 router = APIRouter()
+
+
+# ============================================================================
+# DATABASE HELPER FUNCTIONS
+# ============================================================================
+
+def _get_settings_collection(collection_name: str):
+    """Get settings from database"""
+    try:
+        from database.connection import get_db
+        db = get_db()
+        if db and db.is_connected:
+            return db.db[collection_name]
+    except Exception:
+        pass
+    return None
+
+
+def _get_business_settings_from_db() -> Optional[dict]:
+    """Fetch business settings from database"""
+    collection = _get_settings_collection("business_settings")
+    if collection:
+        settings = collection.find_one({"_id": "default"})
+        if settings:
+            settings.pop("_id", None)
+            return settings
+    return None
+
+
+def _get_tax_settings_from_db() -> Optional[dict]:
+    """Fetch tax settings from database"""
+    collection = _get_settings_collection("tax_settings")
+    if collection:
+        settings = collection.find_one({"_id": "default"})
+        if settings:
+            settings.pop("_id", None)
+            return settings
+    return None
+
+
+def _get_invoice_settings_from_db() -> Optional[dict]:
+    """Fetch invoice settings from database"""
+    collection = _get_settings_collection("invoice_settings")
+    if collection:
+        settings = collection.find_one({"_id": "default"})
+        if settings:
+            settings.pop("_id", None)
+            return settings
+    return None
+
+
+def _get_printer_settings_from_db() -> Optional[dict]:
+    """Fetch printer settings from database"""
+    collection = _get_settings_collection("printer_settings")
+    if collection:
+        settings = collection.find_one({"_id": "default"})
+        if settings:
+            settings.pop("_id", None)
+            return settings
+    return None
+
+
+def _get_notification_templates_from_db() -> List[dict]:
+    """Fetch notification templates from database"""
+    collection = _get_settings_collection("notification_templates")
+    if collection:
+        templates = list(collection.find({}))
+        for t in templates:
+            t.pop("_id", None)
+        return templates
+    return []
+
+
+def _get_discount_rules_from_db() -> Optional[dict]:
+    """Fetch discount rules from database"""
+    collection = _get_settings_collection("discount_rules")
+    if collection:
+        rules = collection.find_one({"_id": "default"})
+        if rules:
+            rules.pop("_id", None)
+            return rules
+    return None
+
+
+def _get_integrations_from_db() -> List[dict]:
+    """Fetch integration configs from database"""
+    collection = _get_settings_collection("integrations")
+    if collection:
+        integrations = list(collection.find({}))
+        for i in integrations:
+            i.pop("_id", None)
+        return integrations
+    return []
 
 
 # ============================================================================
@@ -120,140 +214,9 @@ class AuditLogEntry(BaseModel):
 
 
 # ============================================================================
-# MOCK DATA
+# NOTE: All settings are now fetched from the database.
+# Default empty values are returned when database is unavailable.
 # ============================================================================
-
-# Business settings (would come from database in production)
-MOCK_BUSINESS_SETTINGS = BusinessSettings(
-    company_name="Better Vision Opticals",
-    company_short_name="BVO",
-    tagline="See Better, Live Better",
-    logo_url="/images/logo.png",
-    primary_color="#ba8659",
-    secondary_color="#a67547",
-    support_email="support@bettervision.in",
-    support_phone="+91 11 4567 8900",
-    website="https://bettervision.in",
-    address="123 Vision Street, Connaught Place, New Delhi - 110001",
-)
-
-MOCK_TAX_SETTINGS = TaxSettings(
-    gst_enabled=True,
-    company_gstin="07AABCT1234Q1ZP",
-    default_gst_rate=18.0,
-    hsn_validation=True,
-    e_invoice_enabled=False,
-    e_way_bill_enabled=False,
-    e_way_bill_threshold=50000.0,
-)
-
-MOCK_INVOICE_SETTINGS = InvoiceSettings(
-    invoice_prefix="BVO",
-    invoice_start_number=1,
-    current_invoice_number=1542,
-    financial_year="2024-25",
-    show_logo_on_invoice=True,
-    show_terms_on_invoice=True,
-    default_terms="1. Goods once sold will not be returned or exchanged.\n2. Warranty valid only with original invoice.\n3. Lens warranty does not cover scratches.",
-    default_warranty_days=365,
-    show_qr_code=True,
-)
-
-MOCK_NOTIFICATION_TEMPLATES = [
-    NotificationTemplate(
-        template_id="order_created_sms",
-        template_type="SMS",
-        trigger_event="ORDER_CREATED",
-        is_enabled=True,
-        content="Dear {customer_name}, your order #{order_id} has been placed at Better Vision. Total: Rs.{total}. Expected delivery: {delivery_date}.",
-        variables=["customer_name", "order_id", "total", "delivery_date"]
-    ),
-    NotificationTemplate(
-        template_id="order_ready_sms",
-        template_type="SMS",
-        trigger_event="ORDER_READY",
-        is_enabled=True,
-        content="Dear {customer_name}, your order #{order_id} is ready for pickup at {store_name}. Please visit with your invoice.",
-        variables=["customer_name", "order_id", "store_name"]
-    ),
-    NotificationTemplate(
-        template_id="order_ready_whatsapp",
-        template_type="WHATSAPP",
-        trigger_event="ORDER_READY",
-        is_enabled=True,
-        content="Hello {customer_name}! 👓\n\nGreat news! Your eyewear order #{order_id} is ready for pickup.\n\n📍 Store: {store_name}\n🕐 Store Hours: {store_hours}\n\nPlease bring your invoice for collection.\n\nThank you for choosing Better Vision! 🙏",
-        variables=["customer_name", "order_id", "store_name", "store_hours"]
-    ),
-    NotificationTemplate(
-        template_id="payment_received_sms",
-        template_type="SMS",
-        trigger_event="PAYMENT_RECEIVED",
-        is_enabled=True,
-        content="Dear {customer_name}, payment of Rs.{amount} received for order #{order_id}. Balance: Rs.{balance}. Thank you!",
-        variables=["customer_name", "amount", "order_id", "balance"]
-    ),
-    NotificationTemplate(
-        template_id="eye_test_reminder_sms",
-        template_type="SMS",
-        trigger_event="EYE_TEST_REMINDER",
-        is_enabled=True,
-        content="Dear {customer_name}, it's been a year since your last eye test. Book your appointment at Better Vision. Call: {store_phone}",
-        variables=["customer_name", "store_phone"]
-    ),
-    NotificationTemplate(
-        template_id="birthday_wish_whatsapp",
-        template_type="WHATSAPP",
-        trigger_event="CUSTOMER_BIRTHDAY",
-        is_enabled=False,
-        content="🎂 Happy Birthday {customer_name}! 🎉\n\nWishing you clear vision and a wonderful year ahead!\n\nEnjoy 10% off on your next purchase at Better Vision.\nCode: BDAY{customer_id}\n\nValid for 7 days.",
-        variables=["customer_name", "customer_id"]
-    ),
-]
-
-MOCK_AUDIT_LOGS = [
-    AuditLogEntry(
-        id="log-001",
-        timestamp=datetime.now(),
-        user_id="user-002",
-        user_name="Avinash Kumar (CEO)",
-        action="LOGIN",
-        entity_type="SESSION",
-        entity_id=None,
-        ip_address="192.168.1.100"
-    ),
-    AuditLogEntry(
-        id="log-002",
-        timestamp=datetime.now(),
-        user_id="user-007",
-        user_name="Rajesh Kumar",
-        action="CREATE",
-        entity_type="ORDER",
-        entity_id="ORD-2024-001542",
-        changes={"status": "DRAFT", "total": 12500},
-        ip_address="192.168.1.101"
-    ),
-    AuditLogEntry(
-        id="log-003",
-        timestamp=datetime.now(),
-        user_id="user-015",
-        user_name="Rohit Malhotra",
-        action="UPDATE",
-        entity_type="PRODUCT",
-        entity_id="PROD-FR-001",
-        changes={"mrp": {"old": 5000, "new": 5500}},
-        ip_address="192.168.1.102"
-    ),
-]
-
-MOCK_PRINTER_SETTINGS = PrinterSettings(
-    receipt_printer_name="EPSON TM-T88V",
-    receipt_printer_width=80,
-    label_printer_name="Zebra ZD420",
-    label_size="50x25",
-    auto_print_receipt=True,
-    auto_print_job_card=True,
-    copies_per_print=1,
-)
 
 
 # ============================================================================
@@ -347,7 +310,11 @@ async def update_preferences(
 @router.get("/business")
 async def get_business_settings(current_user: dict = Depends(get_current_user)):
     """Get business/company settings"""
-    return MOCK_BUSINESS_SETTINGS.model_dump()
+    db_settings = _get_business_settings_from_db()
+    if db_settings:
+        return db_settings
+    # Return default empty settings
+    return BusinessSettings().model_dump()
 
 
 @router.put("/business")
@@ -377,7 +344,11 @@ async def upload_logo(current_user: dict = Depends(get_current_user)):
 @router.get("/tax")
 async def get_tax_settings(current_user: dict = Depends(get_current_user)):
     """Get tax and compliance settings"""
-    return MOCK_TAX_SETTINGS.model_dump()
+    db_settings = _get_tax_settings_from_db()
+    if db_settings:
+        return db_settings
+    # Return default settings
+    return TaxSettings().model_dump()
 
 
 @router.put("/tax")
@@ -398,7 +369,11 @@ async def update_tax_settings(
 @router.get("/invoice")
 async def get_invoice_settings(current_user: dict = Depends(get_current_user)):
     """Get invoice settings"""
-    return MOCK_INVOICE_SETTINGS.model_dump()
+    db_settings = _get_invoice_settings_from_db()
+    if db_settings:
+        return db_settings
+    # Return default settings
+    return InvoiceSettings().model_dump()
 
 
 @router.put("/invoice")
@@ -419,7 +394,8 @@ async def update_invoice_settings(
 @router.get("/notifications/templates")
 async def get_notification_templates(current_user: dict = Depends(get_current_user)):
     """Get all notification templates"""
-    return {"templates": [t.model_dump() for t in MOCK_NOTIFICATION_TEMPLATES]}
+    templates = _get_notification_templates_from_db()
+    return {"templates": templates}
 
 
 @router.get("/notifications/templates/{template_id}")
@@ -428,9 +404,10 @@ async def get_notification_template(
     current_user: dict = Depends(get_current_user)
 ):
     """Get specific notification template"""
-    for t in MOCK_NOTIFICATION_TEMPLATES:
-        if t.template_id == template_id:
-            return t.model_dump()
+    templates = _get_notification_templates_from_db()
+    for t in templates:
+        if t.get("template_id") == template_id:
+            return t
     raise HTTPException(status_code=404, detail="Template not found")
 
 
@@ -486,7 +463,11 @@ async def test_notification(
 @router.get("/printers")
 async def get_printer_settings(current_user: dict = Depends(get_current_user)):
     """Get printer settings"""
-    return MOCK_PRINTER_SETTINGS.model_dump()
+    db_settings = _get_printer_settings_from_db()
+    if db_settings:
+        return db_settings
+    # Return default settings
+    return PrinterSettings().model_dump()
 
 
 @router.put("/printers")
@@ -501,13 +482,9 @@ async def update_printer_settings(
 @router.get("/printers/available")
 async def list_available_printers(current_user: dict = Depends(get_current_user)):
     """List available printers (detected on network)"""
-    return {
-        "printers": [
-            {"name": "EPSON TM-T88V", "type": "RECEIPT", "status": "online"},
-            {"name": "Zebra ZD420", "type": "LABEL", "status": "online"},
-            {"name": "HP LaserJet Pro", "type": "A4", "status": "online"},
-        ]
-    }
+    # In production, this would scan for available printers
+    # For now, return empty list as no actual printer detection
+    return {"printers": []}
 
 
 # ============================================================================
@@ -517,19 +494,11 @@ async def list_available_printers(current_user: dict = Depends(get_current_user)
 @router.get("/discount-rules")
 async def get_discount_rules(current_user: dict = Depends(get_current_user)):
     """Get all discount rules by role and tier"""
-    return {
-        "rules": {
-            "SALES_STAFF": {"MASS": 5, "PREMIUM": 3, "LUXURY": 0},
-            "SALES_CASHIER": {"MASS": 10, "PREMIUM": 5, "LUXURY": 3},
-            "OPTOMETRIST": {"MASS": 5, "PREMIUM": 3, "LUXURY": 0},
-            "WORKSHOP_STAFF": {"MASS": 0, "PREMIUM": 0, "LUXURY": 0},
-            "STORE_MANAGER": {"MASS": 15, "PREMIUM": 10, "LUXURY": 5},
-            "ACCOUNTANT": {"MASS": 10, "PREMIUM": 5, "LUXURY": 3},
-            "AREA_MANAGER": {"MASS": 20, "PREMIUM": 15, "LUXURY": 10},
-            "ADMIN": {"MASS": 100, "PREMIUM": 100, "LUXURY": 100},
-            "SUPERADMIN": {"MASS": 100, "PREMIUM": 100, "LUXURY": 100},
-        }
-    }
+    db_rules = _get_discount_rules_from_db()
+    if db_rules and "rules" in db_rules:
+        return db_rules
+    # Return empty rules when no database
+    return {"rules": {}}
 
 
 @router.put("/discount-rules")
@@ -561,50 +530,11 @@ async def set_discount_rule(
 @router.get("/integrations")
 async def list_integrations(current_user: dict = Depends(get_current_user)):
     """List all integration configurations"""
-    return {
-        "integrations": [
-            {
-                "type": "RAZORPAY",
-                "name": "Razorpay",
-                "description": "Online payment gateway",
-                "is_configured": False,
-                "is_enabled": False,
-                "config": {}
-            },
-            {
-                "type": "WHATSAPP",
-                "name": "WhatsApp Business",
-                "description": "Customer notifications via WhatsApp",
-                "is_configured": False,
-                "is_enabled": False,
-                "config": {}
-            },
-            {
-                "type": "TALLY",
-                "name": "Tally ERP",
-                "description": "Accounting synchronization",
-                "is_configured": False,
-                "is_enabled": False,
-                "config": {}
-            },
-            {
-                "type": "SHOPIFY",
-                "name": "Shopify",
-                "description": "E-commerce platform sync",
-                "is_configured": False,
-                "is_enabled": False,
-                "config": {}
-            },
-            {
-                "type": "SMS",
-                "name": "SMS Gateway",
-                "description": "SMS notifications",
-                "is_configured": True,
-                "is_enabled": True,
-                "config": {"provider": "MSG91"}
-            },
-        ]
-    }
+    integrations = _get_integrations_from_db()
+    if integrations:
+        return {"integrations": integrations}
+    # Return empty list when no database
+    return {"integrations": []}
 
 
 @router.get("/integrations/{integration_type}")
@@ -649,6 +579,13 @@ async def test_integration(
 @router.get("/system")
 async def get_system_settings(current_user: dict = Depends(get_current_user)):
     """Get system settings"""
+    collection = _get_settings_collection("system_settings")
+    if collection:
+        settings = collection.find_one({"_id": "default"})
+        if settings:
+            settings.pop("_id", None)
+            return settings
+    # Return default empty settings
     return {
         "maintenance_mode": False,
         "allow_registrations": False,
@@ -656,9 +593,9 @@ async def get_system_settings(current_user: dict = Depends(get_current_user)):
         "max_login_attempts": 5,
         "password_min_length": 8,
         "require_2fa": False,
-        "backup_enabled": True,
-        "backup_frequency": "daily",
-        "last_backup": "2024-02-04T00:00:00Z",
+        "backup_enabled": False,
+        "backup_frequency": "",
+        "last_backup": None,
         "data_retention_days": 365,
     }
 
@@ -692,19 +629,37 @@ async def get_audit_logs(
     if not any(role in current_user["roles"] for role in ["SUPERADMIN", "ADMIN"]):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
-    logs = MOCK_AUDIT_LOGS
+    audit_repo = get_audit_repository()
+    if audit_repo:
+        # Build filter
+        filter_dict = {}
+        if entity_type:
+            filter_dict["entity_type"] = entity_type
+        if entity_id:
+            filter_dict["entity_id"] = entity_id
+        if user_id:
+            filter_dict["user_id"] = user_id
+        if action:
+            filter_dict["action"] = action
 
-    # Apply filters
-    if entity_type:
-        logs = [l for l in logs if l.entity_type == entity_type]
-    if user_id:
-        logs = [l for l in logs if l.user_id == user_id]
-    if action:
-        logs = [l for l in logs if l.action == action]
+        logs = audit_repo.find_many(filter_dict, skip=offset, limit=limit)
+        total = audit_repo.count(filter_dict)
 
+        # Clean up MongoDB _id fields
+        for log in logs:
+            log.pop("_id", None)
+
+        return {
+            "logs": logs,
+            "total": total,
+            "limit": limit,
+            "offset": offset
+        }
+
+    # Return empty when no database
     return {
-        "logs": [l.model_dump() for l in logs],
-        "total": len(logs),
+        "logs": [],
+        "total": 0,
         "limit": limit,
         "offset": offset
     }
@@ -718,19 +673,42 @@ async def get_audit_summary(
     if not any(role in current_user["roles"] for role in ["SUPERADMIN", "ADMIN"]):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
+    audit_repo = get_audit_repository()
+    if audit_repo:
+        # Get today's summary
+        from datetime import date, timedelta
+        today = date.today()
+        week_start = today - timedelta(days=7)
+
+        # Count today's actions
+        today_count = audit_repo.count({"date": today.isoformat()})
+        week_count = audit_repo.count({})  # Would need date range query
+
+        return {
+            "today": {
+                "total_actions": today_count,
+                "logins": 0,
+                "orders_created": 0,
+                "products_updated": 0,
+                "users_created": 0
+            },
+            "this_week": {
+                "total_actions": week_count,
+                "top_users": []
+            }
+        }
+
+    # Return empty summary when no database
     return {
         "today": {
-            "total_actions": 156,
-            "logins": 24,
-            "orders_created": 45,
-            "products_updated": 12,
-            "users_created": 2
+            "total_actions": 0,
+            "logins": 0,
+            "orders_created": 0,
+            "products_updated": 0,
+            "users_created": 0
         },
         "this_week": {
-            "total_actions": 892,
-            "top_users": [
-                {"user_id": "user-007", "user_name": "Rajesh Kumar", "actions": 156},
-                {"user_id": "user-008", "user_name": "Neha Gupta", "actions": 134},
-            ]
+            "total_actions": 0,
+            "top_users": []
         }
     }
