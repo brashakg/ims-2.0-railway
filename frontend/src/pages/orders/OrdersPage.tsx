@@ -59,6 +59,14 @@ export function OrdersPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  // Payment modal state
+  const [showPaymentModal, setShowPaymentModal] = useState(false);
+  const [paymentOrder, setPaymentOrder] = useState<Order | null>(null);
+  const [paymentAmount, setPaymentAmount] = useState('');
+  const [paymentMethod, setPaymentMethod] = useState<'CASH' | 'CARD' | 'UPI' | 'BANK_TRANSFER'>('CASH');
+  const [paymentReference, setPaymentReference] = useState('');
+  const [isProcessingPayment, setIsProcessingPayment] = useState(false);
+
   // Role-based permissions
   const canViewAllStores = hasRole(['SUPERADMIN', 'ADMIN', 'AREA_MANAGER']);
   const _canRefund = hasRole(['SUPERADMIN', 'ADMIN', 'STORE_MANAGER']);
@@ -125,6 +133,49 @@ export function OrdersPage() {
       currency: 'INR',
       maximumFractionDigits: 0,
     }).format(amount);
+  };
+
+  // Open payment modal
+  const openPaymentModal = (order: Order) => {
+    setPaymentOrder(order);
+    setPaymentAmount(order.balanceDue?.toString() || '');
+    setPaymentMethod('CASH');
+    setPaymentReference('');
+    setShowPaymentModal(true);
+  };
+
+  // Process payment
+  const handlePayment = async () => {
+    if (!paymentOrder) return;
+
+    const amount = parseFloat(paymentAmount);
+    if (isNaN(amount) || amount <= 0) {
+      toast.error('Please enter a valid amount');
+      return;
+    }
+    if (amount > (paymentOrder.balanceDue || 0)) {
+      toast.error('Amount cannot exceed balance due');
+      return;
+    }
+
+    setIsProcessingPayment(true);
+    try {
+      await orderApi.addPayment(paymentOrder.id, {
+        amount,
+        mode: paymentMethod,
+        reference: paymentReference || undefined,
+      });
+
+      toast.success(`Payment of ${formatCurrency(amount)} received`);
+      setShowPaymentModal(false);
+      setPaymentOrder(null);
+      setSelectedOrder(null);
+      await loadOrders();
+    } catch {
+      toast.error('Failed to process payment');
+    } finally {
+      setIsProcessingPayment(false);
+    }
   };
 
   return (
@@ -297,7 +348,7 @@ export function OrdersPage() {
                     </button>
                     {order.paymentStatus !== 'PAID' && (
                       <button
-                        onClick={(e) => { e.stopPropagation(); toast.info('Payment collection modal coming soon'); }}
+                        onClick={(e) => { e.stopPropagation(); openPaymentModal(order); }}
                         className="text-xs text-green-600 hover:text-green-700 flex items-center gap-1"
                       >
                         <CreditCard className="w-3 h-3" />
@@ -396,7 +447,7 @@ export function OrdersPage() {
                   </button>
                   {selectedOrder.balanceDue > 0 && (
                     <button
-                      onClick={() => toast.info('Payment collection modal coming soon')}
+                      onClick={() => openPaymentModal(selectedOrder)}
                       className="btn-outline flex-1 flex items-center justify-center gap-2"
                     >
                       <CreditCard className="w-4 h-4" />
@@ -405,6 +456,140 @@ export function OrdersPage() {
                   )}
                 </div>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Payment Collection Modal */}
+      {showPaymentModal && paymentOrder && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-xl shadow-xl max-w-md w-full">
+            <div className="p-6 border-b border-gray-200">
+              <div className="flex items-center justify-between">
+                <h2 className="text-xl font-bold text-gray-900">Collect Payment</h2>
+                <button
+                  onClick={() => setShowPaymentModal(false)}
+                  className="p-2 text-gray-400 hover:text-gray-600 rounded-lg"
+                >
+                  ×
+                </button>
+              </div>
+            </div>
+
+            <div className="p-6 space-y-4">
+              {/* Order Info */}
+              <div className="bg-gray-50 p-4 rounded-lg">
+                <p className="text-sm text-gray-500">Order</p>
+                <p className="font-medium text-gray-900">{paymentOrder.orderNumber}</p>
+                <p className="text-sm text-gray-500 mt-1">{paymentOrder.customerName}</p>
+                <div className="flex justify-between mt-2 pt-2 border-t border-gray-200">
+                  <span className="text-sm text-gray-500">Balance Due:</span>
+                  <span className="font-bold text-red-600">{formatCurrency(paymentOrder.balanceDue || 0)}</span>
+                </div>
+              </div>
+
+              {/* Amount */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Amount <span className="text-red-500">*</span>
+                </label>
+                <div className="relative">
+                  <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500">₹</span>
+                  <input
+                    type="number"
+                    value={paymentAmount}
+                    onChange={e => setPaymentAmount(e.target.value)}
+                    placeholder="0"
+                    min="0"
+                    max={paymentOrder.balanceDue || 0}
+                    className="input-field w-full pl-8"
+                  />
+                </div>
+                <div className="flex gap-2 mt-2">
+                  <button
+                    type="button"
+                    onClick={() => setPaymentAmount((paymentOrder.balanceDue || 0).toString())}
+                    className="text-xs px-2 py-1 bg-gray-100 rounded hover:bg-gray-200"
+                  >
+                    Full Amount
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setPaymentAmount(((paymentOrder.balanceDue || 0) / 2).toString())}
+                    className="text-xs px-2 py-1 bg-gray-100 rounded hover:bg-gray-200"
+                  >
+                    50%
+                  </button>
+                </div>
+              </div>
+
+              {/* Payment Method */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Payment Method
+                </label>
+                <div className="grid grid-cols-4 gap-2">
+                  {(['CASH', 'CARD', 'UPI', 'BANK_TRANSFER'] as const).map(method => (
+                    <button
+                      key={method}
+                      type="button"
+                      onClick={() => setPaymentMethod(method)}
+                      className={clsx(
+                        'p-2 text-xs rounded-lg border transition-colors',
+                        paymentMethod === method
+                          ? 'border-bv-gold-600 bg-bv-gold-50 text-bv-gold-700'
+                          : 'border-gray-200 hover:border-gray-300'
+                      )}
+                    >
+                      {method === 'BANK_TRANSFER' ? 'Bank' : method}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Reference */}
+              {paymentMethod !== 'CASH' && (
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Reference / Transaction ID
+                  </label>
+                  <input
+                    type="text"
+                    value={paymentReference}
+                    onChange={e => setPaymentReference(e.target.value)}
+                    placeholder="Enter reference number"
+                    className="input-field w-full"
+                  />
+                </div>
+              )}
+            </div>
+
+            <div className="p-6 border-t border-gray-200 flex justify-end gap-3">
+              <button
+                onClick={() => setShowPaymentModal(false)}
+                className="btn-secondary"
+                disabled={isProcessingPayment}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handlePayment}
+                className="btn-primary flex items-center gap-2"
+                disabled={isProcessingPayment}
+              >
+                {isProcessingPayment ? (
+                  <>
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    Processing...
+                  </>
+                ) : (
+                  <>
+                    <CreditCard className="w-4 h-4" />
+                    Collect {paymentAmount ? formatCurrency(parseFloat(paymentAmount)) : '₹0'}
+                  </>
+                )}
+              </button>
             </div>
           </div>
         </div>
