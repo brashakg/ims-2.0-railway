@@ -43,7 +43,8 @@ from .routers import (
     hr_router,
     workshop_router,
     reports_router,
-    settings_router
+    settings_router,
+    clinical_router
 )
 
 # Lifespan context manager for startup/shutdown
@@ -155,6 +156,7 @@ app.include_router(hr_router, prefix="/api/v1/hr", tags=["HR"])
 app.include_router(workshop_router, prefix="/api/v1/workshop", tags=["Workshop"])
 app.include_router(reports_router, prefix="/api/v1/reports", tags=["Reports"])
 app.include_router(settings_router, prefix="/api/v1/settings", tags=["Settings"])
+app.include_router(clinical_router, prefix="/api/v1/clinical", tags=["Clinical"])
 
 
 if __name__ == "__main__":

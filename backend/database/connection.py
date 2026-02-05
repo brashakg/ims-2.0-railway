@@ -269,52 +269,186 @@ def close_db():
 
 
 # For testing without MongoDB
+class MockCursor:
+    """Mock cursor for chaining operations like MongoDB"""
+
+    def __init__(self, data: list):
+        self._data = data
+        self._sort_key = None
+        self._skip = 0
+        self._limit = None
+
+    def sort(self, sort_spec):
+        """Sort the results"""
+        if sort_spec and len(sort_spec) > 0:
+            field, direction = sort_spec[0] if isinstance(sort_spec[0], tuple) else (sort_spec[0], 1)
+            reverse = direction == -1
+            self._data = sorted(self._data, key=lambda x: x.get(field, ""), reverse=reverse)
+        return self
+
+    def skip(self, n: int):
+        """Skip n documents"""
+        self._skip = n
+        return self
+
+    def limit(self, n: int):
+        """Limit to n documents"""
+        self._limit = n
+        return self
+
+    def __iter__(self):
+        data = self._data[self._skip:]
+        if self._limit:
+            data = data[:self._limit]
+        return iter(data)
+
+    def __list__(self):
+        return list(self.__iter__())
+
+
 class MockCollection:
     """Mock collection for testing without MongoDB"""
-    
+
     def __init__(self, name: str):
         self.name = name
         self._data: Dict[str, Dict] = {}
-    
+
     def insert_one(self, document: Dict) -> Any:
         doc_id = document.get("_id") or str(len(self._data) + 1)
         document["_id"] = doc_id
-        self._data[doc_id] = document
+        # Make a copy to avoid mutation issues
+        self._data[doc_id] = dict(document)
         return type('obj', (object,), {'inserted_id': doc_id})()
-    
+
+    def insert_many(self, documents: list) -> Any:
+        inserted_ids = []
+        for doc in documents:
+            result = self.insert_one(doc)
+            inserted_ids.append(result.inserted_id)
+        return type('obj', (object,), {'inserted_ids': inserted_ids})()
+
+    def _matches_filter(self, doc: Dict, filter: Dict) -> bool:
+        """Check if document matches the filter"""
+        if not filter:
+            return True
+
+        for key, value in filter.items():
+            if key == "$or":
+                # Handle $or operator
+                if not any(self._matches_filter(doc, cond) for cond in value):
+                    return False
+            elif key == "$and":
+                # Handle $and operator
+                if not all(self._matches_filter(doc, cond) for cond in value):
+                    return False
+            elif isinstance(value, dict):
+                # Handle operators like $regex, $gt, $lt, etc.
+                doc_value = doc.get(key, "")
+                for op, op_value in value.items():
+                    if op == "$regex":
+                        import re
+                        flags = re.IGNORECASE if value.get("$options") == "i" else 0
+                        if not re.search(op_value, str(doc_value), flags):
+                            return False
+                    elif op == "$gt":
+                        if not (doc_value > op_value):
+                            return False
+                    elif op == "$lt":
+                        if not (doc_value < op_value):
+                            return False
+                    elif op == "$gte":
+                        if not (doc_value >= op_value):
+                            return False
+                    elif op == "$lte":
+                        if not (doc_value <= op_value):
+                            return False
+                    elif op == "$in":
+                        if doc_value not in op_value:
+                            return False
+                    elif op == "$ne":
+                        if doc_value == op_value:
+                            return False
+            else:
+                # Direct equality check
+                if doc.get(key) != value:
+                    return False
+        return True
+
     def find_one(self, filter: Dict) -> Optional[Dict]:
-        if "_id" in filter:
+        if not filter:
+            return next(iter(self._data.values()), None)
+
+        # Direct _id lookup
+        if "_id" in filter and len(filter) == 1:
             return self._data.get(filter["_id"])
+
         for doc in self._data.values():
-            if all(doc.get(k) == v for k, v in filter.items()):
+            if self._matches_filter(doc, filter):
                 return doc
         return None
-    
-    def find(self, filter: Dict = None) -> list:
+
+    def find(self, filter: Dict = None) -> MockCursor:
         if not filter:
-            return list(self._data.values())
-        return [
-            doc for doc in self._data.values()
-            if all(doc.get(k) == v for k, v in (filter or {}).items())
-        ]
-    
+            return MockCursor(list(self._data.values()))
+
+        results = [doc for doc in self._data.values() if self._matches_filter(doc, filter)]
+        return MockCursor(results)
+
     def update_one(self, filter: Dict, update: Dict) -> Any:
         doc = self.find_one(filter)
         if doc:
             if "$set" in update:
                 doc.update(update["$set"])
+            if "$inc" in update:
+                for field, amount in update["$inc"].items():
+                    doc[field] = doc.get(field, 0) + amount
+            if "$push" in update:
+                for field, value in update["$push"].items():
+                    if field not in doc:
+                        doc[field] = []
+                    doc[field].append(value)
             return type('obj', (object,), {'modified_count': 1})()
         return type('obj', (object,), {'modified_count': 0})()
-    
+
+    def update_many(self, filter: Dict, update: Dict) -> Any:
+        count = 0
+        for doc in self._data.values():
+            if self._matches_filter(doc, filter):
+                if "$set" in update:
+                    doc.update(update["$set"])
+                if "$inc" in update:
+                    for field, amount in update["$inc"].items():
+                        doc[field] = doc.get(field, 0) + amount
+                count += 1
+        return type('obj', (object,), {'modified_count': count})()
+
     def delete_one(self, filter: Dict) -> Any:
         doc = self.find_one(filter)
-        if doc:
+        if doc and doc.get("_id") in self._data:
             del self._data[doc["_id"]]
             return type('obj', (object,), {'deleted_count': 1})()
         return type('obj', (object,), {'deleted_count': 0})()
-    
+
+    def delete_many(self, filter: Dict = None) -> Any:
+        if not filter:
+            count = len(self._data)
+            self._data.clear()
+            return type('obj', (object,), {'deleted_count': count})()
+
+        to_delete = [doc["_id"] for doc in self._data.values() if self._matches_filter(doc, filter)]
+        for doc_id in to_delete:
+            del self._data[doc_id]
+        return type('obj', (object,), {'deleted_count': len(to_delete)})()
+
     def count_documents(self, filter: Dict = None) -> int:
-        return len(self.find(filter))
+        if not filter:
+            return len(self._data)
+        return len([doc for doc in self._data.values() if self._matches_filter(doc, filter)])
+
+    def aggregate(self, pipeline: list) -> list:
+        """Basic aggregation support - just returns all documents for now"""
+        # This is a simplified implementation
+        return list(self._data.values())
 
 
 class MockDatabase:
@@ -335,6 +469,135 @@ class MockDatabase:
 def get_mock_db() -> MockDatabase:
     """Get mock database for testing"""
     return MockDatabase()
+
+
+# Seeded Mock Database singleton
+_seeded_mock_db = None
+
+
+def get_seeded_mock_db() -> MockDatabase:
+    """Get a mock database pre-seeded with sample data"""
+    global _seeded_mock_db
+    if _seeded_mock_db is None:
+        _seeded_mock_db = MockDatabase()
+        try:
+            from .seed_data import get_all_seed_data
+            seed_data = get_all_seed_data()
+            for collection_name, data in seed_data.items():
+                collection = _seeded_mock_db[collection_name]
+                for doc in data:
+                    collection.insert_one(doc)
+            print(f"✅ Seeded mock database with sample data")
+        except ImportError as e:
+            print(f"⚠️ Could not load seed data: {e}")
+    return _seeded_mock_db
+
+
+class SeededDatabaseConnection:
+    """
+    Database connection that falls back to seeded mock data
+    when MongoDB is not available
+    """
+    _instance = None
+    _mock_db = None
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+
+    def __init__(self):
+        self._real_db = db  # Use the real database connection
+        self._use_mock = False
+
+    @property
+    def is_connected(self) -> bool:
+        if self._real_db.is_connected:
+            return True
+        # If not connected to real DB, use mock
+        self._use_mock = True
+        return True  # Mock is always "connected"
+
+    @property
+    def db(self):
+        if self._real_db.is_connected:
+            return self._real_db.db
+        return get_seeded_mock_db()
+
+    def get_collection(self, name: str):
+        if self._real_db.is_connected:
+            return self._real_db.get_collection(name)
+        return get_seeded_mock_db()[name]
+
+    # Collection shortcuts
+    @property
+    def users(self):
+        return self.get_collection("users")
+
+    @property
+    def stores(self):
+        return self.get_collection("stores")
+
+    @property
+    def products(self):
+        return self.get_collection("products")
+
+    @property
+    def stock_units(self):
+        return self.get_collection("stock_units")
+
+    @property
+    def orders(self):
+        return self.get_collection("orders")
+
+    @property
+    def customers(self):
+        return self.get_collection("customers")
+
+    @property
+    def prescriptions(self):
+        return self.get_collection("prescriptions")
+
+    @property
+    def vendors(self):
+        return self.get_collection("vendors")
+
+    @property
+    def purchase_orders(self):
+        return self.get_collection("purchase_orders")
+
+    @property
+    def grns(self):
+        return self.get_collection("grns")
+
+    @property
+    def tasks(self):
+        return self.get_collection("tasks")
+
+    @property
+    def expenses(self):
+        return self.get_collection("expenses")
+
+    @property
+    def advances(self):
+        return self.get_collection("advances")
+
+    @property
+    def audit_logs(self):
+        return self.get_collection("audit_logs")
+
+    @property
+    def notifications(self):
+        return self.get_collection("notifications")
+
+
+# Seeded database instance
+seeded_db = SeededDatabaseConnection()
+
+
+def get_seeded_db() -> SeededDatabaseConnection:
+    """Get database connection with fallback to seeded mock data"""
+    return seeded_db
 
 
 if __name__ == "__main__":
