@@ -15,6 +15,118 @@ router = APIRouter()
 
 
 # ============================================================================
+# SAMPLE DATA (for demo when database is not connected)
+# ============================================================================
+
+SAMPLE_CUSTOMERS = [
+    {
+        "id": "cust-001",
+        "customerId": "cust-001",
+        "customerType": "B2C",
+        "name": "Rahul Sharma",
+        "mobile": "9876543210",
+        "email": "rahul.sharma@email.com",
+        "homeStoreId": "store-001",
+        "loyaltyPoints": 1250,
+        "storeCredit": 500,
+        "totalPurchases": 45230,
+        "isActive": True,
+        "patients": [
+            {"patientId": "pat-001", "name": "Rahul Sharma", "relation": "Self", "age": 35},
+            {"patientId": "pat-002", "name": "Priya Sharma", "relation": "Wife", "age": 32}
+        ],
+        "createdAt": "2024-01-15T10:30:00Z"
+    },
+    {
+        "id": "cust-002",
+        "customerId": "cust-002",
+        "customerType": "B2C",
+        "name": "Anita Verma",
+        "mobile": "9876543211",
+        "email": "anita.verma@email.com",
+        "homeStoreId": "store-001",
+        "loyaltyPoints": 850,
+        "storeCredit": 0,
+        "totalPurchases": 32100,
+        "isActive": True,
+        "patients": [
+            {"patientId": "pat-003", "name": "Anita Verma", "relation": "Self", "age": 42}
+        ],
+        "createdAt": "2024-02-20T14:15:00Z"
+    },
+    {
+        "id": "cust-003",
+        "customerId": "cust-003",
+        "customerType": "B2B",
+        "name": "Vision Care Hospital",
+        "mobile": "9876543212",
+        "email": "procurement@visioncare.com",
+        "gstin": "07AABCT1234Q1ZP",
+        "homeStoreId": "store-001",
+        "loyaltyPoints": 0,
+        "storeCredit": 0,
+        "totalPurchases": 245000,
+        "isActive": True,
+        "patients": [],
+        "createdAt": "2024-01-05T09:00:00Z"
+    },
+    {
+        "id": "cust-004",
+        "customerId": "cust-004",
+        "customerType": "B2C",
+        "name": "Vikram Singh",
+        "mobile": "9876543213",
+        "email": "vikram.singh@email.com",
+        "homeStoreId": "store-001",
+        "loyaltyPoints": 2100,
+        "storeCredit": 1000,
+        "totalPurchases": 78500,
+        "isActive": True,
+        "patients": [
+            {"patientId": "pat-004", "name": "Vikram Singh", "relation": "Self", "age": 55},
+            {"patientId": "pat-005", "name": "Sunita Singh", "relation": "Wife", "age": 52},
+            {"patientId": "pat-006", "name": "Arjun Singh", "relation": "Son", "age": 25}
+        ],
+        "createdAt": "2023-11-10T11:45:00Z"
+    },
+    {
+        "id": "cust-005",
+        "customerId": "cust-005",
+        "customerType": "B2C",
+        "name": "Meera Patel",
+        "mobile": "9876543214",
+        "email": "meera.patel@email.com",
+        "homeStoreId": "store-001",
+        "loyaltyPoints": 450,
+        "storeCredit": 200,
+        "totalPurchases": 15600,
+        "isActive": True,
+        "patients": [
+            {"patientId": "pat-007", "name": "Meera Patel", "relation": "Self", "age": 28}
+        ],
+        "createdAt": "2024-03-01T16:20:00Z"
+    }
+]
+
+
+def _get_sample_customers(search: str = None, customer_type: str = None):
+    """Filter sample customers based on search and type"""
+    result = SAMPLE_CUSTOMERS.copy()
+
+    if customer_type:
+        result = [c for c in result if c["customerType"] == customer_type]
+
+    if search:
+        search_lower = search.lower()
+        result = [c for c in result if
+                  search_lower in c["name"].lower() or
+                  search_lower in c["mobile"] or
+                  (c.get("email") and search_lower in c["email"].lower())]
+
+    return result
+
+
+# ============================================================================
 # SCHEMAS
 # ============================================================================
 
@@ -71,8 +183,9 @@ async def list_customers(
         total = repo.count(filter_dict) if not search else len(customers)
         return {"customers": customers, "total": total}
 
-    # Stub response if no database
-    return {"customers": [], "total": 0}
+    # Return sample data if no database
+    customers = _get_sample_customers(search, customer_type)
+    return {"customers": customers, "total": len(customers)}
 
 
 @router.post("/", status_code=201)
@@ -151,7 +264,47 @@ async def search_customers(
         customers = repo.search_customers(q, current_user.get("active_store_id"))
         return {"customers": customers}
 
-    return {"customers": []}
+    # Return filtered sample data
+    customers = _get_sample_customers(search=q)
+    return {"customers": customers}
+
+
+@router.get("/search/phone")
+async def search_customer_by_phone(
+    phone: str = Query(...),
+    current_user: dict = Depends(get_current_user)
+):
+    """Search customer by phone number (for quick lookup)"""
+    repo = get_customer_repository()
+
+    if repo:
+        customer = repo.find_by_mobile(phone)
+        if customer:
+            return customer
+        return None
+
+    # Search in sample data
+    for c in SAMPLE_CUSTOMERS:
+        if c["mobile"] == phone:
+            return c
+    return None
+
+
+@router.get("/search/phone")
+async def search_customer_by_phone(
+    phone: str = Query(...),
+    current_user: dict = Depends(get_current_user)
+):
+    """Search customer by phone number"""
+    repo = get_customer_repository()
+
+    if repo:
+        customer = repo.find_by_mobile(phone)
+        if customer:
+            return customer
+        raise HTTPException(status_code=404, detail="Customer not found")
+
+    return {"phone": phone, "message": "Database not connected"}
 
 
 @router.get("/mobile/{mobile}")
@@ -168,7 +321,11 @@ async def get_customer_by_mobile(
             return customer
         raise HTTPException(status_code=404, detail="Customer not found")
 
-    return {"mobile": mobile, "message": "Database not connected"}
+    # Search in sample data
+    for c in SAMPLE_CUSTOMERS:
+        if c["mobile"] == mobile:
+            return c
+    raise HTTPException(status_code=404, detail="Customer not found")
 
 
 @router.get("/{customer_id}")
@@ -185,7 +342,11 @@ async def get_customer(
             return customer
         raise HTTPException(status_code=404, detail="Customer not found")
 
-    return {"customer_id": customer_id}
+    # Search in sample data
+    for c in SAMPLE_CUSTOMERS:
+        if c["id"] == customer_id or c["customerId"] == customer_id:
+            return c
+    raise HTTPException(status_code=404, detail="Customer not found")
 
 
 @router.put("/{customer_id}")
