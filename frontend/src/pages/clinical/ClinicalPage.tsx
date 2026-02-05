@@ -34,6 +34,7 @@ interface QueueItem {
   status: QueueStatus;
   waitTime: number;
   createdAt: string;
+  testId?: string;
 }
 
 interface CompletedTest {
@@ -71,6 +72,7 @@ export function ClinicalPage() {
     age?: number;
     customerId: string;
   } | null>(null);
+  const [currentTestId, setCurrentTestId] = useState<string | null>(null);
 
   // Loading state
   const [isLoading, setIsLoading] = useState(true);
@@ -110,13 +112,15 @@ export function ClinicalPage() {
     }
   };
 
-  const handleStartTest = async (queueId: string) => {
+  const handleStartTest = async (queueId: string): Promise<string | null> => {
     setActionLoading(queueId);
     try {
-      await clinicalApi.startTest(queueId);
+      const result = await clinicalApi.startTest(queueId);
       await loadData();
+      return result?.testId || null;
     } catch {
       setError('Failed to start test.');
+      return null;
     } finally {
       setActionLoading(null);
     }
@@ -135,11 +139,42 @@ export function ClinicalPage() {
 
   const handleSaveEyeTest = async (data: EyeTestData) => {
     try {
-      // TODO: Save eye test data to backend
-      console.log('Eye test data:', data);
+      if (!currentTestId) {
+        toast.error('No active test found');
+        return;
+      }
+
+      // Extract prescription data from finalRx for the API
+      const rightEye = data.finalRx?.rightEye || {};
+      const leftEye = data.finalRx?.leftEye || {};
+
+      // Convert string values to numbers, handling empty strings
+      const parseValue = (val: string): number | null => {
+        const num = parseFloat(val);
+        return isNaN(num) ? null : num;
+      };
+
+      await clinicalApi.completeTest(currentTestId, {
+        rightEye: {
+          sphere: parseValue(rightEye.sphere || ''),
+          cylinder: parseValue(rightEye.cylinder || ''),
+          axis: parseValue(rightEye.axis || ''),
+          add: parseValue(rightEye.add || ''),
+        },
+        leftEye: {
+          sphere: parseValue(leftEye.sphere || ''),
+          cylinder: parseValue(leftEye.cylinder || ''),
+          axis: parseValue(leftEye.axis || ''),
+          add: parseValue(leftEye.add || ''),
+        },
+        pd: parseValue(rightEye.pd || leftEye.pd || '') ?? undefined,
+        notes: data.chiefComplaint || '',
+      });
+
       toast.success('Eye test saved successfully');
       setShowEyeTestForm(false);
       setSelectedPatient(null);
+      setCurrentTestId(null);
       await loadData();
     } catch {
       toast.error('Failed to save eye test');
@@ -344,8 +379,11 @@ export function ClinicalPage() {
                       {item.status === 'WAITING' && canStartTest && (
                         <button
                           onClick={async () => {
-                            await handleStartTest(item.id);
-                            handleOpenEyeTest(item);
+                            const testId = await handleStartTest(item.id);
+                            if (testId) {
+                              setCurrentTestId(testId);
+                              handleOpenEyeTest(item);
+                            }
                           }}
                           disabled={isActionLoading}
                           className="btn-primary flex items-center gap-2 disabled:opacity-50"
@@ -360,7 +398,12 @@ export function ClinicalPage() {
                       )}
                       {item.status === 'IN_PROGRESS' && canStartTest && (
                         <button
-                          onClick={() => handleOpenEyeTest(item)}
+                          onClick={() => {
+                            // For in-progress tests, use the testId from the queue item or fallback to queue id
+                            const testId = item.testId || item.id;
+                            setCurrentTestId(testId);
+                            handleOpenEyeTest(item);
+                          }}
                           className="btn-primary flex items-center gap-2"
                         >
                           <Eye className="w-4 h-4" />
@@ -432,6 +475,7 @@ export function ClinicalPage() {
         onClose={() => {
           setShowEyeTestForm(false);
           setSelectedPatient(null);
+          setCurrentTestId(null);
         }}
         onSave={handleSaveEyeTest}
         patient={selectedPatient}

@@ -23,6 +23,7 @@ try:
     from database.repositories.vendor_repository import VendorRepository, PurchaseOrderRepository, GRNRepository
     from database.repositories.hr_repository import AttendanceRepository, LeaveRepository, PayrollRepository
     from database.repositories.audit_repository import AuditRepository
+    from database.repositories.clinical_repository import EyeTestQueueRepository, EyeTestRepository
     DATABASE_AVAILABLE = True
 except ImportError as e:
     print(f"⚠️ Database import error: {e}")
@@ -177,4 +178,20 @@ def get_audit_repository():
     db = get_db()
     if db and db.is_connected:
         return AuditRepository(db.audit_logs)
+    return None
+
+
+def get_eye_test_queue_repository():
+    """Get EyeTestQueueRepository instance"""
+    db = get_db()
+    if db and db.is_connected:
+        return EyeTestQueueRepository(db.eye_test_queue)
+    return None
+
+
+def get_eye_test_repository():
+    """Get EyeTestRepository instance"""
+    db = get_db()
+    if db and db.is_connected:
+        return EyeTestRepository(db.eye_tests)
     return None

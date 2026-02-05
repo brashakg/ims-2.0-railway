@@ -13,7 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any
 from datetime import datetime
-from .auth import get_current_user
+from .auth import get_current_user, hash_password, verify_password
 
 router = APIRouter()
 
@@ -291,7 +291,28 @@ async def change_password(
     current_user: dict = Depends(get_current_user)
 ):
     """Change current user's password"""
-    # In production, verify current password and update
+    from ..dependencies import get_user_repository
+
+    user_repo = get_user_repository()
+
+    if user_repo:
+        # Get user from database
+        user = user_repo.find_by_id(current_user.get("user_id"))
+        if user:
+            # Verify current password
+            stored_hash = user.get("password_hash")
+            if stored_hash and not verify_password(passwords.current_password, stored_hash):
+                raise HTTPException(status_code=400, detail="Current password is incorrect")
+
+            # Update password in database
+            new_hash = hash_password(passwords.new_password)
+            user_repo.update(current_user.get("user_id"), {"password_hash": new_hash})
+            return {"message": "Password changed successfully"}
+
+    # For demo mode without database, validate format only
+    if len(passwords.new_password) < 8:
+        raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
+
     return {"message": "Password changed successfully"}
 
 

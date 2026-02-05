@@ -246,6 +246,14 @@ class DatabaseConnection:
     def notifications(self) -> Optional[Collection]:
         return self.get_collection("notifications")
 
+    @property
+    def eye_test_queue(self) -> Optional[Collection]:
+        return self.get_collection("eye_test_queue")
+
+    @property
+    def eye_tests(self) -> Optional[Collection]:
+        return self.get_collection("eye_tests")
+
 
 # Global instance
 db = DatabaseConnection()
@@ -589,6 +597,14 @@ class SeededDatabaseConnection:
     @property
     def notifications(self):
         return self.get_collection("notifications")
+
+    @property
+    def eye_test_queue(self):
+        return self.get_collection("eye_test_queue")
+
+    @property
+    def eye_tests(self):
+        return self.get_collection("eye_tests")
 
 
 # Seeded database instance
