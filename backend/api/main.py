@@ -106,12 +106,35 @@ DEFAULT_CORS_ORIGINS = [
     "https://ims-20-railway-production.up.railway.app",
 ]
 
+
+def _sanitize_cors_origin(origin: str) -> str:
+    """Sanitize a CORS origin - remove paths, ensure it's a valid origin"""
+    origin = origin.strip()
+    # Skip wildcards and empty strings
+    if not origin or origin == "*":
+        return ""
+    # Remove any path component - CORS origins should only be scheme://host[:port]
+    if "://" in origin:
+        parts = origin.split("://", 1)
+        scheme = parts[0]
+        rest = parts[1]
+        # Remove path (everything after first /)
+        host_port = rest.split("/")[0]
+        return f"{scheme}://{host_port}"
+    return ""
+
+
 # Add any custom origins from environment
 env_origins = os.getenv("CORS_ORIGINS", "")
-if env_origins and env_origins != "*":
-    CORS_ORIGINS = DEFAULT_CORS_ORIGINS + [o.strip() for o in env_origins.split(",") if o.strip()]
+if env_origins:
+    custom_origins = [_sanitize_cors_origin(o) for o in env_origins.split(",")]
+    # Filter out empty strings and duplicates
+    custom_origins = [o for o in custom_origins if o and o not in DEFAULT_CORS_ORIGINS]
+    CORS_ORIGINS = DEFAULT_CORS_ORIGINS + custom_origins
 else:
     CORS_ORIGINS = DEFAULT_CORS_ORIGINS
+
+logger.info(f"CORS Origins configured: {CORS_ORIGINS}")
 
 app.add_middleware(
     CORSMiddleware,
