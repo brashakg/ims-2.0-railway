@@ -74,9 +74,9 @@ async def get_stock(
                 filter_dict["category"] = category
             stock = repo.find_many(filter_dict, limit=100)
 
-        return {"stock": stock, "total": len(stock)}
+        return {"items": stock, "total": len(stock)}
 
-    return {"stock": [], "total": 0}
+    return {"items": [], "total": 0}
 
 
 # NOTE: Specific routes MUST come before /{parameter} routes
@@ -90,10 +90,27 @@ async def get_low_stock_alerts(
     active_store = store_id or current_user.get("active_store_id")
 
     if repo:
-        alerts = repo.find_low_stock(active_store)
-        return {"alerts": alerts}
+        items = repo.find_low_stock(active_store)
+        return {"items": items}
 
-    return {"alerts": []}
+    return {"items": []}
+
+
+@router.get("/barcode/{barcode}")
+async def get_stock_by_barcode_short(
+    barcode: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """Get stock item by barcode (short path)"""
+    repo = get_stock_repository()
+
+    if repo:
+        stock = repo.find_by_barcode(barcode)
+        if stock:
+            return stock
+        raise HTTPException(status_code=404, detail="Stock item not found")
+
+    return {"barcode": barcode}
 
 
 @router.get("/expiring")
