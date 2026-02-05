@@ -3,7 +3,7 @@
 // ============================================================================
 // Dynamic product creation with category-specific fields
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import {
   Package,
   ChevronRight,
@@ -21,6 +21,7 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
+import { getHSNByCategory, getHSNOptions } from '../../constants/gst';
 import clsx from 'clsx';
 
 // Product categories with display names
@@ -209,6 +210,18 @@ export function AddProductPage() {
   // UI state
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errors, setErrors] = useState<Record<string, string>>({});
+  const [useAdvancedHSN, setUseAdvancedHSN] = useState(false);
+
+  // Auto-populate HSN code and GST rate when category changes
+  useEffect(() => {
+    if (selectedCategory) {
+      const hsnData = getHSNByCategory(selectedCategory, useAdvancedHSN);
+      if (hsnData) {
+        setHsnCode(hsnData.code);
+        setGstRate(hsnData.gstRate.toString());
+      }
+    }
+  }, [selectedCategory, useAdvancedHSN]);
 
   // Permissions check
   const canAddProduct = hasRole(['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER']);
@@ -443,46 +456,81 @@ export function AddProductPage() {
           />
         </div>
 
-        <div className="grid grid-cols-1 tablet:grid-cols-3 gap-4">
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
-              HSN Code
+        <div className="space-y-4 pt-4 border-t">
+          <div className="flex items-center justify-between">
+            <h3 className="font-medium text-gray-900">GST & Tax Information</h3>
+            <label className="flex items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={useAdvancedHSN}
+                onChange={(e) => setUseAdvancedHSN(e.target.checked)}
+                className="w-4 h-4 text-bv-gold-500 border-gray-300 rounded focus:ring-bv-gold-500"
+              />
+              <span className="text-gray-600">Use 6-digit HSN (turnover &gt; ₹5 Cr)</span>
             </label>
-            <input
-              type="text"
-              value={hsnCode}
-              onChange={(e) => setHsnCode(e.target.value)}
-              className="input-field w-full"
-              placeholder="e.g., 90049090"
-            />
           </div>
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
-              GST Rate (%)
-            </label>
-            <select
-              value={gstRate}
-              onChange={(e) => setGstRate(e.target.value)}
-              className="input-field w-full"
-            >
-              <option value="0">0%</option>
-              <option value="5">5%</option>
-              <option value="12">12%</option>
-              <option value="18">18%</option>
-              <option value="28">28%</option>
-            </select>
+
+          <div className="grid grid-cols-1 tablet:grid-cols-3 gap-4">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                HSN Code <span className="text-red-500">*</span>
+              </label>
+              <select
+                value={hsnCode}
+                onChange={(e) => {
+                  setHsnCode(e.target.value);
+                  // Update GST rate when HSN changes
+                  const option = getHSNOptions(useAdvancedHSN).find(opt => opt.value === e.target.value);
+                  if (option) {
+                    setGstRate(option.gstRate.toString());
+                  }
+                }}
+                className="input-field w-full"
+              >
+                <option value="">Select HSN Code</option>
+                {getHSNOptions(useAdvancedHSN).map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+              <p className="text-xs text-gray-500 mt-1">
+                Auto-selected based on category
+              </p>
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                GST Rate (%)
+              </label>
+              <input
+                type="text"
+                value={`${gstRate}%`}
+                readOnly
+                className="input-field w-full bg-gray-50 cursor-not-allowed"
+              />
+              <p className="text-xs text-gray-500 mt-1">
+                Auto-filled from HSN code
+              </p>
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Weight (grams)
+              </label>
+              <input
+                type="number"
+                value={weight}
+                onChange={(e) => setWeight(e.target.value)}
+                className="input-field w-full"
+                placeholder="e.g., 50"
+              />
+            </div>
           </div>
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
-              Weight (grams)
-            </label>
-            <input
-              type="number"
-              value={weight}
-              onChange={(e) => setWeight(e.target.value)}
-              className="input-field w-full"
-              placeholder="e.g., 50"
-            />
+
+          <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 text-sm text-blue-700">
+            <p>
+              <strong>Note:</strong> {useAdvancedHSN ? '6-digit' : '4-digit'} HSN code is mandatory for GST compliance.
+              {!useAdvancedHSN && ' Use 6-digit HSN if your annual turnover exceeds ₹5 Cr.'}
+            </p>
           </div>
         </div>
       </div>

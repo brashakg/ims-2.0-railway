@@ -14,8 +14,10 @@
     "axios": "^1.13.2",
     "clsx": "^2.1.1",
     "date-fns": "^4.1.0",
+    "jsbarcode": "^3.12.3",
     "lucide-react": "^0.562.0",
     "react": "^19.2.0",
+    "react-barcode": "^1.6.1",
     "react-dom": "^19.2.0",
     "react-router-dom": "^6.30.3"
   },

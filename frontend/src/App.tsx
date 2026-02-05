@@ -19,6 +19,10 @@ const CustomersPage = lazy(() => import('./pages/customers/CustomersPage').then(
 const InventoryPage = lazy(() => import('./pages/inventory/InventoryPage').then(m => ({ default: m.InventoryPage })));
 const OrdersPage = lazy(() => import('./pages/orders/OrdersPage').then(m => ({ default: m.OrdersPage })));
 const ClinicalPage = lazy(() => import('./pages/clinical/ClinicalPage').then(m => ({ default: m.ClinicalPage })));
+const NewEyeTestPage = lazy(() => import('./pages/clinical/NewEyeTestPage').then(m => ({ default: m.NewEyeTestPage })));
+const TestHistoryPage = lazy(() => import('./pages/clinical/TestHistoryPage').then(m => ({ default: m.TestHistoryPage })));
+const PrescriptionsPage = lazy(() => import('./pages/clinical/PrescriptionsPage').then(m => ({ default: m.PrescriptionsPage })));
+const ContactLensFittingPage = lazy(() => import('./pages/clinical/ContactLensFittingPage').then(m => ({ default: m.ContactLensFittingPage })));
 const WorkshopPage = lazy(() => import('./pages/workshop/WorkshopPage').then(m => ({ default: m.WorkshopPage })));
 const TasksPage = lazy(() => import('./pages/tasks/TasksPage').then(m => ({ default: m.TasksPage })));
 const HRPage = lazy(() => import('./pages/hr/HRPage').then(m => ({ default: m.HRPage })));
@@ -152,6 +156,46 @@ function App() {
                         allowedRoles={['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'OPTOMETRIST']}
                       >
                         <ClinicalPage />
+                      </ProtectedRoute>
+                    }
+                  />
+                  <Route
+                    path="clinical/test"
+                    element={
+                      <ProtectedRoute
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'OPTOMETRIST']}
+                      >
+                        <NewEyeTestPage />
+                      </ProtectedRoute>
+                    }
+                  />
+                  <Route
+                    path="clinical/history"
+                    element={
+                      <ProtectedRoute
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'OPTOMETRIST']}
+                      >
+                        <TestHistoryPage />
+                      </ProtectedRoute>
+                    }
+                  />
+                  <Route
+                    path="prescriptions"
+                    element={
+                      <ProtectedRoute
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'OPTOMETRIST']}
+                      >
+                        <PrescriptionsPage />
+                      </ProtectedRoute>
+                    }
+                  />
+                  <Route
+                    path="clinical/contact-lens"
+                    element={
+                      <ProtectedRoute
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'OPTOMETRIST']}
+                      >
+                        <ContactLensFittingPage />
                       </ProtectedRoute>
                     }
                   />

@@ -18,10 +18,13 @@ import {
   Loader2,
   RefreshCw,
   AlertTriangle,
+  X,
 } from 'lucide-react';
 import { reportsApi } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
+import { GSTR1Report } from '../../components/reports/GSTR1Report';
+import { GSTR3BReport } from '../../components/reports/GSTR3BReport';
 import clsx from 'clsx';
 
 type ReportType = 'sales' | 'inventory' | 'customers' | 'gst';
@@ -118,6 +121,10 @@ export function ReportsPage() {
   // Loading state
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  // GST Reports Modal state
+  const [showGSTR1, setShowGSTR1] = useState(false);
+  const [showGSTR3B, setShowGSTR3B] = useState(false);
 
   // Role-based permissions
   const canExport = hasRole(['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT']);
@@ -483,18 +490,58 @@ export function ReportsPage() {
               </p>
               <div className="flex gap-3 mt-3">
                 <button
-                  onClick={() => toast.info('GSTR-1 download feature coming soon')}
+                  onClick={() => setShowGSTR1(true)}
                   className="btn-primary text-sm"
                 >
-                  Download GSTR-1
+                  View GSTR-1
                 </button>
                 <button
-                  onClick={() => toast.info('GSTR-3B download feature coming soon')}
+                  onClick={() => setShowGSTR3B(true)}
                   className="btn-outline text-sm"
                 >
-                  Download GSTR-3B
+                  View GSTR-3B
                 </button>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* GSTR-1 Modal */}
+      {showGSTR1 && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-7xl max-h-[90vh] overflow-y-auto">
+            <div className="sticky top-0 bg-white border-b border-gray-200 px-6 py-4 flex items-center justify-between">
+              <h2 className="text-xl font-bold text-gray-900">GSTR-1 Report</h2>
+              <button
+                onClick={() => setShowGSTR1(false)}
+                className="p-2 hover:bg-gray-100 rounded-lg"
+              >
+                <X className="w-5 h-5 text-gray-500" />
+              </button>
+            </div>
+            <div className="p-6">
+              <GSTR1Report />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* GSTR-3B Modal */}
+      {showGSTR3B && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-7xl max-h-[90vh] overflow-y-auto">
+            <div className="sticky top-0 bg-white border-b border-gray-200 px-6 py-4 flex items-center justify-between">
+              <h2 className="text-xl font-bold text-gray-900">GSTR-3B Report</h2>
+              <button
+                onClick={() => setShowGSTR3B(false)}
+                className="p-2 hover:bg-gray-100 rounded-lg"
+              >
+                <X className="w-5 h-5 text-gray-500" />
+              </button>
+            </div>
+            <div className="p-6">
+              <GSTR3BReport />
             </div>
           </div>
         </div>

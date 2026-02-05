@@ -251,6 +251,12 @@ export const inventoryApi = {
     return response.data;
   },
 
+  searchByBarcode: async (barcode: string, storeId: string) => {
+    // Search for product by barcode in specific store
+    const response = await api.get(`/inventory/barcode/${barcode}`, { params: { store_id: storeId } });
+    return response.data;
+  },
+
   getLowStock: async (storeId: string) => {
     const response = await api.get('/inventory/low-stock', { params: { store_id: storeId } });
     return response.data;
@@ -1500,6 +1506,67 @@ export const settingsApi = {
 
   testNotification: async (templateId: string, testPhone?: string, testEmail?: string) => {
     const response = await api.post('/settings/notifications/test', { template_id: templateId, test_phone: testPhone, test_email: testEmail });
+    return response.data;
+  },
+
+  // Notification Providers
+  getNotificationProviders: async () => {
+    const response = await api.get('/settings/notifications/providers');
+    return response.data;
+  },
+
+  updateNotificationProvider: async (provider: {
+    provider: string;
+    api_key: string;
+    api_secret?: string;
+    sender_id?: string;
+    webhook_url?: string;
+    is_active: boolean;
+  }) => {
+    const response = await api.put('/settings/notifications/providers', provider);
+    return response.data;
+  },
+
+  // Notification Logs
+  getNotificationLogs: async (params?: {
+    customer_id?: string;
+    template_id?: string;
+    channel?: string;
+    status?: string;
+    start_date?: string;
+    end_date?: string;
+    limit?: number;
+    offset?: number;
+  }) => {
+    const response = await api.get('/settings/notifications/logs', { params });
+    return response.data;
+  },
+
+  // Send Notification
+  sendNotification: async (notification: {
+    template_id: string;
+    customer_id?: string;
+    phone?: string;
+    email?: string;
+    variables: Record<string, string>;
+    channel?: 'SMS' | 'WHATSAPP' | 'EMAIL';
+  }) => {
+    const response = await api.post('/notifications/send', notification);
+    return response.data;
+  },
+
+  // Bulk Notifications
+  sendBulkNotifications: async (notifications: {
+    template_id: string;
+    recipients: Array<{
+      customer_id?: string;
+      phone?: string;
+      email?: string;
+      variables: Record<string, string>;
+    }>;
+    channel?: 'SMS' | 'WHATSAPP' | 'EMAIL';
+  }) => {
+    const response = await api.post('/notifications/send-bulk', notifications);
     return response.data;
   },
 
