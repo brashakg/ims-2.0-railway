@@ -169,7 +169,7 @@ async def set_shopify_config(
 @router.post("/integrations/shopify/test")
 async def test_shopify_connection(current_user: dict = Depends(get_current_user)):
     """Test Shopify API connection"""
-    config = _get_integration_config("shopify", {}).get("config", {})
+    config = _get_integration_config("shopify").get("config", {})
 
     if not config.get("shop_url"):
         raise HTTPException(status_code=400, detail="Shopify not configured")
@@ -194,7 +194,7 @@ async def sync_shopify_orders(
     current_user: dict = Depends(get_current_user)
 ):
     """Sync orders from Shopify"""
-    config = _get_integration_config("shopify", {})
+    config = _get_integration_config("shopify")
 
     if not config.get("enabled"):
         raise HTTPException(status_code=400, detail="Shopify integration not enabled")
@@ -216,7 +216,7 @@ async def sync_shopify_orders(
 @router.post("/integrations/shopify/sync-inventory")
 async def sync_shopify_inventory(current_user: dict = Depends(get_current_user)):
     """Push inventory updates to Shopify"""
-    config = _get_integration_config("shopify", {})
+    config = _get_integration_config("shopify")
 
     if not config.get("enabled"):
         raise HTTPException(status_code=400, detail="Shopify integration not enabled")
@@ -241,7 +241,7 @@ async def sync_shopify_inventory(current_user: dict = Depends(get_current_user))
 @router.get("/integrations/shiprocket")
 async def get_shiprocket_config(current_user: dict = Depends(get_current_user)):
     """Get Shiprocket integration configuration"""
-    config = _get_integration_config("shiprocket", {})
+    config = _get_integration_config("shiprocket")
     return {
         "type": "SHIPROCKET",
         "name": "Shiprocket",
@@ -277,7 +277,7 @@ async def set_shiprocket_config(
 @router.post("/integrations/shiprocket/test")
 async def test_shiprocket_connection(current_user: dict = Depends(get_current_user)):
     """Test Shiprocket API connection"""
-    config = _get_integration_config("shiprocket", {}).get("config", {})
+    config = _get_integration_config("shiprocket").get("config", {})
 
     if not config.get("email"):
         raise HTTPException(status_code=400, detail="Shiprocket not configured")
@@ -302,7 +302,7 @@ async def create_shiprocket_shipment(
     current_user: dict = Depends(get_current_user)
 ):
     """Create a shipment in Shiprocket"""
-    config = _get_integration_config("shiprocket", {})
+    config = _get_integration_config("shiprocket")
 
     if not config.get("enabled"):
         raise HTTPException(status_code=400, detail="Shiprocket integration not enabled")
@@ -333,7 +333,7 @@ async def track_shiprocket_shipment(
     current_user: dict = Depends(get_current_user)
 ):
     """Track a shipment by AWB number"""
-    config = _get_integration_config("shiprocket", {})
+    config = _get_integration_config("shiprocket")
 
     if not config.get("enabled"):
         raise HTTPException(status_code=400, detail="Shiprocket integration not enabled")
@@ -366,7 +366,7 @@ async def get_shiprocket_rates(
     current_user: dict = Depends(get_current_user)
 ):
     """Get shipping rates from Shiprocket"""
-    config = _get_integration_config("shiprocket", {})
+    config = _get_integration_config("shiprocket")
 
     if not config.get("enabled"):
         raise HTTPException(status_code=400, detail="Shiprocket integration not enabled")
@@ -418,7 +418,7 @@ async def get_shiprocket_rates(
 @router.get("/integrations/razorpay")
 async def get_razorpay_config(current_user: dict = Depends(get_current_user)):
     """Get Razorpay integration configuration"""
-    config = _get_integration_config("razorpay", {})
+    config = _get_integration_config("razorpay")
     return {
         "type": "RAZORPAY",
         "name": "Razorpay",
@@ -451,7 +451,7 @@ async def set_razorpay_config(
 @router.post("/integrations/razorpay/test")
 async def test_razorpay_connection(current_user: dict = Depends(get_current_user)):
     """Test Razorpay API connection"""
-    config = _get_integration_config("razorpay", {}).get("config", {})
+    config = _get_integration_config("razorpay").get("config", {})
 
     if not config.get("key_id"):
         raise HTTPException(status_code=400, detail="Razorpay not configured")
@@ -474,7 +474,7 @@ async def test_razorpay_connection(current_user: dict = Depends(get_current_user
 @router.get("/integrations/whatsapp")
 async def get_whatsapp_config(current_user: dict = Depends(get_current_user)):
     """Get WhatsApp Business integration configuration"""
-    config = _get_integration_config("whatsapp", {})
+    config = _get_integration_config("whatsapp")
     return {
         "type": "WHATSAPP",
         "name": "WhatsApp Business",
@@ -508,7 +508,7 @@ async def set_whatsapp_config(
 @router.post("/integrations/whatsapp/test")
 async def test_whatsapp_connection(current_user: dict = Depends(get_current_user)):
     """Test WhatsApp Business API connection"""
-    config = _get_integration_config("whatsapp", {}).get("config", {})
+    config = _get_integration_config("whatsapp").get("config", {})
 
     if not config.get("api_key"):
         raise HTTPException(status_code=400, detail="WhatsApp not configured")
@@ -531,7 +531,7 @@ async def test_whatsapp_connection(current_user: dict = Depends(get_current_user
 @router.get("/integrations/tally")
 async def get_tally_config(current_user: dict = Depends(get_current_user)):
     """Get Tally ERP integration configuration"""
-    config = _get_integration_config("tally", {})
+    config = _get_integration_config("tally")
     return {
         "type": "TALLY",
         "name": "Tally ERP",
@@ -566,7 +566,7 @@ async def set_tally_config(
 @router.post("/integrations/tally/test")
 async def test_tally_connection(current_user: dict = Depends(get_current_user)):
     """Test Tally ERP connection"""
-    config = _get_integration_config("tally", {}).get("config", {})
+    config = _get_integration_config("tally").get("config", {})
 
     if not config.get("server_url"):
         raise HTTPException(status_code=400, detail="Tally not configured")
@@ -589,7 +589,7 @@ async def test_tally_connection(current_user: dict = Depends(get_current_user)):
 @router.get("/integrations/sms")
 async def get_sms_config(current_user: dict = Depends(get_current_user)):
     """Get SMS Gateway configuration"""
-    config = _get_integration_config("sms", {})
+    config = _get_integration_config("sms")
     return {
         "type": "SMS",
         "name": "SMS Gateway",
