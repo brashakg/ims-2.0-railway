@@ -201,11 +201,15 @@ export default function DashboardPage() {
       const salesRes = await reportsApi.getDashboardStats(user?.activeStoreId || '').catch(() => null);
 
       if (salesRes) {
-        setStats(prev => ({
-          ...prev,
-          todaySales: salesRes.total_sales || 45230,
+        setStats({
+          todaySales: salesRes.totalSales || 45230,
+          pendingOrders: salesRes.pendingOrders || 23,
+          urgentOrders: salesRes.urgentOrders || 5,
+          appointmentsToday: salesRes.appointmentsToday || 8,
+          upcomingAppointments: salesRes.upcomingAppointments || 2,
+          lowStockItems: salesRes.lowStockItems || 12,
           salesChange: salesRes.change || 12,
-        }));
+        });
       } else {
         // Sample data for demo
         setStats({

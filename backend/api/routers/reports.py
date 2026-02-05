@@ -8,6 +8,48 @@ from .auth import get_current_user
 
 router = APIRouter()
 
+
+@router.get("/dashboard")
+async def dashboard_stats(
+    store_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user)
+):
+    """Get dashboard statistics for a store"""
+    # Return aggregated stats for dashboard
+    # In production, this would aggregate data from orders, inventory, appointments etc.
+    return {
+        "totalSales": 45230,
+        "change": 12,
+        "pendingOrders": 23,
+        "urgentOrders": 5,
+        "appointmentsToday": 8,
+        "upcomingAppointments": 2,
+        "lowStockItems": 12,
+        "todaySummary": {
+            "totalOrders": 15,
+            "deliveries": 8,
+            "eyeTests": 6,
+            "newCustomers": 3,
+            "paymentsReceived": 32500
+        }
+    }
+
+
+@router.get("/inventory")
+async def inventory_report(
+    store_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user)
+):
+    """Get inventory report for a store"""
+    return {
+        "totalItems": 1250,
+        "totalValue": 2500000,
+        "lowStock": 12,
+        "outOfStock": 3,
+        "categories": []
+    }
+
+
 @router.get("/sales/summary")
 async def sales_summary(
     store_id: Optional[str] = Query(None),
