@@ -20,6 +20,7 @@ import {
   RefreshCw,
   Barcode,
   ShoppingCart,
+  Hash,
 } from 'lucide-react';
 import type { ProductCategory } from '../../types';
 import { inventoryApi } from '../../services/api';
@@ -29,6 +30,7 @@ import { BarcodeManagementModal } from '../../components/inventory/BarcodeManage
 import { StockTransferModal } from '../../components/inventory/StockTransferModal';
 import { StockTransferManagement } from '../../components/inventory/StockTransferManagement';
 import { ReorderDashboard } from '../../components/inventory/ReorderDashboard';
+import { SerialNumberTracker } from '../../components/inventory/SerialNumberTracker';
 import clsx from 'clsx';
 
 // Category configuration
@@ -77,7 +79,7 @@ interface StockMovement {
   createdBy: string;
 }
 
-type ViewTab = 'catalog' | 'low-stock' | 'reorders' | 'transfers' | 'movements';
+type ViewTab = 'catalog' | 'low-stock' | 'reorders' | 'serial-numbers' | 'transfers' | 'movements';
 
 export function InventoryPage() {
   const { user, hasRole } = useAuth();
@@ -326,6 +328,7 @@ export function InventoryPage() {
           { id: 'catalog' as ViewTab, label: 'Catalog', icon: Package },
           { id: 'low-stock' as ViewTab, label: `Low Stock (${lowStockCount})`, icon: AlertTriangle },
           { id: 'reorders' as ViewTab, label: 'Reorders', icon: ShoppingCart },
+          { id: 'serial-numbers' as ViewTab, label: 'Serial Numbers', icon: Hash },
           { id: 'transfers' as ViewTab, label: 'Transfers', icon: ArrowRightLeft },
           { id: 'movements' as ViewTab, label: 'Movements', icon: Eye },
         ].map(tab => (
@@ -346,7 +349,7 @@ export function InventoryPage() {
       </div>
 
       {/* Search and Filters */}
-      {activeTab !== 'transfers' && activeTab !== 'reorders' && (
+      {activeTab !== 'transfers' && activeTab !== 'reorders' && activeTab !== 'serial-numbers' && (
       <div className="card">
         <div className="flex flex-col tablet:flex-row gap-4 mb-4">
           <div className="relative flex-1">
@@ -539,6 +542,13 @@ export function InventoryPage() {
       {activeTab === 'reorders' && (
         <div className="space-y-4">
           <ReorderDashboard />
+        </div>
+      )}
+
+      {/* Serial Numbers Tab */}
+      {activeTab === 'serial-numbers' && (
+        <div className="space-y-4">
+          <SerialNumberTracker />
         </div>
       )}
 
