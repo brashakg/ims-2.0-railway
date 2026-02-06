@@ -10,11 +10,9 @@ import {
   AlertTriangle,
   Save,
   Loader2,
-  Package,
   BarChart3,
   Calculator,
 } from 'lucide-react';
-import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 
 interface ReorderPointModalProps {
@@ -44,7 +42,6 @@ export interface ReorderPointData {
 }
 
 export function ReorderPointModal({ isOpen, onClose, product, onSave }: ReorderPointModalProps) {
-  const { user } = useAuth();
   const toast = useToast();
 
   const [isSaving, setIsSaving] = useState(false);
