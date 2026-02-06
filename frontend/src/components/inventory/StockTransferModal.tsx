@@ -56,7 +56,6 @@ export function StockTransferModal({ isOpen, onClose, onTransferCreated }: Stock
   const toast = useToast();
 
   const [step, setStep] = useState<'details' | 'items' | 'review'>('details');
-  const [isLoading, setIsLoading] = useState(false);
   const [isSending, setIsSending] = useState(false);
 
   // Transfer details
@@ -112,17 +111,21 @@ export function StockTransferModal({ isOpen, onClose, onTransferCreated }: Stock
 
     setIsSearching(true);
     try {
-      const stock = await inventoryApi.getStock({
-        storeId: user?.activeStoreId || '',
-        search: searchQuery,
-      });
+      // Get all stock for the store and filter client-side
+      // In production, the API should support search parameter
+      const stock = await inventoryApi.getStock(user?.activeStoreId || '');
 
-      // Filter out items already in transfer and items with no available quantity
-      const availableStock = stock.filter(
-        (item: StockItem) =>
-          !transferItems.some(ti => ti.productId === item.productId) &&
-          (item.quantity - item.reservedQuantity) > 0
-      );
+      // Filter by search query and availability
+      const availableStock = stock.filter((item: StockItem) => {
+        const matchesSearch =
+          item.productName?.toLowerCase().includes(searchQuery.toLowerCase()) ||
+          item.sku?.toLowerCase().includes(searchQuery.toLowerCase());
+
+        const notInTransfer = !transferItems.some(ti => ti.productId === item.productId);
+        const hasAvailableQty = (item.quantity - item.reservedQuantity) > 0;
+
+        return matchesSearch && notInTransfer && hasAvailableQty;
+      });
 
       setSearchResults(availableStock);
     } catch (error: any) {
@@ -190,14 +193,14 @@ export function StockTransferModal({ isOpen, onClose, onTransferCreated }: Stock
   const handleSubmit = async () => {
     setIsSending(true);
     try {
-      await inventoryApi.createTransfer(
-        user?.activeStoreId || '',
-        destinationStore,
-        transferItems.map(item => ({
-          product_id: item.productId,
+      await inventoryApi.createTransfer({
+        fromStoreId: user?.activeStoreId || '',
+        toStoreId: destinationStore,
+        items: transferItems.map(item => ({
+          stockId: item.productId,
           quantity: item.quantity,
-        }))
-      );
+        })),
+      });
 
       toast.success('Transfer request created successfully');
       onTransferCreated();

@@ -18,7 +18,6 @@ import {
   Check,
   Building2,
   Calendar,
-  User,
   Filter,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
@@ -72,10 +71,17 @@ export function StockTransferManagement() {
 
     setIsLoading(true);
     try {
-      const data = await inventoryApi.getTransfers(
-        user.activeStoreId,
-        direction === 'all' ? undefined : direction
-      );
+      let data;
+      if (direction === 'all') {
+        // Fetch both incoming and outgoing
+        const [incoming, outgoing] = await Promise.all([
+          inventoryApi.getTransfers(user.activeStoreId, 'incoming'),
+          inventoryApi.getTransfers(user.activeStoreId, 'outgoing'),
+        ]);
+        data = [...incoming, ...outgoing];
+      } else {
+        data = await inventoryApi.getTransfers(user.activeStoreId, direction);
+      }
       setTransfers(data);
     } catch (error: any) {
       toast.error('Failed to load transfers');
@@ -89,10 +95,11 @@ export function StockTransferManagement() {
     setShowDetails(true);
   };
 
-  const handleReceiveTransfer = async (transferId: string) => {
+  const handleReceiveTransfer = async (_transferId: string) => {
     setIsReceiving(true);
     try {
       // In production, call API to mark transfer as received
+      // await inventoryApi.receiveTransfer(transferId);
       await new Promise(resolve => setTimeout(resolve, 1000)); // Mock delay
 
       toast.success('Transfer received successfully');
@@ -107,18 +114,18 @@ export function StockTransferManagement() {
 
   const getStatusBadge = (status: Transfer['status']) => {
     const statusConfig = {
-      PENDING: { label: 'Pending', color: 'yellow', icon: Clock },
-      SENT: { label: 'Sent', color: 'blue', icon: ArrowRight },
-      IN_TRANSIT: { label: 'In Transit', color: 'purple', icon: Package },
-      RECEIVED: { label: 'Received', color: 'green', icon: CheckCircle },
-      PARTIALLY_RECEIVED: { label: 'Partially Received', color: 'orange', icon: AlertCircle },
-      CANCELLED: { label: 'Cancelled', color: 'red', icon: X },
+      PENDING: { label: 'Pending', color: 'yellow' as const, icon: Clock },
+      SENT: { label: 'Sent', color: 'blue' as const, icon: ArrowRight },
+      IN_TRANSIT: { label: 'In Transit', color: 'purple' as const, icon: Package },
+      RECEIVED: { label: 'Received', color: 'green' as const, icon: CheckCircle },
+      PARTIALLY_RECEIVED: { label: 'Partially Received', color: 'orange' as const, icon: AlertCircle },
+      CANCELLED: { label: 'Cancelled', color: 'red' as const, icon: X },
     };
 
     const config = statusConfig[status];
     const Icon = config.icon;
 
-    const colorClasses = {
+    const colorClasses: Record<typeof config.color, string> = {
       yellow: 'bg-yellow-100 text-yellow-800 border-yellow-200',
       blue: 'bg-blue-100 text-blue-800 border-blue-200',
       purple: 'bg-purple-100 text-purple-800 border-purple-200',
