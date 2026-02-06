@@ -315,12 +315,16 @@ export function POSPage() {
 
       // Convert to SearchResultProduct format and add to cart
       const productForCart: SearchResultProduct = {
+        id: product.id,
         productId: product.id,
         productName: product.name,
         sku: product.sku,
         brand: product.brand,
+        model: product.model || '',
+        category: product.category || '',
         mrp: product.mrp,
         offerPrice: product.offerPrice,
+        quantity: response.stockQuantity || 0,
         attributes: product.attributes || {},
       };
 
