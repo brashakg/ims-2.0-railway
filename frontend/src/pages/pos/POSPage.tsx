@@ -174,7 +174,10 @@ export function POSPage() {
   // ============================================================================
 
   const subtotal = orderItems.reduce((sum, item) => sum + item.finalPrice, 0);
-  const gstAmount = Math.round(subtotal * 0.18);
+  const gstAmount = orderItems.reduce((sum, item) => {
+    const rate = (item.gstRate ?? 12) / 100;
+    return sum + Math.round(item.finalPrice * rate);
+  }, 0);
   const grandTotal = subtotal + gstAmount - orderDiscount.amount;
   const totalPaid = payments.reduce((sum, p) => sum + p.amount, 0);
   const balanceDue = grandTotal - totalPaid;
@@ -233,108 +236,6 @@ export function POSPage() {
     setPrescription(newPrescription);
   }, []);
 
-  // Handle barcode scan
-  const handleBarcodeSubmit = useCallback(async (barcode: string) => {
-    if (!barcode.trim()) return;
-
-    try {
-      setError(null);
-
-      // Fetch product from API by barcode
-      const stockUnit = await inventoryApi.getStockByBarcode(barcode);
-
-      if (!stockUnit) {
-        throw new Error(`Product not found for barcode: ${barcode}`);
-      }
-
-      // Check if product is available
-      if (stockUnit.status !== 'AVAILABLE' || stockUnit.quantity < 1) {
-        throw new Error(`Product is not available (Status: ${stockUnit.status})`);
-      }
-
-      // Determine category and requirements
-      const requiresPrescription = categoryRequiresPrescription;
-
-      const newItem: ExtendedCartItem = {
-        id: `item-${Date.now()}`,
-        itemType: activeCategoryConfig?.code as ProductCategory || 'FRAME',
-        productId: stockUnit.productId,
-        productName: stockUnit.productName || `Product ${stockUnit.productId}`,
-        sku: stockUnit.sku || barcode,
-        category: activeCategoryConfig?.code as ProductCategory || 'FRAME',
-        brand: stockUnit.brand || '',
-        quantity: 1,
-        unitPrice: stockUnit.price || 0,
-        mrp: stockUnit.mrp || stockUnit.price || 0,
-        offerPrice: stockUnit.offerPrice || stockUnit.price || 0,
-        discountPercent: 0,
-        discountAmount: 0,
-        finalPrice: stockUnit.offerPrice || stockUnit.price || 0,
-        barcode,
-        requiresPrescription,
-        prescriptionLinked: requiresPrescription && !!prescription,
-        prescriptionId: prescription?.id,
-        productAttributes: stockUnit.attributes,
-      };
-
-      setOrderItems(prev => [...prev, newItem]);
-      setBarcodeInput('');
-      toast.success(`Added: ${newItem.productName}`);
-
-      // Auto-expand the new item
-      setExpandedItems(prev => new Set(prev).add(newItem.id));
-
-      // If this category can have lens and no prescription, prompt for prescription first
-      if (categoryCanAddLens && !prescription) {
-        toast.info('Add a prescription to enable lens options');
-      }
-    } catch (err) {
-      const errorMessage = err instanceof Error ? err.message : 'Failed to lookup product';
-      setError(errorMessage);
-      toast.error(errorMessage);
-    }
-  }, [activeCategory, activeCategoryConfig, categoryRequiresPrescription, categoryCanAddLens, prescription, toast]);
-
-  // Handle barcode scan - search for product and add to cart
-  const handleBarcodeScan = useCallback(async (barcode: string) => {
-    if (!activeCategoryConfig) {
-      toast.error('Please select a product category first');
-      return;
-    }
-
-    try {
-      // Search for product by barcode
-      const response = await inventoryApi.searchByBarcode(barcode, user?.activeStoreId || '');
-
-      if (!response || !response.product) {
-        toast.error(`Product not found with barcode: ${barcode}`);
-        return;
-      }
-
-      const product = response.product;
-
-      // Convert to SearchResultProduct format and add to cart
-      const productForCart: SearchResultProduct = {
-        id: product.id,
-        productId: product.id,
-        productName: product.name,
-        sku: product.sku,
-        brand: product.brand,
-        model: product.model || '',
-        category: product.category || '',
-        mrp: product.mrp,
-        offerPrice: product.offerPrice,
-        quantity: response.stockQuantity || 0,
-        attributes: product.attributes || {},
-      };
-
-      handleProductSelect(productForCart);
-      toast.success(`Added: ${product.name}`);
-    } catch (error: any) {
-      toast.error(error?.message || `Failed to find product with barcode: ${barcode}`);
-    }
-  }, [activeCategoryConfig, user?.activeStoreId, toast]);
-
   // Handle product selection from search modal
   const handleProductSelect = useCallback((product: SearchResultProduct) => {
     const requiresPrescription = categoryRequiresPrescription;
@@ -373,6 +274,52 @@ export function POSPage() {
     // Auto-expand the new item
     setExpandedItems(prev => new Set(prev).add(newItem.id));
   }, [activeCategoryConfig, categoryRequiresPrescription, prescription, toast]);
+
+  // Handle barcode scan - search for product and add to cart
+  const handleBarcodeScan = useCallback(async (barcode: string) => {
+    if (!barcode.trim()) return;
+
+    if (!activeCategoryConfig) {
+      toast.error('Please select a product category first');
+      return;
+    }
+
+    try {
+      setError(null);
+
+      // Search for product by barcode
+      const response = await inventoryApi.searchByBarcode(barcode, user?.activeStoreId || '');
+
+      if (!response || !response.product) {
+        toast.error(`Product not found with barcode: ${barcode}`);
+        return;
+      }
+
+      const product = response.product;
+
+      // Convert to SearchResultProduct format and add to cart
+      const productForCart: SearchResultProduct = {
+        id: product.id,
+        productId: product.id,
+        productName: product.name,
+        sku: product.sku,
+        brand: product.brand,
+        model: product.model || '',
+        category: product.category || '',
+        mrp: product.mrp,
+        offerPrice: product.offerPrice,
+        quantity: response.stockQuantity || 0,
+        attributes: product.attributes || {},
+      };
+
+      handleProductSelect(productForCart);
+      setBarcodeInput('');
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : `Failed to find product with barcode: ${barcode}`;
+      setError(errorMessage);
+      toast.error(errorMessage);
+    }
+  }, [activeCategoryConfig, user?.activeStoreId, handleProductSelect, toast]);
 
   // Open lens details for a frame/sunglass item
   const handleAddLensToItem = useCallback((itemId: string) => {
@@ -979,7 +926,7 @@ export function POSPage() {
                       onChange={(e) => setBarcodeInput(e.target.value)}
                       onKeyDown={(e) => {
                         if (e.key === 'Enter') {
-                          handleBarcodeSubmit(barcodeInput);
+                          handleBarcodeScan(barcodeInput);
                         }
                       }}
                       placeholder="Scan barcode or enter product code..."
@@ -987,7 +934,7 @@ export function POSPage() {
                     />
                   </div>
                   <button
-                    onClick={() => handleBarcodeSubmit(barcodeInput)}
+                    onClick={() => handleBarcodeScan(barcodeInput)}
                     className="btn-primary px-4 py-2.5"
                     disabled={!barcodeInput.trim()}
                   >
@@ -1263,7 +1210,7 @@ export function POSPage() {
                     </div>
                   )}
                   <div className="flex justify-between text-sm">
-                    <span className="text-gray-600">GST (18%)</span>
+                    <span className="text-gray-600">GST</span>
                     <span className="text-gray-900">{formatCurrency(gstAmount)}</span>
                   </div>
                   <div className="flex justify-between text-base font-semibold border-t pt-2">

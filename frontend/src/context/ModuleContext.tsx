@@ -6,8 +6,8 @@
 import { createContext, useContext, useState, useCallback, type ReactNode } from 'react';
 import type { UserRole } from '../types';
 import {
-  ShoppingCart, Eye, Package, Users, Truck, FileText,
-  Users2, BarChart3, Gift, Settings,
+  ShoppingCart, Eye, Package, Users, Truck,
+  Users2, BarChart3, Settings,
   type LucideIcon,
 } from 'lucide-react';
 
@@ -22,10 +22,8 @@ export type ModuleId =
   | 'inventory'
   | 'customers'
   | 'vendors'
-  | 'finance'
   | 'hr'
   | 'reports'
-  | 'marketing'
   | 'settings';
 
 export interface SidebarItem {
@@ -74,7 +72,6 @@ export const MODULE_CONFIGS: ModuleConfig[] = [
       { id: 'pos-pending', label: 'Pending Orders', path: '/orders?status=pending' },
       { id: 'pos-deliveries', label: 'Ready for Delivery', path: '/orders?status=ready' },
       { id: 'pos-workshop', label: 'Workshop Jobs', path: '/workshop' },
-      { id: 'pos-returns', label: 'Returns & Exchange', path: '/orders/returns' },
     ],
   },
   {
@@ -96,18 +93,17 @@ export const MODULE_CONFIGS: ModuleConfig[] = [
   {
     id: 'inventory',
     title: 'Inventory & Stock',
-    subtitle: 'Stock, Categories, Barcode',
+    subtitle: 'Stock, Transfers, Barcode',
     icon: Package,
     color: 'text-green-600',
     bgColor: 'bg-green-50',
     allowedRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'CATALOG_MANAGER', 'WORKSHOP_STAFF'],
     sidebarItems: [
       { id: 'inv-overview', label: 'Stock Overview', path: '/inventory' },
-      { id: 'inv-add', label: 'Add/Remove Stock', path: '/inventory/stock' },
-      { id: 'inv-categories', label: 'Categories & Brands', path: '/inventory/categories' },
-      { id: 'inv-barcode', label: 'Barcode Management', path: '/inventory/barcode' },
-      { id: 'inv-catalog', label: 'Catalog Management', path: '/inventory/catalog' },
-      { id: 'inv-product', label: 'Add Product (Wizard)', path: '/inventory/product/new' },
+      { id: 'inv-transfers', label: 'Stock Transfers', path: '/inventory?tab=transfers' },
+      { id: 'inv-movements', label: 'Stock Movements', path: '/inventory?tab=movements' },
+      { id: 'inv-barcode', label: 'Barcode Management', path: '/inventory?tab=barcode' },
+      { id: 'inv-lowstock', label: 'Low Stock Alerts', path: '/inventory?tab=lowstock' },
     ],
   },
   {
@@ -120,94 +116,51 @@ export const MODULE_CONFIGS: ModuleConfig[] = [
     allowedRoles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'SALES_CASHIER', 'SALES_STAFF', 'OPTOMETRIST'],
     sidebarItems: [
       { id: 'crm-all', label: 'All Customers', path: '/customers' },
-      { id: 'crm-new', label: 'Add Customer', path: '/customers/new' },
       { id: 'crm-search', label: 'Search', path: '/customers?search=true' },
-      { id: 'crm-loyalty', label: 'Loyalty Program', path: '/customers/loyalty' },
-      { id: 'crm-followup', label: 'Follow-ups', path: '/customers/followup' },
-      { id: 'crm-birthdays', label: 'Birthdays & Reminders', path: '/customers/reminders' },
+      { id: 'crm-loyalty', label: 'Loyalty Program', path: '/customers?tab=loyalty' },
     ],
   },
   {
     id: 'vendors',
     title: 'Vendors & Purchase',
-    subtitle: 'Vendors, Purchase Orders',
+    subtitle: 'Vendors, Purchase Orders, GRN',
     icon: Truck,
     color: 'text-cyan-600',
     bgColor: 'bg-cyan-50',
     allowedRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'],
     sidebarItems: [
-      { id: 'vendor-list', label: 'All Vendors', path: '/vendors' },
-      { id: 'vendor-new', label: 'Add Vendor', path: '/vendors/new' },
-      { id: 'vendor-po', label: 'Purchase Orders', path: '/vendors/purchase-orders' },
-      { id: 'vendor-po-new', label: 'New Purchase Order', path: '/vendors/purchase-orders/new' },
-      { id: 'vendor-grn', label: 'Goods Receipt', path: '/vendors/grn' },
-    ],
-  },
-  {
-    id: 'finance',
-    title: 'Finance & Accounts',
-    subtitle: 'Day Book, Expenses, GST',
-    icon: FileText,
-    color: 'text-emerald-600',
-    bgColor: 'bg-emerald-50',
-    allowedRoles: ['SUPERADMIN', 'ADMIN', 'ACCOUNTANT'],
-    sidebarItems: [
-      { id: 'fin-daybook', label: 'Day Book', path: '/finance/daybook' },
-      { id: 'fin-expenses', label: 'Expenses', path: '/finance/expenses' },
-      { id: 'fin-advances', label: 'Advances', path: '/finance/advances' },
-      { id: 'fin-payments', label: 'Payment Collections', path: '/finance/payments' },
-      { id: 'fin-gst', label: 'GST Returns', path: '/finance/gst' },
-      { id: 'fin-ledger', label: 'Ledger', path: '/finance/ledger' },
+      { id: 'vendor-list', label: 'All Vendors', path: '/purchase' },
+      { id: 'vendor-po', label: 'Purchase Orders', path: '/purchase?tab=purchase-orders' },
+      { id: 'vendor-grn', label: 'Goods Receipt', path: '/purchase?tab=grn' },
     ],
   },
   {
     id: 'hr',
     title: 'HR & Employees',
-    subtitle: 'Attendance, Salary, Performance',
+    subtitle: 'Attendance, Leaves, Tasks',
     icon: Users2,
     color: 'text-indigo-600',
     bgColor: 'bg-indigo-50',
     allowedRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER'],
     sidebarItems: [
-      { id: 'hr-employees', label: 'All Employees', path: '/hr/employees' },
-      { id: 'hr-attendance', label: 'Attendance', path: '/hr/attendance' },
-      { id: 'hr-leaves', label: 'Leave Management', path: '/hr/leaves' },
-      { id: 'hr-salary', label: 'Salary & Payroll', path: '/hr/salary' },
+      { id: 'hr-attendance', label: 'Attendance', path: '/hr' },
+      { id: 'hr-leaves', label: 'Leave Management', path: '/hr?tab=leave' },
       { id: 'hr-tasks', label: 'Tasks & Assignments', path: '/tasks' },
-      { id: 'hr-performance', label: 'Performance', path: '/hr/performance' },
     ],
   },
   {
     id: 'reports',
     title: 'Reports & Analytics',
-    subtitle: 'Sales, Stock, Financial Reports',
+    subtitle: 'Sales, Stock, GST Reports',
     icon: BarChart3,
     color: 'text-blue-600',
     bgColor: 'bg-blue-50',
     allowedRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'],
     sidebarItems: [
       { id: 'rpt-dashboard', label: 'Analytics Dashboard', path: '/reports' },
-      { id: 'rpt-sales', label: 'Sales Reports', path: '/reports/sales' },
-      { id: 'rpt-inventory', label: 'Inventory Reports', path: '/reports/inventory' },
-      { id: 'rpt-financial', label: 'Financial Reports', path: '/reports/financial' },
-      { id: 'rpt-employee', label: 'Employee Reports', path: '/reports/employee' },
-      { id: 'rpt-custom', label: 'Custom Reports', path: '/reports/custom' },
-    ],
-  },
-  {
-    id: 'marketing',
-    title: 'Marketing & Offers',
-    subtitle: 'Promotions, Vouchers, SMS',
-    icon: Gift,
-    color: 'text-pink-600',
-    bgColor: 'bg-pink-50',
-    allowedRoles: ['SUPERADMIN', 'ADMIN'],
-    sidebarItems: [
-      { id: 'mkt-promos', label: 'Active Promotions', path: '/marketing/promotions' },
-      { id: 'mkt-new', label: 'Create Promotion', path: '/marketing/promotions/new' },
-      { id: 'mkt-vouchers', label: 'Vouchers & Coupons', path: '/marketing/vouchers' },
-      { id: 'mkt-sms', label: 'SMS Campaigns', path: '/marketing/sms' },
-      { id: 'mkt-whatsapp', label: 'WhatsApp Broadcasts', path: '/marketing/whatsapp' },
+      { id: 'rpt-sales', label: 'Sales Reports', path: '/reports?tab=sales' },
+      { id: 'rpt-inventory', label: 'Inventory Reports', path: '/reports?tab=inventory' },
+      { id: 'rpt-gst', label: 'GST Reports', path: '/reports?tab=gst' },
     ],
   },
   {

@@ -3,7 +3,7 @@
 // ============================================================================
 // Module-aware layout with conditional sidebar
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Outlet, NavLink, useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
 import { useModule, type ModuleId } from '../../context/ModuleContext';
@@ -32,6 +32,7 @@ const pathToModule: Record<string, ModuleId> = {
   '/workshop': 'pos',
   '/tasks': 'hr',
   '/hr': 'hr',
+  '/purchase': 'vendors',
   '/reports': 'reports',
   '/settings': 'settings',
 };
@@ -44,6 +45,22 @@ export function AppLayout() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [roleDropdownOpen, setRoleDropdownOpen] = useState(false);
   const [storeDropdownOpen, setStoreDropdownOpen] = useState(false);
+  const roleDropdownRef = useRef<HTMLDivElement>(null);
+  const storeDropdownRef = useRef<HTMLDivElement>(null);
+
+  // Close dropdowns on outside click
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (roleDropdownRef.current && !roleDropdownRef.current.contains(event.target as Node)) {
+        setRoleDropdownOpen(false);
+      }
+      if (storeDropdownRef.current && !storeDropdownRef.current.contains(event.target as Node)) {
+        setStoreDropdownOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
 
   // Auto-detect module from URL path on mount and route changes
   useEffect(() => {
@@ -240,12 +257,12 @@ export function AppLayout() {
           <div className="flex items-center gap-3">
             {/* Role selector */}
             {user && user.roles.length > 1 && (
-              <div className="relative">
+              <div className="relative" ref={roleDropdownRef}>
                 <button
                   className="flex items-center gap-2 px-3 py-2 text-sm bg-gray-100 rounded-lg hover:bg-gray-200"
                   onClick={() => setRoleDropdownOpen(!roleDropdownOpen)}
                 >
-                  <span className="font-medium">{user.activeRole.replace('_', ' ')}</span>
+                  <span className="font-medium">{user.activeRole.replaceAll('_', ' ')}</span>
                   <ChevronDown className="w-4 h-4" />
                 </button>
                 {roleDropdownOpen && (
@@ -262,7 +279,7 @@ export function AppLayout() {
                           setRoleDropdownOpen(false);
                         }}
                       >
-                        {role.replace('_', ' ')}
+                        {role.replaceAll('_', ' ')}
                       </button>
                     ))}
                   </div>
@@ -272,7 +289,7 @@ export function AppLayout() {
 
             {/* Store selector */}
             {user && (hasRole(['SUPERADMIN', 'ADMIN', 'AREA_MANAGER']) || user.storeIds.length > 1) && (
-              <div className="relative">
+              <div className="relative" ref={storeDropdownRef}>
                 <button
                   className="flex items-center gap-2 px-3 py-2 text-sm bg-gray-100 rounded-lg hover:bg-gray-200"
                   onClick={() => setStoreDropdownOpen(!storeDropdownOpen)}
