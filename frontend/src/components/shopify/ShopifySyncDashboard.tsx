@@ -45,6 +45,7 @@ export function ShopifySyncDashboard() {
   const [stores, setStores] = useState<ShopifyConfig[]>([]);
   const [syncStatus, setSyncStatus] = useState<SyncStatus[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [_showAddStore, setShowAddStore] = useState(false);
 
   useEffect(() => {
     loadStores();

@@ -14,6 +14,7 @@ import { ProtectedRoute } from './components/layout/ProtectedRoute';
 // Lazy load pages for code splitting
 const LoginPage = lazy(() => import('./pages/auth/LoginPage').then(m => ({ default: m.LoginPage })));
 const DashboardPage = lazy(() => import('./pages/dashboard/DashboardPage'));
+const ExecutiveDashboard = lazy(() => import('./pages/dashboard/ExecutiveDashboard').then(m => ({ default: m.ExecutiveDashboard })));
 const POSPage = lazy(() => import('./pages/pos/POSPage').then(m => ({ default: m.POSPage })));
 const CustomersPage = lazy(() => import('./pages/customers/CustomersPage').then(m => ({ default: m.CustomersPage })));
 const InventoryPage = lazy(() => import('./pages/inventory/InventoryPage').then(m => ({ default: m.InventoryPage })));
@@ -24,7 +25,8 @@ const TestHistoryPage = lazy(() => import('./pages/clinical/TestHistoryPage').th
 const PrescriptionsPage = lazy(() => import('./pages/clinical/PrescriptionsPage').then(m => ({ default: m.PrescriptionsPage })));
 const ContactLensFittingPage = lazy(() => import('./pages/clinical/ContactLensFittingPage').then(m => ({ default: m.ContactLensFittingPage })));
 const WorkshopPage = lazy(() => import('./pages/workshop/WorkshopPage').then(m => ({ default: m.WorkshopPage })));
-const TasksPage = lazy(() => import('./pages/tasks/TasksPage').then(m => ({ default: m.TasksPage })));
+const PurchaseManagementPage = lazy(() => import('./pages/purchase/PurchaseManagementPage').then(m => ({ default: m.PurchaseManagementPage })));
+const TaskManagementPage = lazy(() => import('./pages/tasks/TaskManagementPage').then(m => ({ default: m.TaskManagementPage })));
 const HRPage = lazy(() => import('./pages/hr/HRPage').then(m => ({ default: m.HRPage })));
 const ReportsPage = lazy(() => import('./pages/reports/ReportsPage').then(m => ({ default: m.ReportsPage })));
 const SettingsPage = lazy(() => import('./pages/settings/SettingsPage').then(m => ({ default: m.SettingsPage })));
@@ -99,6 +101,14 @@ function App() {
 
                   {/* Dashboard */}
                   <Route path="dashboard" element={<DashboardPage />} />
+                  <Route
+                    path="dashboard/executive"
+                    element={
+                      <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER']}>
+                        <ExecutiveDashboard />
+                      </ProtectedRoute>
+                    }
+                  />
 
                   {/* POS */}
                   <Route
@@ -212,8 +222,18 @@ function App() {
                     }
                   />
 
-                  {/* Tasks */}
-                  <Route path="tasks" element={<TasksPage />} />
+                  {/* Purchase Management */}
+                  <Route
+                    path="purchase"
+                    element={
+                      <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT']}>
+                        <PurchaseManagementPage />
+                      </ProtectedRoute>
+                    }
+                  />
+
+                  {/* Tasks & SOPs */}
+                  <Route path="tasks" element={<TaskManagementPage />} />
 
                   {/* HR */}
                   <Route
