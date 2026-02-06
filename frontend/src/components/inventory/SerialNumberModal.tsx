@@ -3,21 +3,15 @@
 // ============================================================================
 // Add, edit, and track serial numbers for high-value items
 
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import {
   X,
   Hash,
   Save,
   Loader2,
   AlertCircle,
-  Package,
-  Calendar,
-  User,
-  Shield,
-  MapPin,
   CheckCircle,
 } from 'lucide-react';
-import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 
 interface SerialNumberModalProps {
@@ -56,7 +50,6 @@ export function SerialNumberModal({
   onSave,
   editData,
 }: SerialNumberModalProps) {
-  const { user } = useAuth();
   const toast = useToast();
 
   const [isSaving, setIsSaving] = useState(false);

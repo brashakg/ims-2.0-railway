@@ -10,13 +10,9 @@ import {
   Package,
   ShoppingCart,
   Loader2,
-  Eye,
   Settings,
   FileText,
-  Check,
-  X,
   Calendar,
-  BarChart3,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
