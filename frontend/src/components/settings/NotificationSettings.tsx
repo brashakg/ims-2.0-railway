@@ -47,7 +47,7 @@ export function NotificationSettings() {
   });
 
   // Template states
-  const [templates, setTemplates] = useState<NotificationTemplate[]>(
+  const [_templates, setTemplates] = useState<NotificationTemplate[]>(
     Object.values(NOTIFICATION_TEMPLATES)
   );
   const [selectedTemplate, setSelectedTemplate] = useState<NotificationTemplate | null>(null);

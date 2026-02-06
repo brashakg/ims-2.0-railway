@@ -189,10 +189,7 @@ export function ClinicalPage() {
   const handleSaveCustomer = async (customerData: CustomerFormData) => {
     try {
       // Create customer in the system
-      await customerApi.createCustomer({
-        ...customerData,
-        storeId: user?.activeStoreId || '',
-      });
+      await customerApi.createCustomer(customerData);
 
       // After customer is created, add the first patient to the queue
       if (customerData.patients && customerData.patients.length > 0) {
