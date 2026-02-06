@@ -23,7 +23,6 @@ type BarcodeFormat = 'CODE128' | 'EAN13' | 'UPC' | 'CODE39';
 export function BarcodeManagementModal({
   isOpen,
   onClose,
-  productId,
   productName,
   currentBarcode,
   price,

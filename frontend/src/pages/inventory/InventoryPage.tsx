@@ -181,7 +181,7 @@ export function InventoryPage() {
   };
 
   // Handle barcode save
-  const handleSaveBarcode = async (barcode: string) => {
+  const handleSaveBarcode = async (_barcode: string) => {
     if (!selectedProduct) return;
 
     try {
