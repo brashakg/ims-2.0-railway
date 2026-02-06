@@ -11,7 +11,6 @@ import {
   Settings,
   Save,
   TestTube2,
-  CheckCircle,
   AlertCircle,
   Loader2,
   Eye,

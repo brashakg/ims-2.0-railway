@@ -8,7 +8,6 @@ import {
   Download,
   FileText,
   Calendar,
-  Filter,
   AlertCircle,
   CheckCircle,
   Loader2,
@@ -16,7 +15,6 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
-import { calculateGST, calculateIGST, GSTR1_SECTIONS } from '../../constants/gst';
 
 interface GSTR1Invoice {
   invoiceNumber: string;

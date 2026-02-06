@@ -321,7 +321,6 @@ export function POSPage() {
         brand: product.brand,
         mrp: product.mrp,
         offerPrice: product.offerPrice,
-        stockQuantity: response.stockQuantity || 0,
         attributes: product.attributes || {},
       };
 

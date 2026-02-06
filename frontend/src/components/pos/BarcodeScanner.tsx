@@ -25,7 +25,7 @@ export function BarcodeScanner({
   const [value, setValue] = useState('');
   const [isScanning, setIsScanning] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
-  const scanTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const scanTimeoutRef = useRef<number | null>(null);
   const lastKeyTimeRef = useRef<number>(0);
 
   useEffect(() => {

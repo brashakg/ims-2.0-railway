@@ -61,7 +61,6 @@ interface GSTR3BData {
 }
 
 export function GSTR3BReport() {
-  const { user } = useAuth();
   const toast = useToast();
 
   const [isLoading, setIsLoading] = useState(false);

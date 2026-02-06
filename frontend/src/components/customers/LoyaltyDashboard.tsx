@@ -211,7 +211,7 @@ export function LoyaltyDashboard({ customerId, onRedeemPoints }: LoyaltyDashboar
           </div>
 
           {/* Progress to Next Tier */}
-          {nextTierInfo && (
+          {nextTierInfo && nextTierInfo.nextTier && (
             <div>
               <div className="flex items-center justify-between text-sm mb-2">
                 <span className="text-gray-600">

@@ -5,7 +5,7 @@
 
 import { useRef } from 'react';
 import { Printer, Download } from 'lucide-react';
-import { calculateGST, calculateIGST, validateGSTNumber } from '../../constants/gst';
+import { calculateGST, calculateIGST } from '../../constants/gst';
 import type { Order, Store } from '../../types';
 
 interface GSTInvoiceProps {
@@ -365,7 +365,7 @@ export function GSTInvoice({ order, store, onPrint }: GSTInvoiceProps) {
       </div>
 
       {/* Print Styles */}
-      <style jsx>{`
+      <style>{`
         @media print {
           .no-print {
             display: none !important;

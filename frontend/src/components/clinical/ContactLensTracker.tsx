@@ -6,7 +6,6 @@
 import { useState, useEffect } from 'react';
 import {
   Eye,
-  Calendar,
   AlertTriangle,
   CheckCircle,
   Clock,
@@ -15,14 +14,12 @@ import {
   Filter,
   RefreshCw,
   Loader2,
-  Plus,
   MessageSquare,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import {
   type ContactLensPurchase,
-  type LensType,
   LENS_TYPES,
   calculateDaysRemaining,
   getLensStatus,
