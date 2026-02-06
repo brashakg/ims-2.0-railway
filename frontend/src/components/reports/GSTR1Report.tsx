@@ -13,7 +13,6 @@ import {
   Loader2,
   RefreshCw,
 } from 'lucide-react';
-import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 
 interface GSTR1Invoice {
@@ -56,7 +55,6 @@ interface GSTR1Data {
 }
 
 export function GSTR1Report() {
-  const { user } = useAuth();
   const toast = useToast();
 
   const [isLoading, setIsLoading] = useState(false);
