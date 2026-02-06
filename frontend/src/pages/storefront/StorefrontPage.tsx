@@ -7,11 +7,9 @@ import { useState, useEffect } from 'react';
 import {
   Search,
   ShoppingCart,
-  Filter,
   Star,
   Heart,
   Eye,
-  ChevronDown,
   Package,
   Truck,
   Shield,

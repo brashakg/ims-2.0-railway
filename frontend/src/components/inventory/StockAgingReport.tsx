@@ -14,7 +14,6 @@ import {
   Filter,
   BarChart3,
   AlertTriangle,
-  DollarSign,
   Calendar,
   RefreshCw,
 } from 'lucide-react';
