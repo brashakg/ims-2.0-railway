@@ -25,6 +25,8 @@ import { inventoryApi } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { BarcodeManagementModal } from '../../components/inventory/BarcodeManagementModal';
+import { StockTransferModal } from '../../components/inventory/StockTransferModal';
+import { StockTransferManagement } from '../../components/inventory/StockTransferManagement';
 import clsx from 'clsx';
 
 // Category configuration
@@ -73,7 +75,7 @@ interface StockMovement {
   createdBy: string;
 }
 
-type ViewTab = 'catalog' | 'low-stock' | 'movements';
+type ViewTab = 'catalog' | 'low-stock' | 'transfers' | 'movements';
 
 export function InventoryPage() {
   const { user, hasRole } = useAuth();
@@ -98,6 +100,9 @@ export function InventoryPage() {
   // Barcode modal state
   const [showBarcodeModal, setShowBarcodeModal] = useState(false);
   const [selectedProduct, setSelectedProduct] = useState<StockItem | null>(null);
+
+  // Transfer modal state
+  const [showTransferModal, setShowTransferModal] = useState(false);
 
   // Role-based permissions
   const canTransfer = hasRole(['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER']);
@@ -233,11 +238,11 @@ export function InventoryPage() {
           )}
           {canTransfer && (
             <button
-              onClick={() => toast.info('Stock transfer feature coming soon')}
+              onClick={() => setShowTransferModal(true)}
               className="btn-outline flex items-center gap-2"
             >
               <ArrowRightLeft className="w-4 h-4" />
-              Transfer
+              New Transfer
             </button>
           )}
           {canAddProduct && (
@@ -318,7 +323,8 @@ export function InventoryPage() {
         {[
           { id: 'catalog' as ViewTab, label: 'Catalog', icon: Package },
           { id: 'low-stock' as ViewTab, label: `Low Stock (${lowStockCount})`, icon: AlertTriangle },
-          { id: 'movements' as ViewTab, label: 'Movements', icon: ArrowRightLeft },
+          { id: 'transfers' as ViewTab, label: 'Transfers', icon: ArrowRightLeft },
+          { id: 'movements' as ViewTab, label: 'Movements', icon: Eye },
         ].map(tab => (
           <button
             key={tab.id}
@@ -337,6 +343,7 @@ export function InventoryPage() {
       </div>
 
       {/* Search and Filters */}
+      {activeTab !== 'transfers' && (
       <div className="card">
         <div className="flex flex-col tablet:flex-row gap-4 mb-4">
           <div className="relative flex-1">
@@ -381,6 +388,7 @@ export function InventoryPage() {
           ))}
         </div>
       </div>
+      )}
 
       {/* Inventory Table */}
       {activeTab === 'catalog' && (
@@ -524,6 +532,13 @@ export function InventoryPage() {
         </div>
       )}
 
+      {/* Transfers Tab */}
+      {activeTab === 'transfers' && (
+        <div className="space-y-4">
+          <StockTransferManagement />
+        </div>
+      )}
+
       {/* Movements Tab */}
       {activeTab === 'movements' && (
         <div className="card">
@@ -589,6 +604,19 @@ export function InventoryPage() {
           onSave={handleSaveBarcode}
         />
       )}
+
+      {/* Stock Transfer Modal */}
+      <StockTransferModal
+        isOpen={showTransferModal}
+        onClose={() => setShowTransferModal(false)}
+        onTransferCreated={() => {
+          setShowTransferModal(false);
+          if (activeTab === 'transfers') {
+            // Trigger refresh of transfers list
+            setActiveTab('transfers');
+          }
+        }}
+      />
     </div>
   );
 }
