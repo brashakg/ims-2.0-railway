@@ -188,8 +188,29 @@ export function ClinicalPage() {
   // Save customer and add to queue
   const handleSaveCustomer = async (customerData: CustomerFormData) => {
     try {
+      // Transform CustomerFormData to Customer format
+      const customerPayload = {
+        name: customerData.fullName,
+        phone: customerData.mobileNumber,
+        email: customerData.email,
+        customerType: customerData.customerType,
+        gstNumber: customerData.gstNumber || undefined,
+        address: customerData.address,
+        city: customerData.city,
+        state: customerData.state,
+        pincode: customerData.pincode,
+        patients: customerData.patients.map(p => ({
+          id: p.id,
+          customerId: '', // Will be set by backend
+          name: p.name,
+          relation: p.relation,
+          dateOfBirth: p.dateOfBirth,
+          phone: p.mobile,
+        })),
+      };
+
       // Create customer in the system
-      await customerApi.createCustomer(customerData);
+      await customerApi.createCustomer(customerPayload);
 
       // After customer is created, add the first patient to the queue
       if (customerData.patients && customerData.patients.length > 0) {
