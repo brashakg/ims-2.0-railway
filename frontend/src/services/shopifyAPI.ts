@@ -3,7 +3,7 @@
 // ============================================================================
 // Complete Shopify REST Admin API integration for multi-store setup
 
-import axios, { AxiosInstance } from 'axios';
+import axios, { type AxiosInstance } from 'axios';
 
 export interface ShopifyConfig {
   id: string;

@@ -6,20 +6,14 @@
 import { useState, useEffect } from 'react';
 import {
   RefreshCw,
-  Check,
-  X,
   AlertTriangle,
-  Settings,
   Package,
   ShoppingCart,
   Users,
   Boxes,
-  Clock,
   TrendingUp,
   Loader2,
   Plus,
-  Edit,
-  Trash2,
   Link as LinkIcon,
   Activity,
 } from 'lucide-react';
@@ -51,8 +45,6 @@ export function ShopifySyncDashboard() {
   const [stores, setStores] = useState<ShopifyConfig[]>([]);
   const [syncStatus, setSyncStatus] = useState<SyncStatus[]>([]);
   const [isLoading, setIsLoading] = useState(true);
-  const [showAddStore, setShowAddStore] = useState(false);
-  const [selectedStore, setSelectedStore] = useState<string | null>(null);
 
   useEffect(() => {
     loadStores();
