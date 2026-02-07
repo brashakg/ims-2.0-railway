@@ -116,7 +116,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
       if (token && userJson) {
         try {
           // Verify stored user JSON is valid (parsing test)
-          const user = JSON.parse(userJson) as User;
+          JSON.parse(userJson) as User;
 
           // Check if token looks valid (basic JWT format check)
           const tokenParts = token.split('.');
