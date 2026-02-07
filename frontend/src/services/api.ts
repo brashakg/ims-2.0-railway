@@ -1107,6 +1107,7 @@ export const adminProductApi = {
     mrp: number;
     offerPrice: number;
     costPrice: number;
+    barcode: string;
     attributes: Record<string, string | number>;
     images: string[];
     status: string;

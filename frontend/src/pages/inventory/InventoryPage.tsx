@@ -25,7 +25,7 @@ import {
   Clock,
 } from 'lucide-react';
 import type { ProductCategory } from '../../types';
-import { inventoryApi } from '../../services/api';
+import { inventoryApi, adminProductApi } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { BarcodeManagementModal } from '../../components/inventory/BarcodeManagementModal';
@@ -203,16 +203,15 @@ export function InventoryPage() {
   };
 
   // Handle barcode save
-  const handleSaveBarcode = async (_barcode: string) => {
+  const handleSaveBarcode = async (barcode: string) => {
     if (!selectedProduct) return;
 
     try {
-      // Update product with barcode
-      // Note: This would need a proper API endpoint to update product barcode
+      await adminProductApi.updateProduct(selectedProduct.id, { barcode });
       toast.success(`Barcode saved for ${selectedProduct.name}`);
-      await loadInventory(); // Reload to get updated data
+      await loadInventory();
     } catch {
-      toast.error('Failed to save barcode');
+      toast.error('Failed to save barcode. Please try again.');
       throw new Error('Failed to save barcode');
     }
   };
@@ -474,9 +473,9 @@ export function InventoryPage() {
                           {formatCurrency(item.offerPrice || item.mrp || 0)}
                         </td>
                         <td className="px-4 py-3 text-center">
-                          <span className="font-medium">{item.stock}</span>
+                          <span className="font-medium">{item.stock - (item.reserved || 0)}</span>
                           {item.reserved > 0 && (
-                            <span className="text-xs text-gray-400 ml-1">({item.reserved} reserved)</span>
+                            <span className="text-xs text-orange-500 ml-1">+{item.reserved} reserved</span>
                           )}
                         </td>
                         <td className="px-4 py-3 text-center text-sm text-gray-600">{item.location || '-'}</td>
