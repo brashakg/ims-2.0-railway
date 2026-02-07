@@ -23,17 +23,28 @@ export function SkeletonCard() {
 }
 
 export function SkeletonTable({ rows = 3, columns = 4 }: { rows?: number; columns?: number }) {
+  const getColumnWidth = (cols: number) => {
+    const widths: Record<number, string> = {
+      2: 'w-1/2',
+      3: 'w-1/3',
+      4: 'w-1/4',
+      5: 'w-1/5',
+      6: 'w-1/6',
+    };
+    return widths[cols] || 'w-1/4';
+  };
+
   return (
     <div className="space-y-3">
       <div className="flex gap-3">
         {Array.from({ length: columns }).map((_, i) => (
-          <SkeletonText key={i} width={`w-${Math.floor(24 / columns)}/12`} height="h-4" />
+          <SkeletonText key={i} width={getColumnWidth(columns)} height="h-4" />
         ))}
       </div>
       {Array.from({ length: rows }).map((_, rowIdx) => (
         <div key={rowIdx} className="flex gap-3 p-3 bg-gray-50 rounded">
           {Array.from({ length: columns }).map((_, colIdx) => (
-            <SkeletonText key={colIdx} width={`w-${Math.floor(24 / columns)}/12`} height="h-3" />
+            <SkeletonText key={colIdx} width={getColumnWidth(columns)} height="h-3" />
           ))}
         </div>
       ))}

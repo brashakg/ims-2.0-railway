@@ -136,6 +136,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
           // Auth initialization failed - clear storage and force fresh login
           localStorage.removeItem('ims_token');
           localStorage.removeItem('ims_user');
+          localStorage.removeItem('ims_login_time');
           localStorage.removeItem('ims_active_module');
           dispatch({ type: 'LOGOUT' });
         }
@@ -165,6 +166,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
           payload: { user: response.user, token: response.token },
         });
       } else {
+        // Login failed - ensure loading state is cleared and user is not set
         dispatch({ type: 'SET_LOADING', payload: false });
       }
 
@@ -184,6 +186,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
     } finally {
       localStorage.removeItem('ims_token');
       localStorage.removeItem('ims_user');
+      localStorage.removeItem('ims_login_time');
       dispatch({ type: 'LOGOUT' });
     }
   };
