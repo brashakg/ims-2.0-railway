@@ -71,7 +71,6 @@ export const MODULE_CONFIGS: ModuleConfig[] = [
       { id: 'pos-orders', label: 'All Orders', path: '/orders' },
       { id: 'pos-pending', label: 'Pending Orders', path: '/orders?status=IN_PROGRESS' },
       { id: 'pos-deliveries', label: 'Ready for Delivery', path: '/orders?status=READY' },
-      { id: 'pos-workshop', label: 'Workshop Jobs', path: '/workshop' },
     ],
   },
   {
@@ -84,10 +83,8 @@ export const MODULE_CONFIGS: ModuleConfig[] = [
     allowedRoles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'OPTOMETRIST'],
     sidebarItems: [
       { id: 'clinic-queue', label: 'Patient Queue', path: '/clinical' },
-      { id: 'clinic-test', label: 'New Eye Test', path: '/clinical/test' },
       { id: 'clinic-history', label: 'Test History', path: '/clinical/history' },
       { id: 'clinic-prescriptions', label: 'Prescriptions', path: '/prescriptions' },
-      { id: 'clinic-contactlens', label: 'Contact Lens Fitting', path: '/clinical/contact-lens' },
     ],
   },
   {

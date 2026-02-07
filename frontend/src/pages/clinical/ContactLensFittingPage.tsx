@@ -12,9 +12,12 @@ import {
   Calendar,
   AlertCircle,
 } from 'lucide-react';
+import { useToast } from '../../context/ToastContext';
 
 export function ContactLensFittingPage() {
+  const toast = useToast();
   const [searchQuery, setSearchQuery] = useState('');
+  const showDevMessage = () => toast.info('Contact lens fitting module is under development');
 
   return (
     <div className="space-y-4">
@@ -24,7 +27,7 @@ export function ContactLensFittingPage() {
           <h1 className="text-2xl font-bold text-gray-900">Contact Lens Fitting</h1>
           <p className="text-gray-500">Manage contact lens prescriptions and fittings</p>
         </div>
-        <button className="btn-primary flex items-center gap-2">
+        <button onClick={showDevMessage} className="btn-primary flex items-center gap-2">
           <Plus className="w-4 h-4" />
           New Fitting
         </button>
@@ -74,7 +77,7 @@ export function ContactLensFittingPage() {
         <p className="text-gray-500 mb-6">
           Start by creating a new contact lens fitting record
         </p>
-        <button className="btn-primary inline-flex items-center gap-2">
+        <button onClick={showDevMessage} className="btn-primary inline-flex items-center gap-2">
           <Plus className="w-4 h-4" />
           Create First Fitting
         </button>
@@ -136,22 +139,22 @@ export function ContactLensFittingPage() {
       <div className="card bg-gradient-to-r from-purple-50 to-blue-50">
         <h3 className="font-medium text-gray-900 mb-3">Quick Actions</h3>
         <div className="grid grid-cols-2 gap-3">
-          <button className="p-3 bg-white rounded-lg shadow-sm hover:shadow transition-shadow text-left">
+          <button onClick={showDevMessage} className="p-3 bg-white rounded-lg shadow-sm hover:shadow transition-shadow text-left">
             <User className="w-5 h-5 text-purple-600 mb-2" />
             <p className="text-sm font-medium text-gray-900">New Patient</p>
             <p className="text-xs text-gray-500">Add to queue</p>
           </button>
-          <button className="p-3 bg-white rounded-lg shadow-sm hover:shadow transition-shadow text-left">
+          <button onClick={showDevMessage} className="p-3 bg-white rounded-lg shadow-sm hover:shadow transition-shadow text-left">
             <Calendar className="w-5 h-5 text-purple-600 mb-2" />
             <p className="text-sm font-medium text-gray-900">Follow-up</p>
             <p className="text-xs text-gray-500">Schedule visit</p>
           </button>
-          <button className="p-3 bg-white rounded-lg shadow-sm hover:shadow transition-shadow text-left">
+          <button onClick={showDevMessage} className="p-3 bg-white rounded-lg shadow-sm hover:shadow transition-shadow text-left">
             <Eye className="w-5 h-5 text-purple-600 mb-2" />
             <p className="text-sm font-medium text-gray-900">Trial Lens</p>
             <p className="text-xs text-gray-500">Fitting session</p>
           </button>
-          <button className="p-3 bg-white rounded-lg shadow-sm hover:shadow transition-shadow text-left">
+          <button onClick={showDevMessage} className="p-3 bg-white rounded-lg shadow-sm hover:shadow transition-shadow text-left">
             <Search className="w-5 h-5 text-purple-600 mb-2" />
             <p className="text-sm font-medium text-gray-900">Search</p>
             <p className="text-xs text-gray-500">Find records</p>

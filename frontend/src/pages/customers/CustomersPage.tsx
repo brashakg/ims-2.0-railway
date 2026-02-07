@@ -3,7 +3,8 @@
 // ============================================================================
 // NO MOCK DATA - All data from API
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import {
   Search,
   Plus,
@@ -34,6 +35,15 @@ type ViewMode = 'list' | 'detail';
 export function CustomersPage() {
   const { user, hasRole } = useAuth();
   const toast = useToast();
+  const [searchParams] = useSearchParams();
+  const searchInputRef = useRef<HTMLInputElement>(null);
+
+  // Auto-focus search when navigated with ?search=true
+  useEffect(() => {
+    if (searchParams.get('search') === 'true' && searchInputRef.current) {
+      searchInputRef.current.focus();
+    }
+  }, [searchParams]);
 
   // Data state
   const [customers, setCustomers] = useState<Customer[]>([]);
@@ -230,6 +240,7 @@ export function CustomersPage() {
             <div className="relative flex-1">
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" />
               <input
+                ref={searchInputRef}
                 type="text"
                 value={searchQuery}
                 onChange={e => setSearchQuery(e.target.value)}

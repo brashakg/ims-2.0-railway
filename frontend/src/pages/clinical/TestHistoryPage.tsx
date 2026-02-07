@@ -57,15 +57,32 @@ export function TestHistoryPage() {
     setIsLoading(true);
     setError(null);
     try {
-      let response;
-      if (dateFilter === 'today') {
-        response = await clinicalApi.getTodayTests(user?.activeStoreId || '');
-      } else {
-        // For other filters, you might need a different API endpoint
-        response = await clinicalApi.getTodayTests(user?.activeStoreId || '');
-      }
+      const response = await clinicalApi.getTodayTests(user?.activeStoreId || '');
       const testsData = response?.tests || response || [];
-      setTests(Array.isArray(testsData) ? testsData : []);
+      const allTests = Array.isArray(testsData) ? testsData : [];
+
+      // Client-side date filtering since API only returns today's tests
+      const now = new Date();
+      const filtered = allTests.filter((test: CompletedTest) => {
+        if (dateFilter === 'all') return true;
+        const testDate = new Date(test.completedAt);
+        if (dateFilter === 'today') {
+          return testDate.toDateString() === now.toDateString();
+        }
+        if (dateFilter === 'week') {
+          const weekAgo = new Date(now);
+          weekAgo.setDate(weekAgo.getDate() - 7);
+          return testDate >= weekAgo;
+        }
+        if (dateFilter === 'month') {
+          const monthAgo = new Date(now);
+          monthAgo.setMonth(monthAgo.getMonth() - 1);
+          return testDate >= monthAgo;
+        }
+        return true;
+      });
+
+      setTests(filtered);
     } catch {
       setError('Failed to load test history');
       setTests([]);
@@ -273,7 +290,7 @@ export function TestHistoryPage() {
                             {formatPower(selectedTest.rightEye.cylinder)}
                           </td>
                           <td className="border border-gray-200 px-4 py-2 text-center">
-                            {selectedTest.rightEye.axis || '-'}
+                            {selectedTest.rightEye.axis ?? '-'}
                           </td>
                           <td className="border border-gray-200 px-4 py-2 text-center">
                             {formatPower(selectedTest.rightEye.add)}
@@ -288,7 +305,7 @@ export function TestHistoryPage() {
                             {formatPower(selectedTest.leftEye.cylinder)}
                           </td>
                           <td className="border border-gray-200 px-4 py-2 text-center">
-                            {selectedTest.leftEye.axis || '-'}
+                            {selectedTest.leftEye.axis ?? '-'}
                           </td>
                           <td className="border border-gray-200 px-4 py-2 text-center">
                             {formatPower(selectedTest.leftEye.add)}

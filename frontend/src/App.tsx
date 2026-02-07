@@ -151,7 +151,7 @@ function App() {
                     path="orders"
                     element={
                       <ProtectedRoute
-                        allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'SALES_CASHIER']}
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'SALES_CASHIER', 'SALES_STAFF', 'OPTOMETRIST']}
                       >
                         <OrdersPage />
                       </ProtectedRoute>
@@ -233,7 +233,7 @@ function App() {
                   />
 
                   {/* Tasks & SOPs */}
-                  <Route path="tasks" element={<TaskManagementPage />} />
+                  <Route path="tasks" element={<ProtectedRoute><TaskManagementPage /></ProtectedRoute>} />
 
                   {/* HR */}
                   <Route
@@ -263,7 +263,7 @@ function App() {
                   <Route
                     path="settings"
                     element={
-                      <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN']}>
+                      <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'STORE_MANAGER']}>
                         <SettingsPage />
                       </ProtectedRoute>
                     }

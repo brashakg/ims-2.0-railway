@@ -136,7 +136,7 @@ export function ClinicalPage() {
       name: item.patientName,
       phone: item.customerPhone,
       age: item.age,
-      customerId: item.id, // Using queue ID as customer ID for now
+      customerId: (item as any).customerId || item.id,
     });
     setShowEyeTestForm(true);
   };
