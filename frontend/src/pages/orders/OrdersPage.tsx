@@ -69,9 +69,6 @@ export function OrdersPage() {
 
   // Role-based permissions
   const canViewAllStores = hasRole(['SUPERADMIN', 'ADMIN', 'AREA_MANAGER']);
-  const _canRefund = hasRole(['SUPERADMIN', 'ADMIN', 'STORE_MANAGER']);
-  // Reserved for future refund functionality
-  void _canRefund;
 
   // Load orders on mount
   useEffect(() => {

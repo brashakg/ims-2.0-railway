@@ -23,6 +23,7 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
+import { tasksApi } from '../../services/api';
 
 type TabType = 'my-tasks' | 'team-tasks' | 'sop' | 'analytics';
 type TaskStatus = 'PENDING' | 'IN_PROGRESS' | 'COMPLETED' | 'OVERDUE';
@@ -102,8 +103,9 @@ export function TaskManagementPage() {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [sops, setSops] = useState<SOP[]>([]);
   const [employeePerformance, setEmployeePerformance] = useState<EmployeePerformance[]>([]);
-  const [_showCreateTask, setShowCreateTask] = useState(false);
-  const [_selectedTask, setSelectedTask] = useState<Task | null>(null);
+  const [, setShowCreateTask] = useState(false);
+  const [, setSelectedTask] = useState<Task | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     loadData();
@@ -111,90 +113,30 @@ export function TaskManagementPage() {
 
   const loadData = async () => {
     setIsLoading(true);
+    setError(null);
     try {
-      await new Promise(resolve => setTimeout(resolve, 800));
-
-      // Mock tasks
-      setTasks([
-        {
-          id: '1',
-          title: 'Morning Store Opening Checklist',
-          description: 'Complete all opening procedures as per SOP',
-          assignedTo: 'emp1',
-          assignedToName: 'Rajesh Kumar',
-          assignedBy: 'admin',
-          assignedByName: 'Admin',
-          status: 'COMPLETED',
-          priority: 'HIGH',
-          dueDate: '2024-02-06',
-          createdDate: '2024-02-06',
-          completedDate: '2024-02-06',
-          storeId: '1',
-          storeName: 'Main Branch',
-          category: 'DAILY',
-          checklistItems: [
-            { id: '1', text: 'Turn on all lights and AC', completed: true },
-            { id: '2', text: 'Check cash register and starting balance', completed: true },
-            { id: '3', text: 'Clean display cases', completed: true },
-            { id: '4', text: 'Verify stock for high-demand items', completed: true },
-            { id: '5', text: 'Check WhatsApp for customer messages', completed: true },
-          ],
-        },
-        {
-          id: '2',
-          title: 'Update Inventory Stock Counts',
-          description: 'Physical count of all fast-moving items and update system',
-          assignedTo: 'emp2',
-          assignedToName: 'Priya Patel',
-          assignedBy: 'admin',
-          assignedByName: 'Admin',
-          status: 'IN_PROGRESS',
-          priority: 'MEDIUM',
-          dueDate: '2024-02-06',
-          createdDate: '2024-02-05',
-          storeId: '1',
-          storeName: 'Main Branch',
-          category: 'DAILY',
-          checklistItems: [
-            { id: '1', text: 'Count Ray-Ban inventory', completed: true },
-            { id: '2', text: 'Count Titan frames', completed: true },
-            { id: '3', text: 'Count contact lenses', completed: false },
-            { id: '4', text: 'Update system with counts', completed: false },
-          ],
-        },
-        {
-          id: '3',
-          title: 'Customer Follow-up Calls - Lens Delivery',
-          description: 'Call 5 customers whose lenses are ready for delivery',
-          assignedTo: 'emp3',
-          assignedToName: 'Amit Sharma',
-          assignedBy: 'admin',
-          assignedByName: 'Admin',
-          status: 'OVERDUE',
-          priority: 'URGENT',
-          dueDate: '2024-02-05',
-          createdDate: '2024-02-04',
-          storeId: '2',
-          storeName: 'Mall Road',
-          category: 'DAILY',
-        },
-        {
-          id: '4',
-          title: 'Monthly GST Report Preparation',
-          description: 'Compile all invoices and prepare GSTR-1 report',
-          assignedTo: 'emp4',
-          assignedToName: 'Sneha Desai',
-          assignedBy: 'admin',
-          assignedByName: 'Admin',
-          status: 'PENDING',
-          priority: 'HIGH',
-          dueDate: '2024-02-10',
-          createdDate: '2024-02-06',
-          storeId: '1',
-          storeName: 'Main Branch',
-          category: 'MONTHLY',
-        },
-      ]);
+      // Fetch real tasks from API
+      const response = await tasksApi.getTasks();
+      const apiTasks: Task[] = (response?.tasks || []).map((t: any) => ({
+        id: t.id,
+        title: t.title || '',
+        description: t.description || '',
+        assignedTo: t.assigned_to || '',
+        assignedToName: t.assigned_to_name || t.assigned_to || '',
+        assignedBy: t.assigned_by || '',
+        assignedByName: t.assigned_by_name || t.assigned_by || '',
+        status: (t.status === 'OPEN' ? 'PENDING' : t.status === 'ESCALATED' ? 'OVERDUE' : t.status) as TaskStatus,
+        priority: (t.priority === 'P1' ? 'URGENT' : t.priority === 'P2' ? 'HIGH' : t.priority === 'P3' ? 'MEDIUM' : 'LOW') as TaskPriority,
+        dueDate: t.due_at ? t.due_at.split('T')[0] : '',
+        createdDate: t.created_at ? t.created_at.split('T')[0] : '',
+        completedDate: t.completed_at ? t.completed_at.split('T')[0] : undefined,
+        storeId: t.store_id || '',
+        storeName: t.store_name || '',
+        category: t.category || 'ADHOC',
+        checklistItems: t.checklist_items,
+        completionNotes: t.completion_notes,
+      }));
+      setTasks(apiTasks);
 
       // Mock SOPs
       setSops([
@@ -346,7 +288,9 @@ export function TaskManagementPage() {
         },
       ]);
 
-    } catch (error: any) {
+    } catch (err: any) {
+      console.error('Failed to load task data:', err);
+      setError('Failed to load task data. Please try again.');
       toast.error('Failed to load task data');
     } finally {
       setIsLoading(false);
@@ -523,6 +467,19 @@ export function TaskManagementPage() {
               </select>
             </>
           )}
+        </div>
+      )}
+
+      {/* Error Banner */}
+      {error && (
+        <div className="card bg-red-50 border-red-200">
+          <div className="flex items-center gap-3 text-red-600">
+            <AlertTriangle className="w-5 h-5" />
+            <p>{error}</p>
+            <button onClick={loadData} className="ml-auto text-sm underline">
+              Retry
+            </button>
+          </div>
         </div>
       )}
 

@@ -21,6 +21,8 @@ import {
   RefreshCw,
 } from 'lucide-react';
 import { useToast } from '../../context/ToastContext';
+import { useAuth } from '../../context/AuthContext';
+import { reportsApi } from '../../services/api';
 
 interface StorePerformance {
   storeId: string;
@@ -68,8 +70,35 @@ interface TopProduct {
   margin: number;
 }
 
+function getDateRange(range: string): { startDate: string; endDate: string } {
+  const now = new Date();
+  const endDate = now.toISOString().split('T')[0];
+  let start = new Date(now);
+
+  switch (range) {
+    case 'today':
+      break;
+    case 'week':
+      start.setDate(start.getDate() - 7);
+      break;
+    case 'quarter':
+      start.setMonth(start.getMonth() - 3);
+      break;
+    case 'year':
+      start.setFullYear(start.getFullYear() - 1);
+      break;
+    case 'month':
+    default:
+      start.setMonth(start.getMonth() - 1);
+      break;
+  }
+
+  return { startDate: start.toISOString().split('T')[0], endDate };
+}
+
 export function ExecutiveDashboard() {
   const toast = useToast();
+  const { user } = useAuth();
 
   const [timeRange, setTimeRange] = useState<'today' | 'week' | 'month' | 'quarter' | 'year'>('month');
   const [isLoading, setIsLoading] = useState(true);
@@ -85,116 +114,53 @@ export function ExecutiveDashboard() {
   const loadDashboardData = async () => {
     setIsLoading(true);
     try {
-      // Mock data - replace with actual API calls
-      await new Promise(resolve => setTimeout(resolve, 1000));
+      const storeId = user?.activeStoreId || '';
+      const { startDate, endDate } = getDateRange(timeRange);
+
+      const [dashboardRes, inventoryRes, salesRes] = await Promise.all([
+        reportsApi.getDashboardStats(storeId).catch(() => null),
+        reportsApi.getInventoryReport(storeId).catch(() => null),
+        reportsApi.getSalesSummary(storeId, startDate, endDate).catch(() => null),
+      ]);
 
       // Business Metrics
+      const salesSummary = salesRes?.summary;
+      const totalItems = inventoryRes?.totalItems ?? 0;
+      const outOfStock = inventoryRes?.outOfStock ?? 0;
+
       setMetrics({
-        totalRevenue: 45250000, // 4.52 cr
-        totalProfit: 8145000, // 81.45 lakhs
-        totalOrders: 3245,
-        totalCustomers: 1823,
-        averageOrderValue: 13942,
-        inventoryTurnover: 4.2,
-        deadStockPercentage: 18.5,
-        cashFlow: -2340000, // Negative cash flow
-        revenueGrowth: 12.5,
-        profitGrowth: 8.3,
+        totalRevenue: salesSummary?.total_sales ?? dashboardRes?.totalSales ?? 0,
+        totalProfit: 0,
+        totalOrders: salesSummary?.total_orders ?? 0,
+        totalCustomers: 0,
+        averageOrderValue: salesSummary?.avg_order_value ?? 0,
+        inventoryTurnover: 0,
+        deadStockPercentage: totalItems > 0 ? (outOfStock / totalItems) * 100 : 0,
+        cashFlow: 0,
+        revenueGrowth: dashboardRes?.change ?? 0,
+        profitGrowth: 0,
       });
 
-      // Store Performance
-      setStores([
-        {
-          storeId: '1',
-          storeName: 'Better Vision - Main Branch',
-          revenue: 18500000,
-          orders: 1456,
-          profit: 3515000,
-          profitMargin: 19.0,
-          inventoryValue: 8500000,
-          deadStockValue: 1200000,
-          salesPerSqFt: 4250,
-          staffCount: 12,
-          trend: 'up',
-          trendPercentage: 15.2,
-        },
-        {
-          storeId: '2',
-          storeName: 'Better Vision - Mall Road',
-          revenue: 15200000,
-          orders: 1123,
-          profit: 2736000,
-          profitMargin: 18.0,
-          inventoryValue: 6200000,
-          deadStockValue: 980000,
-          salesPerSqFt: 3890,
-          staffCount: 10,
-          trend: 'up',
-          trendPercentage: 8.7,
-        },
-        {
-          storeId: '3',
-          storeName: 'Better Vision - City Center',
-          revenue: 8450000,
-          orders: 789,
-          profit: 1435750,
-          profitMargin: 17.0,
-          inventoryValue: 5100000,
-          deadStockValue: 1150000,
-          salesPerSqFt: 2105,
-          staffCount: 8,
-          trend: 'stable',
-          trendPercentage: 2.1,
-        },
-        {
-          storeId: '4',
-          storeName: 'Better Vision - Satellite',
-          revenue: 2100000,
-          orders: 456,
-          profit: 231000,
-          profitMargin: 11.0,
-          inventoryValue: 3800000,
-          deadStockValue: 1100000,
-          salesPerSqFt: 850,
-          staffCount: 6,
-          trend: 'down',
-          trendPercentage: -5.3,
-        },
-        {
-          storeId: '5',
-          storeName: 'Better Vision - Navrangpura',
-          revenue: 1000000,
-          orders: 421,
-          profit: 90000,
-          profitMargin: 9.0,
-          inventoryValue: 3200000,
-          deadStockValue: 950000,
-          salesPerSqFt: 625,
-          staffCount: 4,
-          trend: 'down',
-          trendPercentage: -12.8,
-        },
-      ]);
+      // Store Performance - no multi-store API available
+      setStores([]);
 
-      // Category Performance
-      setCategories([
-        { category: 'Eyeglasses', revenue: 18500000, profit: 5180000, margin: 28.0, turnover: 5.2, trend: 'up' },
-        { category: 'Sunglasses', revenue: 12300000, profit: 3567000, margin: 29.0, turnover: 6.1, trend: 'up' },
-        { category: 'Contact Lenses', revenue: 8750000, profit: 1750000, margin: 20.0, turnover: 8.5, trend: 'stable' },
-        { category: 'Hearing Aids', revenue: 3200000, profit: 960000, margin: 30.0, turnover: 2.3, trend: 'down' },
-        { category: 'Accessories', revenue: 2500000, profit: 750000, margin: 30.0, turnover: 4.8, trend: 'stable' },
-      ]);
+      // Category Performance from inventory categories
+      const inventoryCategories: any[] = inventoryRes?.categories ?? [];
+      setCategories(
+        inventoryCategories.map((cat: any) => ({
+          category: cat.name ?? 'Other',
+          revenue: cat.value ?? 0,
+          profit: 0,
+          margin: 0,
+          turnover: 0,
+          trend: 'stable' as const,
+        }))
+      );
 
-      // Top Products
-      setTopProducts([
-        { id: '1', name: 'Ray-Ban Aviator Classic', category: 'Sunglasses', revenue: 1245000, quantity: 287, margin: 32.5 },
-        { id: '2', name: 'Titan Eye+ Premium Frame', category: 'Eyeglasses', revenue: 985000, quantity: 156, margin: 28.0 },
-        { id: '3', name: 'Acuvue Oasys Monthly', category: 'Contact Lenses', revenue: 875000, quantity: 1250, margin: 22.0 },
-        { id: '4', name: 'Oakley Frogskins', category: 'Sunglasses', revenue: 756000, quantity: 98, margin: 35.0 },
-        { id: '5', name: 'Carrera Progressive Lenses', category: 'Eyeglasses', revenue: 698000, quantity: 112, margin: 30.0 },
-      ]);
+      // Top Products - no top-products API available
+      setTopProducts([]);
 
-    } catch (error: any) {
+    } catch (_error: any) {
       toast.error('Failed to load dashboard data');
     } finally {
       setIsLoading(false);

@@ -90,9 +90,7 @@ export function InventoryPage() {
   // Data state
   const [inventory, setInventory] = useState<StockItem[]>([]);
   const [lowStockItems, setLowStockItems] = useState<StockItem[]>([]);
-  const [movements, _setMovements] = useState<StockMovement[]>([]);
-  // setMovements reserved for future stock movement tracking
-  void _setMovements;
+  const [movements] = useState<StockMovement[]>([]);
 
   // UI state
   const [searchQuery, setSearchQuery] = useState('');

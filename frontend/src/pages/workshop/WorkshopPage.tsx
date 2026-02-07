@@ -65,7 +65,7 @@ const PRIORITY_CONFIG: Record<JobPriority, { label: string; class: string; icon:
 };
 
 export function WorkshopPage() {
-  const { user, hasRole } = useAuth();
+  const { user } = useAuth();
   const toast = useToast();
 
   // Data state
@@ -79,13 +79,6 @@ export function WorkshopPage() {
   // Loading state
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-
-  // Role-based permissions
-  const _canUpdateStatus = hasRole(['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'WORKSHOP_STAFF']);
-  const _canAssignJob = hasRole(['SUPERADMIN', 'ADMIN', 'STORE_MANAGER']);
-  // Reserved for future job status update and assignment features
-  void _canUpdateStatus;
-  void _canAssignJob;
 
   // Load jobs on mount
   useEffect(() => {
