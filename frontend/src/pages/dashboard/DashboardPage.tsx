@@ -21,6 +21,11 @@ import {
   Package,
   Eye,
   ShoppingCart,
+  Search,
+  Wrench,
+  BarChart3,
+  AlertCircle,
+  Plus,
 } from 'lucide-react';
 import type { UserRole } from '../../types';
 import clsx from 'clsx';
@@ -192,6 +197,11 @@ export default function DashboardPage() {
     eyeTests: 0,
     newCustomers: 0,
     paymentsReceived: 0,
+  });
+
+  // Period-over-period comparison: yesterday's data (API can populate later)
+  const [yesterdaySummary, ] = useState<TodaySummary>({
+    totalOrders: 0, deliveries: 0, eyeTests: 0, newCustomers: 0, paymentsReceived: 0,
   });
 
   const [storeName, setStoreName] = useState<string>('');
@@ -380,10 +390,21 @@ export default function DashboardPage() {
       label: 'Deliveries Today',
       onClick: () => handleModuleClick('pos'),
     };
+    const prescriptionConversionKpi: Omit<KpiCardProps, 'loading'> = {
+      icon: Eye,
+      iconBg: 'bg-violet-100 text-violet-600',
+      value: todaySummary.eyeTests > 0
+        ? `${Math.round((todaySummary.totalOrders / todaySummary.eyeTests) * 100)}%`
+        : 'N/A',
+      label: 'Rx Conversion Rate',
+      change: todaySummary.eyeTests > 0 ? `${todaySummary.eyeTests} tests` : undefined,
+      changeType: 'neutral',
+      onClick: () => handleModuleClick('clinic'),
+    };
 
     switch (role) {
       case 'OPTOMETRIST':
-        return [appointmentKpi, eyeTestsKpi, pendingKpi, customersKpi];
+        return [appointmentKpi, eyeTestsKpi, prescriptionConversionKpi, pendingKpi, customersKpi];
       case 'SALES_CASHIER':
       case 'SALES_STAFF':
         return [salesKpi, ordersKpi, pendingKpi, customersKpi];
@@ -395,7 +416,7 @@ export default function DashboardPage() {
         return [salesKpi, pendingKpi, ordersKpi, lowStockKpi];
       default:
         // SUPERADMIN, ADMIN, AREA_MANAGER, STORE_MANAGER
-        return [salesKpi, pendingKpi, appointmentKpi, lowStockKpi];
+        return [salesKpi, pendingKpi, appointmentKpi, lowStockKpi, prescriptionConversionKpi];
     }
   };
 
@@ -428,11 +449,19 @@ export default function DashboardPage() {
       </div>
 
       {/* Role-based KPI Stats Row */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        {getRoleKpis(user?.activeRole).map((kpi) => (
-          <KpiCard key={kpi.label} {...kpi} loading={isLoading} />
-        ))}
-      </div>
+      {(() => {
+        const kpis = getRoleKpis(user?.activeRole);
+        return (
+          <div className={clsx(
+            'grid grid-cols-1 sm:grid-cols-2 gap-4',
+            kpis.length === 5 ? 'lg:grid-cols-5' : 'lg:grid-cols-4'
+          )}>
+            {kpis.map((kpi) => (
+              <KpiCard key={kpi.label} {...kpi} loading={isLoading} />
+            ))}
+          </div>
+        );
+      })()}
 
       {/* Modules Section */}
       <div>
@@ -504,34 +533,90 @@ export default function DashboardPage() {
               </div>
             ) : (
               <>
-                <div className="flex justify-between py-2 border-b border-gray-100">
-                  <span className="text-gray-600">Total Orders</span>
-                  <span className="font-semibold text-gray-900">{todaySummary.totalOrders}</span>
-                </div>
-                <div className="flex justify-between py-2 border-b border-gray-100">
-                  <span className="text-gray-600">Deliveries</span>
-                  <span className="font-semibold text-gray-900">{todaySummary.deliveries}</span>
-                </div>
-                <div className="flex justify-between py-2 border-b border-gray-100">
-                  <span className="text-gray-600">Eye Tests</span>
-                  <span className="font-semibold text-gray-900">{todaySummary.eyeTests}</span>
-                </div>
-                <div className="flex justify-between py-2 border-b border-gray-100">
-                  <span className="text-gray-600">New Customers</span>
-                  <span className="font-semibold text-gray-900">{todaySummary.newCustomers}</span>
-                </div>
-                <div className="flex justify-between py-2">
-                  <span className="text-gray-600">Payments Received</span>
-                  <span className="font-semibold text-bv-gold-600">{formatCurrency(todaySummary.paymentsReceived)}</span>
-                </div>
+                {[
+                  { label: 'Total Orders', today: todaySummary.totalOrders, yesterday: yesterdaySummary.totalOrders, isCurrency: false },
+                  { label: 'Deliveries', today: todaySummary.deliveries, yesterday: yesterdaySummary.deliveries, isCurrency: false },
+                  { label: 'Eye Tests', today: todaySummary.eyeTests, yesterday: yesterdaySummary.eyeTests, isCurrency: false },
+                  { label: 'New Customers', today: todaySummary.newCustomers, yesterday: yesterdaySummary.newCustomers, isCurrency: false },
+                  { label: 'Payments Received', today: todaySummary.paymentsReceived, yesterday: yesterdaySummary.paymentsReceived, isCurrency: true },
+                ].map((row, idx, arr) => {
+                  const diff = row.today - row.yesterday;
+                  const showComparison = row.yesterday > 0;
+                  return (
+                    <div key={row.label} className={clsx('flex justify-between items-center py-2', idx < arr.length - 1 && 'border-b border-gray-100')}>
+                      <span className="text-gray-600">{row.label}</span>
+                      <div className="flex items-center gap-2">
+                        <span className={clsx('font-semibold', row.isCurrency ? 'text-bv-gold-600' : 'text-gray-900')}>
+                          {row.isCurrency ? formatCurrency(row.today) : row.today}
+                        </span>
+                        {showComparison && (
+                          <span className={clsx(
+                            'text-xs',
+                            diff > 0 ? 'text-green-600' : diff < 0 ? 'text-red-500' : 'text-gray-400'
+                          )}>
+                            {diff > 0 ? `\u2191 ${row.isCurrency ? formatCurrency(diff) : diff}` : diff < 0 ? `\u2193 ${row.isCurrency ? formatCurrency(Math.abs(diff)) : Math.abs(diff)}` : '= same'}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
               </>
             )}
           </div>
         </div>
       </div>
 
-      {/* Quick Actions (hidden on mobile) */}
-      {/* This could be added as floating action buttons on mobile */}
+      {/* Quick Actions */}
+      <div className="hidden sm:block">
+        <h2 className="text-lg font-semibold text-gray-900 mb-4">Quick Actions</h2>
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+          {(() => {
+            const role = user?.activeRole;
+            const actions: { icon: React.ComponentType<{ className?: string }>; label: string; path: string }[] = [];
+
+            // Sales roles
+            const canSell = ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'SALES_CASHIER', 'SALES_STAFF', 'OPTOMETRIST'].includes(role || '');
+            if (canSell) {
+              actions.push({ icon: Plus, label: 'New Sale', path: '/pos' });
+              actions.push({ icon: Search, label: 'Search Customer', path: '/customers?search=true' });
+            }
+
+            // Clinical roles
+            if (role === 'OPTOMETRIST') {
+              actions.push({ icon: Eye, label: 'New Eye Test', path: '/clinical/prescriptions' });
+              actions.push({ icon: Calendar, label: 'View Appointments', path: '/clinical' });
+            }
+
+            // Manager roles
+            if (['SUPERADMIN', 'ADMIN', 'STORE_MANAGER'].includes(role || '')) {
+              actions.push({ icon: BarChart3, label: 'View Reports', path: '/reports' });
+              actions.push({ icon: AlertCircle, label: 'Low Stock Alert', path: '/inventory?tab=low-stock' });
+            }
+
+            // Workshop
+            if (role === 'WORKSHOP_STAFF') {
+              actions.push({ icon: Wrench, label: 'Workshop Jobs', path: '/workshop' });
+            }
+
+            return actions.map((action) => {
+              const ActionIcon = action.icon;
+              return (
+                <button
+                  key={action.label}
+                  onClick={() => navigate(action.path)}
+                  className="flex flex-col items-center gap-2 p-4 bg-white rounded-xl border border-gray-100 shadow-sm hover:border-bv-gold-300 hover:shadow-md transition-all group"
+                >
+                  <div className="p-2 rounded-lg bg-bv-gold-50 group-hover:bg-bv-gold-100 transition-colors">
+                    <ActionIcon className="w-5 h-5 text-bv-gold-600" />
+                  </div>
+                  <span className="text-sm font-medium text-gray-700 group-hover:text-bv-gold-600 transition-colors">{action.label}</span>
+                </button>
+              );
+            });
+          })()}
+        </div>
+      </div>
     </div>
   );
 }

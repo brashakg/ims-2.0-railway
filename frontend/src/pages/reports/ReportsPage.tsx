@@ -26,9 +26,11 @@ import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { GSTR1Report } from '../../components/reports/GSTR1Report';
 import { GSTR3BReport } from '../../components/reports/GSTR3BReport';
+import { DemandForecast } from '../../components/reports/DemandForecast';
 import clsx from 'clsx';
+import { exportToCSV, SALES_REPORT_COLUMNS, INVENTORY_REPORT_COLUMNS, CUSTOMER_REPORT_COLUMNS, GST_REPORT_COLUMNS } from '../../utils/exportUtils';
 
-type ReportType = 'sales' | 'inventory' | 'customers' | 'gst';
+type ReportType = 'sales' | 'inventory' | 'customers' | 'gst' | 'forecast';
 type DateRange = 'today' | 'week' | 'month' | 'quarter' | 'custom';
 
 // Types
@@ -215,6 +217,130 @@ export function ReportsPage() {
 
   const filteredReports = REPORT_CARDS.filter(r => r.category === activeTab);
 
+  // Export handlers
+  const handleExportSalesTrend = () => {
+    if (dailyTrend.length === 0) {
+      toast.warning('No data to export');
+      return;
+    }
+    exportToCSV(
+      dailyTrend.map(d => ({ date: d.date, sales: d.sales.toFixed(2) })),
+      'sales_trend',
+      [{ key: 'date', label: 'Date' }, { key: 'sales', label: 'Sales (₹)' }]
+    );
+    toast.success('Sales trend exported');
+  };
+
+  const handleExportCategoryBreakdown = () => {
+    if (categoryBreakdown.length === 0) {
+      toast.warning('No data to export');
+      return;
+    }
+    exportToCSV(
+      categoryBreakdown.map(c => ({
+        category: c.category,
+        sales: c.sales.toFixed(2),
+        units: c.units,
+        percentage: c.percentage.toFixed(1),
+      })),
+      'category_breakdown',
+      [
+        { key: 'category', label: 'Category' },
+        { key: 'sales', label: 'Sales (₹)' },
+        { key: 'units', label: 'Units Sold' },
+        { key: 'percentage', label: 'Percentage (%)' },
+      ]
+    );
+    toast.success('Category breakdown exported');
+  };
+
+  const handleExportReport = (reportId: string) => {
+    // Export current summary data based on report type
+    const reportData: Record<string, any>[] = [];
+    let columns: { key: string; label: string }[] = [];
+
+    switch (reportId) {
+      case 'daily-sales':
+      case 'monthly-sales':
+        reportData.push({
+          period: dateRange,
+          totalSales: salesSummary.totalSales.toFixed(2),
+          orderCount: salesSummary.orderCount,
+          averageOrderValue: salesSummary.averageOrderValue.toFixed(2),
+          grossProfit: salesSummary.grossProfit.toFixed(2),
+          gstCollected: salesSummary.gstCollected.toFixed(2),
+          topCategory: salesSummary.topCategory,
+        });
+        columns = SALES_REPORT_COLUMNS.slice(0, 4).concat([
+          { key: 'totalSales', label: 'Total Sales (₹)' },
+          { key: 'orderCount', label: 'Orders' },
+          { key: 'averageOrderValue', label: 'Avg Order Value (₹)' },
+          { key: 'grossProfit', label: 'Gross Profit (₹)' },
+          { key: 'gstCollected', label: 'GST Collected (₹)' },
+        ]);
+        break;
+      case 'stock-report':
+      case 'stock-movement':
+        columns = INVENTORY_REPORT_COLUMNS;
+        break;
+      case 'customer-report':
+        columns = CUSTOMER_REPORT_COLUMNS;
+        break;
+      case 'gst-report':
+        columns = GST_REPORT_COLUMNS;
+        break;
+    }
+
+    if (reportData.length > 0) {
+      exportToCSV(reportData, reportId, columns);
+      toast.success(`${reportId.replace('-', ' ')} exported`);
+    } else {
+      // For reports without local data, export what we have
+      const summaryData = [{
+        period: dateRange,
+        totalSales: salesSummary.totalSales.toFixed(2),
+        orderCount: salesSummary.orderCount,
+        averageOrderValue: salesSummary.averageOrderValue.toFixed(2),
+        gstCollected: salesSummary.gstCollected.toFixed(2),
+      }];
+      exportToCSV(summaryData, reportId);
+      toast.success(`${reportId.replace(/-/g, ' ')} summary exported`);
+    }
+  };
+
+  const handlePrintReport = (reportTitle: string) => {
+    // Print current page content
+    const printContent = document.querySelector('.space-y-4');
+    if (printContent) {
+      const printWindow = window.open('', '_blank');
+      if (printWindow) {
+        printWindow.document.write(`
+          <!DOCTYPE html><html><head><title>${reportTitle}</title>
+          <style>
+            body { font-family: sans-serif; padding: 20px; }
+            .card { border: 1px solid #ddd; padding: 16px; margin: 8px 0; border-radius: 8px; }
+            table { width: 100%; border-collapse: collapse; }
+            th, td { border: 1px solid #ddd; padding: 8px; text-align: left; font-size: 12px; }
+            th { background: #f5f5f5; }
+          </style></head><body>
+          <h1>${reportTitle}</h1>
+          <p>Date: ${new Date().toLocaleDateString('en-IN')}</p>
+          <table><tr><th>Metric</th><th>Value</th></tr>
+          <tr><td>Total Sales</td><td>₹${salesSummary.totalSales.toLocaleString('en-IN')}</td></tr>
+          <tr><td>Orders</td><td>${salesSummary.orderCount}</td></tr>
+          <tr><td>Avg Order Value</td><td>₹${salesSummary.averageOrderValue.toLocaleString('en-IN')}</td></tr>
+          <tr><td>GST Collected</td><td>₹${salesSummary.gstCollected.toLocaleString('en-IN')}</td></tr>
+          </table>
+          </body></html>
+        `);
+        printWindow.document.close();
+        printWindow.focus();
+        printWindow.print();
+        printWindow.close();
+      }
+    }
+  };
+
   const formatCurrency = (amount: number) => {
     if (amount >= 100000) {
       return `₹${(amount / 100000).toFixed(2)}L`;
@@ -340,6 +466,7 @@ export function ReportsPage() {
           { id: 'inventory' as ReportType, label: 'Inventory', icon: Package },
           { id: 'customers' as ReportType, label: 'Customers', icon: Users },
           { id: 'gst' as ReportType, label: 'GST', icon: FileText },
+          { id: 'forecast' as ReportType, label: 'Forecast', icon: TrendingUp },
         ].map(tab => (
           <button
             key={tab.id}
@@ -366,11 +493,11 @@ export function ReportsPage() {
               <h3 className="font-semibold text-gray-900">Sales Trend</h3>
               {canExport && (
                 <button
-                  onClick={() => toast.info('Export sales trend feature coming soon')}
+                  onClick={handleExportSalesTrend}
                   className="text-sm text-bv-red-600 hover:text-bv-red-700 flex items-center gap-1"
                 >
                   <Download className="w-4 h-4" />
-                  Export
+                  Export CSV
                 </button>
               )}
             </div>
@@ -406,6 +533,15 @@ export function ReportsPage() {
           <div className="card">
             <div className="flex items-center justify-between mb-4">
               <h3 className="font-semibold text-gray-900">Category Breakdown</h3>
+              {canExport && categoryBreakdown.length > 0 && (
+                <button
+                  onClick={handleExportCategoryBreakdown}
+                  className="text-sm text-bv-red-600 hover:text-bv-red-700 flex items-center gap-1"
+                >
+                  <Download className="w-4 h-4" />
+                  Export CSV
+                </button>
+              )}
             </div>
             {isLoading ? (
               <div className="space-y-3">
@@ -459,22 +595,34 @@ export function ReportsPage() {
                   <h4 className="font-medium text-gray-900">{report.title}</h4>
                   <p className="text-sm text-gray-500 mt-1">{report.description}</p>
                   <div className="flex items-center gap-2 mt-3">
+                    {report.id === 'gst-report' ? (
+                      <button
+                        onClick={() => setShowGSTR1(true)}
+                        className="text-sm text-bv-red-600 hover:text-bv-red-700 flex items-center gap-1"
+                      >
+                        <Eye className="w-4 h-4" />
+                        View GSTR-1
+                      </button>
+                    ) : (
+                      <button
+                        onClick={() => toast.info(`Detailed ${report.title} view requires store data`)}
+                        className="text-sm text-bv-red-600 hover:text-bv-red-700 flex items-center gap-1"
+                      >
+                        <Eye className="w-4 h-4" />
+                        View
+                      </button>
+                    )}
+                    {canExport && (
+                      <button
+                        onClick={() => handleExportReport(report.id)}
+                        className="text-sm text-gray-600 hover:text-gray-700 flex items-center gap-1"
+                      >
+                        <Download className="w-4 h-4" />
+                        Export CSV
+                      </button>
+                    )}
                     <button
-                      onClick={() => toast.info(`View ${report.title}`)}
-                      className="text-sm text-bv-red-600 hover:text-bv-red-700 flex items-center gap-1"
-                    >
-                      <Eye className="w-4 h-4" />
-                      View
-                    </button>
-                    <button
-                      onClick={() => toast.info(`Export ${report.title}`)}
-                      className="text-sm text-gray-600 hover:text-gray-700 flex items-center gap-1"
-                    >
-                      <Download className="w-4 h-4" />
-                      Export
-                    </button>
-                    <button
-                      onClick={() => toast.info(`Print ${report.title}`)}
+                      onClick={() => handlePrintReport(report.title)}
                       className="text-sm text-gray-600 hover:text-gray-700 flex items-center gap-1"
                     >
                       <Printer className="w-4 h-4" />
@@ -517,6 +665,11 @@ export function ReportsPage() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* Demand Forecast Section */}
+      {activeTab === 'forecast' && (
+        <DemandForecast />
       )}
 
       {/* GSTR-1 Modal */}

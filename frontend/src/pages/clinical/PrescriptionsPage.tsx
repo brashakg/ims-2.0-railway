@@ -12,10 +12,13 @@ import {
   Loader2,
   AlertCircle,
   Calendar,
+  Printer,
 } from 'lucide-react';
-import { clinicalApi } from '../../services/api';
+import { clinicalApi, storeApi } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
+import { PrescriptionPrint } from '../../components/clinical/PrescriptionPrint';
+import type { PrescriptionPrintData, StoreInfo } from '../../components/clinical/PrescriptionPrint';
 
 interface Prescription {
   id: string;
@@ -48,10 +51,64 @@ export function PrescriptionsPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selectedPrescription, setSelectedPrescription] = useState<Prescription | null>(null);
+  const [printPrescription, setPrintPrescription] = useState<PrescriptionPrintData | null>(null);
+  const [storeInfo, setStoreInfo] = useState<StoreInfo | null>(null);
 
   useEffect(() => {
     loadPrescriptions();
+    loadStoreInfo();
   }, []);
+
+  const loadStoreInfo = async () => {
+    try {
+      const storeId = user?.activeStoreId;
+      if (!storeId) return;
+      const store = await storeApi.getStore(storeId);
+      if (store) {
+        setStoreInfo({
+          storeName: store.storeName,
+          address: store.address,
+          city: store.city,
+          state: store.state,
+          pincode: store.pincode,
+          phone: (store as any).phone,
+          gstin: store.gstin,
+        });
+      }
+    } catch {
+      // Store info is optional for display; fail silently
+    }
+  };
+
+  const handlePrintPrescription = (rx: Prescription) => {
+    if (!storeInfo) {
+      toast.error('Store information not loaded yet. Please try again.');
+      loadStoreInfo();
+      return;
+    }
+    const printData: PrescriptionPrintData = {
+      id: rx.id,
+      patientName: rx.patientName,
+      customerPhone: rx.customerPhone,
+      prescribedAt: rx.prescribedAt,
+      rightEye: {
+        sphere: rx.rightEye.sphere,
+        cylinder: rx.rightEye.cylinder,
+        axis: rx.rightEye.axis,
+        add: rx.rightEye.add,
+      },
+      leftEye: {
+        sphere: rx.leftEye.sphere,
+        cylinder: rx.leftEye.cylinder,
+        axis: rx.leftEye.axis,
+        add: rx.leftEye.add,
+      },
+      pd: rx.pd,
+      notes: rx.notes,
+      optometristName: rx.optometristName,
+    };
+    setPrintPrescription(printData);
+  };
 
   const loadPrescriptions = async () => {
     setIsLoading(true);
@@ -204,21 +261,40 @@ export function PrescriptionsPage() {
                 </div>
               </div>
 
-              <div className="mt-3 pt-3 border-t border-gray-100">
+              <div className="mt-3 pt-3 border-t border-gray-100 flex items-center gap-3">
                 <button
                   onClick={(e) => {
                     e.stopPropagation();
-                    toast.info('Print functionality coming soon');
+                    setSelectedPrescription(rx);
                   }}
                   className="text-sm text-purple-600 hover:text-purple-700 flex items-center gap-1"
                 >
                   <FileText className="w-4 h-4" />
                   View Details
                 </button>
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handlePrintPrescription(rx);
+                  }}
+                  className="text-sm text-gray-500 hover:text-purple-600 flex items-center gap-1"
+                >
+                  <Printer className="w-4 h-4" />
+                  Print
+                </button>
               </div>
             </div>
           ))}
         </div>
+      )}
+
+      {/* Prescription Print View */}
+      {printPrescription && storeInfo && (
+        <PrescriptionPrint
+          prescription={printPrescription}
+          store={storeInfo}
+          onClose={() => setPrintPrescription(null)}
+        />
       )}
 
       {/* Prescription Detail Modal */}
@@ -330,10 +406,13 @@ export function PrescriptionsPage() {
 
                 <div className="flex gap-2">
                   <button
-                    onClick={() => toast.info('Print functionality coming soon')}
-                    className="btn-primary flex-1"
+                    onClick={() => {
+                      handlePrintPrescription(selectedPrescription);
+                      setSelectedPrescription(null);
+                    }}
+                    className="btn-primary flex-1 flex items-center justify-center"
                   >
-                    <FileText className="w-4 h-4 mr-2" />
+                    <Printer className="w-4 h-4 mr-2" />
                     Print Prescription
                   </button>
                   <button

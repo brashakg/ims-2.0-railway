@@ -4,7 +4,7 @@
 // NO MOCK DATA - All data from API
 
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { useSearchParams, useNavigate } from 'react-router-dom';
 import {
   Search,
   Plus,
@@ -22,21 +22,43 @@ import {
   Building2,
   Loader2,
   AlertCircle,
+  ShoppingCart,
+  Bell,
+  Award,
+  MessageCircle,
+  PhoneCall,
 } from 'lucide-react';
 import type { Customer, Patient, Prescription } from '../../types';
 import { customerApi, prescriptionApi, orderApi } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { AddCustomerModal, type CustomerFormData } from '../../components/customers/AddCustomerModal';
+import { RecallManager } from '../../components/crm/RecallManager';
+import { PromotionEngine } from '../../components/crm/PromotionEngine';
 import clsx from 'clsx';
+import { calculateRFMScore, type CustomerRFMData } from '../../utils/rfmSegmentation';
 
 type ViewMode = 'list' | 'detail';
+type CRMTab = 'customers' | 'recalls' | 'campaigns';
 
 export function CustomersPage() {
   const { user, hasRole } = useAuth();
   const toast = useToast();
+  const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const searchInputRef = useRef<HTMLInputElement>(null);
+
+  // CRM Tab routing from URL params
+  const tabParam = searchParams.get('tab') as CRMTab | null;
+  const activeTab: CRMTab = tabParam && ['recalls', 'campaigns'].includes(tabParam) ? tabParam : 'customers';
+
+  // Render CRM sub-tabs (Recalls & Campaigns)
+  if (activeTab === 'recalls') {
+    return <RecallManager />;
+  }
+  if (activeTab === 'campaigns') {
+    return <PromotionEngine />;
+  }
 
   // Auto-focus search when navigated with ?search=true
   useEffect(() => {
@@ -65,6 +87,8 @@ export function CustomersPage() {
 
   // Modal state
   const [showAddCustomerModal, setShowAddCustomerModal] = useState(false);
+  const [showEditModal, setShowEditModal] = useState(false);
+  const [editForm, setEditForm] = useState({ name: '', phone: '', email: '', address: '' });
 
   // Load customers on mount
   useEffect(() => {
@@ -361,6 +385,41 @@ export function CustomersPage() {
     );
   }
 
+  // ---- Customer 360 Computed Values ----
+  const totalSpend = purchaseHistory.reduce((sum, o) => sum + o.total, 0);
+  const totalOrders = purchaseHistory.length;
+  const avgOrderValue = totalOrders > 0 ? totalSpend / totalOrders : 0;
+  const lastVisit = purchaseHistory.length > 0 ? purchaseHistory[0].date : null;
+  const customerLifetimeDays = selectedCustomer?.createdAt
+    ? Math.floor((Date.now() - new Date(selectedCustomer.createdAt).getTime()) / (1000 * 60 * 60 * 24))
+    : 0;
+
+  // Loyalty: ₹100 = 1 point
+  const loyaltyPoints = Math.floor(totalSpend / 100);
+  const loyaltyTier = loyaltyPoints >= 5000 ? 'Diamond' : loyaltyPoints >= 2000 ? 'Platinum' : loyaltyPoints >= 500 ? 'Gold' : 'Silver';
+  const tierColors: Record<string, { bg: string; text: string; border: string }> = {
+    Silver: { bg: 'bg-gray-100', text: 'text-gray-700', border: 'border-gray-300' },
+    Gold: { bg: 'bg-yellow-50', text: 'text-yellow-700', border: 'border-yellow-300' },
+    Platinum: { bg: 'bg-blue-50', text: 'text-blue-700', border: 'border-blue-300' },
+    Diamond: { bg: 'bg-purple-50', text: 'text-purple-700', border: 'border-purple-300' },
+  };
+
+  // Mock communication log
+  const communicationLog = [
+    { id: '1', date: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString(), type: 'SMS' as const, message: 'Prescription reminder sent' },
+    { id: '2', date: new Date(Date.now() - 5 * 24 * 60 * 60 * 1000).toISOString(), type: 'Visit' as const, message: 'Walk-in visit for eye checkup' },
+    { id: '3', date: new Date(Date.now() - 12 * 24 * 60 * 60 * 1000).toISOString(), type: 'WhatsApp' as const, message: 'Order ready for pickup notification' },
+    { id: '4', date: new Date(Date.now() - 20 * 24 * 60 * 60 * 1000).toISOString(), type: 'Call' as const, message: 'Follow-up call for lens fitting' },
+    { id: '5', date: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString(), type: 'Email' as const, message: 'Invoice and warranty card sent' },
+  ];
+  const commTypeConfig: Record<string, { icon: typeof MessageCircle; color: string; bg: string }> = {
+    SMS: { icon: MessageCircle, color: 'text-green-600', bg: 'bg-green-50' },
+    WhatsApp: { icon: MessageCircle, color: 'text-emerald-600', bg: 'bg-emerald-50' },
+    Call: { icon: PhoneCall, color: 'text-blue-600', bg: 'bg-blue-50' },
+    Visit: { icon: User, color: 'text-orange-600', bg: 'bg-orange-50' },
+    Email: { icon: Mail, color: 'text-purple-600', bg: 'bg-purple-50' },
+  };
+
   // Customer Detail View
   return (
     <div className="space-y-4">
@@ -378,13 +437,71 @@ export function CustomersPage() {
         </div>
         {canEditCustomer && (
           <button
-            onClick={() => toast.info(`Edit customer: ${selectedCustomer?.name}`)}
+            onClick={() => {
+              if (selectedCustomer) {
+                setEditForm({
+                  name: selectedCustomer.name || '',
+                  phone: selectedCustomer.phone || '',
+                  email: selectedCustomer.email || '',
+                  address: (selectedCustomer as any).address || '',
+                });
+                setShowEditModal(true);
+              }
+            }}
             className="btn-outline flex items-center gap-2"
           >
             <Edit2 className="w-4 h-4" />
             Edit
           </button>
         )}
+        {/* Quick Action Buttons */}
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => navigate('/crm?tab=recalls')}
+            className="p-2 rounded-lg bg-amber-50 text-amber-600 hover:bg-amber-100 transition-colors"
+            title="Send Recall"
+          >
+            <Bell className="w-4 h-4" />
+          </button>
+          <button
+            onClick={() => navigate('/pos')}
+            className="p-2 rounded-lg bg-green-50 text-green-600 hover:bg-green-100 transition-colors"
+            title="New Order"
+          >
+            <ShoppingCart className="w-4 h-4" />
+          </button>
+          <button
+            onClick={() => navigate('/clinical')}
+            className="p-2 rounded-lg bg-blue-50 text-blue-600 hover:bg-blue-100 transition-colors"
+            title="Book Eye Test"
+          >
+            <Eye className="w-4 h-4" />
+          </button>
+        </div>
+      </div>
+
+      {/* Customer Summary Stats Row */}
+      <div className="grid grid-cols-2 tablet:grid-cols-5 gap-4">
+        <div className="card text-center">
+          <p className="text-xs text-gray-500 uppercase tracking-wide">Total Spend</p>
+          <p className="text-xl font-bold text-gray-900 mt-1">{formatCurrency(totalSpend)}</p>
+        </div>
+        <div className="card text-center">
+          <p className="text-xs text-gray-500 uppercase tracking-wide">Total Orders</p>
+          <p className="text-xl font-bold text-gray-900 mt-1">{totalOrders}</p>
+        </div>
+        <div className="card text-center">
+          <p className="text-xs text-gray-500 uppercase tracking-wide">Avg Order Value</p>
+          <p className="text-xl font-bold text-gray-900 mt-1">{formatCurrency(avgOrderValue)}</p>
+        </div>
+        <div className="card text-center">
+          <p className="text-xs text-gray-500 uppercase tracking-wide">Last Visit</p>
+          <p className="text-xl font-bold text-gray-900 mt-1">{lastVisit ? formatDate(lastVisit) : 'N/A'}</p>
+        </div>
+        <div className="card text-center">
+          <p className="text-xs text-gray-500 uppercase tracking-wide">Customer Lifetime</p>
+          <p className="text-xl font-bold text-gray-900 mt-1">{customerLifetimeDays} days</p>
+        </div>
       </div>
 
       <div className="grid grid-cols-1 laptop:grid-cols-3 gap-4">
@@ -414,6 +531,68 @@ export function CustomersPage() {
               <Calendar className="w-4 h-4 text-gray-400" />
               <span>Customer since {formatDate(selectedCustomer?.createdAt || '')}</span>
             </div>
+
+            {/* RFM Segment Badge */}
+            {(() => {
+              const rfmData: CustomerRFMData = {
+                customerId: selectedCustomer?.id || '',
+                customerName: selectedCustomer?.name || '',
+                phone: selectedCustomer?.phone || '',
+                lastPurchaseDate: purchaseHistory[0]?.date || null,
+                totalOrders: purchaseHistory.length,
+                totalSpend: purchaseHistory.reduce((sum, o) => sum + o.total, 0),
+                daysSinceLastPurchase: purchaseHistory[0]?.date
+                  ? Math.floor((Date.now() - new Date(purchaseHistory[0].date).getTime()) / (1000 * 60 * 60 * 24))
+                  : 999,
+              };
+              const rfm = calculateRFMScore(rfmData);
+              return (
+                <div className="mt-3 p-3 rounded-lg border" style={{ borderColor: 'currentColor' }}>
+                  <div className="flex items-center justify-between mb-1">
+                    <span className={`text-sm font-semibold px-2 py-0.5 rounded-full ${rfm.bgColor} ${rfm.color}`}>
+                      {rfm.label}
+                    </span>
+                    <span className="text-xs text-gray-500">
+                      R{rfm.recency} F{rfm.frequency} M{rfm.monetary}
+                    </span>
+                  </div>
+                  <p className="text-xs text-gray-600 mt-1">{rfm.action}</p>
+                </div>
+              );
+            })()}
+
+            {/* Loyalty Points */}
+            <div className={`mt-3 p-3 rounded-lg border ${tierColors[loyaltyTier].border} ${tierColors[loyaltyTier].bg}`}>
+              <div className="flex items-center justify-between mb-2">
+                <div className="flex items-center gap-1.5">
+                  <Award className={`w-4 h-4 ${tierColors[loyaltyTier].text}`} />
+                  <span className={`text-sm font-semibold ${tierColors[loyaltyTier].text}`}>{loyaltyTier}</span>
+                </div>
+                <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${tierColors[loyaltyTier].bg} ${tierColors[loyaltyTier].text} border ${tierColors[loyaltyTier].border}`}>
+                  {loyaltyPoints.toLocaleString('en-IN')} pts
+                </span>
+              </div>
+              <div className="w-full bg-white/60 rounded-full h-1.5">
+                <div
+                  className={clsx(
+                    'h-1.5 rounded-full transition-all',
+                    loyaltyTier === 'Silver' && 'bg-gray-400',
+                    loyaltyTier === 'Gold' && 'bg-yellow-500',
+                    loyaltyTier === 'Platinum' && 'bg-blue-500',
+                    loyaltyTier === 'Diamond' && 'bg-purple-500',
+                  )}
+                  style={{
+                    width: `${Math.min(100, loyaltyTier === 'Diamond' ? 100 : loyaltyTier === 'Platinum' ? (loyaltyPoints / 5000) * 100 : loyaltyTier === 'Gold' ? (loyaltyPoints / 2000) * 100 : (loyaltyPoints / 500) * 100)}%`,
+                  }}
+                />
+              </div>
+              <p className="text-xs text-gray-500 mt-1">
+                {loyaltyTier === 'Diamond'
+                  ? 'Top tier reached!'
+                  : `${(loyaltyTier === 'Platinum' ? 5000 : loyaltyTier === 'Gold' ? 2000 : 500) - loyaltyPoints} pts to next tier`}
+              </p>
+            </div>
+
             {selectedCustomer?.customerType === 'B2B' && selectedCustomer.gstNumber && (
               <div className="flex items-center gap-2 text-sm">
                 <Building2 className="w-4 h-4 text-gray-400" />
@@ -554,6 +733,120 @@ export function CustomersPage() {
           </div>
         )}
       </div>
+
+      {/* Communication Log */}
+      <div className="card">
+        <h2 className="font-semibold text-gray-900 mb-4">Communication Log</h2>
+        <div className="relative">
+          {/* Timeline line */}
+          <div className="absolute left-4 top-0 bottom-0 w-px bg-gray-200" />
+          <div className="space-y-4">
+            {communicationLog.map(entry => {
+              const config = commTypeConfig[entry.type];
+              const IconComponent = config.icon;
+              return (
+                <div key={entry.id} className="flex items-start gap-3 relative">
+                  <div className={`relative z-10 flex-shrink-0 w-8 h-8 rounded-full ${config.bg} flex items-center justify-center`}>
+                    <IconComponent className={`w-4 h-4 ${config.color}`} />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className={`text-xs font-medium px-1.5 py-0.5 rounded ${config.bg} ${config.color}`}>
+                        {entry.type}
+                      </span>
+                      <span className="text-xs text-gray-400">{formatDate(entry.date)}</span>
+                    </div>
+                    <p className="text-sm text-gray-700 mt-0.5">{entry.message}</p>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+
+      {/* Edit Customer Modal */}
+      {showEditModal && selectedCustomer && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-xl shadow-xl max-w-md w-full">
+            <div className="p-6">
+              <div className="flex items-center justify-between mb-6">
+                <h2 className="text-xl font-bold text-gray-900">Edit Customer</h2>
+                <button onClick={() => setShowEditModal(false)} className="p-2 hover:bg-gray-100 rounded-lg">
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Name *</label>
+                  <input
+                    type="text"
+                    value={editForm.name}
+                    onChange={e => setEditForm(f => ({ ...f, name: e.target.value }))}
+                    className="input-field"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Phone *</label>
+                  <input
+                    type="tel"
+                    value={editForm.phone}
+                    onChange={e => setEditForm(f => ({ ...f, phone: e.target.value }))}
+                    className="input-field"
+                    maxLength={10}
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Email</label>
+                  <input
+                    type="email"
+                    value={editForm.email}
+                    onChange={e => setEditForm(f => ({ ...f, email: e.target.value }))}
+                    className="input-field"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Address</label>
+                  <textarea
+                    value={editForm.address}
+                    onChange={e => setEditForm(f => ({ ...f, address: e.target.value }))}
+                    className="input-field"
+                    rows={2}
+                  />
+                </div>
+                <button
+                  onClick={async () => {
+                    if (!editForm.name || !editForm.phone) {
+                      toast.error('Name and phone are required');
+                      return;
+                    }
+                    try {
+                      await customerApi.updateCustomer(selectedCustomer.id, {
+                        name: editForm.name,
+                        phone: editForm.phone,
+                        email: editForm.email || undefined,
+                        address: editForm.address || undefined,
+                      });
+                      // Update local state
+                      const updated = { ...selectedCustomer, ...editForm };
+                      setSelectedCustomer(updated as Customer);
+                      setCustomers(prev => prev.map(c => c.id === updated.id ? updated as Customer : c));
+                      setShowEditModal(false);
+                      toast.success('Customer updated successfully');
+                    } catch {
+                      toast.error('Failed to update customer');
+                    }
+                  }}
+                  disabled={!editForm.name || !editForm.phone}
+                  className="btn-primary w-full"
+                >
+                  Save Changes
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
