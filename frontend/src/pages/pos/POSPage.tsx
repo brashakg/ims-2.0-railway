@@ -72,6 +72,7 @@ const ICON_MAP: Record<string, React.FC<{ className?: string }>> = {
 
 // Role-based discount caps
 const ROLE_DISCOUNT_CAPS: Record<UserRole, number> = {
+  CASHIER: 10,
   SALES_STAFF: 10,
   SALES_CASHIER: 10,
   OPTOMETRIST: 10,
