@@ -25,6 +25,7 @@ import {
 import clsx from 'clsx';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
+import type { UserRole } from '../../types';
 import {
   adminStoreApi,
   adminUserApi,
@@ -448,7 +449,7 @@ export function SettingsPage() {
     if (section.role.includes('ALL')) return true;
     // Check if any of user's roles match the section requirements
     const userRoles = user.roles || [user.activeRole];
-    return section.role.some(role => userRoles.includes(role)) || user.activeRole === 'SUPERADMIN';
+    return section.role.some(role => userRoles.includes(role as UserRole)) || user.activeRole === 'SUPERADMIN';
   });
 
   // Load data on tab change
