@@ -40,14 +40,14 @@ export function ProtectedRoute({
   // Check role-based access
   if (allowedRoles && allowedRoles.length > 0) {
     if (!hasRole(allowedRoles)) {
-      return <Navigate to="/unauthorized" replace />;
+      return <Navigate to="/unauthorized" state={{ from: location }} replace />;
     }
   }
 
   // Check permission-based access
   if (requirePermission) {
     if (!hasPermission(requirePermission)) {
-      return <Navigate to="/unauthorized" replace />;
+      return <Navigate to="/unauthorized" state={{ from: location }} replace />;
     }
   }
 
