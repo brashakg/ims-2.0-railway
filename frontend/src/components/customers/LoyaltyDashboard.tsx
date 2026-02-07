@@ -163,10 +163,11 @@ export function LoyaltyDashboard({ customerId, onRedeemPoints }: LoyaltyDashboar
 
   const tierConfig = LOYALTY_TIERS[profile.tier];
   const nextTierInfo = getNextTier(profile.tier, profile.currentBalance);
-  const tierProgress = nextTierInfo
-    ? ((profile.currentBalance - tierConfig.minPoints) /
-        (LOYALTY_TIERS[nextTierInfo.nextTier!].minPoints - tierConfig.minPoints)) *
-      100
+  const tierDenominator = nextTierInfo
+    ? LOYALTY_TIERS[nextTierInfo.nextTier!].minPoints - tierConfig.minPoints
+    : 0;
+  const tierProgress = nextTierInfo && tierDenominator > 0
+    ? ((profile.currentBalance - tierConfig.minPoints) / tierDenominator) * 100
     : 100;
 
   return (

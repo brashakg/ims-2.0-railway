@@ -30,7 +30,7 @@ const pathToModule: Record<string, ModuleId> = {
   '/clinical/history': 'clinic',
   '/clinical/contact-lens': 'clinic',
   '/prescriptions': 'clinic',
-  '/workshop': 'pos',
+  '/workshop': 'workshop',
   '/tasks': 'hr',
   '/hr': 'hr',
   '/purchase': 'vendors',

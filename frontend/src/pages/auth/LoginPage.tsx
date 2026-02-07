@@ -28,6 +28,7 @@ export function LoginPage() {
   }, []);
 
   const handleClearCache = () => {
+    if (!window.confirm('This will clear all cached data and reload the page. Continue?')) return;
     localStorage.clear();
     sessionStorage.clear();
     setError('');

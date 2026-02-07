@@ -199,7 +199,7 @@ export function ExecutiveDashboard() {
           {/* Time Range Selector */}
           <select
             value={timeRange}
-            onChange={(e) => setTimeRange(e.target.value as any)}
+            onChange={(e) => setTimeRange(e.target.value as typeof timeRange)}
             className="input-field w-auto"
           >
             <option value="today">Today</option>
@@ -306,11 +306,12 @@ export function ExecutiveDashboard() {
       )}
 
       {/* Store Performance Comparison */}
+      {stores.length > 0 ? (
       <div className="card">
         <div className="flex items-center justify-between mb-6">
           <h2 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
             <Store className="w-5 h-5 text-purple-600" />
-            5-Store Performance Comparison
+            Store Performance Comparison
           </h2>
           <span className="text-sm text-gray-500">Ranked by revenue</span>
         </div>
@@ -362,7 +363,7 @@ export function ExecutiveDashboard() {
                 <div>
                   <p className="text-xs text-gray-600">Dead Stock</p>
                   <p className={`text-sm font-semibold ${
-                    (store.deadStockValue / store.inventoryValue) * 100 > 20 ? 'text-red-600' : 'text-gray-900'
+                    store.inventoryValue > 0 && (store.deadStockValue / store.inventoryValue) * 100 > 20 ? 'text-red-600' : 'text-gray-900'
                   }`}>
                     {formatCurrency(store.deadStockValue)}
                   </p>
@@ -380,7 +381,7 @@ export function ExecutiveDashboard() {
                     {store.salesPerSqFt < 1500 && (
                       <span className="px-2 py-1 bg-red-100 text-red-800 text-xs rounded">Low Sales Density</span>
                     )}
-                    {(store.deadStockValue / store.inventoryValue) * 100 > 25 && (
+                    {store.inventoryValue > 0 && (store.deadStockValue / store.inventoryValue) * 100 > 25 && (
                       <span className="px-2 py-1 bg-red-100 text-red-800 text-xs rounded">High Dead Stock</span>
                     )}
                     {store.trend === 'down' && (
@@ -393,6 +394,7 @@ export function ExecutiveDashboard() {
           ))}
         </div>
       </div>
+      ) : null}
 
       <div className="grid grid-cols-1 desktop:grid-cols-2 gap-6">
         {/* Category Performance */}
@@ -402,7 +404,9 @@ export function ExecutiveDashboard() {
             Category Performance
           </h2>
           <div className="space-y-3">
-            {categories.map((cat) => (
+            {categories.length === 0 ? (
+              <p className="text-center text-gray-500 py-6">No category data available</p>
+            ) : categories.map((cat) => (
               <div key={cat.category} className="p-3 bg-gray-50 rounded-lg">
                 <div className="flex items-center justify-between mb-2">
                   <span className="font-medium text-gray-900">{cat.category}</span>
@@ -437,7 +441,9 @@ export function ExecutiveDashboard() {
             Top 5 Products
           </h2>
           <div className="space-y-3">
-            {topProducts.map((product, index) => (
+            {topProducts.length === 0 ? (
+              <p className="text-center text-gray-500 py-6">No product data available</p>
+            ) : topProducts.map((product, index) => (
               <div key={product.id} className="flex items-center gap-3 p-3 bg-gray-50 rounded-lg">
                 <div className="w-6 h-6 rounded-full bg-purple-100 flex items-center justify-center text-xs font-bold text-purple-600">
                   {index + 1}

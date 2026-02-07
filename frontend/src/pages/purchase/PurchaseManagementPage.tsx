@@ -400,7 +400,10 @@ export function PurchaseManagementPage() {
                   >
                     <Eye className="w-5 h-5 text-gray-600" />
                   </button>
-                  <button className="p-2 hover:bg-gray-100 rounded-lg transition-colors">
+                  <button
+                    onClick={() => toast.info('PO download coming soon')}
+                    className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
+                  >
                     <Download className="w-5 h-5 text-gray-600" />
                   </button>
                 </div>

@@ -421,8 +421,8 @@ export default function DashboardPage() {
 
       {/* Role-based KPI Stats Row */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        {getRoleKpis(user?.activeRole).map((kpi, index) => (
-          <KpiCard key={index} {...kpi} loading={isLoading} />
+        {getRoleKpis(user?.activeRole).map((kpi) => (
+          <KpiCard key={kpi.label} {...kpi} loading={isLoading} />
         ))}
       </div>
 

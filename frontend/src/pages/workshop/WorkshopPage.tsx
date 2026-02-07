@@ -21,7 +21,6 @@ import {
 import type { JobStatus, JobPriority } from '../../types';
 import { workshopApi } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
-import { useToast } from '../../context/ToastContext';
 import clsx from 'clsx';
 
 // Job type
@@ -66,10 +65,10 @@ const PRIORITY_CONFIG: Record<JobPriority, { label: string; class: string; icon:
 
 export function WorkshopPage() {
   const { user } = useAuth();
-  const toast = useToast();
 
   // Data state
   const [jobs, setJobs] = useState<Job[]>([]);
+  const [selectedJob, setSelectedJob] = useState<Job | null>(null);
 
   // UI state
   const [searchQuery, setSearchQuery] = useState('');
@@ -351,7 +350,7 @@ export function WorkshopPage() {
                       </p>
                     )}
                     <button
-                      onClick={() => toast.info(`View job details: ${job.jobNumber}`)}
+                      onClick={() => setSelectedJob(job)}
                       className="btn-outline text-sm flex items-center gap-1"
                     >
                       <Eye className="w-4 h-4" />
@@ -381,6 +380,130 @@ export function WorkshopPage() {
           })
         )}
       </div>
+
+      {/* Job Detail Modal */}
+      {selectedJob && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-xl shadow-xl max-w-lg w-full max-h-[90vh] overflow-y-auto">
+            <div className="p-6">
+              <div className="flex items-center justify-between mb-6">
+                <h2 className="text-xl font-bold text-gray-900">
+                  Job {selectedJob.jobNumber}
+                </h2>
+                <button
+                  onClick={() => setSelectedJob(null)}
+                  className="p-2 hover:bg-gray-100 rounded-lg text-gray-500"
+                >
+                  ×
+                </button>
+              </div>
+
+              <div className="space-y-4">
+                {/* Status & Priority */}
+                <div className="flex items-center gap-2">
+                  <span className={clsx('px-3 py-1 rounded-full text-sm font-medium', STATUS_CONFIG[selectedJob.status].class)}>
+                    {STATUS_CONFIG[selectedJob.status].label}
+                  </span>
+                  <span className={clsx('text-sm font-medium', PRIORITY_CONFIG[selectedJob.priority].class)}>
+                    {selectedJob.priority}
+                  </span>
+                  {isOverdue(selectedJob.promisedDate) && !['READY', 'DELIVERED', 'CANCELLED'].includes(selectedJob.status) && (
+                    <span className="px-2 py-1 bg-red-100 text-red-700 text-xs rounded-full font-medium">Overdue</span>
+                  )}
+                </div>
+
+                {/* Customer */}
+                <div className="bg-gray-50 rounded-lg p-4 space-y-2">
+                  <h3 className="text-sm font-medium text-gray-500">Customer</h3>
+                  <p className="font-medium text-gray-900 flex items-center gap-2">
+                    <User className="w-4 h-4" /> {selectedJob.customerName}
+                  </p>
+                  <p className="text-sm text-gray-600 flex items-center gap-2">
+                    <Phone className="w-4 h-4" /> {selectedJob.customerPhone}
+                  </p>
+                </div>
+
+                {/* Job Details */}
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <p className="text-sm text-gray-500">Order Number</p>
+                    <p className="font-medium">{selectedJob.orderNumber}</p>
+                  </div>
+                  <div>
+                    <p className="text-sm text-gray-500">Frame</p>
+                    <p className="font-medium">{selectedJob.frameName}</p>
+                  </div>
+                  <div>
+                    <p className="text-sm text-gray-500">Lens Type</p>
+                    <p className="font-medium">{selectedJob.lensType}</p>
+                  </div>
+                  {selectedJob.frameBarcode && (
+                    <div>
+                      <p className="text-sm text-gray-500">Frame Barcode</p>
+                      <p className="font-medium font-mono text-sm">{selectedJob.frameBarcode}</p>
+                    </div>
+                  )}
+                </div>
+
+                {/* Dates */}
+                <div className="grid grid-cols-2 gap-4 bg-gray-50 rounded-lg p-4">
+                  <div>
+                    <p className="text-sm text-gray-500">Created</p>
+                    <p className="font-medium">{formatDate(selectedJob.createdAt)}</p>
+                  </div>
+                  <div>
+                    <p className="text-sm text-gray-500">Promised Date</p>
+                    <p className={clsx('font-medium', isOverdue(selectedJob.promisedDate) && 'text-red-600')}>
+                      {formatDate(selectedJob.promisedDate)}
+                    </p>
+                  </div>
+                  {selectedJob.assignedTo && (
+                    <div>
+                      <p className="text-sm text-gray-500">Assigned To</p>
+                      <p className="font-medium">{selectedJob.assignedTo}</p>
+                    </div>
+                  )}
+                  {selectedJob.completedAt && (
+                    <div>
+                      <p className="text-sm text-gray-500">Completed</p>
+                      <p className="font-medium">{formatDate(selectedJob.completedAt)}</p>
+                    </div>
+                  )}
+                </div>
+
+                {/* Notes */}
+                {selectedJob.notes && (
+                  <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-3">
+                    <p className="text-sm font-medium text-yellow-800">Notes</p>
+                    <p className="text-sm text-yellow-700 mt-1">{selectedJob.notes}</p>
+                  </div>
+                )}
+
+                {/* Progress */}
+                <div>
+                  <p className="text-sm text-gray-500 mb-2">Progress: {STATUS_CONFIG[selectedJob.status].label}</p>
+                  <div className="h-3 bg-gray-200 rounded-full overflow-hidden">
+                    <div
+                      className={clsx(
+                        'h-full transition-all',
+                        selectedJob.status === 'QC_FAILED' ? 'bg-red-500' : 'bg-bv-red-600'
+                      )}
+                      style={{ width: `${(STATUS_CONFIG[selectedJob.status].step / 8) * 100}%` }}
+                    />
+                  </div>
+                </div>
+
+                <button
+                  onClick={() => setSelectedJob(null)}
+                  className="btn-outline w-full"
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
