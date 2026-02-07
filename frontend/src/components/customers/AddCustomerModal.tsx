@@ -3,7 +3,7 @@
 // ============================================================================
 // B2C/B2B customer creation with GST verification
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import {
   X,
   Plus,
@@ -109,6 +109,41 @@ export function AddCustomerModal({ isOpen, onClose, onSave }: AddCustomerModalPr
     dateOfBirth: '',
     relation: 'Self',
   });
+
+  // Reset form state when modal opens to prevent state leakage between modules
+  useEffect(() => {
+    if (isOpen) {
+      setFormData({
+        customerType: 'B2C',
+        fullName: '',
+        mobileNumber: '',
+        email: '',
+        dateOfBirth: '',
+        anniversary: '',
+        address: '',
+        pincode: '',
+        city: '',
+        state: '',
+        gstNumber: '',
+        businessName: '',
+        panNumber: '',
+        patients: [],
+      });
+      setGstVerifying(false);
+      setGstVerified(null);
+      setGstError(null);
+      setIsSaving(false);
+      setShowAddPatient(false);
+      setNewPatient({
+        id: '',
+        name: '',
+        mobile: '',
+        email: '',
+        dateOfBirth: '',
+        relation: 'Self',
+      });
+    }
+  }, [isOpen]);
 
   // GST Verification (simulated - in production, connect to actual GST API)
   const verifyGST = async () => {

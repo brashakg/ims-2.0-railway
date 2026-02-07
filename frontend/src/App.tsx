@@ -11,6 +11,7 @@ import { ModuleProvider } from './context/ModuleContext';
 import { AppLayout } from './components/layout/AppLayout';
 import { ProtectedRoute } from './components/layout/ProtectedRoute';
 import { ErrorBoundary } from './components/layout/ErrorBoundary';
+import { SessionExpiryWarning } from './components/common/SessionExpiryWarning';
 
 // Lazy load pages for code splitting
 const LoginPage = lazy(() => import('./pages/auth/LoginPage').then(m => ({ default: m.LoginPage })));
@@ -83,6 +84,7 @@ function App() {
           <ModuleProvider>
             <ToastProvider>
               <BrowserRouter>
+                <SessionExpiryWarning />
                 <Suspense fallback={<PageLoader />}>
                 <Routes>
                   {/* Public routes */}

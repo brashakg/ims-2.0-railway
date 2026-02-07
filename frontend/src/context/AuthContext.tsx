@@ -158,6 +158,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
         // Store auth data
         localStorage.setItem('ims_token', response.token);
         localStorage.setItem('ims_user', JSON.stringify(response.user));
+        localStorage.setItem('ims_login_time', Date.now().toString());
 
         dispatch({
           type: 'LOGIN_SUCCESS',
