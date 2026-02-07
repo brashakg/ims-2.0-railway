@@ -516,6 +516,15 @@ export function PurchaseManagementPage() {
         </button>
       </div>
 
+      {/* Demo Data Banner */}
+      <div className="p-4 bg-blue-50 border border-blue-200 rounded-lg flex items-start gap-3">
+        <AlertTriangle className="w-5 h-5 text-blue-600 flex-shrink-0 mt-0.5" />
+        <div className="flex-1">
+          <p className="text-sm font-medium text-blue-900">Using Demo Data</p>
+          <p className="text-xs text-blue-700 mt-1">This module is currently displaying sample suppliers and purchase orders for demonstration purposes. Connect to your actual vendor database to manage real purchase orders.</p>
+        </div>
+      </div>
+
       {/* Tabs */}
       <div className="border-b border-gray-200">
         <nav className="flex gap-8">

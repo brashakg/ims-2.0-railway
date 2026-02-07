@@ -19,6 +19,13 @@ export default defineConfig({
   },
   server: {
     port: 3000,
+    middlewareMode: false,
+    // Disable Vite's dev tools and overlays in development
+    hmr: {
+      protocol: 'ws',
+      host: 'localhost',
+      port: 5173,
+    },
     proxy: {
       '/api': {
         target: 'http://localhost:8000',

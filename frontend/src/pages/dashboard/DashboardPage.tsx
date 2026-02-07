@@ -71,30 +71,34 @@ interface KpiCardProps {
   change?: number | string;
   changeType?: 'positive' | 'negative' | 'neutral';
   loading?: boolean;
+  error?: boolean;
   onClick?: () => void;
 }
 
-function KpiCard({ icon: Icon, iconBg, value, label, change, changeType, loading, onClick }: KpiCardProps) {
+function KpiCard({ icon: Icon, iconBg, value, label, change, changeType, loading, error, onClick }: KpiCardProps) {
   return (
     <div
       className={clsx(
-        'bg-white rounded-xl p-4 flex items-center gap-4 border border-gray-100 shadow-sm',
+        'bg-white rounded-xl p-4 flex items-center gap-4 border shadow-sm',
+        error ? 'border-red-200 bg-red-50' : 'border-gray-100',
         onClick && 'cursor-pointer hover:border-bv-gold-200 transition-colors'
       )}
       onClick={onClick}
     >
-      <div className={clsx('p-3 rounded-xl', iconBg)}>
-        <Icon className="w-6 h-6" />
+      <div className={clsx('p-3 rounded-xl', error ? 'bg-red-100 text-red-600' : iconBg)}>
+        {error ? <AlertCircle className="w-6 h-6" /> : <Icon className="w-6 h-6" />}
       </div>
       <div className="flex-1">
         {loading ? (
           <div className="h-7 w-16 bg-gray-200 animate-pulse rounded" />
+        ) : error ? (
+          <p className="text-sm font-medium text-red-600">Data unavailable</p>
         ) : (
           <p className="text-2xl font-bold text-gray-900">{value}</p>
         )}
-        <p className="text-sm text-gray-500">{label}</p>
+        <p className={clsx('text-sm', error ? 'text-red-700' : 'text-gray-500')}>{label}</p>
       </div>
-      {change !== undefined && (
+      {change !== undefined && !error && (
         <div className={clsx(
           'text-sm flex items-center gap-1',
           changeType === 'positive' ? 'text-green-600' :
@@ -180,6 +184,7 @@ export default function DashboardPage() {
   }, [goToDashboard]);
 
   const [isLoading, setIsLoading] = useState(true);
+  const [hasError, setHasError] = useState(false);
   const [stats, setStats] = useState<DashboardStats>({
     todaySales: 0,
     pendingOrders: 0,
@@ -216,6 +221,7 @@ export default function DashboardPage() {
 
   const loadDashboardData = async () => {
     setIsLoading(true);
+    setHasError(false);
     try {
       // Load store name for display
       storeApi.getStores().then((stores: any) => {
@@ -248,8 +254,9 @@ export default function DashboardPage() {
         });
 
         setRecentActivity(salesRes.recentActivity ?? []);
+        setHasError(false);
       } else {
-        // No data available - show zeros
+        // No data available - show error state
         setStats({
           todaySales: 0,
           pendingOrders: 0,
@@ -267,6 +274,7 @@ export default function DashboardPage() {
           paymentsReceived: 0,
         });
         setRecentActivity([]);
+        setHasError(true);
       }
     } catch {
       setStats({
@@ -286,6 +294,7 @@ export default function DashboardPage() {
         paymentsReceived: 0,
       });
       setRecentActivity([]);
+      setHasError(true);
     } finally {
       setIsLoading(false);
     }
@@ -458,7 +467,7 @@ export default function DashboardPage() {
             kpis.length === 5 ? 'lg:grid-cols-5' : 'lg:grid-cols-4'
           )}>
             {kpis.map((kpi) => (
-              <KpiCard key={kpi.label} {...kpi} loading={isLoading} />
+              <KpiCard key={kpi.label} {...kpi} loading={isLoading} error={hasError} />
             ))}
           </div>
         );

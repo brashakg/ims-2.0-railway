@@ -214,6 +214,7 @@ export function ExecutiveDashboard() {
             value={timeRange}
             onChange={(e) => setTimeRange(e.target.value as typeof timeRange)}
             className="input-field w-auto"
+            disabled={isLoading}
           >
             <option value="today">Today</option>
             <option value="week">This Week</option>
@@ -223,10 +224,11 @@ export function ExecutiveDashboard() {
           </select>
           <button
             onClick={loadDashboardData}
-            className="btn-outline flex items-center gap-2"
+            disabled={isLoading}
+            className="btn-outline flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            <RefreshCw className="w-4 h-4" />
-            Refresh
+            <RefreshCw className={`w-4 h-4 ${isLoading ? 'animate-spin' : ''}`} />
+            {isLoading ? 'Loading...' : 'Refresh'}
           </button>
         </div>
       </div>

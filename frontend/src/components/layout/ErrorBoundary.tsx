@@ -27,6 +27,15 @@ export class ErrorBoundary extends Component<Props, State> {
     console.error('Error caught by boundary:', error);
   }
 
+  resetError = () => {
+    this.setState({ hasError: false, error: null });
+  };
+
+  handleRefresh = () => {
+    this.resetError();
+    window.location.href = '/dashboard';
+  };
+
   render() {
     if (this.state.hasError) {
       return (
@@ -38,14 +47,17 @@ export class ErrorBoundary extends Component<Props, State> {
             </p>
             <div className="space-y-3">
               <button
-                onClick={() => window.location.reload()}
+                onClick={this.handleRefresh}
                 className="btn-primary w-full"
               >
-                Refresh Page
-              </button>
-              <a href="/dashboard" className="btn-secondary w-full block">
                 Go to Dashboard
-              </a>
+              </button>
+              <button
+                onClick={() => this.resetError()}
+                className="btn-secondary w-full"
+              >
+                Try Again
+              </button>
             </div>
             {import.meta.env.DEV && this.state.error && (
               <details className="mt-6 text-left">

@@ -5,6 +5,16 @@
     <link rel="icon" type="image/svg+xml" href="/vite.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>frontend</title>
+    <!-- Disable debug overlays and performance monitoring tools in production -->
+    <script>
+      // Disable INP and other debug overlays if not in development
+      if (typeof window !== 'undefined') {
+        // Disable Vite dev tools in production
+        window.__VITE_DISABLE_DEV_TOOLS__ = true;
+        // Disable any performance monitoring overlays
+        window.__DISABLE_INP_OVERLAY__ = true;
+      }
+    </script>
   </head>
   <body>
     <div id="root"></div>
