@@ -13,6 +13,7 @@
 // NO MOCK DATA - All data from API
 
 import { useState, useEffect } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import {
   Store, Users, Tag, Percent, Database, Globe,
   ChevronRight, Plus, Edit2, Trash2, X, Check, AlertCircle,
@@ -254,18 +255,28 @@ const INTEGRATION_DEFINITIONS: Integration[] = [
 export function SettingsPage() {
   const { user } = useAuth();
   const toast = useToast();
+  const [searchParams] = useSearchParams();
 
   // State
   const [activeTab, setActiveTab] = useState<SettingsTab>('profile');
+
+  // Sync active tab from URL query params (e.g. /settings?tab=users)
+  useEffect(() => {
+    const tabParam = searchParams.get('tab');
+    if (tabParam && tabParam !== activeTab) {
+      const validTabs: SettingsTab[] = ['profile', 'business', 'stores', 'users', 'categories', 'brands', 'lens-master', 'discounts', 'tax-invoice', 'notifications', 'integrations', 'printers', 'audit-logs', 'system'];
+      if (validTabs.includes(tabParam as SettingsTab)) {
+        setActiveTab(tabParam as SettingsTab);
+      }
+    }
+  }, [searchParams]);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   // Data state
   const [stores, setStores] = useState<Store[]>([]);
   const [users, setUsers] = useState<User[]>([]);
-  const [categories, _setCategories] = useState<Category[]>(CATEGORY_DEFINITIONS);
-  // Category setter reserved for future API integration
-  void _setCategories;
+  const [categories] = useState<Category[]>(CATEGORY_DEFINITIONS);
   const [brands, setBrands] = useState<Brand[]>([]);
   const [integrations, setIntegrations] = useState<Integration[]>(INTEGRATION_DEFINITIONS);
 
@@ -276,12 +287,8 @@ export function SettingsPage() {
   const [lensAddons, setLensAddons] = useState<{ id: string; name: string; code: string; price: number }[]>([]);
 
   // Discount state
-  const [_roleDiscountCaps, setRoleDiscountCaps] = useState<Record<string, { mass: number; premium: number; luxury: number }>>({});
-  // Role discount caps state for future display
-  void _roleDiscountCaps;
-  const [_tierDiscounts, setTierDiscounts] = useState<Record<string, number>>({});
-  // Tier discounts for future display
-  void _tierDiscounts;
+  const [, setRoleDiscountCaps] = useState<Record<string, { mass: number; premium: number; luxury: number }>>({});
+  const [, setTierDiscounts] = useState<Record<string, number>>({});
 
   // System state
   const [systemStatus, setSystemStatus] = useState<{ database: string; api: string; version: string } | null>(null);
@@ -292,8 +299,7 @@ export function SettingsPage() {
     email: string;
     phone: string;
   } | null>(null);
-  const [_preferences, setPreferences] = useState<Record<string, any>>({});
-  void _preferences; // Used in future preference display
+  const [, setPreferences] = useState<Record<string, any>>({});
   const [showChangePassword, setShowChangePassword] = useState(false);
 
   // Business state
@@ -341,10 +347,6 @@ export function SettingsPage() {
     content: string;
     variables: string[];
   }>>([]);
-  const [_editingTemplate, _setEditingTemplate] = useState<any>(null);
-  void _editingTemplate; // Reserved for template editing modal
-  void _setEditingTemplate;
-
   // Printer state
   const [printerSettings, setPrinterSettings] = useState<{
     receipt_printer_name: string;

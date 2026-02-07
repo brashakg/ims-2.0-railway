@@ -4,6 +4,7 @@
 // NO MOCK DATA - All data from API
 
 import { useState, useEffect } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import {
   Search,
   Package,
@@ -86,6 +87,7 @@ type ViewTab = 'catalog' | 'low-stock' | 'reorders' | 'serial-numbers' | 'aging'
 export function InventoryPage() {
   const { user, hasRole } = useAuth();
   const toast = useToast();
+  const [searchParams] = useSearchParams();
 
   // Data state
   const [inventory, setInventory] = useState<StockItem[]>([]);
@@ -96,6 +98,17 @@ export function InventoryPage() {
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCategory, setSelectedCategory] = useState<ProductCategory | null>(null);
   const [activeTab, setActiveTab] = useState<ViewTab>('catalog');
+
+  // Sync active tab from URL query params (e.g. /inventory?tab=transfers)
+  useEffect(() => {
+    const tabParam = searchParams.get('tab');
+    if (tabParam && tabParam !== activeTab) {
+      const validTabs: ViewTab[] = ['catalog', 'low-stock', 'reorders', 'serial-numbers', 'aging', 'transfers', 'movements'];
+      if (validTabs.includes(tabParam as ViewTab)) {
+        setActiveTab(tabParam as ViewTab);
+      }
+    }
+  }, [searchParams]);
 
   // Loading state
   const [isLoading, setIsLoading] = useState(true);

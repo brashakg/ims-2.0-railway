@@ -37,8 +37,8 @@ export function GSTInvoice({ order, store, onPrint }: GSTInvoiceProps) {
   // Convert order items to invoice line items with GST calculation
   const lineItems: InvoiceLineItem[] = order.items.map(item => {
     const taxableValue = item.finalPrice;
-    const gstRate = 12; // Default rate, should come from product
-    const hsnCode = '9004'; // Default HSN, should come from product
+    const gstRate = (item as any).gstRate || 12;
+    const hsnCode = (item as any).hsnCode || '9004';
 
     let cgst = 0, sgst = 0, igst = 0;
 
@@ -62,7 +62,7 @@ export function GSTInvoice({ order, store, onPrint }: GSTInvoiceProps) {
       cgst: cgst,
       sgst: sgst,
       igst: igst,
-      totalAmount: taxableValue,
+      totalAmount: taxableValue + cgst + sgst + igst,
     };
   });
 

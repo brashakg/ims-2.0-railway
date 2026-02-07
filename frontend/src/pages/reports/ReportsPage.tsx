@@ -4,6 +4,7 @@
 // NO MOCK DATA - All data from API
 
 import { useState, useEffect } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import {
   BarChart3,
   TrendingUp,
@@ -101,6 +102,7 @@ const REPORT_CARDS = [
 export function ReportsPage() {
   const { user, hasRole } = useAuth();
   const toast = useToast();
+  const [searchParams] = useSearchParams();
 
   // Data state
   const [salesSummary, setSalesSummary] = useState<SalesSummary>({
@@ -117,6 +119,17 @@ export function ReportsPage() {
   // UI state
   const [activeTab, setActiveTab] = useState<ReportType>('sales');
   const [dateRange, setDateRange] = useState<DateRange>('month');
+
+  // Sync active tab from URL query params (e.g. /reports?tab=gst)
+  useEffect(() => {
+    const tabParam = searchParams.get('tab');
+    if (tabParam && tabParam !== activeTab) {
+      const validTabs: ReportType[] = ['sales', 'inventory', 'customers', 'gst'];
+      if (validTabs.includes(tabParam as ReportType)) {
+        setActiveTab(tabParam as ReportType);
+      }
+    }
+  }, [searchParams]);
 
   // Loading state
   const [isLoading, setIsLoading] = useState(true);

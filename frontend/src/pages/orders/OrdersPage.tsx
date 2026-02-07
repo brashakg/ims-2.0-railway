@@ -4,6 +4,7 @@
 // NO MOCK DATA - All data from API
 
 import { useState, useEffect } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import {
   Search,
   FileText,
@@ -45,6 +46,7 @@ const PAYMENT_STATUS_CONFIG: Record<PaymentStatus, { label: string; color: strin
 export function OrdersPage() {
   const { user, hasRole } = useAuth();
   const toast = useToast();
+  const [searchParams] = useSearchParams();
 
   // Data state
   const [orders, setOrders] = useState<Order[]>([]);
@@ -54,6 +56,17 @@ export function OrdersPage() {
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<OrderStatus | 'ALL'>('ALL');
   const [dateFilter, setDateFilter] = useState<'today' | 'week' | 'month' | 'all'>('all');
+
+  // Sync status filter from URL query params (e.g. /orders?status=READY)
+  useEffect(() => {
+    const statusParam = searchParams.get('status');
+    if (statusParam && statusParam !== statusFilter) {
+      const validStatuses: (OrderStatus | 'ALL')[] = ['ALL', 'DRAFT', 'CONFIRMED', 'IN_PROGRESS', 'READY', 'DELIVERED', 'CANCELLED'];
+      if (validStatuses.includes(statusParam as OrderStatus)) {
+        setStatusFilter(statusParam as OrderStatus);
+      }
+    }
+  }, [searchParams]);
 
   // Loading state
   const [isLoading, setIsLoading] = useState(true);
