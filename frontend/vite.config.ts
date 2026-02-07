@@ -34,7 +34,7 @@ export default defineConfig({
           // Split vendor libraries into separate chunks
           'vendor-react': ['react', 'react-dom', 'react-router-dom'],
           'vendor-ui': ['lucide-react', 'clsx'],
-          'vendor-utils': ['date-fns', 'axios'],
+          'vendor-utils': ['date-fns', 'axios', 'zustand'],
         },
       },
     },
