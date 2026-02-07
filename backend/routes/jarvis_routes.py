@@ -22,6 +22,11 @@ from backend.core.jarvis_ai_orchestrator import (
     jarvis_orchestrator
 )
 from backend.core.jarvis_claude_integration import ResponseStyle
+from backend.core.jarvis_visualization_engine import (
+    JarvisVisualizationEngine,
+    ChartType,
+    jarvis_visualizer
+)
 
 # Import authentication/authorization
 # (Assuming these exist in your backend)
@@ -565,6 +570,157 @@ async def get_realtime_stats(user_role: str = Query(...)):
     stats = await jarvis_orchestrator.realtime.get_connection_stats()
 
     return stats
+
+
+# ============================================================================
+# Visualization & Charts Endpoints
+# ============================================================================
+
+@router.post("/charts/sales-dashboard")
+async def create_sales_dashboard(
+    metrics: Dict[str, Any] = {},
+    user_role: str = Query(...)
+):
+    """Create sales analytics dashboard"""
+
+    if not await verify_superadmin_role(user_role):
+        raise HTTPException(status_code=403, detail="SUPERADMIN role required")
+
+    dashboard = jarvis_visualizer.create_sales_dashboard(metrics)
+
+    return {
+        "dashboard_id": dashboard.dashboard_id,
+        "title": dashboard.title,
+        "charts_count": len(dashboard.charts),
+        "layout": dashboard.layout,
+        "refresh_interval": dashboard.refresh_interval,
+        "dashboard_data": json.loads(jarvis_visualizer.export_dashboard_json(dashboard))
+    }
+
+
+@router.post("/charts/inventory-dashboard")
+async def create_inventory_dashboard(
+    metrics: Dict[str, Any] = {},
+    user_role: str = Query(...)
+):
+    """Create inventory management dashboard"""
+
+    if not await verify_superadmin_role(user_role):
+        raise HTTPException(status_code=403, detail="SUPERADMIN role required")
+
+    dashboard = jarvis_visualizer.create_inventory_dashboard(metrics)
+
+    return {
+        "dashboard_id": dashboard.dashboard_id,
+        "title": dashboard.title,
+        "charts_count": len(dashboard.charts),
+        "layout": dashboard.layout,
+        "refresh_interval": dashboard.refresh_interval,
+        "dashboard_data": json.loads(jarvis_visualizer.export_dashboard_json(dashboard))
+    }
+
+
+@router.post("/charts/compliance-dashboard")
+async def create_compliance_dashboard(
+    metrics: Dict[str, Any] = {},
+    user_role: str = Query(...)
+):
+    """Create compliance monitoring dashboard"""
+
+    if not await verify_superadmin_role(user_role):
+        raise HTTPException(status_code=403, detail="SUPERADMIN role required")
+
+    dashboard = jarvis_visualizer.create_compliance_dashboard(metrics)
+
+    return {
+        "dashboard_id": dashboard.dashboard_id,
+        "title": dashboard.title,
+        "charts_count": len(dashboard.charts),
+        "layout": dashboard.layout,
+        "refresh_interval": dashboard.refresh_interval,
+        "dashboard_data": json.loads(jarvis_visualizer.export_dashboard_json(dashboard))
+    }
+
+
+@router.get("/charts/{chart_id}")
+async def get_chart(
+    chart_id: str,
+    user_role: str = Query(...)
+):
+    """Get chart by ID"""
+
+    if not await verify_superadmin_role(user_role):
+        raise HTTPException(status_code=403, detail="SUPERADMIN role required")
+
+    chart = jarvis_visualizer.get_chart_by_id(chart_id)
+
+    if not chart:
+        raise HTTPException(status_code=404, detail="Chart not found")
+
+    return json.loads(jarvis_visualizer.export_chart_json(chart))
+
+
+@router.get("/dashboards/{dashboard_id}")
+async def get_dashboard(
+    dashboard_id: str,
+    user_role: str = Query(...)
+):
+    """Get dashboard by ID"""
+
+    if not await verify_superadmin_role(user_role):
+        raise HTTPException(status_code=403, detail="SUPERADMIN role required")
+
+    dashboard = jarvis_visualizer.get_dashboard_by_id(dashboard_id)
+
+    if not dashboard:
+        raise HTTPException(status_code=404, detail="Dashboard not found")
+
+    return json.loads(jarvis_visualizer.export_dashboard_json(dashboard))
+
+
+@router.get("/dashboards")
+async def list_dashboards(user_role: str = Query(...)):
+    """List all dashboards"""
+
+    if not await verify_superadmin_role(user_role):
+        raise HTTPException(status_code=403, detail="SUPERADMIN role required")
+
+    dashboards = jarvis_visualizer.list_dashboards()
+
+    return {
+        "dashboards": [
+            {
+                "dashboard_id": d.dashboard_id,
+                "title": d.title,
+                "description": d.description,
+                "charts_count": len(d.charts),
+                "created_at": d.created_at.isoformat()
+            }
+            for d in dashboards
+        ],
+        "count": len(dashboards)
+    }
+
+
+@router.get("/charts/recent")
+async def get_recent_charts(
+    limit: int = Query(10, ge=1, le=50),
+    user_role: str = Query(...)
+):
+    """Get recently created charts"""
+
+    if not await verify_superadmin_role(user_role):
+        raise HTTPException(status_code=403, detail="SUPERADMIN role required")
+
+    charts = jarvis_visualizer.list_recent_charts(limit)
+
+    return {
+        "charts": [
+            json.loads(jarvis_visualizer.export_chart_json(chart))
+            for chart in charts
+        ],
+        "count": len(charts)
+    }
 
 
 # ============================================================================
