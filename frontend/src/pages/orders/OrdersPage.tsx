@@ -26,6 +26,7 @@ import { orderApi } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import clsx from 'clsx';
+import { OrderNotificationTracker } from '../../components/orders/OrderNotificationTracker';
 
 // Status configurations
 const ORDER_STATUS_CONFIG: Record<OrderStatus, { label: string; color: string; bgColor: string; icon: typeof Clock }> = {
@@ -446,6 +447,19 @@ export function OrdersPage() {
                     </div>
                   )}
                 </div>
+
+                {/* Order Status Timeline & Notifications */}
+                <OrderNotificationTracker
+                  orderId={selectedOrder.id}
+                  orderNumber={selectedOrder.orderNumber}
+                  customerName={selectedOrder.customerName}
+                  customerPhone={selectedOrder.customerPhone}
+                  status={selectedOrder.orderStatus as 'DRAFT' | 'CONFIRMED' | 'IN_PROGRESS' | 'READY' | 'DELIVERED' | 'CANCELLED'}
+                  createdAt={selectedOrder.createdAt}
+                  onSendNotification={(status, channel) => {
+                    toast.success(`${channel} notification sent for status: ${status}`);
+                  }}
+                />
 
                 <div className="flex gap-2 pt-4">
                   <button

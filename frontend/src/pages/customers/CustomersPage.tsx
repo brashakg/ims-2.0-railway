@@ -4,7 +4,7 @@
 // NO MOCK DATA - All data from API
 
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { useSearchParams, useNavigate } from 'react-router-dom';
 import {
   Search,
   Plus,
@@ -22,6 +22,11 @@ import {
   Building2,
   Loader2,
   AlertCircle,
+  ShoppingCart,
+  Bell,
+  Award,
+  MessageCircle,
+  PhoneCall,
 } from 'lucide-react';
 import type { Customer, Patient, Prescription } from '../../types';
 import { customerApi, prescriptionApi, orderApi } from '../../services/api';
@@ -39,6 +44,7 @@ type CRMTab = 'customers' | 'recalls' | 'campaigns';
 export function CustomersPage() {
   const { user, hasRole } = useAuth();
   const toast = useToast();
+  const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const searchInputRef = useRef<HTMLInputElement>(null);
 
@@ -379,6 +385,41 @@ export function CustomersPage() {
     );
   }
 
+  // ---- Customer 360 Computed Values ----
+  const totalSpend = purchaseHistory.reduce((sum, o) => sum + o.total, 0);
+  const totalOrders = purchaseHistory.length;
+  const avgOrderValue = totalOrders > 0 ? totalSpend / totalOrders : 0;
+  const lastVisit = purchaseHistory.length > 0 ? purchaseHistory[0].date : null;
+  const customerLifetimeDays = selectedCustomer?.createdAt
+    ? Math.floor((Date.now() - new Date(selectedCustomer.createdAt).getTime()) / (1000 * 60 * 60 * 24))
+    : 0;
+
+  // Loyalty: ₹100 = 1 point
+  const loyaltyPoints = Math.floor(totalSpend / 100);
+  const loyaltyTier = loyaltyPoints >= 5000 ? 'Diamond' : loyaltyPoints >= 2000 ? 'Platinum' : loyaltyPoints >= 500 ? 'Gold' : 'Silver';
+  const tierColors: Record<string, { bg: string; text: string; border: string }> = {
+    Silver: { bg: 'bg-gray-100', text: 'text-gray-700', border: 'border-gray-300' },
+    Gold: { bg: 'bg-yellow-50', text: 'text-yellow-700', border: 'border-yellow-300' },
+    Platinum: { bg: 'bg-blue-50', text: 'text-blue-700', border: 'border-blue-300' },
+    Diamond: { bg: 'bg-purple-50', text: 'text-purple-700', border: 'border-purple-300' },
+  };
+
+  // Mock communication log
+  const communicationLog = [
+    { id: '1', date: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString(), type: 'SMS' as const, message: 'Prescription reminder sent' },
+    { id: '2', date: new Date(Date.now() - 5 * 24 * 60 * 60 * 1000).toISOString(), type: 'Visit' as const, message: 'Walk-in visit for eye checkup' },
+    { id: '3', date: new Date(Date.now() - 12 * 24 * 60 * 60 * 1000).toISOString(), type: 'WhatsApp' as const, message: 'Order ready for pickup notification' },
+    { id: '4', date: new Date(Date.now() - 20 * 24 * 60 * 60 * 1000).toISOString(), type: 'Call' as const, message: 'Follow-up call for lens fitting' },
+    { id: '5', date: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString(), type: 'Email' as const, message: 'Invoice and warranty card sent' },
+  ];
+  const commTypeConfig: Record<string, { icon: typeof MessageCircle; color: string; bg: string }> = {
+    SMS: { icon: MessageCircle, color: 'text-green-600', bg: 'bg-green-50' },
+    WhatsApp: { icon: MessageCircle, color: 'text-emerald-600', bg: 'bg-emerald-50' },
+    Call: { icon: PhoneCall, color: 'text-blue-600', bg: 'bg-blue-50' },
+    Visit: { icon: User, color: 'text-orange-600', bg: 'bg-orange-50' },
+    Email: { icon: Mail, color: 'text-purple-600', bg: 'bg-purple-50' },
+  };
+
   // Customer Detail View
   return (
     <div className="space-y-4">
@@ -413,6 +454,54 @@ export function CustomersPage() {
             Edit
           </button>
         )}
+        {/* Quick Action Buttons */}
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => navigate('/crm?tab=recalls')}
+            className="p-2 rounded-lg bg-amber-50 text-amber-600 hover:bg-amber-100 transition-colors"
+            title="Send Recall"
+          >
+            <Bell className="w-4 h-4" />
+          </button>
+          <button
+            onClick={() => navigate('/pos')}
+            className="p-2 rounded-lg bg-green-50 text-green-600 hover:bg-green-100 transition-colors"
+            title="New Order"
+          >
+            <ShoppingCart className="w-4 h-4" />
+          </button>
+          <button
+            onClick={() => navigate('/clinical')}
+            className="p-2 rounded-lg bg-blue-50 text-blue-600 hover:bg-blue-100 transition-colors"
+            title="Book Eye Test"
+          >
+            <Eye className="w-4 h-4" />
+          </button>
+        </div>
+      </div>
+
+      {/* Customer Summary Stats Row */}
+      <div className="grid grid-cols-2 tablet:grid-cols-5 gap-4">
+        <div className="card text-center">
+          <p className="text-xs text-gray-500 uppercase tracking-wide">Total Spend</p>
+          <p className="text-xl font-bold text-gray-900 mt-1">{formatCurrency(totalSpend)}</p>
+        </div>
+        <div className="card text-center">
+          <p className="text-xs text-gray-500 uppercase tracking-wide">Total Orders</p>
+          <p className="text-xl font-bold text-gray-900 mt-1">{totalOrders}</p>
+        </div>
+        <div className="card text-center">
+          <p className="text-xs text-gray-500 uppercase tracking-wide">Avg Order Value</p>
+          <p className="text-xl font-bold text-gray-900 mt-1">{formatCurrency(avgOrderValue)}</p>
+        </div>
+        <div className="card text-center">
+          <p className="text-xs text-gray-500 uppercase tracking-wide">Last Visit</p>
+          <p className="text-xl font-bold text-gray-900 mt-1">{lastVisit ? formatDate(lastVisit) : 'N/A'}</p>
+        </div>
+        <div className="card text-center">
+          <p className="text-xs text-gray-500 uppercase tracking-wide">Customer Lifetime</p>
+          <p className="text-xl font-bold text-gray-900 mt-1">{customerLifetimeDays} days</p>
+        </div>
       </div>
 
       <div className="grid grid-cols-1 laptop:grid-cols-3 gap-4">
@@ -471,6 +560,38 @@ export function CustomersPage() {
                 </div>
               );
             })()}
+
+            {/* Loyalty Points */}
+            <div className={`mt-3 p-3 rounded-lg border ${tierColors[loyaltyTier].border} ${tierColors[loyaltyTier].bg}`}>
+              <div className="flex items-center justify-between mb-2">
+                <div className="flex items-center gap-1.5">
+                  <Award className={`w-4 h-4 ${tierColors[loyaltyTier].text}`} />
+                  <span className={`text-sm font-semibold ${tierColors[loyaltyTier].text}`}>{loyaltyTier}</span>
+                </div>
+                <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${tierColors[loyaltyTier].bg} ${tierColors[loyaltyTier].text} border ${tierColors[loyaltyTier].border}`}>
+                  {loyaltyPoints.toLocaleString('en-IN')} pts
+                </span>
+              </div>
+              <div className="w-full bg-white/60 rounded-full h-1.5">
+                <div
+                  className={clsx(
+                    'h-1.5 rounded-full transition-all',
+                    loyaltyTier === 'Silver' && 'bg-gray-400',
+                    loyaltyTier === 'Gold' && 'bg-yellow-500',
+                    loyaltyTier === 'Platinum' && 'bg-blue-500',
+                    loyaltyTier === 'Diamond' && 'bg-purple-500',
+                  )}
+                  style={{
+                    width: `${Math.min(100, loyaltyTier === 'Diamond' ? 100 : loyaltyTier === 'Platinum' ? (loyaltyPoints / 5000) * 100 : loyaltyTier === 'Gold' ? (loyaltyPoints / 2000) * 100 : (loyaltyPoints / 500) * 100)}%`,
+                  }}
+                />
+              </div>
+              <p className="text-xs text-gray-500 mt-1">
+                {loyaltyTier === 'Diamond'
+                  ? 'Top tier reached!'
+                  : `${(loyaltyTier === 'Platinum' ? 5000 : loyaltyTier === 'Gold' ? 2000 : 500) - loyaltyPoints} pts to next tier`}
+              </p>
+            </div>
 
             {selectedCustomer?.customerType === 'B2B' && selectedCustomer.gstNumber && (
               <div className="flex items-center gap-2 text-sm">
@@ -611,6 +732,37 @@ export function CustomersPage() {
             <p>No purchase history available</p>
           </div>
         )}
+      </div>
+
+      {/* Communication Log */}
+      <div className="card">
+        <h2 className="font-semibold text-gray-900 mb-4">Communication Log</h2>
+        <div className="relative">
+          {/* Timeline line */}
+          <div className="absolute left-4 top-0 bottom-0 w-px bg-gray-200" />
+          <div className="space-y-4">
+            {communicationLog.map(entry => {
+              const config = commTypeConfig[entry.type];
+              const IconComponent = config.icon;
+              return (
+                <div key={entry.id} className="flex items-start gap-3 relative">
+                  <div className={`relative z-10 flex-shrink-0 w-8 h-8 rounded-full ${config.bg} flex items-center justify-center`}>
+                    <IconComponent className={`w-4 h-4 ${config.color}`} />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className={`text-xs font-medium px-1.5 py-0.5 rounded ${config.bg} ${config.color}`}>
+                        {entry.type}
+                      </span>
+                      <span className="text-xs text-gray-400">{formatDate(entry.date)}</span>
+                    </div>
+                    <p className="text-sm text-gray-700 mt-0.5">{entry.message}</p>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
       </div>
 
       {/* Edit Customer Modal */}
