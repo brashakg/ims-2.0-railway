@@ -27,6 +27,13 @@ from backend.core.jarvis_visualization_engine import (
     ChartType,
     jarvis_visualizer
 )
+from backend.core.jarvis_voice_interface import (
+    JarvisVoiceInterface,
+    VoiceLanguage,
+    VoiceGender,
+    AudioFormat,
+    jarvis_voice
+)
 
 # Import authentication/authorization
 # (Assuming these exist in your backend)
@@ -720,6 +727,281 @@ async def get_recent_charts(
             for chart in charts
         ],
         "count": len(charts)
+    }
+
+
+# ============================================================================
+# Voice Interface Endpoints
+# ============================================================================
+
+@router.post("/voice/process-query")
+async def process_voice_query(
+    user_id: str = Query(...),
+    user_role: str = Query(...),
+    language: str = Query("en-US")
+):
+    """
+    Process voice query end-to-end
+
+    Accepts audio input, recognizes speech, generates response,
+    and synthesizes audio output.
+
+    Supported languages: en-US, en-GB, hi-IN, es-ES, fr-FR, de-DE, pt-BR, zh-CN, ja-JP
+    """
+
+    if not await verify_superadmin_role(user_role):
+        raise HTTPException(status_code=403, detail="SUPERADMIN role required")
+
+    try:
+        # Map language string to enum
+        language_map = {
+            "en-US": VoiceLanguage.ENGLISH_US,
+            "en-GB": VoiceLanguage.ENGLISH_UK,
+            "hi-IN": VoiceLanguage.HINDI,
+            "es-ES": VoiceLanguage.SPANISH,
+            "fr-FR": VoiceLanguage.FRENCH,
+            "de-DE": VoiceLanguage.GERMAN,
+            "pt-BR": VoiceLanguage.PORTUGUESE,
+            "zh-CN": VoiceLanguage.CHINESE_MANDARIN,
+            "ja-JP": VoiceLanguage.JAPANESE
+        }
+
+        voice_language = language_map.get(language, VoiceLanguage.ENGLISH_US)
+
+        # In a real implementation, receive audio data from request
+        # For now, return mock audio data
+        result = await jarvis_voice.process_voice_query(
+            audio_data=b"mock_audio_data",
+            user_id=user_id,
+            language=voice_language
+        )
+
+        return {
+            "recognized_query": result["recognized_query"],
+            "recognition_confidence": result["recognition_confidence"],
+            "response_text": result["response_text"],
+            "response_duration_ms": result["response_duration_ms"],
+            "alternatives": result["alternatives"],
+            "session_id": result["session_id"],
+            "language": language
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error processing voice query: {str(e)}")
+
+
+@router.post("/voice/text-to-speech")
+async def text_to_speech(
+    text: str = Query(...),
+    language: str = Query("en-US"),
+    gender: str = Query("neutral"),
+    speed: float = Query(1.0, ge=0.25, le=4.0),
+    pitch: float = Query(1.0, ge=0.25, le=4.0),
+    user_role: str = Query(...)
+):
+    """
+    Convert text to speech
+
+    Synthesizes natural language audio from text.
+
+    Genders: male, female, neutral
+    Speed: 0.25 - 4.0 (1.0 = normal)
+    Pitch: 0.25 - 4.0 (1.0 = normal)
+    """
+
+    if not await verify_superadmin_role(user_role):
+        raise HTTPException(status_code=403, detail="SUPERADMIN role required")
+
+    try:
+        # Map string values to enums
+        language_map = {
+            "en-US": VoiceLanguage.ENGLISH_US,
+            "en-GB": VoiceLanguage.ENGLISH_UK,
+            "hi-IN": VoiceLanguage.HINDI,
+            "es-ES": VoiceLanguage.SPANISH,
+            "fr-FR": VoiceLanguage.FRENCH,
+            "de-DE": VoiceLanguage.GERMAN,
+            "pt-BR": VoiceLanguage.PORTUGUESE,
+            "zh-CN": VoiceLanguage.CHINESE_MANDARIN,
+            "ja-JP": VoiceLanguage.JAPANESE
+        }
+
+        gender_map = {
+            "male": VoiceGender.MALE,
+            "female": VoiceGender.FEMALE,
+            "neutral": VoiceGender.NEUTRAL
+        }
+
+        from backend.core.jarvis_voice_interface import TextToSpeechRequest
+
+        tts_request = TextToSpeechRequest(
+            text=text,
+            language=language_map.get(language, VoiceLanguage.ENGLISH_US),
+            gender=gender_map.get(gender, VoiceGender.NEUTRAL),
+            speed=speed,
+            pitch=pitch
+        )
+
+        response = await jarvis_voice.tts.synthesize_speech(tts_request)
+
+        return {
+            "duration_ms": response.duration_ms,
+            "language": response.language.value,
+            "gender": response.gender.value,
+            "characters_processed": response.characters_processed,
+            "audio_format": response.audio_format.value,
+            "created_at": response.created_at.isoformat()
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error synthesizing speech: {str(e)}")
+
+
+@router.get("/voice/profiles")
+async def get_voice_profiles(
+    language: Optional[str] = Query(None),
+    gender: Optional[str] = Query(None),
+    user_role: str = Query(...)
+):
+    """Get available voice profiles"""
+
+    if not await verify_superadmin_role(user_role):
+        raise HTTPException(status_code=403, detail="SUPERADMIN role required")
+
+    language_enum = None
+    if language:
+        language_map = {
+            "en-US": VoiceLanguage.ENGLISH_US,
+            "en-GB": VoiceLanguage.ENGLISH_UK,
+            "hi-IN": VoiceLanguage.HINDI
+        }
+        language_enum = language_map.get(language)
+
+    gender_enum = None
+    if gender:
+        gender_map = {
+            "male": VoiceGender.MALE,
+            "female": VoiceGender.FEMALE,
+            "neutral": VoiceGender.NEUTRAL
+        }
+        gender_enum = gender_map.get(gender)
+
+    profiles = jarvis_voice.tts.get_voice_profiles(language_enum, gender_enum)
+
+    return {
+        "profiles": [
+            {
+                "language": p["language"].value,
+                "gender": p["gender"].value,
+                "tone": p["tone"],
+                "speed_range": p["speed_range"]
+            }
+            for p in profiles
+        ],
+        "count": len(profiles)
+    }
+
+
+@router.get("/voice/sessions/{user_id}")
+async def get_voice_sessions(
+    user_id: str,
+    user_role: str = Query(...)
+):
+    """Get voice sessions for user"""
+
+    if not await verify_superadmin_role(user_role):
+        raise HTTPException(status_code=403, detail="SUPERADMIN role required")
+
+    sessions = jarvis_voice.get_voice_sessions(user_id)
+
+    return {
+        "sessions": [
+            {
+                "session_id": s.session_id,
+                "language": s.language.value,
+                "gender_preference": s.gender_preference.value,
+                "created_at": s.created_at.isoformat(),
+                "is_active": s.is_active,
+                "total_queries": s.total_queries,
+                "total_audio_duration_ms": s.total_audio_duration_ms
+            }
+            for s in sessions
+        ],
+        "count": len(sessions)
+    }
+
+
+@router.post("/voice/sessions/{session_id}/end")
+async def end_voice_session(
+    session_id: str,
+    user_role: str = Query(...)
+):
+    """End a voice session"""
+
+    if not await verify_superadmin_role(user_role):
+        raise HTTPException(status_code=403, detail="SUPERADMIN role required")
+
+    success = jarvis_voice.end_voice_session(session_id)
+
+    if not success:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    return {
+        "success": True,
+        "session_id": session_id,
+        "ended_at": datetime.now().isoformat()
+    }
+
+
+@router.get("/voice/history/{user_id}")
+async def get_voice_history(
+    user_id: str,
+    limit: int = Query(20, ge=1, le=100),
+    user_role: str = Query(...)
+):
+    """Get voice interaction history for user"""
+
+    if not await verify_superadmin_role(user_role):
+        raise HTTPException(status_code=403, detail="SUPERADMIN role required")
+
+    history = jarvis_voice.get_interaction_history(user_id, limit)
+
+    return {
+        "interactions": history,
+        "count": len(history)
+    }
+
+
+@router.get("/voice/stats")
+async def get_voice_stats(user_role: str = Query(...)):
+    """Get voice system statistics"""
+
+    if not await verify_superadmin_role(user_role):
+        raise HTTPException(status_code=403, detail="SUPERADMIN role required")
+
+    stats = jarvis_voice.get_system_stats()
+
+    return stats
+
+
+@router.get("/voice/languages")
+async def get_supported_languages(user_role: str = Query(...)):
+    """Get supported languages for voice"""
+
+    if not await verify_superadmin_role(user_role):
+        raise HTTPException(status_code=403, detail="SUPERADMIN role required")
+
+    languages = [
+        {
+            "code": lang.value,
+            "name": lang.name.replace("_", " ")
+        }
+        for lang in VoiceLanguage
+    ]
+
+    return {
+        "languages": languages,
+        "count": len(languages)
     }
 
 
