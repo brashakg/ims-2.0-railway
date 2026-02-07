@@ -11,9 +11,13 @@ from datetime import datetime, timedelta
 import jwt
 import hashlib
 import os
+import logging
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
-security = HTTPBearer()
+# HTTPBearer with auto_error=False allows us to handle missing credentials gracefully
+security = HTTPBearer(auto_error=False)
 
 # JWT Configuration
 SECRET_KEY = os.getenv("JWT_SECRET_KEY", "ims-2.0-secret-key-change-in-production")
@@ -83,11 +87,36 @@ def decode_token(token: str) -> dict:
     except jwt.InvalidTokenError:
         raise HTTPException(status_code=401, detail="Invalid token")
 
-async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)) -> dict:
+async def get_current_user(credentials: Optional[HTTPAuthorizationCredentials] = Depends(security)) -> dict:
     """Get current user from JWT token"""
-    token = credentials.credentials
-    payload = decode_token(token)
-    return payload
+    try:
+        if not credentials:
+            raise HTTPException(
+                status_code=401,
+                detail="Not authenticated",
+                headers={"WWW-Authenticate": "Bearer"}
+            )
+
+        token = credentials.credentials
+        if not token:
+            raise HTTPException(
+                status_code=401,
+                detail="No token provided",
+                headers={"WWW-Authenticate": "Bearer"}
+            )
+
+        payload = decode_token(token)
+        return payload
+    except HTTPException:
+        # Re-raise HTTPException as-is
+        raise
+    except Exception as e:
+        logger.error(f"Authentication error: {str(e)}")
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid or expired token",
+            headers={"WWW-Authenticate": "Bearer"}
+        )
 
 
 # ============================================================================
