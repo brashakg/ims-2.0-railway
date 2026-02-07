@@ -149,7 +149,7 @@ async def login(request: LoginRequest):
             "email": "avinash@bettervision.in",
             "password_hash": hash_password("Ceo@2024"),
             "full_name": "Avinash Kumar (CEO)",
-            "roles": ["SUPERADMIN"],
+            "roles": ["ADMIN"],
             "store_ids": ["BV-DEL", "BV-NOI", "BV-GUR", "BV-MUM", "BV-BLR", "WO-MUM"],
             "is_active": True
         },
@@ -503,6 +503,27 @@ async def login(request: LoginRequest):
             "full_name": "Sunil Mishra",
             "roles": ["WORKSHOP_STAFF"],
             "store_ids": ["WO-MUM"],
+            "is_active": True
+        },
+        # ============== TEST USERS ==============
+        "store_manager": {
+            "user_id": "user-037",
+            "username": "store_manager",
+            "email": "store.manager@bettervision.in",
+            "password_hash": hash_password("admin123"),
+            "full_name": "Store Manager (Test)",
+            "roles": ["STORE_MANAGER"],
+            "store_ids": ["BV-DEL"],
+            "is_active": True
+        },
+        "optometrist": {
+            "user_id": "user-038",
+            "username": "optometrist",
+            "email": "optometrist@bettervision.in",
+            "password_hash": hash_password("admin123"),
+            "full_name": "Optometrist (Test)",
+            "roles": ["OPTOMETRIST"],
+            "store_ids": ["BV-DEL"],
             "is_active": True
         }
     }
