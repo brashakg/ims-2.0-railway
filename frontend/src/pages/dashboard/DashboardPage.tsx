@@ -415,6 +415,14 @@ export default function DashboardPage() {
           <div className="text-right">
             <p className="text-sm text-bv-gold-200">Today</p>
             <p className="text-xl font-semibold">{dateString}</p>
+            {user?.activeRole && ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER'].includes(user.activeRole) && (
+              <button
+                onClick={() => navigate('/dashboard/executive')}
+                className="mt-2 text-xs bg-white/20 hover:bg-white/30 px-3 py-1 rounded-full transition-colors"
+              >
+                Executive Dashboard →
+              </button>
+            )}
           </div>
         </div>
       </div>
