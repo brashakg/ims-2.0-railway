@@ -28,15 +28,31 @@ import { customerApi, prescriptionApi, orderApi } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { AddCustomerModal, type CustomerFormData } from '../../components/customers/AddCustomerModal';
+import { RecallManager } from '../../components/crm/RecallManager';
+import { PromotionEngine } from '../../components/crm/PromotionEngine';
 import clsx from 'clsx';
+import { calculateRFMScore, type CustomerRFMData } from '../../utils/rfmSegmentation';
 
 type ViewMode = 'list' | 'detail';
+type CRMTab = 'customers' | 'recalls' | 'campaigns';
 
 export function CustomersPage() {
   const { user, hasRole } = useAuth();
   const toast = useToast();
   const [searchParams] = useSearchParams();
   const searchInputRef = useRef<HTMLInputElement>(null);
+
+  // CRM Tab routing from URL params
+  const tabParam = searchParams.get('tab') as CRMTab | null;
+  const activeTab: CRMTab = tabParam && ['recalls', 'campaigns'].includes(tabParam) ? tabParam : 'customers';
+
+  // Render CRM sub-tabs (Recalls & Campaigns)
+  if (activeTab === 'recalls') {
+    return <RecallManager />;
+  }
+  if (activeTab === 'campaigns') {
+    return <PromotionEngine />;
+  }
 
   // Auto-focus search when navigated with ?search=true
   useEffect(() => {
@@ -426,6 +442,36 @@ export function CustomersPage() {
               <Calendar className="w-4 h-4 text-gray-400" />
               <span>Customer since {formatDate(selectedCustomer?.createdAt || '')}</span>
             </div>
+
+            {/* RFM Segment Badge */}
+            {(() => {
+              const rfmData: CustomerRFMData = {
+                customerId: selectedCustomer?.id || '',
+                customerName: selectedCustomer?.name || '',
+                phone: selectedCustomer?.phone || '',
+                lastPurchaseDate: purchaseHistory[0]?.date || null,
+                totalOrders: purchaseHistory.length,
+                totalSpend: purchaseHistory.reduce((sum, o) => sum + o.total, 0),
+                daysSinceLastPurchase: purchaseHistory[0]?.date
+                  ? Math.floor((Date.now() - new Date(purchaseHistory[0].date).getTime()) / (1000 * 60 * 60 * 24))
+                  : 999,
+              };
+              const rfm = calculateRFMScore(rfmData);
+              return (
+                <div className="mt-3 p-3 rounded-lg border" style={{ borderColor: 'currentColor' }}>
+                  <div className="flex items-center justify-between mb-1">
+                    <span className={`text-sm font-semibold px-2 py-0.5 rounded-full ${rfm.bgColor} ${rfm.color}`}>
+                      {rfm.label}
+                    </span>
+                    <span className="text-xs text-gray-500">
+                      R{rfm.recency} F{rfm.frequency} M{rfm.monetary}
+                    </span>
+                  </div>
+                  <p className="text-xs text-gray-600 mt-1">{rfm.action}</p>
+                </div>
+              );
+            })()}
+
             {selectedCustomer?.customerType === 'B2B' && selectedCustomer.gstNumber && (
               <div className="flex items-center gap-2 text-sm">
                 <Building2 className="w-4 h-4 text-gray-400" />

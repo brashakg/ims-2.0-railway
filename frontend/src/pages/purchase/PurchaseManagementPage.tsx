@@ -25,6 +25,8 @@ import {
   Download,
   Eye,
   Loader2,
+  Trash2,
+  AlertTriangle,
 } from 'lucide-react';
 import { useToast } from '../../context/ToastContext';
 
@@ -93,9 +95,31 @@ export function PurchaseManagementPage() {
 
   const [purchaseOrders, setPurchaseOrders] = useState<PurchaseOrder[]>([]);
   const [suppliers, setSuppliers] = useState<Supplier[]>([]);
-  const [, setShowCreatePO] = useState(false);
-  const [, setShowSupplierModal] = useState(false);
-  const [, setSelectedPO] = useState<PurchaseOrder | null>(null);
+  const [showCreatePO, setShowCreatePO] = useState(false);
+  const [showSupplierModal, setShowSupplierModal] = useState(false);
+  const [selectedPO, setSelectedPO] = useState<PurchaseOrder | null>(null);
+
+  // Create PO form state
+  const [poFormSupplierId, setPOFormSupplierId] = useState('');
+  const [poFormExpectedDelivery, setPOFormExpectedDelivery] = useState('');
+  const [poFormNotes, setPOFormNotes] = useState('');
+  const [poFormItems, setPOFormItems] = useState<{ productName: string; sku: string; quantity: number; unitCost: number; taxRate: number }[]>([
+    { productName: '', sku: '', quantity: 1, unitCost: 0, taxRate: 18 },
+  ]);
+
+  // Add Supplier form state
+  const [supplierFormName, setSupplierFormName] = useState('');
+  const [supplierFormCode, setSupplierFormCode] = useState('');
+  const [supplierFormContactPerson, setSupplierFormContactPerson] = useState('');
+  const [supplierFormPhone, setSupplierFormPhone] = useState('');
+  const [supplierFormEmail, setSupplierFormEmail] = useState('');
+  const [supplierFormAddress, setSupplierFormAddress] = useState('');
+  const [supplierFormCity, setSupplierFormCity] = useState('');
+  const [supplierFormState, setSupplierFormState] = useState('');
+  const [supplierFormGST, setSupplierFormGST] = useState('');
+  const [supplierFormPaymentTerms, setSupplierFormPaymentTerms] = useState(30);
+  const [supplierFormCreditLimit, setSupplierFormCreditLimit] = useState(0);
+  const [supplierFormGSTError, setSupplierFormGSTError] = useState('');
 
   // Sync active tab from URL query params (e.g. /purchase?tab=suppliers)
   useEffect(() => {
@@ -280,6 +304,197 @@ export function PurchaseManagementPage() {
     supplier.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
     supplier.code.toLowerCase().includes(searchQuery.toLowerCase())
   );
+
+  // ---- PO Form helpers ----
+  const resetPOForm = () => {
+    setPOFormSupplierId('');
+    setPOFormExpectedDelivery('');
+    setPOFormNotes('');
+    setPOFormItems([{ productName: '', sku: '', quantity: 1, unitCost: 0, taxRate: 18 }]);
+  };
+
+  const addPOFormItem = () => {
+    setPOFormItems(prev => [...prev, { productName: '', sku: '', quantity: 1, unitCost: 0, taxRate: 18 }]);
+  };
+
+  const removePOFormItem = (index: number) => {
+    setPOFormItems(prev => prev.filter((_, i) => i !== index));
+  };
+
+  const updatePOFormItem = (index: number, field: string, value: string | number) => {
+    setPOFormItems(prev => prev.map((item, i) => i === index ? { ...item, [field]: value } : item));
+  };
+
+  const calcLineTotal = (item: { quantity: number; unitCost: number; taxRate: number }) => {
+    return item.quantity * item.unitCost * (1 + item.taxRate / 100);
+  };
+
+  const calcSubtotal = () => poFormItems.reduce((sum, item) => sum + item.quantity * item.unitCost, 0);
+  const calcTax = () => poFormItems.reduce((sum, item) => sum + item.quantity * item.unitCost * item.taxRate / 100, 0);
+  const calcGrandTotal = () => calcSubtotal() + calcTax();
+
+  const handleCreatePO = () => {
+    if (!poFormSupplierId) {
+      toast.error('Please select a supplier');
+      return;
+    }
+    if (!poFormExpectedDelivery) {
+      toast.error('Please set an expected delivery date');
+      return;
+    }
+    const validItems = poFormItems.filter(item => item.productName.trim() && item.quantity > 0 && item.unitCost > 0);
+    if (validItems.length === 0) {
+      toast.error('Please add at least one valid line item');
+      return;
+    }
+
+    const supplier = suppliers.find(s => s.id === poFormSupplierId);
+    const poItems: POItem[] = validItems.map((item, idx) => ({
+      productId: `new-${Date.now()}-${idx}`,
+      productName: item.productName,
+      sku: item.sku || 'N/A',
+      quantity: item.quantity,
+      unitCost: item.unitCost,
+      taxRate: item.taxRate,
+      total: calcLineTotal(item),
+    }));
+
+    const subtotal = validItems.reduce((sum, item) => sum + item.quantity * item.unitCost, 0);
+    const taxAmount = validItems.reduce((sum, item) => sum + item.quantity * item.unitCost * item.taxRate / 100, 0);
+
+    const newPO: PurchaseOrder = {
+      id: `po-${Date.now()}`,
+      poNumber: `PO-2024-${String(purchaseOrders.length + 1).padStart(3, '0')}`,
+      supplierId: poFormSupplierId,
+      supplierName: supplier?.name ?? 'Unknown',
+      date: new Date().toISOString().split('T')[0],
+      expectedDelivery: poFormExpectedDelivery,
+      status: 'DRAFT',
+      items: poItems,
+      subtotal,
+      taxAmount,
+      total: subtotal + taxAmount,
+      notes: poFormNotes || undefined,
+    };
+
+    setPurchaseOrders(prev => [newPO, ...prev]);
+    setShowCreatePO(false);
+    resetPOForm();
+    toast.success(`Purchase Order ${newPO.poNumber} created as Draft`);
+  };
+
+  // ---- Supplier Form helpers ----
+  const resetSupplierForm = () => {
+    setSupplierFormName('');
+    setSupplierFormCode('');
+    setSupplierFormContactPerson('');
+    setSupplierFormPhone('');
+    setSupplierFormEmail('');
+    setSupplierFormAddress('');
+    setSupplierFormCity('');
+    setSupplierFormState('');
+    setSupplierFormGST('');
+    setSupplierFormPaymentTerms(30);
+    setSupplierFormCreditLimit(0);
+    setSupplierFormGSTError('');
+  };
+
+  const validateGST = (gst: string): boolean => {
+    if (!gst) return true; // optional
+    // GST format: 2-digit state code + PAN (5 alpha + 4 digits + 1 alpha) + 1 alphanumeric + Z + 1 alphanumeric
+    const gstRegex = /^\d{2}[A-Z]{5}\d{4}[A-Z][A-Z0-9]Z[A-Z0-9]$/;
+    return gstRegex.test(gst.toUpperCase());
+  };
+
+  const handleAddSupplier = () => {
+    if (!supplierFormName.trim()) {
+      toast.error('Company name is required');
+      return;
+    }
+    if (!supplierFormCode.trim()) {
+      toast.error('Supplier code is required');
+      return;
+    }
+    if (!supplierFormContactPerson.trim()) {
+      toast.error('Contact person is required');
+      return;
+    }
+    if (supplierFormGST && !validateGST(supplierFormGST)) {
+      setSupplierFormGSTError('Invalid GST format. Expected: 2-digit state code + PAN + alphanumeric (e.g., 07AAAAA1234A1Z5)');
+      return;
+    }
+
+    const newSupplier: Supplier = {
+      id: `sup-${Date.now()}`,
+      name: supplierFormName.trim(),
+      code: supplierFormCode.trim().toUpperCase(),
+      contactPerson: supplierFormContactPerson.trim(),
+      phone: supplierFormPhone.trim(),
+      email: supplierFormEmail.trim(),
+      address: supplierFormAddress.trim(),
+      city: supplierFormCity.trim(),
+      state: supplierFormState.trim(),
+      gstNumber: supplierFormGST.trim().toUpperCase(),
+      paymentTerms: supplierFormPaymentTerms,
+      creditLimit: supplierFormCreditLimit,
+      currentOutstanding: 0,
+      rating: 0,
+      totalPurchases: 0,
+      lastPurchaseDate: '',
+      performance: {
+        onTimeDelivery: 0,
+        qualityScore: 0,
+        priceCompetitiveness: 0,
+      },
+    };
+
+    setSuppliers(prev => [...prev, newSupplier]);
+    setShowSupplierModal(false);
+    resetSupplierForm();
+    toast.success(`Supplier "${newSupplier.name}" added successfully`);
+  };
+
+  // ---- PO Status Action handler ----
+  const handlePOAction = (po: PurchaseOrder, action: string) => {
+    let newStatus: POStatus = po.status;
+    let message = '';
+
+    switch (action) {
+      case 'submit':
+        newStatus = 'PENDING';
+        message = `${po.poNumber} submitted for approval`;
+        break;
+      case 'approve':
+        newStatus = 'APPROVED';
+        message = `${po.poNumber} approved`;
+        break;
+      case 'reject':
+        newStatus = 'CANCELLED';
+        message = `${po.poNumber} rejected`;
+        break;
+      case 'order':
+        newStatus = 'ORDERED';
+        message = `${po.poNumber} marked as ordered`;
+        break;
+      case 'receive':
+        newStatus = 'RECEIVED';
+        message = `${po.poNumber} marked as received`;
+        break;
+      default:
+        return;
+    }
+
+    const updatedPO: PurchaseOrder = {
+      ...po,
+      status: newStatus,
+      ...(action === 'approve' ? { approvedBy: 'Current User' } : {}),
+      ...(action === 'receive' ? { receivedDate: new Date().toISOString().split('T')[0] } : {}),
+    };
+
+    setPurchaseOrders(prev => prev.map(p => p.id === po.id ? updatedPO : p));
+    setSelectedPO(updatedPO);
+    toast.success(message);
+  };
 
   return (
     <div className="space-y-6">
@@ -630,6 +845,542 @@ export function PurchaseManagementPage() {
                     </div>
                   );
                 })}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ================================================================ */}
+      {/* CREATE PO MODAL */}
+      {/* ================================================================ */}
+      {showCreatePO && (
+        <div className="fixed inset-0 bg-black/50 flex items-start justify-center z-50 p-4 overflow-y-auto">
+          <div className="bg-white rounded-xl shadow-2xl w-full max-w-3xl my-8">
+            {/* Header */}
+            <div className="flex items-center justify-between p-6 border-b border-gray-200">
+              <h2 className="text-xl font-bold text-gray-900 flex items-center gap-2">
+                <FileText className="w-5 h-5 text-blue-600" />
+                Create Purchase Order
+              </h2>
+              <button
+                onClick={() => { setShowCreatePO(false); resetPOForm(); }}
+                className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
+              >
+                <XIcon className="w-5 h-5 text-gray-500" />
+              </button>
+            </div>
+
+            {/* Body */}
+            <div className="p-6 space-y-6">
+              {/* Supplier & Delivery Date */}
+              <div className="grid grid-cols-1 tablet:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Supplier *</label>
+                  <select
+                    value={poFormSupplierId}
+                    onChange={(e) => setPOFormSupplierId(e.target.value)}
+                    className="input-field"
+                  >
+                    <option value="">Select a supplier...</option>
+                    {suppliers.map(s => (
+                      <option key={s.id} value={s.id}>{s.name} ({s.code})</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Expected Delivery Date *</label>
+                  <input
+                    type="date"
+                    value={poFormExpectedDelivery}
+                    onChange={(e) => setPOFormExpectedDelivery(e.target.value)}
+                    className="input-field"
+                  />
+                </div>
+              </div>
+
+              {/* Line Items */}
+              <div>
+                <div className="flex items-center justify-between mb-3">
+                  <label className="block text-sm font-medium text-gray-700">Line Items *</label>
+                  <button
+                    onClick={addPOFormItem}
+                    className="text-sm text-blue-600 hover:text-blue-700 font-medium flex items-center gap-1"
+                  >
+                    <Plus className="w-4 h-4" />
+                    Add Item
+                  </button>
+                </div>
+
+                <div className="space-y-3">
+                  {poFormItems.map((item, index) => (
+                    <div key={index} className="p-3 bg-gray-50 rounded-lg border border-gray-200">
+                      <div className="grid grid-cols-12 gap-2 items-end">
+                        <div className="col-span-12 tablet:col-span-4">
+                          <label className="block text-xs text-gray-600 mb-1">Product Name</label>
+                          <input
+                            type="text"
+                            placeholder="Product name"
+                            value={item.productName}
+                            onChange={(e) => updatePOFormItem(index, 'productName', e.target.value)}
+                            className="input-field text-sm"
+                          />
+                        </div>
+                        <div className="col-span-6 tablet:col-span-2">
+                          <label className="block text-xs text-gray-600 mb-1">SKU</label>
+                          <input
+                            type="text"
+                            placeholder="SKU"
+                            value={item.sku}
+                            onChange={(e) => updatePOFormItem(index, 'sku', e.target.value)}
+                            className="input-field text-sm"
+                          />
+                        </div>
+                        <div className="col-span-6 tablet:col-span-1">
+                          <label className="block text-xs text-gray-600 mb-1">Qty</label>
+                          <input
+                            type="number"
+                            min="1"
+                            value={item.quantity}
+                            onChange={(e) => updatePOFormItem(index, 'quantity', parseInt(e.target.value) || 0)}
+                            className="input-field text-sm"
+                          />
+                        </div>
+                        <div className="col-span-6 tablet:col-span-2">
+                          <label className="block text-xs text-gray-600 mb-1">Unit Cost (₹)</label>
+                          <input
+                            type="number"
+                            min="0"
+                            step="0.01"
+                            value={item.unitCost}
+                            onChange={(e) => updatePOFormItem(index, 'unitCost', parseFloat(e.target.value) || 0)}
+                            className="input-field text-sm"
+                          />
+                        </div>
+                        <div className="col-span-4 tablet:col-span-1">
+                          <label className="block text-xs text-gray-600 mb-1">Tax %</label>
+                          <input
+                            type="number"
+                            min="0"
+                            max="28"
+                            value={item.taxRate}
+                            onChange={(e) => updatePOFormItem(index, 'taxRate', parseFloat(e.target.value) || 0)}
+                            className="input-field text-sm"
+                          />
+                        </div>
+                        <div className="col-span-6 tablet:col-span-1 text-right">
+                          <label className="block text-xs text-gray-600 mb-1">Total</label>
+                          <p className="text-sm font-semibold text-gray-900 py-2">₹{calcLineTotal(item).toLocaleString()}</p>
+                        </div>
+                        <div className="col-span-2 tablet:col-span-1 flex justify-end">
+                          <button
+                            onClick={() => removePOFormItem(index)}
+                            disabled={poFormItems.length === 1}
+                            className="p-2 text-red-500 hover:bg-red-50 rounded-lg transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Totals */}
+              <div className="flex justify-end">
+                <div className="w-64 space-y-2 p-4 bg-gray-50 rounded-lg">
+                  <div className="flex justify-between text-sm">
+                    <span className="text-gray-600">Subtotal</span>
+                    <span className="font-medium text-gray-900">₹{calcSubtotal().toLocaleString()}</span>
+                  </div>
+                  <div className="flex justify-between text-sm">
+                    <span className="text-gray-600">Tax</span>
+                    <span className="font-medium text-gray-900">₹{calcTax().toLocaleString()}</span>
+                  </div>
+                  <div className="flex justify-between text-sm font-bold border-t border-gray-300 pt-2">
+                    <span className="text-gray-900">Grand Total</span>
+                    <span className="text-gray-900">₹{calcGrandTotal().toLocaleString()}</span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Notes */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Notes</label>
+                <textarea
+                  value={poFormNotes}
+                  onChange={(e) => setPOFormNotes(e.target.value)}
+                  placeholder="Any additional notes for this purchase order..."
+                  rows={3}
+                  className="input-field"
+                />
+              </div>
+            </div>
+
+            {/* Footer */}
+            <div className="flex items-center justify-end gap-3 p-6 border-t border-gray-200">
+              <button
+                onClick={() => { setShowCreatePO(false); resetPOForm(); }}
+                className="px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-100 rounded-lg transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleCreatePO}
+                className="btn-primary flex items-center gap-2"
+              >
+                <FileText className="w-4 h-4" />
+                Create as Draft
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ================================================================ */}
+      {/* ADD SUPPLIER MODAL */}
+      {/* ================================================================ */}
+      {showSupplierModal && (
+        <div className="fixed inset-0 bg-black/50 flex items-start justify-center z-50 p-4 overflow-y-auto">
+          <div className="bg-white rounded-xl shadow-2xl w-full max-w-2xl my-8">
+            {/* Header */}
+            <div className="flex items-center justify-between p-6 border-b border-gray-200">
+              <h2 className="text-xl font-bold text-gray-900 flex items-center gap-2">
+                <Truck className="w-5 h-5 text-blue-600" />
+                Add Supplier
+              </h2>
+              <button
+                onClick={() => { setShowSupplierModal(false); resetSupplierForm(); }}
+                className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
+              >
+                <XIcon className="w-5 h-5 text-gray-500" />
+              </button>
+            </div>
+
+            {/* Body */}
+            <div className="p-6 space-y-5">
+              {/* Company & Code */}
+              <div className="grid grid-cols-1 tablet:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Company Name *</label>
+                  <input
+                    type="text"
+                    value={supplierFormName}
+                    onChange={(e) => setSupplierFormName(e.target.value)}
+                    placeholder="e.g., Titan Eyewear Pvt Ltd"
+                    className="input-field"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Supplier Code *</label>
+                  <input
+                    type="text"
+                    value={supplierFormCode}
+                    onChange={(e) => setSupplierFormCode(e.target.value)}
+                    placeholder="e.g., SUP004"
+                    className="input-field"
+                  />
+                </div>
+              </div>
+
+              {/* Contact Person, Phone, Email */}
+              <div className="grid grid-cols-1 tablet:grid-cols-3 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Contact Person *</label>
+                  <input
+                    type="text"
+                    value={supplierFormContactPerson}
+                    onChange={(e) => setSupplierFormContactPerson(e.target.value)}
+                    placeholder="Full name"
+                    className="input-field"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Phone</label>
+                  <input
+                    type="text"
+                    value={supplierFormPhone}
+                    onChange={(e) => setSupplierFormPhone(e.target.value)}
+                    placeholder="+91 98765 43210"
+                    className="input-field"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Email</label>
+                  <input
+                    type="email"
+                    value={supplierFormEmail}
+                    onChange={(e) => setSupplierFormEmail(e.target.value)}
+                    placeholder="email@company.com"
+                    className="input-field"
+                  />
+                </div>
+              </div>
+
+              {/* Address, City, State */}
+              <div className="grid grid-cols-1 tablet:grid-cols-3 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Address</label>
+                  <input
+                    type="text"
+                    value={supplierFormAddress}
+                    onChange={(e) => setSupplierFormAddress(e.target.value)}
+                    placeholder="Street address"
+                    className="input-field"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">City</label>
+                  <input
+                    type="text"
+                    value={supplierFormCity}
+                    onChange={(e) => setSupplierFormCity(e.target.value)}
+                    placeholder="City"
+                    className="input-field"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">State</label>
+                  <input
+                    type="text"
+                    value={supplierFormState}
+                    onChange={(e) => setSupplierFormState(e.target.value)}
+                    placeholder="State"
+                    className="input-field"
+                  />
+                </div>
+              </div>
+
+              {/* GST Number */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">GST Number</label>
+                <input
+                  type="text"
+                  value={supplierFormGST}
+                  onChange={(e) => {
+                    setSupplierFormGST(e.target.value.toUpperCase());
+                    setSupplierFormGSTError('');
+                  }}
+                  placeholder="e.g., 07AAAAA1234A1Z5"
+                  maxLength={15}
+                  className={`input-field ${supplierFormGSTError ? 'border-red-500' : ''}`}
+                />
+                {supplierFormGSTError && (
+                  <p className="mt-1 text-xs text-red-600 flex items-center gap-1">
+                    <AlertTriangle className="w-3 h-3" />
+                    {supplierFormGSTError}
+                  </p>
+                )}
+              </div>
+
+              {/* Payment Terms & Credit Limit */}
+              <div className="grid grid-cols-1 tablet:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Payment Terms (days)</label>
+                  <input
+                    type="number"
+                    min="0"
+                    value={supplierFormPaymentTerms}
+                    onChange={(e) => setSupplierFormPaymentTerms(parseInt(e.target.value) || 0)}
+                    className="input-field"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Credit Limit (₹)</label>
+                  <input
+                    type="number"
+                    min="0"
+                    step="10000"
+                    value={supplierFormCreditLimit}
+                    onChange={(e) => setSupplierFormCreditLimit(parseFloat(e.target.value) || 0)}
+                    className="input-field"
+                  />
+                </div>
+              </div>
+            </div>
+
+            {/* Footer */}
+            <div className="flex items-center justify-end gap-3 p-6 border-t border-gray-200">
+              <button
+                onClick={() => { setShowSupplierModal(false); resetSupplierForm(); }}
+                className="px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-100 rounded-lg transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleAddSupplier}
+                className="btn-primary flex items-center gap-2"
+              >
+                <CheckCircle className="w-4 h-4" />
+                Save Supplier
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ================================================================ */}
+      {/* PO DETAIL MODAL */}
+      {/* ================================================================ */}
+      {selectedPO && (
+        <div className="fixed inset-0 bg-black/50 flex items-start justify-center z-50 p-4 overflow-y-auto">
+          <div className="bg-white rounded-xl shadow-2xl w-full max-w-3xl my-8">
+            {/* Header */}
+            <div className="flex items-center justify-between p-6 border-b border-gray-200">
+              <div>
+                <h2 className="text-xl font-bold text-gray-900 flex items-center gap-3">
+                  {selectedPO.poNumber}
+                  {getStatusBadge(selectedPO.status)}
+                </h2>
+                <p className="text-sm text-gray-500 mt-1">{selectedPO.supplierName}</p>
+              </div>
+              <button
+                onClick={() => setSelectedPO(null)}
+                className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
+              >
+                <XIcon className="w-5 h-5 text-gray-500" />
+              </button>
+            </div>
+
+            {/* Body */}
+            <div className="p-6 space-y-6">
+              {/* PO Details */}
+              <div className="grid grid-cols-2 tablet:grid-cols-4 gap-4">
+                <div>
+                  <p className="text-xs text-gray-600 mb-1">Order Date</p>
+                  <p className="text-sm font-medium text-gray-900">{new Date(selectedPO.date).toLocaleDateString()}</p>
+                </div>
+                <div>
+                  <p className="text-xs text-gray-600 mb-1">Expected Delivery</p>
+                  <p className="text-sm font-medium text-gray-900">{new Date(selectedPO.expectedDelivery).toLocaleDateString()}</p>
+                </div>
+                {selectedPO.approvedBy && (
+                  <div>
+                    <p className="text-xs text-gray-600 mb-1">Approved By</p>
+                    <p className="text-sm font-medium text-gray-900">{selectedPO.approvedBy}</p>
+                  </div>
+                )}
+                {selectedPO.receivedDate && (
+                  <div>
+                    <p className="text-xs text-gray-600 mb-1">Received Date</p>
+                    <p className="text-sm font-medium text-gray-900">{new Date(selectedPO.receivedDate).toLocaleDateString()}</p>
+                  </div>
+                )}
+              </div>
+
+              {/* Notes */}
+              {selectedPO.notes && (
+                <div className="p-3 bg-yellow-50 rounded-lg border border-yellow-200">
+                  <p className="text-xs text-yellow-700 font-medium mb-1">Notes</p>
+                  <p className="text-sm text-yellow-800">{selectedPO.notes}</p>
+                </div>
+              )}
+
+              {/* Items Table */}
+              <div>
+                <h3 className="text-sm font-semibold text-gray-900 mb-3">Items</h3>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="bg-gray-50 border-b border-gray-200">
+                        <th className="text-left py-2 px-3 text-xs font-medium text-gray-600">Product</th>
+                        <th className="text-left py-2 px-3 text-xs font-medium text-gray-600">SKU</th>
+                        <th className="text-right py-2 px-3 text-xs font-medium text-gray-600">Qty</th>
+                        <th className="text-right py-2 px-3 text-xs font-medium text-gray-600">Unit Cost</th>
+                        <th className="text-right py-2 px-3 text-xs font-medium text-gray-600">Tax %</th>
+                        <th className="text-right py-2 px-3 text-xs font-medium text-gray-600">Total</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {selectedPO.items.map((item, idx) => (
+                        <tr key={idx} className="border-b border-gray-100">
+                          <td className="py-2 px-3 text-gray-900">{item.productName}</td>
+                          <td className="py-2 px-3 text-gray-600">{item.sku}</td>
+                          <td className="py-2 px-3 text-right text-gray-900">{item.quantity}</td>
+                          <td className="py-2 px-3 text-right text-gray-900">₹{item.unitCost.toLocaleString()}</td>
+                          <td className="py-2 px-3 text-right text-gray-600">{item.taxRate}%</td>
+                          <td className="py-2 px-3 text-right font-medium text-gray-900">₹{item.total.toLocaleString()}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              {/* Totals */}
+              <div className="flex justify-end">
+                <div className="w-64 space-y-2 p-4 bg-gray-50 rounded-lg">
+                  <div className="flex justify-between text-sm">
+                    <span className="text-gray-600">Subtotal</span>
+                    <span className="font-medium text-gray-900">₹{selectedPO.subtotal.toLocaleString()}</span>
+                  </div>
+                  <div className="flex justify-between text-sm">
+                    <span className="text-gray-600">Tax</span>
+                    <span className="font-medium text-gray-900">₹{selectedPO.taxAmount.toLocaleString()}</span>
+                  </div>
+                  <div className="flex justify-between text-sm font-bold border-t border-gray-300 pt-2">
+                    <span className="text-gray-900">Total</span>
+                    <span className="text-gray-900">₹{selectedPO.total.toLocaleString()}</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Footer - Action Buttons */}
+            <div className="flex items-center justify-between p-6 border-t border-gray-200">
+              <button
+                onClick={() => setSelectedPO(null)}
+                className="px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-100 rounded-lg transition-colors"
+              >
+                Close
+              </button>
+              <div className="flex items-center gap-2">
+                {selectedPO.status === 'DRAFT' && (
+                  <button
+                    onClick={() => handlePOAction(selectedPO, 'submit')}
+                    className="btn-primary flex items-center gap-2"
+                  >
+                    <FileText className="w-4 h-4" />
+                    Submit for Approval
+                  </button>
+                )}
+                {selectedPO.status === 'PENDING' && (
+                  <>
+                    <button
+                      onClick={() => handlePOAction(selectedPO, 'reject')}
+                      className="px-4 py-2 text-sm font-medium text-red-700 bg-red-50 hover:bg-red-100 rounded-lg transition-colors flex items-center gap-2"
+                    >
+                      <XIcon className="w-4 h-4" />
+                      Reject
+                    </button>
+                    <button
+                      onClick={() => handlePOAction(selectedPO, 'approve')}
+                      className="btn-primary flex items-center gap-2"
+                    >
+                      <CheckCircle className="w-4 h-4" />
+                      Approve
+                    </button>
+                  </>
+                )}
+                {selectedPO.status === 'APPROVED' && (
+                  <button
+                    onClick={() => handlePOAction(selectedPO, 'order')}
+                    className="btn-primary flex items-center gap-2"
+                  >
+                    <Truck className="w-4 h-4" />
+                    Mark as Ordered
+                  </button>
+                )}
+                {selectedPO.status === 'ORDERED' && (
+                  <button
+                    onClick={() => handlePOAction(selectedPO, 'receive')}
+                    className="btn-primary flex items-center gap-2"
+                  >
+                    <Package className="w-4 h-4" />
+                    Mark as Received
+                  </button>
+                )}
+              </div>
             </div>
           </div>
         </div>

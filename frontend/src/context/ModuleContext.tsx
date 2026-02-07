@@ -115,6 +115,8 @@ export const MODULE_CONFIGS: ModuleConfig[] = [
     sidebarItems: [
       { id: 'crm-all', label: 'All Customers', path: '/customers' },
       { id: 'crm-search', label: 'Search Customers', path: '/customers?search=true' },
+      { id: 'crm-recalls', label: 'Recalls & Reminders', path: '/customers?tab=recalls' },
+      { id: 'crm-campaigns', label: 'Promotions', path: '/customers?tab=campaigns' },
     ],
   },
   {
