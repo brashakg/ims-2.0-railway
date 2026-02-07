@@ -26,10 +26,11 @@ import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { GSTR1Report } from '../../components/reports/GSTR1Report';
 import { GSTR3BReport } from '../../components/reports/GSTR3BReport';
+import { DemandForecast } from '../../components/reports/DemandForecast';
 import clsx from 'clsx';
 import { exportToCSV, SALES_REPORT_COLUMNS, INVENTORY_REPORT_COLUMNS, CUSTOMER_REPORT_COLUMNS, GST_REPORT_COLUMNS } from '../../utils/exportUtils';
 
-type ReportType = 'sales' | 'inventory' | 'customers' | 'gst';
+type ReportType = 'sales' | 'inventory' | 'customers' | 'gst' | 'forecast';
 type DateRange = 'today' | 'week' | 'month' | 'quarter' | 'custom';
 
 // Types
@@ -465,6 +466,7 @@ export function ReportsPage() {
           { id: 'inventory' as ReportType, label: 'Inventory', icon: Package },
           { id: 'customers' as ReportType, label: 'Customers', icon: Users },
           { id: 'gst' as ReportType, label: 'GST', icon: FileText },
+          { id: 'forecast' as ReportType, label: 'Forecast', icon: TrendingUp },
         ].map(tab => (
           <button
             key={tab.id}
@@ -663,6 +665,11 @@ export function ReportsPage() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* Demand Forecast Section */}
+      {activeTab === 'forecast' && (
+        <DemandForecast />
       )}
 
       {/* GSTR-1 Modal */}

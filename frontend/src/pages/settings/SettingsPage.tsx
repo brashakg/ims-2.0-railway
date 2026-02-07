@@ -36,6 +36,8 @@ import {
   settingsApi,
 } from '../../services/api';
 
+import { ApprovalWorkflows } from '../../components/settings/ApprovalWorkflows';
+
 // ============================================================================
 // Types
 // ============================================================================
@@ -54,6 +56,7 @@ type SettingsTab =
   | 'integrations'
   | 'printers'
   | 'audit-logs'
+  | 'approvals'
   | 'system';
 
 interface Store {
@@ -180,6 +183,7 @@ const SETTINGS_SECTIONS = [
   { id: 'printers' as SettingsTab, label: 'Printers', icon: Printer, description: 'Receipt and label printers', role: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER'] },
 
   // Security & Audit
+  { id: 'approvals' as SettingsTab, label: 'Approval Workflows', icon: Shield, description: 'Configure approval rules and thresholds', role: ['SUPERADMIN', 'ADMIN'] },
   { id: 'audit-logs' as SettingsTab, label: 'Audit Logs', icon: History, description: 'Activity history and logs', role: ['SUPERADMIN', 'ADMIN'] },
   { id: 'system' as SettingsTab, label: 'System', icon: Database, description: 'Backup, sync, maintenance', role: ['SUPERADMIN', 'ADMIN'] },
 ];
@@ -324,7 +328,7 @@ export function SettingsPage() {
   useEffect(() => {
     const tabParam = searchParams.get('tab');
     if (tabParam && tabParam !== activeTab) {
-      const validTabs: SettingsTab[] = ['profile', 'business', 'stores', 'users', 'categories', 'brands', 'lens-master', 'discounts', 'tax-invoice', 'notifications', 'integrations', 'printers', 'audit-logs', 'system'];
+      const validTabs: SettingsTab[] = ['profile', 'business', 'stores', 'users', 'categories', 'brands', 'lens-master', 'discounts', 'tax-invoice', 'notifications', 'integrations', 'printers', 'approvals', 'audit-logs', 'system'];
       if (validTabs.includes(tabParam as SettingsTab)) {
         setActiveTab(tabParam as SettingsTab);
       }
@@ -2407,6 +2411,15 @@ export function SettingsPage() {
                       )}
                     </div>
                   </div>
+                </div>
+              )}
+
+              {/* ================================================================ */}
+              {/* APPROVAL WORKFLOWS */}
+              {/* ================================================================ */}
+              {activeTab === 'approvals' && (
+                <div>
+                  <ApprovalWorkflows />
                 </div>
               )}
 
