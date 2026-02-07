@@ -6,7 +6,15 @@ import axios from 'axios';
 import type { AxiosInstance, AxiosError, InternalAxiosRequestConfig } from 'axios';
 import type { ApiResponse, LoginCredentials, LoginResponse, User } from '../types';
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || '/api';
+const API_BASE_URL = import.meta.env.VITE_API_URL ||
+  (import.meta.env.PROD ? 'https://ims-20-railway-production.up.railway.app/api/v1' : '/api');
+
+// Log the API URL being used (helpful for debugging)
+console.log(`[IMS API] Base URL: ${API_BASE_URL}`, {
+  env: import.meta.env.MODE,
+  isProd: import.meta.env.PROD,
+  viteUrl: import.meta.env.VITE_API_URL,
+});
 
 // Enforce HTTPS in production - convert any HTTP URLs to HTTPS
 function getSecureApiUrl(): string {
@@ -146,8 +154,15 @@ export const authApi = {
     }
 
     try {
+      console.log(`[AuthAPI] Attempting login for user: ${credentials.username}`, {
+        apiUrl: getSecureApiUrl(),
+        endpoint: '/auth/login',
+      });
+
       const response = await api.post<BackendLoginResponse>('/auth/login', credentials);
       const data = response.data;
+
+      console.log(`[AuthAPI] Login successful for user: ${credentials.username}`);
 
       // Transform backend response to frontend format
       return {
@@ -170,7 +185,20 @@ export const authApi = {
       };
     } catch (error) {
       // Return error response instead of throwing
-      const errorMessage = error instanceof Error ? error.message : 'Invalid username or password';
+      let errorMessage = 'Invalid username or password';
+
+      if (error instanceof Error) {
+        console.error(`[AuthAPI] Login failed: ${error.message}`);
+        errorMessage = error.message;
+
+        // Check if it's a network error
+        if (error.message.includes('Network error') || error.message.includes('ERR_NETWORK')) {
+          errorMessage = `Network error connecting to API. Please check your internet connection. API URL: ${getSecureApiUrl()}`;
+        }
+      }
+
+      console.error(`[AuthAPI] Login failed for user: ${credentials.username}`, { error: errorMessage });
+
       return {
         success: false,
         message: errorMessage,
