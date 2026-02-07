@@ -202,7 +202,7 @@ export function CustomersPage() {
   };
 
   // Check if user can add customers (role-based)
-  const canAddCustomer = hasRole(['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'SALES_CASHIER', 'SALES_STAFF']);
+  const canAddCustomer = hasRole(['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'CASHIER', 'SALES_CASHIER', 'SALES_STAFF']);
   const canEditCustomer = hasRole(['SUPERADMIN', 'ADMIN', 'STORE_MANAGER']);
 
   // Handle creating new customer

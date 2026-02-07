@@ -28,7 +28,9 @@ export function LoginPage() {
   }, []);
 
   const handleClearCache = () => {
-    if (!window.confirm('This will clear all cached data and reload the page. Continue?')) return;
+    if (!window.confirm('Are you sure you want to clear all cached data? Your login session and saved preferences will be removed.')) {
+      return;
+    }
     localStorage.clear();
     sessionStorage.clear();
     setError('');
@@ -169,6 +171,17 @@ export function LoginPage() {
                 'Sign In'
               )}
             </button>
+
+            {/* Forgot Password link */}
+            <div className="mt-4 text-center">
+              <button
+                type="button"
+                onClick={() => alert('Password reset functionality coming soon. Please contact your administrator.')}
+                className="text-sm text-gray-600 hover:text-bv-red-600 transition-colors"
+              >
+                Forgot Password?
+              </button>
+            </div>
           </form>
 
           {/* Location notice */}

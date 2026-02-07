@@ -135,28 +135,39 @@ export const authApi = {
       };
     }
 
-    const response = await api.post<BackendLoginResponse>('/auth/login', credentials);
-    const data = response.data;
+    try {
+      const response = await api.post<BackendLoginResponse>('/auth/login', credentials);
+      const data = response.data;
 
-    // Transform backend response to frontend format
-    return {
-      success: true,
-      token: data.access_token,
-      user: {
-        id: data.user.user_id,
-        email: data.user.username, // Using username as email for compatibility
-        name: data.user.full_name,
-        phone: '',
-        roles: data.user.roles as import('../types').UserRole[],
-        activeRole: data.user.roles[0] as import('../types').UserRole,
-        storeIds: data.user.store_ids,
-        activeStoreId: data.user.active_store_id,
-        discountCap: 0,
-        isActive: true,
-        geoRestricted: false,
-        createdAt: new Date().toISOString(),
-      },
-    };
+      // Transform backend response to frontend format
+      return {
+        success: true,
+        token: data.access_token,
+        user: {
+          id: data.user.user_id,
+          email: data.user.username, // Using username as email for compatibility
+          name: data.user.full_name,
+          phone: '',
+          roles: data.user.roles as import('../types').UserRole[],
+          activeRole: data.user.roles[0] as import('../types').UserRole,
+          storeIds: data.user.store_ids,
+          activeStoreId: data.user.active_store_id,
+          discountCap: 0,
+          isActive: true,
+          geoRestricted: false,
+          createdAt: new Date().toISOString(),
+        },
+      };
+    } catch (error) {
+      // Return error response instead of throwing
+      const errorMessage = error instanceof Error ? error.message : 'Invalid username or password';
+      return {
+        success: false,
+        message: errorMessage,
+        token: undefined,
+        user: undefined,
+      };
+    }
   },
 
   logout: async (): Promise<void> => {

@@ -66,7 +66,7 @@ export const MODULE_CONFIGS: ModuleConfig[] = [
     icon: ShoppingCart,
     color: 'text-red-600',
     bgColor: 'bg-red-50',
-    allowedRoles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'SALES_CASHIER', 'SALES_STAFF', 'OPTOMETRIST'],
+    allowedRoles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'CASHIER', 'SALES_CASHIER', 'SALES_STAFF', 'OPTOMETRIST'],
     sidebarItems: [
       { id: 'pos-new', label: 'New Sale', path: '/pos' },
       { id: 'pos-orders', label: 'All Orders', path: '/orders' },
@@ -111,7 +111,7 @@ export const MODULE_CONFIGS: ModuleConfig[] = [
     icon: Users,
     color: 'text-orange-600',
     bgColor: 'bg-orange-50',
-    allowedRoles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'SALES_CASHIER', 'SALES_STAFF', 'OPTOMETRIST'],
+    allowedRoles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'CASHIER', 'SALES_CASHIER', 'SALES_STAFF', 'OPTOMETRIST'],
     sidebarItems: [
       { id: 'crm-all', label: 'All Customers', path: '/customers' },
       { id: 'crm-search', label: 'Search Customers', path: '/customers?search=true' },

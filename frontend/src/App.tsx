@@ -10,6 +10,7 @@ import { ToastProvider } from './context/ToastContext';
 import { ModuleProvider } from './context/ModuleContext';
 import { AppLayout } from './components/layout/AppLayout';
 import { ProtectedRoute } from './components/layout/ProtectedRoute';
+import { ErrorBoundary } from './components/layout/ErrorBoundary';
 
 // Lazy load pages for code splitting
 const LoginPage = lazy(() => import('./pages/auth/LoginPage').then(m => ({ default: m.LoginPage })));
@@ -76,12 +77,13 @@ const NotFoundPage = () => (
 
 function App() {
   return (
-    <QueryClientProvider client={queryClient}>
-      <AuthProvider>
-        <ModuleProvider>
-          <ToastProvider>
-            <BrowserRouter>
-              <Suspense fallback={<PageLoader />}>
+    <ErrorBoundary>
+      <QueryClientProvider client={queryClient}>
+        <AuthProvider>
+          <ModuleProvider>
+            <ToastProvider>
+              <BrowserRouter>
+                <Suspense fallback={<PageLoader />}>
                 <Routes>
                   {/* Public routes */}
                   <Route path="/login" element={<LoginPage />} />
@@ -115,7 +117,7 @@ function App() {
                     path="pos"
                     element={
                       <ProtectedRoute
-                        allowedRoles={['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'OPTOMETRIST', 'SALES_CASHIER', 'SALES_STAFF']}
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'OPTOMETRIST', 'CASHIER', 'SALES_CASHIER', 'SALES_STAFF']}
                       >
                         <POSPage />
                       </ProtectedRoute>
@@ -127,7 +129,7 @@ function App() {
                     path="customers"
                     element={
                       <ProtectedRoute
-                        allowedRoles={['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'OPTOMETRIST', 'SALES_CASHIER', 'SALES_STAFF']}
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'OPTOMETRIST', 'CASHIER', 'SALES_CASHIER', 'SALES_STAFF']}
                       >
                         <CustomersPage />
                       </ProtectedRoute>
@@ -151,7 +153,7 @@ function App() {
                     path="orders"
                     element={
                       <ProtectedRoute
-                        allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'SALES_CASHIER', 'SALES_STAFF', 'OPTOMETRIST', 'WORKSHOP_STAFF']}
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'CASHIER', 'SALES_CASHIER', 'SALES_STAFF', 'OPTOMETRIST', 'WORKSHOP_STAFF']}
                       >
                         <OrdersPage />
                       </ProtectedRoute>
@@ -286,6 +288,7 @@ function App() {
         </ModuleProvider>
       </AuthProvider>
     </QueryClientProvider>
+    </ErrorBoundary>
   );
 }
 

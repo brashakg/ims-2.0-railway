@@ -227,6 +227,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
       ACCOUNTANT: ['reports.*', 'expenses.approve', 'finance.*'],
       CATALOG_MANAGER: ['inventory.*', 'products.*'],
       OPTOMETRIST: ['clinical.*', 'pos.create'],
+      CASHIER: ['pos.*', 'till.*'],
       SALES_CASHIER: ['pos.*', 'till.*'],
       SALES_STAFF: ['pos.create', 'pos.discount'],
       WORKSHOP_STAFF: ['inventory.view', 'workshop.*'],
