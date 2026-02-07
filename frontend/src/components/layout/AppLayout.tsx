@@ -46,8 +46,10 @@ export function AppLayout() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [roleDropdownOpen, setRoleDropdownOpen] = useState(false);
   const [storeDropdownOpen, setStoreDropdownOpen] = useState(false);
+  const [userDropdownOpen, setUserDropdownOpen] = useState(false);
   const roleDropdownRef = useRef<HTMLDivElement>(null);
   const storeDropdownRef = useRef<HTMLDivElement>(null);
+  const userDropdownRef = useRef<HTMLDivElement>(null);
 
   // Load store names for display
   const [storeNames, setStoreNames] = useState<Record<string, string>>({});
@@ -70,6 +72,9 @@ export function AppLayout() {
       }
       if (storeDropdownRef.current && !storeDropdownRef.current.contains(event.target as Node)) {
         setStoreDropdownOpen(false);
+      }
+      if (userDropdownRef.current && !userDropdownRef.current.contains(event.target as Node)) {
+        setUserDropdownOpen(false);
       }
     };
     document.addEventListener('mousedown', handleClickOutside);
@@ -301,8 +306,8 @@ export function AppLayout() {
               </div>
             )}
 
-            {/* Store selector */}
-            {user && (hasRole(['SUPERADMIN', 'ADMIN', 'AREA_MANAGER']) || user.storeIds.length > 1) && (
+            {/* Store selector - not available for single-store roles like Optometrist */}
+            {user && (hasRole(['SUPERADMIN', 'ADMIN', 'AREA_MANAGER']) || (user.storeIds.length > 1 && !hasRole(['OPTOMETRIST']))) && (
               <div className="relative" ref={storeDropdownRef}>
                 <button
                   className="flex items-center gap-2 px-3 py-2 text-sm bg-gray-100 rounded-lg hover:bg-gray-200"
@@ -334,11 +339,44 @@ export function AppLayout() {
               </div>
             )}
 
-            {/* User avatar */}
-            <div className="w-8 h-8 bg-bv-gold-100 rounded-full flex items-center justify-center">
-              <span className="text-sm font-medium text-bv-gold-600">
-                {user?.name?.charAt(0).toUpperCase()}
-              </span>
+            {/* User avatar and dropdown */}
+            <div className="relative" ref={userDropdownRef}>
+              <button
+                onClick={() => setUserDropdownOpen(!userDropdownOpen)}
+                className="w-8 h-8 bg-bv-gold-100 rounded-full flex items-center justify-center hover:bg-bv-gold-200 transition-colors"
+                title="User menu"
+              >
+                <span className="text-sm font-medium text-bv-gold-600">
+                  {user?.name?.charAt(0).toUpperCase()}
+                </span>
+              </button>
+              {userDropdownOpen && (
+                <div className="absolute top-full right-0 mt-2 w-48 bg-white border border-gray-200 rounded-lg shadow-lg z-50">
+                  <div className="px-4 py-3 border-b border-gray-100">
+                    <div className="text-sm font-medium text-gray-900">{user?.name}</div>
+                    <div className="text-xs text-gray-500 mt-1">{user?.email}</div>
+                    <div className="text-xs text-gray-500 mt-1">Role: {user?.activeRole?.replaceAll('_', ' ')}</div>
+                  </div>
+                  <button
+                    onClick={() => {
+                      navigate('/settings?tab=profile');
+                      setUserDropdownOpen(false);
+                    }}
+                    className="w-full text-left px-4 py-2 text-sm text-gray-600 hover:bg-gray-50 transition-colors"
+                  >
+                    My Profile
+                  </button>
+                  <button
+                    onClick={() => {
+                      handleLogout();
+                      setUserDropdownOpen(false);
+                    }}
+                    className="w-full text-left px-4 py-2 text-sm text-red-600 hover:bg-red-50 transition-colors border-t border-gray-100"
+                  >
+                    Logout
+                  </button>
+                </div>
+              )}
             </div>
           </div>
         </header>

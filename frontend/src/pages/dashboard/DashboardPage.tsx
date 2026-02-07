@@ -405,6 +405,7 @@ export default function DashboardPage() {
     switch (role) {
       case 'OPTOMETRIST':
         return [appointmentKpi, eyeTestsKpi, prescriptionConversionKpi, pendingKpi, customersKpi];
+      case 'CASHIER':
       case 'SALES_CASHIER':
       case 'SALES_STAFF':
         return [salesKpi, ordersKpi, pendingKpi, customersKpi];
@@ -576,7 +577,7 @@ export default function DashboardPage() {
             const actions: { icon: React.ComponentType<{ className?: string }>; label: string; path: string }[] = [];
 
             // Sales roles
-            const canSell = ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'SALES_CASHIER', 'SALES_STAFF', 'OPTOMETRIST'].includes(role || '');
+            const canSell = ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'CASHIER', 'SALES_CASHIER', 'SALES_STAFF', 'OPTOMETRIST'].includes(role || '');
             if (canSell) {
               actions.push({ icon: Plus, label: 'New Sale', path: '/pos' });
               actions.push({ icon: Search, label: 'Search Customer', path: '/customers?search=true' });

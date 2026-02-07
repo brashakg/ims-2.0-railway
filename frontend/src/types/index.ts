@@ -14,6 +14,7 @@ export type UserRole =
   | 'ACCOUNTANT'
   | 'CATALOG_MANAGER'
   | 'OPTOMETRIST'
+  | 'CASHIER'
   | 'SALES_CASHIER'
   | 'SALES_STAFF'
   | 'WORKSHOP_STAFF';

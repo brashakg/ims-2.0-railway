@@ -136,6 +136,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
           // Auth initialization failed - clear storage and force fresh login
           localStorage.removeItem('ims_token');
           localStorage.removeItem('ims_user');
+          localStorage.removeItem('ims_login_time');
           localStorage.removeItem('ims_active_module');
           dispatch({ type: 'LOGOUT' });
         }
@@ -158,12 +159,14 @@ export function AuthProvider({ children }: AuthProviderProps) {
         // Store auth data
         localStorage.setItem('ims_token', response.token);
         localStorage.setItem('ims_user', JSON.stringify(response.user));
+        localStorage.setItem('ims_login_time', Date.now().toString());
 
         dispatch({
           type: 'LOGIN_SUCCESS',
           payload: { user: response.user, token: response.token },
         });
       } else {
+        // Login failed - ensure loading state is cleared and user is not set
         dispatch({ type: 'SET_LOADING', payload: false });
       }
 
@@ -183,6 +186,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
     } finally {
       localStorage.removeItem('ims_token');
       localStorage.removeItem('ims_user');
+      localStorage.removeItem('ims_login_time');
       dispatch({ type: 'LOGOUT' });
     }
   };
@@ -227,6 +231,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
       ACCOUNTANT: ['reports.*', 'expenses.approve', 'finance.*'],
       CATALOG_MANAGER: ['inventory.*', 'products.*'],
       OPTOMETRIST: ['clinical.*', 'pos.create'],
+      CASHIER: ['pos.*', 'till.*'],
       SALES_CASHIER: ['pos.*', 'till.*'],
       SALES_STAFF: ['pos.create', 'pos.discount'],
       WORKSHOP_STAFF: ['inventory.view', 'workshop.*'],
