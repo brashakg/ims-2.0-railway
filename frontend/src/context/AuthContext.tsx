@@ -116,24 +116,56 @@ export function AuthProvider({ children }: AuthProviderProps) {
       if (token && userJson) {
         try {
           // Verify stored user JSON is valid (parsing test)
-          JSON.parse(userJson) as User;
+          const user = JSON.parse(userJson) as User;
 
           // Check if token looks valid (basic JWT format check)
           const tokenParts = token.split('.');
           if (tokenParts.length !== 3) {
+            console.warn('[Auth] Invalid token format detected, clearing storage');
             throw new Error('Invalid token format');
           }
 
+          console.log('[Auth] Attempting to rehydrate session from localStorage');
+
           // Try to verify token is still valid with API
-          const profile = await authApi.getProfile();
-          dispatch({
-            type: 'LOGIN_SUCCESS',
-            payload: { user: profile, token },
-          });
+          try {
+            const profile = await authApi.getProfile();
+            console.log('[Auth] Token validation successful, restoring session');
+            dispatch({
+              type: 'LOGIN_SUCCESS',
+              payload: { user: profile, token },
+            });
+            return;
+          } catch (apiError) {
+            // Check if it's a 401 (token expired/invalid) or network error
+            const errorMsg = apiError instanceof Error ? apiError.message : '';
+
+            // Only clear storage on auth errors (401), not network errors
+            if (errorMsg.includes('401') || errorMsg.includes('Unauthorized') || errorMsg.includes('Invalid or expired token')) {
+              console.warn('[Auth] Token validation failed with 401, clearing storage');
+              localStorage.removeItem('ims_token');
+              localStorage.removeItem('ims_user');
+              localStorage.removeItem('ims_login_time');
+              localStorage.removeItem('ims_active_module');
+              dispatch({ type: 'LOGOUT' });
+            } else if (errorMsg.includes('Network error') || errorMsg.includes('ERR_NETWORK')) {
+              // Network error - don't clear storage, but still show login
+              // User might have lost connectivity temporarily
+              console.warn('[Auth] Network error during token validation, forcing login but preserving token');
+              dispatch({ type: 'SET_LOADING', payload: false });
+            } else {
+              // Other errors - clear storage as safety measure
+              console.error('[Auth] Unexpected error during token validation:', apiError);
+              localStorage.removeItem('ims_token');
+              localStorage.removeItem('ims_user');
+              localStorage.removeItem('ims_login_time');
+              localStorage.removeItem('ims_active_module');
+              dispatch({ type: 'LOGOUT' });
+            }
+          }
         } catch (error) {
-          // Clear storage on any error - force fresh login
-          // This handles both invalid tokens AND network errors with stale data
-          // Auth initialization failed - clear storage and force fresh login
+          // JSON parsing or token format error
+          console.error('[Auth] Failed to parse stored auth data:', error);
           localStorage.removeItem('ims_token');
           localStorage.removeItem('ims_user');
           localStorage.removeItem('ims_login_time');
@@ -141,6 +173,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
           dispatch({ type: 'LOGOUT' });
         }
       } else {
+        console.log('[Auth] No stored token found, user needs to login');
         dispatch({ type: 'SET_LOADING', payload: false });
       }
     };

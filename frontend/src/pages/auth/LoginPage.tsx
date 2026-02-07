@@ -71,6 +71,7 @@ export function LoginPage() {
         }
       }
 
+      console.log('[LoginPage] Submitting login request...');
       const response = await login({
         username,
         password,
@@ -79,12 +80,17 @@ export function LoginPage() {
       });
 
       if (response.success) {
+        console.log('[LoginPage] Login successful, navigating to dashboard');
         navigate(from, { replace: true });
       } else {
-        setError(response.message || 'Login failed');
+        const errorMsg = response.message || 'Login failed. Please check your username and password.';
+        console.error('[LoginPage] Login failed:', errorMsg);
+        setError(errorMsg);
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Login failed');
+      const errorMsg = err instanceof Error ? err.message : 'Login failed. Please try again.';
+      console.error('[LoginPage] Login error:', err);
+      setError(errorMsg);
     }
   };
 
@@ -102,21 +108,26 @@ export function LoginPage() {
 
         {/* Login Card */}
         <div className="card">
-          <h2 className="text-xl font-semibold text-gray-900 mb-6">Sign In</h2>
+          <h1 className="text-2xl font-semibold text-gray-900 mb-6">IMS 2.0 Login</h1>
+          <p className="text-sm text-gray-600 mb-6">Enter your credentials to sign in to your account</p>
 
           {/* Error message */}
           {error && (
-            <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg flex items-start gap-2">
-              <AlertCircle className="w-5 h-5 text-red-500 flex-shrink-0 mt-0.5" />
+            <div
+              role="alert"
+              aria-live="assertive"
+              className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg flex items-start gap-2"
+            >
+              <AlertCircle className="w-5 h-5 text-red-500 flex-shrink-0 mt-0.5" aria-hidden="true" />
               <span className="text-sm text-red-700">{error}</span>
             </div>
           )}
 
-          <form onSubmit={handleSubmit} className="space-y-4">
+          <form onSubmit={handleSubmit} className="space-y-4" aria-label="Login form">
             {/* Username or Email */}
             <div>
               <label htmlFor="username" className="block text-sm font-medium text-gray-700 mb-1">
-                Username or Email
+                Username or Email <span className="text-red-600" aria-label="required">*</span>
               </label>
               <input
                 type="text"
@@ -127,13 +138,15 @@ export function LoginPage() {
                 placeholder="Enter username or email"
                 autoComplete="username"
                 disabled={isLoading}
+                aria-required="true"
+                aria-invalid={!username && error ? 'true' : 'false'}
               />
             </div>
 
             {/* Password */}
             <div>
               <label htmlFor="password" className="block text-sm font-medium text-gray-700 mb-1">
-                Password
+                Password <span className="text-red-600" aria-label="required">*</span>
               </label>
               <div className="relative">
                 <input
@@ -145,13 +158,17 @@ export function LoginPage() {
                   placeholder="Enter password"
                   autoComplete="current-password"
                   disabled={isLoading}
+                  aria-required="true"
+                  aria-invalid={!password && error ? 'true' : 'false'}
                 />
                 <button
                   type="button"
                   onClick={() => setShowPassword(!showPassword)}
-                  className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 focus:outline-none focus:ring-2 focus:ring-bv-red-600 rounded"
+                  aria-label={showPassword ? 'Hide password' : 'Show password'}
+                  aria-pressed={showPassword}
                 >
-                  {showPassword ? <EyeOff className="w-5 h-5" /> : <Eye className="w-5 h-5" />}
+                  {showPassword ? <EyeOff className="w-5 h-5" aria-hidden="true" /> : <Eye className="w-5 h-5" aria-hidden="true" />}
                 </button>
               </div>
             </div>
@@ -161,10 +178,11 @@ export function LoginPage() {
               type="submit"
               disabled={isLoading}
               className="btn-primary w-full py-3 flex items-center justify-center gap-2"
+              aria-busy={isLoading}
             >
               {isLoading ? (
                 <>
-                  <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                  <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin" aria-hidden="true" />
                   <span>Signing in...</span>
                 </>
               ) : (
@@ -177,7 +195,8 @@ export function LoginPage() {
               <button
                 type="button"
                 onClick={() => alert('Password reset functionality coming soon. Please contact your administrator.')}
-                className="text-sm text-gray-600 hover:text-bv-red-600 transition-colors"
+                className="text-sm text-gray-600 hover:text-bv-red-600 transition-colors focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-bv-red-600 rounded px-1"
+                aria-label="Request password reset"
               >
                 Forgot Password?
               </button>
