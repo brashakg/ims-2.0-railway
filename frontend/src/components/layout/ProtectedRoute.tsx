@@ -32,10 +32,10 @@ export function ProtectedRoute({
   // Show loading state - don't render children until auth initialization completes
   if (isLoading) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-gray-50">
+      <div className="min-h-screen flex items-center justify-center bg-gray-50" role="status" aria-live="polite" aria-label="Loading application">
         <div className="text-center">
-          <div className="w-12 h-12 border-4 border-bv-red-600 border-t-transparent rounded-full animate-spin mx-auto"></div>
-          <p className="mt-4 text-gray-600">Initializing...</p>
+          <div className="w-12 h-12 border-4 border-bv-red-600 border-t-transparent rounded-full animate-spin mx-auto" aria-hidden="true"></div>
+          <p className="mt-4 text-gray-600">Initializing application...</p>
         </div>
       </div>
     );
