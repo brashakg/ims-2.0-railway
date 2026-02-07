@@ -157,42 +157,38 @@ else:
 logger.info(f"CORS Origins configured: {CORS_ORIGINS}")
 logger.info("✓ All *.vercel.app and *.up.railway.app domains allowed")
 
-# Custom CORS handler for dynamic origin validation
-@app.middleware("http")
-async def dynamic_cors_handler(request: Request, call_next):
-    origin = request.headers.get("origin")
-
-    # Check if it's a preflight request
-    if request.method == "OPTIONS":
-        if origin and _is_allowed_origin(origin):
-            response = JSONResponse(content={})
-            response.headers["Access-Control-Allow-Origin"] = origin
-            response.headers["Access-Control-Allow-Credentials"] = "true"
-            response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, PATCH, OPTIONS"
-            response.headers["Access-Control-Allow-Headers"] = "*"
-            response.headers["Access-Control-Max-Age"] = "600"
-            return response
-
-    # Process the request
-    response = await call_next(request)
-
-    # Add CORS headers to response if origin is allowed
-    if origin and _is_allowed_origin(origin):
-        response.headers["Access-Control-Allow-Origin"] = origin
-        response.headers["Access-Control-Allow-Credentials"] = "true"
-
-    return response
-
-
-# Keep the standard CORS middleware as fallback
+# Add CORS middleware FIRST (before other middlewares)
+# In FastAPI, middlewares are applied in reverse order of definition
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
-    allow_headers=["*"],
-    expose_headers=["X-Process-Time"],
+    allow_headers=["*"],  # Allow all headers including Authorization
+    expose_headers=["*"],  # Expose all response headers
 )
+
+# Custom CORS handler for dynamic origin validation (additional safety layer)
+@app.middleware("http")
+async def dynamic_cors_handler(request: Request, call_next):
+    origin = request.headers.get("origin")
+
+    # Log CORS requests for debugging
+    if request.method == "OPTIONS":
+        logger.debug(f"CORS preflight request from origin: {origin}")
+        if origin:
+            logger.debug(f"Origin allowed: {_is_allowed_origin(origin)}")
+
+    # Process the request
+    response = await call_next(request)
+
+    # Ensure CORS headers are present for all responses
+    origin = request.headers.get("origin")
+    if origin and _is_allowed_origin(origin):
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Access-Control-Allow-Credentials"] = "true"
+
+    return response
 
 
 # Request timing middleware
