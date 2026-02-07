@@ -260,7 +260,7 @@ export function ExecutiveDashboard() {
                   <span className={`text-sm font-medium ${metrics.profitGrowth >= 0 ? 'text-green-600' : 'text-red-600'}`}>
                     {Math.abs(metrics.profitGrowth)}%
                   </span>
-                  <span className="text-xs text-gray-500">Margin: {((metrics.totalProfit / metrics.totalRevenue) * 100).toFixed(1)}%</span>
+                  <span className="text-xs text-gray-500">Margin: {metrics.totalRevenue > 0 ? ((metrics.totalProfit / metrics.totalRevenue) * 100).toFixed(1) : '0.0'}%</span>
                 </div>
               </div>
               <div className="w-12 h-12 bg-purple-100 rounded-lg flex items-center justify-center">
@@ -457,62 +457,70 @@ export function ExecutiveDashboard() {
       </div>
 
       {/* Key Insights & Recommendations */}
+      {metrics && (
       <div className="card border-2 border-purple-200 bg-purple-50">
         <h2 className="text-lg font-semibold text-purple-900 flex items-center gap-2 mb-4">
           <Activity className="w-5 h-5 text-purple-600" />
-          AI-Powered Insights & Recommendations
+          Key Insights & Recommendations
         </h2>
         <div className="grid grid-cols-1 desktop:grid-cols-2 gap-4">
+          {metrics.deadStockPercentage > 5 && (
           <div className="p-4 bg-white rounded-lg border border-purple-200">
             <div className="flex items-start gap-3">
               <AlertTriangle className="w-5 h-5 text-orange-600 flex-shrink-0 mt-1" />
               <div>
-                <p className="font-medium text-gray-900 mb-1">Dead Stock Crisis</p>
+                <p className="font-medium text-gray-900 mb-1">Dead Stock Alert</p>
                 <p className="text-sm text-gray-700">
-                  18.5% dead stock is costing you ₹54.8L in locked capital. Transfer slow-moving inventory from
-                  underperforming stores to main branches. Consider 20-30% discount campaigns.
+                  {metrics.deadStockPercentage.toFixed(1)}% of inventory is out of stock or slow-moving.
+                  Consider running discount campaigns or transferring stock between stores to free up capital.
                 </p>
               </div>
             </div>
           </div>
+          )}
+          {metrics.revenueGrowth < 0 && (
           <div className="p-4 bg-white rounded-lg border border-purple-200">
             <div className="flex items-start gap-3">
               <Store className="w-5 h-5 text-red-600 flex-shrink-0 mt-1" />
               <div>
-                <p className="font-medium text-gray-900 mb-1">Store Performance Gap</p>
+                <p className="font-medium text-gray-900 mb-1">Revenue Decline</p>
                 <p className="text-sm text-gray-700">
-                  Satellite & Navrangpura stores underperforming significantly. Consider staff training,
-                  inventory optimization, or location analysis. Sales/Sq.Ft 75% below top stores.
+                  Revenue has decreased by {Math.abs(metrics.revenueGrowth).toFixed(1)}% compared to the previous period.
+                  Review store performance, staff productivity, and local market conditions.
                 </p>
               </div>
             </div>
           </div>
+          )}
+          {metrics.averageOrderValue > 0 && (
           <div className="p-4 bg-white rounded-lg border border-purple-200">
             <div className="flex items-start gap-3">
               <TrendingUp className="w-5 h-5 text-green-600 flex-shrink-0 mt-1" />
               <div>
-                <p className="font-medium text-gray-900 mb-1">Category Opportunity</p>
+                <p className="font-medium text-gray-900 mb-1">Order Value Insight</p>
                 <p className="text-sm text-gray-700">
-                  Sunglasses showing 29% margin with 6.1x turnover. Increase inventory allocation in peak season
-                  (Mar-Jun) to capture market demand and improve overall margins.
+                  Average order value is {formatCurrency(metrics.averageOrderValue)}.
+                  Focus on upselling premium lenses and add-ons to increase per-transaction revenue.
                 </p>
               </div>
             </div>
           </div>
+          )}
           <div className="p-4 bg-white rounded-lg border border-purple-200">
             <div className="flex items-start gap-3">
               <DollarSign className="w-5 h-5 text-blue-600 flex-shrink-0 mt-1" />
               <div>
-                <p className="font-medium text-gray-900 mb-1">Cash Flow Optimization</p>
+                <p className="font-medium text-gray-900 mb-1">Business Health</p>
                 <p className="text-sm text-gray-700">
-                  Negative ₹23.4L cash flow. Review payment terms with suppliers, improve collection cycles,
-                  and reduce inventory holding period from current 87 days to target 60 days.
+                  Total revenue: {formatCurrency(metrics.totalRevenue)} with {metrics.totalOrders} orders.
+                  {metrics.revenueGrowth >= 0 ? ` Growth trend: +${metrics.revenueGrowth.toFixed(1)}%.` : ''} Review supplier payment terms and optimize collection cycles for better cash flow.
                 </p>
               </div>
             </div>
           </div>
         </div>
       </div>
+      )}
     </div>
   );
 }

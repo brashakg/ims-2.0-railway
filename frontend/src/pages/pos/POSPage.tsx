@@ -174,11 +174,15 @@ export function POSPage() {
   // ============================================================================
 
   const subtotal = orderItems.reduce((sum, item) => sum + item.finalPrice, 0);
+  // Order discount reduces taxable value before GST (GST rule: discounts on invoice reduce tax base)
+  const taxableSubtotal = Math.max(0, subtotal - orderDiscount.amount);
+  const discountRatio = subtotal > 0 ? taxableSubtotal / subtotal : 1;
   const gstAmount = orderItems.reduce((sum, item) => {
     const rate = (item.gstRate ?? 12) / 100;
-    return sum + Math.round(item.finalPrice * rate);
+    // Proportionally reduce each item's taxable value by the order discount ratio
+    return sum + Math.round(item.finalPrice * discountRatio * rate);
   }, 0);
-  const grandTotal = subtotal + gstAmount - orderDiscount.amount;
+  const grandTotal = taxableSubtotal + gstAmount;
   const totalPaid = payments.reduce((sum, p) => sum + p.amount, 0);
   const balanceDue = grandTotal - totalPaid;
 

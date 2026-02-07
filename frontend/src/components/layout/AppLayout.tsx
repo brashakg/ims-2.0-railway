@@ -7,6 +7,7 @@ import { useState, useEffect, useRef } from 'react';
 import { Outlet, NavLink, useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
 import { useModule, type ModuleId } from '../../context/ModuleContext';
+import { storeApi } from '../../services/api';
 import {
   LogOut,
   ChevronDown,
@@ -47,6 +48,19 @@ export function AppLayout() {
   const [storeDropdownOpen, setStoreDropdownOpen] = useState(false);
   const roleDropdownRef = useRef<HTMLDivElement>(null);
   const storeDropdownRef = useRef<HTMLDivElement>(null);
+
+  // Load store names for display
+  const [storeNames, setStoreNames] = useState<Record<string, string>>({});
+  useEffect(() => {
+    storeApi.getStores().then((stores: any) => {
+      const storesArr = stores?.stores || stores || [];
+      if (Array.isArray(storesArr)) {
+        const nameMap: Record<string, string> = {};
+        storesArr.forEach((s: any) => { if (s.id && s.storeName) nameMap[s.id] = s.storeName; });
+        setStoreNames(nameMap);
+      }
+    }).catch(() => {});
+  }, []);
 
   // Close dropdowns on outside click
   useEffect(() => {
@@ -295,7 +309,7 @@ export function AppLayout() {
                   onClick={() => setStoreDropdownOpen(!storeDropdownOpen)}
                 >
                   <Store className="w-4 h-4" />
-                  <span className="font-medium hidden tablet:inline">{user.activeStoreId || 'Select Store'}</span>
+                  <span className="font-medium hidden tablet:inline">{storeNames[user.activeStoreId] || user.activeStoreId || 'Select Store'}</span>
                   <ChevronDown className="w-4 h-4" />
                 </button>
                 {storeDropdownOpen && (
@@ -312,7 +326,7 @@ export function AppLayout() {
                           setStoreDropdownOpen(false);
                         }}
                       >
-                        {storeId}
+                        {storeNames[storeId] || storeId}
                       </button>
                     ))}
                   </div>

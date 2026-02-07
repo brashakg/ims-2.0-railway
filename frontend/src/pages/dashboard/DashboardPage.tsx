@@ -7,7 +7,7 @@ import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
 import { useModule, MODULE_CONFIGS, type ModuleId } from '../../context/ModuleContext';
-import { reportsApi } from '../../services/api';
+import { reportsApi, storeApi } from '../../services/api';
 import {
   TrendingUp,
   TrendingDown,
@@ -194,6 +194,8 @@ export default function DashboardPage() {
     paymentsReceived: 0,
   });
 
+  const [storeName, setStoreName] = useState<string>('');
+
   // Get modules available for user's role
   const availableModules = user ? getModulesForRole(user.activeRole) : [];
 
@@ -205,6 +207,15 @@ export default function DashboardPage() {
   const loadDashboardData = async () => {
     setIsLoading(true);
     try {
+      // Load store name for display
+      storeApi.getStores().then((stores: any) => {
+        const storesArr = stores?.stores || stores || [];
+        if (Array.isArray(storesArr)) {
+          const active = storesArr.find((s: any) => s.id === user?.activeStoreId);
+          if (active?.storeName) setStoreName(active.storeName);
+        }
+      }).catch(() => {});
+
       const salesRes = await reportsApi.getDashboardStats(user?.activeStoreId || '').catch(() => null);
 
       if (salesRes) {
@@ -247,8 +258,7 @@ export default function DashboardPage() {
         });
         setRecentActivity([]);
       }
-    } catch (err) {
-      console.error('Failed to load dashboard data:', err);
+    } catch {
       setStats({
         todaySales: 0,
         pendingOrders: 0,
@@ -399,7 +409,7 @@ export default function DashboardPage() {
               Welcome back, {user?.name || 'User'}!
             </h1>
             <p className="text-bv-gold-100 mt-1">
-              {user?.activeStoreId || 'Main Store'} • Financial Year {financialYear}
+              {storeName || user?.activeStoreId || 'Main Store'} • Financial Year {financialYear}
             </p>
           </div>
           <div className="text-right">

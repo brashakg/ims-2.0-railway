@@ -286,7 +286,7 @@ export function PrescriptionsPage() {
                             {formatPower(selectedPrescription.rightEye.cylinder)}
                           </td>
                           <td className="border border-gray-200 px-4 py-2 text-center">
-                            {selectedPrescription.rightEye.axis || '-'}
+                            {selectedPrescription.rightEye.axis ?? '-'}
                           </td>
                           <td className="border border-gray-200 px-4 py-2 text-center">
                             {formatPower(selectedPrescription.rightEye.add)}
@@ -301,7 +301,7 @@ export function PrescriptionsPage() {
                             {formatPower(selectedPrescription.leftEye.cylinder)}
                           </td>
                           <td className="border border-gray-200 px-4 py-2 text-center">
-                            {selectedPrescription.leftEye.axis || '-'}
+                            {selectedPrescription.leftEye.axis ?? '-'}
                           </td>
                           <td className="border border-gray-200 px-4 py-2 text-center">
                             {formatPower(selectedPrescription.leftEye.add)}

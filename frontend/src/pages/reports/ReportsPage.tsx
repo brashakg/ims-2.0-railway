@@ -240,7 +240,6 @@ export function ReportsPage() {
             <option value="week">This Week</option>
             <option value="month">This Month</option>
             <option value="quarter">This Quarter</option>
-            <option value="custom">Custom Range</option>
           </select>
           <button
             onClick={loadReportData}
