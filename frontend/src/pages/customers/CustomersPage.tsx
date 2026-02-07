@@ -65,6 +65,8 @@ export function CustomersPage() {
 
   // Modal state
   const [showAddCustomerModal, setShowAddCustomerModal] = useState(false);
+  const [showEditModal, setShowEditModal] = useState(false);
+  const [editForm, setEditForm] = useState({ name: '', phone: '', email: '', address: '' });
 
   // Load customers on mount
   useEffect(() => {
@@ -378,7 +380,17 @@ export function CustomersPage() {
         </div>
         {canEditCustomer && (
           <button
-            onClick={() => toast.info(`Edit customer: ${selectedCustomer?.name}`)}
+            onClick={() => {
+              if (selectedCustomer) {
+                setEditForm({
+                  name: selectedCustomer.name || '',
+                  phone: selectedCustomer.phone || '',
+                  email: selectedCustomer.email || '',
+                  address: (selectedCustomer as any).address || '',
+                });
+                setShowEditModal(true);
+              }
+            }}
             className="btn-outline flex items-center gap-2"
           >
             <Edit2 className="w-4 h-4" />
@@ -554,6 +566,89 @@ export function CustomersPage() {
           </div>
         )}
       </div>
+
+      {/* Edit Customer Modal */}
+      {showEditModal && selectedCustomer && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-xl shadow-xl max-w-md w-full">
+            <div className="p-6">
+              <div className="flex items-center justify-between mb-6">
+                <h2 className="text-xl font-bold text-gray-900">Edit Customer</h2>
+                <button onClick={() => setShowEditModal(false)} className="p-2 hover:bg-gray-100 rounded-lg">
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Name *</label>
+                  <input
+                    type="text"
+                    value={editForm.name}
+                    onChange={e => setEditForm(f => ({ ...f, name: e.target.value }))}
+                    className="input-field"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Phone *</label>
+                  <input
+                    type="tel"
+                    value={editForm.phone}
+                    onChange={e => setEditForm(f => ({ ...f, phone: e.target.value }))}
+                    className="input-field"
+                    maxLength={10}
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Email</label>
+                  <input
+                    type="email"
+                    value={editForm.email}
+                    onChange={e => setEditForm(f => ({ ...f, email: e.target.value }))}
+                    className="input-field"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Address</label>
+                  <textarea
+                    value={editForm.address}
+                    onChange={e => setEditForm(f => ({ ...f, address: e.target.value }))}
+                    className="input-field"
+                    rows={2}
+                  />
+                </div>
+                <button
+                  onClick={async () => {
+                    if (!editForm.name || !editForm.phone) {
+                      toast.error('Name and phone are required');
+                      return;
+                    }
+                    try {
+                      await customerApi.updateCustomer(selectedCustomer.id, {
+                        name: editForm.name,
+                        phone: editForm.phone,
+                        email: editForm.email || undefined,
+                        address: editForm.address || undefined,
+                      });
+                      // Update local state
+                      const updated = { ...selectedCustomer, ...editForm };
+                      setSelectedCustomer(updated as Customer);
+                      setCustomers(prev => prev.map(c => c.id === updated.id ? updated as Customer : c));
+                      setShowEditModal(false);
+                      toast.success('Customer updated successfully');
+                    } catch {
+                      toast.error('Failed to update customer');
+                    }
+                  }}
+                  disabled={!editForm.name || !editForm.phone}
+                  className="btn-primary w-full"
+                >
+                  Save Changes
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
