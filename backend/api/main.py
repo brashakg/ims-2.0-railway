@@ -124,6 +124,26 @@ def _sanitize_cors_origin(origin: str) -> str:
     return ""
 
 
+def _is_allowed_origin(origin: str) -> bool:
+    """Check if an origin is allowed based on exact match or pattern"""
+    if not origin:
+        return False
+
+    # Check exact match first
+    if origin in DEFAULT_CORS_ORIGINS:
+        return True
+
+    # Allow all Vercel preview deployments (*.vercel.app)
+    if origin.startswith("https://") and ".vercel.app" in origin:
+        return True
+
+    # Allow Railway preview deployments (*.up.railway.app)
+    if origin.startswith("https://") and ".up.railway.app" in origin:
+        return True
+
+    return False
+
+
 # Add any custom origins from environment
 env_origins = os.getenv("CORS_ORIGINS", "")
 if env_origins:
@@ -135,7 +155,36 @@ else:
     CORS_ORIGINS = DEFAULT_CORS_ORIGINS
 
 logger.info(f"CORS Origins configured: {CORS_ORIGINS}")
+logger.info("✓ All *.vercel.app and *.up.railway.app domains allowed")
 
+# Custom CORS handler for dynamic origin validation
+@app.middleware("http")
+async def dynamic_cors_handler(request: Request, call_next):
+    origin = request.headers.get("origin")
+
+    # Check if it's a preflight request
+    if request.method == "OPTIONS":
+        if origin and _is_allowed_origin(origin):
+            response = JSONResponse(content={})
+            response.headers["Access-Control-Allow-Origin"] = origin
+            response.headers["Access-Control-Allow-Credentials"] = "true"
+            response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, PATCH, OPTIONS"
+            response.headers["Access-Control-Allow-Headers"] = "*"
+            response.headers["Access-Control-Max-Age"] = "600"
+            return response
+
+    # Process the request
+    response = await call_next(request)
+
+    # Add CORS headers to response if origin is allowed
+    if origin and _is_allowed_origin(origin):
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Access-Control-Allow-Credentials"] = "true"
+
+    return response
+
+
+# Keep the standard CORS middleware as fallback
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
