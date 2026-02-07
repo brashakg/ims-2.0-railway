@@ -133,7 +133,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
         } catch (error) {
           // Clear storage on any error - force fresh login
           // This handles both invalid tokens AND network errors with stale data
-          console.log('Auth initialization failed, clearing storage:', error);
+          // Auth initialization failed - clear storage and force fresh login
           localStorage.removeItem('ims_token');
           localStorage.removeItem('ims_user');
           localStorage.removeItem('ims_active_module');
@@ -260,7 +260,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
     if (!state.user) return false;
     // SUPERADMIN, ADMIN, AREA_MANAGER can access all stores
     if (hasRole(['SUPERADMIN', 'ADMIN', 'AREA_MANAGER'])) return true;
-    return state.user.storeIds.includes(storeId);
+    return (state.user.storeIds ?? []).includes(storeId);
   };
 
   const value: AuthContextType = {

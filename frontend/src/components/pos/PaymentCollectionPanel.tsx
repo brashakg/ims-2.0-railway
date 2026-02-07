@@ -290,10 +290,12 @@ export function PaymentCollectionPanel({
               </button>
               <button
                 onClick={() => {
-                  // Mark as paid manually
+                  // Validate amount before confirming QR payment
+                  const payAmount = parseFloat(amount);
+                  const confirmedAmount = !isNaN(payAmount) && payAmount > 0 ? payAmount : balanceDue;
                   onAddPayment({
                     mode: 'UPI',
-                    amount: parseFloat(amount) || balanceDue,
+                    amount: confirmedAmount,
                     reference: `QR-${Date.now()}`,
                   });
                   setShowQRCode(false);

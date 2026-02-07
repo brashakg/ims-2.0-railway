@@ -75,26 +75,7 @@ export function CustomerSearch({ onSelect }: CustomerSearchProps) {
       setShowCreateForm(false);
       setNewCustomer({ name: '', phone: '', email: '' });
     } catch {
-      // If API fails, still allow local creation for demo purposes
-      const customer: Customer = {
-        id: `cust-${Date.now()}`,
-        name: newCustomer.name,
-        phone: newCustomer.phone,
-        email: newCustomer.email || undefined,
-        customerType: 'B2C',
-        patients: [
-          {
-            id: `pat-${Date.now()}`,
-            customerId: `cust-${Date.now()}`,
-            name: newCustomer.name,
-            relation: 'Self',
-          },
-        ],
-        createdAt: new Date().toISOString(),
-      };
-      onSelect(customer);
-      setShowCreateForm(false);
-      setNewCustomer({ name: '', phone: '', email: '' });
+      // Do not create fake local customer - fake IDs cause data integrity issues with orders
     }
   }, [newCustomer, onSelect]);
 

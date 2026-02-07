@@ -34,9 +34,21 @@ export function GSTInvoice({ order, store, onPrint }: GSTInvoiceProps) {
   // Check if transaction is inter-state (IGST) or intra-state (CGST + SGST)
   const isInterState = false; // TODO: Implement based on customer state vs store state
 
+  // Calculate order-level discount (total discount minus sum of item-level discounts)
+  const itemDiscountTotal = order.items.reduce((sum, item) => sum + (item.discountAmount ?? 0), 0);
+  const orderLevelDiscount = Math.max(0, (order.totalDiscount ?? 0) - itemDiscountTotal);
+
+  // Item subtotal (after item-level discounts, before order discount)
+  const itemSubtotal = order.items.reduce((sum, item) => sum + item.finalPrice, 0);
+  // Ratio to proportionally distribute order discount across items
+  const discountRatio = itemSubtotal > 0 && orderLevelDiscount > 0
+    ? (itemSubtotal - orderLevelDiscount) / itemSubtotal
+    : 1;
+
   // Convert order items to invoice line items with GST calculation
   const lineItems: InvoiceLineItem[] = order.items.map(item => {
-    const taxableValue = item.finalPrice;
+    // Taxable value = item finalPrice reduced by proportional order discount
+    const taxableValue = Math.round(item.finalPrice * discountRatio * 100) / 100;
     const gstRate = (item as any).gstRate || 12;
     const hsnCode = (item as any).hsnCode || '9004';
 
@@ -56,7 +68,7 @@ export function GSTInvoice({ order, store, onPrint }: GSTInvoiceProps) {
       hsnCode: hsnCode,
       quantity: item.quantity,
       unitPrice: item.unitPrice,
-      discount: item.discountAmount,
+      discount: item.discountAmount + (item.finalPrice - taxableValue),
       taxableValue: taxableValue,
       gstRate: gstRate,
       cgst: cgst,
@@ -236,9 +248,19 @@ export function GSTInvoice({ order, store, onPrint }: GSTInvoiceProps) {
               ))}
             </tbody>
             <tfoot>
+              {orderLevelDiscount > 0 && (
+              <tr className="bg-yellow-50">
+                <td colSpan={isInterState ? 9 : 10} className="border border-gray-300 px-2 py-2 text-right text-sm text-green-700">
+                  Order Discount:
+                </td>
+                <td className="border border-gray-300 px-2 py-2 text-right text-sm text-green-700">
+                  -₹{orderLevelDiscount.toFixed(2)}
+                </td>
+              </tr>
+              )}
               <tr className="bg-gray-50 font-medium">
                 <td colSpan={6} className="border border-gray-300 px-2 py-2 text-right">
-                  Sub Total:
+                  Taxable Amount:
                 </td>
                 <td className="border border-gray-300 px-2 py-2 text-right">
                   ₹{subtotal.toFixed(2)}

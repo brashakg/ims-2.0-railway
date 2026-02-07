@@ -7,7 +7,7 @@ import { createContext, useContext, useState, useCallback, type ReactNode } from
 import type { UserRole } from '../types';
 import {
   ShoppingCart, Eye, Package, Users, Truck,
-  Users2, BarChart3, Settings,
+  Users2, BarChart3, Settings, Wrench,
   type LucideIcon,
 } from 'lucide-react';
 
@@ -22,6 +22,7 @@ export type ModuleId =
   | 'inventory'
   | 'customers'
   | 'vendors'
+  | 'workshop'
   | 'hr'
   | 'reports'
   | 'settings';
@@ -117,6 +118,19 @@ export const MODULE_CONFIGS: ModuleConfig[] = [
     ],
   },
   {
+    id: 'workshop',
+    title: 'Workshop',
+    subtitle: 'Lens Fitting & Job Orders',
+    icon: Wrench,
+    color: 'text-amber-600',
+    bgColor: 'bg-amber-50',
+    allowedRoles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'WORKSHOP_STAFF'],
+    sidebarItems: [
+      { id: 'ws-jobs', label: 'All Jobs', path: '/workshop' },
+      { id: 'ws-orders', label: 'Order Pipeline', path: '/orders?status=IN_PROGRESS' },
+    ],
+  },
+  {
     id: 'vendors',
     title: 'Vendors & Purchase',
     subtitle: 'Vendors, Purchase Orders, GRN',
@@ -136,7 +150,7 @@ export const MODULE_CONFIGS: ModuleConfig[] = [
     icon: Users2,
     color: 'text-indigo-600',
     bgColor: 'bg-indigo-50',
-    allowedRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER'],
+    allowedRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'],
     sidebarItems: [
       { id: 'hr-attendance', label: 'Attendance', path: '/hr' },
       { id: 'hr-leaves', label: 'Leave Management', path: '/hr?tab=leave' },
@@ -156,6 +170,7 @@ export const MODULE_CONFIGS: ModuleConfig[] = [
       { id: 'rpt-sales', label: 'Sales Reports', path: '/reports?tab=sales' },
       { id: 'rpt-inventory', label: 'Inventory Reports', path: '/reports?tab=inventory' },
       { id: 'rpt-gst', label: 'GST Reports', path: '/reports?tab=gst' },
+      { id: 'rpt-orders', label: 'Orders Overview', path: '/orders' },
     ],
   },
   {

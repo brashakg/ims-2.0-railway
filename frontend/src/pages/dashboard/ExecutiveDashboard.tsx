@@ -20,7 +20,7 @@ import {
   ArrowDownRight,
   RefreshCw,
 } from 'lucide-react';
-import { useToast } from '../../context/ToastContext';
+
 import { useAuth } from '../../context/AuthContext';
 import { reportsApi } from '../../services/api';
 
@@ -97,11 +97,11 @@ function getDateRange(range: string): { startDate: string; endDate: string } {
 }
 
 export function ExecutiveDashboard() {
-  const toast = useToast();
   const { user } = useAuth();
 
   const [timeRange, setTimeRange] = useState<'today' | 'week' | 'month' | 'quarter' | 'year'>('month');
   const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [metrics, setMetrics] = useState<BusinessMetrics | null>(null);
   const [stores, setStores] = useState<StorePerformance[]>([]);
   const [categories, setCategories] = useState<CategoryPerformance[]>([]);
@@ -113,6 +113,7 @@ export function ExecutiveDashboard() {
 
   const loadDashboardData = async () => {
     setIsLoading(true);
+    setError(null);
     try {
       const storeId = user?.activeStoreId || '';
       const { startDate, endDate } = getDateRange(timeRange);
@@ -160,8 +161,8 @@ export function ExecutiveDashboard() {
       // Top Products - no top-products API available
       setTopProducts([]);
 
-    } catch (_error: any) {
-      toast.error('Failed to load dashboard data');
+    } catch {
+      setError('Failed to load dashboard data. Please try again.');
     } finally {
       setIsLoading(false);
     }
@@ -184,6 +185,18 @@ export function ExecutiveDashboard() {
     );
   }
 
+  if (error && !metrics) {
+    return (
+      <div className="flex flex-col items-center justify-center h-96 text-center">
+        <AlertTriangle className="w-12 h-12 text-red-400 mb-4" />
+        <p className="text-gray-700 mb-4">{error}</p>
+        <button onClick={loadDashboardData} className="btn-primary">
+          Retry
+        </button>
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -199,7 +212,7 @@ export function ExecutiveDashboard() {
           {/* Time Range Selector */}
           <select
             value={timeRange}
-            onChange={(e) => setTimeRange(e.target.value as any)}
+            onChange={(e) => setTimeRange(e.target.value as typeof timeRange)}
             className="input-field w-auto"
           >
             <option value="today">Today</option>
@@ -245,22 +258,14 @@ export function ExecutiveDashboard() {
             </div>
           </div>
 
-          {/* Total Profit */}
+          {/* Average Order Value */}
           <div className="card">
             <div className="flex items-center justify-between">
               <div className="flex-1">
-                <p className="text-sm text-gray-600 mb-1">Total Profit</p>
-                <p className="text-2xl font-bold text-gray-900">{formatCurrency(metrics.totalProfit)}</p>
+                <p className="text-sm text-gray-600 mb-1">Avg. Order Value</p>
+                <p className="text-2xl font-bold text-gray-900">{formatCurrency(metrics.averageOrderValue)}</p>
                 <div className="flex items-center gap-1 mt-2">
-                  {metrics.profitGrowth >= 0 ? (
-                    <ArrowUpRight className="w-4 h-4 text-green-600" />
-                  ) : (
-                    <ArrowDownRight className="w-4 h-4 text-red-600" />
-                  )}
-                  <span className={`text-sm font-medium ${metrics.profitGrowth >= 0 ? 'text-green-600' : 'text-red-600'}`}>
-                    {Math.abs(metrics.profitGrowth)}%
-                  </span>
-                  <span className="text-xs text-gray-500">Margin: {metrics.totalRevenue > 0 ? ((metrics.totalProfit / metrics.totalRevenue) * 100).toFixed(1) : '0.0'}%</span>
+                  <span className="text-xs text-gray-500">{metrics.totalOrders} orders this period</span>
                 </div>
               </div>
               <div className="w-12 h-12 bg-purple-100 rounded-lg flex items-center justify-center">
@@ -270,35 +275,51 @@ export function ExecutiveDashboard() {
           </div>
 
           {/* Dead Stock Alert */}
-          <div className="card border-2 border-orange-200 bg-orange-50">
+          <div className={`card border-2 ${metrics.deadStockPercentage > 10 ? 'border-orange-200 bg-orange-50' : 'border-green-200 bg-green-50'}`}>
             <div className="flex items-center justify-between">
               <div className="flex-1">
-                <p className="text-sm text-orange-800 mb-1">Dead Stock</p>
-                <p className="text-2xl font-bold text-orange-900">{metrics.deadStockPercentage}%</p>
+                <p className={`text-sm mb-1 ${metrics.deadStockPercentage > 10 ? 'text-orange-800' : 'text-green-800'}`}>Out of Stock</p>
+                <p className={`text-2xl font-bold ${metrics.deadStockPercentage > 10 ? 'text-orange-900' : 'text-green-900'}`}>{metrics.deadStockPercentage.toFixed(1)}%</p>
                 <div className="flex items-center gap-1 mt-2">
-                  <AlertTriangle className="w-4 h-4 text-orange-600" />
-                  <span className="text-xs text-orange-700">High - needs attention</span>
+                  {metrics.deadStockPercentage > 10 ? (
+                    <>
+                      <AlertTriangle className="w-4 h-4 text-orange-600" />
+                      <span className="text-xs text-orange-700">High - needs attention</span>
+                    </>
+                  ) : (
+                    <span className="text-xs text-green-700">Within acceptable range</span>
+                  )}
                 </div>
               </div>
-              <div className="w-12 h-12 bg-orange-200 rounded-lg flex items-center justify-center">
-                <Package className="w-6 h-6 text-orange-700" />
+              <div className={`w-12 h-12 rounded-lg flex items-center justify-center ${metrics.deadStockPercentage > 10 ? 'bg-orange-200' : 'bg-green-200'}`}>
+                <Package className={`w-6 h-6 ${metrics.deadStockPercentage > 10 ? 'text-orange-700' : 'text-green-700'}`} />
               </div>
             </div>
           </div>
 
           {/* Cash Flow */}
-          <div className="card border-2 border-red-200 bg-red-50">
+          <div className={`card border-2 ${metrics.cashFlow < 0 ? 'border-red-200 bg-red-50' : metrics.cashFlow > 0 ? 'border-green-200 bg-green-50' : 'border-gray-200 bg-gray-50'}`}>
             <div className="flex items-center justify-between">
               <div className="flex-1">
-                <p className="text-sm text-red-800 mb-1">Cash Flow</p>
-                <p className="text-2xl font-bold text-red-900">{formatCurrency(Math.abs(metrics.cashFlow))}</p>
+                <p className={`text-sm mb-1 ${metrics.cashFlow < 0 ? 'text-red-800' : metrics.cashFlow > 0 ? 'text-green-800' : 'text-gray-600'}`}>Cash Flow</p>
+                <p className={`text-2xl font-bold ${metrics.cashFlow < 0 ? 'text-red-900' : metrics.cashFlow > 0 ? 'text-green-900' : 'text-gray-900'}`}>
+                  {metrics.cashFlow === 0 ? 'N/A' : formatCurrency(Math.abs(metrics.cashFlow))}
+                </p>
                 <div className="flex items-center gap-1 mt-2">
-                  <TrendingDown className="w-4 h-4 text-red-600" />
-                  <span className="text-xs text-red-700">Negative - monitor closely</span>
+                  {metrics.cashFlow < 0 ? (
+                    <>
+                      <TrendingDown className="w-4 h-4 text-red-600" />
+                      <span className="text-xs text-red-700">Negative - monitor closely</span>
+                    </>
+                  ) : metrics.cashFlow > 0 ? (
+                    <span className="text-xs text-green-700">Positive cash flow</span>
+                  ) : (
+                    <span className="text-xs text-gray-500">Cash flow data not available</span>
+                  )}
                 </div>
               </div>
-              <div className="w-12 h-12 bg-red-200 rounded-lg flex items-center justify-center">
-                <Activity className="w-6 h-6 text-red-700" />
+              <div className={`w-12 h-12 rounded-lg flex items-center justify-center ${metrics.cashFlow < 0 ? 'bg-red-200' : metrics.cashFlow > 0 ? 'bg-green-200' : 'bg-gray-200'}`}>
+                <Activity className={`w-6 h-6 ${metrics.cashFlow < 0 ? 'text-red-700' : metrics.cashFlow > 0 ? 'text-green-700' : 'text-gray-500'}`} />
               </div>
             </div>
           </div>
@@ -306,11 +327,12 @@ export function ExecutiveDashboard() {
       )}
 
       {/* Store Performance Comparison */}
+      {stores.length > 0 ? (
       <div className="card">
         <div className="flex items-center justify-between mb-6">
           <h2 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
             <Store className="w-5 h-5 text-purple-600" />
-            5-Store Performance Comparison
+            Store Performance Comparison
           </h2>
           <span className="text-sm text-gray-500">Ranked by revenue</span>
         </div>
@@ -362,7 +384,7 @@ export function ExecutiveDashboard() {
                 <div>
                   <p className="text-xs text-gray-600">Dead Stock</p>
                   <p className={`text-sm font-semibold ${
-                    (store.deadStockValue / store.inventoryValue) * 100 > 20 ? 'text-red-600' : 'text-gray-900'
+                    store.inventoryValue > 0 && (store.deadStockValue / store.inventoryValue) * 100 > 20 ? 'text-red-600' : 'text-gray-900'
                   }`}>
                     {formatCurrency(store.deadStockValue)}
                   </p>
@@ -380,7 +402,7 @@ export function ExecutiveDashboard() {
                     {store.salesPerSqFt < 1500 && (
                       <span className="px-2 py-1 bg-red-100 text-red-800 text-xs rounded">Low Sales Density</span>
                     )}
-                    {(store.deadStockValue / store.inventoryValue) * 100 > 25 && (
+                    {store.inventoryValue > 0 && (store.deadStockValue / store.inventoryValue) * 100 > 25 && (
                       <span className="px-2 py-1 bg-red-100 text-red-800 text-xs rounded">High Dead Stock</span>
                     )}
                     {store.trend === 'down' && (
@@ -393,6 +415,7 @@ export function ExecutiveDashboard() {
           ))}
         </div>
       </div>
+      ) : null}
 
       <div className="grid grid-cols-1 desktop:grid-cols-2 gap-6">
         {/* Category Performance */}
@@ -402,7 +425,9 @@ export function ExecutiveDashboard() {
             Category Performance
           </h2>
           <div className="space-y-3">
-            {categories.map((cat) => (
+            {categories.length === 0 ? (
+              <p className="text-center text-gray-500 py-6">No category data available</p>
+            ) : categories.map((cat) => (
               <div key={cat.category} className="p-3 bg-gray-50 rounded-lg">
                 <div className="flex items-center justify-between mb-2">
                   <span className="font-medium text-gray-900">{cat.category}</span>
@@ -437,7 +462,9 @@ export function ExecutiveDashboard() {
             Top 5 Products
           </h2>
           <div className="space-y-3">
-            {topProducts.map((product, index) => (
+            {topProducts.length === 0 ? (
+              <p className="text-center text-gray-500 py-6">No product data available</p>
+            ) : topProducts.map((product, index) => (
               <div key={product.id} className="flex items-center gap-3 p-3 bg-gray-50 rounded-lg">
                 <div className="w-6 h-6 rounded-full bg-purple-100 flex items-center justify-center text-xs font-bold text-purple-600">
                   {index + 1}
