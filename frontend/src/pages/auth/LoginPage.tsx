@@ -19,10 +19,8 @@ export function LoginPage() {
 
   // Clear any stale auth data when login page mounts
   useEffect(() => {
-    // Only clear if there's stale data that might cause issues
     const token = localStorage.getItem('ims_token');
     if (token) {
-      console.log('Clearing stale auth data on login page mount');
       localStorage.removeItem('ims_token');
       localStorage.removeItem('ims_user');
       localStorage.removeItem('ims_active_module');

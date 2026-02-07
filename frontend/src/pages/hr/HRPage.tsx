@@ -4,6 +4,7 @@
 // NO MOCK DATA - All data from API
 
 import { useState, useEffect } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import {
   Clock,
   Calendar,
@@ -69,6 +70,7 @@ const LEAVE_STATUS_CONFIG: Record<LeaveStatus, { label: string; class: string }>
 
 export function HRPage() {
   const { user, hasRole } = useAuth();
+  const [searchParams] = useSearchParams();
 
   // Data state
   const [attendance, setAttendance] = useState<AttendanceRecord[]>([]);
@@ -76,6 +78,14 @@ export function HRPage() {
 
   // UI state
   const [activeTab, setActiveTab] = useState<'attendance' | 'leave'>('attendance');
+
+  // Sync active tab from URL query params (e.g. /hr?tab=leave)
+  useEffect(() => {
+    const tabParam = searchParams.get('tab');
+    if (tabParam === 'leave' && activeTab !== 'leave') {
+      setActiveTab('leave');
+    }
+  }, [searchParams]);
 
   // Loading state
   const [isLoading, setIsLoading] = useState(true);

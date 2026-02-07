@@ -38,10 +38,10 @@ export function DiscountModal({
     let discountAmount: number;
 
     if (discountType === 'percent') {
-      discountPercent = Math.min(numValue, 100); // Cap at 100%
+      discountPercent = Math.max(0, Math.min(numValue, 100)); // Clamp 0-100%
       discountAmount = Math.round((itemTotal * discountPercent) / 100);
     } else {
-      discountAmount = Math.min(numValue, itemTotal); // Cap at item total
+      discountAmount = Math.max(0, Math.min(numValue, itemTotal)); // Clamp 0-itemTotal
       discountPercent = itemTotal > 0 ? (discountAmount / itemTotal) * 100 : 0;
     }
 

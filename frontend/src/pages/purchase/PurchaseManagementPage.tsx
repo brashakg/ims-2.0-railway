@@ -4,6 +4,7 @@
 // Complete purchase order, supplier, and cost tracking
 
 import { useState, useEffect } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import {
   ShoppingBag,
   Plus,
@@ -83,6 +84,7 @@ interface POItem {
 
 export function PurchaseManagementPage() {
   const toast = useToast();
+  const [searchParams] = useSearchParams();
 
   const [activeTab, setActiveTab] = useState<TabType>('purchase-orders');
   const [searchQuery, setSearchQuery] = useState('');
@@ -91,9 +93,20 @@ export function PurchaseManagementPage() {
 
   const [purchaseOrders, setPurchaseOrders] = useState<PurchaseOrder[]>([]);
   const [suppliers, setSuppliers] = useState<Supplier[]>([]);
-  const [_showCreatePO, setShowCreatePO] = useState(false);
-  const [_showSupplierModal, setShowSupplierModal] = useState(false);
-  const [_selectedPO, setSelectedPO] = useState<PurchaseOrder | null>(null);
+  const [, setShowCreatePO] = useState(false);
+  const [, setShowSupplierModal] = useState(false);
+  const [, setSelectedPO] = useState<PurchaseOrder | null>(null);
+
+  // Sync active tab from URL query params (e.g. /purchase?tab=suppliers)
+  useEffect(() => {
+    const tabParam = searchParams.get('tab');
+    if (tabParam && tabParam !== activeTab) {
+      const validTabs: TabType[] = ['purchase-orders', 'suppliers', 'analytics'];
+      if (validTabs.includes(tabParam as TabType)) {
+        setActiveTab(tabParam as TabType);
+      }
+    }
+  }, [searchParams]);
 
   useEffect(() => {
     loadData();

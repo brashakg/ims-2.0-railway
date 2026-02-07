@@ -19,7 +19,10 @@ import {
   FileText,
   Users,
   Package,
+  Eye,
+  ShoppingCart,
 } from 'lucide-react';
+import type { UserRole } from '../../types';
 import clsx from 'clsx';
 
 // ============================================================================
@@ -301,6 +304,91 @@ export default function DashboardPage() {
     ? `${currentYear}-${(currentYear + 1).toString().slice(-2)}`
     : `${currentYear - 1}-${currentYear.toString().slice(-2)}`;
 
+  // Role-based KPI selection
+  const getRoleKpis = (role?: UserRole): Omit<KpiCardProps, 'loading'>[] => {
+    const salesKpi: Omit<KpiCardProps, 'loading'> = {
+      icon: IndianRupee,
+      iconBg: 'bg-green-100 text-green-600',
+      value: formatCurrency(stats.todaySales),
+      label: "Today's Sales",
+      change: stats.salesChange > 0 ? `+${stats.salesChange}%` : undefined,
+      changeType: 'positive',
+      onClick: () => handleModuleClick('reports'),
+    };
+    const pendingKpi: Omit<KpiCardProps, 'loading'> = {
+      icon: Clock,
+      iconBg: 'bg-orange-100 text-orange-600',
+      value: stats.pendingOrders,
+      label: 'Pending Orders',
+      change: stats.urgentOrders > 0 ? `${stats.urgentOrders} urgent` : undefined,
+      changeType: stats.urgentOrders > 0 ? 'negative' : 'neutral',
+      onClick: () => handleModuleClick('pos'),
+    };
+    const appointmentKpi: Omit<KpiCardProps, 'loading'> = {
+      icon: Calendar,
+      iconBg: 'bg-blue-100 text-blue-600',
+      value: stats.appointmentsToday,
+      label: 'Appointments Today',
+      change: stats.upcomingAppointments > 0 ? `${stats.upcomingAppointments} upcoming` : undefined,
+      changeType: 'neutral',
+      onClick: () => handleModuleClick('clinic'),
+    };
+    const lowStockKpi: Omit<KpiCardProps, 'loading'> = {
+      icon: AlertTriangle,
+      iconBg: 'bg-red-100 text-red-600',
+      value: stats.lowStockItems,
+      label: 'Low Stock Items',
+      change: stats.lowStockItems > 0 ? 'Action needed' : undefined,
+      changeType: stats.lowStockItems > 0 ? 'negative' : 'neutral',
+      onClick: () => handleModuleClick('inventory'),
+    };
+    const ordersKpi: Omit<KpiCardProps, 'loading'> = {
+      icon: ShoppingCart,
+      iconBg: 'bg-purple-100 text-purple-600',
+      value: todaySummary.totalOrders,
+      label: "Today's Orders",
+      onClick: () => handleModuleClick('pos'),
+    };
+    const eyeTestsKpi: Omit<KpiCardProps, 'loading'> = {
+      icon: Eye,
+      iconBg: 'bg-purple-100 text-purple-600',
+      value: todaySummary.eyeTests,
+      label: 'Eye Tests Today',
+      onClick: () => handleModuleClick('clinic'),
+    };
+    const customersKpi: Omit<KpiCardProps, 'loading'> = {
+      icon: Users,
+      iconBg: 'bg-teal-100 text-teal-600',
+      value: todaySummary.newCustomers,
+      label: 'New Customers',
+      onClick: () => handleModuleClick('customers'),
+    };
+    const deliveriesKpi: Omit<KpiCardProps, 'loading'> = {
+      icon: Package,
+      iconBg: 'bg-emerald-100 text-emerald-600',
+      value: todaySummary.deliveries,
+      label: 'Deliveries Today',
+      onClick: () => handleModuleClick('pos'),
+    };
+
+    switch (role) {
+      case 'OPTOMETRIST':
+        return [appointmentKpi, eyeTestsKpi, pendingKpi, customersKpi];
+      case 'SALES_CASHIER':
+      case 'SALES_STAFF':
+        return [salesKpi, ordersKpi, pendingKpi, customersKpi];
+      case 'WORKSHOP_STAFF':
+        return [pendingKpi, deliveriesKpi, lowStockKpi, ordersKpi];
+      case 'CATALOG_MANAGER':
+        return [lowStockKpi, ordersKpi, salesKpi, pendingKpi];
+      case 'ACCOUNTANT':
+        return [salesKpi, pendingKpi, ordersKpi, lowStockKpi];
+      default:
+        // SUPERADMIN, ADMIN, AREA_MANAGER, STORE_MANAGER
+        return [salesKpi, pendingKpi, appointmentKpi, lowStockKpi];
+    }
+  };
+
   return (
     <div className="space-y-6">
       {/* Welcome Header */}
@@ -321,48 +409,11 @@ export default function DashboardPage() {
         </div>
       </div>
 
-      {/* KPI Stats Row */}
+      {/* Role-based KPI Stats Row */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        <KpiCard
-          icon={IndianRupee}
-          iconBg="bg-green-100 text-green-600"
-          value={formatCurrency(stats.todaySales)}
-          label="Today's Sales"
-          change={`+${stats.salesChange}%`}
-          changeType="positive"
-          loading={isLoading}
-          onClick={() => handleModuleClick('reports')}
-        />
-        <KpiCard
-          icon={Clock}
-          iconBg="bg-orange-100 text-orange-600"
-          value={stats.pendingOrders}
-          label="Pending Orders"
-          change={stats.urgentOrders > 0 ? `${stats.urgentOrders} urgent` : undefined}
-          changeType={stats.urgentOrders > 0 ? 'negative' : 'neutral'}
-          loading={isLoading}
-          onClick={() => handleModuleClick('pos')}
-        />
-        <KpiCard
-          icon={Calendar}
-          iconBg="bg-blue-100 text-blue-600"
-          value={stats.appointmentsToday}
-          label="Appointments Today"
-          change={stats.upcomingAppointments > 0 ? `${stats.upcomingAppointments} upcoming` : undefined}
-          changeType="neutral"
-          loading={isLoading}
-          onClick={() => handleModuleClick('clinic')}
-        />
-        <KpiCard
-          icon={AlertTriangle}
-          iconBg="bg-red-100 text-red-600"
-          value={stats.lowStockItems}
-          label="Low Stock Items"
-          change={stats.lowStockItems > 0 ? 'Action needed' : undefined}
-          changeType={stats.lowStockItems > 0 ? 'negative' : 'neutral'}
-          loading={isLoading}
-          onClick={() => handleModuleClick('inventory')}
-        />
+        {getRoleKpis(user?.activeRole).map((kpi, index) => (
+          <KpiCard key={index} {...kpi} loading={isLoading} />
+        ))}
       </div>
 
       {/* Modules Section */}

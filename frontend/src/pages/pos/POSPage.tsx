@@ -427,6 +427,11 @@ export function POSPage() {
 
   // Update item price with discount validation
   const handleUpdateItemPrice = useCallback((itemId: string, newPrice: number) => {
+    if (newPrice <= 0) {
+      toast.error('Price must be greater than zero');
+      return;
+    }
+
     setOrderItems(prev => prev.map(item => {
       if (item.id !== itemId) return item;
 

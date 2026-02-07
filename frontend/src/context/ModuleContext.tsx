@@ -69,8 +69,8 @@ export const MODULE_CONFIGS: ModuleConfig[] = [
     sidebarItems: [
       { id: 'pos-new', label: 'New Sale', path: '/pos' },
       { id: 'pos-orders', label: 'All Orders', path: '/orders' },
-      { id: 'pos-pending', label: 'Pending Orders', path: '/orders?status=pending' },
-      { id: 'pos-deliveries', label: 'Ready for Delivery', path: '/orders?status=ready' },
+      { id: 'pos-pending', label: 'Pending Orders', path: '/orders?status=IN_PROGRESS' },
+      { id: 'pos-deliveries', label: 'Ready for Delivery', path: '/orders?status=READY' },
       { id: 'pos-workshop', label: 'Workshop Jobs', path: '/workshop' },
     ],
   },
@@ -100,10 +100,10 @@ export const MODULE_CONFIGS: ModuleConfig[] = [
     allowedRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'CATALOG_MANAGER', 'WORKSHOP_STAFF'],
     sidebarItems: [
       { id: 'inv-overview', label: 'Stock Overview', path: '/inventory' },
+      { id: 'inv-lowstock', label: 'Low Stock Alerts', path: '/inventory?tab=low-stock' },
+      { id: 'inv-reorders', label: 'Reorder Dashboard', path: '/inventory?tab=reorders' },
       { id: 'inv-transfers', label: 'Stock Transfers', path: '/inventory?tab=transfers' },
       { id: 'inv-movements', label: 'Stock Movements', path: '/inventory?tab=movements' },
-      { id: 'inv-barcode', label: 'Barcode Management', path: '/inventory?tab=barcode' },
-      { id: 'inv-lowstock', label: 'Low Stock Alerts', path: '/inventory?tab=lowstock' },
     ],
   },
   {
@@ -116,8 +116,7 @@ export const MODULE_CONFIGS: ModuleConfig[] = [
     allowedRoles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'SALES_CASHIER', 'SALES_STAFF', 'OPTOMETRIST'],
     sidebarItems: [
       { id: 'crm-all', label: 'All Customers', path: '/customers' },
-      { id: 'crm-search', label: 'Search', path: '/customers?search=true' },
-      { id: 'crm-loyalty', label: 'Loyalty Program', path: '/customers?tab=loyalty' },
+      { id: 'crm-search', label: 'Search Customers', path: '/customers?search=true' },
     ],
   },
   {
@@ -129,9 +128,8 @@ export const MODULE_CONFIGS: ModuleConfig[] = [
     bgColor: 'bg-cyan-50',
     allowedRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'],
     sidebarItems: [
-      { id: 'vendor-list', label: 'All Vendors', path: '/purchase' },
-      { id: 'vendor-po', label: 'Purchase Orders', path: '/purchase?tab=purchase-orders' },
-      { id: 'vendor-grn', label: 'Goods Receipt', path: '/purchase?tab=grn' },
+      { id: 'vendor-po', label: 'Purchase Orders', path: '/purchase' },
+      { id: 'vendor-list', label: 'All Suppliers', path: '/purchase?tab=suppliers' },
     ],
   },
   {
