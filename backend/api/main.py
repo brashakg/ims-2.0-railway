@@ -205,7 +205,18 @@ async def add_process_time_header(request: Request, call_next):
     return response
 
 
-# Global exception handler
+# HTTPException handler - handles authentication and validation errors
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    """Handle HTTP exceptions (like 401 Unauthorized, 403 Forbidden, etc.)"""
+    logger.warning(f"HTTP Exception {exc.status_code}: {exc.detail}")
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": exc.detail}
+    )
+
+
+# Global exception handler for unexpected errors
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
     logger.error(f"Unhandled exception: {exc}")
