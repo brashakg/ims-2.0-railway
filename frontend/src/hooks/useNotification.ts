@@ -17,28 +17,28 @@ export function useNotification() {
   const toast = useToast();
 
   const success = useCallback(
-    (message: string, options?: NotificationOptions) => {
+    (message: string) => {
       toast.success(message);
     },
     [toast]
   );
 
   const error = useCallback(
-    (message: string, options?: NotificationOptions) => {
+    (message: string) => {
       toast.error(message);
     },
     [toast]
   );
 
   const warning = useCallback(
-    (message: string, options?: NotificationOptions) => {
+    (message: string) => {
       toast.warning?.(message);
     },
     [toast]
   );
 
   const info = useCallback(
-    (message: string, options?: NotificationOptions) => {
+    (message: string) => {
       toast.info?.(message);
     },
     [toast]

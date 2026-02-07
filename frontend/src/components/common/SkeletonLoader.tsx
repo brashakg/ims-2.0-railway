@@ -76,7 +76,9 @@ export function SkeletonDashboard() {
         {Array.from({ length: 4 }).map((_, i) => (
           <div key={i} className="bg-white rounded-lg p-4 border border-gray-100 shadow-sm">
             <SkeletonText height="h-4" width="w-2/3" />
-            <SkeletonText height="h-8" width="w-1/2" className="mt-2" />
+            <div className="mt-2">
+              <SkeletonText height="h-8" width="w-1/2" />
+            </div>
           </div>
         ))}
       </div>
