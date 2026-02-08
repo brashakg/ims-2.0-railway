@@ -97,12 +97,16 @@ def calculate_bill(
     for item in items:
         bill.subtotal += item.unit_price * item.quantity
         if item.discount_percent > 0:
-            bill.item_discount += item.unit_price * item.quantity * (item.discount_percent / 100)
+            bill.item_discount += (
+                item.unit_price * item.quantity * (item.discount_percent / 100)
+            )
 
     bill.subtotal_after_discount = bill.subtotal - bill.item_discount
 
     # Apply order-level discount
-    bill.order_discount_amount = bill.subtotal_after_discount * (order_discount_percent / 100)
+    bill.order_discount_amount = bill.subtotal_after_discount * (
+        order_discount_percent / 100
+    )
     bill.order_discount = order_discount_percent
     bill.taxable_amount = bill.subtotal_after_discount - bill.order_discount_amount
 
@@ -270,7 +274,9 @@ async def apply_discount(
         return {"valid": False, "message": "Invalid discount type"}
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error applying discount: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Error applying discount: {str(e)}"
+        )
 
 
 @router.get("/gst-summary")
@@ -339,7 +345,9 @@ async def get_gst_summary(
         }
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error fetching GST summary: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Error fetching GST summary: {str(e)}"
+        )
 
 
 @router.get("/held-bills")
@@ -363,7 +371,9 @@ async def get_held_bills(
         }
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error fetching held bills: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Error fetching held bills: {str(e)}"
+        )
 
 
 @router.post("/hold-bill")
@@ -461,4 +471,6 @@ async def process_payment(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error processing payment: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Error processing payment: {str(e)}"
+        )
