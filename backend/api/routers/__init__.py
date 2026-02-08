@@ -27,6 +27,7 @@ from .jarvis import router as jarvis_router
 from .analytics import router as analytics_router
 from .billing import router as billing_router
 from .crm import router as crm_router
+from .supply_chain import router as supply_chain_router
 
 __all__ = [
     "auth_router",
@@ -53,4 +54,5 @@ __all__ = [
     "jarvis_router",
     "analytics_router",
     "billing_router",
+    "supply_chain_router",
 ]

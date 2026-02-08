@@ -139,15 +139,18 @@ export const MODULE_CONFIGS: ModuleConfig[] = [
   },
   {
     id: 'vendors',
-    title: 'Vendors & Purchase',
-    subtitle: 'Vendors, Purchase Orders, GRN',
+    title: 'Supply Chain & Procurement',
+    subtitle: 'Purchase Orders, Vendors, GRN, Replenishment',
     icon: Truck,
     color: 'text-cyan-600',
     bgColor: 'bg-cyan-50',
     allowedRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'],
     sidebarItems: [
-      { id: 'vendor-po', label: 'Purchase Orders', path: '/purchase' },
-      { id: 'vendor-list', label: 'All Suppliers', path: '/purchase?tab=suppliers' },
+      { id: 'supply-po', label: 'Purchase Orders', path: '/purchase/orders' },
+      { id: 'supply-vendor', label: 'Vendor Management', path: '/purchase/vendors' },
+      { id: 'supply-grn', label: 'Goods Receipt Notes', path: '/purchase/grn' },
+      { id: 'supply-replenish', label: 'Stock Replenishment', path: '/inventory/replenishment' },
+      { id: 'supply-audit', label: 'Stock Audit', path: '/inventory/audit' },
     ],
   },
   {

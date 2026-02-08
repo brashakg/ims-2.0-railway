@@ -40,6 +40,13 @@ const HRPage = lazy(() => import('./pages/hr/HRPage').then(m => ({ default: m.HR
 const ReportsPage = lazy(() => import('./pages/reports/ReportsPage').then(m => ({ default: m.ReportsPage })));
 const SettingsPage = lazy(() => import('./pages/settings/SettingsPage').then(m => ({ default: m.SettingsPage })));
 
+// Phase 4: Supply Chain & Procurement
+const PurchaseOrderDashboard = lazy(() => import('./pages/purchase/PurchaseOrderDashboard').then(m => ({ default: m.PurchaseOrderDashboard })));
+const VendorManagement = lazy(() => import('./pages/purchase/VendorManagement').then(m => ({ default: m.VendorManagement })));
+const GoodsReceiptNote = lazy(() => import('./pages/purchase/GoodsReceiptNote').then(m => ({ default: m.GoodsReceiptNote })));
+const StockReplenishment = lazy(() => import('./pages/inventory/StockReplenishment').then(m => ({ default: m.StockReplenishment })));
+const StockAudit = lazy(() => import('./pages/inventory/StockAudit').then(m => ({ default: m.StockAudit })));
+
 // Loading fallback component
 const PageLoader = () => (
   <div className="flex items-center justify-center h-64">
@@ -319,6 +326,56 @@ function App() {
                     element={
                       <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT']}>
                         <PurchaseManagementPage />
+                      </ProtectedRoute>
+                    }
+                  />
+
+                  {/* Phase 4: Purchase Orders */}
+                  <Route
+                    path="purchase/orders"
+                    element={
+                      <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT']}>
+                        <PurchaseOrderDashboard />
+                      </ProtectedRoute>
+                    }
+                  />
+
+                  {/* Phase 4: Vendor Management */}
+                  <Route
+                    path="purchase/vendors"
+                    element={
+                      <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT']}>
+                        <VendorManagement />
+                      </ProtectedRoute>
+                    }
+                  />
+
+                  {/* Phase 4: Goods Receipt Notes */}
+                  <Route
+                    path="purchase/grn"
+                    element={
+                      <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT']}>
+                        <GoodsReceiptNote />
+                      </ProtectedRoute>
+                    }
+                  />
+
+                  {/* Phase 4: Stock Replenishment */}
+                  <Route
+                    path="inventory/replenishment"
+                    element={
+                      <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'CATALOG_MANAGER']}>
+                        <StockReplenishment />
+                      </ProtectedRoute>
+                    }
+                  />
+
+                  {/* Phase 4: Stock Audit */}
+                  <Route
+                    path="inventory/audit"
+                    element={
+                      <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'CATALOG_MANAGER']}>
+                        <StockAudit />
                       </ProtectedRoute>
                     }
                   />
