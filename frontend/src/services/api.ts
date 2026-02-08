@@ -33,27 +33,30 @@ const RETRY_DELAY_MS = 1000;
 // Helper function for delay
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
-// Check if error is retryable (network errors, timeouts, 5xx errors)
+// Check if error is retryable (only 5xx server errors and rate limiting)
+// Do NOT retry network/CORS errors - they won't be fixed by retrying
 const isRetryableError = (error: AxiosError): boolean => {
-  // Network errors (no response)
+  // CORS errors have no response - don't retry these
   if (!error.response) {
+    console.warn('[API] CORS or network error - not retrying:', error.message);
+    return false;
+  }
+  // Server errors (5xx) - these might be temporary
+  if (error.response.status >= 500 && error.response.status < 600) {
     return true;
   }
-  // Server errors (5xx)
-  if (error.response.status >= 500) {
-    return true;
-  }
-  // Rate limiting
+  // Rate limiting (429) - retry with backoff
   if (error.response.status === 429) {
     return true;
   }
+  // Don't retry other errors (401, 403, 404, CORS, etc.)
   return false;
 };
 
 // Create axios instance with secure URL
 const api: AxiosInstance = axios.create({
   baseURL: getSecureApiUrl(),
-  timeout: 30000,
+  timeout: 10000, // 10 second timeout per request (CORS issues usually fail fast)
   headers: {
     'Content-Type': 'application/json',
   },

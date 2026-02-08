@@ -4,7 +4,7 @@
 // NO MOCK DATA - All data from API
 
 import { useState, useEffect } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { useSearchParams, useNavigate } from 'react-router-dom';
 import {
   Search,
   Package,
@@ -87,6 +87,7 @@ type ViewTab = 'catalog' | 'low-stock' | 'reorders' | 'serial-numbers' | 'aging'
 export function InventoryPage() {
   const { user, hasRole } = useAuth();
   const toast = useToast();
+  const navigate = useNavigate();
   const [searchParams] = useSearchParams();
 
   // Data state
@@ -294,7 +295,7 @@ export function InventoryPage() {
           )}
           {canAddProduct && (
             <button
-              onClick={() => toast.info('Add product via Settings → Products Master')}
+              onClick={() => navigate('/settings?tab=products')}
               className="btn-primary flex items-center gap-2"
             >
               <Plus className="w-4 h-4" />
