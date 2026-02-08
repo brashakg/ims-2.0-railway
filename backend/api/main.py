@@ -37,6 +37,7 @@ from .routers import (
     products_router,
     inventory_router,
     customers_router,
+    crm_router,
     orders_router,
     prescriptions_router,
     vendors_router,
@@ -255,6 +256,7 @@ app.include_router(stores_router, prefix="/api/v1/stores", tags=["Stores"])
 app.include_router(products_router, prefix="/api/v1/products", tags=["Products"])
 app.include_router(inventory_router, prefix="/api/v1/inventory", tags=["Inventory"])
 app.include_router(customers_router, prefix="/api/v1/customers", tags=["Customers"])
+app.include_router(crm_router, prefix="/api/v1/crm", tags=["CRM"])
 app.include_router(orders_router, prefix="/api/v1/orders", tags=["Orders"])
 app.include_router(
     prescriptions_router, prefix="/api/v1/prescriptions", tags=["Prescriptions"]
