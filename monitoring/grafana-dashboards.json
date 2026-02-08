@@ -1,0 +1,387 @@
+{
+  "dashboards": [
+    {
+      "dashboard": {
+        "id": null,
+        "uid": "ims-overview",
+        "title": "IMS 2.0 - System Overview",
+        "description": "Overview of all IMS 2.0 system metrics",
+        "timezone": "UTC",
+        "refresh": "30s",
+        "time": {
+          "from": "now-1h",
+          "to": "now"
+        },
+        "panels": [
+          {
+            "id": 1,
+            "title": "API Request Rate",
+            "type": "graph",
+            "datasource": "Prometheus",
+            "targets": [
+              {
+                "expr": "rate(http_requests_total[1m])"
+              }
+            ],
+            "gridPos": {
+              "h": 8,
+              "w": 12,
+              "x": 0,
+              "y": 0
+            }
+          },
+          {
+            "id": 2,
+            "title": "API Error Rate",
+            "type": "graph",
+            "datasource": "Prometheus",
+            "targets": [
+              {
+                "expr": "rate(http_requests_total{status=~\"5..\"}[1m])"
+              }
+            ],
+            "gridPos": {
+              "h": 8,
+              "w": 12,
+              "x": 12,
+              "y": 0
+            }
+          },
+          {
+            "id": 3,
+            "title": "API Response Time (P95)",
+            "type": "graph",
+            "datasource": "Prometheus",
+            "targets": [
+              {
+                "expr": "histogram_quantile(0.95, rate(http_request_duration_seconds_bucket[5m]))"
+              }
+            ],
+            "gridPos": {
+              "h": 8,
+              "w": 12,
+              "x": 0,
+              "y": 8
+            }
+          },
+          {
+            "id": 4,
+            "title": "Database Connections",
+            "type": "gauge",
+            "datasource": "Prometheus",
+            "targets": [
+              {
+                "expr": "pg_stat_activity_count"
+              }
+            ],
+            "gridPos": {
+              "h": 8,
+              "w": 6,
+              "x": 12,
+              "y": 8
+            }
+          },
+          {
+            "id": 5,
+            "title": "Database CPU",
+            "type": "gauge",
+            "datasource": "Prometheus",
+            "targets": [
+              {
+                "expr": "pg_stat_cpu_utilization"
+              }
+            ],
+            "gridPos": {
+              "h": 8,
+              "w": 6,
+              "x": 18,
+              "y": 8
+            }
+          },
+          {
+            "id": 6,
+            "title": "Redis Hit Rate",
+            "type": "gauge",
+            "datasource": "Prometheus",
+            "targets": [
+              {
+                "expr": "rate(redis_hits_total[5m]) / (rate(redis_hits_total[5m]) + rate(redis_misses_total[5m]))"
+              }
+            ],
+            "gridPos": {
+              "h": 8,
+              "w": 6,
+              "x": 0,
+              "y": 16
+            }
+          },
+          {
+            "id": 7,
+            "title": "Redis Memory Usage",
+            "type": "gauge",
+            "datasource": "Prometheus",
+            "targets": [
+              {
+                "expr": "redis_memory_used_bytes / redis_memory_max_bytes"
+              }
+            ],
+            "gridPos": {
+              "h": 8,
+              "w": 6,
+              "x": 6,
+              "y": 16
+            }
+          },
+          {
+            "id": 8,
+            "title": "System Memory",
+            "type": "gauge",
+            "datasource": "Prometheus",
+            "targets": [
+              {
+                "expr": "1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)"
+              }
+            ],
+            "gridPos": {
+              "h": 8,
+              "w": 6,
+              "x": 12,
+              "y": 16
+            }
+          },
+          {
+            "id": 9,
+            "title": "Disk Usage",
+            "type": "gauge",
+            "datasource": "Prometheus",
+            "targets": [
+              {
+                "expr": "1 - (node_filesystem_avail_bytes / node_filesystem_size_bytes)"
+              }
+            ],
+            "gridPos": {
+              "h": 8,
+              "w": 6,
+              "x": 18,
+              "y": 16
+            }
+          }
+        ]
+      },
+      "overwrite": true
+    },
+    {
+      "dashboard": {
+        "id": null,
+        "uid": "ims-api-performance",
+        "title": "IMS 2.0 - API Performance",
+        "description": "Detailed API performance metrics",
+        "timezone": "UTC",
+        "refresh": "30s",
+        "panels": [
+          {
+            "id": 1,
+            "title": "Request Rate by Endpoint",
+            "type": "graph",
+            "datasource": "Prometheus",
+            "targets": [
+              {
+                "expr": "sum(rate(http_requests_total[1m])) by (endpoint)"
+              }
+            ],
+            "gridPos": {
+              "h": 8,
+              "w": 12,
+              "x": 0,
+              "y": 0
+            }
+          },
+          {
+            "id": 2,
+            "title": "Response Time by Endpoint (P95)",
+            "type": "graph",
+            "datasource": "Prometheus",
+            "targets": [
+              {
+                "expr": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[5m])) by (endpoint, le))"
+              }
+            ],
+            "gridPos": {
+              "h": 8,
+              "w": 12,
+              "x": 12,
+              "y": 0
+            }
+          },
+          {
+            "id": 3,
+            "title": "Error Rate by Status Code",
+            "type": "graph",
+            "datasource": "Prometheus",
+            "targets": [
+              {
+                "expr": "sum(rate(http_requests_total[1m])) by (status)"
+              }
+            ],
+            "gridPos": {
+              "h": 8,
+              "w": 12,
+              "x": 0,
+              "y": 8
+            }
+          },
+          {
+            "id": 4,
+            "title": "Request Size Distribution",
+            "type": "histogram",
+            "datasource": "Prometheus",
+            "targets": [
+              {
+                "expr": "http_request_size_bytes"
+              }
+            ],
+            "gridPos": {
+              "h": 8,
+              "w": 12,
+              "x": 12,
+              "y": 8
+            }
+          }
+        ]
+      },
+      "overwrite": true
+    },
+    {
+      "dashboard": {
+        "id": null,
+        "uid": "ims-database",
+        "title": "IMS 2.0 - Database Health",
+        "description": "Database performance and health metrics",
+        "timezone": "UTC",
+        "refresh": "30s",
+        "panels": [
+          {
+            "id": 1,
+            "title": "Query Execution Time",
+            "type": "graph",
+            "datasource": "Prometheus",
+            "targets": [
+              {
+                "expr": "histogram_quantile(0.95, rate(pg_statement_duration_seconds_bucket[5m]))"
+              }
+            ],
+            "gridPos": {
+              "h": 8,
+              "w": 12,
+              "x": 0,
+              "y": 0
+            }
+          },
+          {
+            "id": 2,
+            "title": "Active Connections",
+            "type": "graph",
+            "datasource": "Prometheus",
+            "targets": [
+              {
+                "expr": "pg_stat_activity_count"
+              }
+            ],
+            "gridPos": {
+              "h": 8,
+              "w": 12,
+              "x": 12,
+              "y": 0
+            }
+          },
+          {
+            "id": 3,
+            "title": "Transaction Rate",
+            "type": "graph",
+            "datasource": "Prometheus",
+            "targets": [
+              {
+                "expr": "rate(pg_stat_transactions_total[1m])"
+              }
+            ],
+            "gridPos": {
+              "h": 8,
+              "w": 12,
+              "x": 0,
+              "y": 8
+            }
+          },
+          {
+            "id": 4,
+            "title": "Index Efficiency",
+            "type": "graph",
+            "datasource": "Prometheus",
+            "targets": [
+              {
+                "expr": "pg_stat_index_efficiency"
+              }
+            ],
+            "gridPos": {
+              "h": 8,
+              "w": 12,
+              "x": 12,
+              "y": 8
+            }
+          },
+          {
+            "id": 5,
+            "title": "Database Size",
+            "type": "gauge",
+            "datasource": "Prometheus",
+            "targets": [
+              {
+                "expr": "pg_database_size_bytes / 1024 / 1024 / 1024"
+              }
+            ],
+            "gridPos": {
+              "h": 8,
+              "w": 6,
+              "x": 0,
+              "y": 16
+            }
+          },
+          {
+            "id": 6,
+            "title": "Replication Lag",
+            "type": "gauge",
+            "datasource": "Prometheus",
+            "targets": [
+              {
+                "expr": "pg_replication_lag_seconds"
+              }
+            ],
+            "gridPos": {
+              "h": 8,
+              "w": 6,
+              "x": 6,
+              "y": 16
+            }
+          },
+          {
+            "id": 7,
+            "title": "Backup Status",
+            "type": "stat",
+            "datasource": "Prometheus",
+            "targets": [
+              {
+                "expr": "time() - pg_last_backup_timestamp_seconds"
+              }
+            ],
+            "gridPos": {
+              "h": 8,
+              "w": 6,
+              "x": 12,
+              "y": 16
+            }
+          }
+        ]
+      },
+      "overwrite": true
+    }
+  ]
+}

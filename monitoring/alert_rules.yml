@@ -1,0 +1,287 @@
+# ============================================================================
+# Prometheus Alert Rules
+# ============================================================================
+# Define alerting conditions for IMS 2.0 infrastructure
+
+groups:
+  # ============================================================================
+  # Application Alerts
+  # ============================================================================
+  - name: application_alerts
+    interval: 15s
+    rules:
+      # API Response Time
+      - alert: HighAPIResponseTime
+        expr: |
+          histogram_quantile(0.95, rate(http_request_duration_seconds_bucket[5m])) > 1
+        for: 5m
+        labels:
+          severity: warning
+          component: api
+        annotations:
+          summary: "High API response time detected"
+          description: "API P95 response time is {{ $value }}s (threshold: 1s)"
+          dashboard: "http://grafana:3000/d/api-performance"
+
+      # High Error Rate
+      - alert: HighErrorRate
+        expr: |
+          rate(http_requests_total{status=~"5.."}[5m]) > 0.05
+        for: 2m
+        labels:
+          severity: critical
+          component: api
+        annotations:
+          summary: "High error rate detected"
+          description: "Error rate is {{ $value | humanizePercentage }} (threshold: 5%)"
+          dashboard: "http://grafana:3000/d/api-errors"
+
+      # Request Rate Spike
+      - alert: RequestRateSpike
+        expr: |
+          rate(http_requests_total[1m]) >
+          avg_over_time(rate(http_requests_total[5m])[1h:1m]) * 2
+        for: 5m
+        labels:
+          severity: warning
+          component: api
+        annotations:
+          summary: "Unusual request rate detected"
+          description: "Request rate is {{ $value | humanizePercentage }} above normal"
+
+  # ============================================================================
+  # Database Alerts
+  # ============================================================================
+  - name: database_alerts
+    interval: 15s
+    rules:
+      # High CPU Usage
+      - alert: PostgreSQLHighCPU
+        expr: |
+          pg_stat_activity_count / pg_settings_max_connections > 0.8
+        for: 5m
+        labels:
+          severity: warning
+          component: database
+        annotations:
+          summary: "PostgreSQL CPU usage is high"
+          description: "CPU usage: {{ $value | humanizePercentage }} (threshold: 80%)"
+
+      # Connection Pool Exhaustion
+      - alert: PostgreSQLConnectionPoolExhaustion
+        expr: |
+          pg_stat_activity_count / pg_settings_max_connections > 0.9
+        for: 2m
+        labels:
+          severity: critical
+          component: database
+        annotations:
+          summary: "PostgreSQL connection pool near exhaustion"
+          description: "Connections: {{ $value | humanizePercentage }} of max (threshold: 90%)"
+
+      # High Transaction Time
+      - alert: PostgreSQLLongTransaction
+        expr: |
+          pg_stat_activity_duration_seconds > 600
+        for: 10m
+        labels:
+          severity: warning
+          component: database
+        annotations:
+          summary: "Long running transaction detected"
+          description: "Transaction running for {{ $value | humanizeDuration }}"
+
+      # Replication Lag
+      - alert: PostgreSQLReplicationLag
+        expr: |
+          pg_replication_lag_seconds > 10
+        for: 5m
+        labels:
+          severity: warning
+          component: database
+        annotations:
+          summary: "High replication lag detected"
+          description: "Replication lag: {{ $value | humanizeDuration }} (threshold: 10s)"
+
+  # ============================================================================
+  # Cache Alerts
+  # ============================================================================
+  - name: cache_alerts
+    interval: 15s
+    rules:
+      # Low Cache Hit Rate
+      - alert: LowCacheHitRate
+        expr: |
+          rate(redis_hits_total[5m]) /
+          (rate(redis_hits_total[5m]) + rate(redis_misses_total[5m])) < 0.8
+        for: 5m
+        labels:
+          severity: warning
+          component: cache
+        annotations:
+          summary: "Low Redis cache hit rate"
+          description: "Hit rate: {{ $value | humanizePercentage }} (threshold: 80%)"
+
+      # Memory Usage High
+      - alert: RedisMemoryHigh
+        expr: |
+          redis_memory_used_bytes / redis_memory_max_bytes > 0.9
+        for: 5m
+        labels:
+          severity: critical
+          component: cache
+        annotations:
+          summary: "Redis memory usage is critical"
+          description: "Memory usage: {{ $value | humanizePercentage }} (threshold: 90%)"
+
+      # Evictions Detected
+      - alert: RedisEvictions
+        expr: |
+          rate(redis_evicted_keys_total[1m]) > 0
+        for: 2m
+        labels:
+          severity: critical
+          component: cache
+        annotations:
+          summary: "Redis key evictions detected"
+          description: "Eviction rate: {{ $value }}/sec"
+
+      # Redis Connection Issues
+      - alert: RedisConnectionRejected
+        expr: |
+          rate(redis_rejected_connections_total[1m]) > 0
+        for: 1m
+        labels:
+          severity: warning
+          component: cache
+        annotations:
+          summary: "Redis is rejecting connections"
+          description: "Rejection rate: {{ $value }}/sec"
+
+  # ============================================================================
+  # Infrastructure Alerts
+  # ============================================================================
+  - name: infrastructure_alerts
+    interval: 15s
+    rules:
+      # High Memory Usage
+      - alert: HighMemoryUsage
+        expr: |
+          (1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) > 0.85
+        for: 5m
+        labels:
+          severity: warning
+          component: infrastructure
+        annotations:
+          summary: "High memory usage detected"
+          description: "Memory usage: {{ $value | humanizePercentage }} (threshold: 85%)"
+
+      # High Disk Usage
+      - alert: HighDiskUsage
+        expr: |
+          (1 - (node_filesystem_avail_bytes / node_filesystem_size_bytes)) > 0.85
+        for: 5m
+        labels:
+          severity: warning
+          component: infrastructure
+        annotations:
+          summary: "High disk usage detected"
+          description: "Disk usage: {{ $value | humanizePercentage }} (threshold: 85%)"
+
+      # Low Available Disk Space
+      - alert: LowDiskSpace
+        expr: |
+          node_filesystem_avail_bytes < 5368709120  # 5GB
+        for: 5m
+        labels:
+          severity: critical
+          component: infrastructure
+        annotations:
+          summary: "Low disk space available"
+          description: "Available space: {{ $value | humanize1024 }}B (threshold: 5GB)"
+
+  # ============================================================================
+  # Security Alerts
+  # ============================================================================
+  - name: security_alerts
+    interval: 15s
+    rules:
+      # Brute Force Attempts
+      - alert: BruteForceAttempts
+        expr: |
+          rate(http_requests_total{endpoint="/auth/login", status="401"}[1m]) > 10
+        for: 1m
+        labels:
+          severity: critical
+          component: security
+        annotations:
+          summary: "Potential brute force attack detected"
+          description: "Failed login rate: {{ $value }}/sec"
+
+      # SQL Injection Attempts
+      - alert: SQLInjectionAttempts
+        expr: |
+          rate(security_invalid_sql_detected_total[1m]) > 0
+        for: 1m
+        labels:
+          severity: critical
+          component: security
+        annotations:
+          summary: "Potential SQL injection attempt detected"
+          description: "Detection rate: {{ $value }}/sec"
+
+      # XSS Attempts
+      - alert: XSSAttempts
+        expr: |
+          rate(security_xss_detected_total[1m]) > 0
+        for: 1m
+        labels:
+          severity: warning
+          component: security
+        annotations:
+          summary: "Potential XSS attempt detected"
+          description: "Detection rate: {{ $value }}/sec"
+
+      # Unusual Traffic Pattern
+      - alert: UnusualTrafficPattern
+        expr: |
+          rate(http_requests_total[5m]) >
+          avg_over_time(rate(http_requests_total[5m])[24h:1m]) * 3
+        for: 5m
+        labels:
+          severity: warning
+          component: security
+        annotations:
+          summary: "Unusual traffic pattern detected"
+          description: "Traffic is {{ $value | humanizePercentage }} above 24h average"
+
+  # ============================================================================
+  # Business Alerts
+  # ============================================================================
+  - name: business_alerts
+    interval: 15s
+    rules:
+      # Low Transaction Success Rate
+      - alert: LowTransactionSuccessRate
+        expr: |
+          rate(transactions_completed_total[5m]) /
+          rate(transactions_attempted_total[5m]) < 0.95
+        for: 5m
+        labels:
+          severity: warning
+          component: business
+        annotations:
+          summary: "Low transaction success rate"
+          description: "Success rate: {{ $value | humanizePercentage }} (threshold: 95%)"
+
+      # Zero Sales in Time Period
+      - alert: ZeroSalesDetected
+        expr: |
+          increase(sales_total[1h]) == 0
+        for: 1h
+        labels:
+          severity: warning
+          component: business
+        annotations:
+          summary: "No sales recorded in past hour"
+          description: "Check if system is functioning properly"
