@@ -3,6 +3,7 @@ IMS 2.0 - Customers Router
 ===========================
 Customer and patient management endpoints
 """
+
 from fastapi import APIRouter, HTTPException, Depends, Query
 from pydantic import BaseModel, Field
 from typing import List, Optional
@@ -22,6 +23,7 @@ router = APIRouter()
 # ============================================================================
 # SCHEMAS
 # ============================================================================
+
 
 class PatientCreate(BaseModel):
     name: str
@@ -50,13 +52,14 @@ class CustomerUpdate(BaseModel):
 # ENDPOINTS
 # ============================================================================
 
+
 @router.get("/")
 async def list_customers(
     search: Optional[str] = Query(None),
     customer_type: Optional[str] = Query(None),
     skip: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=100),
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
     """List customers with optional filtering"""
     repo = get_customer_repository()
@@ -69,7 +72,9 @@ async def list_customers(
 
         # If search provided, use search method
         if search:
-            customers = repo.search_customers(search, current_user.get("active_store_id"))
+            customers = repo.search_customers(
+                search, current_user.get("active_store_id")
+            )
         else:
             customers = repo.find_many(filter_dict, skip=skip, limit=limit)
 
@@ -82,8 +87,7 @@ async def list_customers(
 
 @router.post("/", status_code=201)
 async def create_customer(
-    customer: CustomerCreate,
-    current_user: dict = Depends(get_current_user)
+    customer: CustomerCreate, current_user: dict = Depends(get_current_user)
 ):
     """Create a new customer"""
     repo = get_customer_repository()
@@ -92,7 +96,9 @@ async def create_customer(
         # Check if mobile already exists
         existing = repo.find_by_mobile(customer.mobile)
         if existing:
-            raise HTTPException(status_code=400, detail="Customer with this mobile already exists")
+            raise HTTPException(
+                status_code=400, detail="Customer with this mobile already exists"
+            )
 
         # Prepare customer data
         customer_data = {
@@ -107,35 +113,41 @@ async def create_customer(
             "store_credit": 0,
             "total_purchases": 0,
             "is_active": True,
-            "patients": []
+            "patients": [],
         }
 
         # Add default patient (self) if no patients provided
         if customer.patients:
             for p in customer.patients:
-                customer_data["patients"].append({
-                    "patient_id": str(uuid.uuid4()),
-                    "name": p.name,
-                    "mobile": p.mobile,
-                    "dob": p.dob.isoformat() if p.dob else None,
-                    "anniversary": p.anniversary.isoformat() if p.anniversary else None,
-                    "relation": "Self" if p.name == customer.name else "Other"
-                })
+                customer_data["patients"].append(
+                    {
+                        "patient_id": str(uuid.uuid4()),
+                        "name": p.name,
+                        "mobile": p.mobile,
+                        "dob": p.dob.isoformat() if p.dob else None,
+                        "anniversary": (
+                            p.anniversary.isoformat() if p.anniversary else None
+                        ),
+                        "relation": "Self" if p.name == customer.name else "Other",
+                    }
+                )
         else:
             # Add self as default patient
-            customer_data["patients"].append({
-                "patient_id": str(uuid.uuid4()),
-                "name": customer.name,
-                "mobile": customer.mobile,
-                "relation": "Self"
-            })
+            customer_data["patients"].append(
+                {
+                    "patient_id": str(uuid.uuid4()),
+                    "name": customer.name,
+                    "mobile": customer.mobile,
+                    "relation": "Self",
+                }
+            )
 
         created = repo.create(customer_data)
         if created:
             return {
                 "customer_id": created["customer_id"],
                 "name": created["name"],
-                "patients": created.get("patients", [])
+                "patients": created.get("patients", []),
             }
 
         raise HTTPException(status_code=500, detail="Failed to create customer")
@@ -146,8 +158,7 @@ async def create_customer(
 
 @router.get("/search")
 async def search_customers(
-    q: str = Query(..., min_length=3),
-    current_user: dict = Depends(get_current_user)
+    q: str = Query(..., min_length=3), current_user: dict = Depends(get_current_user)
 ):
     """Search customers by name, mobile, or email"""
     repo = get_customer_repository()
@@ -162,8 +173,7 @@ async def search_customers(
 
 @router.get("/search/phone")
 async def search_customer_by_phone(
-    phone: str = Query(...),
-    current_user: dict = Depends(get_current_user)
+    phone: str = Query(...), current_user: dict = Depends(get_current_user)
 ):
     """Search customer by phone number (for quick lookup)"""
     repo = get_customer_repository()
@@ -180,8 +190,7 @@ async def search_customer_by_phone(
 
 @router.get("/mobile/{mobile}")
 async def get_customer_by_mobile(
-    mobile: str,
-    current_user: dict = Depends(get_current_user)
+    mobile: str, current_user: dict = Depends(get_current_user)
 ):
     """Get customer by mobile number"""
     repo = get_customer_repository()
@@ -196,8 +205,7 @@ async def get_customer_by_mobile(
 
 @router.get("/{customer_id}")
 async def get_customer(
-    customer_id: str,
-    current_user: dict = Depends(get_current_user)
+    customer_id: str, current_user: dict = Depends(get_current_user)
 ):
     """Get customer by ID"""
     repo = get_customer_repository()
@@ -214,7 +222,7 @@ async def get_customer(
 async def update_customer(
     customer_id: str,
     customer: CustomerUpdate,
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
     """Update customer details"""
     repo = get_customer_repository()
@@ -237,7 +245,7 @@ async def update_customer(
 async def add_patient(
     customer_id: str,
     patient: PatientCreate,
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
     """Add a patient to customer"""
     repo = get_customer_repository()
@@ -252,8 +260,10 @@ async def add_patient(
             "name": patient.name,
             "mobile": patient.mobile,
             "dob": patient.dob.isoformat() if patient.dob else None,
-            "anniversary": patient.anniversary.isoformat() if patient.anniversary else None,
-            "relation": "Family"
+            "anniversary": (
+                patient.anniversary.isoformat() if patient.anniversary else None
+            ),
+            "relation": "Family",
         }
 
         if repo.add_patient(customer_id, patient_data):
@@ -266,8 +276,7 @@ async def add_patient(
 
 @router.get("/{customer_id}/orders")
 async def get_customer_orders(
-    customer_id: str,
-    current_user: dict = Depends(get_current_user)
+    customer_id: str, current_user: dict = Depends(get_current_user)
 ):
     """Get orders for a customer"""
     # This will be implemented when we connect OrderRepository
@@ -276,8 +285,7 @@ async def get_customer_orders(
 
 @router.get("/{customer_id}/prescriptions")
 async def get_customer_prescriptions(
-    customer_id: str,
-    current_user: dict = Depends(get_current_user)
+    customer_id: str, current_user: dict = Depends(get_current_user)
 ):
     """Get prescriptions for a customer"""
     # This will be implemented when we connect PrescriptionRepository
@@ -288,7 +296,7 @@ async def get_customer_prescriptions(
 async def add_loyalty_points(
     customer_id: str,
     points: int = Query(..., ge=1),
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
     """Add loyalty points to customer"""
     repo = get_customer_repository()
@@ -301,7 +309,7 @@ async def add_loyalty_points(
         if repo.add_loyalty_points(customer_id, points):
             return {
                 "message": f"Added {points} loyalty points",
-                "new_total": existing.get("loyalty_points", 0) + points
+                "new_total": existing.get("loyalty_points", 0) + points,
             }
 
         raise HTTPException(status_code=500, detail="Failed to add loyalty points")
@@ -313,7 +321,7 @@ async def add_loyalty_points(
 async def add_store_credit(
     customer_id: str,
     amount: float = Query(..., gt=0),
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
     """Add store credit to customer"""
     repo = get_customer_repository()
@@ -326,7 +334,7 @@ async def add_store_credit(
         if repo.add_store_credit(customer_id, amount):
             return {
                 "message": f"Added ₹{amount} store credit",
-                "new_total": existing.get("store_credit", 0) + amount
+                "new_total": existing.get("store_credit", 0) + amount,
             }
 
         raise HTTPException(status_code=500, detail="Failed to add store credit")

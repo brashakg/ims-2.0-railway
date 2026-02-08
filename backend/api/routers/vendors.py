@@ -3,6 +3,7 @@ IMS 2.0 - Vendors Router
 =========================
 Real database queries for vendor and purchase order management
 """
+
 from fastapi import APIRouter, HTTPException, Depends, Query
 from pydantic import BaseModel
 from typing import List, Optional
@@ -22,6 +23,7 @@ router = APIRouter()
 # ============================================================================
 # SCHEMAS
 # ============================================================================
+
 
 class VendorCreate(BaseModel):
     legal_name: str
@@ -86,17 +88,18 @@ class GRNCreate(BaseModel):
 # HELPER FUNCTIONS
 # ============================================================================
 
+
 def generate_po_number(store_id: str) -> str:
     """Generate unique PO number"""
     prefix = store_id[:3].upper() if store_id else "HQ"
-    timestamp = datetime.now().strftime('%y%m%d%H%M')
+    timestamp = datetime.now().strftime("%y%m%d%H%M")
     return f"PO-{prefix}-{timestamp}"
 
 
 def generate_grn_number(store_id: str) -> str:
     """Generate unique GRN number"""
     prefix = store_id[:3].upper() if store_id else "HQ"
-    timestamp = datetime.now().strftime('%y%m%d%H%M')
+    timestamp = datetime.now().strftime("%y%m%d%H%M")
     return f"GRN-{prefix}-{timestamp}"
 
 
@@ -104,13 +107,14 @@ def generate_grn_number(store_id: str) -> str:
 # VENDOR ENDPOINTS
 # ============================================================================
 
+
 @router.get("/")
 async def list_vendors(
     search: Optional[str] = Query(None),
     is_active: Optional[bool] = Query(None),
     skip: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=100),
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
     """List all vendors with optional search"""
     vendor_repo = get_vendor_repository()
@@ -133,8 +137,7 @@ async def list_vendors(
 
 @router.post("/", status_code=201)
 async def create_vendor(
-    vendor: VendorCreate,
-    current_user: dict = Depends(get_current_user)
+    vendor: VendorCreate, current_user: dict = Depends(get_current_user)
 ):
     """Create a new vendor"""
     vendor_repo = get_vendor_repository()
@@ -145,34 +148,35 @@ async def create_vendor(
         if vendor.gstin:
             existing = vendor_repo.find_one({"gstin": vendor.gstin})
             if existing:
-                raise HTTPException(status_code=400, detail="Vendor with this GSTIN already exists")
+                raise HTTPException(
+                    status_code=400, detail="Vendor with this GSTIN already exists"
+                )
 
-        vendor_repo.create({
-            "vendor_id": vendor_id,
-            "legal_name": vendor.legal_name,
-            "trade_name": vendor.trade_name,
-            "vendor_type": vendor.vendor_type,
-            "gstin_status": vendor.gstin_status,
-            "gstin": vendor.gstin,
-            "address": vendor.address,
-            "city": vendor.city,
-            "state": vendor.state,
-            "mobile": vendor.mobile,
-            "email": vendor.email,
-            "credit_days": vendor.credit_days,
-            "is_active": True,
-            "created_by": current_user.get("user_id"),
-            "created_at": datetime.now().isoformat()
-        })
+        vendor_repo.create(
+            {
+                "vendor_id": vendor_id,
+                "legal_name": vendor.legal_name,
+                "trade_name": vendor.trade_name,
+                "vendor_type": vendor.vendor_type,
+                "gstin_status": vendor.gstin_status,
+                "gstin": vendor.gstin,
+                "address": vendor.address,
+                "city": vendor.city,
+                "state": vendor.state,
+                "mobile": vendor.mobile,
+                "email": vendor.email,
+                "credit_days": vendor.credit_days,
+                "is_active": True,
+                "created_by": current_user.get("user_id"),
+                "created_at": datetime.now().isoformat(),
+            }
+        )
 
     return {"vendor_id": vendor_id, "message": "Vendor created successfully"}
 
 
 @router.get("/{vendor_id}")
-async def get_vendor(
-    vendor_id: str,
-    current_user: dict = Depends(get_current_user)
-):
+async def get_vendor(vendor_id: str, current_user: dict = Depends(get_current_user)):
     """Get vendor details"""
     vendor_repo = get_vendor_repository()
 
@@ -190,7 +194,7 @@ async def get_vendor(
 async def update_vendor(
     vendor_id: str,
     updates: VendorUpdate,
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
     """Update vendor details"""
     vendor_repo = get_vendor_repository()
@@ -213,6 +217,7 @@ async def update_vendor(
 # PURCHASE ORDER ENDPOINTS
 # ============================================================================
 
+
 @router.get("/purchase-orders")
 async def list_pos(
     vendor_id: Optional[str] = Query(None),
@@ -220,7 +225,7 @@ async def list_pos(
     store_id: Optional[str] = Query(None),
     skip: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=100),
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
     """List purchase orders with filters"""
     po_repo = get_purchase_order_repository()
@@ -243,10 +248,7 @@ async def list_pos(
 
 
 @router.post("/purchase-orders", status_code=201)
-async def create_po(
-    po: POCreate,
-    current_user: dict = Depends(get_current_user)
-):
+async def create_po(po: POCreate, current_user: dict = Depends(get_current_user)):
     """Create a new purchase order"""
     po_repo = get_purchase_order_repository()
     vendor_repo = get_vendor_repository()
@@ -266,36 +268,37 @@ async def create_po(
     total = subtotal + tax
 
     if po_repo:
-        po_repo.create({
-            "po_id": po_id,
-            "po_number": po_number,
-            "vendor_id": po.vendor_id,
-            "vendor_name": vendor.get("trade_name") if vendor_repo and vendor else None,
-            "delivery_store_id": po.delivery_store_id,
-            "items": [item.model_dump() for item in po.items],
-            "subtotal": subtotal,
-            "tax_amount": tax,
-            "total_amount": total,
-            "expected_date": po.expected_date,
-            "notes": po.notes,
-            "status": "DRAFT",
-            "created_by": current_user.get("user_id"),
-            "created_at": datetime.now().isoformat()
-        })
+        po_repo.create(
+            {
+                "po_id": po_id,
+                "po_number": po_number,
+                "vendor_id": po.vendor_id,
+                "vendor_name": (
+                    vendor.get("trade_name") if vendor_repo and vendor else None
+                ),
+                "delivery_store_id": po.delivery_store_id,
+                "items": [item.model_dump() for item in po.items],
+                "subtotal": subtotal,
+                "tax_amount": tax,
+                "total_amount": total,
+                "expected_date": po.expected_date,
+                "notes": po.notes,
+                "status": "DRAFT",
+                "created_by": current_user.get("user_id"),
+                "created_at": datetime.now().isoformat(),
+            }
+        )
 
     return {
         "po_id": po_id,
         "po_number": po_number,
         "total_amount": total,
-        "message": "Purchase order created"
+        "message": "Purchase order created",
     }
 
 
 @router.get("/purchase-orders/{po_id}")
-async def get_po(
-    po_id: str,
-    current_user: dict = Depends(get_current_user)
-):
+async def get_po(po_id: str, current_user: dict = Depends(get_current_user)):
     """Get purchase order details"""
     po_repo = get_purchase_order_repository()
 
@@ -310,10 +313,7 @@ async def get_po(
 
 
 @router.post("/purchase-orders/{po_id}/send")
-async def send_po(
-    po_id: str,
-    current_user: dict = Depends(get_current_user)
-):
+async def send_po(po_id: str, current_user: dict = Depends(get_current_user)):
     """Send PO to vendor (mark as sent)"""
     po_repo = get_purchase_order_repository()
 
@@ -325,20 +325,21 @@ async def send_po(
         if po.get("status") != "DRAFT":
             raise HTTPException(status_code=400, detail="Only draft POs can be sent")
 
-        po_repo.update(po_id, {
-            "status": "SENT",
-            "sent_at": datetime.now().isoformat(),
-            "sent_by": current_user.get("user_id")
-        })
+        po_repo.update(
+            po_id,
+            {
+                "status": "SENT",
+                "sent_at": datetime.now().isoformat(),
+                "sent_by": current_user.get("user_id"),
+            },
+        )
 
     return {"message": "PO sent to vendor", "po_id": po_id}
 
 
 @router.post("/purchase-orders/{po_id}/cancel")
 async def cancel_po(
-    po_id: str,
-    reason: str = Query(...),
-    current_user: dict = Depends(get_current_user)
+    po_id: str, reason: str = Query(...), current_user: dict = Depends(get_current_user)
 ):
     """Cancel a purchase order"""
     po_repo = get_purchase_order_repository()
@@ -351,12 +352,15 @@ async def cancel_po(
         if po.get("status") in ["RECEIVED", "CANCELLED"]:
             raise HTTPException(status_code=400, detail="Cannot cancel this PO")
 
-        po_repo.update(po_id, {
-            "status": "CANCELLED",
-            "cancelled_at": datetime.now().isoformat(),
-            "cancelled_by": current_user.get("user_id"),
-            "cancellation_reason": reason
-        })
+        po_repo.update(
+            po_id,
+            {
+                "status": "CANCELLED",
+                "cancelled_at": datetime.now().isoformat(),
+                "cancelled_by": current_user.get("user_id"),
+                "cancellation_reason": reason,
+            },
+        )
 
     return {"message": "PO cancelled", "po_id": po_id}
 
@@ -365,6 +369,7 @@ async def cancel_po(
 # GRN (GOODS RECEIVED NOTE) ENDPOINTS
 # ============================================================================
 
+
 @router.get("/grn")
 async def list_grns(
     store_id: Optional[str] = Query(None),
@@ -372,7 +377,7 @@ async def list_grns(
     po_id: Optional[str] = Query(None),
     skip: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=100),
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
     """List GRNs with filters"""
     grn_repo = get_grn_repository()
@@ -395,10 +400,7 @@ async def list_grns(
 
 
 @router.post("/grn", status_code=201)
-async def create_grn(
-    grn: GRNCreate,
-    current_user: dict = Depends(get_current_user)
-):
+async def create_grn(grn: GRNCreate, current_user: dict = Depends(get_current_user)):
     """Create a new GRN"""
     grn_repo = get_grn_repository()
     po_repo = get_purchase_order_repository()
@@ -414,7 +416,9 @@ async def create_grn(
             raise HTTPException(status_code=404, detail="Purchase order not found")
 
         if po.get("status") not in ["SENT", "PARTIAL"]:
-            raise HTTPException(status_code=400, detail="PO is not in receivable status")
+            raise HTTPException(
+                status_code=400, detail="PO is not in receivable status"
+            )
 
     # Calculate totals
     total_received = sum(item.received_qty for item in grn.items)
@@ -422,39 +426,38 @@ async def create_grn(
     total_rejected = sum(item.rejected_qty for item in grn.items)
 
     if grn_repo:
-        grn_repo.create({
-            "grn_id": grn_id,
-            "grn_number": grn_number,
-            "po_id": grn.po_id,
-            "po_number": po.get("po_number") if po else None,
-            "vendor_id": po.get("vendor_id") if po else None,
-            "vendor_name": po.get("vendor_name") if po else None,
-            "store_id": current_user.get("active_store_id"),
-            "vendor_invoice_no": grn.vendor_invoice_no,
-            "vendor_invoice_date": grn.vendor_invoice_date,
-            "items": [item.model_dump() for item in grn.items],
-            "total_received": total_received,
-            "total_accepted": total_accepted,
-            "total_rejected": total_rejected,
-            "notes": grn.notes,
-            "status": "PENDING",
-            "created_by": current_user.get("user_id"),
-            "created_at": datetime.now().isoformat()
-        })
+        grn_repo.create(
+            {
+                "grn_id": grn_id,
+                "grn_number": grn_number,
+                "po_id": grn.po_id,
+                "po_number": po.get("po_number") if po else None,
+                "vendor_id": po.get("vendor_id") if po else None,
+                "vendor_name": po.get("vendor_name") if po else None,
+                "store_id": current_user.get("active_store_id"),
+                "vendor_invoice_no": grn.vendor_invoice_no,
+                "vendor_invoice_date": grn.vendor_invoice_date,
+                "items": [item.model_dump() for item in grn.items],
+                "total_received": total_received,
+                "total_accepted": total_accepted,
+                "total_rejected": total_rejected,
+                "notes": grn.notes,
+                "status": "PENDING",
+                "created_by": current_user.get("user_id"),
+                "created_at": datetime.now().isoformat(),
+            }
+        )
 
     return {
         "grn_id": grn_id,
         "grn_number": grn_number,
         "total_received": total_received,
-        "message": "GRN created"
+        "message": "GRN created",
     }
 
 
 @router.get("/grn/{grn_id}")
-async def get_grn(
-    grn_id: str,
-    current_user: dict = Depends(get_current_user)
-):
+async def get_grn(grn_id: str, current_user: dict = Depends(get_current_user)):
     """Get GRN details"""
     grn_repo = get_grn_repository()
 
@@ -469,10 +472,7 @@ async def get_grn(
 
 
 @router.post("/grn/{grn_id}/accept")
-async def accept_grn(
-    grn_id: str,
-    current_user: dict = Depends(get_current_user)
-):
+async def accept_grn(grn_id: str, current_user: dict = Depends(get_current_user)):
     """Accept GRN and add stock"""
     grn_repo = get_grn_repository()
     stock_repo = get_stock_repository()
@@ -497,15 +497,18 @@ async def accept_grn(
                     product_id=item.get("product_id"),
                     quantity=item.get("accepted_qty"),
                     source_type="GRN",
-                    source_id=grn_id
+                    source_id=grn_id,
                 )
 
     # Update GRN status
-    grn_repo.update(grn_id, {
-        "status": "ACCEPTED",
-        "accepted_at": datetime.now().isoformat(),
-        "accepted_by": current_user.get("user_id")
-    })
+    grn_repo.update(
+        grn_id,
+        {
+            "status": "ACCEPTED",
+            "accepted_at": datetime.now().isoformat(),
+            "accepted_by": current_user.get("user_id"),
+        },
+    )
 
     # Update PO status
     if po_repo and grn.get("po_id"):
@@ -514,15 +517,15 @@ async def accept_grn(
     return {
         "message": "GRN accepted, stock added",
         "grn_id": grn_id,
-        "items_added": len([i for i in grn.get("items", []) if i.get("accepted_qty", 0) > 0])
+        "items_added": len(
+            [i for i in grn.get("items", []) if i.get("accepted_qty", 0) > 0]
+        ),
     }
 
 
 @router.post("/grn/{grn_id}/escalate")
 async def escalate_grn(
-    grn_id: str,
-    note: str = Query(...),
-    current_user: dict = Depends(get_current_user)
+    grn_id: str, note: str = Query(...), current_user: dict = Depends(get_current_user)
 ):
     """Escalate GRN to HQ for review"""
     grn_repo = get_grn_repository()
@@ -532,11 +535,14 @@ async def escalate_grn(
         if not grn:
             raise HTTPException(status_code=404, detail="GRN not found")
 
-        grn_repo.update(grn_id, {
-            "status": "ESCALATED",
-            "escalated_at": datetime.now().isoformat(),
-            "escalated_by": current_user.get("user_id"),
-            "escalation_note": note
-        })
+        grn_repo.update(
+            grn_id,
+            {
+                "status": "ESCALATED",
+                "escalated_at": datetime.now().isoformat(),
+                "escalated_by": current_user.get("user_id"),
+                "escalation_note": note,
+            },
+        )
 
     return {"message": "GRN escalated to HQ", "grn_id": grn_id}

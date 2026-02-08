@@ -8,6 +8,7 @@ Powered by Anthropic Claude - the most intelligent AI assistant.
 
 *** STRICTLY SUPERADMIN ONLY - NO EXCEPTIONS ***
 """
+
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 from typing import Optional, Dict, Any, List
@@ -26,7 +27,9 @@ logger = logging.getLogger(__name__)
 
 # Anthropic Claude Configuration
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
-CLAUDE_MODEL = os.getenv("JARVIS_MODEL", "claude-sonnet-4-20250514")  # Default to Claude 3.5 Sonnet
+CLAUDE_MODEL = os.getenv(
+    "JARVIS_MODEL", "claude-sonnet-4-20250514"
+)  # Default to Claude 3.5 Sonnet
 
 router = APIRouter()
 
@@ -34,6 +37,7 @@ router = APIRouter()
 # ============================================================================
 # SUPERADMIN-ONLY GUARD - CRITICAL SECURITY
 # ============================================================================
+
 
 def require_superadmin(current_user: dict = Depends(get_current_user)):
     """Strict SUPERADMIN-only access guard"""
@@ -46,6 +50,7 @@ def require_superadmin(current_user: dict = Depends(get_current_user)):
 # ============================================================================
 # SCHEMAS
 # ============================================================================
+
 
 class JarvisQueryType(str, Enum):
     ANALYTICS = "analytics"
@@ -77,10 +82,14 @@ class JarvisCommand(BaseModel):
 
 import sys
 import os
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
+sys.path.insert(
+    0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+)
 
 try:
     from database.connection import get_seeded_db
+
     DB_AVAILABLE = True
 except ImportError:
     DB_AVAILABLE = False
@@ -102,6 +111,7 @@ def get_db_collection(name: str):
 # JARVIS KNOWLEDGE BASE & ANALYTICS ENGINE
 # ============================================================================
 
+
 class JarvisAnalyticsEngine:
     """Core analytics engine for JARVIS - Queries real database"""
 
@@ -119,19 +129,35 @@ class JarvisAnalyticsEngine:
                         "yesterday": int(metrics["revenue"]["total"] // 30 * 0.95),
                         "this_week": metrics["revenue"]["total"] // 4,
                         "this_month": metrics["revenue"]["total"],
-                        "last_month": int(metrics["revenue"]["total"] / (1 + metrics["revenue"]["growth_vs_last_month"] / 100)),
+                        "last_month": int(
+                            metrics["revenue"]["total"]
+                            / (1 + metrics["revenue"]["growth_vs_last_month"] / 100)
+                        ),
                         "growth_percentage": metrics["revenue"]["growth_vs_last_month"],
                         "target": metrics["revenue"]["target"],
-                        "achievement_percent": metrics["revenue"]["achievement_percent"],
-                        "trend": "up" if metrics["revenue"]["growth_vs_last_month"] > 0 else "down"
+                        "achievement_percent": metrics["revenue"][
+                            "achievement_percent"
+                        ],
+                        "trend": (
+                            "up"
+                            if metrics["revenue"]["growth_vs_last_month"] > 0
+                            else "down"
+                        ),
                     },
                     "orders": {
                         "today": metrics["orders"]["total"] // 30,
                         "pending": metrics["orders"]["pending"],
-                        "in_progress": metrics["orders"]["total"] - metrics["orders"]["completed"] - metrics["orders"]["cancelled"],
-                        "ready_for_delivery": metrics["orders"]["completed"] - (metrics["orders"]["completed"] - 10),
+                        "in_progress": metrics["orders"]["total"]
+                        - metrics["orders"]["completed"]
+                        - metrics["orders"]["cancelled"],
+                        "ready_for_delivery": metrics["orders"]["completed"]
+                        - (metrics["orders"]["completed"] - 10),
                         "average_order_value": metrics["orders"]["avg_value"],
-                        "conversion_rate": metrics["clinical"]["conversion_rate"] * 100 if "clinical" in metrics else 34.5
+                        "conversion_rate": (
+                            metrics["clinical"]["conversion_rate"] * 100
+                            if "clinical" in metrics
+                            else 34.5
+                        ),
                     },
                     "inventory": {
                         "total_products": metrics["inventory"]["total_items"],
@@ -141,24 +167,31 @@ class JarvisAnalyticsEngine:
                         "fast_moving_count": 145,
                         "slow_moving_count": 67,
                         "expiring_soon": metrics["inventory"]["expiring_soon"],
-                        "turnover_rate": metrics["inventory"]["turnover_rate"]
+                        "turnover_rate": metrics["inventory"]["turnover_rate"],
                     },
                     "customers": {
                         "total": metrics["customers"]["total_active"],
                         "new_this_month": metrics["customers"]["new_this_month"],
                         "returning_rate": metrics["customers"]["repeat_rate"] * 100,
-                        "average_lifetime_value": metrics["customers"]["avg_lifetime_value"],
+                        "average_lifetime_value": metrics["customers"][
+                            "avg_lifetime_value"
+                        ],
                         "nps_score": metrics["customers"]["nps_score"],
-                        "top_segment": "Premium Eyewear"
+                        "top_segment": "Premium Eyewear",
                     },
                     "staff": {
                         "total_employees": metrics["staff"]["total_employees"],
                         "present_today": metrics["staff"]["present_today"],
-                        "on_leave": metrics["staff"]["total_employees"] - metrics["staff"]["present_today"],
+                        "on_leave": metrics["staff"]["total_employees"]
+                        - metrics["staff"]["present_today"],
                         "top_performer": metrics["staff"]["top_performer"],
-                        "average_sales_per_staff": metrics["staff"]["top_performer_sales"] // metrics["staff"]["total_employees"],
-                        "attendance_rate": metrics["staff"]["avg_attendance_rate"] * 100
-                    }
+                        "average_sales_per_staff": metrics["staff"][
+                            "top_performer_sales"
+                        ]
+                        // metrics["staff"]["total_employees"],
+                        "attendance_rate": metrics["staff"]["avg_attendance_rate"]
+                        * 100,
+                    },
                 }
 
         # Return empty structure if database not available
@@ -172,7 +205,7 @@ class JarvisAnalyticsEngine:
                 "growth_percentage": 0,
                 "target": 0,
                 "achievement_percent": 0,
-                "trend": "stable"
+                "trend": "stable",
             },
             "orders": {
                 "today": 0,
@@ -180,7 +213,7 @@ class JarvisAnalyticsEngine:
                 "in_progress": 0,
                 "ready_for_delivery": 0,
                 "average_order_value": 0,
-                "conversion_rate": 0
+                "conversion_rate": 0,
             },
             "inventory": {
                 "total_products": 0,
@@ -190,7 +223,7 @@ class JarvisAnalyticsEngine:
                 "fast_moving_count": 0,
                 "slow_moving_count": 0,
                 "expiring_soon": 0,
-                "turnover_rate": 0
+                "turnover_rate": 0,
             },
             "customers": {
                 "total": 0,
@@ -198,7 +231,7 @@ class JarvisAnalyticsEngine:
                 "returning_rate": 0,
                 "average_lifetime_value": 0,
                 "nps_score": 0,
-                "top_segment": "N/A"
+                "top_segment": "N/A",
             },
             "staff": {
                 "total_employees": 0,
@@ -206,8 +239,8 @@ class JarvisAnalyticsEngine:
                 "on_leave": 0,
                 "top_performer": "N/A",
                 "average_sales_per_staff": 0,
-                "attendance_rate": 0
-            }
+                "attendance_rate": 0,
+            },
         }
 
     @staticmethod
@@ -220,7 +253,9 @@ class JarvisAnalyticsEngine:
 
         if sales_col:
             # Get last 30 days of sales
-            sales_records = list(sales_col.find({"store_id": "store-001"}).sort([("date", -1)]).limit(30))
+            sales_records = list(
+                sales_col.find({"store_id": "store-001"}).sort([("date", -1)]).limit(30)
+            )
 
             if sales_records:
                 # Calculate totals
@@ -228,7 +263,12 @@ class JarvisAnalyticsEngine:
                 total_orders = sum(s.get("order_count", 0) for s in sales_records)
 
                 # Category breakdown from latest records
-                category_totals = {"frames": 0, "lenses": 0, "sunglasses": 0, "accessories": 0}
+                category_totals = {
+                    "frames": 0,
+                    "lenses": 0,
+                    "sunglasses": 0,
+                    "accessories": 0,
+                }
                 for s in sales_records:
                     breakdown = s.get("category_breakdown", {})
                     for cat, amount in breakdown.items():
@@ -247,18 +287,58 @@ class JarvisAnalyticsEngine:
 
                 return {
                     "top_selling_categories": [
-                        {"category": "Frames", "sales": category_totals["frames"], "units": total_orders // 3, "growth": 12.5},
-                        {"category": "Lenses", "sales": category_totals["lenses"], "units": total_orders // 3, "growth": 8.3},
-                        {"category": "Sunglasses", "sales": category_totals["sunglasses"], "units": total_orders // 5, "growth": 15.2},
-                        {"category": "Accessories", "sales": category_totals["accessories"], "units": total_orders // 4, "growth": 5.1},
+                        {
+                            "category": "Frames",
+                            "sales": category_totals["frames"],
+                            "units": total_orders // 3,
+                            "growth": 12.5,
+                        },
+                        {
+                            "category": "Lenses",
+                            "sales": category_totals["lenses"],
+                            "units": total_orders // 3,
+                            "growth": 8.3,
+                        },
+                        {
+                            "category": "Sunglasses",
+                            "sales": category_totals["sunglasses"],
+                            "units": total_orders // 5,
+                            "growth": 15.2,
+                        },
+                        {
+                            "category": "Accessories",
+                            "sales": category_totals["accessories"],
+                            "units": total_orders // 4,
+                            "growth": 5.1,
+                        },
                     ],
                     "top_selling_products": [
-                        {"name": "Ray-Ban Aviator Classic", "sku": "BV-FR-RAY-001", "sales": 89, "revenue": 445000},
-                        {"name": "Zeiss Progressive Individual", "sku": "BV-LS-ZEI-001", "sales": 67, "revenue": 234500},
-                        {"name": "Ray-Ban Wayfarer Sunglasses", "sku": "BV-SG-RAY-001", "sales": 54, "revenue": 108000},
+                        {
+                            "name": "Ray-Ban Aviator Classic",
+                            "sku": "BV-FR-RAY-001",
+                            "sales": 89,
+                            "revenue": 445000,
+                        },
+                        {
+                            "name": "Zeiss Progressive Individual",
+                            "sku": "BV-LS-ZEI-001",
+                            "sales": 67,
+                            "revenue": 234500,
+                        },
+                        {
+                            "name": "Ray-Ban Wayfarer Sunglasses",
+                            "sku": "BV-SG-RAY-001",
+                            "sales": 54,
+                            "revenue": 108000,
+                        },
                     ],
                     "sales_by_store": [
-                        {"store": "Better Vision - CP", "sales": total_revenue, "target": 2500000, "achievement": round(total_revenue / 25000, 2)},
+                        {
+                            "store": "Better Vision - CP",
+                            "sales": total_revenue,
+                            "target": 2500000,
+                            "achievement": round(total_revenue / 25000, 2),
+                        },
                     ],
                     "peak_hours": [
                         {"hour": "11:00-12:00", "sales": 125000, "footfall": 45},
@@ -269,11 +349,11 @@ class JarvisAnalyticsEngine:
                         "UPI": round(payment_totals["upi"] / total_payments * 100, 1),
                         "Card": round(payment_totals["card"] / total_payments * 100, 1),
                         "Cash": round(payment_totals["cash"] / total_payments * 100, 1),
-                        "EMI": 8.0
+                        "EMI": 8.0,
                     },
                     "total_revenue_30_days": total_revenue,
                     "total_orders_30_days": total_orders,
-                    "avg_daily_revenue": total_revenue // 30 if total_revenue else 0
+                    "avg_daily_revenue": total_revenue // 30 if total_revenue else 0,
                 }
 
         # Return empty structure if database not available
@@ -285,7 +365,7 @@ class JarvisAnalyticsEngine:
             "payment_methods": {},
             "total_revenue_30_days": 0,
             "total_orders_30_days": 0,
-            "avg_daily_revenue": 0
+            "avg_daily_revenue": 0,
         }
 
     @staticmethod
@@ -305,24 +385,44 @@ class JarvisAnalyticsEngine:
 
         # Get alerts from database
         if alerts_col:
-            db_alerts = list(alerts_col.find({"alert_type": {"$in": ["LOW_STOCK", "OUT_OF_STOCK", "EXPIRING_SOON"]}}))
+            db_alerts = list(
+                alerts_col.find(
+                    {
+                        "alert_type": {
+                            "$in": ["LOW_STOCK", "OUT_OF_STOCK", "EXPIRING_SOON"]
+                        }
+                    }
+                )
+            )
             for alert in db_alerts:
                 if alert.get("alert_type") == "LOW_STOCK":
-                    critical_alerts.append({
-                        "type": "low_stock",
-                        "sku": alert.get("entity_id", ""),
-                        "product": alert.get("message", "").split(" has")[0] if "has" in alert.get("message", "") else alert.get("title", ""),
-                        "quantity": 5,
-                        "reorder_point": 10
-                    })
+                    critical_alerts.append(
+                        {
+                            "type": "low_stock",
+                            "sku": alert.get("entity_id", ""),
+                            "product": (
+                                alert.get("message", "").split(" has")[0]
+                                if "has" in alert.get("message", "")
+                                else alert.get("title", "")
+                            ),
+                            "quantity": 5,
+                            "reorder_point": 10,
+                        }
+                    )
                 elif alert.get("alert_type") == "OUT_OF_STOCK":
-                    critical_alerts.append({
-                        "type": "out_of_stock",
-                        "sku": alert.get("entity_id", ""),
-                        "product": alert.get("message", "").split(" is")[0] if "is" in alert.get("message", "") else alert.get("title", ""),
-                        "last_sold": "recently",
-                        "demand": "high"
-                    })
+                    critical_alerts.append(
+                        {
+                            "type": "out_of_stock",
+                            "sku": alert.get("entity_id", ""),
+                            "product": (
+                                alert.get("message", "").split(" is")[0]
+                                if "is" in alert.get("message", "")
+                                else alert.get("title", "")
+                            ),
+                            "last_sold": "recently",
+                            "demand": "high",
+                        }
+                    )
 
         # Get stock data for analysis
         if stock_col:
@@ -332,23 +432,33 @@ class JarvisAnalyticsEngine:
             for item in all_stock:
                 qty = item.get("quantity", 0)
                 if qty > 0 and qty <= 5:
-                    reorder_recommendations.append({
-                        "sku": item.get("sku", ""),
-                        "product": item.get("product_name", "Unknown"),
-                        "current": qty,
-                        "recommended_order": max(20, qty * 4),
-                        "supplier": item.get("vendor", "Default Supplier")
-                    })
+                    reorder_recommendations.append(
+                        {
+                            "sku": item.get("sku", ""),
+                            "product": item.get("product_name", "Unknown"),
+                            "current": qty,
+                            "recommended_order": max(20, qty * 4),
+                            "supplier": item.get("vendor", "Default Supplier"),
+                        }
+                    )
 
             # Calculate inventory metrics
-            total_value = sum(s.get("quantity", 0) * s.get("cost_price", 0) for s in all_stock)
-            low_stock_count = len([s for s in all_stock if 0 < s.get("quantity", 0) <= 5])
-            out_of_stock_count = len([s for s in all_stock if s.get("quantity", 0) <= 0])
+            total_value = sum(
+                s.get("quantity", 0) * s.get("cost_price", 0) for s in all_stock
+            )
+            low_stock_count = len(
+                [s for s in all_stock if 0 < s.get("quantity", 0) <= 5]
+            )
+            out_of_stock_count = len(
+                [s for s in all_stock if s.get("quantity", 0) <= 0]
+            )
             total_items = len(all_stock)
 
             # Calculate health score (0-100)
             if total_items > 0:
-                healthy_ratio = (total_items - low_stock_count - out_of_stock_count) / total_items
+                healthy_ratio = (
+                    total_items - low_stock_count - out_of_stock_count
+                ) / total_items
                 inventory_health_score = round(healthy_ratio * 100)
 
         # Get metrics from business_metrics collection
@@ -356,7 +466,9 @@ class JarvisAnalyticsEngine:
             metrics = metrics_col.find_one({"store_id": "store-001"})
             if metrics and "inventory" in metrics:
                 turnover_ratio = metrics["inventory"].get("turnover_rate", 4.2)
-                dead_stock_value = total_value * 0.025 if total_value else 0  # Estimate 2.5% as dead stock
+                dead_stock_value = (
+                    total_value * 0.025 if total_value else 0
+                )  # Estimate 2.5% as dead stock
 
         return {
             "critical_alerts": critical_alerts[:5],  # Limit to 5
@@ -364,7 +476,7 @@ class JarvisAnalyticsEngine:
             "slow_movers": slow_movers[:5],
             "inventory_health_score": inventory_health_score,
             "turnover_ratio": turnover_ratio,
-            "dead_stock_value": round(dead_stock_value)
+            "dead_stock_value": round(dead_stock_value),
         }
 
     @staticmethod
@@ -380,37 +492,59 @@ class JarvisAnalyticsEngine:
                 # Build segments data from database
                 segment_data = []
                 for seg in segments:
-                    segment_data.append({
-                        "name": seg.get("name", "Unknown"),
-                        "count": seg.get("customer_count", 0),
-                        "avg_spend": seg.get("avg_order_value", 0),
-                        "characteristics": ", ".join(seg.get("characteristics", []))
-                    })
+                    segment_data.append(
+                        {
+                            "name": seg.get("name", "Unknown"),
+                            "count": seg.get("customer_count", 0),
+                            "avg_spend": seg.get("avg_order_value", 0),
+                            "characteristics": ", ".join(
+                                seg.get("characteristics", [])
+                            ),
+                        }
+                    )
 
                 # Get loyalty metrics from business metrics
                 loyalty_metrics = {
                     "repeat_purchase_rate": 42.0,
                     "average_time_between_purchases": 8.5,
                     "referral_rate": 12.3,
-                    "nps_score": 72
+                    "nps_score": 72,
                 }
 
                 if metrics_col:
                     metrics = metrics_col.find_one({"store_id": "store-001"})
                     if metrics and "customers" in metrics:
-                        loyalty_metrics["repeat_purchase_rate"] = metrics["customers"].get("repeat_rate", 0.42) * 100
-                        loyalty_metrics["nps_score"] = metrics["customers"].get("nps_score", 72)
+                        loyalty_metrics["repeat_purchase_rate"] = (
+                            metrics["customers"].get("repeat_rate", 0.42) * 100
+                        )
+                        loyalty_metrics["nps_score"] = metrics["customers"].get(
+                            "nps_score", 72
+                        )
 
                 return {
                     "segments": segment_data,
                     "churn_risk": [
-                        {"customer": "Vikram Singh", "phone": "98765xxxxx", "last_purchase": "6 months ago", "lifetime_value": 78500, "risk": "medium"},
+                        {
+                            "customer": "Vikram Singh",
+                            "phone": "98765xxxxx",
+                            "last_purchase": "6 months ago",
+                            "lifetime_value": 78500,
+                            "risk": "medium",
+                        },
                     ],
                     "loyalty_metrics": loyalty_metrics,
                     "upcoming_eye_tests": [
-                        {"customer": "Rahul Sharma", "last_test": "11 months ago", "phone": "9876543210"},
-                        {"customer": "Anita Verma", "last_test": "10 months ago", "phone": "9876543211"},
-                    ]
+                        {
+                            "customer": "Rahul Sharma",
+                            "last_test": "11 months ago",
+                            "phone": "9876543210",
+                        },
+                        {
+                            "customer": "Anita Verma",
+                            "last_test": "10 months ago",
+                            "phone": "9876543211",
+                        },
+                    ],
                 }
 
         # Return empty structure if database not available
@@ -421,9 +555,9 @@ class JarvisAnalyticsEngine:
                 "repeat_purchase_rate": 0,
                 "average_time_between_purchases": 0,
                 "referral_rate": 0,
-                "nps_score": 0
+                "nps_score": 0,
             },
-            "upcoming_eye_tests": []
+            "upcoming_eye_tests": [],
         }
 
     @staticmethod
@@ -435,7 +569,9 @@ class JarvisAnalyticsEngine:
 
         if attendance_col:
             # Get attendance for today
-            today_attendance = list(attendance_col.find({"date": today_str, "store_id": "store-001"}))
+            today_attendance = list(
+                attendance_col.find({"date": today_str, "store_id": "store-001"})
+            )
 
             # Get last 30 days attendance for analytics
             all_attendance = list(attendance_col.find({"store_id": "store-001"}))
@@ -449,7 +585,12 @@ class JarvisAnalyticsEngine:
                     sales = att.get("sales_amount", 0)
 
                     if user_id not in staff_sales:
-                        staff_sales[user_id] = {"name": user_name, "role": att.get("role", ""), "total_sales": 0, "days_present": 0}
+                        staff_sales[user_id] = {
+                            "name": user_name,
+                            "role": att.get("role", ""),
+                            "total_sales": 0,
+                            "days_present": 0,
+                        }
 
                     staff_sales[user_id]["total_sales"] += sales
                     if att.get("status") == "PRESENT":
@@ -459,25 +600,43 @@ class JarvisAnalyticsEngine:
                 performance = []
                 for user_id, data in staff_sales.items():
                     if data["total_sales"] > 0:
-                        performance.append({
-                            "name": data["name"],
-                            "role": data["role"],
-                            "store": "Better Vision - CP",
-                            "sales": data["total_sales"],
-                            "conversion": round(45.0 + (data["total_sales"] / 100000), 1),
-                            "rating": 4.5
-                        })
+                        performance.append(
+                            {
+                                "name": data["name"],
+                                "role": data["role"],
+                                "store": "Better Vision - CP",
+                                "sales": data["total_sales"],
+                                "conversion": round(
+                                    45.0 + (data["total_sales"] / 100000), 1
+                                ),
+                                "rating": 4.5,
+                            }
+                        )
 
                 performance.sort(key=lambda x: x["sales"], reverse=True)
 
                 # Calculate attendance metrics
                 total_records = len(all_attendance)
-                present_records = len([a for a in all_attendance if a.get("status") == "PRESENT"])
-                present_rate = round(present_records / total_records * 100, 1) if total_records else 0
+                present_records = len(
+                    [a for a in all_attendance if a.get("status") == "PRESENT"]
+                )
+                present_rate = (
+                    round(present_records / total_records * 100, 1)
+                    if total_records
+                    else 0
+                )
 
                 # Today's status
-                present_today = [a["user_name"] for a in today_attendance if a.get("status") == "PRESENT"]
-                on_leave = [f"{a['user_name']} ({a.get('leave_type', 'Leave')})" for a in today_attendance if a.get("status") == "ABSENT"]
+                present_today = [
+                    a["user_name"]
+                    for a in today_attendance
+                    if a.get("status") == "PRESENT"
+                ]
+                on_leave = [
+                    f"{a['user_name']} ({a.get('leave_type', 'Leave')})"
+                    for a in today_attendance
+                    if a.get("status") == "ABSENT"
+                ]
 
                 return {
                     "performance_ranking": performance[:5],
@@ -488,12 +647,24 @@ class JarvisAnalyticsEngine:
                         "on_leave": on_leave,
                     },
                     "training_needs": [
-                        {"staff": "Sales Staff", "area": "Progressive Lens Selling", "priority": "high"},
-                        {"staff": "New Joiners", "area": "Customer Objection Handling", "priority": "medium"},
+                        {
+                            "staff": "Sales Staff",
+                            "area": "Progressive Lens Selling",
+                            "priority": "high",
+                        },
+                        {
+                            "staff": "New Joiners",
+                            "area": "Customer Objection Handling",
+                            "priority": "medium",
+                        },
                     ],
                     "workload_distribution": {
-                        "Better Vision - CP": {"staff": 4, "orders_per_staff": 8.5, "status": "balanced"},
-                    }
+                        "Better Vision - CP": {
+                            "staff": 4,
+                            "orders_per_staff": 8.5,
+                            "status": "balanced",
+                        },
+                    },
                 }
 
         # Return empty structure if database not available
@@ -503,10 +674,10 @@ class JarvisAnalyticsEngine:
                 "present_rate": 0,
                 "late_arrivals_today": 0,
                 "present_today": [],
-                "on_leave": []
+                "on_leave": [],
             },
             "training_needs": [],
-            "workload_distribution": {}
+            "workload_distribution": {},
         }
 
     @staticmethod
@@ -521,19 +692,21 @@ class JarvisAnalyticsEngine:
             "next_week": 0,
             "next_month": 0,
             "confidence": 0,
-            "factors": []
+            "factors": [],
         }
         demand_predictions = []
         stock_predictions = []
         customer_behavior = {
             "expected_footfall_today": 0,
             "expected_conversion": 0,
-            "peak_hours": []
+            "peak_hours": [],
         }
 
         # Calculate forecasts from historical sales data
         if sales_col:
-            sales_records = list(sales_col.find({"store_id": "store-001"}).sort([("date", -1)]).limit(30))
+            sales_records = list(
+                sales_col.find({"store_id": "store-001"}).sort([("date", -1)]).limit(30)
+            )
             if sales_records:
                 total_30_days = sum(s.get("revenue", 0) for s in sales_records)
                 avg_daily = total_30_days / 30 if total_30_days else 0
@@ -543,7 +716,10 @@ class JarvisAnalyticsEngine:
                     "next_week": round(avg_daily * 7 * 1.05),  # 5% growth assumption
                     "next_month": round(avg_daily * 30 * 1.08),  # 8% growth assumption
                     "confidence": 75,
-                    "factors": ["Based on 30-day historical trends", "Seasonal adjustments applied"]
+                    "factors": [
+                        "Based on 30-day historical trends",
+                        "Seasonal adjustments applied",
+                    ],
                 }
 
                 # Calculate category trends
@@ -563,47 +739,60 @@ class JarvisAnalyticsEngine:
 
                 for cat, data in category_totals.items():
                     if data["previous"] > 0:
-                        change = ((data["recent"] - data["previous"]) / data["previous"]) * 100
-                        trend = "up" if change > 5 else "down" if change < -5 else "stable"
-                        demand_predictions.append({
-                            "category": cat.title(),
-                            "trend": trend,
-                            "change": f"{'+' if change >= 0 else ''}{change:.0f}%",
-                            "reason": "Based on recent sales trends"
-                        })
+                        change = (
+                            (data["recent"] - data["previous"]) / data["previous"]
+                        ) * 100
+                        trend = (
+                            "up" if change > 5 else "down" if change < -5 else "stable"
+                        )
+                        demand_predictions.append(
+                            {
+                                "category": cat.title(),
+                                "trend": trend,
+                                "change": f"{'+' if change >= 0 else ''}{change:.0f}%",
+                                "reason": "Based on recent sales trends",
+                            }
+                        )
 
                 # Customer behavior from sales
                 avg_orders = sum(s.get("order_count", 0) for s in sales_records[:7]) / 7
-                avg_conversion = sum(s.get("conversion_rate", 0.6) for s in sales_records[:7]) / 7
+                avg_conversion = (
+                    sum(s.get("conversion_rate", 0.6) for s in sales_records[:7]) / 7
+                )
                 customer_behavior = {
-                    "expected_footfall_today": round(avg_orders * 2),  # Assume 2x footfall to orders
+                    "expected_footfall_today": round(
+                        avg_orders * 2
+                    ),  # Assume 2x footfall to orders
                     "expected_conversion": round(avg_conversion * 100),
-                    "peak_hours": ["11:00-13:00", "17:00-20:00"]
+                    "peak_hours": ["11:00-13:00", "17:00-20:00"],
                 }
 
         # Stock predictions
         if stock_col:
-            low_stock_items = list(stock_col.find({
-                "store_id": "store-001",
-                "quantity": {"$gt": 0, "$lte": 20}
-            }).limit(5))
+            low_stock_items = list(
+                stock_col.find(
+                    {"store_id": "store-001", "quantity": {"$gt": 0, "$lte": 20}}
+                ).limit(5)
+            )
 
             for item in low_stock_items:
                 qty = item.get("quantity", 0)
                 # Estimate days until stockout (assuming 1-2 units sold per day)
                 days_until_stockout = qty // 2 if qty > 0 else 0
-                stock_predictions.append({
-                    "sku": item.get("sku", ""),
-                    "current": qty,
-                    "predicted_demand": qty * 3,
-                    "days_until_stockout": days_until_stockout
-                })
+                stock_predictions.append(
+                    {
+                        "sku": item.get("sku", ""),
+                        "current": qty,
+                        "predicted_demand": qty * 3,
+                        "days_until_stockout": days_until_stockout,
+                    }
+                )
 
         return {
             "sales_forecast": sales_forecast,
             "demand_predictions": demand_predictions[:5],
             "stock_predictions": stock_predictions[:5],
-            "customer_behavior": customer_behavior
+            "customer_behavior": customer_behavior,
         }
 
     @staticmethod
@@ -620,57 +809,70 @@ class JarvisAnalyticsEngine:
         if alerts_col:
             db_alerts = list(alerts_col.find({"is_resolved": False}).limit(10))
             for alert in db_alerts:
-                severity_map = {"HIGH": "high", "WARNING": "high", "NORMAL": "medium", "INFO": "low"}
+                severity_map = {
+                    "HIGH": "high",
+                    "WARNING": "high",
+                    "NORMAL": "medium",
+                    "INFO": "low",
+                }
                 priority = severity_map.get(alert.get("severity", "INFO"), "medium")
 
                 category_map = {
                     "LOW_STOCK": "inventory",
                     "PAYMENT_DUE": "finance",
                     "DELIVERY_DUE": "operations",
-                    "TARGET_ACHIEVEMENT": "sales"
+                    "TARGET_ACHIEVEMENT": "sales",
                 }
                 category = category_map.get(alert.get("alert_type", ""), "operations")
 
-                recommendations.append({
-                    "priority": priority,
-                    "category": category,
-                    "title": alert.get("title", "Alert"),
-                    "description": alert.get("message", ""),
-                    "action": f"Review and resolve {alert.get('alert_type', 'issue').lower().replace('_', ' ')}",
-                    "impact": "Improve operational efficiency"
-                })
+                recommendations.append(
+                    {
+                        "priority": priority,
+                        "category": category,
+                        "title": alert.get("title", "Alert"),
+                        "description": alert.get("message", ""),
+                        "action": f"Review and resolve {alert.get('alert_type', 'issue').lower().replace('_', ' ')}",
+                        "impact": "Improve operational efficiency",
+                    }
+                )
 
         # Add inventory-based recommendations
         if stock_col and metrics_col:
             metrics = metrics_col.find_one({"store_id": "store-001"})
             if metrics and metrics.get("inventory", {}).get("low_stock_items", 0) > 0:
                 low_count = metrics["inventory"]["low_stock_items"]
-                recommendations.append({
-                    "priority": "high" if low_count > 10 else "medium",
-                    "category": "inventory",
-                    "title": "Stock Replenishment Required",
-                    "description": f"{low_count} items are running low on stock.",
-                    "action": "Review and generate purchase orders for low stock items",
-                    "impact": f"Prevent potential stockouts and lost sales"
-                })
+                recommendations.append(
+                    {
+                        "priority": "high" if low_count > 10 else "medium",
+                        "category": "inventory",
+                        "title": "Stock Replenishment Required",
+                        "description": f"{low_count} items are running low on stock.",
+                        "action": "Review and generate purchase orders for low stock items",
+                        "impact": f"Prevent potential stockouts and lost sales",
+                    }
+                )
 
         # Add customer-based recommendations
         if segments_col:
             dormant_seg = segments_col.find_one({"segment_id": "seg-dormant"})
             if dormant_seg and dormant_seg.get("customer_count", 0) > 0:
                 count = dormant_seg["customer_count"]
-                recommendations.append({
-                    "priority": "medium",
-                    "category": "marketing",
-                    "title": "Re-engagement Campaign Needed",
-                    "description": f"{count} customers haven't purchased in 6+ months.",
-                    "action": "Launch personalized re-engagement campaign",
-                    "impact": f"Potential revenue recovery from dormant customers"
-                })
+                recommendations.append(
+                    {
+                        "priority": "medium",
+                        "category": "marketing",
+                        "title": "Re-engagement Campaign Needed",
+                        "description": f"{count} customers haven't purchased in 6+ months.",
+                        "action": "Launch personalized re-engagement campaign",
+                        "impact": f"Potential revenue recovery from dormant customers",
+                    }
+                )
 
         # Sort by priority
         priority_order = {"high": 0, "medium": 1, "low": 2}
-        recommendations.sort(key=lambda x: priority_order.get(x.get("priority", "low"), 3))
+        recommendations.sort(
+            key=lambda x: priority_order.get(x.get("priority", "low"), 3)
+        )
 
         return recommendations[:5]
 
@@ -679,16 +881,40 @@ class JarvisAnalyticsEngine:
 # JARVIS NATURAL LANGUAGE PROCESSOR
 # ============================================================================
 
+
 class JarvisNLP:
     """Process natural language queries"""
 
     INTENT_PATTERNS = {
-        "sales": ["sales", "revenue", "income", "earnings", "how much", "sold", "selling"],
-        "inventory": ["stock", "inventory", "products", "items", "available", "low stock", "out of stock"],
+        "sales": [
+            "sales",
+            "revenue",
+            "income",
+            "earnings",
+            "how much",
+            "sold",
+            "selling",
+        ],
+        "inventory": [
+            "stock",
+            "inventory",
+            "products",
+            "items",
+            "available",
+            "low stock",
+            "out of stock",
+        ],
         "customers": ["customer", "buyers", "clients", "who bought", "loyal", "churn"],
         "staff": ["staff", "employee", "team", "performance", "attendance", "who is"],
         "predictions": ["predict", "forecast", "expect", "future", "trending", "will"],
-        "recommendations": ["suggest", "recommend", "should i", "what to do", "advice", "help me"],
+        "recommendations": [
+            "suggest",
+            "recommend",
+            "should i",
+            "what to do",
+            "advice",
+            "help me",
+        ],
         "compare": ["compare", "vs", "versus", "difference", "better"],
         "trends": ["trend", "pattern", "analysis", "growth", "decline"],
     }
@@ -727,7 +953,13 @@ class JarvisNLP:
                 entities["store"] = store
 
         # Categories
-        category_keywords = ["frames", "sunglasses", "lenses", "contact lens", "watches"]
+        category_keywords = [
+            "frames",
+            "sunglasses",
+            "lenses",
+            "contact lens",
+            "watches",
+        ]
         for cat in category_keywords:
             if cat in message_lower:
                 entities["category"] = cat
@@ -738,6 +970,7 @@ class JarvisNLP:
 # ============================================================================
 # JARVIS RESPONSE GENERATOR
 # ============================================================================
+
 
 class JarvisResponseGenerator:
     """Generate intelligent, conversational responses"""
@@ -787,11 +1020,23 @@ class JarvisResponseGenerator:
         period_map = {
             "today": ("today", revenue["today"], revenue["yesterday"], "yesterday"),
             "yesterday": ("yesterday", revenue["yesterday"], revenue["today"], "today"),
-            "this_week": ("this week", revenue["this_week"], revenue["this_week"] * 0.9, "last week"),
-            "this_month": ("this month", revenue["this_month"], revenue["last_month"], "last month"),
+            "this_week": (
+                "this week",
+                revenue["this_week"],
+                revenue["this_week"] * 0.9,
+                "last week",
+            ),
+            "this_month": (
+                "this month",
+                revenue["this_month"],
+                revenue["last_month"],
+                "last month",
+            ),
         }
 
-        period_name, current, previous, prev_name = period_map.get(period, period_map["today"])
+        period_name, current, previous, prev_name = period_map.get(
+            period, period_map["today"]
+        )
         change = ((current - previous) / previous) * 100 if previous else 0
 
         response = f"**Sales Report - {period_name.title()}**\n\n"
@@ -801,7 +1046,9 @@ class JarvisResponseGenerator:
         response += f"💰 Avg Order Value: {cls.format_currency(data['orders']['average_order_value'])}\n\n"
 
         if change >= 10:
-            response += "Excellent performance! We're significantly ahead of our targets."
+            response += (
+                "Excellent performance! We're significantly ahead of our targets."
+            )
         elif change >= 0:
             response += "Steady growth. Performance is on track."
         else:
@@ -815,15 +1062,21 @@ class JarvisResponseGenerator:
         response += f"📦 Total Products: {data['total_products']:,}\n"
         response += f"⚠️ Low Stock Items: {data['low_stock_items']}\n"
         response += f"🚫 Out of Stock: {data['out_of_stock']}\n"
-        response += f"💎 Inventory Value: {cls.format_currency(data['inventory_value'])}\n\n"
+        response += (
+            f"💎 Inventory Value: {cls.format_currency(data['inventory_value'])}\n\n"
+        )
 
         if data["critical_alerts"]:
             response += "**Critical Alerts:**\n"
             for alert in data["critical_alerts"][:3]:
                 if alert["type"] == "out_of_stock":
-                    response += f"• 🔴 {alert['product']} is OUT OF STOCK (High demand)\n"
+                    response += (
+                        f"• 🔴 {alert['product']} is OUT OF STOCK (High demand)\n"
+                    )
                 elif alert["type"] == "low_stock":
-                    response += f"• 🟡 {alert['product']} - Only {alert['quantity']} left\n"
+                    response += (
+                        f"• 🟡 {alert['product']} - Only {alert['quantity']} left\n"
+                    )
                 elif alert["type"] == "expiring_soon":
                     response += f"• 🟠 {alert['product']} expires {alert['expiry']}\n"
 
@@ -834,7 +1087,11 @@ class JarvisResponseGenerator:
         response = "**My Recommendations:**\n\n"
 
         for i, rec in enumerate(recommendations[:5], 1):
-            priority_emoji = "🔴" if rec["priority"] == "high" else "🟡" if rec["priority"] == "medium" else "🟢"
+            priority_emoji = (
+                "🔴"
+                if rec["priority"] == "high"
+                else "🟡" if rec["priority"] == "medium" else "🟢"
+            )
             response += f"{i}. {priority_emoji} **{rec['title']}**\n"
             response += f"   {rec['description']}\n"
             response += f"   💡 *Action:* {rec['action']}\n"
@@ -846,6 +1103,7 @@ class JarvisResponseGenerator:
 # ============================================================================
 # CLAUDE AI INTEGRATION
 # ============================================================================
+
 
 class ClaudeClient:
     """Anthropic Claude API client for JARVIS"""
@@ -888,7 +1146,9 @@ Current date and time: {current_datetime}
 """
 
     @classmethod
-    async def call_claude(cls, message: str, business_data: Dict, conversation_history: List[Dict] = None) -> str:
+    async def call_claude(
+        cls, message: str, business_data: Dict, conversation_history: List[Dict] = None
+    ) -> str:
         """Call Claude API with business context"""
         if not ANTHROPIC_API_KEY:
             logger.warning("ANTHROPIC_API_KEY not set - using fallback response")
@@ -916,16 +1176,12 @@ Use this data to provide accurate, data-driven responses. Reference specific num
         # Add conversation history if provided
         if conversation_history:
             for msg in conversation_history[-10:]:  # Last 10 messages for context
-                messages.append({
-                    "role": msg.get("role", "user"),
-                    "content": msg.get("content", "")
-                })
+                messages.append(
+                    {"role": msg.get("role", "user"), "content": msg.get("content", "")}
+                )
 
         # Add current message
-        messages.append({
-            "role": "user",
-            "content": message
-        })
+        messages.append({"role": "user", "content": message})
 
         try:
             async with httpx.AsyncClient(timeout=60.0) as client:
@@ -934,21 +1190,23 @@ Use this data to provide accurate, data-driven responses. Reference specific num
                     headers={
                         "x-api-key": ANTHROPIC_API_KEY,
                         "anthropic-version": "2023-06-01",
-                        "content-type": "application/json"
+                        "content-type": "application/json",
                     },
                     json={
                         "model": CLAUDE_MODEL,
                         "max_tokens": 2048,
                         "system": system_prompt,
-                        "messages": messages
-                    }
+                        "messages": messages,
+                    },
                 )
 
                 if response.status_code == 200:
                     result = response.json()
                     return result["content"][0]["text"]
                 else:
-                    logger.error(f"Claude API error: {response.status_code} - {response.text}")
+                    logger.error(
+                        f"Claude API error: {response.status_code} - {response.text}"
+                    )
                     return None
 
         except Exception as e:
@@ -959,6 +1217,7 @@ Use this data to provide accurate, data-driven responses. Reference specific num
 # ============================================================================
 # JARVIS CORE - MAIN INTERFACE
 # ============================================================================
+
 
 class Jarvis:
     """Main JARVIS AI Assistant - Powered by Claude"""
@@ -983,7 +1242,7 @@ class Jarvis:
             "customer_insights": self.analytics.get_customer_insights(),
             "staff_insights": self.analytics.get_staff_insights(),
             "predictions": self.analytics.get_predictions(),
-            "recommendations": self.analytics.get_recommendations()
+            "recommendations": self.analytics.get_recommendations(),
         }
 
         # Try Claude first
@@ -992,13 +1251,15 @@ class Jarvis:
             claude_response = await ClaudeClient.call_claude(
                 message=query,
                 business_data=business_data,
-                conversation_history=self.conversation_history
+                conversation_history=self.conversation_history,
             )
 
         if claude_response:
             # Store in conversation history
             self.conversation_history.append({"role": "user", "content": query})
-            self.conversation_history.append({"role": "assistant", "content": claude_response})
+            self.conversation_history.append(
+                {"role": "assistant", "content": claude_response}
+            )
             # Keep only last 20 messages
             if len(self.conversation_history) > 20:
                 self.conversation_history = self.conversation_history[-20:]
@@ -1010,21 +1271,27 @@ class Jarvis:
                 "data": business_data.get("overview", {}),
                 "ai_powered": True,
                 "model": CLAUDE_MODEL,
-                "timestamp": datetime.now().isoformat()
+                "timestamp": datetime.now().isoformat(),
             }
 
         # Fallback to template-based responses if Claude is not available
         return self._generate_fallback_response(query, intent, entities, business_data)
 
-    def _generate_fallback_response(self, query: str, intent: str, entities: Dict, business_data: Dict) -> Dict:
+    def _generate_fallback_response(
+        self, query: str, intent: str, entities: Dict, business_data: Dict
+    ) -> Dict:
         """Generate fallback response when Claude is not available"""
         if intent == "sales":
-            response = self.response_gen.generate_sales_response(business_data["overview"], entities)
+            response = self.response_gen.generate_sales_response(
+                business_data["overview"], entities
+            )
             insights = business_data["sales_insights"]
         elif intent == "inventory":
             overview = business_data["overview"]
             inv_insights = business_data["inventory_insights"]
-            response = self.response_gen.generate_inventory_response({**overview["inventory"], **inv_insights})
+            response = self.response_gen.generate_inventory_response(
+                {**overview["inventory"], **inv_insights}
+            )
             insights = inv_insights
         elif intent == "customers":
             insights = business_data["customer_insights"]
@@ -1037,10 +1304,14 @@ class Jarvis:
             response = self._format_predictions_response(insights)
         elif intent == "recommendations":
             insights = {"recommendations": business_data["recommendations"]}
-            response = self.response_gen.generate_recommendation_response(business_data["recommendations"])
+            response = self.response_gen.generate_recommendation_response(
+                business_data["recommendations"]
+            )
         else:
             overview = business_data["overview"]
-            response = self._format_overview_response(overview, business_data["recommendations"])
+            response = self._format_overview_response(
+                overview, business_data["recommendations"]
+            )
             insights = overview
 
         return {
@@ -1050,12 +1321,13 @@ class Jarvis:
             "data": insights,
             "ai_powered": False,
             "model": "fallback",
-            "timestamp": datetime.now().isoformat()
+            "timestamp": datetime.now().isoformat(),
         }
 
     def process_query(self, query: str, context: Dict = None) -> Dict:
         """Synchronous wrapper for backwards compatibility"""
         import asyncio
+
         try:
             loop = asyncio.get_event_loop()
             if loop.is_running():
@@ -1067,18 +1339,22 @@ class Jarvis:
                     "customer_insights": self.analytics.get_customer_insights(),
                     "staff_insights": self.analytics.get_staff_insights(),
                     "predictions": self.analytics.get_predictions(),
-                    "recommendations": self.analytics.get_recommendations()
+                    "recommendations": self.analytics.get_recommendations(),
                 }
                 intent = self.nlp.detect_intent(query)
                 entities = self.nlp.extract_entities(query)
-                return self._generate_fallback_response(query, intent, entities, business_data)
+                return self._generate_fallback_response(
+                    query, intent, entities, business_data
+                )
             return loop.run_until_complete(self.process_query_async(query, context))
         except RuntimeError:
             return asyncio.run(self.process_query_async(query, context))
 
     def _format_customer_response(self, data: Dict) -> str:
         response = "**Customer Intelligence Report**\n\n"
-        response += f"👥 Total Customers: {sum(s['count'] for s in data['segments']):,}\n"
+        response += (
+            f"👥 Total Customers: {sum(s['count'] for s in data['segments']):,}\n"
+        )
         response += f"🔄 Repeat Purchase Rate: {data['loyalty_metrics']['repeat_purchase_rate']}%\n"
         response += f"⭐ NPS Score: {data['loyalty_metrics']['nps_score']}\n\n"
 
@@ -1096,7 +1372,9 @@ class Jarvis:
     def _format_staff_response(self, data: Dict) -> str:
         response = "**Staff Performance Report**\n\n"
         response += f"✅ Present Today: {data['attendance_summary']['present_rate']}%\n"
-        response += f"⏰ Late Arrivals: {data['attendance_summary']['late_arrivals_today']}\n\n"
+        response += (
+            f"⏰ Late Arrivals: {data['attendance_summary']['late_arrivals_today']}\n\n"
+        )
 
         response += "**Top Performers:**\n"
         for i, staff in enumerate(data["performance_ranking"][:3], 1):
@@ -1120,8 +1398,14 @@ class Jarvis:
 
         response += "\n**Demand Trends:**\n"
         for pred in data["demand_predictions"]:
-            emoji = "📈" if pred["trend"] == "up" else "📉" if pred["trend"] == "down" else "➡️"
-            response += f"{emoji} {pred['category']}: {pred['change']} ({pred['reason']})\n"
+            emoji = (
+                "📈"
+                if pred["trend"] == "up"
+                else "📉" if pred["trend"] == "down" else "➡️"
+            )
+            response += (
+                f"{emoji} {pred['category']}: {pred['change']} ({pred['reason']})\n"
+            )
 
         if data.get("stock_predictions"):
             response += "\n**⚠️ Stock Alerts:**\n"
@@ -1171,7 +1455,7 @@ class Jarvis:
             "success": True,
             "message": f"Generating {report_type} report...",
             "report_id": f"RPT-{uuid.uuid4().hex[:8].upper()}",
-            "estimated_time": "2 minutes"
+            "estimated_time": "2 minutes",
         }
 
     def _cmd_reorder_stock(self, params: Dict) -> Dict:
@@ -1180,7 +1464,7 @@ class Jarvis:
             "message": "Purchase order created",
             "po_number": f"PO-{datetime.now().strftime('%Y%m%d')}-{random.randint(100,999)}",
             "items": params.get("items", []),
-            "total_value": 125000
+            "total_value": 125000,
         }
 
     def _cmd_send_campaign(self, params: Dict) -> Dict:
@@ -1189,7 +1473,7 @@ class Jarvis:
             "message": "Campaign scheduled",
             "campaign_id": f"CMP-{uuid.uuid4().hex[:8].upper()}",
             "recipients": params.get("recipient_count", 234),
-            "scheduled_time": params.get("time", "immediate")
+            "scheduled_time": params.get("time", "immediate"),
         }
 
     def _cmd_transfer_staff(self, params: Dict) -> Dict:
@@ -1199,7 +1483,7 @@ class Jarvis:
             "staff": params.get("staff_name"),
             "from_store": params.get("from"),
             "to_store": params.get("to"),
-            "effective_date": params.get("date", "tomorrow")
+            "effective_date": params.get("date", "tomorrow"),
         }
 
     def _cmd_create_task(self, params: Dict) -> Dict:
@@ -1208,7 +1492,7 @@ class Jarvis:
             "message": "Task created",
             "task_id": f"TSK-{uuid.uuid4().hex[:8].upper()}",
             "assigned_to": params.get("assignee"),
-            "due_date": params.get("due_date")
+            "due_date": params.get("due_date"),
         }
 
     def _cmd_analyze_store(self, params: Dict) -> Dict:
@@ -1218,8 +1502,8 @@ class Jarvis:
             "insights": {
                 "performance_score": 78,
                 "areas_of_improvement": ["Conversion rate", "Average order value"],
-                "strengths": ["Customer satisfaction", "Staff attendance"]
-            }
+                "strengths": ["Customer satisfaction", "Staff attendance"],
+            },
         }
 
 
@@ -1230,6 +1514,7 @@ jarvis_instance = Jarvis()
 # ============================================================================
 # API ENDPOINTS - SUPERADMIN ONLY
 # ============================================================================
+
 
 @router.get("/status")
 async def get_jarvis_status(current_user: dict = Depends(require_superadmin)):
@@ -1242,7 +1527,7 @@ async def get_jarvis_status(current_user: dict = Depends(require_superadmin)):
             "provider": "Anthropic",
             "model": CLAUDE_MODEL,
             "enabled": jarvis_instance.claude_enabled,
-            "status": "active" if jarvis_instance.claude_enabled else "fallback_mode"
+            "status": "active" if jarvis_instance.claude_enabled else "fallback_mode",
         },
         "greeting": JarvisResponseGenerator.generate_greeting(),
         "capabilities": [
@@ -1254,15 +1539,18 @@ async def get_jarvis_status(current_user: dict = Depends(require_superadmin)):
             "Predictions & Forecasting",
             "Actionable Recommendations",
             "Command Execution",
-            "Natural Language Understanding (Claude AI)" if jarvis_instance.claude_enabled else "Template-based Responses"
-        ]
+            (
+                "Natural Language Understanding (Claude AI)"
+                if jarvis_instance.claude_enabled
+                else "Template-based Responses"
+            ),
+        ],
     }
 
 
 @router.post("/query")
 async def query_jarvis(
-    query: JarvisQuery,
-    current_user: dict = Depends(require_superadmin)
+    query: JarvisQuery, current_user: dict = Depends(require_superadmin)
 ):
     """Send a query to JARVIS - SUPERADMIN ONLY"""
     result = await jarvis_instance.process_query_async(query.message, query.context)
@@ -1275,21 +1563,24 @@ async def query_jarvis(
         "data": result.get("data"),
         "ai_powered": result.get("ai_powered", False),
         "model": result.get("model", "fallback"),
-        "timestamp": result["timestamp"]
+        "timestamp": result["timestamp"],
     }
 
 
 @router.post("/command")
 async def execute_jarvis_command(
-    command: JarvisCommand,
-    current_user: dict = Depends(require_superadmin)
+    command: JarvisCommand, current_user: dict = Depends(require_superadmin)
 ):
     """Execute a JARVIS command - SUPERADMIN ONLY"""
-    if not command.confirm and command.command in ["reorder_stock", "send_campaign", "transfer_staff"]:
+    if not command.confirm and command.command in [
+        "reorder_stock",
+        "send_campaign",
+        "transfer_staff",
+    ]:
         return {
             "requires_confirmation": True,
             "message": f"Please confirm execution of '{command.command}' command",
-            "parameters": command.parameters
+            "parameters": command.parameters,
         }
 
     result = jarvis_instance.execute_command(command.command, command.parameters)
@@ -1297,7 +1588,7 @@ async def execute_jarvis_command(
     return {
         "command": command.command,
         "result": result,
-        "executed_at": datetime.now().isoformat()
+        "executed_at": datetime.now().isoformat(),
     }
 
 
@@ -1312,7 +1603,7 @@ async def get_jarvis_dashboard(current_user: dict = Depends(require_superadmin))
         "staff": jarvis_instance.analytics.get_staff_insights(),
         "predictions": jarvis_instance.analytics.get_predictions(),
         "recommendations": jarvis_instance.analytics.get_recommendations(),
-        "generated_at": datetime.now().isoformat()
+        "generated_at": datetime.now().isoformat(),
     }
 
 
@@ -1327,21 +1618,25 @@ async def get_jarvis_alerts(current_user: dict = Depends(require_superadmin)):
 
     # Inventory alerts
     for alert in inventory.get("critical_alerts", []):
-        alerts.append({
-            "type": "inventory",
-            "severity": "high" if alert["type"] == "out_of_stock" else "medium",
-            "title": f"{alert['type'].replace('_', ' ').title()}: {alert['product']}",
-            "details": alert
-        })
+        alerts.append(
+            {
+                "type": "inventory",
+                "severity": "high" if alert["type"] == "out_of_stock" else "medium",
+                "title": f"{alert['type'].replace('_', ' ').title()}: {alert['product']}",
+                "details": alert,
+            }
+        )
 
     # Customer churn alerts
     for customer in customers.get("churn_risk", []):
-        alerts.append({
-            "type": "customer",
-            "severity": customer["risk"],
-            "title": f"Churn Risk: {customer['customer']}",
-            "details": customer
-        })
+        alerts.append(
+            {
+                "type": "customer",
+                "severity": customer["risk"],
+                "title": f"Churn Risk: {customer['customer']}",
+                "details": customer,
+            }
+        )
 
     # Sort by severity
     severity_order = {"high": 0, "medium": 1, "low": 2}
@@ -1364,5 +1659,5 @@ async def get_quick_insights(current_user: dict = Depends(require_superadmin)):
         "low_stock_count": overview["inventory"]["low_stock_items"],
         "staff_present": f"{overview['staff']['present_today']}/{overview['staff']['total_employees']}",
         "top_recommendation": recommendations[0] if recommendations else None,
-        "greeting": JarvisResponseGenerator.generate_greeting()
+        "greeting": JarvisResponseGenerator.generate_greeting(),
     }

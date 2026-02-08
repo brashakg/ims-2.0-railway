@@ -3,6 +3,7 @@ IMS 2.0 - Authentication Router
 ================================
 Login, logout, token management
 """
+
 from fastapi import APIRouter, HTTPException, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, Field
@@ -29,6 +30,7 @@ ACCESS_TOKEN_EXPIRE_MINUTES = 480  # 8 hours
 # SCHEMAS
 # ============================================================================
 
+
 class LoginRequest(BaseModel):
     username: str = Field(..., min_length=3)
     password: str = Field(..., min_length=6)
@@ -36,11 +38,13 @@ class LoginRequest(BaseModel):
     latitude: Optional[float] = None
     longitude: Optional[float] = None
 
+
 class LoginResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
     expires_in: int
     user: dict
+
 
 class TokenData(BaseModel):
     user_id: str
@@ -50,9 +54,11 @@ class TokenData(BaseModel):
     active_store_id: Optional[str]
     exp: datetime
 
+
 class ChangePasswordRequest(BaseModel):
     current_password: str
     new_password: str = Field(..., min_length=8)
+
 
 class RefreshTokenRequest(BaseModel):
     token: str
@@ -62,20 +68,26 @@ class RefreshTokenRequest(BaseModel):
 # HELPERS
 # ============================================================================
 
+
 def hash_password(password: str) -> str:
     """Hash password using SHA-256"""
     return hashlib.sha256(password.encode()).hexdigest()
+
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     """Verify password against hash"""
     return hash_password(plain_password) == hashed_password
 
+
 def create_access_token(data: dict, expires_delta: timedelta = None) -> str:
     """Create JWT access token"""
     to_encode = data.copy()
-    expire = datetime.utcnow() + (expires_delta or timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
+    expire = datetime.utcnow() + (
+        expires_delta or timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    )
     to_encode.update({"exp": expire})
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+
 
 def decode_token(token: str) -> dict:
     """Decode and validate JWT token"""
@@ -87,14 +99,17 @@ def decode_token(token: str) -> dict:
     except jwt.InvalidTokenError:
         raise HTTPException(status_code=401, detail="Invalid token")
 
-async def get_current_user(credentials: Optional[HTTPAuthorizationCredentials] = Depends(security)) -> dict:
+
+async def get_current_user(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+) -> dict:
     """Get current user from JWT token"""
     try:
         if not credentials:
             raise HTTPException(
                 status_code=401,
                 detail="Not authenticated",
-                headers={"WWW-Authenticate": "Bearer"}
+                headers={"WWW-Authenticate": "Bearer"},
             )
 
         token = credentials.credentials
@@ -102,7 +117,7 @@ async def get_current_user(credentials: Optional[HTTPAuthorizationCredentials] =
             raise HTTPException(
                 status_code=401,
                 detail="No token provided",
-                headers={"WWW-Authenticate": "Bearer"}
+                headers={"WWW-Authenticate": "Bearer"},
             )
 
         payload = decode_token(token)
@@ -115,13 +130,14 @@ async def get_current_user(credentials: Optional[HTTPAuthorizationCredentials] =
         raise HTTPException(
             status_code=401,
             detail="Invalid or expired token",
-            headers={"WWW-Authenticate": "Bearer"}
+            headers={"WWW-Authenticate": "Bearer"},
         )
 
 
 # ============================================================================
 # ENDPOINTS
 # ============================================================================
+
 
 @router.post("/login", response_model=LoginResponse)
 async def login(request: LoginRequest):
@@ -141,7 +157,7 @@ async def login(request: LoginRequest):
             "full_name": "System Administrator",
             "roles": ["SUPERADMIN"],
             "store_ids": ["BV-DEL", "BV-NOI", "BV-GUR", "BV-MUM", "BV-BLR", "WO-MUM"],
-            "is_active": True
+            "is_active": True,
         },
         "avinash.ceo": {
             "user_id": "user-002",
@@ -151,7 +167,7 @@ async def login(request: LoginRequest):
             "full_name": "Avinash Kumar (CEO)",
             "roles": ["ADMIN"],
             "store_ids": ["BV-DEL", "BV-NOI", "BV-GUR", "BV-MUM", "BV-BLR", "WO-MUM"],
-            "is_active": True
+            "is_active": True,
         },
         # ============== ADMIN / DIRECTORS (2) ==============
         "director1": {
@@ -162,7 +178,7 @@ async def login(request: LoginRequest):
             "full_name": "Rajiv Sharma (Director - Operations)",
             "roles": ["ADMIN"],
             "store_ids": ["BV-DEL", "BV-NOI", "BV-GUR", "BV-MUM", "BV-BLR"],
-            "is_active": True
+            "is_active": True,
         },
         "director2": {
             "user_id": "user-004",
@@ -172,7 +188,7 @@ async def login(request: LoginRequest):
             "full_name": "Priya Singh (Director - Finance)",
             "roles": ["ADMIN"],
             "store_ids": ["BV-DEL", "BV-NOI", "BV-GUR", "BV-MUM", "BV-BLR"],
-            "is_active": True
+            "is_active": True,
         },
         # ============== AREA MANAGERS (2) ==============
         "area.north": {
@@ -183,7 +199,7 @@ async def login(request: LoginRequest):
             "full_name": "Amit Verma (Area Manager - North)",
             "roles": ["AREA_MANAGER"],
             "store_ids": ["BV-DEL", "BV-NOI", "BV-GUR"],
-            "is_active": True
+            "is_active": True,
         },
         "area.west": {
             "user_id": "user-006",
@@ -193,7 +209,7 @@ async def login(request: LoginRequest):
             "full_name": "Sneha Patel (Area Manager - West)",
             "roles": ["AREA_MANAGER"],
             "store_ids": ["BV-MUM", "WO-MUM"],
-            "is_active": True
+            "is_active": True,
         },
         # ============== STORE MANAGERS (6) ==============
         "rajesh.manager": {
@@ -204,7 +220,7 @@ async def login(request: LoginRequest):
             "full_name": "Rajesh Kumar",
             "roles": ["STORE_MANAGER"],
             "store_ids": ["BV-DEL"],
-            "is_active": True
+            "is_active": True,
         },
         "neha.manager": {
             "user_id": "user-008",
@@ -214,7 +230,7 @@ async def login(request: LoginRequest):
             "full_name": "Neha Gupta",
             "roles": ["STORE_MANAGER"],
             "store_ids": ["BV-NOI"],
-            "is_active": True
+            "is_active": True,
         },
         "vikram.manager": {
             "user_id": "user-009",
@@ -224,7 +240,7 @@ async def login(request: LoginRequest):
             "full_name": "Vikram Singh",
             "roles": ["STORE_MANAGER", "OPTOMETRIST"],
             "store_ids": ["BV-GUR"],
-            "is_active": True
+            "is_active": True,
         },
         "pooja.manager": {
             "user_id": "user-010",
@@ -234,7 +250,7 @@ async def login(request: LoginRequest):
             "full_name": "Pooja Shah",
             "roles": ["STORE_MANAGER"],
             "store_ids": ["BV-MUM"],
-            "is_active": True
+            "is_active": True,
         },
         "arjun.manager": {
             "user_id": "user-011",
@@ -244,7 +260,7 @@ async def login(request: LoginRequest):
             "full_name": "Arjun Reddy",
             "roles": ["STORE_MANAGER", "OPTOMETRIST"],
             "store_ids": ["BV-BLR"],
-            "is_active": True
+            "is_active": True,
         },
         "deepak.workshop": {
             "user_id": "user-012",
@@ -254,7 +270,7 @@ async def login(request: LoginRequest):
             "full_name": "Deepak Mishra (Workshop Manager)",
             "roles": ["STORE_MANAGER"],
             "store_ids": ["WO-MUM"],
-            "is_active": True
+            "is_active": True,
         },
         # ============== ACCOUNTANTS (2) ==============
         "accountant.delhi": {
@@ -265,7 +281,7 @@ async def login(request: LoginRequest):
             "full_name": "Suresh Agarwal",
             "roles": ["ACCOUNTANT"],
             "store_ids": ["BV-DEL"],
-            "is_active": True
+            "is_active": True,
         },
         "accountant.mumbai": {
             "user_id": "user-014",
@@ -275,7 +291,7 @@ async def login(request: LoginRequest):
             "full_name": "Meera Joshi",
             "roles": ["ACCOUNTANT"],
             "store_ids": ["BV-MUM"],
-            "is_active": True
+            "is_active": True,
         },
         # ============== CATALOG MANAGER (1) ==============
         "catalog.admin": {
@@ -286,7 +302,7 @@ async def login(request: LoginRequest):
             "full_name": "Rohit Malhotra",
             "roles": ["CATALOG_MANAGER"],
             "store_ids": ["BV-DEL", "BV-NOI", "BV-GUR", "BV-MUM", "BV-BLR", "WO-MUM"],
-            "is_active": True
+            "is_active": True,
         },
         # ============== HEAD OPTOMETRIST (1) ==============
         "dr.sharma": {
@@ -297,7 +313,7 @@ async def login(request: LoginRequest):
             "full_name": "Dr. Anita Sharma (Head Optometrist)",
             "roles": ["OPTOMETRIST"],
             "store_ids": ["BV-DEL", "BV-NOI", "BV-GUR", "BV-MUM", "BV-BLR"],
-            "is_active": True
+            "is_active": True,
         },
         # ============== DELHI SALES STAFF (3) ==============
         "sales.delhi1": {
@@ -308,7 +324,7 @@ async def login(request: LoginRequest):
             "full_name": "Ravi Sharma",
             "roles": ["SALES_STAFF"],
             "store_ids": ["BV-DEL"],
-            "is_active": True
+            "is_active": True,
         },
         "sales.delhi2": {
             "user_id": "user-018",
@@ -318,7 +334,7 @@ async def login(request: LoginRequest):
             "full_name": "Anjali Verma",
             "roles": ["SALES_STAFF"],
             "store_ids": ["BV-DEL"],
-            "is_active": True
+            "is_active": True,
         },
         "sales.delhi3": {
             "user_id": "user-019",
@@ -328,7 +344,7 @@ async def login(request: LoginRequest):
             "full_name": "Karan Mehta",
             "roles": ["SALES_STAFF"],
             "store_ids": ["BV-DEL"],
-            "is_active": True
+            "is_active": True,
         },
         # ============== NOIDA SALES STAFF (3) ==============
         "sales.noida1": {
@@ -339,7 +355,7 @@ async def login(request: LoginRequest):
             "full_name": "Simran Kaur",
             "roles": ["SALES_STAFF"],
             "store_ids": ["BV-NOI"],
-            "is_active": True
+            "is_active": True,
         },
         "sales.noida2": {
             "user_id": "user-021",
@@ -349,7 +365,7 @@ async def login(request: LoginRequest):
             "full_name": "Rahul Jain",
             "roles": ["SALES_STAFF"],
             "store_ids": ["BV-NOI"],
-            "is_active": True
+            "is_active": True,
         },
         "sales.noida3": {
             "user_id": "user-022",
@@ -359,7 +375,7 @@ async def login(request: LoginRequest):
             "full_name": "Priyanka Mishra",
             "roles": ["SALES_STAFF"],
             "store_ids": ["BV-NOI"],
-            "is_active": True
+            "is_active": True,
         },
         # ============== GURGAON SALES STAFF (2) ==============
         "sales.gurgaon1": {
@@ -370,7 +386,7 @@ async def login(request: LoginRequest):
             "full_name": "Aditya Singh",
             "roles": ["SALES_STAFF"],
             "store_ids": ["BV-GUR"],
-            "is_active": True
+            "is_active": True,
         },
         "sales.gurgaon2": {
             "user_id": "user-024",
@@ -380,7 +396,7 @@ async def login(request: LoginRequest):
             "full_name": "Kavita Rani",
             "roles": ["SALES_STAFF"],
             "store_ids": ["BV-GUR"],
-            "is_active": True
+            "is_active": True,
         },
         # ============== WIZOPT SALES STAFF (2) ==============
         "sales.wizopt1": {
@@ -391,7 +407,7 @@ async def login(request: LoginRequest):
             "full_name": "Sanjay Kumar",
             "roles": ["SALES_STAFF"],
             "store_ids": ["WO-MUM"],
-            "is_active": True
+            "is_active": True,
         },
         "sales.wizopt2": {
             "user_id": "user-026",
@@ -401,7 +417,7 @@ async def login(request: LoginRequest):
             "full_name": "Nisha Patel",
             "roles": ["SALES_STAFF"],
             "store_ids": ["WO-MUM"],
-            "is_active": True
+            "is_active": True,
         },
         # ============== CASHIERS (6) ==============
         "cashier.delhi": {
@@ -412,7 +428,7 @@ async def login(request: LoginRequest):
             "full_name": "Mohan Lal",
             "roles": ["CASHIER"],
             "store_ids": ["BV-DEL"],
-            "is_active": True
+            "is_active": True,
         },
         "cashier.noida": {
             "user_id": "user-028",
@@ -422,7 +438,7 @@ async def login(request: LoginRequest):
             "full_name": "Sunita Devi",
             "roles": ["CASHIER"],
             "store_ids": ["BV-NOI"],
-            "is_active": True
+            "is_active": True,
         },
         "cashier.gurgaon": {
             "user_id": "user-029",
@@ -432,7 +448,7 @@ async def login(request: LoginRequest):
             "full_name": "Ramesh Kumar",
             "roles": ["CASHIER"],
             "store_ids": ["BV-GUR"],
-            "is_active": True
+            "is_active": True,
         },
         "cashier.mumbai": {
             "user_id": "user-030",
@@ -442,7 +458,7 @@ async def login(request: LoginRequest):
             "full_name": "Lakshmi Iyer",
             "roles": ["CASHIER"],
             "store_ids": ["BV-MUM"],
-            "is_active": True
+            "is_active": True,
         },
         "cashier.bangalore": {
             "user_id": "user-031",
@@ -452,7 +468,7 @@ async def login(request: LoginRequest):
             "full_name": "Venkat Rao",
             "roles": ["CASHIER"],
             "store_ids": ["BV-BLR"],
-            "is_active": True
+            "is_active": True,
         },
         "cashier.wizopt": {
             "user_id": "user-032",
@@ -462,7 +478,7 @@ async def login(request: LoginRequest):
             "full_name": "Prakash Sharma",
             "roles": ["CASHIER"],
             "store_ids": ["WO-MUM"],
-            "is_active": True
+            "is_active": True,
         },
         # ============== WORKSHOP STAFF (4) ==============
         "workshop.tech1": {
@@ -473,7 +489,7 @@ async def login(request: LoginRequest):
             "full_name": "Vinod Yadav",
             "roles": ["WORKSHOP_STAFF"],
             "store_ids": ["WO-MUM"],
-            "is_active": True
+            "is_active": True,
         },
         "workshop.tech2": {
             "user_id": "user-034",
@@ -483,7 +499,7 @@ async def login(request: LoginRequest):
             "full_name": "Rajiv Gupta",
             "roles": ["WORKSHOP_STAFF"],
             "store_ids": ["WO-MUM"],
-            "is_active": True
+            "is_active": True,
         },
         "workshop.tech3": {
             "user_id": "user-035",
@@ -493,7 +509,7 @@ async def login(request: LoginRequest):
             "full_name": "Manoj Singh",
             "roles": ["WORKSHOP_STAFF"],
             "store_ids": ["WO-MUM"],
-            "is_active": True
+            "is_active": True,
         },
         "workshop.tech4": {
             "user_id": "user-036",
@@ -503,7 +519,7 @@ async def login(request: LoginRequest):
             "full_name": "Sunil Mishra",
             "roles": ["WORKSHOP_STAFF"],
             "store_ids": ["WO-MUM"],
-            "is_active": True
+            "is_active": True,
         },
         # ============== TEST USERS ==============
         "store_manager": {
@@ -514,7 +530,7 @@ async def login(request: LoginRequest):
             "full_name": "Store Manager (Test)",
             "roles": ["STORE_MANAGER"],
             "store_ids": ["BV-DEL"],
-            "is_active": True
+            "is_active": True,
         },
         "optometrist": {
             "user_id": "user-038",
@@ -524,10 +540,10 @@ async def login(request: LoginRequest):
             "full_name": "Optometrist (Test)",
             "roles": ["OPTOMETRIST"],
             "store_ids": ["BV-DEL"],
-            "is_active": True
-        }
+            "is_active": True,
+        },
     }
-    
+
     # Find user by username first, then by email
     login_input = request.username.lower().strip()
     user = mock_users.get(login_input)
@@ -541,31 +557,33 @@ async def login(request: LoginRequest):
 
     if not user:
         raise HTTPException(status_code=401, detail="Invalid username or password")
-    
+
     if not verify_password(request.password, user["password_hash"]):
         raise HTTPException(status_code=401, detail="Invalid username or password")
-    
+
     if not user["is_active"]:
         raise HTTPException(status_code=403, detail="User account is disabled")
-    
+
     # Validate store access if store_id provided
     active_store = request.store_id
     if active_store and active_store not in user["store_ids"]:
         # Allow ADMIN/SUPERADMIN to access any store
         if not any(r in ["ADMIN", "SUPERADMIN"] for r in user["roles"]):
             raise HTTPException(status_code=403, detail="No access to this store")
-    
+
     # Create token
     token_data = {
         "user_id": user["user_id"],
         "username": user["username"],
         "roles": user["roles"],
         "store_ids": user["store_ids"],
-        "active_store_id": active_store or user["store_ids"][0] if user["store_ids"] else None
+        "active_store_id": (
+            active_store or user["store_ids"][0] if user["store_ids"] else None
+        ),
     }
-    
+
     access_token = create_access_token(token_data)
-    
+
     return LoginResponse(
         access_token=access_token,
         expires_in=ACCESS_TOKEN_EXPIRE_MINUTES * 60,
@@ -575,8 +593,8 @@ async def login(request: LoginRequest):
             "full_name": user["full_name"],
             "roles": user["roles"],
             "store_ids": user["store_ids"],
-            "active_store_id": token_data["active_store_id"]
-        }
+            "active_store_id": token_data["active_store_id"],
+        },
     )
 
 
@@ -603,29 +621,28 @@ async def refresh_token(request: RefreshTokenRequest):
     Refresh access token
     """
     payload = decode_token(request.token)
-    
+
     # Create new token
     token_data = {
         "user_id": payload["user_id"],
         "username": payload["username"],
         "roles": payload["roles"],
         "store_ids": payload["store_ids"],
-        "active_store_id": payload.get("active_store_id")
+        "active_store_id": payload.get("active_store_id"),
     }
-    
+
     new_token = create_access_token(token_data)
-    
+
     return {
         "access_token": new_token,
         "token_type": "bearer",
-        "expires_in": ACCESS_TOKEN_EXPIRE_MINUTES * 60
+        "expires_in": ACCESS_TOKEN_EXPIRE_MINUTES * 60,
     }
 
 
 @router.post("/change-password")
 async def change_password(
-    request: ChangePasswordRequest, 
-    current_user: dict = Depends(get_current_user)
+    request: ChangePasswordRequest, current_user: dict = Depends(get_current_user)
 ):
     """
     Change user password
@@ -642,19 +659,16 @@ async def switch_store(store_id: str, current_user: dict = Depends(get_current_u
     if store_id not in current_user["store_ids"]:
         if not any(r in ["ADMIN", "SUPERADMIN"] for r in current_user["roles"]):
             raise HTTPException(status_code=403, detail="No access to this store")
-    
+
     # Create new token with updated store
     token_data = {
         "user_id": current_user["user_id"],
         "username": current_user["username"],
         "roles": current_user["roles"],
         "store_ids": current_user["store_ids"],
-        "active_store_id": store_id
+        "active_store_id": store_id,
     }
-    
+
     new_token = create_access_token(token_data)
-    
-    return {
-        "access_token": new_token,
-        "active_store_id": store_id
-    }
+
+    return {"access_token": new_token, "active_store_id": store_id}

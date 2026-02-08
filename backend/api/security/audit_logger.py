@@ -17,6 +17,7 @@ Base = declarative_base()
 # Enums
 # ============================================================================
 
+
 class AuditAction(str, Enum):
     """Audit log actions"""
 
@@ -60,16 +61,20 @@ class AuditAction(str, Enum):
     PERMISSION_DENIED = "permission_denied"
     SECURITY_ALERT = "security_alert"
 
+
 class AuditSeverity(str, Enum):
     """Audit event severity levels"""
+
     INFO = "INFO"
     WARNING = "WARNING"
     ERROR = "ERROR"
     CRITICAL = "CRITICAL"
 
+
 # ============================================================================
 # Database Model
 # ============================================================================
+
 
 class AuditLog(Base):
     """Audit log database model"""
@@ -89,9 +94,11 @@ class AuditLog(Base):
     details = Column(JSON, nullable=True)
     change_hash = Column(String(64), nullable=True)  # For change verification
 
+
 # ============================================================================
 # Audit Logger Service
 # ============================================================================
+
 
 class AuditLoggerService:
     """Comprehensive audit logging service"""
@@ -136,7 +143,7 @@ class AuditLoggerService:
             ip_address=ip_address,
             user_agent=user_agent,
             details=sanitized_details,
-            change_hash=change_hash
+            change_hash=change_hash,
         )
 
         # Save to database
@@ -160,55 +167,45 @@ class AuditLoggerService:
         finally:
             session.close()
 
-    async def get_user_activity(
-        self,
-        user_id: str,
-        limit: int = 100,
-        offset: int = 0
-    ):
+    async def get_user_activity(self, user_id: str, limit: int = 100, offset: int = 0):
         """Get audit logs for specific user"""
 
         session = self.SessionLocal()
         try:
-            logs = session.query(AuditLog)\
-                .filter(AuditLog.user_id == user_id)\
-                .order_by(AuditLog.timestamp.desc())\
-                .limit(limit)\
-                .offset(offset)\
+            logs = (
+                session.query(AuditLog)
+                .filter(AuditLog.user_id == user_id)
+                .order_by(AuditLog.timestamp.desc())
+                .limit(limit)
+                .offset(offset)
                 .all()
+            )
 
             return logs
 
         finally:
             session.close()
 
-    async def get_resource_changes(
-        self,
-        resource: str,
-        resource_id: str
-    ):
+    async def get_resource_changes(self, resource: str, resource_id: str):
         """Get change history for a resource"""
 
         session = self.SessionLocal()
         try:
-            logs = session.query(AuditLog)\
+            logs = (
+                session.query(AuditLog)
                 .filter(
-                    AuditLog.resource == resource,
-                    AuditLog.resource_id == resource_id
-                )\
-                .order_by(AuditLog.timestamp.asc())\
+                    AuditLog.resource == resource, AuditLog.resource_id == resource_id
+                )
+                .order_by(AuditLog.timestamp.asc())
                 .all()
+            )
 
             return logs
 
         finally:
             session.close()
 
-    async def verify_audit_trail(
-        self,
-        log_id: int,
-        expected_hash: str
-    ) -> bool:
+    async def verify_audit_trail(self, log_id: int, expected_hash: str) -> bool:
         """Verify audit trail integrity using cryptographic hash"""
 
         session = self.SessionLocal()
@@ -231,7 +228,7 @@ class AuditLoggerService:
         change_data = {
             "before": before_state,
             "after": after_state,
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": datetime.utcnow().isoformat(),
         }
 
         change_json = json.dumps(change_data, sort_keys=True)
@@ -242,8 +239,15 @@ class AuditLoggerService:
         """Remove sensitive data from audit details"""
 
         sensitive_fields = {
-            "password", "token", "secret", "key", "credit_card",
-            "ssn", "pin", "api_key", "private_key"
+            "password",
+            "token",
+            "secret",
+            "key",
+            "credit_card",
+            "ssn",
+            "pin",
+            "api_key",
+            "private_key",
         }
 
         sanitized = {}
@@ -270,7 +274,7 @@ class AuditLoggerService:
             "status": log_entry.status,
             "severity": log_entry.severity,
             "ip_address": log_entry.ip_address,
-            "details": log_entry.details
+            "details": log_entry.details,
         }
 
         # Send to structured logging service
@@ -283,24 +287,29 @@ class AuditLoggerService:
 
         # Write to local file as backup
         with open("/var/log/ims/audit_failsafe.log", "a") as f:
-            f.write(json.dumps({
-                "timestamp": datetime.utcnow().isoformat(),
-                "action": log_entry.action,
-                "error": error
-            }) + "\n")
+            f.write(
+                json.dumps(
+                    {
+                        "timestamp": datetime.utcnow().isoformat(),
+                        "action": log_entry.action,
+                        "error": error,
+                    }
+                )
+                + "\n"
+            )
+
 
 # ============================================================================
 # Compliance Reports
 # ============================================================================
+
 
 class ComplianceReportService:
     """Generate compliance reports from audit logs"""
 
     @staticmethod
     async def generate_user_access_report(
-        user_id: str,
-        start_date: datetime,
-        end_date: datetime
+        user_id: str, start_date: datetime, end_date: datetime
     ) -> Dict:
         """Generate user access report for compliance"""
 
@@ -308,24 +317,26 @@ class ComplianceReportService:
 
         session = audit_service.SessionLocal()
         try:
-            logs = session.query(AuditLog)\
+            logs = (
+                session.query(AuditLog)
                 .filter(
                     AuditLog.user_id == user_id,
                     AuditLog.timestamp >= start_date,
-                    AuditLog.timestamp <= end_date
-                )\
+                    AuditLog.timestamp <= end_date,
+                )
                 .all()
+            )
 
             return {
                 "user_id": user_id,
                 "period": {
                     "start": start_date.isoformat(),
-                    "end": end_date.isoformat()
+                    "end": end_date.isoformat(),
                 },
                 "total_actions": len(logs),
                 "actions_by_type": self._group_by_action(logs),
                 "login_history": self._extract_login_history(logs),
-                "sensitive_operations": self._extract_sensitive_ops(logs)
+                "sensitive_operations": self._extract_sensitive_ops(logs),
             }
 
         finally:
@@ -348,8 +359,7 @@ class ComplianceReportService:
         """Extract login history from logs"""
 
         login_logs = [
-            log for log in logs
-            if log.action in ["login_success", "login_failure"]
+            log for log in logs if log.action in ["login_success", "login_failure"]
         ]
 
         return [
@@ -357,7 +367,7 @@ class ComplianceReportService:
                 "timestamp": log.timestamp.isoformat(),
                 "action": log.action,
                 "ip_address": log.ip_address,
-                "user_agent": log.user_agent
+                "user_agent": log.user_agent,
             }
             for log in login_logs
         ]
@@ -367,14 +377,14 @@ class ComplianceReportService:
         """Extract sensitive operations"""
 
         sensitive_actions = {
-            "user_deleted", "data_deleted", "payment_processed",
-            "user_role_changed", "configuration_changed"
+            "user_deleted",
+            "data_deleted",
+            "payment_processed",
+            "user_role_changed",
+            "configuration_changed",
         }
 
-        sensitive_logs = [
-            log for log in logs
-            if log.action in sensitive_actions
-        ]
+        sensitive_logs = [log for log in logs if log.action in sensitive_actions]
 
         return [
             {
@@ -382,16 +392,18 @@ class ComplianceReportService:
                 "action": log.action,
                 "resource": log.resource,
                 "resource_id": log.resource_id,
-                "details": log.details
+                "details": log.details,
             }
             for log in sensitive_logs
         ]
+
 
 # ============================================================================
 # Singleton Instance
 # ============================================================================
 
 _audit_logger_instance = None
+
 
 def get_audit_logger() -> AuditLoggerService:
     """Get singleton audit logger instance"""

@@ -3,6 +3,7 @@ IMS 2.0 - FastAPI Main Application
 ===================================
 Main entry point for the API server
 """
+
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -22,6 +23,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # Database connection
 try:
     from database.connection import init_db, close_db, get_db, DatabaseConfig
+
     DATABASE_AVAILABLE = True
 except ImportError:
     DATABASE_AVAILABLE = False
@@ -49,8 +51,9 @@ from .routers import (
     shopify_router,
     transfers_router,
     catalog_router,
-    jarvis_router
+    jarvis_router,
 )
+
 
 # Lifespan context manager for startup/shutdown
 @asynccontextmanager
@@ -89,7 +92,7 @@ app = FastAPI(
     version="2.0.0",
     docs_url="/docs",
     redoc_url="/redoc",
-    lifespan=lifespan
+    lifespan=lifespan,
 )
 
 # CORS Middleware - Configure allowed origins
@@ -168,6 +171,7 @@ app.add_middleware(
     expose_headers=["*"],  # Expose all response headers
 )
 
+
 # Custom CORS handler for dynamic origin validation (additional safety layer)
 @app.middleware("http")
 async def dynamic_cors_handler(request: Request, call_next):
@@ -206,10 +210,7 @@ async def add_process_time_header(request: Request, call_next):
 async def http_exception_handler(request: Request, exc: HTTPException):
     """Handle HTTP exceptions (like 401 Unauthorized, 403 Forbidden, etc.)"""
     logger.warning(f"HTTP Exception {exc.status_code}: {exc.detail}")
-    return JSONResponse(
-        status_code=exc.status_code,
-        content={"detail": exc.detail}
-    )
+    return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
 
 
 # Global exception handler for unexpected errors
@@ -217,20 +218,21 @@ async def http_exception_handler(request: Request, exc: HTTPException):
 async def global_exception_handler(request: Request, exc: Exception):
     logger.error(f"Unhandled exception: {exc}")
     return JSONResponse(
-        status_code=500,
-        content={"detail": "Internal server error", "error": str(exc)}
+        status_code=500, content={"detail": "Internal server error", "error": str(exc)}
     )
 
 
 # Health check endpoint
 @app.get("/health", tags=["Health"])
 async def health_check():
-    db_status = "connected" if DATABASE_AVAILABLE and get_db().is_connected else "disconnected"
+    db_status = (
+        "connected" if DATABASE_AVAILABLE and get_db().is_connected else "disconnected"
+    )
     return {
         "status": "healthy",
         "service": "IMS 2.0 API",
         "version": "2.0.0",
-        "database": db_status
+        "database": db_status,
     }
 
 
@@ -240,7 +242,7 @@ async def root():
     return {
         "message": "IMS 2.0 - Retail Operating System API",
         "docs": "/docs",
-        "health": "/health"
+        "health": "/health",
     }
 
 
@@ -252,7 +254,9 @@ app.include_router(products_router, prefix="/api/v1/products", tags=["Products"]
 app.include_router(inventory_router, prefix="/api/v1/inventory", tags=["Inventory"])
 app.include_router(customers_router, prefix="/api/v1/customers", tags=["Customers"])
 app.include_router(orders_router, prefix="/api/v1/orders", tags=["Orders"])
-app.include_router(prescriptions_router, prefix="/api/v1/prescriptions", tags=["Prescriptions"])
+app.include_router(
+    prescriptions_router, prefix="/api/v1/prescriptions", tags=["Prescriptions"]
+)
 app.include_router(vendors_router, prefix="/api/v1/vendors", tags=["Vendors"])
 app.include_router(tasks_router, prefix="/api/v1/tasks", tags=["Tasks"])
 app.include_router(expenses_router, prefix="/api/v1/expenses", tags=["Expenses"])
@@ -263,11 +267,14 @@ app.include_router(settings_router, prefix="/api/v1/settings", tags=["Settings"]
 app.include_router(clinical_router, prefix="/api/v1/clinical", tags=["Clinical"])
 app.include_router(admin_router, prefix="/api/v1/admin", tags=["Admin"])
 app.include_router(shopify_router, prefix="/api/v1/shopify", tags=["Shopify"])
-app.include_router(transfers_router, prefix="/api/v1/transfers", tags=["Stock Transfers"])
+app.include_router(
+    transfers_router, prefix="/api/v1/transfers", tags=["Stock Transfers"]
+)
 app.include_router(catalog_router, prefix="/api/v1/catalog", tags=["Catalog"])
 app.include_router(jarvis_router, prefix="/api/v1/jarvis", tags=["JARVIS"])
 
 
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(app, host="0.0.0.0", port=8000)

@@ -3,6 +3,7 @@ IMS 2.0 - Users Router
 =======================
 User management endpoints
 """
+
 from fastapi import APIRouter, HTTPException, Depends, Query
 from pydantic import BaseModel, Field, EmailStr
 from typing import List, Optional
@@ -20,6 +21,7 @@ router = APIRouter()
 # SCHEMAS
 # ============================================================================
 
+
 class UserCreate(BaseModel):
     username: str = Field(..., min_length=3, max_length=50)
     email: EmailStr
@@ -31,6 +33,7 @@ class UserCreate(BaseModel):
     primary_store_id: Optional[str] = None
     discount_cap: float = Field(default=10.0, ge=0, le=100)
 
+
 class UserUpdate(BaseModel):
     full_name: Optional[str] = None
     phone: Optional[str] = None
@@ -39,6 +42,7 @@ class UserUpdate(BaseModel):
     primary_store_id: Optional[str] = None
     discount_cap: Optional[float] = Field(default=None, ge=0, le=100)
     is_active: Optional[bool] = None
+
 
 class UserResponse(BaseModel):
     user_id: str
@@ -59,6 +63,7 @@ class UserResponse(BaseModel):
 # HELPER FUNCTIONS
 # ============================================================================
 
+
 def hash_password(password: str) -> str:
     """Hash password using SHA-256"""
     return hashlib.sha256(password.encode()).hexdigest()
@@ -76,11 +81,13 @@ def sanitize_user(user: dict) -> dict:
 # ROLE CHECKS
 # ============================================================================
 
+
 def require_admin(current_user: dict = Depends(get_current_user)):
     """Require ADMIN or SUPERADMIN role"""
     if not any(r in ["ADMIN", "SUPERADMIN"] for r in current_user.get("roles", [])):
         raise HTTPException(status_code=403, detail="Admin access required")
     return current_user
+
 
 def require_manager(current_user: dict = Depends(get_current_user)):
     """Require STORE_MANAGER or higher"""
@@ -94,12 +101,13 @@ def require_manager(current_user: dict = Depends(get_current_user)):
 # ENDPOINTS
 # ============================================================================
 
+
 # NOTE: Specific routes MUST come before /{user_id} to avoid being matched as user_id
 @router.get("/store/{store_id}", response_model=List[dict])
 async def get_store_users(
     store_id: str,
     role: Optional[str] = Query(None),
-    current_user: dict = Depends(require_manager)
+    current_user: dict = Depends(require_manager),
 ):
     """Get users for a specific store"""
     repo = get_user_repository()
@@ -118,7 +126,7 @@ async def get_store_users(
 async def get_users_by_role(
     role: str,
     store_id: Optional[str] = Query(None),
-    current_user: dict = Depends(require_manager)
+    current_user: dict = Depends(require_manager),
 ):
     """Get users by role"""
     repo = get_user_repository()
@@ -134,7 +142,7 @@ async def get_users_by_role(
 async def search_users(
     q: str = Query(..., min_length=2),
     store_id: Optional[str] = Query(None),
-    current_user: dict = Depends(require_manager)
+    current_user: dict = Depends(require_manager),
 ):
     """Search users by name, username, or email"""
     repo = get_user_repository()
@@ -148,8 +156,7 @@ async def search_users(
 
 @router.get("/summary")
 async def get_user_summary(
-    store_id: Optional[str] = Query(None),
-    current_user: dict = Depends(require_manager)
+    store_id: Optional[str] = Query(None), current_user: dict = Depends(require_manager)
 ):
     """Get user count summary by role"""
     repo = get_user_repository()
@@ -168,7 +175,7 @@ async def list_users(
     active_only: bool = Query(True),
     skip: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=100),
-    current_user: dict = Depends(require_manager)
+    current_user: dict = Depends(require_manager),
 ):
     """List users with filters"""
     repo = get_user_repository()
@@ -189,10 +196,7 @@ async def list_users(
 
 
 @router.post("/", response_model=dict, status_code=201)
-async def create_user(
-    user: UserCreate,
-    current_user: dict = Depends(require_admin)
-):
+async def create_user(user: UserCreate, current_user: dict = Depends(require_admin)):
     """Create new user (Admin only)"""
     repo = get_user_repository()
 
@@ -213,10 +217,11 @@ async def create_user(
             "phone": user.phone,
             "roles": user.roles,
             "store_ids": user.store_ids,
-            "primary_store_id": user.primary_store_id or (user.store_ids[0] if user.store_ids else None),
+            "primary_store_id": user.primary_store_id
+            or (user.store_ids[0] if user.store_ids else None),
             "discount_cap": user.discount_cap,
             "is_active": True,
-            "created_by": current_user.get("user_id")
+            "created_by": current_user.get("user_id"),
         }
 
         created = repo.create(user_data)
@@ -224,7 +229,7 @@ async def create_user(
             return {
                 "user_id": created["user_id"],
                 "username": created["username"],
-                "message": "User created successfully"
+                "message": "User created successfully",
             }
 
         raise HTTPException(status_code=500, detail="Failed to create user")
@@ -232,15 +237,12 @@ async def create_user(
     return {
         "user_id": str(uuid.uuid4()),
         "username": user.username,
-        "message": "User created successfully"
+        "message": "User created successfully",
     }
 
 
 @router.get("/{user_id}", response_model=dict)
-async def get_user(
-    user_id: str,
-    current_user: dict = Depends(require_manager)
-):
+async def get_user(user_id: str, current_user: dict = Depends(require_manager)):
     """Get user by ID"""
     repo = get_user_repository()
 
@@ -255,9 +257,7 @@ async def get_user(
 
 @router.put("/{user_id}", response_model=dict)
 async def update_user(
-    user_id: str,
-    user: UserUpdate,
-    current_user: dict = Depends(require_admin)
+    user_id: str, user: UserUpdate, current_user: dict = Depends(require_admin)
 ):
     """Update user (Admin only)"""
     repo = get_user_repository()
@@ -279,10 +279,7 @@ async def update_user(
 
 
 @router.delete("/{user_id}")
-async def delete_user(
-    user_id: str,
-    current_user: dict = Depends(require_admin)
-):
+async def delete_user(user_id: str, current_user: dict = Depends(require_admin)):
     """Deactivate user (soft delete)"""
     repo = get_user_repository()
 
@@ -295,7 +292,9 @@ async def delete_user(
         if user_id == current_user.get("user_id"):
             raise HTTPException(status_code=400, detail="Cannot deactivate yourself")
 
-        if repo.update(user_id, {"is_active": False, "deactivated_by": current_user.get("user_id")}):
+        if repo.update(
+            user_id, {"is_active": False, "deactivated_by": current_user.get("user_id")}
+        ):
             return {"message": "User deactivated"}
 
         raise HTTPException(status_code=500, detail="Failed to deactivate user")
@@ -305,9 +304,7 @@ async def delete_user(
 
 @router.post("/{user_id}/roles/{role}")
 async def add_role(
-    user_id: str,
-    role: str,
-    current_user: dict = Depends(require_admin)
+    user_id: str, role: str, current_user: dict = Depends(require_admin)
 ):
     """Add role to user"""
     repo = get_user_repository()
@@ -327,9 +324,7 @@ async def add_role(
 
 @router.delete("/{user_id}/roles/{role}")
 async def remove_role(
-    user_id: str,
-    role: str,
-    current_user: dict = Depends(require_admin)
+    user_id: str, role: str, current_user: dict = Depends(require_admin)
 ):
     """Remove role from user"""
     repo = get_user_repository()
@@ -349,9 +344,7 @@ async def remove_role(
 
 @router.post("/{user_id}/stores/{store_id}")
 async def add_store_access(
-    user_id: str,
-    store_id: str,
-    current_user: dict = Depends(require_admin)
+    user_id: str, store_id: str, current_user: dict = Depends(require_admin)
 ):
     """Add store access to user"""
     repo = get_user_repository()
@@ -371,9 +364,7 @@ async def add_store_access(
 
 @router.delete("/{user_id}/stores/{store_id}")
 async def remove_store_access(
-    user_id: str,
-    store_id: str,
-    current_user: dict = Depends(require_admin)
+    user_id: str, store_id: str, current_user: dict = Depends(require_admin)
 ):
     """Remove store access from user"""
     repo = get_user_repository()

@@ -11,6 +11,7 @@ from functools import lru_cache
 # Enums & Constants
 # ============================================================================
 
+
 class Permission(str, Enum):
     """Fine-grained permissions"""
 
@@ -60,8 +61,10 @@ class Permission(str, Enum):
     SYSTEM_SETTINGS = "system:settings"
     SYSTEM_AUDIT_LOG = "system:audit_log"
 
+
 class Role(str, Enum):
     """System roles"""
+
     ADMIN = "ADMIN"
     STORE_MANAGER = "STORE_MANAGER"
     INVENTORY_MANAGER = "INVENTORY_MANAGER"
@@ -70,6 +73,7 @@ class Role(str, Enum):
     ACCOUNTANT = "ACCOUNTANT"
     READ_ONLY = "READ_ONLY"
 
+
 # ============================================================================
 # Role-Permission Mapping
 # ============================================================================
@@ -77,84 +81,100 @@ class Role(str, Enum):
 ROLE_PERMISSIONS: Dict[Role, Set[Permission]] = {
     Role.ADMIN: {
         # All permissions
-        Permission.PRODUCT_CREATE, Permission.PRODUCT_READ,
-        Permission.PRODUCT_UPDATE, Permission.PRODUCT_DELETE,
+        Permission.PRODUCT_CREATE,
+        Permission.PRODUCT_READ,
+        Permission.PRODUCT_UPDATE,
+        Permission.PRODUCT_DELETE,
         Permission.PRODUCT_BULK_IMPORT,
-
-        Permission.CUSTOMER_CREATE, Permission.CUSTOMER_READ,
-        Permission.CUSTOMER_UPDATE, Permission.CUSTOMER_DELETE,
+        Permission.CUSTOMER_CREATE,
+        Permission.CUSTOMER_READ,
+        Permission.CUSTOMER_UPDATE,
+        Permission.CUSTOMER_DELETE,
         Permission.CUSTOMER_EXPORT,
-
-        Permission.ORDER_CREATE, Permission.ORDER_READ,
-        Permission.ORDER_UPDATE, Permission.ORDER_CANCEL,
+        Permission.ORDER_CREATE,
+        Permission.ORDER_READ,
+        Permission.ORDER_UPDATE,
+        Permission.ORDER_CANCEL,
         Permission.ORDER_PROCESS_PAYMENT,
-
-        Permission.INVENTORY_READ, Permission.INVENTORY_UPDATE,
-        Permission.INVENTORY_TRANSFER, Permission.INVENTORY_ADJUST,
-
-        Permission.FINANCIAL_READ, Permission.FINANCIAL_EXPORT,
-        Permission.FINANCIAL_AUDIT,
-
-        Permission.USER_CREATE, Permission.USER_READ,
-        Permission.USER_UPDATE, Permission.USER_DELETE,
-        Permission.USER_MANAGE_ROLES, Permission.USER_MANAGE_PERMISSIONS,
-
-        Permission.SYSTEM_ADMIN, Permission.SYSTEM_BACKUP,
-        Permission.SYSTEM_SETTINGS, Permission.SYSTEM_AUDIT_LOG,
-    },
-
-    Role.STORE_MANAGER: {
-        Permission.PRODUCT_READ, Permission.PRODUCT_UPDATE,
-        Permission.CUSTOMER_READ, Permission.CUSTOMER_UPDATE,
-        Permission.ORDER_READ, Permission.ORDER_UPDATE,
-        Permission.INVENTORY_READ, Permission.INVENTORY_UPDATE,
+        Permission.INVENTORY_READ,
+        Permission.INVENTORY_UPDATE,
         Permission.INVENTORY_TRANSFER,
-        Permission.FINANCIAL_READ, Permission.FINANCIAL_EXPORT,
+        Permission.INVENTORY_ADJUST,
+        Permission.FINANCIAL_READ,
+        Permission.FINANCIAL_EXPORT,
+        Permission.FINANCIAL_AUDIT,
+        Permission.USER_CREATE,
+        Permission.USER_READ,
+        Permission.USER_UPDATE,
+        Permission.USER_DELETE,
+        Permission.USER_MANAGE_ROLES,
+        Permission.USER_MANAGE_PERMISSIONS,
+        Permission.SYSTEM_ADMIN,
+        Permission.SYSTEM_BACKUP,
+        Permission.SYSTEM_SETTINGS,
+        Permission.SYSTEM_AUDIT_LOG,
+    },
+    Role.STORE_MANAGER: {
+        Permission.PRODUCT_READ,
+        Permission.PRODUCT_UPDATE,
+        Permission.CUSTOMER_READ,
+        Permission.CUSTOMER_UPDATE,
+        Permission.ORDER_READ,
+        Permission.ORDER_UPDATE,
+        Permission.INVENTORY_READ,
+        Permission.INVENTORY_UPDATE,
+        Permission.INVENTORY_TRANSFER,
+        Permission.FINANCIAL_READ,
+        Permission.FINANCIAL_EXPORT,
         Permission.USER_READ,
     },
-
     Role.INVENTORY_MANAGER: {
-        Permission.PRODUCT_READ, Permission.PRODUCT_UPDATE,
-        Permission.INVENTORY_READ, Permission.INVENTORY_UPDATE,
-        Permission.INVENTORY_TRANSFER, Permission.INVENTORY_ADJUST,
+        Permission.PRODUCT_READ,
+        Permission.PRODUCT_UPDATE,
+        Permission.INVENTORY_READ,
+        Permission.INVENTORY_UPDATE,
+        Permission.INVENTORY_TRANSFER,
+        Permission.INVENTORY_ADJUST,
         Permission.ORDER_READ,
     },
-
     Role.SALES_STAFF: {
         Permission.PRODUCT_READ,
-        Permission.CUSTOMER_CREATE, Permission.CUSTOMER_READ,
+        Permission.CUSTOMER_CREATE,
+        Permission.CUSTOMER_READ,
         Permission.CUSTOMER_UPDATE,
-        Permission.ORDER_CREATE, Permission.ORDER_READ,
-        Permission.ORDER_UPDATE, Permission.ORDER_PROCESS_PAYMENT,
+        Permission.ORDER_CREATE,
+        Permission.ORDER_READ,
+        Permission.ORDER_UPDATE,
+        Permission.ORDER_PROCESS_PAYMENT,
         Permission.INVENTORY_READ,
     },
-
     Role.CUSTOMER_SUPPORT: {
-        Permission.CUSTOMER_READ, Permission.CUSTOMER_UPDATE,
+        Permission.CUSTOMER_READ,
+        Permission.CUSTOMER_UPDATE,
         Permission.ORDER_READ,
         Permission.FINANCIAL_READ,
     },
-
     Role.ACCOUNTANT: {
         Permission.PRODUCT_READ,
         Permission.CUSTOMER_READ,
         Permission.ORDER_READ,
-        Permission.FINANCIAL_READ, Permission.FINANCIAL_EXPORT,
+        Permission.FINANCIAL_READ,
+        Permission.FINANCIAL_EXPORT,
         Permission.FINANCIAL_AUDIT,
     },
-
     Role.READ_ONLY: {
         Permission.PRODUCT_READ,
         Permission.CUSTOMER_READ,
         Permission.ORDER_READ,
         Permission.INVENTORY_READ,
         Permission.FINANCIAL_READ,
-    }
+    },
 }
 
 # ============================================================================
 # RBAC Service
 # ============================================================================
+
 
 class RBACService:
     """Advanced RBAC service with permission caching"""
@@ -199,9 +219,11 @@ class RBACService:
         user_permissions = RBACService.get_user_permissions(user_roles)
         return all(perm in user_permissions for perm in permissions)
 
+
 # ============================================================================
 # Resource-Level Access Control
 # ============================================================================
+
 
 class ResourceAccessControl:
     """Handle resource-level access control decisions"""
@@ -245,45 +267,40 @@ class ResourceAccessControl:
 
         return False
 
+
 # ============================================================================
 # FastAPI Dependency for Permission Checking
 # ============================================================================
 
 from fastapi import Depends, HTTPException, status
 
+
 async def require_permission(
-    required_permission: str,
-    current_user = Depends(get_current_user)
+    required_permission: str, current_user=Depends(get_current_user)
 ):
     """Dependency to enforce permission check"""
 
-    if not RBACService.has_permission(
-        tuple(current_user.roles),
-        required_permission
-    ):
+    if not RBACService.has_permission(tuple(current_user.roles), required_permission):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"Permission denied: {required_permission} required"
+            detail=f"Permission denied: {required_permission} required",
         )
 
     return current_user
 
+
 async def require_any_permission(
-    permissions: List[str],
-    current_user = Depends(get_current_user)
+    permissions: List[str], current_user=Depends(get_current_user)
 ):
     """Dependency to enforce any of multiple permissions"""
 
-    if not RBACService.has_any_permission(
-        tuple(current_user.roles),
-        permissions
-    ):
+    if not RBACService.has_any_permission(tuple(current_user.roles), permissions):
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Insufficient permissions"
+            status_code=status.HTTP_403_FORBIDDEN, detail="Insufficient permissions"
         )
 
     return current_user
+
 
 # ============================================================================
 # Usage Examples

@@ -3,6 +3,7 @@ IMS 2.0 - Workshop Router
 ==========================
 Workshop job management endpoints
 """
+
 from fastapi import APIRouter, HTTPException, Depends, Query
 from pydantic import BaseModel, Field
 from typing import Optional
@@ -18,6 +19,7 @@ router = APIRouter()
 # ============================================================================
 # SCHEMAS
 # ============================================================================
+
 
 class WorkshopJobCreate(BaseModel):
     order_id: str
@@ -38,6 +40,7 @@ class WorkshopJobUpdate(BaseModel):
 # ============================================================================
 # HELPER FUNCTIONS
 # ============================================================================
+
 
 def generate_job_number() -> str:
     """Generate unique workshop job number"""
@@ -92,11 +95,12 @@ def job_to_frontend(job: dict) -> dict:
 # ENDPOINTS
 # ============================================================================
 
+
 # NOTE: Specific routes MUST come before /jobs/{job_id}
 @router.get("/pending")
 async def get_pending_jobs(
     store_id: Optional[str] = Query(None),
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
     """Get pending workshop jobs"""
     repo = get_workshop_repository()
@@ -113,7 +117,7 @@ async def get_pending_jobs(
 @router.get("/overdue")
 async def get_overdue_jobs(
     store_id: Optional[str] = Query(None),
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
     """Get overdue workshop jobs"""
     repo = get_workshop_repository()
@@ -130,7 +134,7 @@ async def get_overdue_jobs(
 @router.get("/ready")
 async def get_ready_jobs(
     store_id: Optional[str] = Query(None),
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
     """Get jobs ready for delivery"""
     repo = get_workshop_repository()
@@ -147,7 +151,7 @@ async def get_ready_jobs(
 @router.get("/technician-workload")
 async def get_technician_workload(
     store_id: Optional[str] = Query(None),
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
     """Get technician workload summary"""
     repo = get_workshop_repository()
@@ -167,7 +171,7 @@ async def list_jobs(
     store_id: Optional[str] = Query(None),
     skip: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=100),
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
     """List workshop jobs with filters"""
     repo = get_workshop_repository()
@@ -182,7 +186,9 @@ async def list_jobs(
         if technician_id:
             filter_dict["technician_id"] = technician_id
 
-        jobs = repo.find_many(filter_dict, skip=skip, limit=limit, sort=[("created_at", -1)])
+        jobs = repo.find_many(
+            filter_dict, skip=skip, limit=limit, sort=[("created_at", -1)]
+        )
         jobs_formatted = [job_to_frontend(j) for j in jobs]
         return {"jobs": jobs_formatted, "total": len(jobs_formatted)}
 
@@ -191,8 +197,7 @@ async def list_jobs(
 
 @router.post("/jobs", status_code=201)
 async def create_job(
-    job: WorkshopJobCreate,
-    current_user: dict = Depends(get_current_user)
+    job: WorkshopJobCreate, current_user: dict = Depends(get_current_user)
 ):
     """Create a new workshop job"""
     repo = get_workshop_repository()
@@ -216,7 +221,7 @@ async def create_job(
             "special_notes": job.special_notes,
             "expected_date": job.expected_date.isoformat(),
             "status": "PENDING",
-            "created_by": current_user.get("user_id")
+            "created_by": current_user.get("user_id"),
         }
 
         created = repo.create(job_data)
@@ -224,7 +229,7 @@ async def create_job(
             return {
                 "job_id": created["job_id"],
                 "job_number": created["job_number"],
-                "message": "Workshop job created"
+                "message": "Workshop job created",
             }
 
         raise HTTPException(status_code=500, detail="Failed to create workshop job")
@@ -232,15 +237,12 @@ async def create_job(
     return {
         "id": str(uuid.uuid4()),
         "jobNumber": generate_job_number(),
-        "message": "Workshop job created"
+        "message": "Workshop job created",
     }
 
 
 @router.get("/jobs/{job_id}")
-async def get_job(
-    job_id: str,
-    current_user: dict = Depends(get_current_user)
-):
+async def get_job(job_id: str, current_user: dict = Depends(get_current_user)):
     """Get workshop job by ID"""
     repo = get_workshop_repository()
 
@@ -255,9 +257,7 @@ async def get_job(
 
 @router.put("/jobs/{job_id}")
 async def update_job(
-    job_id: str,
-    job: WorkshopJobUpdate,
-    current_user: dict = Depends(get_current_user)
+    job_id: str, job: WorkshopJobUpdate, current_user: dict = Depends(get_current_user)
 ):
     """Update workshop job details"""
     repo = get_workshop_repository()
@@ -288,7 +288,7 @@ async def update_job_status(
     job_id: str,
     status: str = Query(...),
     notes: Optional[str] = Query(None),
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
     """Update job status (generic endpoint)"""
     repo = get_workshop_repository()
@@ -299,18 +299,26 @@ async def update_job_status(
             raise HTTPException(status_code=404, detail="Workshop job not found")
 
         if repo.update_status(job_id, status, current_user.get("user_id"), notes):
-            return {"job_id": job_id, "status": status, "message": f"Job status updated to {status}"}
+            return {
+                "job_id": job_id,
+                "status": status,
+                "message": f"Job status updated to {status}",
+            }
 
         raise HTTPException(status_code=500, detail="Failed to update job status")
 
-    return {"job_id": job_id, "status": status, "message": f"Job status updated to {status}"}
+    return {
+        "job_id": job_id,
+        "status": status,
+        "message": f"Job status updated to {status}",
+    }
 
 
 @router.post("/jobs/{job_id}/assign")
 async def assign_job(
     job_id: str,
     technician_id: str = Query(...),
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
     """Assign job to a technician"""
     repo = get_workshop_repository()
@@ -321,10 +329,16 @@ async def assign_job(
             raise HTTPException(status_code=404, detail="Workshop job not found")
 
         if job.get("status") not in ["PENDING", "IN_PROGRESS"]:
-            raise HTTPException(status_code=400, detail="Job cannot be assigned in current state")
+            raise HTTPException(
+                status_code=400, detail="Job cannot be assigned in current state"
+            )
 
         if repo.assign_technician(job_id, technician_id):
-            return {"job_id": job_id, "technician_id": technician_id, "message": "Job assigned"}
+            return {
+                "job_id": job_id,
+                "technician_id": technician_id,
+                "message": "Job assigned",
+            }
 
         raise HTTPException(status_code=500, detail="Failed to assign job")
 
@@ -332,10 +346,7 @@ async def assign_job(
 
 
 @router.post("/jobs/{job_id}/start")
-async def start_job(
-    job_id: str,
-    current_user: dict = Depends(get_current_user)
-):
+async def start_job(job_id: str, current_user: dict = Depends(get_current_user)):
     """Start working on a job"""
     repo = get_workshop_repository()
 
@@ -356,10 +367,7 @@ async def start_job(
 
 
 @router.post("/jobs/{job_id}/complete")
-async def complete_job(
-    job_id: str,
-    current_user: dict = Depends(get_current_user)
-):
+async def complete_job(job_id: str, current_user: dict = Depends(get_current_user)):
     """Mark job as completed (pending QC)"""
     repo = get_workshop_repository()
 
@@ -369,10 +377,16 @@ async def complete_job(
             raise HTTPException(status_code=404, detail="Workshop job not found")
 
         if job.get("status") != "IN_PROGRESS":
-            raise HTTPException(status_code=400, detail="Job must be IN_PROGRESS to complete")
+            raise HTTPException(
+                status_code=400, detail="Job must be IN_PROGRESS to complete"
+            )
 
         if repo.update_status(job_id, "COMPLETED", current_user.get("user_id")):
-            return {"job_id": job_id, "status": "COMPLETED", "message": "Job completed, pending QC"}
+            return {
+                "job_id": job_id,
+                "status": "COMPLETED",
+                "message": "Job completed, pending QC",
+            }
 
         raise HTTPException(status_code=500, detail="Failed to complete job")
 
@@ -384,7 +398,7 @@ async def qc_job(
     job_id: str,
     passed: bool = Query(...),
     notes: Optional[str] = Query(None),
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
     """Perform QC on completed job"""
     repo = get_workshop_repository()
@@ -395,11 +409,18 @@ async def qc_job(
             raise HTTPException(status_code=404, detail="Workshop job not found")
 
         if job.get("status") not in ["COMPLETED", "QC_FAILED"]:
-            raise HTTPException(status_code=400, detail="Job must be COMPLETED or QC_FAILED for QC")
+            raise HTTPException(
+                status_code=400, detail="Job must be COMPLETED or QC_FAILED for QC"
+            )
 
         if repo.add_qc_result(job_id, passed, notes or "", current_user.get("user_id")):
             status = "READY" if passed else "QC_FAILED"
-            return {"job_id": job_id, "status": status, "qc_passed": passed, "message": "QC recorded"}
+            return {
+                "job_id": job_id,
+                "status": status,
+                "qc_passed": passed,
+                "message": "QC recorded",
+            }
 
         raise HTTPException(status_code=500, detail="Failed to record QC")
 

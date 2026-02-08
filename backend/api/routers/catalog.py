@@ -4,6 +4,7 @@ IMS 2.0 - Catalog Router
 Comprehensive product catalog management with category-specific fields.
 Handles product creation, SKU generation, and Shopify sync.
 """
+
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
 from pydantic import BaseModel, Field
 from typing import Optional, Dict, Any, List, Union
@@ -19,6 +20,7 @@ router = APIRouter()
 # ============================================================================
 # PRODUCT CATEGORIES WITH SKU PREFIXES
 # ============================================================================
+
 
 class ProductCategory(str, Enum):
     SUNGLASS = "SG"
@@ -62,175 +64,682 @@ CATEGORY_FIELDS = {
         "required": ["brand_name", "model_no", "colour_code"],
         "optional": ["subbrand", "lens_size", "bridge_width", "temple_length"],
         "fields": [
-            {"name": "brand_name", "label": "Brand Name", "type": "select", "required": True},
-            {"name": "subbrand", "label": "Sub Brand", "type": "text", "required": False},
+            {
+                "name": "brand_name",
+                "label": "Brand Name",
+                "type": "select",
+                "required": True,
+            },
+            {
+                "name": "subbrand",
+                "label": "Sub Brand",
+                "type": "text",
+                "required": False,
+            },
             {"name": "model_no", "label": "Model No", "type": "text", "required": True},
-            {"name": "colour_code", "label": "Colour Code", "type": "text", "required": True},
-            {"name": "lens_size", "label": "Lens Size (mm)", "type": "number", "required": False},
-            {"name": "bridge_width", "label": "Bridge Width (mm)", "type": "number", "required": False},
-            {"name": "temple_length", "label": "Temple Length (mm)", "type": "number", "required": False},
-        ]
+            {
+                "name": "colour_code",
+                "label": "Colour Code",
+                "type": "text",
+                "required": True,
+            },
+            {
+                "name": "lens_size",
+                "label": "Lens Size (mm)",
+                "type": "number",
+                "required": False,
+            },
+            {
+                "name": "bridge_width",
+                "label": "Bridge Width (mm)",
+                "type": "number",
+                "required": False,
+            },
+            {
+                "name": "temple_length",
+                "label": "Temple Length (mm)",
+                "type": "number",
+                "required": False,
+            },
+        ],
     },
     ProductCategory.CONTACT_LENS: {
         "required": ["brand_name", "model_name", "power"],
         "optional": ["subbrand", "colour_name", "pack", "expiry_date"],
         "fields": [
-            {"name": "brand_name", "label": "Brand Name", "type": "select", "required": True},
-            {"name": "subbrand", "label": "Sub Brand", "type": "text", "required": False},
-            {"name": "model_name", "label": "Model Name", "type": "text", "required": True},
-            {"name": "colour_name", "label": "Colour Name", "type": "text", "required": False},
-            {"name": "power", "label": "Power", "type": "text", "required": True, "placeholder": "-6.00 to +6.00"},
-            {"name": "pack", "label": "Pack Size", "type": "select", "required": False, "options": ["1", "3", "6", "30", "90"]},
-            {"name": "expiry_date", "label": "Expiry Date", "type": "date", "required": False},
-        ]
+            {
+                "name": "brand_name",
+                "label": "Brand Name",
+                "type": "select",
+                "required": True,
+            },
+            {
+                "name": "subbrand",
+                "label": "Sub Brand",
+                "type": "text",
+                "required": False,
+            },
+            {
+                "name": "model_name",
+                "label": "Model Name",
+                "type": "text",
+                "required": True,
+            },
+            {
+                "name": "colour_name",
+                "label": "Colour Name",
+                "type": "text",
+                "required": False,
+            },
+            {
+                "name": "power",
+                "label": "Power",
+                "type": "text",
+                "required": True,
+                "placeholder": "-6.00 to +6.00",
+            },
+            {
+                "name": "pack",
+                "label": "Pack Size",
+                "type": "select",
+                "required": False,
+                "options": ["1", "3", "6", "30", "90"],
+            },
+            {
+                "name": "expiry_date",
+                "label": "Expiry Date",
+                "type": "date",
+                "required": False,
+            },
+        ],
     },
     ProductCategory.FRAME: {
         "required": ["brand_name", "model_no", "colour_code"],
         "optional": ["subbrand", "lens_size", "bridge_width", "temple_length"],
         "fields": [
-            {"name": "brand_name", "label": "Brand Name", "type": "select", "required": True},
-            {"name": "subbrand", "label": "Sub Brand", "type": "text", "required": False},
+            {
+                "name": "brand_name",
+                "label": "Brand Name",
+                "type": "select",
+                "required": True,
+            },
+            {
+                "name": "subbrand",
+                "label": "Sub Brand",
+                "type": "text",
+                "required": False,
+            },
             {"name": "model_no", "label": "Model No", "type": "text", "required": True},
-            {"name": "colour_code", "label": "Colour Code", "type": "text", "required": True},
-            {"name": "lens_size", "label": "Lens Size (mm)", "type": "number", "required": False},
-            {"name": "bridge_width", "label": "Bridge Width (mm)", "type": "number", "required": False},
-            {"name": "temple_length", "label": "Temple Length (mm)", "type": "number", "required": False},
-        ]
+            {
+                "name": "colour_code",
+                "label": "Colour Code",
+                "type": "text",
+                "required": True,
+            },
+            {
+                "name": "lens_size",
+                "label": "Lens Size (mm)",
+                "type": "number",
+                "required": False,
+            },
+            {
+                "name": "bridge_width",
+                "label": "Bridge Width (mm)",
+                "type": "number",
+                "required": False,
+            },
+            {
+                "name": "temple_length",
+                "label": "Temple Length (mm)",
+                "type": "number",
+                "required": False,
+            },
+        ],
     },
     ProductCategory.ACCESSORIES: {
         "required": ["brand_name", "model_name"],
         "optional": ["subbrand", "size", "pack", "expiry_date", "accessory_type"],
         "fields": [
-            {"name": "brand_name", "label": "Brand Name", "type": "select", "required": True},
-            {"name": "subbrand", "label": "Sub Brand", "type": "text", "required": False},
-            {"name": "model_name", "label": "Model Name", "type": "text", "required": True},
-            {"name": "accessory_type", "label": "Accessory Type", "type": "select", "required": False,
-             "options": ["Case", "Cloth", "Chain", "Nose Pad", "Temple Tip", "Screw Kit", "Spray", "Other"]},
+            {
+                "name": "brand_name",
+                "label": "Brand Name",
+                "type": "select",
+                "required": True,
+            },
+            {
+                "name": "subbrand",
+                "label": "Sub Brand",
+                "type": "text",
+                "required": False,
+            },
+            {
+                "name": "model_name",
+                "label": "Model Name",
+                "type": "text",
+                "required": True,
+            },
+            {
+                "name": "accessory_type",
+                "label": "Accessory Type",
+                "type": "select",
+                "required": False,
+                "options": [
+                    "Case",
+                    "Cloth",
+                    "Chain",
+                    "Nose Pad",
+                    "Temple Tip",
+                    "Screw Kit",
+                    "Spray",
+                    "Other",
+                ],
+            },
             {"name": "size", "label": "Size", "type": "text", "required": False},
             {"name": "pack", "label": "Pack Size", "type": "number", "required": False},
-            {"name": "expiry_date", "label": "Expiry Date", "type": "date", "required": False},
-        ]
+            {
+                "name": "expiry_date",
+                "label": "Expiry Date",
+                "type": "date",
+                "required": False,
+            },
+        ],
     },
     ProductCategory.LENS: {
         "required": ["brand_name", "index", "coating"],
         "optional": ["subbrand", "lens_category", "add_on_1", "add_on_2", "add_on_3"],
         "fields": [
-            {"name": "brand_name", "label": "Brand Name", "type": "select", "required": True},
-            {"name": "subbrand", "label": "Sub Brand", "type": "text", "required": False},
-            {"name": "index", "label": "Index", "type": "select", "required": True,
-             "options": ["1.50", "1.56", "1.59", "1.60", "1.67", "1.74"]},
-            {"name": "coating", "label": "Coating", "type": "select", "required": True,
-             "options": ["UC", "HC", "ARC", "Blue Cut", "Photochromic", "Transitions", "Polarized"]},
-            {"name": "lens_category", "label": "Lens Category", "type": "select", "required": False,
-             "options": ["Single Vision", "Bifocal", "Progressive", "Office", "Driving"]},
-            {"name": "add_on_1", "label": "Add-On 1", "type": "text", "required": False},
-            {"name": "add_on_2", "label": "Add-On 2", "type": "text", "required": False},
-            {"name": "add_on_3", "label": "Add-On 3", "type": "text", "required": False},
-        ]
+            {
+                "name": "brand_name",
+                "label": "Brand Name",
+                "type": "select",
+                "required": True,
+            },
+            {
+                "name": "subbrand",
+                "label": "Sub Brand",
+                "type": "text",
+                "required": False,
+            },
+            {
+                "name": "index",
+                "label": "Index",
+                "type": "select",
+                "required": True,
+                "options": ["1.50", "1.56", "1.59", "1.60", "1.67", "1.74"],
+            },
+            {
+                "name": "coating",
+                "label": "Coating",
+                "type": "select",
+                "required": True,
+                "options": [
+                    "UC",
+                    "HC",
+                    "ARC",
+                    "Blue Cut",
+                    "Photochromic",
+                    "Transitions",
+                    "Polarized",
+                ],
+            },
+            {
+                "name": "lens_category",
+                "label": "Lens Category",
+                "type": "select",
+                "required": False,
+                "options": [
+                    "Single Vision",
+                    "Bifocal",
+                    "Progressive",
+                    "Office",
+                    "Driving",
+                ],
+            },
+            {
+                "name": "add_on_1",
+                "label": "Add-On 1",
+                "type": "text",
+                "required": False,
+            },
+            {
+                "name": "add_on_2",
+                "label": "Add-On 2",
+                "type": "text",
+                "required": False,
+            },
+            {
+                "name": "add_on_3",
+                "label": "Add-On 3",
+                "type": "text",
+                "required": False,
+            },
+        ],
     },
     ProductCategory.READING_GLASSES: {
         "required": ["brand_name", "model_no", "colour_code"],
         "optional": ["subbrand", "lens_size", "bridge_width", "temple_length", "power"],
         "fields": [
-            {"name": "brand_name", "label": "Brand Name", "type": "select", "required": True},
-            {"name": "subbrand", "label": "Sub Brand", "type": "text", "required": False},
+            {
+                "name": "brand_name",
+                "label": "Brand Name",
+                "type": "select",
+                "required": True,
+            },
+            {
+                "name": "subbrand",
+                "label": "Sub Brand",
+                "type": "text",
+                "required": False,
+            },
             {"name": "model_no", "label": "Model No", "type": "text", "required": True},
-            {"name": "colour_code", "label": "Colour Code", "type": "text", "required": True},
-            {"name": "power", "label": "Power", "type": "select", "required": False,
-             "options": ["+1.00", "+1.25", "+1.50", "+1.75", "+2.00", "+2.25", "+2.50", "+2.75", "+3.00", "+3.50"]},
-            {"name": "lens_size", "label": "Lens Size (mm)", "type": "number", "required": False},
-            {"name": "bridge_width", "label": "Bridge Width (mm)", "type": "number", "required": False},
-            {"name": "temple_length", "label": "Temple Length (mm)", "type": "number", "required": False},
-        ]
+            {
+                "name": "colour_code",
+                "label": "Colour Code",
+                "type": "text",
+                "required": True,
+            },
+            {
+                "name": "power",
+                "label": "Power",
+                "type": "select",
+                "required": False,
+                "options": [
+                    "+1.00",
+                    "+1.25",
+                    "+1.50",
+                    "+1.75",
+                    "+2.00",
+                    "+2.25",
+                    "+2.50",
+                    "+2.75",
+                    "+3.00",
+                    "+3.50",
+                ],
+            },
+            {
+                "name": "lens_size",
+                "label": "Lens Size (mm)",
+                "type": "number",
+                "required": False,
+            },
+            {
+                "name": "bridge_width",
+                "label": "Bridge Width (mm)",
+                "type": "number",
+                "required": False,
+            },
+            {
+                "name": "temple_length",
+                "label": "Temple Length (mm)",
+                "type": "number",
+                "required": False,
+            },
+        ],
     },
     ProductCategory.WRIST_WATCH: {
         "required": ["brand_name", "model_no", "colour_code"],
-        "optional": ["subbrand", "dial_colour", "belt_colour", "dial_size", "belt_size", "watch_category"],
+        "optional": [
+            "subbrand",
+            "dial_colour",
+            "belt_colour",
+            "dial_size",
+            "belt_size",
+            "watch_category",
+        ],
         "fields": [
-            {"name": "brand_name", "label": "Brand Name", "type": "select", "required": True},
-            {"name": "subbrand", "label": "Sub Brand", "type": "text", "required": False},
+            {
+                "name": "brand_name",
+                "label": "Brand Name",
+                "type": "select",
+                "required": True,
+            },
+            {
+                "name": "subbrand",
+                "label": "Sub Brand",
+                "type": "text",
+                "required": False,
+            },
             {"name": "model_no", "label": "Model No", "type": "text", "required": True},
-            {"name": "colour_code", "label": "Colour Code", "type": "text", "required": True},
-            {"name": "dial_colour", "label": "Dial Colour", "type": "text", "required": False},
-            {"name": "belt_colour", "label": "Belt Colour", "type": "text", "required": False},
-            {"name": "dial_size", "label": "Dial Size (mm)", "type": "number", "required": False},
-            {"name": "belt_size", "label": "Belt Size (mm)", "type": "number", "required": False},
-            {"name": "watch_category", "label": "Watch Category", "type": "select", "required": False,
-             "options": ["Analog", "Digital", "Analog-Digital", "Chronograph", "Automatic", "Quartz"]},
-        ]
+            {
+                "name": "colour_code",
+                "label": "Colour Code",
+                "type": "text",
+                "required": True,
+            },
+            {
+                "name": "dial_colour",
+                "label": "Dial Colour",
+                "type": "text",
+                "required": False,
+            },
+            {
+                "name": "belt_colour",
+                "label": "Belt Colour",
+                "type": "text",
+                "required": False,
+            },
+            {
+                "name": "dial_size",
+                "label": "Dial Size (mm)",
+                "type": "number",
+                "required": False,
+            },
+            {
+                "name": "belt_size",
+                "label": "Belt Size (mm)",
+                "type": "number",
+                "required": False,
+            },
+            {
+                "name": "watch_category",
+                "label": "Watch Category",
+                "type": "select",
+                "required": False,
+                "options": [
+                    "Analog",
+                    "Digital",
+                    "Analog-Digital",
+                    "Chronograph",
+                    "Automatic",
+                    "Quartz",
+                ],
+            },
+        ],
     },
     ProductCategory.CLOCK: {
         "required": ["brand_name", "model_no", "colour_code"],
-        "optional": ["subbrand", "dial_colour", "body_colour", "dial_size", "battery_size", "clock_category"],
+        "optional": [
+            "subbrand",
+            "dial_colour",
+            "body_colour",
+            "dial_size",
+            "battery_size",
+            "clock_category",
+        ],
         "fields": [
-            {"name": "brand_name", "label": "Brand Name", "type": "select", "required": True},
-            {"name": "subbrand", "label": "Sub Brand", "type": "text", "required": False},
+            {
+                "name": "brand_name",
+                "label": "Brand Name",
+                "type": "select",
+                "required": True,
+            },
+            {
+                "name": "subbrand",
+                "label": "Sub Brand",
+                "type": "text",
+                "required": False,
+            },
             {"name": "model_no", "label": "Model No", "type": "text", "required": True},
-            {"name": "colour_code", "label": "Colour Code", "type": "text", "required": True},
-            {"name": "dial_colour", "label": "Dial Colour", "type": "text", "required": False},
-            {"name": "body_colour", "label": "Body Colour", "type": "text", "required": False},
-            {"name": "dial_size", "label": "Dial Size (inches)", "type": "number", "required": False},
-            {"name": "battery_size", "label": "Battery Size", "type": "text", "required": False},
-            {"name": "clock_category", "label": "Clock Category", "type": "select", "required": False,
-             "options": ["Wall Clock", "Table Clock", "Alarm Clock", "Desk Clock", "Decorative"]},
-        ]
+            {
+                "name": "colour_code",
+                "label": "Colour Code",
+                "type": "text",
+                "required": True,
+            },
+            {
+                "name": "dial_colour",
+                "label": "Dial Colour",
+                "type": "text",
+                "required": False,
+            },
+            {
+                "name": "body_colour",
+                "label": "Body Colour",
+                "type": "text",
+                "required": False,
+            },
+            {
+                "name": "dial_size",
+                "label": "Dial Size (inches)",
+                "type": "number",
+                "required": False,
+            },
+            {
+                "name": "battery_size",
+                "label": "Battery Size",
+                "type": "text",
+                "required": False,
+            },
+            {
+                "name": "clock_category",
+                "label": "Clock Category",
+                "type": "select",
+                "required": False,
+                "options": [
+                    "Wall Clock",
+                    "Table Clock",
+                    "Alarm Clock",
+                    "Desk Clock",
+                    "Decorative",
+                ],
+            },
+        ],
     },
     ProductCategory.HEARING_AID: {
         "required": ["brand_name", "model_no"],
         "optional": ["subbrand", "serial_no", "machine_capacity", "machine_type"],
         "fields": [
-            {"name": "brand_name", "label": "Brand Name", "type": "select", "required": True},
-            {"name": "subbrand", "label": "Sub Brand", "type": "text", "required": False},
+            {
+                "name": "brand_name",
+                "label": "Brand Name",
+                "type": "select",
+                "required": True,
+            },
+            {
+                "name": "subbrand",
+                "label": "Sub Brand",
+                "type": "text",
+                "required": False,
+            },
             {"name": "model_no", "label": "Model No", "type": "text", "required": True},
-            {"name": "serial_no", "label": "Serial No", "type": "text", "required": False},
-            {"name": "machine_capacity", "label": "Machine Capacity", "type": "select", "required": False,
-             "options": ["Mild", "Moderate", "Severe", "Profound"]},
-            {"name": "machine_type", "label": "Machine Type", "type": "select", "required": False,
-             "options": ["BTE", "ITE", "ITC", "CIC", "RIC", "Body Worn"]},
-        ]
+            {
+                "name": "serial_no",
+                "label": "Serial No",
+                "type": "text",
+                "required": False,
+            },
+            {
+                "name": "machine_capacity",
+                "label": "Machine Capacity",
+                "type": "select",
+                "required": False,
+                "options": ["Mild", "Moderate", "Severe", "Profound"],
+            },
+            {
+                "name": "machine_type",
+                "label": "Machine Type",
+                "type": "select",
+                "required": False,
+                "options": ["BTE", "ITE", "ITC", "CIC", "RIC", "Body Worn"],
+            },
+        ],
     },
     ProductCategory.SMART_SUNGLASS: {
         "required": ["brand_name", "model_name", "colour_code"],
-        "optional": ["subbrand", "lens_size", "bridge_width", "temple_length", "year_of_launch"],
+        "optional": [
+            "subbrand",
+            "lens_size",
+            "bridge_width",
+            "temple_length",
+            "year_of_launch",
+        ],
         "fields": [
-            {"name": "brand_name", "label": "Brand Name", "type": "select", "required": True},
-            {"name": "subbrand", "label": "Sub Brand", "type": "text", "required": False},
-            {"name": "model_name", "label": "Model Name", "type": "text", "required": True},
-            {"name": "colour_code", "label": "Colour Code", "type": "text", "required": True},
-            {"name": "lens_size", "label": "Lens Size (mm)", "type": "number", "required": False},
-            {"name": "bridge_width", "label": "Bridge Width (mm)", "type": "number", "required": False},
-            {"name": "temple_length", "label": "Temple Length (mm)", "type": "number", "required": False},
-            {"name": "year_of_launch", "label": "Year of Launch", "type": "number", "required": False},
-        ]
+            {
+                "name": "brand_name",
+                "label": "Brand Name",
+                "type": "select",
+                "required": True,
+            },
+            {
+                "name": "subbrand",
+                "label": "Sub Brand",
+                "type": "text",
+                "required": False,
+            },
+            {
+                "name": "model_name",
+                "label": "Model Name",
+                "type": "text",
+                "required": True,
+            },
+            {
+                "name": "colour_code",
+                "label": "Colour Code",
+                "type": "text",
+                "required": True,
+            },
+            {
+                "name": "lens_size",
+                "label": "Lens Size (mm)",
+                "type": "number",
+                "required": False,
+            },
+            {
+                "name": "bridge_width",
+                "label": "Bridge Width (mm)",
+                "type": "number",
+                "required": False,
+            },
+            {
+                "name": "temple_length",
+                "label": "Temple Length (mm)",
+                "type": "number",
+                "required": False,
+            },
+            {
+                "name": "year_of_launch",
+                "label": "Year of Launch",
+                "type": "number",
+                "required": False,
+            },
+        ],
     },
     ProductCategory.SMART_FRAME: {
         "required": ["brand_name", "model_name", "colour_code"],
-        "optional": ["subbrand", "lens_size", "bridge_width", "temple_length", "year_of_launch"],
+        "optional": [
+            "subbrand",
+            "lens_size",
+            "bridge_width",
+            "temple_length",
+            "year_of_launch",
+        ],
         "fields": [
-            {"name": "brand_name", "label": "Brand Name", "type": "select", "required": True},
-            {"name": "subbrand", "label": "Sub Brand", "type": "text", "required": False},
-            {"name": "model_name", "label": "Model Name", "type": "text", "required": True},
-            {"name": "colour_code", "label": "Colour Code", "type": "text", "required": True},
-            {"name": "lens_size", "label": "Lens Size (mm)", "type": "number", "required": False},
-            {"name": "bridge_width", "label": "Bridge Width (mm)", "type": "number", "required": False},
-            {"name": "temple_length", "label": "Temple Length (mm)", "type": "number", "required": False},
-            {"name": "year_of_launch", "label": "Year of Launch", "type": "number", "required": False},
-        ]
+            {
+                "name": "brand_name",
+                "label": "Brand Name",
+                "type": "select",
+                "required": True,
+            },
+            {
+                "name": "subbrand",
+                "label": "Sub Brand",
+                "type": "text",
+                "required": False,
+            },
+            {
+                "name": "model_name",
+                "label": "Model Name",
+                "type": "text",
+                "required": True,
+            },
+            {
+                "name": "colour_code",
+                "label": "Colour Code",
+                "type": "text",
+                "required": True,
+            },
+            {
+                "name": "lens_size",
+                "label": "Lens Size (mm)",
+                "type": "number",
+                "required": False,
+            },
+            {
+                "name": "bridge_width",
+                "label": "Bridge Width (mm)",
+                "type": "number",
+                "required": False,
+            },
+            {
+                "name": "temple_length",
+                "label": "Temple Length (mm)",
+                "type": "number",
+                "required": False,
+            },
+            {
+                "name": "year_of_launch",
+                "label": "Year of Launch",
+                "type": "number",
+                "required": False,
+            },
+        ],
     },
     ProductCategory.SMART_WATCH: {
         "required": ["brand_name", "model_name", "colour_code"],
-        "optional": ["subbrand", "body_colour", "belt_colour", "dial_size", "belt_size", "year_of_launch"],
+        "optional": [
+            "subbrand",
+            "body_colour",
+            "belt_colour",
+            "dial_size",
+            "belt_size",
+            "year_of_launch",
+        ],
         "fields": [
-            {"name": "brand_name", "label": "Brand Name", "type": "select", "required": True},
-            {"name": "subbrand", "label": "Sub Brand", "type": "text", "required": False},
-            {"name": "model_name", "label": "Model Name", "type": "text", "required": True},
-            {"name": "colour_code", "label": "Colour Code", "type": "text", "required": True},
-            {"name": "body_colour", "label": "Body Colour", "type": "text", "required": False},
-            {"name": "belt_colour", "label": "Belt Colour", "type": "text", "required": False},
-            {"name": "dial_size", "label": "Dial Size (mm)", "type": "number", "required": False},
-            {"name": "belt_size", "label": "Belt Size (mm)", "type": "number", "required": False},
-            {"name": "year_of_launch", "label": "Year of Launch", "type": "number", "required": False},
-        ]
+            {
+                "name": "brand_name",
+                "label": "Brand Name",
+                "type": "select",
+                "required": True,
+            },
+            {
+                "name": "subbrand",
+                "label": "Sub Brand",
+                "type": "text",
+                "required": False,
+            },
+            {
+                "name": "model_name",
+                "label": "Model Name",
+                "type": "text",
+                "required": True,
+            },
+            {
+                "name": "colour_code",
+                "label": "Colour Code",
+                "type": "text",
+                "required": True,
+            },
+            {
+                "name": "body_colour",
+                "label": "Body Colour",
+                "type": "text",
+                "required": False,
+            },
+            {
+                "name": "belt_colour",
+                "label": "Belt Colour",
+                "type": "text",
+                "required": False,
+            },
+            {
+                "name": "dial_size",
+                "label": "Dial Size (mm)",
+                "type": "number",
+                "required": False,
+            },
+            {
+                "name": "belt_size",
+                "label": "Belt Size (mm)",
+                "type": "number",
+                "required": False,
+            },
+            {
+                "name": "year_of_launch",
+                "label": "Year of Launch",
+                "type": "number",
+                "required": False,
+            },
+        ],
     },
 }
 
@@ -238,6 +747,7 @@ CATEGORY_FIELDS = {
 # ============================================================================
 # SCHEMAS
 # ============================================================================
+
 
 class PricingInput(BaseModel):
     mrp: float = Field(..., gt=0)
@@ -314,9 +824,26 @@ class ProductUpdateInput(BaseModel):
 
 CATALOG_PRODUCTS: Dict[str, Dict] = {}
 BRANDS: Dict[str, List[str]] = {
-    "frames": ["Ray-Ban", "Oakley", "Vogue", "Prada", "Gucci", "Titan", "Fastrack", "Lenskart", "Vincent Chase", "John Jacobs"],
+    "frames": [
+        "Ray-Ban",
+        "Oakley",
+        "Vogue",
+        "Prada",
+        "Gucci",
+        "Titan",
+        "Fastrack",
+        "Lenskart",
+        "Vincent Chase",
+        "John Jacobs",
+    ],
     "lenses": ["Essilor", "Zeiss", "Hoya", "Crizal", "Kodak", "Nikon", "Rodenstock"],
-    "contact_lenses": ["Bausch & Lomb", "Johnson & Johnson", "Alcon", "CooperVision", "Acuvue"],
+    "contact_lenses": [
+        "Bausch & Lomb",
+        "Johnson & Johnson",
+        "Alcon",
+        "CooperVision",
+        "Acuvue",
+    ],
     "watches": ["Titan", "Fastrack", "Casio", "Fossil", "Timex", "Sonata", "HMT"],
     "hearing_aids": ["Phonak", "Signia", "Widex", "Oticon", "ReSound", "Starkey"],
     "accessories": ["Generic", "Ray-Ban", "Oakley", "Titan"],
@@ -335,12 +862,16 @@ def generate_sku(category: ProductCategory, attributes: Dict[str, Any]) -> str:
 
     # Add model/colour for uniqueness
     model = attributes.get("model_no", attributes.get("model_name", ""))[:4].upper()
-    colour = attributes.get("colour_code", attributes.get("colour_name", ""))[:3].upper()
+    colour = attributes.get("colour_code", attributes.get("colour_name", ""))[
+        :3
+    ].upper()
 
     return f"{prefix}-{brand}-{model}{colour}-{counter}"
 
 
-def generate_product_title(category: ProductCategory, attributes: Dict[str, Any]) -> str:
+def generate_product_title(
+    category: ProductCategory, attributes: Dict[str, Any]
+) -> str:
     """Generate product title from attributes"""
     brand = attributes.get("brand_name", "")
     subbrand = attributes.get("subbrand", "")
@@ -363,6 +894,7 @@ def generate_product_title(category: ProductCategory, attributes: Dict[str, Any]
 # ENDPOINTS - Category Fields
 # ============================================================================
 
+
 @router.get("/categories")
 async def list_categories(current_user: dict = Depends(get_current_user)):
     """List all product categories with their display names"""
@@ -371,7 +903,7 @@ async def list_categories(current_user: dict = Depends(get_current_user)):
             {
                 "code": cat.value,
                 "name": CATEGORY_NAMES.get(cat, cat.value),
-                "sku_prefix": cat.value
+                "sku_prefix": cat.value,
             }
             for cat in ProductCategory
         ]
@@ -380,8 +912,7 @@ async def list_categories(current_user: dict = Depends(get_current_user)):
 
 @router.get("/categories/{category}/fields")
 async def get_category_fields(
-    category: ProductCategory,
-    current_user: dict = Depends(get_current_user)
+    category: ProductCategory, current_user: dict = Depends(get_current_user)
 ):
     """Get the fields required for a specific category"""
     if category not in CATEGORY_FIELDS:
@@ -392,14 +923,14 @@ async def get_category_fields(
         "category_name": CATEGORY_NAMES.get(category, category.value),
         "fields": CATEGORY_FIELDS[category]["fields"],
         "required_fields": CATEGORY_FIELDS[category]["required"],
-        "optional_fields": CATEGORY_FIELDS[category]["optional"]
+        "optional_fields": CATEGORY_FIELDS[category]["optional"],
     }
 
 
 @router.get("/brands")
 async def get_brands(
     category: Optional[ProductCategory] = None,
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
     """Get available brands, optionally filtered by category"""
     if category:
@@ -432,6 +963,7 @@ async def get_brands(
 # ENDPOINTS - Product CRUD
 # ============================================================================
 
+
 @router.get("/products")
 async def list_catalog_products(
     category: Optional[ProductCategory] = None,
@@ -440,7 +972,7 @@ async def list_catalog_products(
     is_active: bool = True,
     limit: int = Query(default=50, le=250),
     page: int = 1,
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
     """List all products in catalog"""
     products = list(CATALOG_PRODUCTS.values())
@@ -449,11 +981,14 @@ async def list_catalog_products(
     if category:
         products = [p for p in products if p.get("category") == category.value]
     if brand:
-        products = [p for p in products if p.get("attributes", {}).get("brand_name") == brand]
+        products = [
+            p for p in products if p.get("attributes", {}).get("brand_name") == brand
+        ]
     if search:
         search_lower = search.lower()
         products = [
-            p for p in products
+            p
+            for p in products
             if search_lower in p.get("title", "").lower()
             or search_lower in p.get("sku", "").lower()
             or search_lower in str(p.get("attributes", {})).lower()
@@ -472,14 +1007,13 @@ async def list_catalog_products(
         "products": products[start:end],
         "total": total,
         "page": page,
-        "total_pages": (total + limit - 1) // limit
+        "total_pages": (total + limit - 1) // limit,
     }
 
 
 @router.get("/products/{product_id}")
 async def get_catalog_product(
-    product_id: str,
-    current_user: dict = Depends(get_current_user)
+    product_id: str, current_user: dict = Depends(get_current_user)
 ):
     """Get a single product with all details"""
     product = CATALOG_PRODUCTS.get(product_id)
@@ -491,11 +1025,13 @@ async def get_catalog_product(
 
 @router.post("/products")
 async def create_catalog_product(
-    product: ProductCreateInput,
-    current_user: dict = Depends(get_current_user)
+    product: ProductCreateInput, current_user: dict = Depends(get_current_user)
 ):
     """Create a new product in catalog"""
-    if not any(role in current_user.get("roles", []) for role in ["SUPERADMIN", "ADMIN", "CATALOG_MANAGER"]):
+    if not any(
+        role in current_user.get("roles", [])
+        for role in ["SUPERADMIN", "ADMIN", "CATALOG_MANAGER"]
+    ):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     # Validate required fields for category
@@ -504,10 +1040,12 @@ async def create_catalog_product(
         raise HTTPException(status_code=400, detail="Invalid category")
 
     for required_field in category_config["required"]:
-        if required_field not in product.attributes or not product.attributes[required_field]:
+        if (
+            required_field not in product.attributes
+            or not product.attributes[required_field]
+        ):
             raise HTTPException(
-                status_code=400,
-                detail=f"Missing required field: {required_field}"
+                status_code=400, detail=f"Missing required field: {required_field}"
             )
 
     # Generate SKU and title
@@ -535,11 +1073,17 @@ async def create_catalog_product(
         },
         "images": product.images,
         "inventory": {
-            "total_quantity": product.inventory.initial_quantity if product.inventory else 0,
+            "total_quantity": (
+                product.inventory.initial_quantity if product.inventory else 0
+            ),
             "locations": {},
             "barcode": product.inventory.barcode if product.inventory else None,
-            "reorder_level": product.inventory.reorder_level if product.inventory else 5,
-            "reorder_quantity": product.inventory.reorder_quantity if product.inventory else 10,
+            "reorder_level": (
+                product.inventory.reorder_level if product.inventory else 5
+            ),
+            "reorder_quantity": (
+                product.inventory.reorder_quantity if product.inventory else 10
+            ),
         },
         "shopify": {
             "synced": False,
@@ -548,8 +1092,12 @@ async def create_catalog_product(
         },
         "seo": {
             "page_title": product.seo.page_title if product.seo else title,
-            "meta_description": product.seo.meta_description if product.seo else product.description,
-            "url_handle": product.seo.url_handle if product.seo else sku.lower().replace(" ", "-"),
+            "meta_description": (
+                product.seo.meta_description if product.seo else product.description
+            ),
+            "url_handle": (
+                product.seo.url_handle if product.seo else sku.lower().replace(" ", "-")
+            ),
         },
         "is_active": True,
         "created_by": current_user.get("user_id"),
@@ -559,7 +1107,9 @@ async def create_catalog_product(
 
     # Set inventory by location if provided
     if product.inventory and product.inventory.location_id:
-        product_data["inventory"]["locations"][product.inventory.location_id] = product.inventory.initial_quantity
+        product_data["inventory"]["locations"][
+            product.inventory.location_id
+        ] = product.inventory.initial_quantity
 
     CATALOG_PRODUCTS[product_id] = product_data
 
@@ -572,7 +1122,7 @@ async def create_catalog_product(
     return {
         "product": product_data,
         "message": "Product created successfully",
-        "shopify_sync": shopify_result
+        "shopify_sync": shopify_result,
     }
 
 
@@ -580,10 +1130,13 @@ async def create_catalog_product(
 async def update_catalog_product(
     product_id: str,
     product: ProductUpdateInput,
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
     """Update an existing product"""
-    if not any(role in current_user.get("roles", []) for role in ["SUPERADMIN", "ADMIN", "CATALOG_MANAGER"]):
+    if not any(
+        role in current_user.get("roles", [])
+        for role in ["SUPERADMIN", "ADMIN", "CATALOG_MANAGER"]
+    ):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     existing = CATALOG_PRODUCTS.get(product_id)
@@ -594,8 +1147,7 @@ async def update_catalog_product(
     if product.attributes:
         existing["attributes"].update(product.attributes)
         existing["title"] = generate_product_title(
-            ProductCategory(existing["category"]),
-            existing["attributes"]
+            ProductCategory(existing["category"]), existing["attributes"]
         )
 
     if product.description is not None:
@@ -620,11 +1172,12 @@ async def update_catalog_product(
 
 @router.delete("/products/{product_id}")
 async def delete_catalog_product(
-    product_id: str,
-    current_user: dict = Depends(get_current_user)
+    product_id: str, current_user: dict = Depends(get_current_user)
 ):
     """Delete a product (soft delete)"""
-    if not any(role in current_user.get("roles", []) for role in ["SUPERADMIN", "ADMIN"]):
+    if not any(
+        role in current_user.get("roles", []) for role in ["SUPERADMIN", "ADMIN"]
+    ):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     product = CATALOG_PRODUCTS.get(product_id)
@@ -642,16 +1195,20 @@ async def delete_catalog_product(
 # ENDPOINTS - Inventory
 # ============================================================================
 
+
 @router.post("/products/{product_id}/inventory/adjust")
 async def adjust_product_inventory(
     product_id: str,
     location_id: str,
     adjustment: int,  # Positive to add, negative to remove
     reason: Optional[str] = None,
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
     """Adjust inventory for a product at a location"""
-    if not any(role in current_user.get("roles", []) for role in ["SUPERADMIN", "ADMIN", "STORE_MANAGER", "WORKSHOP_STAFF"]):
+    if not any(
+        role in current_user.get("roles", [])
+        for role in ["SUPERADMIN", "ADMIN", "STORE_MANAGER", "WORKSHOP_STAFF"]
+    ):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     product = CATALOG_PRODUCTS.get(product_id)
@@ -665,7 +1222,9 @@ async def adjust_product_inventory(
         raise HTTPException(status_code=400, detail="Cannot have negative inventory")
 
     product["inventory"]["locations"][location_id] = new_qty
-    product["inventory"]["total_quantity"] = sum(product["inventory"]["locations"].values())
+    product["inventory"]["total_quantity"] = sum(
+        product["inventory"]["locations"].values()
+    )
     product["updated_at"] = datetime.now().isoformat()
 
     return {
@@ -674,14 +1233,13 @@ async def adjust_product_inventory(
         "previous_quantity": current_qty,
         "adjustment": adjustment,
         "new_quantity": new_qty,
-        "total_quantity": product["inventory"]["total_quantity"]
+        "total_quantity": product["inventory"]["total_quantity"],
     }
 
 
 @router.get("/products/{product_id}/inventory")
 async def get_product_inventory(
-    product_id: str,
-    current_user: dict = Depends(get_current_user)
+    product_id: str, current_user: dict = Depends(get_current_user)
 ):
     """Get inventory levels for a product across all locations"""
     product = CATALOG_PRODUCTS.get(product_id)
@@ -695,7 +1253,8 @@ async def get_product_inventory(
         "total_quantity": product["inventory"]["total_quantity"],
         "locations": product["inventory"]["locations"],
         "reorder_level": product["inventory"]["reorder_level"],
-        "needs_reorder": product["inventory"]["total_quantity"] <= product["inventory"]["reorder_level"]
+        "needs_reorder": product["inventory"]["total_quantity"]
+        <= product["inventory"]["reorder_level"],
     }
 
 
@@ -703,7 +1262,10 @@ async def get_product_inventory(
 # ENDPOINTS - Shopify Sync
 # ============================================================================
 
-async def _sync_product_to_shopify(product: Dict, shopify_config: ShopifySyncInput) -> Dict:
+
+async def _sync_product_to_shopify(
+    product: Dict, shopify_config: ShopifySyncInput
+) -> Dict:
     """Sync a product to Shopify (mock implementation)"""
     shopify_product_id = f"shopify_{uuid.uuid4().hex[:12]}"
 
@@ -715,7 +1277,7 @@ async def _sync_product_to_shopify(product: Dict, shopify_config: ShopifySyncInp
         "published_channels": {
             "online_store": shopify_config.publish_to_online_store,
             "pos": shopify_config.publish_to_pos,
-        }
+        },
     }
 
 
@@ -723,10 +1285,13 @@ async def _sync_product_to_shopify(product: Dict, shopify_config: ShopifySyncInp
 async def sync_product_to_shopify(
     product_id: str,
     sync_config: ShopifySyncInput,
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
     """Sync a single product to Shopify"""
-    if not any(role in current_user.get("roles", []) for role in ["SUPERADMIN", "ADMIN", "CATALOG_MANAGER"]):
+    if not any(
+        role in current_user.get("roles", [])
+        for role in ["SUPERADMIN", "ADMIN", "CATALOG_MANAGER"]
+    ):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     product = CATALOG_PRODUCTS.get(product_id)
@@ -740,7 +1305,7 @@ async def sync_product_to_shopify(
     return {
         "product_id": product_id,
         "shopify_sync": result,
-        "message": "Product synced to Shopify successfully"
+        "message": "Product synced to Shopify successfully",
     }
 
 
@@ -748,10 +1313,12 @@ async def sync_product_to_shopify(
 async def bulk_sync_products_to_shopify(
     product_ids: List[str],
     sync_config: ShopifySyncInput,
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
     """Bulk sync multiple products to Shopify"""
-    if not any(role in current_user.get("roles", []) for role in ["SUPERADMIN", "ADMIN"]):
+    if not any(
+        role in current_user.get("roles", []) for role in ["SUPERADMIN", "ADMIN"]
+    ):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     synced = 0
@@ -771,7 +1338,7 @@ async def bulk_sync_products_to_shopify(
     return {
         "synced_count": synced,
         "errors": errors,
-        "message": f"{synced} products synced to Shopify"
+        "message": f"{synced} products synced to Shopify",
     }
 
 
@@ -779,13 +1346,15 @@ async def bulk_sync_products_to_shopify(
 # ENDPOINTS - Import/Export
 # ============================================================================
 
+
 @router.post("/products/import")
 async def import_products(
-    products: List[ProductCreateInput],
-    current_user: dict = Depends(get_current_user)
+    products: List[ProductCreateInput], current_user: dict = Depends(get_current_user)
 ):
     """Bulk import products"""
-    if not any(role in current_user.get("roles", []) for role in ["SUPERADMIN", "ADMIN"]):
+    if not any(
+        role in current_user.get("roles", []) for role in ["SUPERADMIN", "ADMIN"]
+    ):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     created = 0
@@ -839,7 +1408,7 @@ async def import_products(
     return {
         "created_count": created,
         "errors": errors,
-        "message": f"{created} products imported successfully"
+        "message": f"{created} products imported successfully",
     }
 
 
@@ -847,10 +1416,13 @@ async def import_products(
 async def export_products(
     category: Optional[ProductCategory] = None,
     format: str = "json",
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
     """Export products"""
-    if not any(role in current_user.get("roles", []) for role in ["SUPERADMIN", "ADMIN", "CATALOG_MANAGER"]):
+    if not any(
+        role in current_user.get("roles", [])
+        for role in ["SUPERADMIN", "ADMIN", "CATALOG_MANAGER"]
+    ):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     products = list(CATALOG_PRODUCTS.values())
@@ -861,5 +1433,5 @@ async def export_products(
     return {
         "products": products,
         "total": len(products),
-        "exported_at": datetime.now().isoformat()
+        "exported_at": datetime.now().isoformat(),
     }

@@ -3,6 +3,7 @@ IMS 2.0 - API Dependencies
 ===========================
 Dependency injection for repositories and services
 """
+
 import os
 import sys
 
@@ -12,18 +13,36 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 try:
     from database.connection import get_seeded_db
     from database.repositories.customer_repository import CustomerRepository
-    from database.repositories.product_repository import ProductRepository, StockRepository
+    from database.repositories.product_repository import (
+        ProductRepository,
+        StockRepository,
+    )
     from database.repositories.order_repository import OrderRepository
     from database.repositories.user_repository import UserRepository
     from database.repositories.store_repository import StoreRepository
     from database.repositories.prescription_repository import PrescriptionRepository
     from database.repositories.task_repository import TaskRepository
     from database.repositories.workshop_repository import WorkshopJobRepository
-    from database.repositories.expense_repository import ExpenseRepository, AdvanceRepository
-    from database.repositories.vendor_repository import VendorRepository, PurchaseOrderRepository, GRNRepository
-    from database.repositories.hr_repository import AttendanceRepository, LeaveRepository, PayrollRepository
+    from database.repositories.expense_repository import (
+        ExpenseRepository,
+        AdvanceRepository,
+    )
+    from database.repositories.vendor_repository import (
+        VendorRepository,
+        PurchaseOrderRepository,
+        GRNRepository,
+    )
+    from database.repositories.hr_repository import (
+        AttendanceRepository,
+        LeaveRepository,
+        PayrollRepository,
+    )
     from database.repositories.audit_repository import AuditRepository
-    from database.repositories.clinical_repository import EyeTestQueueRepository, EyeTestRepository
+    from database.repositories.clinical_repository import (
+        EyeTestQueueRepository,
+        EyeTestRepository,
+    )
+
     DATABASE_AVAILABLE = True
 except ImportError as e:
     print(f"⚠️ Database import error: {e}")
