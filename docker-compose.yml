@@ -1,157 +1,101 @@
 # ============================================================================
 # IMS 2.0 - Docker Compose Configuration
 # ============================================================================
-# Complete stack: Frontend (Nginx) + Backend (FastAPI) + MongoDB
-# ============================================================================
+# Local development and testing environment
 
 version: '3.8'
 
 services:
-  # --------------------------------------------------------------------------
-  # MongoDB Database
-  # --------------------------------------------------------------------------
-  mongodb:
-    image: mongo:7.0
-    container_name: ims2-mongodb
-    restart: unless-stopped
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: ims-postgres
     environment:
-      MONGO_INITDB_ROOT_USERNAME: ${MONGO_USERNAME:-admin}
-      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASSWORD:-changeme}
-      MONGO_INITDB_DATABASE: ${MONGO_DATABASE:-ims_2_0}
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
+      POSTGRES_DB: ${DB_NAME:-ims_db}
     ports:
-      - "${MONGO_PORT:-27017}:27017"
+      - "5432:5432"
     volumes:
-      - mongodb_data:/data/db
-      - mongodb_config:/data/configdb
-      - ./scripts/init-mongo.js:/docker-entrypoint-initdb.d/init-mongo.js:ro
-    networks:
-      - ims-network
+      - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: echo 'db.runCommand("ping").ok' | mongosh localhost:27017/test --quiet
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-postgres}"]
       interval: 10s
       timeout: 5s
       retries: 5
-      start_period: 40s
-
-  # --------------------------------------------------------------------------
-  # Backend API (FastAPI)
-  # --------------------------------------------------------------------------
-  backend:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
-    container_name: ims2-backend
-    restart: unless-stopped
-    environment:
-      # MongoDB Configuration
-      MONGO_HOST: mongodb
-      MONGO_PORT: 27017
-      MONGO_DATABASE: ${MONGO_DATABASE:-ims_2_0}
-      MONGO_USERNAME: ${MONGO_USERNAME:-admin}
-      MONGO_PASSWORD: ${MONGO_PASSWORD:-changeme}
-      MONGO_AUTH_SOURCE: admin
-
-      # JWT Configuration
-      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-CHANGE_THIS_IN_PRODUCTION}
-      JWT_ALGORITHM: HS256
-      ACCESS_TOKEN_EXPIRE_MINUTES: 480
-
-      # API Configuration
-      API_HOST: 0.0.0.0
-      API_PORT: 8000
-
-      # CORS
-      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000,http://localhost:5173,http://localhost}
-
-      # Logging
-      LOG_LEVEL: ${LOG_LEVEL:-INFO}
-    ports:
-      - "${API_PORT:-8000}:8000"
-    volumes:
-      - ./backend/logs:/app/logs
-      - ./backend/uploads:/app/uploads
-      - ./backend/backups:/app/backups
-    depends_on:
-      mongodb:
-        condition: service_healthy
     networks:
       - ims-network
+
+  # Redis Cache
+  redis:
+    image: redis:7-alpine
+    container_name: ims-redis
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-redis}
+    volumes:
+      - redis_data:/data
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health').read()"]
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - ims-network
+
+  # Backend API
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: ims-backend
+    environment:
+      DATABASE_URL: postgresql://${DB_USER:-postgres}:${DB_PASSWORD:-postgres}@postgres:5432/${DB_NAME:-ims_db}
+      REDIS_URL: redis://:${REDIS_PASSWORD:-redis}@redis:6379/0
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      DEBUG: ${DEBUG:-true}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-dev-secret-key-change-in-production}
+      JWT_ALGORITHM: HS256
+      JWT_EXPIRATION_HOURS: 24
+      CORS_ORIGINS: http://localhost:5173,http://localhost:3000,http://localhost:8000
+      LOG_LEVEL: DEBUG
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./backend/api:/app/api
+      - ./backend/logs:/app/logs
+    command: uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 40s
-
-  # --------------------------------------------------------------------------
-  # Frontend (React + Nginx)
-  # --------------------------------------------------------------------------
-  frontend:
-    build:
-      context: ./frontend
-      dockerfile: Dockerfile
-      args:
-        VITE_API_URL: ${VITE_API_URL:-http://localhost:8000/api/v1}
-    container_name: ims2-frontend
-    restart: unless-stopped
-    environment:
-      VITE_API_URL: ${VITE_API_URL:-http://localhost:8000/api/v1}
-      VITE_APP_NAME: ${VITE_APP_NAME:-IMS 2.0}
-      VITE_APP_VERSION: ${VITE_APP_VERSION:-2.0.0}
-    ports:
-      - "${FRONTEND_PORT:-80}:80"
-    depends_on:
-      backend:
-        condition: service_healthy
     networks:
       - ims-network
-    healthcheck:
-      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:80/health"]
-      interval: 30s
-      timeout: 3s
-      retries: 3
-      start_period: 10s
 
-  # --------------------------------------------------------------------------
-  # Nginx Reverse Proxy (Optional - for production)
-  # --------------------------------------------------------------------------
-  nginx:
-    image: nginx:1.27-alpine
-    container_name: ims2-nginx
-    restart: unless-stopped
+  # Adminer (Database UI)
+  adminer:
+    image: adminer:latest
+    container_name: ims-adminer
     ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
-      - ./nginx/ssl:/etc/nginx/ssl:ro
-      - ./nginx/logs:/var/log/nginx
+      - "8081:8080"
     depends_on:
-      - frontend
-      - backend
+      - postgres
     networks:
       - ims-network
-    profiles:
-      - production
-    healthcheck:
-      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost/health"]
-      interval: 30s
-      timeout: 3s
-      retries: 3
 
-# ==============================================================================
-# NETWORKS
-# ==============================================================================
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+
 networks:
   ims-network:
     driver: bridge
-    name: ims2-network
-
-# ==============================================================================
-# VOLUMES
-# ==============================================================================
-volumes:
-  mongodb_data:
-    name: ims2-mongodb-data
-  mongodb_config:
-    name: ims2-mongodb-config
