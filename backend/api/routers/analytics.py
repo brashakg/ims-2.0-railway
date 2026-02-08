@@ -20,13 +20,17 @@ router = APIRouter(prefix="/analytics", tags=["Analytics"])
 # Types
 # ============================================================================
 
+
 class KPIData:
     """Key Performance Indicator Data"""
+
     pass
+
 
 # ============================================================================
 # Helper Functions
 # ============================================================================
+
 
 def get_date_range(period: str) -> tuple[datetime, datetime]:
     """Get start and end date for a given period"""
@@ -47,13 +51,14 @@ def get_date_range(period: str) -> tuple[datetime, datetime]:
 
     return start_date, end_date
 
-def calculate_metrics_for_period(db: Session, store_id: Optional[str], start_date: datetime, end_date: datetime) -> Dict[str, Any]:
+
+def calculate_metrics_for_period(
+    db: Session, store_id: Optional[str], start_date: datetime, end_date: datetime
+) -> Dict[str, Any]:
     """Calculate all metrics for a given period"""
 
     # Base query for orders
-    query = db.query(Order).filter(
-        Order.created_at.between(start_date, end_date)
-    )
+    query = db.query(Order).filter(Order.created_at.between(start_date, end_date))
 
     if store_id:
         query = query.filter(Order.store_id == store_id)
@@ -69,16 +74,16 @@ def calculate_metrics_for_period(db: Session, store_id: Optional[str], start_dat
     prev_start = start_date - (end_date - start_date)
     prev_end = start_date
 
-    prev_query = db.query(Order).filter(
-        Order.created_at.between(prev_start, prev_end)
-    )
+    prev_query = db.query(Order).filter(Order.created_at.between(prev_start, prev_end))
     if store_id:
         prev_query = prev_query.filter(Order.store_id == store_id)
 
     prev_orders = prev_query.all()
     prev_revenue = sum(o.total_amount for o in prev_orders if o.total_amount)
 
-    revenue_change = ((total_revenue - prev_revenue) / prev_revenue * 100) if prev_revenue > 0 else 0
+    revenue_change = (
+        ((total_revenue - prev_revenue) / prev_revenue * 100) if prev_revenue > 0 else 0
+    )
 
     return {
         "total_revenue": float(total_revenue),
@@ -89,9 +94,11 @@ def calculate_metrics_for_period(db: Session, store_id: Optional[str], start_dat
         "period_end": end_date.isoformat(),
     }
 
+
 # ============================================================================
 # Endpoints
 # ============================================================================
+
 
 @router.get("/dashboard-summary")
 async def get_dashboard_summary(
@@ -110,58 +117,52 @@ async def get_dashboard_summary(
         metrics = calculate_metrics_for_period(db, store_id, start_date, end_date)
 
         # Get inventory metrics
-        inventory = db.query(Inventory).filter(
-            Inventory.store_id == store_id
-        ).all()
+        inventory = db.query(Inventory).filter(Inventory.store_id == store_id).all()
 
-        total_inventory_value = sum(i.quantity * i.unit_price for i in inventory if i.unit_price)
+        total_inventory_value = sum(
+            i.quantity * i.unit_price for i in inventory if i.unit_price
+        )
         low_stock_items = len([i for i in inventory if i.quantity <= i.reorder_point])
         out_of_stock = len([i for i in inventory if i.quantity == 0])
 
         # Get customer metrics
-        customers = db.query(Customer).filter(
-            Customer.store_id == store_id
-        ).all()
+        customers = db.query(Customer).filter(Customer.store_id == store_id).all()
 
-        new_customers = len([
-            c for c in customers
-            if c.created_at.date() >= start_date.date()
-        ])
+        new_customers = len(
+            [c for c in customers if c.created_at.date() >= start_date.date()]
+        )
 
         return {
             "period": period,
             "timestamp": datetime.now().isoformat(),
-
             # Revenue metrics
             "total_revenue": metrics["total_revenue"],
             "revenue_change": metrics["revenue_change"],
             "avg_order_value": metrics["avg_order_value"],
             "total_orders": metrics["total_orders"],
-
             # Gross margin (placeholder - would be calculated from actual order line items)
             "gross_margin_percent": 40.5,
             "margin_target": 42,
-
             # Inventory metrics
             "inventory_value": float(total_inventory_value),
             "low_stock_items": low_stock_items,
             "out_of_stock_items": out_of_stock,
             "inventory_turnover_ratio": 8.5,  # Would be calculated from COGS and avg inventory
-
             # Customer metrics
             "total_customers": len(customers),
             "new_customers": new_customers,
             "customer_acquisition_rate": new_customers,
-
             # Optical-specific metrics
             "prescription_renewals_pending": 32,  # Placeholder
-
             # Performance indicators
             "stores_count": 1 if store_id else len(db.query(Store).all()),
         }
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error calculating dashboard summary: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Error calculating dashboard summary: {str(e)}"
+        )
+
 
 @router.get("/revenue-trends")
 async def get_revenue_trends(
@@ -180,19 +181,27 @@ async def get_revenue_trends(
         start_date = end_date - timedelta(days=days)
 
         # Get orders for the period
-        current_period = db.query(Order).filter(
-            Order.created_at.between(start_date, end_date),
-            Order.store_id == store_id
-        ).all()
+        current_period = (
+            db.query(Order)
+            .filter(
+                Order.created_at.between(start_date, end_date),
+                Order.store_id == store_id,
+            )
+            .all()
+        )
 
         # Get previous period for YoY
         prev_start = start_date - timedelta(days=days)
         prev_end = start_date
 
-        previous_period = db.query(Order).filter(
-            Order.created_at.between(prev_start, prev_end),
-            Order.store_id == store_id
-        ).all()
+        previous_period = (
+            db.query(Order)
+            .filter(
+                Order.created_at.between(prev_start, prev_end),
+                Order.store_id == store_id,
+            )
+            .all()
+        )
 
         # Group by period
         def group_by_period(orders: List[Order], period_type: str):
@@ -201,7 +210,9 @@ async def get_revenue_trends(
                 if period_type == "daily":
                     key = order.created_at.date().isoformat()
                 elif period_type == "weekly":
-                    week_start = order.created_at - timedelta(days=order.created_at.weekday())
+                    week_start = order.created_at - timedelta(
+                        days=order.created_at.weekday()
+                    )
                     key = week_start.date().isoformat()
                 else:  # monthly
                     key = order.created_at.strftime("%Y-%m")
@@ -230,15 +241,19 @@ async def get_revenue_trends(
             else:  # monthly
                 key = current_date.strftime("%Y-%m")
                 if current_date.month == 12:
-                    next_date = current_date.replace(year=current_date.year + 1, month=1)
+                    next_date = current_date.replace(
+                        year=current_date.year + 1, month=1
+                    )
                 else:
                     next_date = current_date.replace(month=current_date.month + 1)
 
-            timeline_data.append({
-                "label": key,
-                "value": float(current_grouped.get(key, 0)),
-                "previous_value": float(previous_grouped.get(key, 0)),
-            })
+            timeline_data.append(
+                {
+                    "label": key,
+                    "value": float(current_grouped.get(key, 0)),
+                    "previous_value": float(previous_grouped.get(key, 0)),
+                }
+            )
 
             current_date = next_date
 
@@ -253,7 +268,10 @@ async def get_revenue_trends(
         }
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error fetching revenue trends: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Error fetching revenue trends: {str(e)}"
+        )
+
 
 @router.get("/store-performance")
 async def get_store_performance(
@@ -273,10 +291,14 @@ async def get_store_performance(
 
         for store in stores:
             # Orders for this store
-            orders = db.query(Order).filter(
-                Order.created_at.between(start_date, end_date),
-                Order.store_id == store.id
-            ).all()
+            orders = (
+                db.query(Order)
+                .filter(
+                    Order.created_at.between(start_date, end_date),
+                    Order.store_id == store.id,
+                )
+                .all()
+            )
 
             revenue = sum(o.total_amount for o in orders if o.total_amount)
             order_count = len(orders)
@@ -284,37 +306,49 @@ async def get_store_performance(
 
             # Previous period comparison
             prev_start = start_date - (end_date - start_date)
-            prev_orders = db.query(Order).filter(
-                Order.created_at.between(prev_start, start_date),
-                Order.store_id == store.id
-            ).all()
+            prev_orders = (
+                db.query(Order)
+                .filter(
+                    Order.created_at.between(prev_start, start_date),
+                    Order.store_id == store.id,
+                )
+                .all()
+            )
 
             prev_revenue = sum(o.total_amount for o in prev_orders if o.total_amount)
-            revenue_change = ((revenue - prev_revenue) / prev_revenue * 100) if prev_revenue > 0 else 0
+            revenue_change = (
+                ((revenue - prev_revenue) / prev_revenue * 100)
+                if prev_revenue > 0
+                else 0
+            )
 
             # Inventory metrics
-            inventory = db.query(Inventory).filter(
-                Inventory.store_id == store.id
-            ).all()
+            inventory = db.query(Inventory).filter(Inventory.store_id == store.id).all()
 
-            stock_value = sum(i.quantity * i.unit_price for i in inventory if i.unit_price)
+            stock_value = sum(
+                i.quantity * i.unit_price for i in inventory if i.unit_price
+            )
 
             # Staff count (placeholder - would come from actual staff table)
             staff_count = 10  # Placeholder
 
             # Metrics calculation
-            store_metrics.append({
-                "store_id": store.id,
-                "store_name": store.name,
-                "revenue": float(revenue),
-                "orders": order_count,
-                "avg_order_value": float(avg_order_value),
-                "margin_percent": 40.5,  # Placeholder
-                "stock_value": float(stock_value),
-                "staff_count": staff_count,
-                "revenue_per_sqft": float(revenue / 1000) if revenue > 0 else 0,  # Placeholder
-                "revenue_trend": float(revenue_change),
-            })
+            store_metrics.append(
+                {
+                    "store_id": store.id,
+                    "store_name": store.name,
+                    "revenue": float(revenue),
+                    "orders": order_count,
+                    "avg_order_value": float(avg_order_value),
+                    "margin_percent": 40.5,  # Placeholder
+                    "stock_value": float(stock_value),
+                    "staff_count": staff_count,
+                    "revenue_per_sqft": (
+                        float(revenue / 1000) if revenue > 0 else 0
+                    ),  # Placeholder
+                    "revenue_trend": float(revenue_change),
+                }
+            )
 
         return {
             "period": period,
@@ -323,13 +357,20 @@ async def get_store_performance(
             "summary": {
                 "total_stores": len(stores),
                 "total_revenue": sum(s["revenue"] for s in store_metrics),
-                "avg_revenue_per_store": sum(s["revenue"] for s in store_metrics) / len(stores) if stores else 0,
+                "avg_revenue_per_store": (
+                    sum(s["revenue"] for s in store_metrics) / len(stores)
+                    if stores
+                    else 0
+                ),
                 "avg_margin": 40.5,  # Placeholder
-            }
+            },
         }
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error fetching store performance: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Error fetching store performance: {str(e)}"
+        )
+
 
 @router.get("/inventory-intelligence")
 async def get_inventory_intelligence(
@@ -342,38 +383,71 @@ async def get_inventory_intelligence(
     try:
         store_id = current_user.active_store_id
 
-        inventory = db.query(Inventory).filter(
-            Inventory.store_id == store_id
-        ).all()
+        inventory = db.query(Inventory).filter(Inventory.store_id == store_id).all()
 
         # Categorize items
         low_stock = [i for i in inventory if i.quantity <= i.reorder_point]
-        dead_stock = [i for i in inventory if i.quantity > i.reorder_point * 2]  # Simplified
+        dead_stock = [
+            i for i in inventory if i.quantity > i.reorder_point * 2
+        ]  # Simplified
         fast_moving = [i for i in inventory if i.quantity < i.reorder_point / 2]
 
         return {
             "low_stock": {
                 "count": len(low_stock),
-                "items": [{"sku": i.sku, "name": i.name, "quantity": i.quantity, "reorder_point": i.reorder_point} for i in low_stock[:10]],
-                "total_value": sum(i.quantity * i.unit_price for i in low_stock if i.unit_price),
+                "items": [
+                    {
+                        "sku": i.sku,
+                        "name": i.name,
+                        "quantity": i.quantity,
+                        "reorder_point": i.reorder_point,
+                    }
+                    for i in low_stock[:10]
+                ],
+                "total_value": sum(
+                    i.quantity * i.unit_price for i in low_stock if i.unit_price
+                ),
             },
             "dead_stock": {
                 "count": len(dead_stock),
-                "items": [{"sku": i.sku, "name": i.name, "quantity": i.quantity, "value": i.quantity * i.unit_price if i.unit_price else 0} for i in dead_stock[:10]],
-                "total_value": sum(i.quantity * i.unit_price for i in dead_stock if i.unit_price),
+                "items": [
+                    {
+                        "sku": i.sku,
+                        "name": i.name,
+                        "quantity": i.quantity,
+                        "value": i.quantity * i.unit_price if i.unit_price else 0,
+                    }
+                    for i in dead_stock[:10]
+                ],
+                "total_value": sum(
+                    i.quantity * i.unit_price for i in dead_stock if i.unit_price
+                ),
             },
             "fast_moving": {
                 "count": len(fast_moving),
-                "items": [{"sku": i.sku, "name": i.name, "quantity": i.quantity, "velocity": "high"} for i in fast_moving[:10]],
+                "items": [
+                    {
+                        "sku": i.sku,
+                        "name": i.name,
+                        "quantity": i.quantity,
+                        "velocity": "high",
+                    }
+                    for i in fast_moving[:10]
+                ],
             },
             "total_inventory": {
                 "items": len(inventory),
-                "value": sum(i.quantity * i.unit_price for i in inventory if i.unit_price),
-            }
+                "value": sum(
+                    i.quantity * i.unit_price for i in inventory if i.unit_price
+                ),
+            },
         }
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error fetching inventory intelligence: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Error fetching inventory intelligence: {str(e)}"
+        )
+
 
 @router.get("/customer-insights")
 async def get_customer_insights(
@@ -389,18 +463,18 @@ async def get_customer_insights(
         store_id = current_user.active_store_id
 
         # Total customers
-        all_customers = db.query(Customer).filter(
-            Customer.store_id == store_id
-        ).all()
+        all_customers = db.query(Customer).filter(Customer.store_id == store_id).all()
 
         # New customers this period
-        new_customers = [c for c in all_customers if c.created_at.date() >= start_date.date()]
-        returning_customers = [c for c in all_customers if c.created_at.date() < start_date.date()]
+        new_customers = [
+            c for c in all_customers if c.created_at.date() >= start_date.date()
+        ]
+        returning_customers = [
+            c for c in all_customers if c.created_at.date() < start_date.date()
+        ]
 
         # Top customers by spend
-        orders = db.query(Order).filter(
-            Order.store_id == store_id
-        ).all()
+        orders = db.query(Order).filter(Order.store_id == store_id).all()
 
         customer_spend = {}
         for order in orders:
@@ -413,7 +487,7 @@ async def get_customer_insights(
         top_customers = sorted(
             [{"customer_id": cid, **data} for cid, data in customer_spend.items()],
             key=lambda x: x["spend"],
-            reverse=True
+            reverse=True,
         )[:10]
 
         return {
@@ -421,11 +495,21 @@ async def get_customer_insights(
             "total_customers": len(all_customers),
             "new_customers": len(new_customers),
             "returning_customers": len(returning_customers),
-            "retention_rate": (len(returning_customers) / len(all_customers) * 100) if all_customers else 0,
+            "retention_rate": (
+                (len(returning_customers) / len(all_customers) * 100)
+                if all_customers
+                else 0
+            ),
             "acquisition_rate": len(new_customers),
             "top_customers": top_customers,
-            "avg_customer_lifetime_value": sum(c["spend"] for c in top_customers) / len(top_customers) if top_customers else 0,
+            "avg_customer_lifetime_value": (
+                sum(c["spend"] for c in top_customers) / len(top_customers)
+                if top_customers
+                else 0
+            ),
         }
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error fetching customer insights: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Error fetching customer insights: {str(e)}"
+        )
