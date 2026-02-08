@@ -17,6 +17,7 @@ router = APIRouter(prefix="/supply-chain", tags=["supply-chain"])
 # Models
 # ============================================================================
 
+
 class POLineItem(BaseModel):
     product_id: str
     product_name: str
@@ -314,7 +315,14 @@ def update_purchase_order_status(po_id: str, new_status: dict):
     if not po:
         raise HTTPException(status_code=404, detail="Purchase order not found")
 
-    valid_statuses = ["draft", "approved", "sent", "partial_receipt", "received", "closed"]
+    valid_statuses = [
+        "draft",
+        "approved",
+        "sent",
+        "partial_receipt",
+        "received",
+        "closed",
+    ]
     if new_status.get("status") not in valid_statuses:
         raise HTTPException(status_code=400, detail="Invalid status")
 
@@ -354,9 +362,7 @@ def list_vendors(skip: int = Query(0), limit: int = Query(10)):
 @router.get("/vendors/{vendor_id}/performance")
 def get_vendor_performance(vendor_id: str):
     """Get vendor performance metrics"""
-    vendor = next(
-        (v for v in MOCK_VENDORS if v["id"] == vendor_id), None
-    )
+    vendor = next((v for v in MOCK_VENDORS if v["id"] == vendor_id), None)
     if not vendor:
         raise HTTPException(status_code=404, detail="Vendor not found")
 
@@ -378,9 +384,7 @@ def get_vendor_performance(vendor_id: str):
 @router.post("/vendors/{vendor_id}/rate")
 def rate_vendor(vendor_id: str, rating_data: VendorRating):
     """Rate vendor"""
-    vendor = next(
-        (v for v in MOCK_VENDORS if v["id"] == vendor_id), None
-    )
+    vendor = next((v for v in MOCK_VENDORS if v["id"] == vendor_id), None)
     if not vendor:
         raise HTTPException(status_code=404, detail="Vendor not found")
 
@@ -413,7 +417,9 @@ def create_grn(grn_data: GRNCreate):
         "po_id": grn_data.po_id,
         "po_number": po["po_number"],
         "received_at": datetime.now().isoformat() + "Z",
-        "items_received": sum(item.get("quantity", 0) for item in grn_data.received_items),
+        "items_received": sum(
+            item.get("quantity", 0) for item in grn_data.received_items
+        ),
         "quality_status": "passed",
         "created_by": "Store Manager",
         "quality_notes": grn_data.quality_notes,
@@ -537,12 +543,11 @@ def generate_replenishment_pos(generation_data: dict):
     items = generation_data.get("items", [])
 
     if not vendor_id or not items:
-        raise HTTPException(
-            status_code=400,
-            detail="vendor_id and items are required"
-        )
+        raise HTTPException(status_code=400, detail="vendor_id and items are required")
 
-    total_amount = sum(item.get("quantity", 0) * item.get("unit_price", 0) for item in items)
+    total_amount = sum(
+        item.get("quantity", 0) * item.get("unit_price", 0) for item in items
+    )
     gst_amount = total_amount * 0.18
     net_amount = total_amount + gst_amount
 
@@ -564,10 +569,14 @@ def generate_replenishment_pos(generation_data: dict):
             "items": [items[i]],
             "status": "draft",
             "total_amount": items[i].get("quantity", 0) * items[i].get("unit_price", 0),
-            "gst_amount": (items[i].get("quantity", 0) * items[i].get("unit_price", 0)) * 0.18,
-            "net_amount": (items[i].get("quantity", 0) * items[i].get("unit_price", 0)) * 1.18,
+            "gst_amount": (items[i].get("quantity", 0) * items[i].get("unit_price", 0))
+            * 0.18,
+            "net_amount": (items[i].get("quantity", 0) * items[i].get("unit_price", 0))
+            * 1.18,
             "created_at": datetime.now().isoformat() + "Z",
-            "expected_delivery": (datetime.now() + timedelta(days=7)).isoformat().split("T")[0],
+            "expected_delivery": (datetime.now() + timedelta(days=7))
+            .isoformat()
+            .split("T")[0],
             "approved_by": None,
             "approved_at": None,
         }
@@ -601,7 +610,9 @@ def create_stock_audit(audit_data: StockAuditCreate):
         "category": audit_data.category,
         "zone": audit_data.zone,
         "status": "scheduled",
-        "scheduled_date": (datetime.now() + timedelta(days=7)).isoformat().split("T")[0],
+        "scheduled_date": (datetime.now() + timedelta(days=7))
+        .isoformat()
+        .split("T")[0],
         "created_at": datetime.now().isoformat() + "Z",
         "created_by": "Admin",
         "items_counted": 0,
