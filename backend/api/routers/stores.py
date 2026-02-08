@@ -3,6 +3,7 @@ IMS 2.0 - Stores Router
 ========================
 Store management endpoints
 """
+
 from fastapi import APIRouter, HTTPException, Depends, Query
 from pydantic import BaseModel, Field
 from typing import List, Optional
@@ -17,6 +18,7 @@ router = APIRouter()
 # ============================================================================
 # SCHEMAS
 # ============================================================================
+
 
 class StoreCreate(BaseModel):
     store_code: str = Field(..., min_length=2, max_length=10)
@@ -45,6 +47,7 @@ class StoreUpdate(BaseModel):
 # ENDPOINTS
 # ============================================================================
 
+
 @router.get("/summary")
 async def get_store_summary(current_user: dict = Depends(get_current_user)):
     """Get summary of all stores by brand"""
@@ -62,7 +65,7 @@ async def list_stores(
     brand: Optional[str] = Query(None),
     city: Optional[str] = Query(None),
     active_only: bool = Query(True),
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
     """List stores with optional filtering"""
     repo = get_store_repository()
@@ -86,8 +89,7 @@ async def list_stores(
 
 @router.post("/", status_code=201)
 async def create_store(
-    store: StoreCreate,
-    current_user: dict = Depends(get_current_user)
+    store: StoreCreate, current_user: dict = Depends(get_current_user)
 ):
     """Create a new store"""
     repo = get_store_repository()
@@ -111,7 +113,7 @@ async def create_store(
             "enabled_categories": store.enabled_categories,
             "is_active": True,
             "is_hq": False,
-            "created_by": current_user.get("user_id")
+            "created_by": current_user.get("user_id"),
         }
 
         created = repo.create(store_data)
@@ -119,7 +121,7 @@ async def create_store(
             return {
                 "store_id": created["store_id"],
                 "store_code": created["store_code"],
-                "message": "Store created"
+                "message": "Store created",
             }
 
         raise HTTPException(status_code=500, detail="Failed to create store")
@@ -128,10 +130,7 @@ async def create_store(
 
 
 @router.get("/{store_id}")
-async def get_store(
-    store_id: str,
-    current_user: dict = Depends(get_current_user)
-):
+async def get_store(store_id: str, current_user: dict = Depends(get_current_user)):
     """Get store by ID"""
     repo = get_store_repository()
 
@@ -146,9 +145,7 @@ async def get_store(
 
 @router.put("/{store_id}")
 async def update_store(
-    store_id: str,
-    store: StoreUpdate,
-    current_user: dict = Depends(get_current_user)
+    store_id: str, store: StoreUpdate, current_user: dict = Depends(get_current_user)
 ):
     """Update store details"""
     repo = get_store_repository()
@@ -171,9 +168,7 @@ async def update_store(
 
 @router.post("/{store_id}/categories/{category}")
 async def enable_category(
-    store_id: str,
-    category: str,
-    current_user: dict = Depends(get_current_user)
+    store_id: str, category: str, current_user: dict = Depends(get_current_user)
 ):
     """Enable a category for the store"""
     repo = get_store_repository()
@@ -193,9 +188,7 @@ async def enable_category(
 
 @router.delete("/{store_id}/categories/{category}")
 async def disable_category(
-    store_id: str,
-    category: str,
-    current_user: dict = Depends(get_current_user)
+    store_id: str, category: str, current_user: dict = Depends(get_current_user)
 ):
     """Disable a category for the store"""
     repo = get_store_repository()

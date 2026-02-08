@@ -3,6 +3,7 @@ IMS 2.0 - Clinical Router
 ==========================
 Eye test queue and clinical management endpoints with database persistence
 """
+
 from fastapi import APIRouter, HTTPException, Depends, Query
 from pydantic import BaseModel, Field
 from typing import List, Optional
@@ -17,6 +18,7 @@ router = APIRouter()
 # ============================================================================
 # SCHEMAS
 # ============================================================================
+
 
 class QueueItemCreate(BaseModel):
     store_id: str = Field(..., alias="storeId")
@@ -50,10 +52,11 @@ class StatusUpdate(BaseModel):
 # HELPER FUNCTIONS
 # ============================================================================
 
+
 def _to_camel_case(snake_str: str) -> str:
     """Convert snake_case to camelCase"""
-    components = snake_str.split('_')
-    return components[0] + ''.join(x.title() for x in components[1:])
+    components = snake_str.split("_")
+    return components[0] + "".join(x.title() for x in components[1:])
 
 
 def _convert_to_camel(data: dict) -> dict:
@@ -62,7 +65,7 @@ def _convert_to_camel(data: dict) -> dict:
         return data
     result = {}
     for key, value in data.items():
-        if key.startswith('_'):
+        if key.startswith("_"):
             continue
         camel_key = _to_camel_case(key)
         if isinstance(value, dict):
@@ -91,10 +94,11 @@ def _get_empty_tests() -> List[dict]:
 # QUEUE ENDPOINTS
 # ============================================================================
 
+
 @router.get("/queue")
 async def get_queue(
     store_id: str = Query(..., alias="store_id"),
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
     """Get eye test queue for a store"""
     queue_repo = get_eye_test_queue_repository()
@@ -115,8 +119,7 @@ async def get_queue(
 
 @router.post("/queue")
 async def add_to_queue(
-    item: QueueItemCreate,
-    current_user: dict = Depends(get_current_user)
+    item: QueueItemCreate, current_user: dict = Depends(get_current_user)
 ):
     """Add a patient to the eye test queue"""
     queue_repo = get_eye_test_queue_repository()
@@ -128,7 +131,7 @@ async def add_to_queue(
             customer_phone=item.customer_phone,
             age=item.age,
             reason=item.reason,
-            customer_id=item.customer_id
+            customer_id=item.customer_id,
         )
         if created:
             result = _convert_to_camel(created)
@@ -148,16 +151,14 @@ async def add_to_queue(
         "customerId": item.customer_id,
         "status": "WAITING",
         "createdAt": datetime.now().isoformat(),
-        "waitTime": 0
+        "waitTime": 0,
     }
     return new_item
 
 
 @router.patch("/queue/{queue_id}/status")
 async def update_queue_status(
-    queue_id: str,
-    body: StatusUpdate,
-    current_user: dict = Depends(get_current_user)
+    queue_id: str, body: StatusUpdate, current_user: dict = Depends(get_current_user)
 ):
     """Update queue item status"""
     queue_repo = get_eye_test_queue_repository()
@@ -174,8 +175,7 @@ async def update_queue_status(
 
 @router.delete("/queue/{queue_id}")
 async def remove_from_queue(
-    queue_id: str,
-    current_user: dict = Depends(get_current_user)
+    queue_id: str, current_user: dict = Depends(get_current_user)
 ):
     """Remove a patient from the queue"""
     queue_repo = get_eye_test_queue_repository()
@@ -187,10 +187,7 @@ async def remove_from_queue(
 
 
 @router.post("/queue/{queue_id}/start-test")
-async def start_test(
-    queue_id: str,
-    current_user: dict = Depends(get_current_user)
-):
+async def start_test(queue_id: str, current_user: dict = Depends(get_current_user)):
     """Start an eye test for a queue item"""
     queue_repo = get_eye_test_queue_repository()
     test_repo = get_eye_test_repository()
@@ -211,7 +208,7 @@ async def start_test(
                 store_id=queue_item.get("store_id", ""),
                 optometrist_id=current_user.get("user_id", ""),
                 optometrist_name=current_user.get("full_name", "Unknown"),
-                customer_id=queue_item.get("customer_id")
+                customer_id=queue_item.get("customer_id"),
             )
 
             if test:
@@ -229,7 +226,7 @@ async def start_test(
 @router.get("/queue/stats")
 async def get_queue_stats(
     store_id: str = Query(..., alias="store_id"),
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
     """Get queue statistics for today"""
     queue_repo = get_eye_test_queue_repository()
@@ -238,24 +235,19 @@ async def get_queue_stats(
         return queue_repo.get_today_stats(store_id)
 
     # Return zeros when no DB available
-    return {
-        "total": 0,
-        "waiting": 0,
-        "in_progress": 0,
-        "completed": 0,
-        "no_show": 0
-    }
+    return {"total": 0, "waiting": 0, "in_progress": 0, "completed": 0, "no_show": 0}
 
 
 # ============================================================================
 # TEST ENDPOINTS
 # ============================================================================
 
+
 @router.get("/tests")
 async def get_tests(
     store_id: str = Query(..., alias="store_id"),
     date: Optional[str] = Query(None),
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
     """Get eye tests for a store"""
     test_repo = get_eye_test_repository()
@@ -278,10 +270,7 @@ async def get_tests(
 
 
 @router.get("/tests/{test_id}")
-async def get_test(
-    test_id: str,
-    current_user: dict = Depends(get_current_user)
-):
+async def get_test(test_id: str, current_user: dict = Depends(get_current_user)):
     """Get a specific eye test"""
     test_repo = get_eye_test_repository()
 
@@ -298,9 +287,7 @@ async def get_test(
 
 @router.post("/tests/{test_id}/complete")
 async def complete_test(
-    test_id: str,
-    data: EyeTestData,
-    current_user: dict = Depends(get_current_user)
+    test_id: str, data: EyeTestData, current_user: dict = Depends(get_current_user)
 ):
     """Complete an eye test with prescription data"""
     test_repo = get_eye_test_repository()
@@ -315,7 +302,7 @@ async def complete_test(
             pd=data.pd,
             notes=data.notes,
             lens_recommendation=data.lens_recommendation,
-            coating_recommendation=data.coating_recommendation
+            coating_recommendation=data.coating_recommendation,
         )
 
         if success:
@@ -334,8 +321,7 @@ async def complete_test(
 
 @router.get("/tests/patient/{customer_phone}")
 async def get_patient_tests(
-    customer_phone: str,
-    current_user: dict = Depends(get_current_user)
+    customer_phone: str, current_user: dict = Depends(get_current_user)
 ):
     """Get all tests for a patient by phone number"""
     test_repo = get_eye_test_repository()
@@ -354,8 +340,7 @@ async def get_patient_tests(
 
 @router.get("/tests/customer/{customer_id}")
 async def get_customer_tests(
-    customer_id: str,
-    current_user: dict = Depends(get_current_user)
+    customer_id: str, current_user: dict = Depends(get_current_user)
 ):
     """Get all tests for a customer by ID"""
     test_repo = get_eye_test_repository()
@@ -377,7 +362,7 @@ async def get_optometrist_stats(
     optometrist_id: str,
     from_date: date = Query(...),
     to_date: date = Query(...),
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
     """Get statistics for an optometrist"""
     test_repo = get_eye_test_repository()
@@ -385,8 +370,4 @@ async def get_optometrist_stats(
     if test_repo:
         return test_repo.get_optometrist_stats(optometrist_id, from_date, to_date)
 
-    return {
-        "total_tests": 0,
-        "completed_tests": 0,
-        "completion_rate": 0
-    }
+    return {"total_tests": 0, "completed_tests": 0, "completion_rate": 0}

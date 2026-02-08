@@ -4,6 +4,7 @@ IMS 2.0 - Stock Transfers Router
 Complete stock transfer management between locations, stores, and warehouses.
 Includes transfer requests, approvals, in-transit tracking, and receiving.
 """
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from typing import Optional, Dict, Any, List
@@ -19,6 +20,7 @@ router = APIRouter()
 # ============================================================================
 # ENUMS
 # ============================================================================
+
 
 class TransferStatus(str, Enum):
     DRAFT = "draft"
@@ -53,6 +55,7 @@ class TransferPriority(str, Enum):
 # ============================================================================
 # SCHEMAS
 # ============================================================================
+
 
 class TransferItemInput(BaseModel):
     product_id: str
@@ -120,6 +123,7 @@ def generate_transfer_number() -> str:
 # TRANSFER ENDPOINTS
 # ============================================================================
 
+
 @router.get("/")
 async def list_transfers(
     status: Optional[TransferStatus] = None,
@@ -131,7 +135,7 @@ async def list_transfers(
     created_before: Optional[str] = None,
     limit: int = Query(default=50, le=250),
     page: int = 1,
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
     """List all stock transfers with filtering"""
     transfers = list(STOCK_TRANSFERS.values())
@@ -142,7 +146,9 @@ async def list_transfers(
     if transfer_type:
         transfers = [t for t in transfers if t.get("transfer_type") == transfer_type]
     if from_location_id:
-        transfers = [t for t in transfers if t.get("from_location_id") == from_location_id]
+        transfers = [
+            t for t in transfers if t.get("from_location_id") == from_location_id
+        ]
     if to_location_id:
         transfers = [t for t in transfers if t.get("to_location_id") == to_location_id]
     if priority:
@@ -153,8 +159,10 @@ async def list_transfers(
     if not any(role in user_roles for role in ["SUPERADMIN", "ADMIN", "AREA_MANAGER"]):
         user_stores = current_user.get("store_ids", [])
         transfers = [
-            t for t in transfers
-            if t.get("from_location_id") in user_stores or t.get("to_location_id") in user_stores
+            t
+            for t in transfers
+            if t.get("from_location_id") in user_stores
+            or t.get("to_location_id") in user_stores
         ]
 
     # Sort by created date (newest first)
@@ -169,14 +177,13 @@ async def list_transfers(
         "total": total,
         "page": page,
         "limit": limit,
-        "total_pages": (total + limit - 1) // limit
+        "total_pages": (total + limit - 1) // limit,
     }
 
 
 @router.get("/pending")
 async def get_pending_transfers(
-    location_id: Optional[str] = None,
-    current_user: dict = Depends(get_current_user)
+    location_id: Optional[str] = None, current_user: dict = Depends(get_current_user)
 ):
     """Get transfers pending approval or action"""
     transfers = list(STOCK_TRANSFERS.values())
@@ -185,29 +192,38 @@ async def get_pending_transfers(
         TransferStatus.PENDING_APPROVAL,
         TransferStatus.APPROVED,
         TransferStatus.IN_TRANSIT,
-        TransferStatus.PARTIALLY_RECEIVED
+        TransferStatus.PARTIALLY_RECEIVED,
     ]
 
     transfers = [t for t in transfers if t.get("status") in pending_statuses]
 
     if location_id:
         transfers = [
-            t for t in transfers
-            if t.get("from_location_id") == location_id or t.get("to_location_id") == location_id
+            t
+            for t in transfers
+            if t.get("from_location_id") == location_id
+            or t.get("to_location_id") == location_id
         ]
 
     return {
-        "pending_approval": [t for t in transfers if t.get("status") == TransferStatus.PENDING_APPROVAL],
-        "ready_to_ship": [t for t in transfers if t.get("status") == TransferStatus.APPROVED],
-        "in_transit": [t for t in transfers if t.get("status") == TransferStatus.IN_TRANSIT],
-        "pending_receipt": [t for t in transfers if t.get("status") == TransferStatus.PARTIALLY_RECEIVED]
+        "pending_approval": [
+            t for t in transfers if t.get("status") == TransferStatus.PENDING_APPROVAL
+        ],
+        "ready_to_ship": [
+            t for t in transfers if t.get("status") == TransferStatus.APPROVED
+        ],
+        "in_transit": [
+            t for t in transfers if t.get("status") == TransferStatus.IN_TRANSIT
+        ],
+        "pending_receipt": [
+            t for t in transfers if t.get("status") == TransferStatus.PARTIALLY_RECEIVED
+        ],
     }
 
 
 @router.get("/{transfer_id}")
 async def get_transfer(
-    transfer_id: str,
-    current_user: dict = Depends(get_current_user)
+    transfer_id: str, current_user: dict = Depends(get_current_user)
 ):
     """Get a single transfer with full details"""
     transfer = STOCK_TRANSFERS.get(transfer_id)
@@ -219,11 +235,13 @@ async def get_transfer(
 
 @router.post("/")
 async def create_transfer(
-    transfer: TransferInput,
-    current_user: dict = Depends(get_current_user)
+    transfer: TransferInput, current_user: dict = Depends(get_current_user)
 ):
     """Create a new stock transfer request"""
-    if not any(role in current_user.get("roles", []) for role in ["SUPERADMIN", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"]):
+    if not any(
+        role in current_user.get("roles", [])
+        for role in ["SUPERADMIN", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"]
+    ):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     transfer_id = f"trf_{uuid.uuid4().hex[:12]}"
@@ -232,23 +250,24 @@ async def create_transfer(
     # Calculate totals
     total_items = sum(item.quantity_requested for item in transfer.items)
     total_value = sum(
-        (item.unit_cost or 0) * item.quantity_requested
-        for item in transfer.items
+        (item.unit_cost or 0) * item.quantity_requested for item in transfer.items
     )
 
     # Process items
     items = []
     for item in transfer.items:
         item_id = f"trfi_{uuid.uuid4().hex[:8]}"
-        items.append({
-            "id": item_id,
-            "transfer_id": transfer_id,
-            **item.model_dump(),
-            "quantity_shipped": 0,
-            "quantity_received": 0,
-            "quantity_damaged": 0,
-            "status": "pending"
-        })
+        items.append(
+            {
+                "id": item_id,
+                "transfer_id": transfer_id,
+                **item.model_dump(),
+                "quantity_shipped": 0,
+                "quantity_received": 0,
+                "quantity_damaged": 0,
+                "status": "pending",
+            }
+        )
 
     # Determine initial status based on user role
     user_roles = current_user.get("roles", [])
@@ -284,18 +303,26 @@ async def create_transfer(
                 "timestamp": datetime.now().isoformat(),
                 "user_id": current_user.get("user_id"),
                 "user_name": current_user.get("username"),
-                "notes": "Transfer created"
+                "notes": "Transfer created",
             }
         ],
         "created_by": current_user.get("user_id"),
         "created_by_name": current_user.get("username"),
-        "approved_by": current_user.get("user_id") if initial_status == TransferStatus.APPROVED else None,
-        "approved_at": datetime.now().isoformat() if initial_status == TransferStatus.APPROVED else None,
+        "approved_by": (
+            current_user.get("user_id")
+            if initial_status == TransferStatus.APPROVED
+            else None
+        ),
+        "approved_at": (
+            datetime.now().isoformat()
+            if initial_status == TransferStatus.APPROVED
+            else None
+        ),
         "shipped_at": None,
         "received_at": None,
         "completed_at": None,
         "created_at": datetime.now().isoformat(),
-        "updated_at": datetime.now().isoformat()
+        "updated_at": datetime.now().isoformat(),
     }
 
     # Create Shiprocket shipment if requested
@@ -307,7 +334,7 @@ async def create_transfer(
 
     return {
         "transfer": transfer_data,
-        "message": f"Transfer {transfer_number} created successfully"
+        "message": f"Transfer {transfer_number} created successfully",
     }
 
 
@@ -315,10 +342,13 @@ async def create_transfer(
 async def update_transfer(
     transfer_id: str,
     update: TransferUpdate,
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
     """Update transfer details"""
-    if not any(role in current_user.get("roles", []) for role in ["SUPERADMIN", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"]):
+    if not any(
+        role in current_user.get("roles", [])
+        for role in ["SUPERADMIN", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"]
+    ):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     transfer = STOCK_TRANSFERS.get(transfer_id)
@@ -327,7 +357,9 @@ async def update_transfer(
 
     # Can only update certain statuses
     if transfer["status"] in [TransferStatus.COMPLETED, TransferStatus.CANCELLED]:
-        raise HTTPException(status_code=400, detail="Cannot update completed or cancelled transfer")
+        raise HTTPException(
+            status_code=400, detail="Cannot update completed or cancelled transfer"
+        )
 
     update_data = update.model_dump(exclude_none=True)
     transfer.update(update_data)
@@ -340,10 +372,13 @@ async def update_transfer(
 async def approve_transfer(
     transfer_id: str,
     approval: TransferApproval,
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
     """Approve or reject a transfer request"""
-    if not any(role in current_user.get("roles", []) for role in ["SUPERADMIN", "ADMIN", "AREA_MANAGER"]):
+    if not any(
+        role in current_user.get("roles", [])
+        for role in ["SUPERADMIN", "ADMIN", "AREA_MANAGER"]
+    ):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     transfer = STOCK_TRANSFERS.get(transfer_id)
@@ -363,27 +398,33 @@ async def approve_transfer(
     transfer["status"] = new_status
     transfer["approved_by"] = current_user.get("user_id")
     transfer["approved_at"] = datetime.now().isoformat()
-    transfer["rejection_reason"] = approval.rejection_reason if not approval.approved else None
+    transfer["rejection_reason"] = (
+        approval.rejection_reason if not approval.approved else None
+    )
     transfer["updated_at"] = datetime.now().isoformat()
 
-    transfer["status_history"].append({
-        "status": new_status,
-        "timestamp": datetime.now().isoformat(),
-        "user_id": current_user.get("user_id"),
-        "user_name": current_user.get("username"),
-        "notes": approval.rejection_reason if not approval.approved else "Approved"
-    })
+    transfer["status_history"].append(
+        {
+            "status": new_status,
+            "timestamp": datetime.now().isoformat(),
+            "user_id": current_user.get("user_id"),
+            "user_name": current_user.get("username"),
+            "notes": approval.rejection_reason if not approval.approved else "Approved",
+        }
+    )
 
     return {"transfer": transfer, "message": message}
 
 
 @router.post("/{transfer_id}/start-picking")
 async def start_picking(
-    transfer_id: str,
-    current_user: dict = Depends(get_current_user)
+    transfer_id: str, current_user: dict = Depends(get_current_user)
 ):
     """Start picking items for transfer"""
-    if not any(role in current_user.get("roles", []) for role in ["SUPERADMIN", "ADMIN", "STORE_MANAGER", "WORKSHOP_STAFF"]):
+    if not any(
+        role in current_user.get("roles", [])
+        for role in ["SUPERADMIN", "ADMIN", "STORE_MANAGER", "WORKSHOP_STAFF"]
+    ):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     transfer = STOCK_TRANSFERS.get(transfer_id)
@@ -391,20 +432,24 @@ async def start_picking(
         raise HTTPException(status_code=404, detail="Transfer not found")
 
     if transfer["status"] != TransferStatus.APPROVED:
-        raise HTTPException(status_code=400, detail="Transfer must be approved before picking")
+        raise HTTPException(
+            status_code=400, detail="Transfer must be approved before picking"
+        )
 
     transfer["status"] = TransferStatus.PICKING
     transfer["picking_started_at"] = datetime.now().isoformat()
     transfer["picking_by"] = current_user.get("user_id")
     transfer["updated_at"] = datetime.now().isoformat()
 
-    transfer["status_history"].append({
-        "status": TransferStatus.PICKING,
-        "timestamp": datetime.now().isoformat(),
-        "user_id": current_user.get("user_id"),
-        "user_name": current_user.get("username"),
-        "notes": "Picking started"
-    })
+    transfer["status_history"].append(
+        {
+            "status": TransferStatus.PICKING,
+            "timestamp": datetime.now().isoformat(),
+            "user_id": current_user.get("user_id"),
+            "user_name": current_user.get("username"),
+            "notes": "Picking started",
+        }
+    )
 
     return {"transfer": transfer, "message": "Picking started"}
 
@@ -413,10 +458,13 @@ async def start_picking(
 async def complete_picking(
     transfer_id: str,
     items_picked: List[Dict[str, Any]],  # [{"item_id": "xxx", "quantity_picked": 10}]
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
     """Complete picking and mark items as packed"""
-    if not any(role in current_user.get("roles", []) for role in ["SUPERADMIN", "ADMIN", "STORE_MANAGER", "WORKSHOP_STAFF"]):
+    if not any(
+        role in current_user.get("roles", [])
+        for role in ["SUPERADMIN", "ADMIN", "STORE_MANAGER", "WORKSHOP_STAFF"]
+    ):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     transfer = STOCK_TRANSFERS.get(transfer_id)
@@ -424,26 +472,32 @@ async def complete_picking(
         raise HTTPException(status_code=404, detail="Transfer not found")
 
     if transfer["status"] != TransferStatus.PICKING:
-        raise HTTPException(status_code=400, detail="Transfer must be in picking status")
+        raise HTTPException(
+            status_code=400, detail="Transfer must be in picking status"
+        )
 
     # Update item quantities
     item_map = {item["id"]: item for item in transfer["items"]}
     for picked in items_picked:
         if picked["item_id"] in item_map:
-            item_map[picked["item_id"]]["quantity_shipped"] = picked.get("quantity_picked", 0)
+            item_map[picked["item_id"]]["quantity_shipped"] = picked.get(
+                "quantity_picked", 0
+            )
             item_map[picked["item_id"]]["status"] = "packed"
 
     transfer["status"] = TransferStatus.PACKED
     transfer["picking_completed_at"] = datetime.now().isoformat()
     transfer["updated_at"] = datetime.now().isoformat()
 
-    transfer["status_history"].append({
-        "status": TransferStatus.PACKED,
-        "timestamp": datetime.now().isoformat(),
-        "user_id": current_user.get("user_id"),
-        "user_name": current_user.get("username"),
-        "notes": "Picking completed, items packed"
-    })
+    transfer["status_history"].append(
+        {
+            "status": TransferStatus.PACKED,
+            "timestamp": datetime.now().isoformat(),
+            "user_id": current_user.get("user_id"),
+            "user_name": current_user.get("username"),
+            "notes": "Picking completed, items packed",
+        }
+    )
 
     return {"transfer": transfer, "message": "Picking completed, ready for shipment"}
 
@@ -455,10 +509,13 @@ async def ship_transfer(
     tracking_url: Optional[str] = None,
     courier_name: Optional[str] = None,
     create_shiprocket: bool = False,
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
     """Mark transfer as shipped / in transit"""
-    if not any(role in current_user.get("roles", []) for role in ["SUPERADMIN", "ADMIN", "STORE_MANAGER", "WORKSHOP_STAFF"]):
+    if not any(
+        role in current_user.get("roles", [])
+        for role in ["SUPERADMIN", "ADMIN", "STORE_MANAGER", "WORKSHOP_STAFF"]
+    ):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     transfer = STOCK_TRANSFERS.get(transfer_id)
@@ -466,7 +523,10 @@ async def ship_transfer(
         raise HTTPException(status_code=404, detail="Transfer not found")
 
     if transfer["status"] not in [TransferStatus.APPROVED, TransferStatus.PACKED]:
-        raise HTTPException(status_code=400, detail="Transfer must be approved or packed before shipping")
+        raise HTTPException(
+            status_code=400,
+            detail="Transfer must be approved or packed before shipping",
+        )
 
     # Create Shiprocket shipment if requested
     if create_shiprocket:
@@ -491,21 +551,23 @@ async def ship_transfer(
     for item in transfer["items"]:
         item["status"] = "in_transit"
 
-    transfer["status_history"].append({
-        "status": TransferStatus.IN_TRANSIT,
-        "timestamp": datetime.now().isoformat(),
-        "user_id": current_user.get("user_id"),
-        "user_name": current_user.get("username"),
-        "notes": f"Shipped via {transfer.get('courier_name', 'carrier')}"
-    })
+    transfer["status_history"].append(
+        {
+            "status": TransferStatus.IN_TRANSIT,
+            "timestamp": datetime.now().isoformat(),
+            "user_id": current_user.get("user_id"),
+            "user_name": current_user.get("username"),
+            "notes": f"Shipped via {transfer.get('courier_name', 'carrier')}",
+        }
+    )
 
     return {
         "transfer": transfer,
         "message": "Transfer shipped",
         "tracking": {
             "number": transfer.get("tracking_number"),
-            "url": transfer.get("tracking_url")
-        }
+            "url": transfer.get("tracking_url"),
+        },
     }
 
 
@@ -513,18 +575,26 @@ async def ship_transfer(
 async def receive_transfer(
     transfer_id: str,
     items_received: List[TransferItemReceive],
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
     """Receive transfer items at destination"""
-    if not any(role in current_user.get("roles", []) for role in ["SUPERADMIN", "ADMIN", "STORE_MANAGER", "WORKSHOP_STAFF"]):
+    if not any(
+        role in current_user.get("roles", [])
+        for role in ["SUPERADMIN", "ADMIN", "STORE_MANAGER", "WORKSHOP_STAFF"]
+    ):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     transfer = STOCK_TRANSFERS.get(transfer_id)
     if not transfer:
         raise HTTPException(status_code=404, detail="Transfer not found")
 
-    if transfer["status"] not in [TransferStatus.IN_TRANSIT, TransferStatus.PARTIALLY_RECEIVED]:
-        raise HTTPException(status_code=400, detail="Transfer must be in transit to receive")
+    if transfer["status"] not in [
+        TransferStatus.IN_TRANSIT,
+        TransferStatus.PARTIALLY_RECEIVED,
+    ]:
+        raise HTTPException(
+            status_code=400, detail="Transfer must be in transit to receive"
+        )
 
     # Update item quantities
     item_map = {item["id"]: item for item in transfer["items"]}
@@ -559,13 +629,15 @@ async def receive_transfer(
     transfer["total_damaged"] = total_damaged
     transfer["updated_at"] = datetime.now().isoformat()
 
-    transfer["status_history"].append({
-        "status": new_status,
-        "timestamp": datetime.now().isoformat(),
-        "user_id": current_user.get("user_id"),
-        "user_name": current_user.get("username"),
-        "notes": f"Received {total_received} items, {total_damaged} damaged"
-    })
+    transfer["status_history"].append(
+        {
+            "status": new_status,
+            "timestamp": datetime.now().isoformat(),
+            "user_id": current_user.get("user_id"),
+            "user_name": current_user.get("username"),
+            "notes": f"Received {total_received} items, {total_damaged} damaged",
+        }
+    )
 
     return {
         "transfer": transfer,
@@ -573,8 +645,8 @@ async def receive_transfer(
         "summary": {
             "expected": total_expected,
             "received": total_received,
-            "damaged": total_damaged
-        }
+            "damaged": total_damaged,
+        },
     }
 
 
@@ -582,18 +654,26 @@ async def receive_transfer(
 async def complete_transfer(
     transfer_id: str,
     notes: Optional[str] = None,
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
     """Mark transfer as completed"""
-    if not any(role in current_user.get("roles", []) for role in ["SUPERADMIN", "ADMIN", "STORE_MANAGER"]):
+    if not any(
+        role in current_user.get("roles", [])
+        for role in ["SUPERADMIN", "ADMIN", "STORE_MANAGER"]
+    ):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     transfer = STOCK_TRANSFERS.get(transfer_id)
     if not transfer:
         raise HTTPException(status_code=404, detail="Transfer not found")
 
-    if transfer["status"] not in [TransferStatus.RECEIVED, TransferStatus.PARTIALLY_RECEIVED]:
-        raise HTTPException(status_code=400, detail="Transfer must be received before completion")
+    if transfer["status"] not in [
+        TransferStatus.RECEIVED,
+        TransferStatus.PARTIALLY_RECEIVED,
+    ]:
+        raise HTTPException(
+            status_code=400, detail="Transfer must be received before completion"
+        )
 
     transfer["status"] = TransferStatus.COMPLETED
     transfer["completed_at"] = datetime.now().isoformat()
@@ -601,25 +681,28 @@ async def complete_transfer(
     transfer["completion_notes"] = notes
     transfer["updated_at"] = datetime.now().isoformat()
 
-    transfer["status_history"].append({
-        "status": TransferStatus.COMPLETED,
-        "timestamp": datetime.now().isoformat(),
-        "user_id": current_user.get("user_id"),
-        "user_name": current_user.get("username"),
-        "notes": notes or "Transfer completed"
-    })
+    transfer["status_history"].append(
+        {
+            "status": TransferStatus.COMPLETED,
+            "timestamp": datetime.now().isoformat(),
+            "user_id": current_user.get("user_id"),
+            "user_name": current_user.get("username"),
+            "notes": notes or "Transfer completed",
+        }
+    )
 
     return {"transfer": transfer, "message": "Transfer completed"}
 
 
 @router.post("/{transfer_id}/cancel")
 async def cancel_transfer(
-    transfer_id: str,
-    reason: str,
-    current_user: dict = Depends(get_current_user)
+    transfer_id: str, reason: str, current_user: dict = Depends(get_current_user)
 ):
     """Cancel a transfer"""
-    if not any(role in current_user.get("roles", []) for role in ["SUPERADMIN", "ADMIN", "AREA_MANAGER"]):
+    if not any(
+        role in current_user.get("roles", [])
+        for role in ["SUPERADMIN", "ADMIN", "AREA_MANAGER"]
+    ):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     transfer = STOCK_TRANSFERS.get(transfer_id)
@@ -627,10 +710,15 @@ async def cancel_transfer(
         raise HTTPException(status_code=404, detail="Transfer not found")
 
     if transfer["status"] in [TransferStatus.COMPLETED, TransferStatus.CANCELLED]:
-        raise HTTPException(status_code=400, detail="Cannot cancel completed or already cancelled transfer")
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot cancel completed or already cancelled transfer",
+        )
 
     if transfer["status"] == TransferStatus.IN_TRANSIT:
-        raise HTTPException(status_code=400, detail="Cannot cancel transfer that is in transit")
+        raise HTTPException(
+            status_code=400, detail="Cannot cancel transfer that is in transit"
+        )
 
     transfer["status"] = TransferStatus.CANCELLED
     transfer["cancelled_at"] = datetime.now().isoformat()
@@ -638,13 +726,15 @@ async def cancel_transfer(
     transfer["cancellation_reason"] = reason
     transfer["updated_at"] = datetime.now().isoformat()
 
-    transfer["status_history"].append({
-        "status": TransferStatus.CANCELLED,
-        "timestamp": datetime.now().isoformat(),
-        "user_id": current_user.get("user_id"),
-        "user_name": current_user.get("username"),
-        "notes": reason
-    })
+    transfer["status_history"].append(
+        {
+            "status": TransferStatus.CANCELLED,
+            "timestamp": datetime.now().isoformat(),
+            "user_id": current_user.get("user_id"),
+            "user_name": current_user.get("username"),
+            "notes": reason,
+        }
+    )
 
     return {"transfer": transfer, "message": "Transfer cancelled"}
 
@@ -653,26 +743,35 @@ async def cancel_transfer(
 # ANALYTICS & REPORTS
 # ============================================================================
 
+
 @router.get("/analytics/summary")
 async def get_transfer_analytics(
     from_date: Optional[str] = None,
     to_date: Optional[str] = None,
     location_id: Optional[str] = None,
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
     """Get transfer analytics summary"""
     transfers = list(STOCK_TRANSFERS.values())
 
     if location_id:
         transfers = [
-            t for t in transfers
-            if t.get("from_location_id") == location_id or t.get("to_location_id") == location_id
+            t
+            for t in transfers
+            if t.get("from_location_id") == location_id
+            or t.get("to_location_id") == location_id
         ]
 
     total_transfers = len(transfers)
     completed = len([t for t in transfers if t["status"] == TransferStatus.COMPLETED])
     in_transit = len([t for t in transfers if t["status"] == TransferStatus.IN_TRANSIT])
-    pending = len([t for t in transfers if t["status"] in [TransferStatus.PENDING_APPROVAL, TransferStatus.APPROVED]])
+    pending = len(
+        [
+            t
+            for t in transfers
+            if t["status"] in [TransferStatus.PENDING_APPROVAL, TransferStatus.APPROVED]
+        ]
+    )
     cancelled = len([t for t in transfers if t["status"] == TransferStatus.CANCELLED])
 
     total_value = sum(t.get("total_value", 0) for t in transfers)
@@ -686,23 +785,24 @@ async def get_transfer_analytics(
             "pending": pending,
             "cancelled": cancelled,
             "total_value": total_value,
-            "total_items": total_items
+            "total_items": total_items,
         },
         "by_type": {
-            t_type.value: len([t for t in transfers if t.get("transfer_type") == t_type.value])
+            t_type.value: len(
+                [t for t in transfers if t.get("transfer_type") == t_type.value]
+            )
             for t_type in TransferType
         },
         "by_priority": {
             p.value: len([t for t in transfers if t.get("priority") == p.value])
             for p in TransferPriority
-        }
+        },
     }
 
 
 @router.get("/analytics/location/{location_id}")
 async def get_location_transfer_analytics(
-    location_id: str,
-    current_user: dict = Depends(get_current_user)
+    location_id: str, current_user: dict = Depends(get_current_user)
 ):
     """Get transfer analytics for a specific location"""
     transfers = list(STOCK_TRANSFERS.values())
@@ -714,16 +814,29 @@ async def get_location_transfer_analytics(
         "location_id": location_id,
         "outgoing": {
             "total": len(outgoing),
-            "in_transit": len([t for t in outgoing if t["status"] == TransferStatus.IN_TRANSIT]),
-            "pending": len([t for t in outgoing if t["status"] in [TransferStatus.PENDING_APPROVAL, TransferStatus.APPROVED]]),
-            "value": sum(t.get("total_value", 0) for t in outgoing)
+            "in_transit": len(
+                [t for t in outgoing if t["status"] == TransferStatus.IN_TRANSIT]
+            ),
+            "pending": len(
+                [
+                    t
+                    for t in outgoing
+                    if t["status"]
+                    in [TransferStatus.PENDING_APPROVAL, TransferStatus.APPROVED]
+                ]
+            ),
+            "value": sum(t.get("total_value", 0) for t in outgoing),
         },
         "incoming": {
             "total": len(incoming),
-            "in_transit": len([t for t in incoming if t["status"] == TransferStatus.IN_TRANSIT]),
-            "pending_receipt": len([t for t in incoming if t["status"] == TransferStatus.IN_TRANSIT]),
-            "value": sum(t.get("total_value", 0) for t in incoming)
-        }
+            "in_transit": len(
+                [t for t in incoming if t["status"] == TransferStatus.IN_TRANSIT]
+            ),
+            "pending_receipt": len(
+                [t for t in incoming if t["status"] == TransferStatus.IN_TRANSIT]
+            ),
+            "value": sum(t.get("total_value", 0) for t in incoming),
+        },
     }
 
 
@@ -731,13 +844,16 @@ async def get_location_transfer_analytics(
 # BULK OPERATIONS
 # ============================================================================
 
+
 @router.post("/bulk-approve")
 async def bulk_approve_transfers(
-    transfer_ids: List[str],
-    current_user: dict = Depends(get_current_user)
+    transfer_ids: List[str], current_user: dict = Depends(get_current_user)
 ):
     """Bulk approve multiple transfers"""
-    if not any(role in current_user.get("roles", []) for role in ["SUPERADMIN", "ADMIN", "AREA_MANAGER"]):
+    if not any(
+        role in current_user.get("roles", [])
+        for role in ["SUPERADMIN", "ADMIN", "AREA_MANAGER"]
+    ):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     approved = 0
@@ -758,20 +874,22 @@ async def bulk_approve_transfers(
         transfer["approved_at"] = datetime.now().isoformat()
         transfer["updated_at"] = datetime.now().isoformat()
 
-        transfer["status_history"].append({
-            "status": TransferStatus.APPROVED,
-            "timestamp": datetime.now().isoformat(),
-            "user_id": current_user.get("user_id"),
-            "user_name": current_user.get("username"),
-            "notes": "Bulk approved"
-        })
+        transfer["status_history"].append(
+            {
+                "status": TransferStatus.APPROVED,
+                "timestamp": datetime.now().isoformat(),
+                "user_id": current_user.get("user_id"),
+                "user_name": current_user.get("username"),
+                "notes": "Bulk approved",
+            }
+        )
 
         approved += 1
 
     return {
         "message": f"{approved} transfers approved",
         "approved_count": approved,
-        "errors": errors
+        "errors": errors,
     }
 
 
@@ -779,14 +897,18 @@ async def bulk_approve_transfers(
 # SHIPROCKET INTEGRATION
 # ============================================================================
 
+
 @router.post("/{transfer_id}/create-shiprocket-shipment")
 async def create_shiprocket_shipment_for_transfer(
     transfer_id: str,
     courier_code: Optional[str] = None,
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
     """Create Shiprocket shipment for a transfer"""
-    if not any(role in current_user.get("roles", []) for role in ["SUPERADMIN", "ADMIN", "STORE_MANAGER"]):
+    if not any(
+        role in current_user.get("roles", [])
+        for role in ["SUPERADMIN", "ADMIN", "STORE_MANAGER"]
+    ):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     transfer = STOCK_TRANSFERS.get(transfer_id)
@@ -794,7 +916,9 @@ async def create_shiprocket_shipment_for_transfer(
         raise HTTPException(status_code=404, detail="Transfer not found")
 
     if transfer["status"] not in [TransferStatus.APPROVED, TransferStatus.PACKED]:
-        raise HTTPException(status_code=400, detail="Transfer must be approved or packed")
+        raise HTTPException(
+            status_code=400, detail="Transfer must be approved or packed"
+        )
 
     # In production, would call Shiprocket API
     shipment_id = f"SHP_{uuid.uuid4().hex[:8].upper()}"
@@ -812,14 +936,13 @@ async def create_shiprocket_shipment_for_transfer(
         "awb": awb,
         "tracking_url": transfer["tracking_url"],
         "courier": transfer["courier_name"],
-        "message": "Shiprocket shipment created"
+        "message": "Shiprocket shipment created",
     }
 
 
 @router.get("/{transfer_id}/tracking")
 async def get_transfer_tracking(
-    transfer_id: str,
-    current_user: dict = Depends(get_current_user)
+    transfer_id: str, current_user: dict = Depends(get_current_user)
 ):
     """Get tracking information for a transfer"""
     transfer = STOCK_TRANSFERS.get(transfer_id)
@@ -837,8 +960,28 @@ async def get_transfer_tracking(
         "courier": transfer.get("courier_name"),
         "current_status": transfer.get("status"),
         "tracking_history": [
-            {"status": "PICKUP_SCHEDULED", "location": transfer.get("from_location_name"), "timestamp": transfer.get("created_at")},
-            {"status": "PICKED_UP", "location": transfer.get("from_location_name"), "timestamp": transfer.get("shipped_at")} if transfer.get("shipped_at") else None,
-            {"status": "IN_TRANSIT", "location": "Distribution Hub", "timestamp": transfer.get("shipped_at")} if transfer.get("shipped_at") else None,
-        ]
+            {
+                "status": "PICKUP_SCHEDULED",
+                "location": transfer.get("from_location_name"),
+                "timestamp": transfer.get("created_at"),
+            },
+            (
+                {
+                    "status": "PICKED_UP",
+                    "location": transfer.get("from_location_name"),
+                    "timestamp": transfer.get("shipped_at"),
+                }
+                if transfer.get("shipped_at")
+                else None
+            ),
+            (
+                {
+                    "status": "IN_TRANSIT",
+                    "location": "Distribution Hub",
+                    "timestamp": transfer.get("shipped_at"),
+                }
+                if transfer.get("shipped_at")
+                else None
+            ),
+        ],
     }

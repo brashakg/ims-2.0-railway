@@ -3,6 +3,7 @@ IMS 2.0 - Inventory Router
 ===========================
 Stock and inventory management endpoints
 """
+
 from fastapi import APIRouter, HTTPException, Depends, Query
 from pydantic import BaseModel, Field
 from typing import List, Optional
@@ -17,6 +18,7 @@ router = APIRouter()
 # ============================================================================
 # SCHEMAS
 # ============================================================================
+
 
 class StockAddRequest(BaseModel):
     product_id: str
@@ -41,6 +43,7 @@ class StockCountItem(BaseModel):
 # HELPER FUNCTIONS
 # ============================================================================
 
+
 def generate_barcode(store_id: str, product_id: str) -> str:
     """Generate unique barcode for stock item"""
     short_uuid = str(uuid.uuid4())[:8].upper()
@@ -51,13 +54,14 @@ def generate_barcode(store_id: str, product_id: str) -> str:
 # ENDPOINTS
 # ============================================================================
 
+
 @router.get("/stock")
 async def get_stock(
     store_id: Optional[str] = Query(None),
     product_id: Optional[str] = Query(None),
     category: Optional[str] = Query(None),
     low_stock: bool = Query(False),
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
     """Get stock with filtering"""
     repo = get_stock_repository()
@@ -83,7 +87,7 @@ async def get_stock(
 @router.get("/low-stock")
 async def get_low_stock_alerts(
     store_id: Optional[str] = Query(None),
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
     """Get low stock alerts"""
     repo = get_stock_repository()
@@ -98,8 +102,7 @@ async def get_low_stock_alerts(
 
 @router.get("/barcode/{barcode}")
 async def get_stock_by_barcode_short(
-    barcode: str,
-    current_user: dict = Depends(get_current_user)
+    barcode: str, current_user: dict = Depends(get_current_user)
 ):
     """Get stock item by barcode (short path)"""
     repo = get_stock_repository()
@@ -115,8 +118,7 @@ async def get_stock_by_barcode_short(
 
 @router.get("/expiring")
 async def get_expiring_stock(
-    days: int = Query(30, ge=1, le=365),
-    current_user: dict = Depends(get_current_user)
+    days: int = Query(30, ge=1, le=365), current_user: dict = Depends(get_current_user)
 ):
     """Get stock items expiring within specified days"""
     repo = get_stock_repository()
@@ -133,7 +135,7 @@ async def get_expiring_stock(
 async def list_transfers(
     store_id: Optional[str] = Query(None),
     status: Optional[str] = Query(None),
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
     """List stock transfers"""
     # Transfer logic to be implemented with transfer repository
@@ -143,7 +145,7 @@ async def list_transfers(
 @router.get("/stock-count")
 async def list_stock_counts(
     store_id: Optional[str] = Query(None),
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
     """List stock counts"""
     return {"counts": []}
@@ -151,8 +153,7 @@ async def list_stock_counts(
 
 @router.get("/stock/barcode/{barcode}")
 async def get_stock_by_barcode(
-    barcode: str,
-    current_user: dict = Depends(get_current_user)
+    barcode: str, current_user: dict = Depends(get_current_user)
 ):
     """Get stock item by barcode"""
     repo = get_stock_repository()
@@ -168,8 +169,7 @@ async def get_stock_by_barcode(
 
 @router.post("/stock/add")
 async def add_stock(
-    request: StockAddRequest,
-    current_user: dict = Depends(get_current_user)
+    request: StockAddRequest, current_user: dict = Depends(get_current_user)
 ):
     """Add stock to inventory"""
     stock_repo = get_stock_repository()
@@ -192,11 +192,13 @@ async def add_stock(
                 "barcode": barcode,
                 "location_code": request.location_code or "DEFAULT",
                 "batch_code": request.batch_code,
-                "expiry_date": request.expiry_date.isoformat() if request.expiry_date else None,
+                "expiry_date": (
+                    request.expiry_date.isoformat() if request.expiry_date else None
+                ),
                 "status": "AVAILABLE",
                 "is_reserved": False,
                 "barcode_printed": False,
-                "created_by": current_user.get("user_id")
+                "created_by": current_user.get("user_id"),
             }
             created = stock_repo.create(stock_data)
             if created:
@@ -205,7 +207,7 @@ async def add_stock(
         return {
             "stock_ids": [s["stock_unit_id"] for s in stock_items],
             "barcodes": [s["barcode"] for s in stock_items],
-            "quantity": len(stock_items)
+            "quantity": len(stock_items),
         }
 
     return {"stock_id": str(uuid.uuid4()), "barcode": generate_barcode("STR", "PRD")}
@@ -213,18 +215,19 @@ async def add_stock(
 
 @router.post("/transfers")
 async def create_transfer(
-    request: StockTransferRequest,
-    current_user: dict = Depends(get_current_user)
+    request: StockTransferRequest, current_user: dict = Depends(get_current_user)
 ):
     """Create a stock transfer request"""
     # Transfer creation to be implemented
-    return {"transfer_id": str(uuid.uuid4()), "transfer_number": f"TRF-{uuid.uuid4().hex[:6].upper()}"}
+    return {
+        "transfer_id": str(uuid.uuid4()),
+        "transfer_number": f"TRF-{uuid.uuid4().hex[:6].upper()}",
+    }
 
 
 @router.post("/transfers/{transfer_id}/send")
 async def send_transfer(
-    transfer_id: str,
-    current_user: dict = Depends(get_current_user)
+    transfer_id: str, current_user: dict = Depends(get_current_user)
 ):
     """Mark transfer as sent"""
     return {"message": "Transfer sent", "transfer_id": transfer_id}
@@ -232,9 +235,7 @@ async def send_transfer(
 
 @router.post("/transfers/{transfer_id}/receive")
 async def receive_transfer(
-    transfer_id: str,
-    items: List[dict],
-    current_user: dict = Depends(get_current_user)
+    transfer_id: str, items: List[dict], current_user: dict = Depends(get_current_user)
 ):
     """Receive a stock transfer"""
     return {"message": "Transfer received", "transfer_id": transfer_id}
@@ -242,8 +243,7 @@ async def receive_transfer(
 
 @router.post("/stock-count/start")
 async def start_stock_count(
-    category: str,
-    current_user: dict = Depends(get_current_user)
+    category: str, current_user: dict = Depends(get_current_user)
 ):
     """Start a stock count session"""
     return {"count_id": str(uuid.uuid4()), "category": category}
@@ -251,9 +251,7 @@ async def start_stock_count(
 
 @router.post("/stock-count/{count_id}/items")
 async def record_count_item(
-    count_id: str,
-    item: StockCountItem,
-    current_user: dict = Depends(get_current_user)
+    count_id: str, item: StockCountItem, current_user: dict = Depends(get_current_user)
 ):
     """Record a counted item"""
     return {"message": "Item counted", "count_id": count_id}
@@ -261,8 +259,7 @@ async def record_count_item(
 
 @router.post("/stock-count/{count_id}/complete")
 async def complete_stock_count(
-    count_id: str,
-    current_user: dict = Depends(get_current_user)
+    count_id: str, current_user: dict = Depends(get_current_user)
 ):
     """Complete stock count and calculate variances"""
     return {"message": "Stock count completed", "variances": []}

@@ -3,11 +3,12 @@
 # ============================================================================
 
 import pytest
+import sys
+import os
 from datetime import datetime, timedelta
-from .test_config import (
-    client, db_session, admin_token, manager_token,
-    get_auth_headers, assert_success_response, assert_error_response
-)
+
+# Add backend to path for imports
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 pytestmark = pytest.mark.auth
 

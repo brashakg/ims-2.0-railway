@@ -2,6 +2,7 @@
 IMS 2.0 - API Routers
 ======================
 """
+
 from .auth import router as auth_router
 from .users import router as users_router
 from .stores import router as stores_router
@@ -25,25 +26,25 @@ from .catalog import router as catalog_router
 from .jarvis import router as jarvis_router
 
 __all__ = [
-    'auth_router',
-    'users_router',
-    'stores_router',
-    'products_router',
-    'inventory_router',
-    'customers_router',
-    'orders_router',
-    'prescriptions_router',
-    'vendors_router',
-    'tasks_router',
-    'expenses_router',
-    'hr_router',
-    'workshop_router',
-    'reports_router',
-    'settings_router',
-    'clinical_router',
-    'admin_router',
-    'shopify_router',
-    'transfers_router',
-    'catalog_router',
-    'jarvis_router'
+    "auth_router",
+    "users_router",
+    "stores_router",
+    "products_router",
+    "inventory_router",
+    "customers_router",
+    "orders_router",
+    "prescriptions_router",
+    "vendors_router",
+    "tasks_router",
+    "expenses_router",
+    "hr_router",
+    "workshop_router",
+    "reports_router",
+    "settings_router",
+    "clinical_router",
+    "admin_router",
+    "shopify_router",
+    "transfers_router",
+    "catalog_router",
+    "jarvis_router",
 ]

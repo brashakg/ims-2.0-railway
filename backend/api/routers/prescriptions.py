@@ -3,6 +3,7 @@ IMS 2.0 - Prescriptions Router
 ===============================
 Prescription management endpoints
 """
+
 from fastapi import APIRouter, HTTPException, Depends, Query
 from pydantic import BaseModel, Field
 from typing import Optional
@@ -18,6 +19,7 @@ router = APIRouter()
 # ============================================================================
 # SCHEMAS
 # ============================================================================
+
 
 class EyeData(BaseModel):
     sph: Optional[str] = None
@@ -47,6 +49,7 @@ class PrescriptionCreate(BaseModel):
 # HELPER FUNCTIONS
 # ============================================================================
 
+
 def generate_rx_number() -> str:
     """Generate unique prescription number"""
     return f"RX-{datetime.now().strftime('%y%m%d')}-{str(uuid.uuid4())[:6].upper()}"
@@ -56,11 +59,11 @@ def generate_rx_number() -> str:
 # ENDPOINTS
 # ============================================================================
 
+
 # NOTE: Specific routes MUST come before /{prescription_id}
 @router.get("/patient/{patient_id}")
 async def get_patient_prescriptions(
-    patient_id: str,
-    current_user: dict = Depends(get_current_user)
+    patient_id: str, current_user: dict = Depends(get_current_user)
 ):
     """Get all prescriptions for a patient"""
     repo = get_prescription_repository()
@@ -74,8 +77,7 @@ async def get_patient_prescriptions(
 
 @router.get("/patient/{patient_id}/latest")
 async def get_latest_prescription(
-    patient_id: str,
-    current_user: dict = Depends(get_current_user)
+    patient_id: str, current_user: dict = Depends(get_current_user)
 ):
     """Get latest prescription for a patient"""
     repo = get_prescription_repository()
@@ -91,8 +93,7 @@ async def get_latest_prescription(
 
 @router.get("/patient/{patient_id}/valid")
 async def get_valid_prescriptions(
-    patient_id: str,
-    current_user: dict = Depends(get_current_user)
+    patient_id: str, current_user: dict = Depends(get_current_user)
 ):
     """Get valid (non-expired) prescriptions for a patient"""
     repo = get_prescription_repository()
@@ -106,8 +107,7 @@ async def get_valid_prescriptions(
 
 @router.get("/expiring")
 async def get_expiring_prescriptions(
-    days: int = Query(30, ge=7, le=90),
-    current_user: dict = Depends(get_current_user)
+    days: int = Query(30, ge=7, le=90), current_user: dict = Depends(get_current_user)
 ):
     """Get prescriptions expiring within specified days"""
     repo = get_prescription_repository()
@@ -124,7 +124,7 @@ async def get_optometrist_stats(
     optometrist_id: str,
     from_date: date = Query(...),
     to_date: date = Query(...),
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
     """Get prescription statistics for an optometrist"""
     repo = get_prescription_repository()
@@ -146,7 +146,7 @@ async def list_prescriptions(
     to_date: Optional[date] = Query(None),
     skip: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=100),
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
     """List prescriptions with filters"""
     repo = get_prescription_repository()
@@ -171,8 +171,7 @@ async def list_prescriptions(
 
 @router.post("/", status_code=201)
 async def create_prescription(
-    rx: PrescriptionCreate,
-    current_user: dict = Depends(get_current_user)
+    rx: PrescriptionCreate, current_user: dict = Depends(get_current_user)
 ):
     """Create a new prescription"""
     repo = get_prescription_repository()
@@ -180,13 +179,19 @@ async def create_prescription(
 
     # Validate optometrist requirement
     if rx.source == "TESTED_AT_STORE" and not rx.optometrist_id:
-        raise HTTPException(status_code=400, detail="Optometrist required for store tests")
+        raise HTTPException(
+            status_code=400, detail="Optometrist required for store tests"
+        )
 
     # Validate axis is whole number
     if rx.right_eye.axis and not isinstance(rx.right_eye.axis, int):
-        raise HTTPException(status_code=400, detail="Right eye axis must be whole number")
+        raise HTTPException(
+            status_code=400, detail="Right eye axis must be whole number"
+        )
     if rx.left_eye.axis and not isinstance(rx.left_eye.axis, int):
-        raise HTTPException(status_code=400, detail="Left eye axis must be whole number")
+        raise HTTPException(
+            status_code=400, detail="Left eye axis must be whole number"
+        )
 
     if repo:
         # Verify customer exists
@@ -213,7 +218,7 @@ async def create_prescription(
             "lens_recommendation": rx.lens_recommendation,
             "coating_recommendation": rx.coating_recommendation,
             "remarks": rx.remarks,
-            "created_by": current_user.get("user_id")
+            "created_by": current_user.get("user_id"),
         }
 
         created = repo.create(rx_data)
@@ -221,7 +226,7 @@ async def create_prescription(
             return {
                 "prescription_id": created["prescription_id"],
                 "prescription_number": created["prescription_number"],
-                "message": "Prescription created"
+                "message": "Prescription created",
             }
 
         raise HTTPException(status_code=500, detail="Failed to create prescription")
@@ -229,14 +234,13 @@ async def create_prescription(
     return {
         "prescription_id": str(uuid.uuid4()),
         "prescription_number": generate_rx_number(),
-        "message": "Prescription created"
+        "message": "Prescription created",
     }
 
 
 @router.get("/{prescription_id}")
 async def get_prescription(
-    prescription_id: str,
-    current_user: dict = Depends(get_current_user)
+    prescription_id: str, current_user: dict = Depends(get_current_user)
 ):
     """Get prescription by ID"""
     repo = get_prescription_repository()
@@ -252,8 +256,7 @@ async def get_prescription(
 
 @router.get("/{prescription_id}/print")
 async def print_prescription(
-    prescription_id: str,
-    current_user: dict = Depends(get_current_user)
+    prescription_id: str, current_user: dict = Depends(get_current_user)
 ):
     """Generate printable prescription HTML"""
     repo = get_prescription_repository()
@@ -316,6 +319,9 @@ async def print_prescription(
         </html>
         """
 
-        return {"html": html, "prescription_number": prescription.get("prescription_number")}
+        return {
+            "html": html,
+            "prescription_number": prescription.get("prescription_number"),
+        }
 
     return {"html": "<html><body>Prescription not found</body></html>"}

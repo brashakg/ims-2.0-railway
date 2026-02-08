@@ -3,6 +3,7 @@ IMS 2.0 - Products Router
 ==========================
 Product catalog management endpoints
 """
+
 from fastapi import APIRouter, HTTPException, Depends, Query
 from pydantic import BaseModel, Field
 from typing import List, Optional
@@ -17,10 +18,12 @@ router = APIRouter()
 # DATABASE HELPER FUNCTIONS
 # ============================================================================
 
+
 def _get_categories_from_db() -> List[str]:
     """Fetch product categories from database"""
     try:
         from database.connection import get_db
+
         db = get_db()
         if db and db.is_connected:
             # Get categories collection or distinct from products
@@ -44,6 +47,7 @@ def _get_categories_from_db() -> List[str]:
 # ============================================================================
 # SCHEMAS
 # ============================================================================
+
 
 class ProductCreate(BaseModel):
     sku: str
@@ -72,6 +76,7 @@ class ProductUpdate(BaseModel):
 # ENDPOINTS
 # ============================================================================
 
+
 @router.get("/")
 async def list_products(
     category: Optional[str] = Query(None),
@@ -79,7 +84,7 @@ async def list_products(
     search: Optional[str] = Query(None),
     skip: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=100),
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
     """List products with filtering"""
     repo = get_product_repository()
@@ -94,7 +99,11 @@ async def list_products(
         else:
             products = repo.find_many({}, skip=skip, limit=limit)
 
-        total = len(products) if search or brand else repo.count({"category": category} if category else {})
+        total = (
+            len(products)
+            if search or brand
+            else repo.count({"category": category} if category else {})
+        )
         return {"products": products, "total": total}
 
     return {"products": [], "total": 0}
@@ -102,8 +111,7 @@ async def list_products(
 
 @router.post("/", status_code=201)
 async def create_product(
-    product: ProductCreate,
-    current_user: dict = Depends(get_current_user)
+    product: ProductCreate, current_user: dict = Depends(get_current_user)
 ):
     """Create a new product"""
     # Validate MRP >= Offer Price
@@ -116,7 +124,9 @@ async def create_product(
         # Check if SKU already exists
         existing = repo.find_by_sku(product.sku)
         if existing:
-            raise HTTPException(status_code=400, detail="Product with this SKU already exists")
+            raise HTTPException(
+                status_code=400, detail="Product with this SKU already exists"
+            )
 
         product_data = {
             "sku": product.sku,
@@ -132,7 +142,7 @@ async def create_product(
             "tax_rate": product.tax_rate,
             "attributes": product.attributes or {},
             "is_active": True,
-            "created_by": current_user.get("user_id")
+            "created_by": current_user.get("user_id"),
         }
 
         created = repo.create(product_data)
@@ -148,7 +158,7 @@ async def create_product(
 @router.get("/brands/list")
 async def list_brands(
     category: Optional[str] = Query(None),
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
     """List all brands, optionally filtered by category"""
     repo = get_product_repository()
@@ -168,10 +178,7 @@ async def list_categories(current_user: dict = Depends(get_current_user)):
 
 
 @router.get("/sku/{sku}")
-async def get_product_by_sku(
-    sku: str,
-    current_user: dict = Depends(get_current_user)
-):
+async def get_product_by_sku(sku: str, current_user: dict = Depends(get_current_user)):
     """Get product by SKU"""
     repo = get_product_repository()
 
@@ -185,10 +192,7 @@ async def get_product_by_sku(
 
 
 @router.get("/{product_id}")
-async def get_product(
-    product_id: str,
-    current_user: dict = Depends(get_current_user)
-):
+async def get_product(product_id: str, current_user: dict = Depends(get_current_user)):
     """Get product by ID"""
     repo = get_product_repository()
 
@@ -205,7 +209,7 @@ async def get_product(
 async def update_product(
     product_id: str,
     product: ProductUpdate,
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
     """Update product details"""
     repo = get_product_repository()
@@ -220,7 +224,9 @@ async def update_product(
         # Validate MRP >= Offer Price if both are being updated
         if "mrp" in update_data and "offer_price" in update_data:
             if update_data["offer_price"] > update_data["mrp"]:
-                raise HTTPException(status_code=400, detail="Offer price cannot exceed MRP")
+                raise HTTPException(
+                    status_code=400, detail="Offer price cannot exceed MRP"
+                )
 
         update_data["updated_by"] = current_user.get("user_id")
 

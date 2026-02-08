@@ -9,6 +9,7 @@ Comprehensive settings management for all user roles.
 - Integration configurations
 - Audit logs
 """
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any
@@ -23,10 +24,12 @@ router = APIRouter()
 # DATABASE HELPER FUNCTIONS
 # ============================================================================
 
+
 def _get_settings_collection(collection_name: str):
     """Get settings from database"""
     try:
         from database.connection import get_db
+
         db = get_db()
         if db and db.is_connected:
             return db.db[collection_name]
@@ -115,6 +118,7 @@ def _get_integrations_from_db() -> List[dict]:
 # ============================================================================
 # SCHEMAS
 # ============================================================================
+
 
 class DiscountSettings(BaseModel):
     role: str
@@ -223,6 +227,7 @@ class AuditLogEntry(BaseModel):
 # PROFILE ENDPOINTS
 # ============================================================================
 
+
 @router.get("/profile")
 async def get_profile(current_user: dict = Depends(get_current_user)):
     """Get current user's profile"""
@@ -237,21 +242,19 @@ async def get_profile(current_user: dict = Depends(get_current_user)):
 
 @router.put("/profile")
 async def update_profile(
-    profile: ProfileUpdate,
-    current_user: dict = Depends(get_current_user)
+    profile: ProfileUpdate, current_user: dict = Depends(get_current_user)
 ):
     """Update current user's profile"""
     # In production, update database
     return {
         "message": "Profile updated successfully",
-        "updated_fields": profile.model_dump(exclude_none=True)
+        "updated_fields": profile.model_dump(exclude_none=True),
     }
 
 
 @router.post("/profile/change-password")
 async def change_password(
-    passwords: PasswordChange,
-    current_user: dict = Depends(get_current_user)
+    passwords: PasswordChange, current_user: dict = Depends(get_current_user)
 ):
     """Change current user's password"""
     from ..dependencies import get_user_repository
@@ -264,8 +267,12 @@ async def change_password(
         if user:
             # Verify current password
             stored_hash = user.get("password_hash")
-            if stored_hash and not verify_password(passwords.current_password, stored_hash):
-                raise HTTPException(status_code=400, detail="Current password is incorrect")
+            if stored_hash and not verify_password(
+                passwords.current_password, stored_hash
+            ):
+                raise HTTPException(
+                    status_code=400, detail="Current password is incorrect"
+                )
 
             # Update password in database
             new_hash = hash_password(passwords.new_password)
@@ -274,7 +281,9 @@ async def change_password(
 
     # For demo mode without database, validate format only
     if len(passwords.new_password) < 8:
-        raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
+        raise HTTPException(
+            status_code=400, detail="Password must be at least 8 characters"
+        )
 
     return {"message": "Password changed successfully"}
 
@@ -296,8 +305,7 @@ async def get_preferences(current_user: dict = Depends(get_current_user)):
 
 @router.put("/profile/preferences")
 async def update_preferences(
-    preferences: Dict,
-    current_user: dict = Depends(get_current_user)
+    preferences: Dict, current_user: dict = Depends(get_current_user)
 ):
     """Update user's display preferences"""
     return {"message": "Preferences updated", "preferences": preferences}
@@ -306,6 +314,7 @@ async def update_preferences(
 # ============================================================================
 # BUSINESS SETTINGS ENDPOINTS
 # ============================================================================
+
 
 @router.get("/business")
 async def get_business_settings(current_user: dict = Depends(get_current_user)):
@@ -319,8 +328,7 @@ async def get_business_settings(current_user: dict = Depends(get_current_user)):
 
 @router.put("/business")
 async def update_business_settings(
-    settings: BusinessSettings,
-    current_user: dict = Depends(get_current_user)
+    settings: BusinessSettings, current_user: dict = Depends(get_current_user)
 ):
     """Update business settings (SUPERADMIN/ADMIN only)"""
     if not any(role in current_user["roles"] for role in ["SUPERADMIN", "ADMIN"]):
@@ -341,6 +349,7 @@ async def upload_logo(current_user: dict = Depends(get_current_user)):
 # TAX SETTINGS ENDPOINTS
 # ============================================================================
 
+
 @router.get("/tax")
 async def get_tax_settings(current_user: dict = Depends(get_current_user)):
     """Get tax and compliance settings"""
@@ -353,8 +362,7 @@ async def get_tax_settings(current_user: dict = Depends(get_current_user)):
 
 @router.put("/tax")
 async def update_tax_settings(
-    settings: TaxSettings,
-    current_user: dict = Depends(get_current_user)
+    settings: TaxSettings, current_user: dict = Depends(get_current_user)
 ):
     """Update tax settings (SUPERADMIN/ADMIN only)"""
     if not any(role in current_user["roles"] for role in ["SUPERADMIN", "ADMIN"]):
@@ -365,6 +373,7 @@ async def update_tax_settings(
 # ============================================================================
 # INVOICE SETTINGS ENDPOINTS
 # ============================================================================
+
 
 @router.get("/invoice")
 async def get_invoice_settings(current_user: dict = Depends(get_current_user)):
@@ -378,8 +387,7 @@ async def get_invoice_settings(current_user: dict = Depends(get_current_user)):
 
 @router.put("/invoice")
 async def update_invoice_settings(
-    settings: InvoiceSettings,
-    current_user: dict = Depends(get_current_user)
+    settings: InvoiceSettings, current_user: dict = Depends(get_current_user)
 ):
     """Update invoice settings (SUPERADMIN/ADMIN only)"""
     if not any(role in current_user["roles"] for role in ["SUPERADMIN", "ADMIN"]):
@@ -391,6 +399,7 @@ async def update_invoice_settings(
 # NOTIFICATION SETTINGS ENDPOINTS
 # ============================================================================
 
+
 @router.get("/notifications/templates")
 async def get_notification_templates(current_user: dict = Depends(get_current_user)):
     """Get all notification templates"""
@@ -400,8 +409,7 @@ async def get_notification_templates(current_user: dict = Depends(get_current_us
 
 @router.get("/notifications/templates/{template_id}")
 async def get_notification_template(
-    template_id: str,
-    current_user: dict = Depends(get_current_user)
+    template_id: str, current_user: dict = Depends(get_current_user)
 ):
     """Get specific notification template"""
     templates = _get_notification_templates_from_db()
@@ -415,7 +423,7 @@ async def get_notification_template(
 async def update_notification_template(
     template_id: str,
     template: NotificationTemplate,
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
     """Update notification template (SUPERADMIN/ADMIN only)"""
     if not any(role in current_user["roles"] for role in ["SUPERADMIN", "ADMIN"]):
@@ -425,8 +433,7 @@ async def update_notification_template(
 
 @router.post("/notifications/templates")
 async def create_notification_template(
-    template: NotificationTemplate,
-    current_user: dict = Depends(get_current_user)
+    template: NotificationTemplate, current_user: dict = Depends(get_current_user)
 ):
     """Create new notification template (SUPERADMIN/ADMIN only)"""
     if not any(role in current_user["roles"] for role in ["SUPERADMIN", "ADMIN"]):
@@ -436,8 +443,7 @@ async def create_notification_template(
 
 @router.delete("/notifications/templates/{template_id}")
 async def delete_notification_template(
-    template_id: str,
-    current_user: dict = Depends(get_current_user)
+    template_id: str, current_user: dict = Depends(get_current_user)
 ):
     """Delete notification template (SUPERADMIN/ADMIN only)"""
     if not any(role in current_user["roles"] for role in ["SUPERADMIN", "ADMIN"]):
@@ -450,7 +456,7 @@ async def test_notification(
     template_id: str,
     test_phone: Optional[str] = None,
     test_email: Optional[str] = None,
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
     """Send test notification"""
     return {"message": "Test notification sent", "template_id": template_id}
@@ -459,6 +465,7 @@ async def test_notification(
 # ============================================================================
 # PRINTER SETTINGS ENDPOINTS
 # ============================================================================
+
 
 @router.get("/printers")
 async def get_printer_settings(current_user: dict = Depends(get_current_user)):
@@ -472,8 +479,7 @@ async def get_printer_settings(current_user: dict = Depends(get_current_user)):
 
 @router.put("/printers")
 async def update_printer_settings(
-    settings: PrinterSettings,
-    current_user: dict = Depends(get_current_user)
+    settings: PrinterSettings, current_user: dict = Depends(get_current_user)
 ):
     """Update printer settings"""
     return {"message": "Printer settings updated", "settings": settings.model_dump()}
@@ -491,6 +497,7 @@ async def list_available_printers(current_user: dict = Depends(get_current_user)
 # DISCOUNT RULES ENDPOINTS
 # ============================================================================
 
+
 @router.get("/discount-rules")
 async def get_discount_rules(current_user: dict = Depends(get_current_user)):
     """Get all discount rules by role and tier"""
@@ -503,8 +510,7 @@ async def get_discount_rules(current_user: dict = Depends(get_current_user)):
 
 @router.put("/discount-rules")
 async def update_discount_rules(
-    rules: Dict[str, Dict[str, int]],
-    current_user: dict = Depends(get_current_user)
+    rules: Dict[str, Dict[str, int]], current_user: dict = Depends(get_current_user)
 ):
     """Update discount rules (SUPERADMIN/ADMIN only)"""
     if not any(role in current_user["roles"] for role in ["SUPERADMIN", "ADMIN"]):
@@ -514,8 +520,7 @@ async def update_discount_rules(
 
 @router.post("/discount-rules")
 async def set_discount_rule(
-    rule: DiscountSettings,
-    current_user: dict = Depends(get_current_user)
+    rule: DiscountSettings, current_user: dict = Depends(get_current_user)
 ):
     """Set individual discount rule"""
     if not any(role in current_user["roles"] for role in ["SUPERADMIN", "ADMIN"]):
@@ -526,6 +531,7 @@ async def set_discount_rule(
 # ============================================================================
 # INTEGRATION ENDPOINTS
 # ============================================================================
+
 
 @router.get("/integrations")
 async def list_integrations(current_user: dict = Depends(get_current_user)):
@@ -539,15 +545,14 @@ async def list_integrations(current_user: dict = Depends(get_current_user)):
 
 @router.get("/integrations/{integration_type}")
 async def get_integration(
-    integration_type: str,
-    current_user: dict = Depends(get_current_user)
+    integration_type: str, current_user: dict = Depends(get_current_user)
 ):
     """Get specific integration configuration"""
     return {
         "type": integration_type.upper(),
         "is_configured": False,
         "is_enabled": False,
-        "config": {}
+        "config": {},
     }
 
 
@@ -555,18 +560,20 @@ async def get_integration(
 async def update_integration(
     integration_type: str,
     config: IntegrationConfig,
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
     """Update integration configuration (SUPERADMIN/ADMIN only)"""
     if not any(role in current_user["roles"] for role in ["SUPERADMIN", "ADMIN"]):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
-    return {"message": f"{integration_type} integration updated", "config": config.model_dump()}
+    return {
+        "message": f"{integration_type} integration updated",
+        "config": config.model_dump(),
+    }
 
 
 @router.post("/integrations/{integration_type}/test")
 async def test_integration(
-    integration_type: str,
-    current_user: dict = Depends(get_current_user)
+    integration_type: str, current_user: dict = Depends(get_current_user)
 ):
     """Test integration connection"""
     return {"status": "success", "message": f"{integration_type} connection successful"}
@@ -575,6 +582,7 @@ async def test_integration(
 # ============================================================================
 # SYSTEM SETTINGS ENDPOINTS
 # ============================================================================
+
 
 @router.get("/system")
 async def get_system_settings(current_user: dict = Depends(get_current_user)):
@@ -602,8 +610,7 @@ async def get_system_settings(current_user: dict = Depends(get_current_user)):
 
 @router.put("/system")
 async def update_system_settings(
-    settings: Dict,
-    current_user: dict = Depends(get_current_user)
+    settings: Dict, current_user: dict = Depends(get_current_user)
 ):
     """Update system settings (SUPERADMIN only)"""
     if "SUPERADMIN" not in current_user["roles"]:
@@ -615,6 +622,7 @@ async def update_system_settings(
 # AUDIT LOG ENDPOINTS
 # ============================================================================
 
+
 @router.get("/audit-logs")
 async def get_audit_logs(
     entity_type: Optional[str] = None,
@@ -623,7 +631,7 @@ async def get_audit_logs(
     action: Optional[str] = None,
     limit: int = 50,
     offset: int = 0,
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
     """Get audit logs (SUPERADMIN/ADMIN only)"""
     if not any(role in current_user["roles"] for role in ["SUPERADMIN", "ADMIN"]):
@@ -649,26 +657,14 @@ async def get_audit_logs(
         for log in logs:
             log.pop("_id", None)
 
-        return {
-            "logs": logs,
-            "total": total,
-            "limit": limit,
-            "offset": offset
-        }
+        return {"logs": logs, "total": total, "limit": limit, "offset": offset}
 
     # Return empty when no database
-    return {
-        "logs": [],
-        "total": 0,
-        "limit": limit,
-        "offset": offset
-    }
+    return {"logs": [], "total": 0, "limit": limit, "offset": offset}
 
 
 @router.get("/audit-logs/summary")
-async def get_audit_summary(
-    current_user: dict = Depends(get_current_user)
-):
+async def get_audit_summary(current_user: dict = Depends(get_current_user)):
     """Get audit log summary for dashboard"""
     if not any(role in current_user["roles"] for role in ["SUPERADMIN", "ADMIN"]):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
@@ -677,6 +673,7 @@ async def get_audit_summary(
     if audit_repo:
         # Get today's summary
         from datetime import date, timedelta
+
         today = date.today()
         week_start = today - timedelta(days=7)
 
@@ -690,12 +687,9 @@ async def get_audit_summary(
                 "logins": 0,
                 "orders_created": 0,
                 "products_updated": 0,
-                "users_created": 0
+                "users_created": 0,
             },
-            "this_week": {
-                "total_actions": week_count,
-                "top_users": []
-            }
+            "this_week": {"total_actions": week_count, "top_users": []},
         }
 
     # Return empty summary when no database
@@ -705,10 +699,7 @@ async def get_audit_summary(
             "logins": 0,
             "orders_created": 0,
             "products_updated": 0,
-            "users_created": 0
+            "users_created": 0,
         },
-        "this_week": {
-            "total_actions": 0,
-            "top_users": []
-        }
+        "this_week": {"total_actions": 0, "top_users": []},
     }

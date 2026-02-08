@@ -4,6 +4,7 @@ IMS 2.0 - Comprehensive Shopify Integration Router
 Complete Shopify store management without needing to open Shopify admin.
 Covers products, collections, inventory, media, SEO, metafields, and more.
 """
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from typing import Optional, Dict, Any, List
@@ -19,6 +20,7 @@ router = APIRouter()
 # ============================================================================
 # ENUMS
 # ============================================================================
+
 
 class ProductStatus(str, Enum):
     ACTIVE = "active"
@@ -76,6 +78,7 @@ class CollectionConditionRelation(str, Enum):
 # SCHEMAS - Products
 # ============================================================================
 
+
 class ProductVariantInput(BaseModel):
     sku: Optional[str] = None
     barcode: Optional[str] = None
@@ -113,7 +116,9 @@ class ProductMetafieldInput(BaseModel):
     namespace: str
     key: str
     value: str
-    type: str = "single_line_text_field"  # single_line_text_field, multi_line_text_field, number_integer, json, etc.
+    type: str = (
+        "single_line_text_field"  # single_line_text_field, multi_line_text_field, number_integer, json, etc.
+    )
 
 
 class ProductInput(BaseModel):
@@ -124,7 +129,9 @@ class ProductInput(BaseModel):
     tags: List[str] = []
     status: ProductStatus = ProductStatus.DRAFT
     variants: List[ProductVariantInput] = []
-    options: List[Dict[str, Any]] = []  # e.g., [{"name": "Size", "values": ["S", "M", "L"]}]
+    options: List[Dict[str, Any]] = (
+        []
+    )  # e.g., [{"name": "Size", "values": ["S", "M", "L"]}]
     media: List[ProductMediaInput] = []
     seo: Optional[ProductSEOInput] = None
     metafields: List[ProductMetafieldInput] = []
@@ -145,6 +152,7 @@ class ProductUpdate(BaseModel):
 # ============================================================================
 # SCHEMAS - Collections
 # ============================================================================
+
 
 class CollectionCondition(BaseModel):
     column: CollectionConditionColumn
@@ -175,6 +183,7 @@ class CollectionInput(BaseModel):
 # ============================================================================
 # SCHEMAS - Inventory
 # ============================================================================
+
 
 class InventoryLocationInput(BaseModel):
     name: str
@@ -207,6 +216,7 @@ class InventoryTransfer(BaseModel):
 # SCHEMAS - Channels/Publishing
 # ============================================================================
 
+
 class PublicationInput(BaseModel):
     product_id: str
     channel_id: str  # "online_store", "pos", "facebook", "instagram", etc.
@@ -217,6 +227,7 @@ class PublicationInput(BaseModel):
 # ============================================================================
 # SCHEMAS - Shipping
 # ============================================================================
+
 
 class ShippingZoneInput(BaseModel):
     name: str
@@ -250,7 +261,7 @@ SHOPIFY_INVENTORY_LOCATIONS: Dict[str, Dict] = {
         "country": "IN",
         "zip": "110001",
         "active": True,
-        "fulfills_online_orders": True
+        "fulfills_online_orders": True,
     }
 }
 SHOPIFY_INVENTORY: Dict[str, Dict] = {}
@@ -265,6 +276,7 @@ SHOPIFY_METAFIELDS: Dict[str, List[Dict]] = {}
 # PRODUCTS ENDPOINTS
 # ============================================================================
 
+
 @router.get("/products")
 async def list_products(
     status: Optional[ProductStatus] = None,
@@ -277,7 +289,7 @@ async def list_products(
     updated_at_min: Optional[str] = None,
     limit: int = Query(default=50, le=250),
     page: int = 1,
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
     """List all products with filtering"""
     products = list(SHOPIFY_PRODUCTS.values())
@@ -301,15 +313,12 @@ async def list_products(
         "total": total,
         "page": page,
         "limit": limit,
-        "total_pages": (total + limit - 1) // limit
+        "total_pages": (total + limit - 1) // limit,
     }
 
 
 @router.get("/products/{product_id}")
-async def get_product(
-    product_id: str,
-    current_user: dict = Depends(get_current_user)
-):
+async def get_product(product_id: str, current_user: dict = Depends(get_current_user)):
     """Get a single product with all details"""
     product = SHOPIFY_PRODUCTS.get(product_id)
     if not product:
@@ -323,15 +332,21 @@ async def get_product(
 
 @router.post("/products")
 async def create_product(
-    product: ProductInput,
-    current_user: dict = Depends(get_current_user)
+    product: ProductInput, current_user: dict = Depends(get_current_user)
 ):
     """Create a new product in Shopify"""
-    if not any(role in current_user.get("roles", []) for role in ["SUPERADMIN", "ADMIN", "CATALOG_MANAGER"]):
+    if not any(
+        role in current_user.get("roles", [])
+        for role in ["SUPERADMIN", "ADMIN", "CATALOG_MANAGER"]
+    ):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     product_id = f"prod_{uuid.uuid4().hex[:12]}"
-    handle = product.seo.url_handle if product.seo and product.seo.url_handle else product.title.lower().replace(" ", "-")
+    handle = (
+        product.seo.url_handle
+        if product.seo and product.seo.url_handle
+        else product.title.lower().replace(" ", "-")
+    )
 
     # Process variants
     variants = []
@@ -344,7 +359,7 @@ async def create_product(
             "product_id": product_id,
             "inventory_item_id": inventory_item_id,
             "position": i + 1,
-            **variant.model_dump()
+            **variant.model_dump(),
         }
         variants.append(variant_data)
 
@@ -354,34 +369,36 @@ async def create_product(
             "variant_id": variant_id,
             "sku": variant.sku,
             "tracked": True,
-            "levels": {
-                "loc_default": variant.inventory_quantity
-            }
+            "levels": {"loc_default": variant.inventory_quantity},
         }
 
     # If no variants provided, create default
     if not variants:
         variant_id = f"var_{uuid.uuid4().hex[:12]}"
         inventory_item_id = f"inv_{uuid.uuid4().hex[:12]}"
-        variants.append({
-            "id": variant_id,
-            "product_id": product_id,
-            "inventory_item_id": inventory_item_id,
-            "position": 1,
-            "price": 0,
-            "inventory_quantity": 0
-        })
+        variants.append(
+            {
+                "id": variant_id,
+                "product_id": product_id,
+                "inventory_item_id": inventory_item_id,
+                "position": 1,
+                "price": 0,
+                "inventory_quantity": 0,
+            }
+        )
 
     # Process media
     media = []
     for i, m in enumerate(product.media):
-        media.append({
-            "id": f"media_{uuid.uuid4().hex[:12]}",
-            "position": m.position or i + 1,
-            "src": m.url,
-            "alt": m.alt_text,
-            "media_type": m.media_type
-        })
+        media.append(
+            {
+                "id": f"media_{uuid.uuid4().hex[:12]}",
+                "position": m.position or i + 1,
+                "src": m.url,
+                "alt": m.alt_text,
+                "media_type": m.media_type,
+            }
+        )
 
     product_data = {
         "id": product_id,
@@ -404,7 +421,11 @@ async def create_product(
         "published_scope": product.published_scope,
         "created_at": datetime.now().isoformat(),
         "updated_at": datetime.now().isoformat(),
-        "published_at": datetime.now().isoformat() if product.status == ProductStatus.ACTIVE else None
+        "published_at": (
+            datetime.now().isoformat()
+            if product.status == ProductStatus.ACTIVE
+            else None
+        ),
     }
 
     SHOPIFY_PRODUCTS[product_id] = product_data
@@ -412,7 +433,11 @@ async def create_product(
     # Store metafields
     if product.metafields:
         SHOPIFY_METAFIELDS[product_id] = [
-            {"id": f"mf_{uuid.uuid4().hex[:8]}", "owner_id": product_id, **m.model_dump()}
+            {
+                "id": f"mf_{uuid.uuid4().hex[:8]}",
+                "owner_id": product_id,
+                **m.model_dump(),
+            }
             for m in product.metafields
         ]
 
@@ -423,10 +448,13 @@ async def create_product(
 async def update_product(
     product_id: str,
     product: ProductUpdate,
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
     """Update an existing product"""
-    if not any(role in current_user.get("roles", []) for role in ["SUPERADMIN", "ADMIN", "CATALOG_MANAGER"]):
+    if not any(
+        role in current_user.get("roles", [])
+        for role in ["SUPERADMIN", "ADMIN", "CATALOG_MANAGER"]
+    ):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     existing = SHOPIFY_PRODUCTS.get(product_id)
@@ -437,8 +465,10 @@ async def update_product(
 
     if "seo" in update_data and update_data["seo"]:
         existing["seo"] = {
-            "title": update_data["seo"].get("page_title") or existing.get("seo", {}).get("title"),
-            "description": update_data["seo"].get("meta_description") or existing.get("seo", {}).get("description"),
+            "title": update_data["seo"].get("page_title")
+            or existing.get("seo", {}).get("title"),
+            "description": update_data["seo"].get("meta_description")
+            or existing.get("seo", {}).get("description"),
         }
         if update_data["seo"].get("url_handle"):
             existing["handle"] = update_data["seo"]["url_handle"]
@@ -452,11 +482,12 @@ async def update_product(
 
 @router.delete("/products/{product_id}")
 async def delete_product(
-    product_id: str,
-    current_user: dict = Depends(get_current_user)
+    product_id: str, current_user: dict = Depends(get_current_user)
 ):
     """Delete a product"""
-    if not any(role in current_user.get("roles", []) for role in ["SUPERADMIN", "ADMIN"]):
+    if not any(
+        role in current_user.get("roles", []) for role in ["SUPERADMIN", "ADMIN"]
+    ):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     if product_id not in SHOPIFY_PRODUCTS:
@@ -472,10 +503,10 @@ async def delete_product(
 # VARIANTS ENDPOINTS
 # ============================================================================
 
+
 @router.get("/products/{product_id}/variants")
 async def list_variants(
-    product_id: str,
-    current_user: dict = Depends(get_current_user)
+    product_id: str, current_user: dict = Depends(get_current_user)
 ):
     """List all variants for a product"""
     product = SHOPIFY_PRODUCTS.get(product_id)
@@ -489,10 +520,13 @@ async def list_variants(
 async def create_variant(
     product_id: str,
     variant: ProductVariantInput,
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
     """Add a variant to a product"""
-    if not any(role in current_user.get("roles", []) for role in ["SUPERADMIN", "ADMIN", "CATALOG_MANAGER"]):
+    if not any(
+        role in current_user.get("roles", [])
+        for role in ["SUPERADMIN", "ADMIN", "CATALOG_MANAGER"]
+    ):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     product = SHOPIFY_PRODUCTS.get(product_id)
@@ -507,7 +541,7 @@ async def create_variant(
         "product_id": product_id,
         "inventory_item_id": inventory_item_id,
         "position": len(product.get("variants", [])) + 1,
-        **variant.model_dump()
+        **variant.model_dump(),
     }
 
     product.setdefault("variants", []).append(variant_data)
@@ -521,7 +555,7 @@ async def create_variant(
         "tracked": True,
         "levels": {
             variant.inventory_location_id or "loc_default": variant.inventory_quantity
-        }
+        },
     }
 
     return {"variant": variant_data, "message": "Variant created successfully"}
@@ -531,10 +565,13 @@ async def create_variant(
 async def update_variant(
     variant_id: str,
     variant: ProductVariantInput,
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
     """Update a variant"""
-    if not any(role in current_user.get("roles", []) for role in ["SUPERADMIN", "ADMIN", "CATALOG_MANAGER"]):
+    if not any(
+        role in current_user.get("roles", [])
+        for role in ["SUPERADMIN", "ADMIN", "CATALOG_MANAGER"]
+    ):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     # Find variant in products
@@ -543,18 +580,22 @@ async def update_variant(
             if v["id"] == variant_id:
                 product["variants"][i].update(variant.model_dump(exclude_none=True))
                 product["updated_at"] = datetime.now().isoformat()
-                return {"variant": product["variants"][i], "message": "Variant updated successfully"}
+                return {
+                    "variant": product["variants"][i],
+                    "message": "Variant updated successfully",
+                }
 
     raise HTTPException(status_code=404, detail="Variant not found")
 
 
 @router.delete("/variants/{variant_id}")
 async def delete_variant(
-    variant_id: str,
-    current_user: dict = Depends(get_current_user)
+    variant_id: str, current_user: dict = Depends(get_current_user)
 ):
     """Delete a variant"""
-    if not any(role in current_user.get("roles", []) for role in ["SUPERADMIN", "ADMIN"]):
+    if not any(
+        role in current_user.get("roles", []) for role in ["SUPERADMIN", "ADMIN"]
+    ):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     for product in SHOPIFY_PRODUCTS.values():
@@ -562,7 +603,9 @@ async def delete_variant(
         for i, v in enumerate(variants):
             if v["id"] == variant_id:
                 if len(variants) <= 1:
-                    raise HTTPException(status_code=400, detail="Cannot delete the only variant")
+                    raise HTTPException(
+                        status_code=400, detail="Cannot delete the only variant"
+                    )
                 variants.pop(i)
                 product["updated_at"] = datetime.now().isoformat()
                 return {"message": "Variant deleted successfully"}
@@ -574,10 +617,10 @@ async def delete_variant(
 # MEDIA ENDPOINTS
 # ============================================================================
 
+
 @router.get("/products/{product_id}/media")
 async def list_product_media(
-    product_id: str,
-    current_user: dict = Depends(get_current_user)
+    product_id: str, current_user: dict = Depends(get_current_user)
 ):
     """List all media for a product"""
     product = SHOPIFY_PRODUCTS.get(product_id)
@@ -591,10 +634,13 @@ async def list_product_media(
 async def add_product_media(
     product_id: str,
     media: ProductMediaInput,
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
     """Add media to a product"""
-    if not any(role in current_user.get("roles", []) for role in ["SUPERADMIN", "ADMIN", "CATALOG_MANAGER"]):
+    if not any(
+        role in current_user.get("roles", [])
+        for role in ["SUPERADMIN", "ADMIN", "CATALOG_MANAGER"]
+    ):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     product = SHOPIFY_PRODUCTS.get(product_id)
@@ -609,7 +655,7 @@ async def add_product_media(
         "src": media.url,
         "alt": media.alt_text,
         "media_type": media.media_type,
-        "created_at": datetime.now().isoformat()
+        "created_at": datetime.now().isoformat(),
     }
 
     product.setdefault("media", []).append(media_data)
@@ -624,10 +670,13 @@ async def update_media(
     media_id: str,
     alt_text: Optional[str] = None,
     position: Optional[int] = None,
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
     """Update media alt text or position"""
-    if not any(role in current_user.get("roles", []) for role in ["SUPERADMIN", "ADMIN", "CATALOG_MANAGER"]):
+    if not any(
+        role in current_user.get("roles", [])
+        for role in ["SUPERADMIN", "ADMIN", "CATALOG_MANAGER"]
+    ):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     for product in SHOPIFY_PRODUCTS.values():
@@ -644,12 +693,12 @@ async def update_media(
 
 
 @router.delete("/media/{media_id}")
-async def delete_media(
-    media_id: str,
-    current_user: dict = Depends(get_current_user)
-):
+async def delete_media(media_id: str, current_user: dict = Depends(get_current_user)):
     """Delete media from a product"""
-    if not any(role in current_user.get("roles", []) for role in ["SUPERADMIN", "ADMIN", "CATALOG_MANAGER"]):
+    if not any(
+        role in current_user.get("roles", [])
+        for role in ["SUPERADMIN", "ADMIN", "CATALOG_MANAGER"]
+    ):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     for product in SHOPIFY_PRODUCTS.values():
@@ -670,10 +719,13 @@ async def delete_media(
 async def reorder_media(
     product_id: str,
     media_ids: List[str],
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
     """Reorder media for a product"""
-    if not any(role in current_user.get("roles", []) for role in ["SUPERADMIN", "ADMIN", "CATALOG_MANAGER"]):
+    if not any(
+        role in current_user.get("roles", [])
+        for role in ["SUPERADMIN", "ADMIN", "CATALOG_MANAGER"]
+    ):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     product = SHOPIFY_PRODUCTS.get(product_id)
@@ -700,19 +752,22 @@ async def reorder_media(
 # COLLECTIONS ENDPOINTS
 # ============================================================================
 
+
 @router.get("/collections")
 async def list_collections(
     collection_type: Optional[str] = None,  # smart, custom
     published: Optional[bool] = None,
     limit: int = Query(default=50, le=250),
     page: int = 1,
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
     """List all collections"""
     collections = list(SHOPIFY_COLLECTIONS.values())
 
     if collection_type:
-        collections = [c for c in collections if c.get("collection_type") == collection_type]
+        collections = [
+            c for c in collections if c.get("collection_type") == collection_type
+        ]
     if published is not None:
         collections = [c for c in collections if c.get("published") == published]
 
@@ -724,14 +779,13 @@ async def list_collections(
         "collections": collections[start:end],
         "total": total,
         "page": page,
-        "total_pages": (total + limit - 1) // limit
+        "total_pages": (total + limit - 1) // limit,
     }
 
 
 @router.get("/collections/{collection_id}")
 async def get_collection(
-    collection_id: str,
-    current_user: dict = Depends(get_current_user)
+    collection_id: str, current_user: dict = Depends(get_current_user)
 ):
     """Get a single collection"""
     collection = SHOPIFY_COLLECTIONS.get(collection_id)
@@ -830,11 +884,13 @@ def _evaluate_condition(product: Dict, condition: Dict) -> bool:
 
 @router.post("/collections")
 async def create_collection(
-    collection: CollectionInput,
-    current_user: dict = Depends(get_current_user)
+    collection: CollectionInput, current_user: dict = Depends(get_current_user)
 ):
     """Create a new collection"""
-    if not any(role in current_user.get("roles", []) for role in ["SUPERADMIN", "ADMIN", "CATALOG_MANAGER"]):
+    if not any(
+        role in current_user.get("roles", [])
+        for role in ["SUPERADMIN", "ADMIN", "CATALOG_MANAGER"]
+    ):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     collection_id = f"col_{uuid.uuid4().hex[:12]}"
@@ -862,7 +918,7 @@ async def create_collection(
         "products_count": 0,
         "created_at": datetime.now().isoformat(),
         "updated_at": datetime.now().isoformat(),
-        "published_at": datetime.now().isoformat() if collection.published else None
+        "published_at": datetime.now().isoformat() if collection.published else None,
     }
 
     # Calculate products count
@@ -874,7 +930,11 @@ async def create_collection(
     # Store metafields
     if collection.metafields:
         SHOPIFY_METAFIELDS[collection_id] = [
-            {"id": f"mf_{uuid.uuid4().hex[:8]}", "owner_id": collection_id, **m.model_dump()}
+            {
+                "id": f"mf_{uuid.uuid4().hex[:8]}",
+                "owner_id": collection_id,
+                **m.model_dump(),
+            }
             for m in collection.metafields
         ]
 
@@ -885,33 +945,48 @@ async def create_collection(
 async def update_collection(
     collection_id: str,
     collection: CollectionInput,
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
     """Update a collection"""
-    if not any(role in current_user.get("roles", []) for role in ["SUPERADMIN", "ADMIN", "CATALOG_MANAGER"]):
+    if not any(
+        role in current_user.get("roles", [])
+        for role in ["SUPERADMIN", "ADMIN", "CATALOG_MANAGER"]
+    ):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     existing = SHOPIFY_COLLECTIONS.get(collection_id)
     if not existing:
         raise HTTPException(status_code=404, detail="Collection not found")
 
-    existing.update({
-        "title": collection.title,
-        "body_html": collection.body_html,
-        "handle": collection.handle or existing.get("handle"),
-        "image": collection.image.model_dump() if collection.image else existing.get("image"),
-        "sort_order": collection.sort_order,
-        "template_suffix": collection.template_suffix,
-        "published": collection.published,
-        "disjunctive": collection.disjunctive,
-        "conditions": [c.model_dump() for c in collection.conditions],
-        "seo": {
-            "title": collection.seo.page_title if collection.seo else collection.title,
-            "description": collection.seo.meta_description if collection.seo else None,
-        },
-        "updated_at": datetime.now().isoformat(),
-        "published_at": datetime.now().isoformat() if collection.published else None
-    })
+    existing.update(
+        {
+            "title": collection.title,
+            "body_html": collection.body_html,
+            "handle": collection.handle or existing.get("handle"),
+            "image": (
+                collection.image.model_dump()
+                if collection.image
+                else existing.get("image")
+            ),
+            "sort_order": collection.sort_order,
+            "template_suffix": collection.template_suffix,
+            "published": collection.published,
+            "disjunctive": collection.disjunctive,
+            "conditions": [c.model_dump() for c in collection.conditions],
+            "seo": {
+                "title": (
+                    collection.seo.page_title if collection.seo else collection.title
+                ),
+                "description": (
+                    collection.seo.meta_description if collection.seo else None
+                ),
+            },
+            "updated_at": datetime.now().isoformat(),
+            "published_at": (
+                datetime.now().isoformat() if collection.published else None
+            ),
+        }
+    )
 
     # Update collection type based on conditions
     existing["collection_type"] = "smart" if collection.conditions else "custom"
@@ -921,11 +996,12 @@ async def update_collection(
 
 @router.delete("/collections/{collection_id}")
 async def delete_collection(
-    collection_id: str,
-    current_user: dict = Depends(get_current_user)
+    collection_id: str, current_user: dict = Depends(get_current_user)
 ):
     """Delete a collection"""
-    if not any(role in current_user.get("roles", []) for role in ["SUPERADMIN", "ADMIN"]):
+    if not any(
+        role in current_user.get("roles", []) for role in ["SUPERADMIN", "ADMIN"]
+    ):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     if collection_id not in SHOPIFY_COLLECTIONS:
@@ -941,10 +1017,13 @@ async def delete_collection(
 async def add_products_to_collection(
     collection_id: str,
     product_ids: List[str],
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
     """Add products to a manual collection"""
-    if not any(role in current_user.get("roles", []) for role in ["SUPERADMIN", "ADMIN", "CATALOG_MANAGER"]):
+    if not any(
+        role in current_user.get("roles", [])
+        for role in ["SUPERADMIN", "ADMIN", "CATALOG_MANAGER"]
+    ):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     collection = SHOPIFY_COLLECTIONS.get(collection_id)
@@ -952,7 +1031,9 @@ async def add_products_to_collection(
         raise HTTPException(status_code=404, detail="Collection not found")
 
     if collection.get("collection_type") == "smart":
-        raise HTTPException(status_code=400, detail="Cannot manually add products to a smart collection")
+        raise HTTPException(
+            status_code=400, detail="Cannot manually add products to a smart collection"
+        )
 
     existing_ids = set(collection.get("product_ids", []))
     for pid in product_ids:
@@ -963,17 +1044,23 @@ async def add_products_to_collection(
     collection["products_count"] = len(existing_ids)
     collection["updated_at"] = datetime.now().isoformat()
 
-    return {"message": f"{len(product_ids)} products added to collection", "products_count": len(existing_ids)}
+    return {
+        "message": f"{len(product_ids)} products added to collection",
+        "products_count": len(existing_ids),
+    }
 
 
 @router.delete("/collections/{collection_id}/products")
 async def remove_products_from_collection(
     collection_id: str,
     product_ids: List[str],
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
     """Remove products from a manual collection"""
-    if not any(role in current_user.get("roles", []) for role in ["SUPERADMIN", "ADMIN", "CATALOG_MANAGER"]):
+    if not any(
+        role in current_user.get("roles", [])
+        for role in ["SUPERADMIN", "ADMIN", "CATALOG_MANAGER"]
+    ):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     collection = SHOPIFY_COLLECTIONS.get(collection_id)
@@ -981,7 +1068,10 @@ async def remove_products_from_collection(
         raise HTTPException(status_code=404, detail="Collection not found")
 
     if collection.get("collection_type") == "smart":
-        raise HTTPException(status_code=400, detail="Cannot manually remove products from a smart collection")
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot manually remove products from a smart collection",
+        )
 
     existing_ids = set(collection.get("product_ids", []))
     for pid in product_ids:
@@ -991,17 +1081,19 @@ async def remove_products_from_collection(
     collection["products_count"] = len(existing_ids)
     collection["updated_at"] = datetime.now().isoformat()
 
-    return {"message": f"{len(product_ids)} products removed from collection", "products_count": len(existing_ids)}
+    return {
+        "message": f"{len(product_ids)} products removed from collection",
+        "products_count": len(existing_ids),
+    }
 
 
 # ============================================================================
 # TAGS ENDPOINTS
 # ============================================================================
 
+
 @router.get("/tags")
-async def list_tags(
-    current_user: dict = Depends(get_current_user)
-):
+async def list_tags(current_user: dict = Depends(get_current_user)):
     """List all unique tags across products"""
     all_tags = set()
     for product in SHOPIFY_PRODUCTS.values():
@@ -1022,12 +1114,13 @@ async def list_tags(
 
 @router.post("/products/{product_id}/tags")
 async def add_tags_to_product(
-    product_id: str,
-    tags: List[str],
-    current_user: dict = Depends(get_current_user)
+    product_id: str, tags: List[str], current_user: dict = Depends(get_current_user)
 ):
     """Add tags to a product"""
-    if not any(role in current_user.get("roles", []) for role in ["SUPERADMIN", "ADMIN", "CATALOG_MANAGER"]):
+    if not any(
+        role in current_user.get("roles", [])
+        for role in ["SUPERADMIN", "ADMIN", "CATALOG_MANAGER"]
+    ):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     product = SHOPIFY_PRODUCTS.get(product_id)
@@ -1044,12 +1137,13 @@ async def add_tags_to_product(
 
 @router.delete("/products/{product_id}/tags")
 async def remove_tags_from_product(
-    product_id: str,
-    tags: List[str],
-    current_user: dict = Depends(get_current_user)
+    product_id: str, tags: List[str], current_user: dict = Depends(get_current_user)
 ):
     """Remove tags from a product"""
-    if not any(role in current_user.get("roles", []) for role in ["SUPERADMIN", "ADMIN", "CATALOG_MANAGER"]):
+    if not any(
+        role in current_user.get("roles", [])
+        for role in ["SUPERADMIN", "ADMIN", "CATALOG_MANAGER"]
+    ):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     product = SHOPIFY_PRODUCTS.get(product_id)
@@ -1069,21 +1163,21 @@ async def remove_tags_from_product(
 # INVENTORY LOCATIONS ENDPOINTS
 # ============================================================================
 
+
 @router.get("/inventory/locations")
-async def list_inventory_locations(
-    current_user: dict = Depends(get_current_user)
-):
+async def list_inventory_locations(current_user: dict = Depends(get_current_user)):
     """List all inventory locations"""
     return {"locations": list(SHOPIFY_INVENTORY_LOCATIONS.values())}
 
 
 @router.post("/inventory/locations")
 async def create_inventory_location(
-    location: InventoryLocationInput,
-    current_user: dict = Depends(get_current_user)
+    location: InventoryLocationInput, current_user: dict = Depends(get_current_user)
 ):
     """Create a new inventory location"""
-    if not any(role in current_user.get("roles", []) for role in ["SUPERADMIN", "ADMIN"]):
+    if not any(
+        role in current_user.get("roles", []) for role in ["SUPERADMIN", "ADMIN"]
+    ):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     location_id = f"loc_{uuid.uuid4().hex[:12]}"
@@ -1091,7 +1185,7 @@ async def create_inventory_location(
     location_data = {
         "id": location_id,
         **location.model_dump(),
-        "created_at": datetime.now().isoformat()
+        "created_at": datetime.now().isoformat(),
     }
 
     SHOPIFY_INVENTORY_LOCATIONS[location_id] = location_data
@@ -1103,10 +1197,12 @@ async def create_inventory_location(
 async def update_inventory_location(
     location_id: str,
     location: InventoryLocationInput,
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
     """Update an inventory location"""
-    if not any(role in current_user.get("roles", []) for role in ["SUPERADMIN", "ADMIN"]):
+    if not any(
+        role in current_user.get("roles", []) for role in ["SUPERADMIN", "ADMIN"]
+    ):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     existing = SHOPIFY_INVENTORY_LOCATIONS.get(location_id)
@@ -1120,11 +1216,12 @@ async def update_inventory_location(
 
 @router.delete("/inventory/locations/{location_id}")
 async def delete_inventory_location(
-    location_id: str,
-    current_user: dict = Depends(get_current_user)
+    location_id: str, current_user: dict = Depends(get_current_user)
 ):
     """Delete an inventory location"""
-    if not any(role in current_user.get("roles", []) for role in ["SUPERADMIN", "ADMIN"]):
+    if not any(
+        role in current_user.get("roles", []) for role in ["SUPERADMIN", "ADMIN"]
+    ):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     if location_id == "loc_default":
@@ -1142,11 +1239,12 @@ async def delete_inventory_location(
 # INVENTORY LEVELS ENDPOINTS
 # ============================================================================
 
+
 @router.get("/inventory/levels")
 async def get_inventory_levels(
     location_id: Optional[str] = None,
     inventory_item_ids: Optional[str] = None,  # Comma-separated
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
     """Get inventory levels"""
     levels = []
@@ -1160,23 +1258,27 @@ async def get_inventory_levels(
         for loc_id, quantity in inv_data.get("levels", {}).items():
             if location_id and loc_id != location_id:
                 continue
-            levels.append({
-                "inventory_item_id": inv_item_id,
-                "location_id": loc_id,
-                "available": quantity,
-                "updated_at": datetime.now().isoformat()
-            })
+            levels.append(
+                {
+                    "inventory_item_id": inv_item_id,
+                    "location_id": loc_id,
+                    "available": quantity,
+                    "updated_at": datetime.now().isoformat(),
+                }
+            )
 
     return {"inventory_levels": levels}
 
 
 @router.post("/inventory/adjust")
 async def adjust_inventory(
-    adjustment: InventoryAdjustment,
-    current_user: dict = Depends(get_current_user)
+    adjustment: InventoryAdjustment, current_user: dict = Depends(get_current_user)
 ):
     """Adjust inventory level for an item at a location"""
-    if not any(role in current_user.get("roles", []) for role in ["SUPERADMIN", "ADMIN", "STORE_MANAGER", "WORKSHOP_STAFF"]):
+    if not any(
+        role in current_user.get("roles", [])
+        for role in ["SUPERADMIN", "ADMIN", "STORE_MANAGER", "WORKSHOP_STAFF"]
+    ):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     inv_item = SHOPIFY_INVENTORY.get(adjustment.inventory_item_id)
@@ -1190,7 +1292,9 @@ async def adjust_inventory(
     new_level = current_level + adjustment.available_adjustment
 
     if new_level < 0:
-        raise HTTPException(status_code=400, detail="Cannot adjust to negative inventory")
+        raise HTTPException(
+            status_code=400, detail="Cannot adjust to negative inventory"
+        )
 
     inv_item.setdefault("levels", {})[adjustment.location_id] = new_level
 
@@ -1199,9 +1303,9 @@ async def adjust_inventory(
             "inventory_item_id": adjustment.inventory_item_id,
             "location_id": adjustment.location_id,
             "available": new_level,
-            "adjustment": adjustment.available_adjustment
+            "adjustment": adjustment.available_adjustment,
         },
-        "message": "Inventory adjusted successfully"
+        "message": "Inventory adjusted successfully",
     }
 
 
@@ -1210,10 +1314,13 @@ async def set_inventory_level(
     inventory_item_id: str,
     location_id: str,
     available: int,
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
     """Set inventory level to a specific value"""
-    if not any(role in current_user.get("roles", []) for role in ["SUPERADMIN", "ADMIN", "STORE_MANAGER"]):
+    if not any(
+        role in current_user.get("roles", [])
+        for role in ["SUPERADMIN", "ADMIN", "STORE_MANAGER"]
+    ):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     inv_item = SHOPIFY_INVENTORY.get(inventory_item_id)
@@ -1232,9 +1339,9 @@ async def set_inventory_level(
         "inventory_level": {
             "inventory_item_id": inventory_item_id,
             "location_id": location_id,
-            "available": available
+            "available": available,
         },
-        "message": "Inventory set successfully"
+        "message": "Inventory set successfully",
     }
 
 
@@ -1242,18 +1349,16 @@ async def set_inventory_level(
 # CHANNELS/PUBLISHING ENDPOINTS
 # ============================================================================
 
+
 @router.get("/channels")
-async def list_channels(
-    current_user: dict = Depends(get_current_user)
-):
+async def list_channels(current_user: dict = Depends(get_current_user)):
     """List all sales channels"""
     return {"channels": list(SHOPIFY_CHANNELS.values())}
 
 
 @router.get("/products/{product_id}/publications")
 async def get_product_publications(
-    product_id: str,
-    current_user: dict = Depends(get_current_user)
+    product_id: str, current_user: dict = Depends(get_current_user)
 ):
     """Get publication status for a product across channels"""
     product = SHOPIFY_PRODUCTS.get(product_id)
@@ -1265,12 +1370,14 @@ async def get_product_publications(
     result = []
     for channel_id, channel in SHOPIFY_CHANNELS.items():
         pub = publications.get(channel_id, {"published": False})
-        result.append({
-            "channel_id": channel_id,
-            "channel_name": channel["name"],
-            "published": pub.get("published", False),
-            "published_at": pub.get("published_at")
-        })
+        result.append(
+            {
+                "channel_id": channel_id,
+                "channel_name": channel["name"],
+                "published": pub.get("published", False),
+                "published_at": pub.get("published_at"),
+            }
+        )
 
     return {"publications": result}
 
@@ -1279,10 +1386,13 @@ async def get_product_publications(
 async def publish_product(
     product_id: str,
     publication: PublicationInput,
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
     """Publish or unpublish a product to a channel"""
-    if not any(role in current_user.get("roles", []) for role in ["SUPERADMIN", "ADMIN", "CATALOG_MANAGER"]):
+    if not any(
+        role in current_user.get("roles", [])
+        for role in ["SUPERADMIN", "ADMIN", "CATALOG_MANAGER"]
+    ):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     product = SHOPIFY_PRODUCTS.get(product_id)
@@ -1294,7 +1404,7 @@ async def publish_product(
 
     product.setdefault("publications", {})[publication.channel_id] = {
         "published": publication.published,
-        "published_at": datetime.now().isoformat() if publication.published else None
+        "published_at": datetime.now().isoformat() if publication.published else None,
     }
     product["updated_at"] = datetime.now().isoformat()
 
@@ -1308,10 +1418,13 @@ async def bulk_publish_products(
     product_ids: List[str],
     channel_id: str,
     published: bool = True,
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
     """Bulk publish/unpublish products to a channel"""
-    if not any(role in current_user.get("roles", []) for role in ["SUPERADMIN", "ADMIN", "CATALOG_MANAGER"]):
+    if not any(
+        role in current_user.get("roles", [])
+        for role in ["SUPERADMIN", "ADMIN", "CATALOG_MANAGER"]
+    ):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     if channel_id not in SHOPIFY_CHANNELS:
@@ -1323,23 +1436,27 @@ async def bulk_publish_products(
         if product:
             product.setdefault("publications", {})[channel_id] = {
                 "published": published,
-                "published_at": datetime.now().isoformat() if published else None
+                "published_at": datetime.now().isoformat() if published else None,
             }
             product["updated_at"] = datetime.now().isoformat()
             updated += 1
 
-    return {"message": f"{updated} products {'published' if published else 'unpublished'}", "updated_count": updated}
+    return {
+        "message": f"{updated} products {'published' if published else 'unpublished'}",
+        "updated_count": updated,
+    }
 
 
 # ============================================================================
 # METAFIELDS ENDPOINTS
 # ============================================================================
 
+
 @router.get("/products/{product_id}/metafields")
 async def get_product_metafields(
     product_id: str,
     namespace: Optional[str] = None,
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
     """Get metafields for a product"""
     if product_id not in SHOPIFY_PRODUCTS:
@@ -1357,10 +1474,13 @@ async def get_product_metafields(
 async def add_product_metafield(
     product_id: str,
     metafield: ProductMetafieldInput,
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
     """Add a metafield to a product"""
-    if not any(role in current_user.get("roles", []) for role in ["SUPERADMIN", "ADMIN", "CATALOG_MANAGER"]):
+    if not any(
+        role in current_user.get("roles", [])
+        for role in ["SUPERADMIN", "ADMIN", "CATALOG_MANAGER"]
+    ):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     if product_id not in SHOPIFY_PRODUCTS:
@@ -1373,7 +1493,7 @@ async def add_product_metafield(
         "owner_resource": "product",
         **metafield.model_dump(),
         "created_at": datetime.now().isoformat(),
-        "updated_at": datetime.now().isoformat()
+        "updated_at": datetime.now().isoformat(),
     }
 
     SHOPIFY_METAFIELDS.setdefault(product_id, []).append(metafield_data)
@@ -1383,12 +1503,13 @@ async def add_product_metafield(
 
 @router.put("/metafields/{metafield_id}")
 async def update_metafield(
-    metafield_id: str,
-    value: str,
-    current_user: dict = Depends(get_current_user)
+    metafield_id: str, value: str, current_user: dict = Depends(get_current_user)
 ):
     """Update a metafield value"""
-    if not any(role in current_user.get("roles", []) for role in ["SUPERADMIN", "ADMIN", "CATALOG_MANAGER"]):
+    if not any(
+        role in current_user.get("roles", [])
+        for role in ["SUPERADMIN", "ADMIN", "CATALOG_MANAGER"]
+    ):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     for owner_id, metafields in SHOPIFY_METAFIELDS.items():
@@ -1403,11 +1524,12 @@ async def update_metafield(
 
 @router.delete("/metafields/{metafield_id}")
 async def delete_metafield(
-    metafield_id: str,
-    current_user: dict = Depends(get_current_user)
+    metafield_id: str, current_user: dict = Depends(get_current_user)
 ):
     """Delete a metafield"""
-    if not any(role in current_user.get("roles", []) for role in ["SUPERADMIN", "ADMIN"]):
+    if not any(
+        role in current_user.get("roles", []) for role in ["SUPERADMIN", "ADMIN"]
+    ):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     for owner_id, metafields in SHOPIFY_METAFIELDS.items():
@@ -1423,10 +1545,10 @@ async def delete_metafield(
 # SEO ENDPOINTS
 # ============================================================================
 
+
 @router.get("/products/{product_id}/seo")
 async def get_product_seo(
-    product_id: str,
-    current_user: dict = Depends(get_current_user)
+    product_id: str, current_user: dict = Depends(get_current_user)
 ):
     """Get SEO data for a product"""
     product = SHOPIFY_PRODUCTS.get(product_id)
@@ -1438,7 +1560,7 @@ async def get_product_seo(
             "title": product.get("seo", {}).get("title"),
             "description": product.get("seo", {}).get("description"),
             "handle": product.get("handle"),
-            "url": f"/products/{product.get('handle')}"
+            "url": f"/products/{product.get('handle')}",
         }
     }
 
@@ -1447,10 +1569,13 @@ async def get_product_seo(
 async def update_product_seo(
     product_id: str,
     seo: ProductSEOInput,
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
     """Update SEO data for a product"""
-    if not any(role in current_user.get("roles", []) for role in ["SUPERADMIN", "ADMIN", "CATALOG_MANAGER"]):
+    if not any(
+        role in current_user.get("roles", [])
+        for role in ["SUPERADMIN", "ADMIN", "CATALOG_MANAGER"]
+    ):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     product = SHOPIFY_PRODUCTS.get(product_id)
@@ -1459,7 +1584,8 @@ async def update_product_seo(
 
     product["seo"] = {
         "title": seo.page_title or product.get("seo", {}).get("title"),
-        "description": seo.meta_description or product.get("seo", {}).get("description")
+        "description": seo.meta_description
+        or product.get("seo", {}).get("description"),
     }
 
     if seo.url_handle:
@@ -1467,21 +1593,29 @@ async def update_product_seo(
 
     product["updated_at"] = datetime.now().isoformat()
 
-    return {"seo": product["seo"], "handle": product["handle"], "message": "SEO updated successfully"}
+    return {
+        "seo": product["seo"],
+        "handle": product["handle"],
+        "message": "SEO updated successfully",
+    }
 
 
 # ============================================================================
 # BULK OPERATIONS
 # ============================================================================
 
+
 @router.post("/products/bulk-update")
 async def bulk_update_products(
     product_ids: List[str],
     update: Dict[str, Any],
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
     """Bulk update multiple products"""
-    if not any(role in current_user.get("roles", []) for role in ["SUPERADMIN", "ADMIN", "CATALOG_MANAGER"]):
+    if not any(
+        role in current_user.get("roles", [])
+        for role in ["SUPERADMIN", "ADMIN", "CATALOG_MANAGER"]
+    ):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     updated = 0
@@ -1489,7 +1623,14 @@ async def bulk_update_products(
         product = SHOPIFY_PRODUCTS.get(pid)
         if product:
             for key, value in update.items():
-                if key in ["title", "body_html", "vendor", "product_type", "status", "tags"]:
+                if key in [
+                    "title",
+                    "body_html",
+                    "vendor",
+                    "product_type",
+                    "status",
+                    "tags",
+                ]:
                     product[key] = value
             product["updated_at"] = datetime.now().isoformat()
             updated += 1
@@ -1499,11 +1640,12 @@ async def bulk_update_products(
 
 @router.post("/products/bulk-delete")
 async def bulk_delete_products(
-    product_ids: List[str],
-    current_user: dict = Depends(get_current_user)
+    product_ids: List[str], current_user: dict = Depends(get_current_user)
 ):
     """Bulk delete multiple products"""
-    if not any(role in current_user.get("roles", []) for role in ["SUPERADMIN", "ADMIN"]):
+    if not any(
+        role in current_user.get("roles", []) for role in ["SUPERADMIN", "ADMIN"]
+    ):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     deleted = 0
@@ -1520,13 +1662,16 @@ async def bulk_delete_products(
 # SYNC WITH IMS
 # ============================================================================
 
+
 @router.post("/sync/products-to-shopify")
 async def sync_products_to_shopify(
     product_ids: Optional[List[str]] = None,
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
     """Sync IMS products to Shopify"""
-    if not any(role in current_user.get("roles", []) for role in ["SUPERADMIN", "ADMIN"]):
+    if not any(
+        role in current_user.get("roles", []) for role in ["SUPERADMIN", "ADMIN"]
+    ):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     # In production, would fetch from IMS database and push to Shopify
@@ -1538,18 +1683,19 @@ async def sync_products_to_shopify(
             "products_created": 0,
             "products_updated": len(product_ids) if product_ids else 0,
             "errors": 0,
-            "sync_time": datetime.now().isoformat()
-        }
+            "sync_time": datetime.now().isoformat(),
+        },
     }
 
 
 @router.post("/sync/shopify-to-ims")
 async def sync_shopify_to_ims(
-    since: Optional[str] = None,
-    current_user: dict = Depends(get_current_user)
+    since: Optional[str] = None, current_user: dict = Depends(get_current_user)
 ):
     """Sync Shopify products to IMS"""
-    if not any(role in current_user.get("roles", []) for role in ["SUPERADMIN", "ADMIN"]):
+    if not any(
+        role in current_user.get("roles", []) for role in ["SUPERADMIN", "ADMIN"]
+    ):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     # In production, would fetch from Shopify API and update IMS database
@@ -1561,18 +1707,20 @@ async def sync_shopify_to_ims(
             "products_created": 0,
             "products_updated": len(SHOPIFY_PRODUCTS),
             "errors": 0,
-            "sync_time": datetime.now().isoformat()
-        }
+            "sync_time": datetime.now().isoformat(),
+        },
     }
 
 
 @router.post("/sync/inventory")
 async def sync_inventory(
-    location_id: Optional[str] = None,
-    current_user: dict = Depends(get_current_user)
+    location_id: Optional[str] = None, current_user: dict = Depends(get_current_user)
 ):
     """Sync inventory levels between IMS and Shopify"""
-    if not any(role in current_user.get("roles", []) for role in ["SUPERADMIN", "ADMIN", "STORE_MANAGER"]):
+    if not any(
+        role in current_user.get("roles", [])
+        for role in ["SUPERADMIN", "ADMIN", "STORE_MANAGER"]
+    ):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     return {
@@ -1583,6 +1731,6 @@ async def sync_inventory(
             "locations_synced": 1 if location_id else len(SHOPIFY_INVENTORY_LOCATIONS),
             "discrepancies_found": 0,
             "discrepancies_resolved": 0,
-            "sync_time": datetime.now().isoformat()
-        }
+            "sync_time": datetime.now().isoformat(),
+        },
     }
