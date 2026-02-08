@@ -1,12 +1,10 @@
 # ============================================================================
-# IMS 2.0 - Backend Test Configuration
+# IMS 2.0 - Backend Test Configuration (Legacy - See conftest.py instead)
 # ============================================================================
-# Pytest configuration and fixtures for backend testing
+# This file is deprecated. Use conftest.py for pytest fixtures.
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker, Session
 from datetime import datetime, timedelta
 import os
 import sys
@@ -14,20 +12,63 @@ import sys
 # Add backend to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from api.main import app, get_db
-from api.models import Base, User, Role, Store, Product, Customer, Order, Inventory
-from api.schemas import UserCreate, ProductCreate, CustomerCreate, OrderCreate
-from api.config import Settings
-from api.utils.security import get_password_hash
+from api.main import app
 
 # ============================================================================
-# Test Database Configuration
+# Test Database Configuration - MongoDB
 # ============================================================================
 
-# Use SQLite for tests (in-memory)
-SQLALCHEMY_TEST_DATABASE_URL = "sqlite:///./test.db"
+MONGODB_TEST_URL = os.getenv("MONGODB_URL", "mongodb://localhost:27017/ims_test")
 
-engine = create_engine(
+# ============================================================================
+# Test Client Fixture
+# ============================================================================
+
+
+@pytest.fixture(scope="function")
+def client():
+    """Create FastAPI test client"""
+    return TestClient(app)
+
+
+# ============================================================================
+# Authentication Fixtures
+# ============================================================================
+
+
+@pytest.fixture(scope="function")
+def admin_token():
+    """Provide admin authentication token"""
+    return "test-admin-token-placeholder"
+
+
+@pytest.fixture(scope="function")
+def manager_token():
+    """Provide manager authentication token"""
+    return "test-manager-token-placeholder"
+
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+
+def get_auth_headers(token: str) -> dict:
+    """Helper to generate authorization headers"""
+    return {"Authorization": f"Bearer {token}"}
+
+
+def assert_success_response(response, status_code: int = 200):
+    """Assert that response is successful and return JSON data"""
+    assert response.status_code == status_code
+    return response.json()
+
+
+def assert_error_response(response, expected_status: int = 400):
+    """Assert that response is an error"""
+    assert response.status_code == expected_status
+    return response.json()
+
     SQLALCHEMY_TEST_DATABASE_URL,
     connect_args={"check_same_thread": False},
     echo=False
