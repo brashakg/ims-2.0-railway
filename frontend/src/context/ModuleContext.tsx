@@ -115,8 +115,13 @@ export const MODULE_CONFIGS: ModuleConfig[] = [
     sidebarItems: [
       { id: 'crm-all', label: 'All Customers', path: '/customers' },
       { id: 'crm-search', label: 'Search Customers', path: '/customers?search=true' },
+      { id: 'crm-360', label: 'Customer 360', path: '/customers/360' },
+      { id: 'crm-segmentation', label: 'Segmentation (RFM)', path: '/customers/segmentation' },
+      { id: 'crm-loyalty', label: 'Loyalty Program', path: '/customers/loyalty' },
+      { id: 'crm-campaigns', label: 'Campaign Manager', path: '/customers/campaigns' },
+      { id: 'crm-referrals', label: 'Referral Tracker', path: '/customers/referrals' },
+      { id: 'crm-feedback', label: 'Feedback & NPS', path: '/customers/feedback' },
       { id: 'crm-recalls', label: 'Recalls & Reminders', path: '/customers?tab=recalls' },
-      { id: 'crm-campaigns', label: 'Promotions', path: '/customers?tab=campaigns' },
     ],
   },
   {

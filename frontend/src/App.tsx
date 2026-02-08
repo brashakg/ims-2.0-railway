@@ -20,6 +20,12 @@ const ExecutiveDashboard = lazy(() => import('./pages/dashboard/ExecutiveDashboa
 const EnterpriseAnalyticsDashboard = lazy(() => import('./pages/dashboard/EnterpriseAnalyticsDashboard'));
 const POSPage = lazy(() => import('./pages/pos/POSPage').then(m => ({ default: m.POSPage })));
 const CustomersPage = lazy(() => import('./pages/customers/CustomersPage').then(m => ({ default: m.CustomersPage })));
+const Customer360Dashboard = lazy(() => import('./pages/customers/Customer360Dashboard').then(m => ({ default: m.Customer360Dashboard })));
+const CustomerSegmentation = lazy(() => import('./pages/customers/CustomerSegmentation').then(m => ({ default: m.CustomerSegmentation })));
+const LoyaltyProgram = lazy(() => import('./pages/customers/LoyaltyProgram').then(m => ({ default: m.LoyaltyProgram })));
+const CampaignManager = lazy(() => import('./pages/customers/CampaignManager').then(m => ({ default: m.CampaignManager })));
+const ReferralTracker = lazy(() => import('./pages/customers/ReferralTracker').then(m => ({ default: m.ReferralTracker })));
+const CustomerFeedback = lazy(() => import('./pages/customers/CustomerFeedback').then(m => ({ default: m.CustomerFeedback })));
 const InventoryPage = lazy(() => import('./pages/inventory/InventoryPage').then(m => ({ default: m.InventoryPage })));
 const OrdersPage = lazy(() => import('./pages/orders/OrdersPage').then(m => ({ default: m.OrdersPage })));
 const ClinicalPage = lazy(() => import('./pages/clinical/ClinicalPage').then(m => ({ default: m.ClinicalPage })));
@@ -143,6 +149,78 @@ function App() {
                         allowedRoles={['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'OPTOMETRIST', 'CASHIER', 'SALES_CASHIER', 'SALES_STAFF']}
                       >
                         <CustomersPage />
+                      </ProtectedRoute>
+                    }
+                  />
+
+                  {/* CRM: Customer 360 */}
+                  <Route
+                    path="customers/:customerId/360"
+                    element={
+                      <ProtectedRoute
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'OPTOMETRIST', 'CASHIER', 'SALES_CASHIER', 'SALES_STAFF']}
+                      >
+                        <Customer360Dashboard />
+                      </ProtectedRoute>
+                    }
+                  />
+
+                  {/* CRM: Customer Segmentation */}
+                  <Route
+                    path="customers/segmentation"
+                    element={
+                      <ProtectedRoute
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'STORE_MANAGER']}
+                      >
+                        <CustomerSegmentation />
+                      </ProtectedRoute>
+                    }
+                  />
+
+                  {/* CRM: Loyalty Program */}
+                  <Route
+                    path="customers/loyalty"
+                    element={
+                      <ProtectedRoute
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'STORE_MANAGER']}
+                      >
+                        <LoyaltyProgram />
+                      </ProtectedRoute>
+                    }
+                  />
+
+                  {/* CRM: Campaign Manager */}
+                  <Route
+                    path="customers/campaigns"
+                    element={
+                      <ProtectedRoute
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'STORE_MANAGER']}
+                      >
+                        <CampaignManager />
+                      </ProtectedRoute>
+                    }
+                  />
+
+                  {/* CRM: Referral Tracker */}
+                  <Route
+                    path="customers/referrals"
+                    element={
+                      <ProtectedRoute
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'STORE_MANAGER']}
+                      >
+                        <ReferralTracker />
+                      </ProtectedRoute>
+                    }
+                  />
+
+                  {/* CRM: Customer Feedback & NPS */}
+                  <Route
+                    path="customers/feedback"
+                    element={
+                      <ProtectedRoute
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'STORE_MANAGER']}
+                      >
+                        <CustomerFeedback />
                       </ProtectedRoute>
                     }
                   />
