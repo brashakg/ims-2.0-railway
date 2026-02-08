@@ -4,7 +4,7 @@
 // Display action history and track user activities with timestamps
 
 import { useState } from 'react';
-import { ChevronDown, Filter, X } from 'lucide-react';
+import { ChevronDown, Filter, X, Lock } from 'lucide-react';
 import clsx from 'clsx';
 
 export interface AuditLogEntry {
@@ -25,6 +25,11 @@ export interface AuditLogEntry {
   userAgent?: string;
   status: 'success' | 'failure';
   details?: string;
+  // SOX/GDPR Compliance Fields
+  immutable: boolean; // Cannot be modified after creation (SOX requirement)
+  retentionDays: number; // Retention period: 2555 for SOX (7 years), 365 for GDPR (1 year)
+  isArchived: boolean; // Archive after retention period expires
+  hashChecksum?: string; // For integrity verification
 }
 
 interface AuditLogProps {
@@ -95,13 +100,32 @@ export function AuditLog({ entries, loading = false, onFilterChange, maxRows = 5
   const uniqueEntities = Array.from(new Set(entries.map(e => e.entityType)));
   const uniqueUsers = Array.from(new Set(entries.map(e => e.userId)));
 
+  // Calculate compliance status
+  const immutableEntries = entries.filter(e => e.immutable).length;
+  const complianceRate = entries.length > 0 ? Math.round((immutableEntries / entries.length) * 100) : 0;
+
   return (
-    <div className="bg-white rounded-lg border border-gray-200">
+    <div className="bg-white rounded-lg border border-gray-200 dark:bg-gray-900 dark:border-gray-800">
+      {/* Compliance Banner */}
+      {entries.length > 0 && (
+        <div className="bg-blue-50 dark:bg-blue-900/20 border-b border-blue-200 dark:border-blue-800 p-4 flex items-center gap-3">
+          <Lock className="w-4 h-4 text-blue-600 dark:text-blue-400" />
+          <div className="text-sm">
+            <p className="font-medium text-blue-900 dark:text-blue-300">
+              SOX/GDPR Compliance: {complianceRate}% immutable logs
+            </p>
+            <p className="text-xs text-blue-700 dark:text-blue-400 mt-1">
+              {immutableEntries} of {entries.length} logs are immutable and cannot be modified
+            </p>
+          </div>
+        </div>
+      )}
+
       {/* Header with filters */}
-      <div className="border-b border-gray-200 p-4 flex items-center justify-between">
+      <div className="border-b border-gray-200 dark:border-gray-800 p-4 flex items-center justify-between">
         <div>
-          <h2 className="text-lg font-bold text-gray-900">Audit Log</h2>
-          <p className="text-sm text-gray-600 mt-1">
+          <h2 className="text-lg font-bold text-gray-900 dark:text-white">Audit Log</h2>
+          <p className="text-sm text-gray-600 dark:text-gray-400 mt-1">
             Showing {displayedEntries.length} of {filteredEntries.length} actions
           </p>
         </div>
@@ -128,15 +152,15 @@ export function AuditLog({ entries, loading = false, onFilterChange, maxRows = 5
 
       {/* Filter Panel */}
       {showFilters && (
-        <div className="border-b border-gray-200 p-4 bg-gray-50 space-y-4">
+        <div className="border-b border-gray-200 dark:border-gray-800 p-4 bg-gray-50 dark:bg-gray-800 space-y-4">
           <div className="grid grid-cols-2 gap-4">
             {/* Action Filter */}
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">Action</label>
+              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Action</label>
               <select
                 value={filters.action || ''}
                 onChange={e => handleFilterChange({ ...filters, action: e.target.value || undefined })}
-                className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                className="w-full px-3 py-2 border border-gray-300 dark:border-gray-700 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
               >
                 <option value="">All Actions</option>
                 {uniqueActions.map(action => (
