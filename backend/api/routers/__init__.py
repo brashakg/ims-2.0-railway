@@ -25,6 +25,7 @@ from .transfers import router as transfers_router
 from .catalog import router as catalog_router
 from .jarvis import router as jarvis_router
 from .analytics import router as analytics_router
+from .billing import router as billing_router
 
 __all__ = [
     "auth_router",
@@ -49,4 +50,5 @@ __all__ = [
     "catalog_router",
     "jarvis_router",
     "analytics_router",
+    "billing_router",
 ]

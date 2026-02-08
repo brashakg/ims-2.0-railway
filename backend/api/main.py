@@ -53,6 +53,7 @@ from .routers import (
     catalog_router,
     jarvis_router,
     analytics_router,
+    billing_router,
 )
 
 
@@ -274,6 +275,7 @@ app.include_router(
 app.include_router(catalog_router, prefix="/api/v1/catalog", tags=["Catalog"])
 app.include_router(jarvis_router, prefix="/api/v1/jarvis", tags=["JARVIS"])
 app.include_router(analytics_router, prefix="/api/v1/analytics", tags=["Analytics"])
+app.include_router(billing_router, prefix="/api/v1/billing", tags=["Billing"])
 
 
 if __name__ == "__main__":
