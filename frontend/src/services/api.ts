@@ -493,6 +493,37 @@ export const reportsApi = {
 };
 
 // ============================================================================
+// Analytics API - Enterprise Dashboard
+// ============================================================================
+
+export const analyticsApi = {
+  getDashboardSummary: async (period: string = 'month') => {
+    const response = await api.get('/analytics/dashboard-summary', { params: { period } });
+    return response.data;
+  },
+
+  getRevenueTrends: async (period: string = 'daily', days: number = 30) => {
+    const response = await api.get('/analytics/revenue-trends', { params: { period, days } });
+    return response.data;
+  },
+
+  getStorePerformance: async (period: string = 'month') => {
+    const response = await api.get('/analytics/store-performance', { params: { period } });
+    return response.data;
+  },
+
+  getInventoryIntelligence: async () => {
+    const response = await api.get('/analytics/inventory-intelligence');
+    return response.data;
+  },
+
+  getCustomerInsights: async (period: string = 'month') => {
+    const response = await api.get('/analytics/customer-insights', { params: { period } });
+    return response.data;
+  },
+};
+
+// ============================================================================
 // HR API
 // ============================================================================
 
