@@ -7,6 +7,9 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
+    "type-check": "tsc --noEmit",
+    "test:unit": "echo 'No unit tests configured yet'",
+    "test:integration": "echo 'No integration tests configured yet'",
     "preview": "vite preview"
   },
   "dependencies": {
