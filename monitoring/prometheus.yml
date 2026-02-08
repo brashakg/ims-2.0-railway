@@ -1,0 +1,91 @@
+# ============================================================================
+# Prometheus Configuration
+# ============================================================================
+# Scrape configuration for metrics collection
+
+global:
+  scrape_interval: 15s          # Scrape targets every 15 seconds
+  evaluation_interval: 15s      # Evaluate rules every 15 seconds
+  external_labels:
+    cluster: 'ims-2.0'
+    environment: 'production'
+
+# Alertmanager configuration
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ['localhost:9093']
+
+# Load rules
+rule_files:
+  - 'alert_rules.yml'
+  - 'recording_rules.yml'
+
+# Scrape configurations
+scrape_configs:
+  # Prometheus self-monitoring
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  # Backend API metrics
+  - job_name: 'ims-backend'
+    static_configs:
+      - targets: ['localhost:8000']
+    metrics_path: '/metrics'
+    scrape_interval: 30s
+    scrape_timeout: 10s
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+        replacement: 'ims-backend-prod'
+
+  # PostgreSQL metrics (via postgres_exporter)
+  - job_name: 'postgres'
+    static_configs:
+      - targets: ['localhost:9187']
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+        replacement: 'postgres-prod'
+
+  # Redis metrics (via redis_exporter)
+  - job_name: 'redis'
+    static_configs:
+      - targets: ['localhost:9121']
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+        replacement: 'redis-prod'
+
+  # Node Exporter (System metrics)
+  - job_name: 'node'
+    static_configs:
+      - targets: ['localhost:9100']
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+        replacement: 'system-prod'
+
+  # Docker daemon metrics (if available)
+  - job_name: 'docker'
+    static_configs:
+      - targets: ['localhost:9323']
+
+  # Blackbox Exporter (Endpoint availability)
+  - job_name: 'blackbox'
+    metrics_path: /probe
+    params:
+      module: [http_2xx]
+    static_configs:
+      - targets:
+          - 'https://api.ims-2.0.com/health'
+          - 'https://api.ims-2.0.com/health/db'
+          - 'https://api.ims-2.0.com/health/cache'
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: 'localhost:9115'
