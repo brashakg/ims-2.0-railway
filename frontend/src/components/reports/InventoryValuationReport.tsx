@@ -3,7 +3,7 @@
 // ============================================================================
 // Detailed inventory valuation methods: FIFO, LIFO, Weighted Average, ABC
 
-import { Package, TrendingUp, AlertCircle, Download, Printer, BarChart3 } from 'lucide-react';
+import { Package, Download, Printer, BarChart3 } from 'lucide-react';
 import clsx from 'clsx';
 
 export type ValuationMethod = 'FIFO' | 'LIFO' | 'WeightedAvg' | 'ABC';
