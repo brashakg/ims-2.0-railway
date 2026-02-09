@@ -363,7 +363,7 @@ async def create_order(
     if not order.items:
         raise HTTPException(status_code=400, detail="Order must have at least one item")
 
-    if order_repo and customer_repo:
+    if order_repo is not None and customer_repo is not None:
         # Verify customer exists
         customer = customer_repo.find_by_id(order.customer_id)
         if not customer:
