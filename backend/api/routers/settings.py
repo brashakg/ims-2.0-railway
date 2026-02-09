@@ -261,7 +261,7 @@ async def change_password(
 
     user_repo = get_user_repository()
 
-    if user_repo:
+    if user_repo is not None:
         # Get user from database
         user = user_repo.find_by_id(current_user.get("user_id"))
         if user:
@@ -638,7 +638,7 @@ async def get_audit_logs(
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     audit_repo = get_audit_repository()
-    if audit_repo:
+    if audit_repo is not None:
         # Build filter
         filter_dict = {}
         if entity_type:
@@ -670,7 +670,7 @@ async def get_audit_summary(current_user: dict = Depends(get_current_user)):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     audit_repo = get_audit_repository()
-    if audit_repo:
+    if audit_repo is not None:
         # Get today's summary
         from datetime import date, timedelta
 
