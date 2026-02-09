@@ -34,6 +34,11 @@ const pathToModule: Record<string, ModuleId> = {
   '/tasks': 'hr',
   '/hr': 'hr',
   '/purchase': 'vendors',
+  '/purchase/orders': 'vendors',
+  '/purchase/vendors': 'vendors',
+  '/purchase/grn': 'vendors',
+  '/inventory/replenishment': 'inventory',
+  '/inventory/audit': 'inventory',
   '/reports': 'reports',
   '/settings': 'settings',
 };
