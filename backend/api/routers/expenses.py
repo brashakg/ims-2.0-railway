@@ -53,7 +53,7 @@ async def list_expenses(
     expense_repo = get_expense_repository()
     active_store = store_id or current_user.get("active_store_id")
 
-    if not expense_repo:
+    if expense_repo is None:
         return {"expenses": [], "total": 0}
 
     filter_dict = {}
@@ -87,7 +87,7 @@ async def create_expense(
     expense_repo = get_expense_repository()
     expense_id = str(uuid.uuid4())
 
-    if expense_repo:
+    if expense_repo is not None:
         expense_repo.create(
             {
                 "expense_id": expense_id,
@@ -116,7 +116,7 @@ async def upload_bill(
     """Upload bill/receipt for expense"""
     expense_repo = get_expense_repository()
 
-    if expense_repo:
+    if expense_repo is not None:
         existing = expense_repo.find_by_id(expense_id)
         if not existing:
             raise HTTPException(status_code=404, detail="Expense not found")
@@ -141,7 +141,7 @@ async def submit_expense(
     """Submit expense for approval"""
     expense_repo = get_expense_repository()
 
-    if expense_repo:
+    if expense_repo is not None:
         existing = expense_repo.find_by_id(expense_id)
         if not existing:
             raise HTTPException(status_code=404, detail="Expense not found")
@@ -166,7 +166,7 @@ async def approve_expense(
     """Approve an expense"""
     expense_repo = get_expense_repository()
 
-    if expense_repo:
+    if expense_repo is not None:
         existing = expense_repo.find_by_id(expense_id)
         if not existing:
             raise HTTPException(status_code=404, detail="Expense not found")
@@ -197,7 +197,7 @@ async def reject_expense(
     """Reject an expense"""
     expense_repo = get_expense_repository()
 
-    if expense_repo:
+    if expense_repo is not None:
         existing = expense_repo.find_by_id(expense_id)
         if not existing:
             raise HTTPException(status_code=404, detail="Expense not found")
@@ -236,7 +236,7 @@ async def list_advances(
     advance_repo = get_advance_repository()
     active_store = store_id or current_user.get("active_store_id")
 
-    if not advance_repo:
+    if advance_repo is None:
         return {"advances": [], "total": 0}
 
     filter_dict = {}
@@ -260,7 +260,7 @@ async def request_advance(
     advance_repo = get_advance_repository()
     advance_id = str(uuid.uuid4())
 
-    if advance_repo:
+    if advance_repo is not None:
         advance_repo.create(
             {
                 "advance_id": advance_id,
@@ -290,7 +290,7 @@ async def approve_advance(
     """Approve an advance request"""
     advance_repo = get_advance_repository()
 
-    if advance_repo:
+    if advance_repo is not None:
         existing = advance_repo.find_by_id(advance_id)
         if not existing:
             raise HTTPException(status_code=404, detail="Advance not found")
@@ -321,7 +321,7 @@ async def disburse_advance(
     """Mark advance as disbursed"""
     advance_repo = get_advance_repository()
 
-    if advance_repo:
+    if advance_repo is not None:
         existing = advance_repo.find_by_id(advance_id)
         if not existing:
             raise HTTPException(status_code=404, detail="Advance not found")
@@ -355,7 +355,7 @@ async def settle_advance(
     """Mark advance as settled"""
     advance_repo = get_advance_repository()
 
-    if advance_repo:
+    if advance_repo is not None:
         existing = advance_repo.find_by_id(advance_id)
         if not existing:
             raise HTTPException(status_code=404, detail="Advance not found")
@@ -385,13 +385,13 @@ async def get_pending_approvals(
     pending_expenses = []
     pending_advances = []
 
-    if expense_repo:
+    if expense_repo is not None:
         filter_dict = {"status": "PENDING"}
         if active_store:
             filter_dict["store_id"] = active_store
         pending_expenses = expense_repo.find_many(filter_dict) or []
 
-    if advance_repo:
+    if advance_repo is not None:
         filter_dict = {"status": "PENDING"}
         if active_store:
             filter_dict["store_id"] = active_store
