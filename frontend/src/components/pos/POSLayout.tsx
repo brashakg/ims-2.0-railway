@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect } from 'react';
-import { ShoppingCart, BarChart3, Barcode, Search, Zap } from 'lucide-react';
+import { ShoppingCart, BarChart3, Barcode, Zap } from 'lucide-react';
 import ProductCatalog from './ProductCatalog';
 import CartPanel from './CartPanel';
 import BillingEngine from './BillingEngine';
