@@ -6,6 +6,10 @@ Provides comprehensive analytics and business intelligence endpoints
 from fastapi import APIRouter, Depends, Query, HTTPException
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
+import traceback
+import logging
+
+logger = logging.getLogger(__name__)
 from .auth import get_current_user
 from ..dependencies import (
     get_order_repository,
@@ -131,7 +135,7 @@ async def get_dashboard_summary(
         metrics = calculate_metrics_for_period(order_repo, store_id, start_date, end_date)
 
         # Get inventory metrics
-        inventory = stock_repo.find_by_store(store_id) if stock_repo is not None else []
+        inventory = stock_repo.find_many({"store_id": store_id}) if stock_repo is not None else []
 
         total_inventory_value = sum(
             (i.get("quantity", 0) or 0) * (i.get("unit_price", 0) or 0) for i in inventory
@@ -339,7 +343,7 @@ async def get_store_performance(
             )
 
             # Inventory metrics
-            inventory = stock_repo.find_by_store(store_id) if stock_repo is not None else []
+            inventory = stock_repo.find_many({"store_id": store_id}) if stock_repo is not None else []
 
             stock_value = sum(
                 (i.get("quantity", 0) or 0) * (i.get("unit_price", 0) or 0) for i in inventory
@@ -399,7 +403,7 @@ async def get_inventory_intelligence(
         store_id = current_user.get("active_store_id") or "store-001"
 
         stock_repo = get_stock_repository()
-        inventory = stock_repo.find_by_store(store_id) if stock_repo is not None else []
+        inventory = stock_repo.find_many({"store_id": store_id}) if stock_repo is not None else []
 
         # Categorize items
         low_stock = [
@@ -610,7 +614,7 @@ async def get_enterprise_kpis(
         customer_footfall = len(set(o.get("customer_id") for o in current_orders if o.get("customer_id")))
 
         # ===== INVENTORY METRICS =====
-        inventory = stock_repo.find_by_store(store_id) if stock_repo is not None else []
+        inventory = stock_repo.find_many({"store_id": store_id}) if stock_repo is not None else []
 
         # Calculate inventory turnover (COGS / Average Inventory Value)
         avg_inventory_value = sum(
@@ -721,6 +725,8 @@ async def get_enterprise_kpis(
     except HTTPException:
         raise
     except Exception as e:
+        logger.error(f"Enterprise KPIs error: {str(e)}")
+        logger.error(traceback.format_exc())
         raise HTTPException(
             status_code=500, detail=f"Error fetching enterprise KPIs: {str(e)}"
         )
