@@ -131,7 +131,7 @@ async def get_dashboard_summary(
         metrics = calculate_metrics_for_period(order_repo, store_id, start_date, end_date)
 
         # Get inventory metrics
-        inventory = stock_repo.find_by_store(store_id) if stock_repo else []
+        inventory = stock_repo.find_by_store(store_id) if stock_repo is not None else []
 
         total_inventory_value = sum(
             (i.get("quantity", 0) or 0) * (i.get("unit_price", 0) or 0) for i in inventory
@@ -140,7 +140,7 @@ async def get_dashboard_summary(
         out_of_stock = len([i for i in inventory if (i.get("quantity", 0) or 0) == 0])
 
         # Get customer metrics
-        customers = customer_repo.find_many({"store_id": store_id}) if customer_repo else []
+        customers = customer_repo.find_many({"store_id": store_id}) if customer_repo is not None else []
 
         new_customers = len([
             c for c in customers
@@ -300,7 +300,7 @@ async def get_store_performance(
         stock_repo = get_stock_repository()
 
         # Get all orders
-        all_orders = order_repo.find_many({}) if order_repo else []
+        all_orders = order_repo.find_many({}) if order_repo is not None else []
 
         # Group by store
         stores = {}
@@ -339,7 +339,7 @@ async def get_store_performance(
             )
 
             # Inventory metrics
-            inventory = stock_repo.find_by_store(store_id) if stock_repo else []
+            inventory = stock_repo.find_by_store(store_id) if stock_repo is not None else []
 
             stock_value = sum(
                 (i.get("quantity", 0) or 0) * (i.get("unit_price", 0) or 0) for i in inventory
@@ -399,7 +399,7 @@ async def get_inventory_intelligence(
         store_id = current_user.get("active_store_id") or "store-001"
 
         stock_repo = get_stock_repository()
-        inventory = stock_repo.find_by_store(store_id) if stock_repo else []
+        inventory = stock_repo.find_by_store(store_id) if stock_repo is not None else []
 
         # Categorize items
         low_stock = [
@@ -488,7 +488,7 @@ async def get_customer_insights(
         order_repo = get_order_repository()
 
         # Total customers
-        all_customers = customer_repo.find_many({"store_id": store_id}) if customer_repo else []
+        all_customers = customer_repo.find_many({"store_id": store_id}) if customer_repo is not None else []
 
         # New customers this period
         new_customers = [
@@ -501,7 +501,7 @@ async def get_customer_insights(
         ]
 
         # Top customers by spend
-        orders = order_repo.find_by_store(store_id) if order_repo else []
+        orders = order_repo.find_by_store(store_id) if order_repo is not None else []
 
         customer_spend = {}
         for order in orders:
@@ -610,7 +610,7 @@ async def get_enterprise_kpis(
         customer_footfall = len(set(o.get("customer_id") for o in current_orders if o.get("customer_id")))
 
         # ===== INVENTORY METRICS =====
-        inventory = stock_repo.find_by_store(store_id) if stock_repo else []
+        inventory = stock_repo.find_by_store(store_id) if stock_repo is not None else []
 
         # Calculate inventory turnover (COGS / Average Inventory Value)
         avg_inventory_value = sum(
