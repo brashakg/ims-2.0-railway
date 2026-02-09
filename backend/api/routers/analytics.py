@@ -14,7 +14,7 @@ from ..dependencies import (
     get_task_repository,
 )
 
-router = APIRouter(prefix="/analytics", tags=["Analytics"])
+router = APIRouter(prefix="", tags=["Analytics"])
 
 # ============================================================================
 # Types
