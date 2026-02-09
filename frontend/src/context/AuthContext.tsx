@@ -290,7 +290,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
   const hasRole = (role: UserRole | UserRole[]): boolean => {
     if (!state.user) return false;
     const roles = Array.isArray(role) ? role : [role];
-    return roles.includes(state.user.activeRole);
+    // Check activeRole first, then fall back to checking roles array    const userRoles = state.user.roles || [];
   };
 
   // Store access check
