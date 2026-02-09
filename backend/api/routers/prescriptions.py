@@ -68,7 +68,7 @@ async def get_patient_prescriptions(
     """Get all prescriptions for a patient"""
     repo = get_prescription_repository()
 
-    if repo:
+    if repo is not None:
         prescriptions = repo.find_by_patient(patient_id)
         return {"prescriptions": prescriptions, "total": len(prescriptions)}
 
@@ -82,7 +82,7 @@ async def get_latest_prescription(
     """Get latest prescription for a patient"""
     repo = get_prescription_repository()
 
-    if repo:
+    if repo is not None:
         prescriptions = repo.find_by_patient(patient_id, limit=1)
         if prescriptions:
             return {"prescription": prescriptions[0]}
@@ -98,7 +98,7 @@ async def get_valid_prescriptions(
     """Get valid (non-expired) prescriptions for a patient"""
     repo = get_prescription_repository()
 
-    if repo:
+    if repo is not None:
         prescriptions = repo.find_valid(patient_id)
         return {"prescriptions": prescriptions, "total": len(prescriptions)}
 
@@ -112,7 +112,7 @@ async def get_expiring_prescriptions(
     """Get prescriptions expiring within specified days"""
     repo = get_prescription_repository()
 
-    if repo:
+    if repo is not None:
         prescriptions = repo.find_expiring_soon(days)
         return {"prescriptions": prescriptions, "total": len(prescriptions)}
 
@@ -129,7 +129,7 @@ async def get_optometrist_stats(
     """Get prescription statistics for an optometrist"""
     repo = get_prescription_repository()
 
-    if repo:
+    if repo is not None:
         stats = repo.get_optometrist_stats(optometrist_id, from_date, to_date)
         return stats
 
@@ -152,7 +152,7 @@ async def list_prescriptions(
     repo = get_prescription_repository()
     active_store = store_id or current_user.get("active_store_id")
 
-    if repo:
+    if repo is not None:
         if patient_id:
             prescriptions = repo.find_by_patient(patient_id)
         elif customer_id:
@@ -193,9 +193,9 @@ async def create_prescription(
             status_code=400, detail="Left eye axis must be whole number"
         )
 
-    if repo:
+    if repo is not None:
         # Verify customer exists
-        if customer_repo:
+        if customer_repo is not None:
             customer = customer_repo.find_by_id(rx.customer_id)
             if not customer:
                 raise HTTPException(status_code=404, detail="Customer not found")
@@ -245,7 +245,7 @@ async def get_prescription(
     """Get prescription by ID"""
     repo = get_prescription_repository()
 
-    if repo:
+    if repo is not None:
         prescription = repo.find_by_id(prescription_id)
         if prescription:
             return prescription
@@ -261,7 +261,7 @@ async def print_prescription(
     """Generate printable prescription HTML"""
     repo = get_prescription_repository()
 
-    if repo:
+    if repo is not None:
         prescription = repo.find_by_id(prescription_id)
         if not prescription:
             raise HTTPException(status_code=404, detail="Prescription not found")
