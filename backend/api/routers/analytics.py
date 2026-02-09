@@ -541,3 +541,186 @@ async def get_customer_insights(
         raise HTTPException(
             status_code=500, detail=f"Error fetching customer insights: {str(e)}"
         )
+
+
+# ============================================================================
+# ENTERPRISE PHASE 6: COMPREHENSIVE KPI ENDPOINT
+# ============================================================================
+
+
+@router.get("/enterprise-kpis")
+async def get_enterprise_kpis(
+    current_user: dict = Depends(get_current_user),
+    period: str = Query("today", regex="^(today|week|month|year)$"),
+):
+    """
+    Comprehensive enterprise KPI dashboard with SAP/Power BI style metrics
+    Returns: Revenue, margins, footfall, inventory, products, cash register, store comparison
+    """
+    try:
+        store_id = current_user.get("active_store_id") or "store-001"
+        start_date, end_date = get_date_range(period)
+
+        # Get repositories
+        order_repo = get_order_repository()
+        stock_repo = get_stock_repository()
+        customer_repo = get_customer_repository()
+
+        if not order_repo:
+            raise HTTPException(status_code=500, detail="Database connection failed")
+
+        # ===== REVENUE METRICS =====
+        all_orders = order_repo.find_by_store(store_id)
+        current_orders = [
+            o for o in all_orders
+            if start_date <= datetime.fromisoformat(o.get("created_at", "").replace("Z", "+00:00")) <= end_date
+        ]
+
+        total_revenue = sum(float(o.get("total_amount", 0) or 0) for o in current_orders)
+        total_orders_count = len(current_orders)
+
+        # Previous period for comparison
+        prev_start = start_date - (end_date - start_date)
+        prev_end = start_date
+        prev_orders = [
+            o for o in all_orders
+            if prev_start <= datetime.fromisoformat(o.get("created_at", "").replace("Z", "+00:00")) <= prev_end
+        ]
+        prev_revenue = sum(float(o.get("total_amount", 0) or 0) for o in prev_orders)
+        revenue_change = (((total_revenue - prev_revenue) / prev_revenue * 100) if prev_revenue > 0 else 0)
+
+        # ===== MARGIN METRICS =====
+        # Calculate from order line items
+        total_cost = sum(
+            float(item.get("quantity", 0) or 0) * float(item.get("cost_price", 0) or 0)
+            for order in current_orders
+            for item in order.get("items", [])
+        )
+        total_cogs = total_cost
+        gross_profit = total_revenue - total_cogs
+        gross_margin_percent = (gross_profit / total_revenue * 100) if total_revenue > 0 else 0
+
+        # Net margin (assuming 10% operating expenses as placeholder)
+        operating_expenses = total_revenue * 0.10
+        net_profit = gross_profit - operating_expenses
+        net_margin_percent = (net_profit / total_revenue * 100) if total_revenue > 0 else 0
+
+        # ===== TRANSACTION METRICS =====
+        avg_transaction_value = total_revenue / total_orders_count if total_orders_count > 0 else 0
+        customer_footfall = len(set(o.get("customer_id") for o in current_orders if o.get("customer_id")))
+
+        # ===== INVENTORY METRICS =====
+        inventory = stock_repo.find_by_store(store_id) if stock_repo else []
+
+        # Calculate inventory turnover (COGS / Average Inventory Value)
+        avg_inventory_value = sum(
+            (i.get("quantity", 0) or 0) * (i.get("unit_price", 0) or 0) for i in inventory
+        ) / 2  # Simplified average
+        inventory_turnover = (total_cogs / avg_inventory_value) if avg_inventory_value > 0 else 0
+
+        low_stock_count = len([i for i in inventory if (i.get("quantity", 0) or 0) <= (i.get("reorder_point", 0) or 0)])
+
+        # ===== TOP 5 PRODUCTS =====
+        product_sales = {}
+        for order in current_orders:
+            for item in order.get("items", []):
+                product_id = item.get("product_id", "unknown")
+                if product_id not in product_sales:
+                    product_sales[product_id] = {
+                        "name": item.get("product_name", "Unknown"),
+                        "units": 0,
+                        "revenue": 0.0,
+                        "sku": item.get("sku", "")
+                    }
+                product_sales[product_id]["units"] += int(item.get("quantity", 0) or 0)
+                product_sales[product_id]["revenue"] += float(item.get("total_amount", 0) or 0)
+
+        top_products = sorted(
+            [{"product_id": pid, **data} for pid, data in product_sales.items()],
+            key=lambda x: x["revenue"],
+            reverse=True
+        )[:5]
+
+        # ===== CASH REGISTER SUMMARY =====
+        # Opening balance (from previous day closing or default 0)
+        opening_balance = 5000.0  # Placeholder - should fetch from actual cash register
+        sales_amount = total_revenue
+        expenses_amount = 500.0  # Placeholder - should fetch actual expenses
+        closing_balance = opening_balance + sales_amount - expenses_amount
+
+        # ===== STORE COMPARISON (if applicable) =====
+        all_store_orders = order_repo.find_many({})
+        store_comparison = []
+        stores_by_id = {}
+
+        for order in all_store_orders:
+            order_store_id = order.get("store_id", "store-001")
+            if order_store_id not in stores_by_id:
+                stores_by_id[order_store_id] = {"store_id": order_store_id, "revenue": 0.0, "orders": 0}
+            order_date_str = order.get("created_at", "")[:10]
+            current_date_str = end_date.date().isoformat()
+            if order_date_str == current_date_str:  # Same day for today
+                stores_by_id[order_store_id]["revenue"] += float(order.get("total_amount", 0) or 0)
+                stores_by_id[order_store_id]["orders"] += 1
+
+        store_comparison = sorted(
+            list(stores_by_id.values()),
+            key=lambda x: x["revenue"],
+            reverse=True
+        )[:5]
+
+        return {
+            "period": period,
+            "timestamp": datetime.now().isoformat(),
+            "store_id": store_id,
+
+            # Revenue metrics
+            "revenue": {
+                "total": float(total_revenue),
+                "change_percent": float(revenue_change),
+                "avg_transaction_value": float(avg_transaction_value),
+                "total_orders": total_orders_count,
+            },
+
+            # Margin metrics
+            "margins": {
+                "gross_margin_percent": float(gross_margin_percent),
+                "net_margin_percent": float(net_margin_percent),
+                "gross_profit": float(gross_profit),
+                "net_profit": float(net_profit),
+            },
+
+            # Customer metrics
+            "customers": {
+                "footfall": customer_footfall,
+                "avg_order_value": float(avg_transaction_value),
+            },
+
+            # Inventory metrics
+            "inventory": {
+                "turnover_ratio": float(inventory_turnover),
+                "low_stock_items": low_stock_count,
+                "total_items": len(inventory),
+            },
+
+            # Top products
+            "top_products": top_products,
+
+            # Cash register
+            "cash_register": {
+                "opening_balance": float(opening_balance),
+                "sales": float(sales_amount),
+                "expenses": float(expenses_amount),
+                "closing_balance": float(closing_balance),
+            },
+
+            # Store comparison
+            "store_comparison": store_comparison,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500, detail=f"Error fetching enterprise KPIs: {str(e)}"
+        )
