@@ -131,9 +131,16 @@ export function AuthProvider({ children }: AuthProviderProps) {
           try {
             const profile = await authApi.getProfile();
             console.log('[Auth] Token validation successful, restoring session');
+
+            // Ensure activeRole is set
+            const userWithActiveRole = { ...profile };
+            if (!userWithActiveRole.activeRole && userWithActiveRole.roles && userWithActiveRole.roles.length > 0) {
+              userWithActiveRole.activeRole = userWithActiveRole.roles[0];
+            }
+
             dispatch({
               type: 'LOGIN_SUCCESS',
-              payload: { user: profile, token },
+              payload: { user: userWithActiveRole, token },
             });
             return;
           } catch (apiError) {
@@ -189,14 +196,20 @@ export function AuthProvider({ children }: AuthProviderProps) {
       const response = await authApi.login(credentials);
 
       if (response.success && response.token && response.user) {
+        // Ensure activeRole is set to first role if not already set
+        const userWithActiveRole = { ...response.user };
+        if (!userWithActiveRole.activeRole && userWithActiveRole.roles && userWithActiveRole.roles.length > 0) {
+          userWithActiveRole.activeRole = userWithActiveRole.roles[0];
+        }
+
         // Store auth data
         localStorage.setItem('ims_token', response.token);
-        localStorage.setItem('ims_user', JSON.stringify(response.user));
+        localStorage.setItem('ims_user', JSON.stringify(userWithActiveRole));
         localStorage.setItem('ims_login_time', Date.now().toString());
 
         dispatch({
           type: 'LOGIN_SUCCESS',
-          payload: { user: response.user, token: response.token },
+          payload: { user: userWithActiveRole, token: response.token },
         });
       } else {
         // Login failed - ensure loading state is cleared and user is not set
@@ -289,8 +302,14 @@ export function AuthProvider({ children }: AuthProviderProps) {
   // Role check
   const hasRole = (role: UserRole | UserRole[]): boolean => {
     if (!state.user) return false;
-    const roles = Array.isArray(role) ? role : [role];
-    return roles.includes(state.user.activeRole);
+    const userRoles = state.user.roles || [];
+
+    // SUPERADMIN and ADMIN can access everything
+    if (userRoles.includes('SUPERADMIN') || userRoles.includes('ADMIN')) return true;
+
+    // Check if user has any of the required roles
+    const requiredRoles = Array.isArray(role) ? role : [role];
+    return requiredRoles.some(r => userRoles.includes(r));
   };
 
   // Store access check
