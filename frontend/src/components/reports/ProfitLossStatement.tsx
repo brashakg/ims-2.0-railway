@@ -3,7 +3,7 @@
 // ============================================================================
 // Comprehensive financial statement with detailed breakdowns
 
-import { IndianRupee, TrendingUp, TrendingDown, Download, Printer } from 'lucide-react';
+import { Download, Printer } from 'lucide-react';
 import clsx from 'clsx';
 
 interface PLData {
