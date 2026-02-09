@@ -4,7 +4,7 @@ IMS 2.0 - Customers Router
 Customer and patient management endpoints
 """
 
-from fastapi import APIRouter, HTTPException, Depends, Query
+from fastapi import APIRouter, HTTPException, Depends, Query, Path
 from pydantic import BaseModel, Field
 from typing import List, Optional
 from datetime import date
@@ -190,7 +190,8 @@ async def search_customer_by_phone(
 
 @router.get("/mobile/{mobile}")
 async def get_customer_by_mobile(
-    mobile: str, current_user: dict = Depends(get_current_user)
+    mobile: str = Path(..., description="Mobile number"),
+    current_user: dict = Depends(get_current_user)
 ):
     """Get customer by mobile number"""
     repo = get_customer_repository()
@@ -205,7 +206,8 @@ async def get_customer_by_mobile(
 
 @router.get("/{customer_id}")
 async def get_customer(
-    customer_id: str, current_user: dict = Depends(get_current_user)
+    customer_id: str = Path(..., description="Customer ID"),
+    current_user: dict = Depends(get_current_user)
 ):
     """Get customer by ID"""
     repo = get_customer_repository()
@@ -220,7 +222,7 @@ async def get_customer(
 
 @router.put("/{customer_id}")
 async def update_customer(
-    customer_id: str,
+    customer_id: str = Path(..., description="Customer ID"),
     customer: CustomerUpdate,
     current_user: dict = Depends(get_current_user),
 ):
@@ -243,7 +245,7 @@ async def update_customer(
 
 @router.post("/{customer_id}/patients")
 async def add_patient(
-    customer_id: str,
+    customer_id: str = Path(..., description="Customer ID"),
     patient: PatientCreate,
     current_user: dict = Depends(get_current_user),
 ):
@@ -276,7 +278,8 @@ async def add_patient(
 
 @router.get("/{customer_id}/orders")
 async def get_customer_orders(
-    customer_id: str, current_user: dict = Depends(get_current_user)
+    customer_id: str = Path(..., description="Customer ID"),
+    current_user: dict = Depends(get_current_user)
 ):
     """Get orders for a customer"""
     # This will be implemented when we connect OrderRepository
@@ -285,7 +288,8 @@ async def get_customer_orders(
 
 @router.get("/{customer_id}/prescriptions")
 async def get_customer_prescriptions(
-    customer_id: str, current_user: dict = Depends(get_current_user)
+    customer_id: str = Path(..., description="Customer ID"),
+    current_user: dict = Depends(get_current_user)
 ):
     """Get prescriptions for a customer"""
     # This will be implemented when we connect PrescriptionRepository
@@ -294,8 +298,8 @@ async def get_customer_prescriptions(
 
 @router.post("/{customer_id}/loyalty/add")
 async def add_loyalty_points(
-    customer_id: str,
-    points: int = Query(..., ge=1),
+    customer_id: str = Path(..., description="Customer ID"),
+    points: int = Query(..., ge=1, description="Loyalty points to add"),
     current_user: dict = Depends(get_current_user),
 ):
     """Add loyalty points to customer"""
