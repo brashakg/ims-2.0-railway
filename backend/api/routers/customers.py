@@ -4,7 +4,7 @@ IMS 2.0 - Customers Router
 Customer and patient management endpoints
 """
 
-from fastapi import APIRouter, HTTPException, Depends, Query, Path
+from fastapi import APIRouter, HTTPException, Depends, Query, Path, Body
 from pydantic import BaseModel, Field
 from typing import List, Optional
 from datetime import date
@@ -223,7 +223,7 @@ async def get_customer(
 @router.put("/{customer_id}")
 async def update_customer(
     customer_id: str = Path(..., description="Customer ID"),
-    customer: CustomerUpdate,
+    customer: CustomerUpdate = Body(...),
     current_user: dict = Depends(get_current_user),
 ):
     """Update customer details"""
@@ -246,7 +246,7 @@ async def update_customer(
 @router.post("/{customer_id}/patients")
 async def add_patient(
     customer_id: str = Path(..., description="Customer ID"),
-    patient: PatientCreate,
+    patient: PatientCreate = Body(...),
     current_user: dict = Depends(get_current_user),
 ):
     """Add a patient to customer"""

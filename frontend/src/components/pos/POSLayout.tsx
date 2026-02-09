@@ -1,5 +1,5 @@
-import { useState, useCallback } from 'react';
-import { ShoppingCart, BarChart3, Barcode } from 'lucide-react';
+import { useState, useCallback, useEffect } from 'react';
+import { ShoppingCart, BarChart3, Barcode, Search, Zap } from 'lucide-react';
 import ProductCatalog from './ProductCatalog';
 import CartPanel from './CartPanel';
 import BillingEngine from './BillingEngine';
@@ -50,6 +50,46 @@ export function POSLayout() {
   const [currentStage, setCurrentStage] = useState<POSStage>('catalog');
   const [barcodeInput, setBarcodeInput] = useState('');
   const [billData, setBillData] = useState<any>(null);
+  const [showKeyboardHelp, setShowKeyboardHelp] = useState(false);
+
+  // Keyboard shortcuts
+  useEffect(() => {
+    const handleKeyboardShortcuts = (e: KeyboardEvent) => {
+      // F2: Quick product search
+      if (e.key === 'F2') {
+        e.preventDefault();
+        setCurrentStage('catalog');
+        setTimeout(() => {
+          const barcodeInput = document.querySelector('input[placeholder*="Scan barcode"]') as HTMLInputElement;
+          barcodeInput?.focus();
+        }, 0);
+      }
+      // F9: Proceed to payment
+      if (e.key === 'F9') {
+        e.preventDefault();
+        if (cartItems.length > 0) {
+          setCurrentStage('billing');
+        }
+      }
+      // ESC: Cancel/Go back
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        if (currentStage !== 'catalog') {
+          setCurrentStage('catalog');
+        }
+      }
+      // CTRL+L: Show loyalty points
+      if (e.ctrlKey && e.key === 'l') {
+        e.preventDefault();
+        if (selectedCustomer?.loyalty_points) {
+          alert(`Loyalty Points: ${selectedCustomer.loyalty_points}`);
+        }
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyboardShortcuts);
+    return () => window.removeEventListener('keydown', handleKeyboardShortcuts);
+  }, [cartItems.length, currentStage, selectedCustomer]);
 
   // Add item to cart from barcode or product selection
   const handleAddToCart = useCallback((product: any) => {
@@ -135,6 +175,27 @@ export function POSLayout() {
 
   return (
     <div className="h-screen bg-gray-900 text-white overflow-hidden">
+      {/* Keyboard Shortcuts Help */}
+      {showKeyboardHelp && (
+        <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50">
+          <div className="bg-gray-800 rounded-lg p-6 max-w-md">
+            <h3 className="text-lg font-bold mb-4">Keyboard Shortcuts</h3>
+            <div className="space-y-2 text-sm mb-6">
+              <div className="flex justify-between"><span>F2</span><span className="text-gray-400">Quick Product Search</span></div>
+              <div className="flex justify-between"><span>F9</span><span className="text-gray-400">Proceed to Billing</span></div>
+              <div className="flex justify-between"><span>ESC</span><span className="text-gray-400">Back to Catalog</span></div>
+              <div className="flex justify-between"><span>CTRL+L</span><span className="text-gray-400">Show Loyalty Points</span></div>
+            </div>
+            <button
+              onClick={() => setShowKeyboardHelp(false)}
+              className="w-full bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded-lg"
+            >
+              Close
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Header */}
       <div className="bg-gradient-to-r from-blue-900 to-purple-900 px-6 py-4 border-b border-gray-700">
         <div className="flex items-center justify-between">
@@ -143,8 +204,8 @@ export function POSLayout() {
             <div>
               <h1 className="text-2xl font-bold">Enterprise POS</h1>
               <p className="text-sm text-gray-300">
-                {currentStage === 'catalog' && '📦 Product Selection'}
-                {currentStage === 'billing' && '📊 Billing & Discounts'}
+                {currentStage === 'catalog' && '📦 Product Selection [F2: Search, F9: Billing, ESC: Back]'}
+                {currentStage === 'billing' && '📊 Billing & Discounts [F9: Payment, ESC: Back]'}
                 {currentStage === 'payment' && '💳 Payment Processing'}
                 {currentStage === 'receipt' && '✅ Transaction Complete'}
               </p>
@@ -156,12 +217,24 @@ export function POSLayout() {
               <div className="bg-blue-900 px-4 py-2 rounded-lg">
                 <p className="text-sm font-semibold">{selectedCustomer.name}</p>
                 <p className="text-xs text-gray-300">{selectedCustomer.phone}</p>
+                {selectedCustomer.loyalty_points !== undefined && (
+                  <p className="text-xs text-yellow-300 mt-1">
+                    ⭐ {selectedCustomer.loyalty_points} points
+                  </p>
+                )}
               </div>
             )}
             <div className="bg-gray-800 px-4 py-2 rounded-lg flex items-center gap-2">
               <ShoppingCart className="w-5 h-5 text-blue-400" />
               <span className="font-semibold">{cartItems.length} items</span>
             </div>
+            <button
+              onClick={() => setShowKeyboardHelp(!showKeyboardHelp)}
+              className="bg-gray-800 hover:bg-gray-700 px-3 py-2 rounded-lg text-xs font-semibold"
+              title="Keyboard shortcuts"
+            >
+              <Zap className="w-4 h-4" />
+            </button>
           </div>
         </div>
       </div>

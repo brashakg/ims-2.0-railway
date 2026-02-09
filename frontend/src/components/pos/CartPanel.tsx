@@ -166,6 +166,38 @@ export function CartPanel({
 
       {/* Totals & Action Buttons */}
       <div className="border-t border-gray-700 px-4 py-4 space-y-4">
+        {/* GST Breakdown */}
+        {items.length > 0 && (
+          <div className="bg-gray-700 rounded-lg p-3 space-y-2 text-xs">
+            <p className="font-semibold text-gray-300 flex items-center gap-2">
+              <Zap className="w-3 h-3 text-yellow-400" />
+              GST Breakdown (18% Standard)
+            </p>
+            {(() => {
+              const gstRate = 0.18;
+              const cgstAmount = totalAmount * (gstRate / 2) / (1 + gstRate);
+              const sgstAmount = totalAmount * (gstRate / 2) / (1 + gstRate);
+              const subtotal = totalAmount / (1 + gstRate);
+              return (
+                <>
+                  <div className="flex justify-between text-gray-300">
+                    <span>Subtotal (excl. GST)</span>
+                    <span>₹{subtotal.toFixed(2)}</span>
+                  </div>
+                  <div className="flex justify-between text-blue-300">
+                    <span>CGST (9%)</span>
+                    <span>₹{cgstAmount.toFixed(2)}</span>
+                  </div>
+                  <div className="flex justify-between text-blue-300">
+                    <span>SGST (9%)</span>
+                    <span>₹{sgstAmount.toFixed(2)}</span>
+                  </div>
+                </>
+              );
+            })()}
+          </div>
+        )}
+
         {/* Summary */}
         <div className="space-y-2 text-sm">
           <div className="flex justify-between text-gray-300">

@@ -267,7 +267,7 @@ async def get_customer_interactions(
 @router.post("/customers/{customer_id}/interactions", response_model=InteractionRecord)
 async def create_customer_interaction(
     customer_id: str = Path(..., description="Customer ID"),
-    interaction: InteractionRecord,
+    interaction: InteractionRecord = Body(...),
     current_user: dict = Depends(get_current_user),
 ):
     """Log a new customer interaction (call, message, visit, etc.)"""
