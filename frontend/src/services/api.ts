@@ -7,7 +7,7 @@ import type { AxiosInstance, AxiosError, InternalAxiosRequestConfig } from 'axio
 import type { ApiResponse, LoginCredentials, LoginResponse, User } from '../types';
 
 const API_BASE_URL = import.meta.env.VITE_API_URL ||
-  (import.meta.env.PROD ? 'https://ims-20-railway-production.up.railway.app/api/v1' : '/api');
+  (import.meta.env.PROD ? 'https://ims-20-railway-production.up.railway.app/api/v1' : '/api/v1');
 
 // Log the API URL being used (helpful for debugging)
 console.log(`[IMS API] Base URL: ${API_BASE_URL}`, {
