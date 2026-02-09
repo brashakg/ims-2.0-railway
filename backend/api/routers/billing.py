@@ -6,12 +6,11 @@ Comprehensive POS billing system with GST calculations, discounts, and payment p
 from fastapi import APIRouter, Depends, HTTPException
 from datetime import datetime
 from typing import Optional, List, Dict, Any
-from sqlalchemy.orm import Session
-
-from api.database import get_db
-from api.models import Order, OrderLineItem, Customer, Store
-from api.auth import get_current_user
-from api.schemas import UserSchema
+from .auth import get_current_user
+from ..dependencies import (
+    get_order_repository,
+    get_customer_repository,
+)
 
 router = APIRouter(prefix="/billing", tags=["Billing"])
 
@@ -139,8 +138,7 @@ def calculate_bill(
 
 @router.post("/create-invoice")
 async def create_invoice(
-    db: Session = Depends(get_db),
-    current_user: UserSchema = Depends(get_current_user),
+    current_user: dict = Depends(get_current_user),
     invoice_data: Dict[str, Any] = None,
 ):
     """
@@ -202,8 +200,7 @@ async def create_invoice(
 
 @router.post("/apply-discount")
 async def apply_discount(
-    db: Session = Depends(get_db),
-    current_user: UserSchema = Depends(get_current_user),
+    current_user: dict = Depends(get_current_user),
     discount_data: Dict[str, Any] = None,
 ):
     """
@@ -281,8 +278,7 @@ async def apply_discount(
 
 @router.get("/gst-summary")
 async def get_gst_summary(
-    db: Session = Depends(get_db),
-    current_user: UserSchema = Depends(get_current_user),
+    current_user: dict = Depends(get_current_user),
     period: str = "month",
 ):
     """
@@ -352,8 +348,7 @@ async def get_gst_summary(
 
 @router.get("/held-bills")
 async def get_held_bills(
-    db: Session = Depends(get_db),
-    current_user: UserSchema = Depends(get_current_user),
+    current_user: dict = Depends(get_current_user),
 ):
     """
     Get list of bills held for later completion
@@ -378,8 +373,7 @@ async def get_held_bills(
 
 @router.post("/hold-bill")
 async def hold_bill(
-    db: Session = Depends(get_db),
-    current_user: UserSchema = Depends(get_current_user),
+    current_user: dict = Depends(get_current_user),
     bill_data: Dict[str, Any] = None,
 ):
     """
@@ -406,8 +400,7 @@ async def hold_bill(
 
 @router.post("/recall-held-bill")
 async def recall_held_bill(
-    db: Session = Depends(get_db),
-    current_user: UserSchema = Depends(get_current_user),
+    current_user: dict = Depends(get_current_user),
     bill_id: str = None,
 ):
     """
@@ -437,8 +430,7 @@ async def recall_held_bill(
 
 @router.post("/process-payment")
 async def process_payment(
-    db: Session = Depends(get_db),
-    current_user: UserSchema = Depends(get_current_user),
+    current_user: dict = Depends(get_current_user),
     payment_data: Dict[str, Any] = None,
 ):
     """

@@ -6,13 +6,13 @@ Provides comprehensive analytics and business intelligence endpoints
 from fastapi import APIRouter, Depends, Query, HTTPException
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
-from sqlalchemy import func, and_
-from sqlalchemy.orm import Session
-
-from api.database import get_db
-from api.models import Order, Customer, Product, Inventory, Store
-from api.auth import get_current_user
-from api.schemas import UserSchema
+from .auth import get_current_user
+from ..dependencies import (
+    get_order_repository,
+    get_stock_repository,
+    get_customer_repository,
+    get_task_repository,
+)
 
 router = APIRouter(prefix="/analytics", tags=["Analytics"])
 
@@ -53,20 +53,31 @@ def get_date_range(period: str) -> tuple[datetime, datetime]:
 
 
 def calculate_metrics_for_period(
-    db: Session, store_id: Optional[str], start_date: datetime, end_date: datetime
+    order_repo, store_id: Optional[str], start_date: datetime, end_date: datetime
 ) -> Dict[str, Any]:
     """Calculate all metrics for a given period"""
 
-    # Base query for orders
-    query = db.query(Order).filter(Order.created_at.between(start_date, end_date))
+    if not order_repo:
+        return {
+            "total_revenue": 0.0,
+            "total_orders": 0,
+            "avg_order_value": 0.0,
+            "revenue_change": 0.0,
+            "period_start": start_date.isoformat(),
+            "period_end": end_date.isoformat(),
+        }
 
-    if store_id:
-        query = query.filter(Order.store_id == store_id)
+    # Get all orders and filter in memory
+    all_orders = order_repo.find_by_store(store_id) if store_id else []
 
-    orders = query.all()
+    # Filter by date range
+    orders = [
+        o for o in all_orders
+        if start_date <= datetime.fromisoformat(o.get("created_at", "").replace("Z", "+00:00")) <= end_date
+    ]
 
     # Calculate metrics
-    total_revenue = sum(o.total_amount for o in orders if o.total_amount)
+    total_revenue = sum(float(o.get("total_amount", 0) or 0) for o in orders)
     total_orders = len(orders)
     avg_order_value = total_revenue / total_orders if total_orders > 0 else 0
 
@@ -74,12 +85,12 @@ def calculate_metrics_for_period(
     prev_start = start_date - (end_date - start_date)
     prev_end = start_date
 
-    prev_query = db.query(Order).filter(Order.created_at.between(prev_start, prev_end))
-    if store_id:
-        prev_query = prev_query.filter(Order.store_id == store_id)
+    prev_orders = [
+        o for o in all_orders
+        if prev_start <= datetime.fromisoformat(o.get("created_at", "").replace("Z", "+00:00")) <= prev_end
+    ]
 
-    prev_orders = prev_query.all()
-    prev_revenue = sum(o.total_amount for o in prev_orders if o.total_amount)
+    prev_revenue = sum(float(o.get("total_amount", 0) or 0) for o in prev_orders)
 
     revenue_change = (
         ((total_revenue - prev_revenue) / prev_revenue * 100) if prev_revenue > 0 else 0
@@ -102,8 +113,7 @@ def calculate_metrics_for_period(
 
 @router.get("/dashboard-summary")
 async def get_dashboard_summary(
-    db: Session = Depends(get_db),
-    current_user: UserSchema = Depends(get_current_user),
+    current_user: dict = Depends(get_current_user),
     period: str = Query("month", regex="^(today|week|month|quarter|year)$"),
 ):
     """
@@ -112,25 +122,30 @@ async def get_dashboard_summary(
     """
     try:
         start_date, end_date = get_date_range(period)
-        store_id = current_user.active_store_id
+        store_id = current_user.get("active_store_id") or "store-001"
 
-        metrics = calculate_metrics_for_period(db, store_id, start_date, end_date)
+        order_repo = get_order_repository()
+        stock_repo = get_stock_repository()
+        customer_repo = get_customer_repository()
+
+        metrics = calculate_metrics_for_period(order_repo, store_id, start_date, end_date)
 
         # Get inventory metrics
-        inventory = db.query(Inventory).filter(Inventory.store_id == store_id).all()
+        inventory = stock_repo.find_by_store(store_id) if stock_repo else []
 
         total_inventory_value = sum(
-            i.quantity * i.unit_price for i in inventory if i.unit_price
+            (i.get("quantity", 0) or 0) * (i.get("unit_price", 0) or 0) for i in inventory
         )
-        low_stock_items = len([i for i in inventory if i.quantity <= i.reorder_point])
-        out_of_stock = len([i for i in inventory if i.quantity == 0])
+        low_stock_items = len([i for i in inventory if (i.get("quantity", 0) or 0) <= (i.get("reorder_point", 0) or 0)])
+        out_of_stock = len([i for i in inventory if (i.get("quantity", 0) or 0) == 0])
 
         # Get customer metrics
-        customers = db.query(Customer).filter(Customer.store_id == store_id).all()
+        customers = customer_repo.find_many({"store_id": store_id}) if customer_repo else []
 
-        new_customers = len(
-            [c for c in customers if c.created_at.date() >= start_date.date()]
-        )
+        new_customers = len([
+            c for c in customers
+            if c.get("created_at", "")[:10] >= start_date.date().isoformat()
+        ])
 
         return {
             "period": period,
@@ -155,7 +170,7 @@ async def get_dashboard_summary(
             # Optical-specific metrics
             "prescription_renewals_pending": 32,  # Placeholder
             # Performance indicators
-            "stores_count": 1 if store_id else len(db.query(Store).all()),
+            "stores_count": 1,
         }
 
     except Exception as e:
@@ -166,8 +181,7 @@ async def get_dashboard_summary(
 
 @router.get("/revenue-trends")
 async def get_revenue_trends(
-    db: Session = Depends(get_db),
-    current_user: UserSchema = Depends(get_current_user),
+    current_user: dict = Depends(get_current_user),
     period: str = Query("daily", regex="^(daily|weekly|monthly)$"),
     days: int = Query(30, ge=7, le=365),
 ):
@@ -176,50 +190,47 @@ async def get_revenue_trends(
     Returns: Time-series revenue data with YoY comparison
     """
     try:
-        store_id = current_user.active_store_id
+        store_id = current_user.get("active_store_id") or "store-001"
         end_date = datetime.now()
         start_date = end_date - timedelta(days=days)
 
+        order_repo = get_order_repository()
+        if not order_repo:
+            return {"period": period, "days": days, "data": []}
+
+        all_orders = order_repo.find_by_store(store_id)
+
         # Get orders for the period
-        current_period = (
-            db.query(Order)
-            .filter(
-                Order.created_at.between(start_date, end_date),
-                Order.store_id == store_id,
-            )
-            .all()
-        )
+        current_period = [
+            o for o in all_orders
+            if start_date <= datetime.fromisoformat(o.get("created_at", "").replace("Z", "+00:00")) <= end_date
+        ]
 
         # Get previous period for YoY
         prev_start = start_date - timedelta(days=days)
         prev_end = start_date
 
-        previous_period = (
-            db.query(Order)
-            .filter(
-                Order.created_at.between(prev_start, prev_end),
-                Order.store_id == store_id,
-            )
-            .all()
-        )
+        previous_period = [
+            o for o in all_orders
+            if prev_start <= datetime.fromisoformat(o.get("created_at", "").replace("Z", "+00:00")) <= prev_end
+        ]
 
         # Group by period
-        def group_by_period(orders: List[Order], period_type: str):
+        def group_by_period(orders: List[Dict[str, Any]], period_type: str):
             grouped = {}
             for order in orders:
+                created_at = datetime.fromisoformat(order.get("created_at", "").replace("Z", "+00:00"))
                 if period_type == "daily":
-                    key = order.created_at.date().isoformat()
+                    key = created_at.date().isoformat()
                 elif period_type == "weekly":
-                    week_start = order.created_at - timedelta(
-                        days=order.created_at.weekday()
-                    )
+                    week_start = created_at - timedelta(days=created_at.weekday())
                     key = week_start.date().isoformat()
                 else:  # monthly
-                    key = order.created_at.strftime("%Y-%m")
+                    key = created_at.strftime("%Y-%m")
 
                 if key not in grouped:
                     grouped[key] = 0
-                grouped[key] += order.total_amount or 0
+                grouped[key] += float(order.get("total_amount", 0) or 0)
 
             return grouped
 
@@ -275,8 +286,7 @@ async def get_revenue_trends(
 
 @router.get("/store-performance")
 async def get_store_performance(
-    db: Session = Depends(get_db),
-    current_user: UserSchema = Depends(get_current_user),
+    current_user: dict = Depends(get_current_user),
     period: str = Query("month", regex="^(today|week|month|quarter|year)$"),
 ):
     """
@@ -286,36 +296,42 @@ async def get_store_performance(
     try:
         start_date, end_date = get_date_range(period)
 
-        stores = db.query(Store).all()
+        order_repo = get_order_repository()
+        stock_repo = get_stock_repository()
+
+        # Get all orders
+        all_orders = order_repo.find_many({}) if order_repo else []
+
+        # Group by store
+        stores = {}
+        for order in all_orders:
+            store_id = order.get("store_id", "store-001")
+            if store_id not in stores:
+                stores[store_id] = {"store_id": store_id, "store_name": f"Store {store_id}"}
+
         store_metrics = []
 
-        for store in stores:
+        for store_id, store_info in stores.items():
             # Orders for this store
-            orders = (
-                db.query(Order)
-                .filter(
-                    Order.created_at.between(start_date, end_date),
-                    Order.store_id == store.id,
-                )
-                .all()
-            )
+            orders = [
+                o for o in all_orders
+                if o.get("store_id") == store_id and
+                start_date <= datetime.fromisoformat(o.get("created_at", "").replace("Z", "+00:00")) <= end_date
+            ]
 
-            revenue = sum(o.total_amount for o in orders if o.total_amount)
+            revenue = sum(float(o.get("total_amount", 0) or 0) for o in orders)
             order_count = len(orders)
             avg_order_value = revenue / order_count if order_count > 0 else 0
 
             # Previous period comparison
             prev_start = start_date - (end_date - start_date)
-            prev_orders = (
-                db.query(Order)
-                .filter(
-                    Order.created_at.between(prev_start, start_date),
-                    Order.store_id == store.id,
-                )
-                .all()
-            )
+            prev_orders = [
+                o for o in all_orders
+                if o.get("store_id") == store_id and
+                prev_start <= datetime.fromisoformat(o.get("created_at", "").replace("Z", "+00:00")) <= start_date
+            ]
 
-            prev_revenue = sum(o.total_amount for o in prev_orders if o.total_amount)
+            prev_revenue = sum(float(o.get("total_amount", 0) or 0) for o in prev_orders)
             revenue_change = (
                 ((revenue - prev_revenue) / prev_revenue * 100)
                 if prev_revenue > 0
@@ -323,10 +339,10 @@ async def get_store_performance(
             )
 
             # Inventory metrics
-            inventory = db.query(Inventory).filter(Inventory.store_id == store.id).all()
+            inventory = stock_repo.find_by_store(store_id) if stock_repo else []
 
             stock_value = sum(
-                i.quantity * i.unit_price for i in inventory if i.unit_price
+                (i.get("quantity", 0) or 0) * (i.get("unit_price", 0) or 0) for i in inventory
             )
 
             # Staff count (placeholder - would come from actual staff table)
@@ -335,8 +351,8 @@ async def get_store_performance(
             # Metrics calculation
             store_metrics.append(
                 {
-                    "store_id": store.id,
-                    "store_name": store.name,
+                    "store_id": store_id,
+                    "store_name": store_info.get("store_name", store_id),
                     "revenue": float(revenue),
                     "orders": order_count,
                     "avg_order_value": float(avg_order_value),
@@ -374,62 +390,69 @@ async def get_store_performance(
 
 @router.get("/inventory-intelligence")
 async def get_inventory_intelligence(
-    db: Session = Depends(get_db),
-    current_user: UserSchema = Depends(get_current_user),
+    current_user: dict = Depends(get_current_user),
 ):
     """
     Get inventory intelligence: low stock, dead stock, fast-moving items
     """
     try:
-        store_id = current_user.active_store_id
+        store_id = current_user.get("active_store_id") or "store-001"
 
-        inventory = db.query(Inventory).filter(Inventory.store_id == store_id).all()
+        stock_repo = get_stock_repository()
+        inventory = stock_repo.find_by_store(store_id) if stock_repo else []
 
         # Categorize items
-        low_stock = [i for i in inventory if i.quantity <= i.reorder_point]
+        low_stock = [
+            i for i in inventory
+            if (i.get("quantity", 0) or 0) <= (i.get("reorder_point", 0) or 0)
+        ]
         dead_stock = [
-            i for i in inventory if i.quantity > i.reorder_point * 2
-        ]  # Simplified
-        fast_moving = [i for i in inventory if i.quantity < i.reorder_point / 2]
+            i for i in inventory
+            if (i.get("quantity", 0) or 0) > (i.get("reorder_point", 0) or 0) * 2
+        ]
+        fast_moving = [
+            i for i in inventory
+            if (i.get("quantity", 0) or 0) < (i.get("reorder_point", 0) or 0) / 2
+        ]
 
         return {
             "low_stock": {
                 "count": len(low_stock),
                 "items": [
                     {
-                        "sku": i.sku,
-                        "name": i.name,
-                        "quantity": i.quantity,
-                        "reorder_point": i.reorder_point,
+                        "sku": i.get("sku", ""),
+                        "name": i.get("name", ""),
+                        "quantity": i.get("quantity", 0),
+                        "reorder_point": i.get("reorder_point", 0),
                     }
                     for i in low_stock[:10]
                 ],
                 "total_value": sum(
-                    i.quantity * i.unit_price for i in low_stock if i.unit_price
+                    (i.get("quantity", 0) or 0) * (i.get("unit_price", 0) or 0) for i in low_stock
                 ),
             },
             "dead_stock": {
                 "count": len(dead_stock),
                 "items": [
                     {
-                        "sku": i.sku,
-                        "name": i.name,
-                        "quantity": i.quantity,
-                        "value": i.quantity * i.unit_price if i.unit_price else 0,
+                        "sku": i.get("sku", ""),
+                        "name": i.get("name", ""),
+                        "quantity": i.get("quantity", 0),
+                        "value": (i.get("quantity", 0) or 0) * (i.get("unit_price", 0) or 0),
                     }
                     for i in dead_stock[:10]
                 ],
                 "total_value": sum(
-                    i.quantity * i.unit_price for i in dead_stock if i.unit_price
+                    (i.get("quantity", 0) or 0) * (i.get("unit_price", 0) or 0) for i in dead_stock
                 ),
             },
             "fast_moving": {
                 "count": len(fast_moving),
                 "items": [
                     {
-                        "sku": i.sku,
-                        "name": i.name,
-                        "quantity": i.quantity,
+                        "sku": i.get("sku", ""),
+                        "name": i.get("name", ""),
+                        "quantity": i.get("quantity", 0),
                         "velocity": "high",
                     }
                     for i in fast_moving[:10]
@@ -438,7 +461,7 @@ async def get_inventory_intelligence(
             "total_inventory": {
                 "items": len(inventory),
                 "value": sum(
-                    i.quantity * i.unit_price for i in inventory if i.unit_price
+                    (i.get("quantity", 0) or 0) * (i.get("unit_price", 0) or 0) for i in inventory
                 ),
             },
         }
@@ -451,8 +474,7 @@ async def get_inventory_intelligence(
 
 @router.get("/customer-insights")
 async def get_customer_insights(
-    db: Session = Depends(get_db),
-    current_user: UserSchema = Depends(get_current_user),
+    current_user: dict = Depends(get_current_user),
     period: str = Query("month", regex="^(today|week|month|quarter|year)$"),
 ):
     """
@@ -460,29 +482,35 @@ async def get_customer_insights(
     """
     try:
         start_date, end_date = get_date_range(period)
-        store_id = current_user.active_store_id
+        store_id = current_user.get("active_store_id") or "store-001"
+
+        customer_repo = get_customer_repository()
+        order_repo = get_order_repository()
 
         # Total customers
-        all_customers = db.query(Customer).filter(Customer.store_id == store_id).all()
+        all_customers = customer_repo.find_many({"store_id": store_id}) if customer_repo else []
 
         # New customers this period
         new_customers = [
-            c for c in all_customers if c.created_at.date() >= start_date.date()
+            c for c in all_customers
+            if c.get("created_at", "")[:10] >= start_date.date().isoformat()
         ]
         returning_customers = [
-            c for c in all_customers if c.created_at.date() < start_date.date()
+            c for c in all_customers
+            if c.get("created_at", "")[:10] < start_date.date().isoformat()
         ]
 
         # Top customers by spend
-        orders = db.query(Order).filter(Order.store_id == store_id).all()
+        orders = order_repo.find_by_store(store_id) if order_repo else []
 
         customer_spend = {}
         for order in orders:
-            if order.customer_id:
-                if order.customer_id not in customer_spend:
-                    customer_spend[order.customer_id] = {"spend": 0, "orders": 0}
-                customer_spend[order.customer_id]["spend"] += order.total_amount or 0
-                customer_spend[order.customer_id]["orders"] += 1
+            customer_id = order.get("customer_id")
+            if customer_id:
+                if customer_id not in customer_spend:
+                    customer_spend[customer_id] = {"spend": 0, "orders": 0}
+                customer_spend[customer_id]["spend"] += float(order.get("total_amount", 0) or 0)
+                customer_spend[customer_id]["orders"] += 1
 
         top_customers = sorted(
             [{"customer_id": cid, **data} for cid, data in customer_spend.items()],
