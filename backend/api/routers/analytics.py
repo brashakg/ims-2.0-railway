@@ -57,7 +57,7 @@ def calculate_metrics_for_period(
 ) -> Dict[str, Any]:
     """Calculate all metrics for a given period"""
 
-    if not order_repo:
+    if order_repo is None:
         return {
             "total_revenue": 0.0,
             "total_orders": 0,
@@ -195,7 +195,7 @@ async def get_revenue_trends(
         start_date = end_date - timedelta(days=days)
 
         order_repo = get_order_repository()
-        if not order_repo:
+        if order_repo is None:
             return {"period": period, "days": days, "data": []}
 
         all_orders = order_repo.find_by_store(store_id)
@@ -566,7 +566,7 @@ async def get_enterprise_kpis(
         stock_repo = get_stock_repository()
         customer_repo = get_customer_repository()
 
-        if not order_repo:
+        if order_repo is None:
             raise HTTPException(status_code=500, detail="Database connection failed")
 
         # ===== REVENUE METRICS =====
