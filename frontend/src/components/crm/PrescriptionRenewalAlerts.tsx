@@ -3,7 +3,7 @@
 // ============================================================================
 // Automated prescription renewal reminders with smart notifications
 
-import { Calendar, AlertTriangle, AlertCircle, Clock, Send, Eye } from 'lucide-react';
+import { Calendar, AlertTriangle, Clock, Send, Eye } from 'lucide-react';
 import clsx from 'clsx';
 
 export interface PrescriptionReminder {
@@ -31,55 +31,6 @@ export function PrescriptionRenewalAlerts({
   onSendReminder,
   onUpdateFrequency,
 }: PrescriptionRenewalAlertsProps) {
-  const getReminderSeverity = (daysUntilRenewal: number): 'critical' | 'warning' | 'info' => {
-    if (daysUntilRenewal < 0) return 'critical'; // Expired
-    if (daysUntilRenewal <= 30) return 'warning'; // Due soon
-    return 'info'; // Upcoming
-  };
-
-  const getSeverityColor = (severity: 'critical' | 'warning' | 'info'): string => {
-    switch (severity) {
-      case 'critical':
-        return 'bg-red-50 border-red-200';
-      case 'warning':
-        return 'bg-yellow-50 border-yellow-200';
-      case 'info':
-        return 'bg-blue-50 border-blue-200';
-    }
-  };
-
-  const getSeverityBadgeColor = (severity: 'critical' | 'warning' | 'info'): string => {
-    switch (severity) {
-      case 'critical':
-        return 'bg-red-100 text-red-800';
-      case 'warning':
-        return 'bg-yellow-100 text-yellow-800';
-      case 'info':
-        return 'bg-blue-100 text-blue-800';
-    }
-  };
-
-  const getSeverityIcon = (severity: 'critical' | 'warning' | 'info') => {
-    switch (severity) {
-      case 'critical':
-        return <AlertTriangle className="w-5 h-5 text-red-600" />;
-      case 'warning':
-        return <Clock className="w-5 h-5 text-yellow-600" />;
-      case 'info':
-        return <Eye className="w-5 h-5 text-blue-600" />;
-    }
-  };
-
-  const formatDaysUntilRenewal = (days: number): string => {
-    if (days < 0) {
-      return `Expired ${Math.abs(days)} days ago`;
-    }
-    if (days === 0) {
-      return 'Renew today';
-    }
-    return `Renew in ${days} days`;
-  };
-
   const upcomingReminders = reminders.filter(r => r.daysUntilRenewal <= 30 && r.daysUntilRenewal >= -30);
   const expiredReminders = reminders.filter(r => r.daysUntilRenewal < -30);
 
