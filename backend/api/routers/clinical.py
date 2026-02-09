@@ -4,7 +4,7 @@ IMS 2.0 - Clinical Router
 Eye test queue and clinical management endpoints with database persistence
 """
 
-from fastapi import APIRouter, HTTPException, Depends, Query
+from fastapi import APIRouter, HTTPException, Depends, Query, Path
 from pydantic import BaseModel, Field
 from typing import List, Optional
 from datetime import datetime, date

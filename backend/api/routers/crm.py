@@ -5,13 +5,13 @@ Enterprise CRM endpoints for customer 360 views, segmentation,
 lifecycle management, and customer intelligence
 """
 
-from fastapi import APIRouter, HTTPException, Depends, Query
+from fastapi import APIRouter, HTTPException, Depends, Query, Path, Body
 from pydantic import BaseModel, Field
 from typing import List, Optional, Literal
 from datetime import datetime, date, timedelta
 import uuid
 from .auth import get_current_user
-from ..dependencies import get_db
+from ..dependencies import get_customer_repository
 
 router = APIRouter()
 
@@ -57,6 +57,13 @@ class LoyaltyTierResponse(BaseModel):
     total_points_earned: int
     member_since: str
     birthday_month: Optional[int] = None
+
+
+class AddLoyaltyPointsRequest(BaseModel):
+    """Request to add loyalty points to customer"""
+
+    points: int = Field(..., gt=0, description="Loyalty points to add")
+    reason: str = Field(default="Purchase", description="Reason for adding points")
 
 
 class PrescriptionWithStatusResponse(BaseModel):
@@ -121,9 +128,8 @@ class LifecyclePhase(BaseModel):
 
 @router.get("/customers/360/{customer_id}", response_model=Customer360Response)
 async def get_customer_360(
-    customer_id: str,
-    current_user=Depends(get_current_user),
-    db=Depends(get_db),
+    customer_id: str = Path(..., description="Customer ID"),
+    current_user: dict = Depends(get_current_user),
 ):
     """
     Get complete 360-degree customer view with stats, loyalty, prescriptions,
@@ -180,9 +186,8 @@ async def get_customer_360(
 
 @router.get("/customers/{customer_id}/lifecycle", response_model=LifecyclePhase)
 async def get_customer_lifecycle_phase(
-    customer_id: str,
-    current_user=Depends(get_current_user),
-    db=Depends(get_db),
+    customer_id: str = Path(..., description="Customer ID"),
+    current_user: dict = Depends(get_current_user),
 ):
     """
     Determine customer lifecycle phase based on engagement metrics.
@@ -210,8 +215,7 @@ async def get_customer_lifecycle_phase(
 
 @router.get("/customers/segment/rfm", response_model=List[CustomerSegmentResponse])
 async def get_rfm_segmentation(
-    current_user=Depends(get_current_user),
-    db=Depends(get_db),
+    current_user: dict = Depends(get_current_user),
 ):
     """
     RFM (Recency, Frequency, Monetary) segmentation of all customers.
@@ -235,11 +239,10 @@ async def get_rfm_segmentation(
     "/customers/{customer_id}/interactions", response_model=List[InteractionRecord]
 )
 async def get_customer_interactions(
-    customer_id: str,
+    customer_id: str = Path(..., description="Customer ID"),
     limit: int = Query(50, ge=1, le=500),
-    interaction_type: Optional[str] = None,
-    current_user=Depends(get_current_user),
-    db=Depends(get_db),
+    interaction_type: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
 ):
     """
     Get complete interaction history for a customer including calls, SMS,
@@ -263,10 +266,9 @@ async def get_customer_interactions(
 
 @router.post("/customers/{customer_id}/interactions", response_model=InteractionRecord)
 async def create_customer_interaction(
-    customer_id: str,
+    customer_id: str = Path(..., description="Customer ID"),
     interaction: InteractionRecord,
-    current_user=Depends(get_current_user),
-    db=Depends(get_db),
+    current_user: dict = Depends(get_current_user),
 ):
     """Log a new customer interaction (call, message, visit, etc.)"""
     try:
@@ -293,9 +295,8 @@ async def create_customer_interaction(
     response_model=List[PrescriptionWithStatusResponse],
 )
 async def get_customer_prescriptions(
-    customer_id: str,
-    current_user=Depends(get_current_user),
-    db=Depends(get_db),
+    customer_id: str = Path(..., description="Customer ID"),
+    current_user: dict = Depends(get_current_user),
 ):
     """Get all prescriptions for a customer with renewal status indicators"""
     try:
@@ -309,8 +310,7 @@ async def get_customer_prescriptions(
 async def get_churn_risk_customers(
     risk_level: Literal["high", "medium", "low"] = Query("high"),
     limit: int = Query(50, ge=1, le=500),
-    current_user=Depends(get_current_user),
-    db=Depends(get_db),
+    current_user: dict = Depends(get_current_user),
 ):
     """
     Get list of customers at risk of churning based on engagement metrics.
@@ -332,23 +332,31 @@ async def get_churn_risk_customers(
     "/customers/{customer_id}/loyalty-points", response_model=LoyaltyTierResponse
 )
 async def add_loyalty_points(
-    customer_id: str,
-    points: int = Field(..., gt=0),
-    reason: str = "Purchase",
-    current_user=Depends(get_current_user),
-    db=Depends(get_db),
+    customer_id: str = Path(..., description="Customer ID"),
+    request: AddLoyaltyPointsRequest = Body(...),
+    current_user: dict = Depends(get_current_user),
 ):
     """Add loyalty points to customer account"""
     try:
-        customer = db.query_customer(customer_id)
+        repo = get_customer_repository()
+        if not repo:
+            raise HTTPException(status_code=500, detail="Database connection failed")
+
+        customer = repo.find_by_id(customer_id)
         if not customer:
             raise HTTPException(status_code=404, detail="Customer not found")
 
         # Update customer loyalty points
-        updated_customer = db.update_customer_loyalty_points(customer_id, points)
-        return _calculate_loyalty_tier(
-            updated_customer.get("loyalty_points", 0), updated_customer["created_at"]
-        )
+        current_points = customer.get("loyalty_points", 0)
+        new_points = current_points + request.points
+
+        if repo.update(customer_id, {"loyalty_points": new_points}):
+            updated_customer = repo.find_by_id(customer_id)
+            return _calculate_loyalty_tier(
+                updated_customer.get("loyalty_points", 0), updated_customer.get("created_at", "")
+            )
+
+        raise HTTPException(status_code=500, detail="Failed to update loyalty points")
     except HTTPException:
         raise
     except Exception as e:
