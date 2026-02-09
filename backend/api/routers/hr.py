@@ -78,7 +78,7 @@ async def mark_attendance(
     """Mark attendance for an employee (admin function)"""
     attendance_repo = get_attendance_repository()
 
-    if attendance_repo:
+    if attendance_repo is not None:
         # Check if record exists
         existing = attendance_repo.find_one(
             {"employee_id": request.employee_id, "date": request.date.isoformat()}
@@ -120,7 +120,7 @@ async def list_leaves(
     leave_repo = get_leave_repository()
     active_store = store_id or current_user.get("active_store_id")
 
-    if not leave_repo:
+    if leave_repo is None:
         return {"leaves": [], "total": 0}
 
     filter_dict = {}
@@ -148,7 +148,7 @@ async def approve_leave(leave_id: str, current_user: dict = Depends(get_current_
     """Approve a leave request"""
     leave_repo = get_leave_repository()
 
-    if leave_repo:
+    if leave_repo is not None:
         leave = leave_repo.find_by_id(leave_id)
         if not leave:
             raise HTTPException(status_code=404, detail="Leave request not found")
@@ -177,7 +177,7 @@ async def reject_leave(
     """Reject a leave request"""
     leave_repo = get_leave_repository()
 
-    if leave_repo:
+    if leave_repo is not None:
         leave = leave_repo.find_by_id(leave_id)
         if not leave:
             raise HTTPException(status_code=404, detail="Leave request not found")
@@ -218,7 +218,7 @@ async def list_payroll(
     payroll_repo = get_payroll_repository()
     active_store = store_id or current_user.get("active_store_id")
 
-    if not payroll_repo:
+    if payroll_repo is None:
         return {"payroll": [], "total": 0}
 
     records = payroll_repo.find_many(
@@ -260,7 +260,7 @@ async def generate_payroll(
         # Calculate attendance
         working_days = 0
         present_days = 0
-        if attendance_repo:
+        if attendance_repo is not None:
             attendance = attendance_repo.find_many(
                 {
                     "employee_id": employee.get("user_id"),
@@ -322,7 +322,7 @@ async def approve_payroll(
     """Approve payroll for payment"""
     payroll_repo = get_payroll_repository()
 
-    if payroll_repo:
+    if payroll_repo is not None:
         record = payroll_repo.find_by_id(payroll_id)
         if not record:
             raise HTTPException(status_code=404, detail="Payroll record not found")
