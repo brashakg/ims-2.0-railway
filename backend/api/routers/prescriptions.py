@@ -247,7 +247,7 @@ async def get_prescription(
 
     if repo is not None:
         prescription = repo.find_by_id(prescription_id)
-        if prescription:
+        if prescription is not None:
             return prescription
         raise HTTPException(status_code=404, detail="Prescription not found")
 

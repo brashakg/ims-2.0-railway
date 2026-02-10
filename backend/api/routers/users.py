@@ -71,7 +71,7 @@ def hash_password(password: str) -> str:
 
 def sanitize_user(user: dict) -> dict:
     """Remove sensitive fields from user response"""
-    if user:
+    if user is not None:
         user.pop("password_hash", None)
         user.pop("password", None)
     return user
@@ -112,7 +112,7 @@ async def get_store_users(
     """Get users for a specific store"""
     repo = get_user_repository()
 
-    if repo:
+    if repo is not None:
         if role:
             users = repo.find_by_role(role, store_id)
         else:
@@ -131,7 +131,7 @@ async def get_users_by_role(
     """Get users by role"""
     repo = get_user_repository()
 
-    if repo:
+    if repo is not None:
         users = repo.find_by_role(role, store_id)
         return [sanitize_user(u) for u in users]
 
@@ -147,7 +147,7 @@ async def search_users(
     """Search users by name, username, or email"""
     repo = get_user_repository()
 
-    if repo:
+    if repo is not None:
         users = repo.search_users(q, store_id)
         return {"users": [sanitize_user(u) for u in users]}
 
@@ -161,7 +161,7 @@ async def get_user_summary(
     """Get user count summary by role"""
     repo = get_user_repository()
 
-    if repo:
+    if repo is not None:
         summary = repo.get_user_summary(store_id)
         return {"summary": summary}
 
@@ -180,7 +180,7 @@ async def list_users(
     """List users with filters"""
     repo = get_user_repository()
 
-    if repo:
+    if repo is not None:
         filter_dict = {}
         if store_id:
             filter_dict["store_ids"] = store_id
@@ -200,7 +200,7 @@ async def create_user(user: UserCreate, current_user: dict = Depends(require_adm
     """Create new user (Admin only)"""
     repo = get_user_repository()
 
-    if repo:
+    if repo is not None:
         # Check if username exists
         if repo.find_by_username(user.username):
             raise HTTPException(status_code=400, detail="Username already exists")
@@ -246,9 +246,9 @@ async def get_user(user_id: str, current_user: dict = Depends(require_manager)):
     """Get user by ID"""
     repo = get_user_repository()
 
-    if repo:
+    if repo is not None:
         user = repo.find_by_id(user_id)
-        if user:
+        if user is not None:
             return sanitize_user(user)
         raise HTTPException(status_code=404, detail="User not found")
 
@@ -262,7 +262,7 @@ async def update_user(
     """Update user (Admin only)"""
     repo = get_user_repository()
 
-    if repo:
+    if repo is not None:
         existing = repo.find_by_id(user_id)
         if not existing:
             raise HTTPException(status_code=404, detail="User not found")
@@ -283,7 +283,7 @@ async def delete_user(user_id: str, current_user: dict = Depends(require_admin))
     """Deactivate user (soft delete)"""
     repo = get_user_repository()
 
-    if repo:
+    if repo is not None:
         existing = repo.find_by_id(user_id)
         if not existing:
             raise HTTPException(status_code=404, detail="User not found")
@@ -309,7 +309,7 @@ async def add_role(
     """Add role to user"""
     repo = get_user_repository()
 
-    if repo:
+    if repo is not None:
         existing = repo.find_by_id(user_id)
         if not existing:
             raise HTTPException(status_code=404, detail="User not found")
@@ -329,7 +329,7 @@ async def remove_role(
     """Remove role from user"""
     repo = get_user_repository()
 
-    if repo:
+    if repo is not None:
         existing = repo.find_by_id(user_id)
         if not existing:
             raise HTTPException(status_code=404, detail="User not found")
@@ -349,7 +349,7 @@ async def add_store_access(
     """Add store access to user"""
     repo = get_user_repository()
 
-    if repo:
+    if repo is not None:
         existing = repo.find_by_id(user_id)
         if not existing:
             raise HTTPException(status_code=404, detail="User not found")
@@ -369,7 +369,7 @@ async def remove_store_access(
     """Remove store access from user"""
     repo = get_user_repository()
 
-    if repo:
+    if repo is not None:
         existing = repo.find_by_id(user_id)
         if not existing:
             raise HTTPException(status_code=404, detail="User not found")

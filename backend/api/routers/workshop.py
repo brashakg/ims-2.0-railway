@@ -248,7 +248,7 @@ async def get_job(job_id: str, current_user: dict = Depends(get_current_user)):
 
     if repo is not None:
         job = repo.find_by_id(job_id)
-        if job:
+        if job is not None:
             return job_to_frontend(job)
         raise HTTPException(status_code=404, detail="Workshop job not found")
 
