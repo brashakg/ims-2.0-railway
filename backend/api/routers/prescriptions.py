@@ -195,7 +195,7 @@ async def create_prescription(
 
     if repo is not None:
         # Verify customer exists
-        if customer_repo:
+        if customer_repo is not None:
             customer = customer_repo.find_by_id(rx.customer_id)
             if not customer:
                 raise HTTPException(status_code=404, detail="Customer not found")

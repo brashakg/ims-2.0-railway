@@ -119,7 +119,7 @@ async def list_vendors(
     """List all vendors with optional search"""
     vendor_repo = get_vendor_repository()
 
-    if not vendor_repo:
+    if vendor_repo is None:
         return {"vendors": [], "total": 0}
 
     filter_dict = {}
@@ -143,7 +143,7 @@ async def create_vendor(
     vendor_repo = get_vendor_repository()
     vendor_id = str(uuid.uuid4())
 
-    if vendor_repo:
+    if vendor_repo is not None:
         # Check for duplicate GSTIN
         if vendor.gstin:
             existing = vendor_repo.find_one({"gstin": vendor.gstin})
@@ -180,7 +180,7 @@ async def get_vendor(vendor_id: str, current_user: dict = Depends(get_current_us
     """Get vendor details"""
     vendor_repo = get_vendor_repository()
 
-    if not vendor_repo:
+    if vendor_repo is None:
         return {"vendor_id": vendor_id}
 
     vendor = vendor_repo.find_by_id(vendor_id)
@@ -199,7 +199,7 @@ async def update_vendor(
     """Update vendor details"""
     vendor_repo = get_vendor_repository()
 
-    if vendor_repo:
+    if vendor_repo is not None:
         existing = vendor_repo.find_by_id(vendor_id)
         if existing is None:
             raise HTTPException(status_code=404, detail="Vendor not found")
@@ -231,7 +231,7 @@ async def list_pos(
     po_repo = get_purchase_order_repository()
     active_store = store_id or current_user.get("active_store_id")
 
-    if not po_repo:
+    if po_repo is None:
         return {"purchase_orders": [], "total": 0}
 
     filter_dict = {}
@@ -257,7 +257,7 @@ async def create_po(po: POCreate, current_user: dict = Depends(get_current_user)
     po_number = generate_po_number(po.delivery_store_id)
 
     # Validate vendor exists
-    if vendor_repo:
+    if vendor_repo is not None:
         vendor = vendor_repo.find_by_id(po.vendor_id)
         if vendor is None:
             raise HTTPException(status_code=404, detail="Vendor not found")
@@ -267,14 +267,14 @@ async def create_po(po: POCreate, current_user: dict = Depends(get_current_user)
     tax = subtotal * 0.18  # Assuming 18% GST
     total = subtotal + tax
 
-    if po_repo:
+    if po_repo is not None:
         po_repo.create(
             {
                 "po_id": po_id,
                 "po_number": po_number,
                 "vendor_id": po.vendor_id,
                 "vendor_name": (
-                    vendor.get("trade_name") if vendor_repo and vendor else None
+                    vendor.get("trade_name") if vendor_repo is not None and vendor else None
                 ),
                 "delivery_store_id": po.delivery_store_id,
                 "items": [item.model_dump() for item in po.items],
@@ -302,7 +302,7 @@ async def get_po(po_id: str, current_user: dict = Depends(get_current_user)):
     """Get purchase order details"""
     po_repo = get_purchase_order_repository()
 
-    if not po_repo:
+    if po_repo is None:
         return {"po_id": po_id}
 
     po = po_repo.find_by_id(po_id)
@@ -317,7 +317,7 @@ async def send_po(po_id: str, current_user: dict = Depends(get_current_user)):
     """Send PO to vendor (mark as sent)"""
     po_repo = get_purchase_order_repository()
 
-    if po_repo:
+    if po_repo is not None:
         po = po_repo.find_by_id(po_id)
         if not po:
             raise HTTPException(status_code=404, detail="Purchase order not found")
@@ -344,7 +344,7 @@ async def cancel_po(
     """Cancel a purchase order"""
     po_repo = get_purchase_order_repository()
 
-    if po_repo:
+    if po_repo is not None:
         po = po_repo.find_by_id(po_id)
         if not po:
             raise HTTPException(status_code=404, detail="Purchase order not found")
@@ -383,7 +383,7 @@ async def list_grns(
     grn_repo = get_grn_repository()
     active_store = store_id or current_user.get("active_store_id")
 
-    if not grn_repo:
+    if grn_repo is None:
         return {"grns": [], "total": 0}
 
     filter_dict = {}
@@ -410,7 +410,7 @@ async def create_grn(grn: GRNCreate, current_user: dict = Depends(get_current_us
 
     # Validate PO exists
     po = None
-    if po_repo:
+    if po_repo is not None:
         po = po_repo.find_by_id(grn.po_id)
         if not po:
             raise HTTPException(status_code=404, detail="Purchase order not found")
@@ -425,7 +425,7 @@ async def create_grn(grn: GRNCreate, current_user: dict = Depends(get_current_us
     total_accepted = sum(item.accepted_qty for item in grn.items)
     total_rejected = sum(item.rejected_qty for item in grn.items)
 
-    if grn_repo:
+    if grn_repo is not None:
         grn_repo.create(
             {
                 "grn_id": grn_id,
@@ -461,7 +461,7 @@ async def get_grn(grn_id: str, current_user: dict = Depends(get_current_user)):
     """Get GRN details"""
     grn_repo = get_grn_repository()
 
-    if not grn_repo:
+    if grn_repo is None:
         return {"grn_id": grn_id}
 
     grn = grn_repo.find_by_id(grn_id)
@@ -478,7 +478,7 @@ async def accept_grn(grn_id: str, current_user: dict = Depends(get_current_user)
     stock_repo = get_stock_repository()
     po_repo = get_purchase_order_repository()
 
-    if not grn_repo:
+    if grn_repo is None:
         return {"message": "GRN accepted, stock added"}
 
     grn = grn_repo.find_by_id(grn_id)
@@ -489,7 +489,7 @@ async def accept_grn(grn_id: str, current_user: dict = Depends(get_current_user)
         raise HTTPException(status_code=400, detail="GRN is not pending")
 
     # Add stock for accepted items
-    if stock_repo:
+    if stock_repo is not None:
         for item in grn.get("items", []):
             if item.get("accepted_qty", 0) > 0:
                 stock_repo.add_stock(
@@ -511,7 +511,7 @@ async def accept_grn(grn_id: str, current_user: dict = Depends(get_current_user)
     )
 
     # Update PO status
-    if po_repo and grn.get("po_id"):
+    if po_repo is not None and grn.get("po_id"):
         po_repo.update(grn.get("po_id"), {"status": "RECEIVED"})
 
     return {
@@ -530,7 +530,7 @@ async def escalate_grn(
     """Escalate GRN to HQ for review"""
     grn_repo = get_grn_repository()
 
-    if grn_repo:
+    if grn_repo is not None:
         grn = grn_repo.find_by_id(grn_id)
         if not grn:
             raise HTTPException(status_code=404, detail="GRN not found")

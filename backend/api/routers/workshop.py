@@ -205,7 +205,7 @@ async def create_job(
 
     if repo is not None:
         # Verify order exists
-        if order_repo:
+        if order_repo is not None:
             order = order_repo.find_by_id(job.order_id)
             if order is None:
                 raise HTTPException(status_code=404, detail="Order not found")

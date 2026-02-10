@@ -17,8 +17,15 @@ import { SessionExpiryWarning } from './components/common/SessionExpiryWarning';
 const LoginPage = lazy(() => import('./pages/auth/LoginPage').then(m => ({ default: m.LoginPage })));
 const DashboardPage = lazy(() => import('./pages/dashboard/DashboardPage'));
 const ExecutiveDashboard = lazy(() => import('./pages/dashboard/ExecutiveDashboard').then(m => ({ default: m.ExecutiveDashboard })));
+const EnterpriseAnalyticsDashboard = lazy(() => import('./pages/dashboard/EnterpriseAnalyticsDashboard'));
 const POSPage = lazy(() => import('./pages/pos/POSPage').then(m => ({ default: m.POSPage })));
 const CustomersPage = lazy(() => import('./pages/customers/CustomersPage').then(m => ({ default: m.CustomersPage })));
+const Customer360Dashboard = lazy(() => import('./pages/customers/Customer360Dashboard').then(m => ({ default: m.Customer360Dashboard })));
+const CustomerSegmentation = lazy(() => import('./pages/customers/CustomerSegmentation').then(m => ({ default: m.CustomerSegmentation })));
+const LoyaltyProgram = lazy(() => import('./pages/customers/LoyaltyProgram').then(m => ({ default: m.LoyaltyProgram })));
+const CampaignManager = lazy(() => import('./pages/customers/CampaignManager').then(m => ({ default: m.CampaignManager })));
+const ReferralTracker = lazy(() => import('./pages/customers/ReferralTracker').then(m => ({ default: m.ReferralTracker })));
+const CustomerFeedback = lazy(() => import('./pages/customers/CustomerFeedback').then(m => ({ default: m.CustomerFeedback })));
 const InventoryPage = lazy(() => import('./pages/inventory/InventoryPage').then(m => ({ default: m.InventoryPage })));
 const OrdersPage = lazy(() => import('./pages/orders/OrdersPage').then(m => ({ default: m.OrdersPage })));
 const ClinicalPage = lazy(() => import('./pages/clinical/ClinicalPage').then(m => ({ default: m.ClinicalPage })));
@@ -32,6 +39,13 @@ const TaskManagementPage = lazy(() => import('./pages/tasks/TaskManagementPage')
 const HRPage = lazy(() => import('./pages/hr/HRPage').then(m => ({ default: m.HRPage })));
 const ReportsPage = lazy(() => import('./pages/reports/ReportsPage').then(m => ({ default: m.ReportsPage })));
 const SettingsPage = lazy(() => import('./pages/settings/SettingsPage').then(m => ({ default: m.SettingsPage })));
+
+// Phase 4: Supply Chain & Procurement
+const PurchaseOrderDashboard = lazy(() => import('./pages/purchase/PurchaseOrderDashboard').then(m => ({ default: m.PurchaseOrderDashboard })));
+const VendorManagement = lazy(() => import('./pages/purchase/VendorManagement').then(m => ({ default: m.VendorManagement })));
+const GoodsReceiptNote = lazy(() => import('./pages/purchase/GoodsReceiptNote').then(m => ({ default: m.GoodsReceiptNote })));
+const StockReplenishment = lazy(() => import('./pages/inventory/StockReplenishment').then(m => ({ default: m.StockReplenishment })));
+const StockAudit = lazy(() => import('./pages/inventory/StockAudit').then(m => ({ default: m.StockAudit })));
 
 // Loading fallback component
 const PageLoader = () => (
@@ -113,6 +127,14 @@ function App() {
                       </ProtectedRoute>
                     }
                   />
+                  <Route
+                    path="dashboard/analytics"
+                    element={
+                      <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER']}>
+                        <EnterpriseAnalyticsDashboard />
+                      </ProtectedRoute>
+                    }
+                  />
 
                   {/* POS */}
                   <Route
@@ -134,6 +156,78 @@ function App() {
                         allowedRoles={['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'OPTOMETRIST', 'CASHIER', 'SALES_CASHIER', 'SALES_STAFF']}
                       >
                         <CustomersPage />
+                      </ProtectedRoute>
+                    }
+                  />
+
+                  {/* CRM: Customer 360 */}
+                  <Route
+                    path="customers/:customerId/360"
+                    element={
+                      <ProtectedRoute
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'OPTOMETRIST', 'CASHIER', 'SALES_CASHIER', 'SALES_STAFF']}
+                      >
+                        <Customer360Dashboard />
+                      </ProtectedRoute>
+                    }
+                  />
+
+                  {/* CRM: Customer Segmentation */}
+                  <Route
+                    path="customers/segmentation"
+                    element={
+                      <ProtectedRoute
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'STORE_MANAGER']}
+                      >
+                        <CustomerSegmentation />
+                      </ProtectedRoute>
+                    }
+                  />
+
+                  {/* CRM: Loyalty Program */}
+                  <Route
+                    path="customers/loyalty"
+                    element={
+                      <ProtectedRoute
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'STORE_MANAGER']}
+                      >
+                        <LoyaltyProgram />
+                      </ProtectedRoute>
+                    }
+                  />
+
+                  {/* CRM: Campaign Manager */}
+                  <Route
+                    path="customers/campaigns"
+                    element={
+                      <ProtectedRoute
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'STORE_MANAGER']}
+                      >
+                        <CampaignManager />
+                      </ProtectedRoute>
+                    }
+                  />
+
+                  {/* CRM: Referral Tracker */}
+                  <Route
+                    path="customers/referrals"
+                    element={
+                      <ProtectedRoute
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'STORE_MANAGER']}
+                      >
+                        <ReferralTracker />
+                      </ProtectedRoute>
+                    }
+                  />
+
+                  {/* CRM: Customer Feedback & NPS */}
+                  <Route
+                    path="customers/feedback"
+                    element={
+                      <ProtectedRoute
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'STORE_MANAGER']}
+                      >
+                        <CustomerFeedback />
                       </ProtectedRoute>
                     }
                   />
@@ -232,6 +326,56 @@ function App() {
                     element={
                       <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT']}>
                         <PurchaseManagementPage />
+                      </ProtectedRoute>
+                    }
+                  />
+
+                  {/* Phase 4: Purchase Orders */}
+                  <Route
+                    path="purchase/orders"
+                    element={
+                      <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT']}>
+                        <PurchaseOrderDashboard />
+                      </ProtectedRoute>
+                    }
+                  />
+
+                  {/* Phase 4: Vendor Management */}
+                  <Route
+                    path="purchase/vendors"
+                    element={
+                      <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT']}>
+                        <VendorManagement />
+                      </ProtectedRoute>
+                    }
+                  />
+
+                  {/* Phase 4: Goods Receipt Notes */}
+                  <Route
+                    path="purchase/grn"
+                    element={
+                      <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT']}>
+                        <GoodsReceiptNote />
+                      </ProtectedRoute>
+                    }
+                  />
+
+                  {/* Phase 4: Stock Replenishment */}
+                  <Route
+                    path="inventory/replenishment"
+                    element={
+                      <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'CATALOG_MANAGER']}>
+                        <StockReplenishment />
+                      </ProtectedRoute>
+                    }
+                  />
+
+                  {/* Phase 4: Stock Audit */}
+                  <Route
+                    path="inventory/audit"
+                    element={
+                      <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'CATALOG_MANAGER']}>
+                        <StockAudit />
                       </ProtectedRoute>
                     }
                   />

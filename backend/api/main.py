@@ -37,6 +37,7 @@ from .routers import (
     products_router,
     inventory_router,
     customers_router,
+    crm_router,
     orders_router,
     prescriptions_router,
     vendors_router,
@@ -52,6 +53,9 @@ from .routers import (
     transfers_router,
     catalog_router,
     jarvis_router,
+    analytics_router,
+    billing_router,
+    supply_chain_router,
 )
 
 
@@ -253,6 +257,7 @@ app.include_router(stores_router, prefix="/api/v1/stores", tags=["Stores"])
 app.include_router(products_router, prefix="/api/v1/products", tags=["Products"])
 app.include_router(inventory_router, prefix="/api/v1/inventory", tags=["Inventory"])
 app.include_router(customers_router, prefix="/api/v1/customers", tags=["Customers"])
+app.include_router(crm_router, prefix="/api/v1/crm", tags=["CRM"])
 app.include_router(orders_router, prefix="/api/v1/orders", tags=["Orders"])
 app.include_router(
     prescriptions_router, prefix="/api/v1/prescriptions", tags=["Prescriptions"]
@@ -272,6 +277,11 @@ app.include_router(
 )
 app.include_router(catalog_router, prefix="/api/v1/catalog", tags=["Catalog"])
 app.include_router(jarvis_router, prefix="/api/v1/jarvis", tags=["JARVIS"])
+app.include_router(analytics_router, prefix="/api/v1/analytics", tags=["Analytics"])
+app.include_router(billing_router, prefix="/api/v1/billing", tags=["Billing"])
+app.include_router(
+    supply_chain_router, prefix="/api/v1/supply-chain", tags=["Supply Chain"]
+)
 
 
 if __name__ == "__main__":

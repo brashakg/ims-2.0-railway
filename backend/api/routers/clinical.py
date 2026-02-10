@@ -4,7 +4,7 @@ IMS 2.0 - Clinical Router
 Eye test queue and clinical management endpoints with database persistence
 """
 
-from fastapi import APIRouter, HTTPException, Depends, Query
+from fastapi import APIRouter, HTTPException, Depends, Query, Path
 from pydantic import BaseModel, Field
 from typing import List, Optional
 from datetime import datetime, date
@@ -103,7 +103,7 @@ async def get_queue(
     """Get eye test queue for a store"""
     queue_repo = get_eye_test_queue_repository()
 
-    if queue_repo:
+    if queue_repo is not None:
         queue_items = queue_repo.get_store_queue(store_id)
         # Convert to camelCase and add 'id' alias
         result = []
@@ -124,7 +124,7 @@ async def add_to_queue(
     """Add a patient to the eye test queue"""
     queue_repo = get_eye_test_queue_repository()
 
-    if queue_repo:
+    if queue_repo is not None:
         created = queue_repo.add_to_queue(
             store_id=item.store_id,
             patient_name=item.patient_name,
@@ -163,7 +163,7 @@ async def update_queue_status(
     """Update queue item status"""
     queue_repo = get_eye_test_queue_repository()
 
-    if queue_repo:
+    if queue_repo is not None:
         success = queue_repo.update_status(queue_id, body.status)
         if success:
             return {"message": "Status updated", "status": body.status}
@@ -180,7 +180,7 @@ async def remove_from_queue(
     """Remove a patient from the queue"""
     queue_repo = get_eye_test_queue_repository()
 
-    if queue_repo:
+    if queue_repo is not None:
         queue_repo.remove_from_queue(queue_id)
 
     return {"message": "Removed from queue"}
@@ -192,7 +192,7 @@ async def start_test(queue_id: str, current_user: dict = Depends(get_current_use
     queue_repo = get_eye_test_queue_repository()
     test_repo = get_eye_test_repository()
 
-    if queue_repo and test_repo:
+    if queue_repo is not None and test_repo is not None:
         # Get queue item
         queue_item = queue_repo.find_by_id(queue_id)
 
@@ -231,7 +231,7 @@ async def get_queue_stats(
     """Get queue statistics for today"""
     queue_repo = get_eye_test_queue_repository()
 
-    if queue_repo:
+    if queue_repo is not None:
         return queue_repo.get_today_stats(store_id)
 
     # Return zeros when no DB available
@@ -252,7 +252,7 @@ async def get_tests(
     """Get eye tests for a store"""
     test_repo = get_eye_test_repository()
 
-    if test_repo:
+    if test_repo is not None:
         if date == "today":
             tests = test_repo.get_today_completed_tests(store_id)
         else:
@@ -274,7 +274,7 @@ async def get_test(test_id: str, current_user: dict = Depends(get_current_user))
     """Get a specific eye test"""
     test_repo = get_eye_test_repository()
 
-    if test_repo:
+    if test_repo is not None:
         test = test_repo.find_by_id(test_id)
         if test:
             result = _convert_to_camel(test)
@@ -293,7 +293,7 @@ async def complete_test(
     test_repo = get_eye_test_repository()
     queue_repo = get_eye_test_queue_repository()
 
-    if test_repo:
+    if test_repo is not None:
         # Update test record
         success = test_repo.complete_test(
             test_id=test_id,
@@ -326,7 +326,7 @@ async def get_patient_tests(
     """Get all tests for a patient by phone number"""
     test_repo = get_eye_test_repository()
 
-    if test_repo:
+    if test_repo is not None:
         tests = test_repo.get_patient_tests(customer_phone)
         result = []
         for test in tests:
@@ -345,7 +345,7 @@ async def get_customer_tests(
     """Get all tests for a customer by ID"""
     test_repo = get_eye_test_repository()
 
-    if test_repo:
+    if test_repo is not None:
         tests = test_repo.get_customer_tests(customer_id)
         result = []
         for test in tests:
@@ -367,7 +367,7 @@ async def get_optometrist_stats(
     """Get statistics for an optometrist"""
     test_repo = get_eye_test_repository()
 
-    if test_repo:
+    if test_repo is not None:
         return test_repo.get_optometrist_stats(optometrist_id, from_date, to_date)
 
     return {"total_tests": 0, "completed_tests": 0, "completion_rate": 0}

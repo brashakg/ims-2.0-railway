@@ -176,7 +176,7 @@ async def add_stock(
     product_repo = get_product_repository()
     active_store = current_user.get("active_store_id")
 
-    if stock_repo and product_repo:
+    if stock_repo is not None and product_repo is not None:
         # Verify product exists
         product = product_repo.find_by_id(request.product_id)
         if product is None:

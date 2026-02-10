@@ -115,8 +115,13 @@ export const MODULE_CONFIGS: ModuleConfig[] = [
     sidebarItems: [
       { id: 'crm-all', label: 'All Customers', path: '/customers' },
       { id: 'crm-search', label: 'Search Customers', path: '/customers?search=true' },
+      { id: 'crm-360', label: 'Customer 360', path: '/customers/360' },
+      { id: 'crm-segmentation', label: 'Segmentation (RFM)', path: '/customers/segmentation' },
+      { id: 'crm-loyalty', label: 'Loyalty Program', path: '/customers/loyalty' },
+      { id: 'crm-campaigns', label: 'Campaign Manager', path: '/customers/campaigns' },
+      { id: 'crm-referrals', label: 'Referral Tracker', path: '/customers/referrals' },
+      { id: 'crm-feedback', label: 'Feedback & NPS', path: '/customers/feedback' },
       { id: 'crm-recalls', label: 'Recalls & Reminders', path: '/customers?tab=recalls' },
-      { id: 'crm-campaigns', label: 'Promotions', path: '/customers?tab=campaigns' },
     ],
   },
   {
@@ -134,15 +139,18 @@ export const MODULE_CONFIGS: ModuleConfig[] = [
   },
   {
     id: 'vendors',
-    title: 'Vendors & Purchase',
-    subtitle: 'Vendors, Purchase Orders, GRN',
+    title: 'Supply Chain & Procurement',
+    subtitle: 'Purchase Orders, Vendors, GRN, Replenishment',
     icon: Truck,
     color: 'text-cyan-600',
     bgColor: 'bg-cyan-50',
     allowedRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'],
     sidebarItems: [
-      { id: 'vendor-po', label: 'Purchase Orders', path: '/purchase' },
-      { id: 'vendor-list', label: 'All Suppliers', path: '/purchase?tab=suppliers' },
+      { id: 'supply-po', label: 'Purchase Orders', path: '/purchase/orders' },
+      { id: 'supply-vendor', label: 'Vendor Management', path: '/purchase/vendors' },
+      { id: 'supply-grn', label: 'Goods Receipt Notes', path: '/purchase/grn' },
+      { id: 'supply-replenish', label: 'Stock Replenishment', path: '/inventory/replenishment' },
+      { id: 'supply-audit', label: 'Stock Audit', path: '/inventory/audit' },
     ],
   },
   {

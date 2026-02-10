@@ -49,14 +49,20 @@ function authReducer(state: AuthState, action: AuthAction): AuthState {
     case 'SET_LOADING':
       return { ...state, isLoading: action.payload };
 
-    case 'LOGIN_SUCCESS':
+    case 'LOGIN_SUCCESS': {
+      // Auto-set activeRole from roles array if not already set
+      const user = action.payload.user;
+      if (!user.activeRole && user.roles && user.roles.length > 0) {
+        user.activeRole = user.roles[0];
+      }
       return {
         ...state,
-        user: action.payload.user,
+        user,
         token: action.payload.token,
         isAuthenticated: true,
         isLoading: false,
       };
+    }
 
     case 'LOGOUT':
       return {
@@ -131,6 +137,10 @@ export function AuthProvider({ children }: AuthProviderProps) {
           try {
             const profile = await authApi.getProfile();
             console.log('[Auth] Token validation successful, restoring session');
+            // Auto-set activeRole if not set
+            if (!profile.activeRole && profile.roles && profile.roles.length > 0) {
+              profile.activeRole = profile.roles[0];
+            }
             dispatch({
               type: 'LOGIN_SUCCESS',
               payload: { user: profile, token },
@@ -189,6 +199,11 @@ export function AuthProvider({ children }: AuthProviderProps) {
       const response = await authApi.login(credentials);
 
       if (response.success && response.token && response.user) {
+        // Auto-set activeRole from roles array
+        if (!response.user.activeRole && response.user.roles && response.user.roles.length > 0) {
+          response.user.activeRole = response.user.roles[0];
+        }
+
         // Store auth data
         localStorage.setItem('ims_token', response.token);
         localStorage.setItem('ims_user', JSON.stringify(response.user));
@@ -270,13 +285,24 @@ export function AuthProvider({ children }: AuthProviderProps) {
       WORKSHOP_STAFF: ['inventory.view', 'workshop.*'],
     };
 
-    const userPerms = rolePermissions[state.user.activeRole] || [];
+    // Check permissions for ALL user roles, not just activeRole
+    const userRoles = state.user.roles || [];
+
+    // SUPERADMIN and ADMIN bypass all permission checks
+    if (userRoles.includes('SUPERADMIN') || userRoles.includes('ADMIN')) return true;
+
+    // Collect all permissions from all user roles
+    const allPerms: string[] = [];
+    for (const r of userRoles) {
+      const perms = rolePermissions[r] || [];
+      allPerms.push(...perms);
+    }
 
     // Check for wildcard permission
-    if (userPerms.includes('*')) return true;
+    if (allPerms.includes('*')) return true;
 
     // Check for exact match or category wildcard
-    return userPerms.some((perm) => {
+    return allPerms.some((perm) => {
       if (perm === permission) return true;
       if (perm.endsWith('.*')) {
         const category = perm.slice(0, -2);
@@ -286,11 +312,17 @@ export function AuthProvider({ children }: AuthProviderProps) {
     });
   };
 
-  // Role check
+  // Role check - now checks user.roles array instead of activeRole
   const hasRole = (role: UserRole | UserRole[]): boolean => {
     if (!state.user) return false;
-    const roles = Array.isArray(role) ? role : [role];
-    return roles.includes(state.user.activeRole);
+    const userRoles = state.user.roles || [];
+
+    // SUPERADMIN and ADMIN can access everything
+    if (userRoles.includes('SUPERADMIN') || userRoles.includes('ADMIN')) return true;
+
+    // Check if user has any of the required roles
+    const requiredRoles = Array.isArray(role) ? role : [role];
+    return requiredRoles.some(r => userRoles.includes(r));
   };
 
   // Store access check

@@ -34,6 +34,7 @@ import { StockTransferManagement } from '../../components/inventory/StockTransfe
 import { ReorderDashboard } from '../../components/inventory/ReorderDashboard';
 import { SerialNumberTracker } from '../../components/inventory/SerialNumberTracker';
 import { StockAgingReport } from '../../components/inventory/StockAgingReport';
+import { StockAlertsOverview } from '../../components/inventory/StockAlertsOverview';
 import clsx from 'clsx';
 
 // Category configuration
@@ -82,7 +83,7 @@ interface StockMovement {
   createdBy: string;
 }
 
-type ViewTab = 'catalog' | 'low-stock' | 'reorders' | 'serial-numbers' | 'aging' | 'transfers' | 'movements';
+type ViewTab = 'alerts' | 'catalog' | 'low-stock' | 'reorders' | 'serial-numbers' | 'aging' | 'transfers' | 'movements';
 
 export function InventoryPage() {
   const { user, hasRole } = useAuth();
@@ -106,7 +107,7 @@ export function InventoryPage() {
   useEffect(() => {
     const tabParam = searchParams.get('tab');
     if (tabParam && tabParam !== activeTab) {
-      const validTabs: ViewTab[] = ['catalog', 'low-stock', 'reorders', 'serial-numbers', 'aging', 'transfers', 'movements'];
+      const validTabs: ViewTab[] = ['alerts', 'catalog', 'low-stock', 'reorders', 'serial-numbers', 'aging', 'transfers', 'movements'];
       if (validTabs.includes(tabParam as ViewTab)) {
         setActiveTab(tabParam as ViewTab);
       }
@@ -369,6 +370,7 @@ export function InventoryPage() {
       {/* Tabs */}
       <div className="flex border-b border-gray-200">
         {[
+          { id: 'alerts' as ViewTab, label: 'Inventory Alerts', icon: AlertTriangle },
           { id: 'catalog' as ViewTab, label: 'Catalog', icon: Package },
           { id: 'low-stock' as ViewTab, label: `Low Stock (${lowStockCount})`, icon: AlertTriangle },
           { id: 'reorders' as ViewTab, label: 'Reorders', icon: ShoppingCart },
@@ -394,7 +396,7 @@ export function InventoryPage() {
       </div>
 
       {/* Search and Filters */}
-      {activeTab !== 'transfers' && activeTab !== 'reorders' && activeTab !== 'serial-numbers' && activeTab !== 'aging' && (
+      {activeTab !== 'alerts' && activeTab !== 'transfers' && activeTab !== 'reorders' && activeTab !== 'serial-numbers' && activeTab !== 'aging' && (
       <div className="card">
         <div className="flex flex-col tablet:flex-row gap-4 mb-4">
           <div className="relative flex-1">
@@ -439,6 +441,13 @@ export function InventoryPage() {
           ))}
         </div>
       </div>
+      )}
+
+      {/* Stock Alerts Tab */}
+      {activeTab === 'alerts' && (
+        <div className="card">
+          <StockAlertsOverview />
+        </div>
       )}
 
       {/* Inventory Table */}
