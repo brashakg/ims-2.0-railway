@@ -60,7 +60,7 @@ async def get_store_summary(current_user: dict = Depends(get_current_user)):
     return {"summary": {}}
 
 
-@router.get("/")
+@router.get("")
 async def list_stores(
     brand: Optional[str] = Query(None),
     city: Optional[str] = Query(None),
@@ -87,7 +87,7 @@ async def list_stores(
     return {"stores": [], "total": 0}
 
 
-@router.post("/", status_code=201)
+@router.post("", status_code=201)
 async def create_store(
     store: StoreCreate, current_user: dict = Depends(get_current_user)
 ):
