@@ -67,7 +67,7 @@ async def get_stock(
     repo = get_stock_repository()
     active_store = store_id or current_user.get("active_store_id")
 
-    if repo:
+    if repo is not None:
         if low_stock:
             stock = repo.find_low_stock(active_store)
         elif product_id:
@@ -93,7 +93,7 @@ async def get_low_stock_alerts(
     repo = get_stock_repository()
     active_store = store_id or current_user.get("active_store_id")
 
-    if repo:
+    if repo is not None:
         items = repo.find_low_stock(active_store)
         return {"items": items}
 
@@ -107,7 +107,7 @@ async def get_stock_by_barcode_short(
     """Get stock item by barcode (short path)"""
     repo = get_stock_repository()
 
-    if repo:
+    if repo is not None:
         stock = repo.find_by_barcode(barcode)
         if stock:
             return stock
@@ -124,7 +124,7 @@ async def get_expiring_stock(
     repo = get_stock_repository()
     active_store = current_user.get("active_store_id")
 
-    if repo:
+    if repo is not None:
         items = repo.find_expiring(active_store, days)
         return {"items": items}
 
@@ -158,7 +158,7 @@ async def get_stock_by_barcode(
     """Get stock item by barcode"""
     repo = get_stock_repository()
 
-    if repo:
+    if repo is not None:
         stock = repo.find_by_barcode(barcode)
         if stock:
             return stock

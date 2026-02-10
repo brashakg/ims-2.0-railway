@@ -89,7 +89,7 @@ async def list_products(
     """List products with filtering"""
     repo = get_product_repository()
 
-    if repo:
+    if repo is not None:
         if search:
             products = repo.search_products(search, category)
         elif brand:
@@ -120,7 +120,7 @@ async def create_product(
 
     repo = get_product_repository()
 
-    if repo:
+    if repo is not None:
         # Check if SKU already exists
         existing = repo.find_by_sku(product.sku)
         if existing:
@@ -163,7 +163,7 @@ async def list_brands(
     """List all brands, optionally filtered by category"""
     repo = get_product_repository()
 
-    if repo:
+    if repo is not None:
         brands = repo.get_brands(category)
         return {"brands": brands}
 
@@ -182,9 +182,9 @@ async def get_product_by_sku(sku: str, current_user: dict = Depends(get_current_
     """Get product by SKU"""
     repo = get_product_repository()
 
-    if repo:
+    if repo is not None:
         product = repo.find_by_sku(sku)
-        if product:
+        if product is not None:
             return product
         raise HTTPException(status_code=404, detail="Product not found")
 
@@ -196,9 +196,9 @@ async def get_product(product_id: str, current_user: dict = Depends(get_current_
     """Get product by ID"""
     repo = get_product_repository()
 
-    if repo:
+    if repo is not None:
         product = repo.find_by_id(product_id)
-        if product:
+        if product is not None:
             return product
         raise HTTPException(status_code=404, detail="Product not found")
 
@@ -214,7 +214,7 @@ async def update_product(
     """Update product details"""
     repo = get_product_repository()
 
-    if repo:
+    if repo is not None:
         existing = repo.find_by_id(product_id)
         if not existing:
             raise HTTPException(status_code=404, detail="Product not found")

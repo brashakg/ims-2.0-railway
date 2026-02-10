@@ -63,7 +63,7 @@ async def my_tasks(
     """Get tasks assigned to current user"""
     repo = get_task_repository()
 
-    if repo:
+    if repo is not None:
         tasks = repo.find_by_assignee(
             current_user.get("user_id"), include_completed=include_completed
         )
@@ -81,7 +81,7 @@ async def get_overdue_tasks(
     repo = get_task_repository()
     active_store = store_id or current_user.get("active_store_id")
 
-    if repo:
+    if repo is not None:
         tasks = repo.find_overdue(active_store)
         return {"tasks": tasks, "total": len(tasks)}
 
@@ -93,7 +93,7 @@ async def get_escalated_tasks(current_user: dict = Depends(get_current_user)):
     """Get escalated tasks"""
     repo = get_task_repository()
 
-    if repo:
+    if repo is not None:
         # Get tasks escalated to current user
         tasks = repo.find_escalated(current_user.get("user_id"))
         return {"tasks": tasks, "total": len(tasks)}
@@ -110,7 +110,7 @@ async def get_task_summary(
     repo = get_task_repository()
     active_store = store_id or current_user.get("active_store_id")
 
-    if repo:
+    if repo is not None:
         summary = repo.get_task_summary(active_store)
         overdue_count = repo.get_overdue_count(active_store)
         return {"summary": summary, "overdue_count": overdue_count}
@@ -132,7 +132,7 @@ async def list_tasks(
     repo = get_task_repository()
     active_store = store_id or current_user.get("active_store_id")
 
-    if repo:
+    if repo is not None:
         if assigned_to:
             tasks = repo.find_by_assignee(assigned_to, status)
         elif priority:
@@ -155,7 +155,7 @@ async def create_task(task: TaskCreate, current_user: dict = Depends(get_current
     """Create a new task"""
     repo = get_task_repository()
 
-    if repo:
+    if repo is not None:
         task_data = {
             "task_number": generate_task_number(),
             "title": task.title,
@@ -189,7 +189,7 @@ async def get_task(task_id: str, current_user: dict = Depends(get_current_user))
     """Get task by ID"""
     repo = get_task_repository()
 
-    if repo:
+    if repo is not None:
         task = repo.find_by_id(task_id)
         if task:
             return task
@@ -205,7 +205,7 @@ async def update_task(
     """Update task details"""
     repo = get_task_repository()
 
-    if repo:
+    if repo is not None:
         existing = repo.find_by_id(task_id)
         if not existing:
             raise HTTPException(status_code=404, detail="Task not found")
@@ -233,7 +233,7 @@ async def start_task(task_id: str, current_user: dict = Depends(get_current_user
     """Start working on a task"""
     repo = get_task_repository()
 
-    if repo:
+    if repo is not None:
         task = repo.find_by_id(task_id)
         if not task:
             raise HTTPException(status_code=404, detail="Task not found")
@@ -262,7 +262,7 @@ async def complete_task(
     """Mark task as complete"""
     repo = get_task_repository()
 
-    if repo:
+    if repo is not None:
         task = repo.find_by_id(task_id)
         if not task:
             raise HTTPException(status_code=404, detail="Task not found")
@@ -294,7 +294,7 @@ async def escalate_task(
     """Escalate task to another user"""
     repo = get_task_repository()
 
-    if repo:
+    if repo is not None:
         task = repo.find_by_id(task_id)
         if not task:
             raise HTTPException(status_code=404, detail="Task not found")
@@ -325,7 +325,7 @@ async def reassign_task(
     """Reassign task to another user"""
     repo = get_task_repository()
 
-    if repo:
+    if repo is not None:
         task = repo.find_by_id(task_id)
         if not task:
             raise HTTPException(status_code=404, detail="Task not found")

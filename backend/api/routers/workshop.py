@@ -106,7 +106,7 @@ async def get_pending_jobs(
     repo = get_workshop_repository()
     active_store = store_id or current_user.get("active_store_id")
 
-    if repo:
+    if repo is not None:
         jobs = repo.find_pending(active_store)
         jobs_formatted = [job_to_frontend(j) for j in jobs]
         return {"jobs": jobs_formatted, "total": len(jobs_formatted)}
@@ -123,7 +123,7 @@ async def get_overdue_jobs(
     repo = get_workshop_repository()
     active_store = store_id or current_user.get("active_store_id")
 
-    if repo:
+    if repo is not None:
         jobs = repo.find_overdue(active_store)
         jobs_formatted = [job_to_frontend(j) for j in jobs]
         return {"jobs": jobs_formatted, "total": len(jobs_formatted)}
@@ -140,7 +140,7 @@ async def get_ready_jobs(
     repo = get_workshop_repository()
     active_store = store_id or current_user.get("active_store_id")
 
-    if repo:
+    if repo is not None:
         jobs = repo.find_ready(active_store)
         jobs_formatted = [job_to_frontend(j) for j in jobs]
         return {"jobs": jobs_formatted, "total": len(jobs_formatted)}
@@ -177,7 +177,7 @@ async def list_jobs(
     repo = get_workshop_repository()
     active_store = store_id or current_user.get("active_store_id")
 
-    if repo:
+    if repo is not None:
         filter_dict = {}
         if active_store:
             filter_dict["store_id"] = active_store
@@ -203,7 +203,7 @@ async def create_job(
     repo = get_workshop_repository()
     order_repo = get_order_repository()
 
-    if repo:
+    if repo is not None:
         # Verify order exists
         if order_repo:
             order = order_repo.find_by_id(job.order_id)
@@ -246,9 +246,9 @@ async def get_job(job_id: str, current_user: dict = Depends(get_current_user)):
     """Get workshop job by ID"""
     repo = get_workshop_repository()
 
-    if repo:
+    if repo is not None:
         job = repo.find_by_id(job_id)
-        if job:
+        if job is not None:
             return job_to_frontend(job)
         raise HTTPException(status_code=404, detail="Workshop job not found")
 
@@ -262,7 +262,7 @@ async def update_job(
     """Update workshop job details"""
     repo = get_workshop_repository()
 
-    if repo:
+    if repo is not None:
         existing = repo.find_by_id(job_id)
         if not existing:
             raise HTTPException(status_code=404, detail="Workshop job not found")
@@ -293,7 +293,7 @@ async def update_job_status(
     """Update job status (generic endpoint)"""
     repo = get_workshop_repository()
 
-    if repo:
+    if repo is not None:
         job = repo.find_by_id(job_id)
         if not job:
             raise HTTPException(status_code=404, detail="Workshop job not found")
@@ -323,7 +323,7 @@ async def assign_job(
     """Assign job to a technician"""
     repo = get_workshop_repository()
 
-    if repo:
+    if repo is not None:
         job = repo.find_by_id(job_id)
         if not job:
             raise HTTPException(status_code=404, detail="Workshop job not found")
@@ -350,7 +350,7 @@ async def start_job(job_id: str, current_user: dict = Depends(get_current_user))
     """Start working on a job"""
     repo = get_workshop_repository()
 
-    if repo:
+    if repo is not None:
         job = repo.find_by_id(job_id)
         if not job:
             raise HTTPException(status_code=404, detail="Workshop job not found")
@@ -371,7 +371,7 @@ async def complete_job(job_id: str, current_user: dict = Depends(get_current_use
     """Mark job as completed (pending QC)"""
     repo = get_workshop_repository()
 
-    if repo:
+    if repo is not None:
         job = repo.find_by_id(job_id)
         if not job:
             raise HTTPException(status_code=404, detail="Workshop job not found")
@@ -403,7 +403,7 @@ async def qc_job(
     """Perform QC on completed job"""
     repo = get_workshop_repository()
 
-    if repo:
+    if repo is not None:
         job = repo.find_by_id(job_id)
         if not job:
             raise HTTPException(status_code=404, detail="Workshop job not found")

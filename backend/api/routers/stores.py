@@ -53,7 +53,7 @@ async def get_store_summary(current_user: dict = Depends(get_current_user)):
     """Get summary of all stores by brand"""
     repo = get_store_repository()
 
-    if repo:
+    if repo is not None:
         summary = repo.get_store_summary()
         return {"summary": summary}
 
@@ -70,7 +70,7 @@ async def list_stores(
     """List stores with optional filtering"""
     repo = get_store_repository()
 
-    if repo:
+    if repo is not None:
         filter_dict = {}
         if brand:
             filter_dict["brand"] = brand
@@ -94,7 +94,7 @@ async def create_store(
     """Create a new store"""
     repo = get_store_repository()
 
-    if repo:
+    if repo is not None:
         # Check if store code exists
         if repo.find_by_code(store.store_code):
             raise HTTPException(status_code=400, detail="Store code already exists")
@@ -134,9 +134,9 @@ async def get_store(store_id: str, current_user: dict = Depends(get_current_user
     """Get store by ID"""
     repo = get_store_repository()
 
-    if repo:
+    if repo is not None:
         store = repo.find_by_id(store_id)
-        if store:
+        if store is not None:
             return store
         raise HTTPException(status_code=404, detail="Store not found")
 
@@ -150,7 +150,7 @@ async def update_store(
     """Update store details"""
     repo = get_store_repository()
 
-    if repo:
+    if repo is not None:
         existing = repo.find_by_id(store_id)
         if not existing:
             raise HTTPException(status_code=404, detail="Store not found")
@@ -173,7 +173,7 @@ async def enable_category(
     """Enable a category for the store"""
     repo = get_store_repository()
 
-    if repo:
+    if repo is not None:
         existing = repo.find_by_id(store_id)
         if not existing:
             raise HTTPException(status_code=404, detail="Store not found")
@@ -193,7 +193,7 @@ async def disable_category(
     """Disable a category for the store"""
     repo = get_store_repository()
 
-    if repo:
+    if repo is not None:
         existing = repo.find_by_id(store_id)
         if not existing:
             raise HTTPException(status_code=404, detail="Store not found")

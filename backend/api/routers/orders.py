@@ -208,7 +208,7 @@ async def list_orders(
     repo = get_order_repository()
     active_store = store_id or current_user.get("active_store_id")
 
-    if repo:
+    if repo is not None:
         if customer_id:
             orders = repo.find_by_customer(customer_id, limit=limit)
         elif active_store:
@@ -241,7 +241,7 @@ async def get_pending_deliveries(
     repo = get_order_repository()
     active_store = store_id or current_user.get("active_store_id")
 
-    if repo:
+    if repo is not None:
         orders = repo.find_ready_for_delivery(active_store)
         orders_formatted = [order_to_frontend(o) for o in orders]
         return {"orders": orders_formatted}
@@ -258,7 +258,7 @@ async def get_unpaid_orders(
     repo = get_order_repository()
     active_store = store_id or current_user.get("active_store_id")
 
-    if repo:
+    if repo is not None:
         orders = repo.find_unpaid(active_store)
         orders_formatted = [order_to_frontend(o) for o in orders]
         return {"orders": orders_formatted}
@@ -275,7 +275,7 @@ async def get_overdue_orders(
     repo = get_order_repository()
     active_store = store_id or current_user.get("active_store_id")
 
-    if repo:
+    if repo is not None:
         orders = repo.find_overdue(active_store)
         orders_formatted = [order_to_frontend(o) for o in orders]
         return {"orders": orders_formatted}
@@ -293,7 +293,7 @@ async def search_orders(
     repo = get_order_repository()
     active_store = store_id or current_user.get("active_store_id")
 
-    if repo:
+    if repo is not None:
         orders = repo.search_orders(q, active_store)
         orders_formatted = [order_to_frontend(o) for o in orders]
         return {"orders": orders_formatted}
@@ -334,7 +334,7 @@ async def get_status_counts(
     repo = get_order_repository()
     active_store = store_id or current_user.get("active_store_id")
 
-    if repo:
+    if repo is not None:
         counts = repo.get_status_counts(active_store)
         return {"statusCounts": counts}
 
@@ -449,9 +449,9 @@ async def get_order(order_id: str, current_user: dict = Depends(get_current_user
     """Get order details"""
     repo = get_order_repository()
 
-    if repo:
+    if repo is not None:
         order = repo.find_by_id(order_id)
-        if order:
+        if order is not None:
             return order_to_frontend(order)
         raise HTTPException(status_code=404, detail="Order not found")
 
@@ -465,7 +465,7 @@ async def update_order(
     """Update order (only DRAFT orders)"""
     repo = get_order_repository()
 
-    if repo:
+    if repo is not None:
         existing = repo.find_by_id(order_id)
         if not existing:
             raise HTTPException(status_code=404, detail="Order not found")
@@ -498,7 +498,7 @@ async def add_order_item(
     """Add item to order (only DRAFT orders)"""
     repo = get_order_repository()
 
-    if repo:
+    if repo is not None:
         order = repo.find_by_id(order_id)
         if not order:
             raise HTTPException(status_code=404, detail="Order not found")
@@ -556,7 +556,7 @@ async def remove_order_item(
     """Remove item from order (only DRAFT orders)"""
     repo = get_order_repository()
 
-    if repo:
+    if repo is not None:
         order = repo.find_by_id(order_id)
         if not order:
             raise HTTPException(status_code=404, detail="Order not found")
@@ -597,7 +597,7 @@ async def confirm_order(order_id: str, current_user: dict = Depends(get_current_
     """Confirm order (DRAFT -> CONFIRMED)"""
     repo = get_order_repository()
 
-    if repo:
+    if repo is not None:
         order = repo.find_by_id(order_id)
         if not order:
             raise HTTPException(status_code=404, detail="Order not found")
@@ -633,7 +633,7 @@ async def add_payment(
     """Add payment to order"""
     repo = get_order_repository()
 
-    if repo:
+    if repo is not None:
         order = repo.find_by_id(order_id)
         if not order:
             raise HTTPException(status_code=404, detail="Order not found")
@@ -676,7 +676,7 @@ async def mark_ready(order_id: str, current_user: dict = Depends(get_current_use
     """Mark order as ready for delivery"""
     repo = get_order_repository()
 
-    if repo:
+    if repo is not None:
         order = repo.find_by_id(order_id)
         if not order:
             raise HTTPException(status_code=404, detail="Order not found")
@@ -704,7 +704,7 @@ async def deliver_order(order_id: str, current_user: dict = Depends(get_current_
     """Deliver order to customer"""
     repo = get_order_repository()
 
-    if repo:
+    if repo is not None:
         order = repo.find_by_id(order_id)
         if not order:
             raise HTTPException(status_code=404, detail="Order not found")
@@ -743,7 +743,7 @@ async def cancel_order(
     """Cancel order"""
     repo = get_order_repository()
 
-    if repo:
+    if repo is not None:
         order = repo.find_by_id(order_id)
         if not order:
             raise HTTPException(status_code=404, detail="Order not found")
@@ -781,7 +781,7 @@ async def get_invoice(order_id: str, current_user: dict = Depends(get_current_us
     """Get/generate invoice for order"""
     repo = get_order_repository()
 
-    if repo:
+    if repo is not None:
         order = repo.find_by_id(order_id)
         if not order:
             raise HTTPException(status_code=404, detail="Order not found")

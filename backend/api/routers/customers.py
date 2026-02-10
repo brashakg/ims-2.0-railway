@@ -64,7 +64,7 @@ async def list_customers(
     """List customers with optional filtering"""
     repo = get_customer_repository()
 
-    if repo:
+    if repo is not None:
         # Build filter
         filter_dict = {}
         if customer_type:
@@ -92,7 +92,7 @@ async def create_customer(
     """Create a new customer"""
     repo = get_customer_repository()
 
-    if repo:
+    if repo is not None:
         # Check if mobile already exists
         existing = repo.find_by_mobile(customer.mobile)
         if existing:
@@ -163,7 +163,7 @@ async def search_customers(
     """Search customers by name, mobile, or email"""
     repo = get_customer_repository()
 
-    if repo:
+    if repo is not None:
         customers = repo.search_customers(q, current_user.get("active_store_id"))
         return {"customers": customers}
 
@@ -178,7 +178,7 @@ async def search_customer_by_phone(
     """Search customer by phone number (for quick lookup)"""
     repo = get_customer_repository()
 
-    if repo:
+    if repo is not None:
         customer = repo.find_by_mobile(phone)
         if customer:
             return customer
@@ -195,7 +195,7 @@ async def get_customer_by_mobile(
     """Get customer by mobile number"""
     repo = get_customer_repository()
 
-    if repo:
+    if repo is not None:
         customer = repo.find_by_mobile(mobile)
         if customer:
             return customer
@@ -210,7 +210,7 @@ async def get_customer(
     """Get customer by ID"""
     repo = get_customer_repository()
 
-    if repo:
+    if repo is not None:
         customer = repo.find_by_id(customer_id)
         if customer:
             return customer
@@ -227,7 +227,7 @@ async def update_customer(
     """Update customer details"""
     repo = get_customer_repository()
 
-    if repo:
+    if repo is not None:
         existing = repo.find_by_id(customer_id)
         if not existing:
             raise HTTPException(status_code=404, detail="Customer not found")
@@ -250,7 +250,7 @@ async def add_patient(
     """Add a patient to customer"""
     repo = get_customer_repository()
 
-    if repo:
+    if repo is not None:
         existing = repo.find_by_id(customer_id)
         if not existing:
             raise HTTPException(status_code=404, detail="Customer not found")
@@ -301,7 +301,7 @@ async def add_loyalty_points(
     """Add loyalty points to customer"""
     repo = get_customer_repository()
 
-    if repo:
+    if repo is not None:
         existing = repo.find_by_id(customer_id)
         if not existing:
             raise HTTPException(status_code=404, detail="Customer not found")
@@ -326,7 +326,7 @@ async def add_store_credit(
     """Add store credit to customer"""
     repo = get_customer_repository()
 
-    if repo:
+    if repo is not None:
         existing = repo.find_by_id(customer_id)
         if not existing:
             raise HTTPException(status_code=404, detail="Customer not found")

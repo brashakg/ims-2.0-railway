@@ -264,7 +264,7 @@ async def change_password(
     if user_repo:
         # Get user from database
         user = user_repo.find_by_id(current_user.get("user_id"))
-        if user:
+        if user is not None:
             # Verify current password
             stored_hash = user.get("password_hash")
             if stored_hash and not verify_password(
