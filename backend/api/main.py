@@ -97,6 +97,7 @@ app = FastAPI(
     docs_url="/docs",
     redoc_url="/redoc",
     lifespan=lifespan,
+    redirect_slashes=False,  # Prevent 307 redirects that break CORS
 )
 
 # CORS Middleware - Configure allowed origins
