@@ -1,4 +1,4 @@
-"""
+h"""
 IMS 2.0 - Customers Router
 ===========================
 Customer and patient management endpoints
@@ -53,7 +53,7 @@ class CustomerUpdate(BaseModel):
 # ============================================================================
 
 
-@router.get("/")
+@router.get("")
 async def list_customers(
     search: Optional[str] = Query(None),
     customer_type: Optional[str] = Query(None),
@@ -85,7 +85,7 @@ async def list_customers(
     return {"customers": [], "total": 0}
 
 
-@router.post("/", status_code=201)
+@router.post("", status_code=201)
 async def create_customer(
     customer: CustomerCreate, current_user: dict = Depends(get_current_user)
 ):
