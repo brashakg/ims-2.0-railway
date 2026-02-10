@@ -299,7 +299,7 @@ async def list_products(
         products = [p for p in products if p.get("status") == status]
     if product_type:
         products = [p for p in products if p.get("product_type") == product_type]
-    if vendor:
+    if vendor is not None:
         products = [p for p in products if p.get("vendor") == vendor]
     if tag:
         products = [p for p in products if tag in p.get("tags", [])]
@@ -1433,7 +1433,7 @@ async def bulk_publish_products(
     updated = 0
     for pid in product_ids:
         product = SHOPIFY_PRODUCTS.get(pid)
-        if product:
+        if product is not None:
             product.setdefault("publications", {})[channel_id] = {
                 "published": published,
                 "published_at": datetime.now().isoformat() if published else None,
@@ -1621,7 +1621,7 @@ async def bulk_update_products(
     updated = 0
     for pid in product_ids:
         product = SHOPIFY_PRODUCTS.get(pid)
-        if product:
+        if product is not None:
             for key, value in update.items():
                 if key in [
                     "title",
