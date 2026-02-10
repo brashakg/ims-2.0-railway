@@ -118,7 +118,7 @@ async def upload_bill(
 
     if expense_repo:
         existing = expense_repo.find_by_id(expense_id)
-        if not existing:
+        if existing is None:
             raise HTTPException(status_code=404, detail="Expense not found")
 
         # In production, you'd upload to cloud storage (S3, GCS, etc.)
@@ -143,7 +143,7 @@ async def submit_expense(
 
     if expense_repo:
         existing = expense_repo.find_by_id(expense_id)
-        if not existing:
+        if existing is None:
             raise HTTPException(status_code=404, detail="Expense not found")
 
         if existing.get("status") != "DRAFT":
@@ -168,7 +168,7 @@ async def approve_expense(
 
     if expense_repo:
         existing = expense_repo.find_by_id(expense_id)
-        if not existing:
+        if existing is None:
             raise HTTPException(status_code=404, detail="Expense not found")
 
         if existing.get("status") != "PENDING":
@@ -199,7 +199,7 @@ async def reject_expense(
 
     if expense_repo:
         existing = expense_repo.find_by_id(expense_id)
-        if not existing:
+        if existing is None:
             raise HTTPException(status_code=404, detail="Expense not found")
 
         if existing.get("status") != "PENDING":
@@ -292,7 +292,7 @@ async def approve_advance(
 
     if advance_repo:
         existing = advance_repo.find_by_id(advance_id)
-        if not existing:
+        if existing is None:
             raise HTTPException(status_code=404, detail="Advance not found")
 
         if existing.get("status") != "PENDING":
@@ -323,7 +323,7 @@ async def disburse_advance(
 
     if advance_repo:
         existing = advance_repo.find_by_id(advance_id)
-        if not existing:
+        if existing is None:
             raise HTTPException(status_code=404, detail="Advance not found")
 
         if existing.get("status") != "APPROVED":
@@ -357,7 +357,7 @@ async def settle_advance(
 
     if advance_repo:
         existing = advance_repo.find_by_id(advance_id)
-        if not existing:
+        if existing is None:
             raise HTTPException(status_code=404, detail="Advance not found")
 
         if existing.get("status") != "DISBURSED":

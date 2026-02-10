@@ -152,7 +152,7 @@ async def update_store(
 
     if repo is not None:
         existing = repo.find_by_id(store_id)
-        if not existing:
+        if existing is None:
             raise HTTPException(status_code=404, detail="Store not found")
 
         update_data = store.model_dump(exclude_unset=True)
@@ -175,7 +175,7 @@ async def enable_category(
 
     if repo is not None:
         existing = repo.find_by_id(store_id)
-        if not existing:
+        if existing is None:
             raise HTTPException(status_code=404, detail="Store not found")
 
         if repo.enable_category(store_id, category):
@@ -195,7 +195,7 @@ async def disable_category(
 
     if repo is not None:
         existing = repo.find_by_id(store_id)
-        if not existing:
+        if existing is None:
             raise HTTPException(status_code=404, detail="Store not found")
 
         if repo.disable_category(store_id, category):

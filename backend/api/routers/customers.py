@@ -95,7 +95,7 @@ async def create_customer(
     if repo is not None:
         # Check if mobile already exists
         existing = repo.find_by_mobile(customer.mobile)
-        if existing:
+        if existing is not None:
             raise HTTPException(
                 status_code=400, detail="Customer with this mobile already exists"
             )
@@ -229,7 +229,7 @@ async def update_customer(
 
     if repo is not None:
         existing = repo.find_by_id(customer_id)
-        if not existing:
+        if existing is None:
             raise HTTPException(status_code=404, detail="Customer not found")
 
         update_data = customer.model_dump(exclude_unset=True)
@@ -252,7 +252,7 @@ async def add_patient(
 
     if repo is not None:
         existing = repo.find_by_id(customer_id)
-        if not existing:
+        if existing is None:
             raise HTTPException(status_code=404, detail="Customer not found")
 
         patient_data = {
@@ -303,7 +303,7 @@ async def add_loyalty_points(
 
     if repo is not None:
         existing = repo.find_by_id(customer_id)
-        if not existing:
+        if existing is None:
             raise HTTPException(status_code=404, detail="Customer not found")
 
         if repo.add_loyalty_points(customer_id, points):
@@ -328,7 +328,7 @@ async def add_store_credit(
 
     if repo is not None:
         existing = repo.find_by_id(customer_id)
-        if not existing:
+        if existing is None:
             raise HTTPException(status_code=404, detail="Customer not found")
 
         if repo.add_store_credit(customer_id, amount):

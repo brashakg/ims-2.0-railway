@@ -49,7 +49,7 @@ def generate_job_number() -> str:
 
 def job_to_frontend(job: dict) -> dict:
     """Convert workshop job from snake_case to camelCase for frontend"""
-    if not job:
+    if job is None:
         return job
 
     key_map = {
@@ -207,7 +207,7 @@ async def create_job(
         # Verify order exists
         if order_repo:
             order = order_repo.find_by_id(job.order_id)
-            if not order:
+            if order is None:
                 raise HTTPException(status_code=404, detail="Order not found")
 
         job_data = {
@@ -264,7 +264,7 @@ async def update_job(
 
     if repo is not None:
         existing = repo.find_by_id(job_id)
-        if not existing:
+        if existing is None:
             raise HTTPException(status_code=404, detail="Workshop job not found")
 
         if existing.get("status") in ["COMPLETED", "READY", "DELIVERED"]:
@@ -295,7 +295,7 @@ async def update_job_status(
 
     if repo is not None:
         job = repo.find_by_id(job_id)
-        if not job:
+        if job is None:
             raise HTTPException(status_code=404, detail="Workshop job not found")
 
         if repo.update_status(job_id, status, current_user.get("user_id"), notes):
@@ -325,7 +325,7 @@ async def assign_job(
 
     if repo is not None:
         job = repo.find_by_id(job_id)
-        if not job:
+        if job is None:
             raise HTTPException(status_code=404, detail="Workshop job not found")
 
         if job.get("status") not in ["PENDING", "IN_PROGRESS"]:
@@ -352,7 +352,7 @@ async def start_job(job_id: str, current_user: dict = Depends(get_current_user))
 
     if repo is not None:
         job = repo.find_by_id(job_id)
-        if not job:
+        if job is None:
             raise HTTPException(status_code=404, detail="Workshop job not found")
 
         if job.get("status") != "PENDING":
@@ -373,7 +373,7 @@ async def complete_job(job_id: str, current_user: dict = Depends(get_current_use
 
     if repo is not None:
         job = repo.find_by_id(job_id)
-        if not job:
+        if job is None:
             raise HTTPException(status_code=404, detail="Workshop job not found")
 
         if job.get("status") != "IN_PROGRESS":
@@ -405,7 +405,7 @@ async def qc_job(
 
     if repo is not None:
         job = repo.find_by_id(job_id)
-        if not job:
+        if job is None:
             raise HTTPException(status_code=404, detail="Workshop job not found")
 
         if job.get("status") not in ["COMPLETED", "QC_FAILED"]:

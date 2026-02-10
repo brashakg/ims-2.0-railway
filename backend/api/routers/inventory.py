@@ -179,7 +179,7 @@ async def add_stock(
     if stock_repo and product_repo:
         # Verify product exists
         product = product_repo.find_by_id(request.product_id)
-        if not product:
+        if product is None:
             raise HTTPException(status_code=404, detail="Product not found")
 
         # Create stock entries for each unit

@@ -147,7 +147,7 @@ async def create_vendor(
         # Check for duplicate GSTIN
         if vendor.gstin:
             existing = vendor_repo.find_one({"gstin": vendor.gstin})
-            if existing:
+            if existing is not None:
                 raise HTTPException(
                     status_code=400, detail="Vendor with this GSTIN already exists"
                 )
@@ -184,7 +184,7 @@ async def get_vendor(vendor_id: str, current_user: dict = Depends(get_current_us
         return {"vendor_id": vendor_id}
 
     vendor = vendor_repo.find_by_id(vendor_id)
-    if not vendor:
+    if vendor is None:
         raise HTTPException(status_code=404, detail="Vendor not found")
 
     return vendor
@@ -201,7 +201,7 @@ async def update_vendor(
 
     if vendor_repo:
         existing = vendor_repo.find_by_id(vendor_id)
-        if not existing:
+        if existing is None:
             raise HTTPException(status_code=404, detail="Vendor not found")
 
         update_data = updates.model_dump(exclude_unset=True)
@@ -259,7 +259,7 @@ async def create_po(po: POCreate, current_user: dict = Depends(get_current_user)
     # Validate vendor exists
     if vendor_repo:
         vendor = vendor_repo.find_by_id(po.vendor_id)
-        if not vendor:
+        if vendor is None:
             raise HTTPException(status_code=404, detail="Vendor not found")
 
     # Calculate totals

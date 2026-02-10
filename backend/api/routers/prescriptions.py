@@ -263,7 +263,7 @@ async def print_prescription(
 
     if repo is not None:
         prescription = repo.find_by_id(prescription_id)
-        if not prescription:
+        if prescription is None:
             raise HTTPException(status_code=404, detail="Prescription not found")
 
         # Generate basic HTML for printing

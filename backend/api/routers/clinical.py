@@ -61,7 +61,7 @@ def _to_camel_case(snake_str: str) -> str:
 
 def _convert_to_camel(data: dict) -> dict:
     """Convert all keys in dict from snake_case to camelCase"""
-    if not data:
+    if data is None:
         return data
     result = {}
     for key, value in data.items():

@@ -207,7 +207,7 @@ async def update_task(
 
     if repo is not None:
         existing = repo.find_by_id(task_id)
-        if not existing:
+        if existing is None:
             raise HTTPException(status_code=404, detail="Task not found")
 
         if existing.get("status") in ["COMPLETED", "CANCELLED"]:
