@@ -34,7 +34,7 @@ def to_camel_case(snake_str: str) -> str:
 
 def order_to_frontend(order: dict) -> dict:
     """Convert order dict from snake_case to camelCase for frontend"""
-    if not order:
+    if order is None:
         return order
 
     # Map of snake_case keys to camelCase
@@ -467,7 +467,7 @@ async def update_order(
 
     if repo is not None:
         existing = repo.find_by_id(order_id)
-        if not existing:
+        if existing is None:
             raise HTTPException(status_code=404, detail="Order not found")
 
         if existing.get("status") != "DRAFT":
@@ -500,7 +500,7 @@ async def add_order_item(
 
     if repo is not None:
         order = repo.find_by_id(order_id)
-        if not order:
+        if order is None:
             raise HTTPException(status_code=404, detail="Order not found")
 
         if order.get("status") != "DRAFT":
@@ -558,7 +558,7 @@ async def remove_order_item(
 
     if repo is not None:
         order = repo.find_by_id(order_id)
-        if not order:
+        if order is None:
             raise HTTPException(status_code=404, detail="Order not found")
 
         if order.get("status") != "DRAFT":
@@ -599,7 +599,7 @@ async def confirm_order(order_id: str, current_user: dict = Depends(get_current_
 
     if repo is not None:
         order = repo.find_by_id(order_id)
-        if not order:
+        if order is None:
             raise HTTPException(status_code=404, detail="Order not found")
 
         if order.get("status") != "DRAFT":
@@ -635,7 +635,7 @@ async def add_payment(
 
     if repo is not None:
         order = repo.find_by_id(order_id)
-        if not order:
+        if order is None:
             raise HTTPException(status_code=404, detail="Order not found")
 
         if order.get("status") == "CANCELLED":
@@ -678,7 +678,7 @@ async def mark_ready(order_id: str, current_user: dict = Depends(get_current_use
 
     if repo is not None:
         order = repo.find_by_id(order_id)
-        if not order:
+        if order is None:
             raise HTTPException(status_code=404, detail="Order not found")
 
         if order.get("status") not in ["CONFIRMED", "PROCESSING"]:
@@ -706,7 +706,7 @@ async def deliver_order(order_id: str, current_user: dict = Depends(get_current_
 
     if repo is not None:
         order = repo.find_by_id(order_id)
-        if not order:
+        if order is None:
             raise HTTPException(status_code=404, detail="Order not found")
 
         if order.get("status") != "READY":
@@ -745,7 +745,7 @@ async def cancel_order(
 
     if repo is not None:
         order = repo.find_by_id(order_id)
-        if not order:
+        if order is None:
             raise HTTPException(status_code=404, detail="Order not found")
 
         if order.get("status") == "DELIVERED":
@@ -783,7 +783,7 @@ async def get_invoice(order_id: str, current_user: dict = Depends(get_current_us
 
     if repo is not None:
         order = repo.find_by_id(order_id)
-        if not order:
+        if order is None:
             raise HTTPException(status_code=404, detail="Order not found")
 
         if order.get("status") == "DRAFT":

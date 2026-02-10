@@ -549,13 +549,13 @@ async def login(request: LoginRequest):
     user = mock_users.get(login_input)
 
     # If not found by username, search by email
-    if not user:
+    if user is None:
         for u in mock_users.values():
             if u.get("email", "").lower() == login_input:
                 user = u
                 break
 
-    if not user:
+    if user is None:
         raise HTTPException(status_code=401, detail="Invalid username or password")
 
     if not verify_password(request.password, user["password_hash"]):

@@ -1017,7 +1017,7 @@ async def get_catalog_product(
 ):
     """Get a single product with all details"""
     product = CATALOG_PRODUCTS.get(product_id)
-    if not product:
+    if product is None:
         raise HTTPException(status_code=404, detail="Product not found")
 
     return {"product": product}
@@ -1140,7 +1140,7 @@ async def update_catalog_product(
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     existing = CATALOG_PRODUCTS.get(product_id)
-    if not existing:
+    if existing is None:
         raise HTTPException(status_code=404, detail="Product not found")
 
     # Update fields
@@ -1181,7 +1181,7 @@ async def delete_catalog_product(
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     product = CATALOG_PRODUCTS.get(product_id)
-    if not product:
+    if product is None:
         raise HTTPException(status_code=404, detail="Product not found")
 
     product["is_active"] = False
@@ -1212,7 +1212,7 @@ async def adjust_product_inventory(
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     product = CATALOG_PRODUCTS.get(product_id)
-    if not product:
+    if product is None:
         raise HTTPException(status_code=404, detail="Product not found")
 
     current_qty = product["inventory"]["locations"].get(location_id, 0)
@@ -1243,7 +1243,7 @@ async def get_product_inventory(
 ):
     """Get inventory levels for a product across all locations"""
     product = CATALOG_PRODUCTS.get(product_id)
-    if not product:
+    if product is None:
         raise HTTPException(status_code=404, detail="Product not found")
 
     return {
@@ -1295,7 +1295,7 @@ async def sync_product_to_shopify(
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     product = CATALOG_PRODUCTS.get(product_id)
-    if not product:
+    if product is None:
         raise HTTPException(status_code=404, detail="Product not found")
 
     result = await _sync_product_to_shopify(product, sync_config)
@@ -1326,7 +1326,7 @@ async def bulk_sync_products_to_shopify(
 
     for pid in product_ids:
         product = CATALOG_PRODUCTS.get(pid)
-        if not product:
+        if product is None:
             errors.append({"product_id": pid, "error": "Not found"})
             continue
 

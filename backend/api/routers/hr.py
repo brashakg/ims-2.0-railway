@@ -95,7 +95,7 @@ async def mark_attendance(
             "marked_at": datetime.now().isoformat(),
         }
 
-        if existing:
+        if existing is not None:
             attendance_repo.update(existing.get("attendance_id"), data)
         else:
             data["attendance_id"] = str(uuid.uuid4())
@@ -254,7 +254,7 @@ async def generate_payroll(
             {"employee_id": employee.get("user_id"), "year": year, "month": month}
         )
 
-        if existing:
+        if existing is not None:
             continue
 
         # Calculate attendance

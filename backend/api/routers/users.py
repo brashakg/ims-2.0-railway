@@ -264,7 +264,7 @@ async def update_user(
 
     if repo is not None:
         existing = repo.find_by_id(user_id)
-        if not existing:
+        if existing is None:
             raise HTTPException(status_code=404, detail="User not found")
 
         update_data = user.model_dump(exclude_unset=True)
@@ -285,7 +285,7 @@ async def delete_user(user_id: str, current_user: dict = Depends(require_admin))
 
     if repo is not None:
         existing = repo.find_by_id(user_id)
-        if not existing:
+        if existing is None:
             raise HTTPException(status_code=404, detail="User not found")
 
         # Prevent deactivating yourself
@@ -311,7 +311,7 @@ async def add_role(
 
     if repo is not None:
         existing = repo.find_by_id(user_id)
-        if not existing:
+        if existing is None:
             raise HTTPException(status_code=404, detail="User not found")
 
         if repo.add_role(user_id, role):
@@ -331,7 +331,7 @@ async def remove_role(
 
     if repo is not None:
         existing = repo.find_by_id(user_id)
-        if not existing:
+        if existing is None:
             raise HTTPException(status_code=404, detail="User not found")
 
         if repo.remove_role(user_id, role):
@@ -351,7 +351,7 @@ async def add_store_access(
 
     if repo is not None:
         existing = repo.find_by_id(user_id)
-        if not existing:
+        if existing is None:
             raise HTTPException(status_code=404, detail="User not found")
 
         if repo.add_store(user_id, store_id):
@@ -371,7 +371,7 @@ async def remove_store_access(
 
     if repo is not None:
         existing = repo.find_by_id(user_id)
-        if not existing:
+        if existing is None:
             raise HTTPException(status_code=404, detail="User not found")
 
         if repo.remove_store(user_id, store_id):
