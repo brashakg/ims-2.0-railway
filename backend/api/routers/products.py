@@ -77,7 +77,7 @@ class ProductUpdate(BaseModel):
 # ============================================================================
 
 
-@router.get("/")
+@router.get("")
 async def list_products(
     category: Optional[str] = Query(None),
     brand: Optional[str] = Query(None),
@@ -109,7 +109,7 @@ async def list_products(
     return {"products": [], "total": 0}
 
 
-@router.post("/", status_code=201)
+@router.post("", status_code=201)
 async def create_product(
     product: ProductCreate, current_user: dict = Depends(get_current_user)
 ):
