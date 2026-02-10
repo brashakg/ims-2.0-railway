@@ -193,7 +193,7 @@ class OrderUpdate(BaseModel):
 # ============================================================================
 
 
-@router.get("/")
+@router.get("")
 async def list_orders(
     store_id: Optional[str] = Query(None),
     status: Optional[OrderStatus] = Query(None),
@@ -349,7 +349,7 @@ def generate_order_number(store_id: str) -> str:
     return f"BV-{prefix}-{year}-{short_uuid}"
 
 
-@router.post("/", status_code=201)
+@router.post("", status_code=201)
 async def create_order(
     order: OrderCreate, current_user: dict = Depends(get_current_user)
 ):
