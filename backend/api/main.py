@@ -215,16 +215,39 @@ async def add_process_time_header(request: Request, call_next):
 async def http_exception_handler(request: Request, exc: HTTPException):
     """Handle HTTP exceptions (like 401 Unauthorized, 403 Forbidden, etc.)"""
     logger.warning(f"HTTP Exception {exc.status_code}: {exc.detail}")
-    return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+
+    # Create response with proper content
+    response = JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+
+    # Add CORS headers to the error response so browser doesn't treat it as CORS error
+    origin = request.headers.get("origin")
+    if origin and _is_allowed_origin(origin):
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Access-Control-Allow-Credentials"] = "true"
+
+    # Re-apply WWW-Authenticate header if present in original exception
+    if exc.headers:
+        for header_name, header_value in exc.headers.items():
+            response.headers[header_name] = header_value
+
+    return response
 
 
 # Global exception handler for unexpected errors
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
     logger.error(f"Unhandled exception: {exc}")
-    return JSONResponse(
+    response = JSONResponse(
         status_code=500, content={"detail": "Internal server error", "error": str(exc)}
     )
+
+    # Add CORS headers to error responses
+    origin = request.headers.get("origin")
+    if origin and _is_allowed_origin(origin):
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Access-Control-Allow-Credentials"] = "true"
+
+    return response
 
 
 # Health check endpoint

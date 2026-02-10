@@ -321,7 +321,7 @@ async def list_products(
 async def get_product(product_id: str, current_user: dict = Depends(get_current_user)):
     """Get a single product with all details"""
     product = SHOPIFY_PRODUCTS.get(product_id)
-    if not product:
+    if product is None:
         raise HTTPException(status_code=404, detail="Product not found")
 
     # Include metafields
@@ -458,7 +458,7 @@ async def update_product(
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     existing = SHOPIFY_PRODUCTS.get(product_id)
-    if not existing:
+    if existing is None:
         raise HTTPException(status_code=404, detail="Product not found")
 
     update_data = product.model_dump(exclude_none=True)
@@ -510,7 +510,7 @@ async def list_variants(
 ):
     """List all variants for a product"""
     product = SHOPIFY_PRODUCTS.get(product_id)
-    if not product:
+    if product is None:
         raise HTTPException(status_code=404, detail="Product not found")
 
     return {"variants": product.get("variants", [])}
@@ -530,7 +530,7 @@ async def create_variant(
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     product = SHOPIFY_PRODUCTS.get(product_id)
-    if not product:
+    if product is None:
         raise HTTPException(status_code=404, detail="Product not found")
 
     variant_id = f"var_{uuid.uuid4().hex[:12]}"
@@ -624,7 +624,7 @@ async def list_product_media(
 ):
     """List all media for a product"""
     product = SHOPIFY_PRODUCTS.get(product_id)
-    if not product:
+    if product is None:
         raise HTTPException(status_code=404, detail="Product not found")
 
     return {"media": product.get("media", [])}
@@ -644,7 +644,7 @@ async def add_product_media(
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     product = SHOPIFY_PRODUCTS.get(product_id)
-    if not product:
+    if product is None:
         raise HTTPException(status_code=404, detail="Product not found")
 
     media_id = f"media_{uuid.uuid4().hex[:12]}"
@@ -729,7 +729,7 @@ async def reorder_media(
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     product = SHOPIFY_PRODUCTS.get(product_id)
-    if not product:
+    if product is None:
         raise HTTPException(status_code=404, detail="Product not found")
 
     media = product.get("media", [])
@@ -955,7 +955,7 @@ async def update_collection(
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     existing = SHOPIFY_COLLECTIONS.get(collection_id)
-    if not existing:
+    if existing is None:
         raise HTTPException(status_code=404, detail="Collection not found")
 
     existing.update(
@@ -1124,7 +1124,7 @@ async def add_tags_to_product(
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     product = SHOPIFY_PRODUCTS.get(product_id)
-    if not product:
+    if product is None:
         raise HTTPException(status_code=404, detail="Product not found")
 
     existing_tags = set(product.get("tags", []))
@@ -1147,7 +1147,7 @@ async def remove_tags_from_product(
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     product = SHOPIFY_PRODUCTS.get(product_id)
-    if not product:
+    if product is None:
         raise HTTPException(status_code=404, detail="Product not found")
 
     existing_tags = set(product.get("tags", []))
@@ -1206,7 +1206,7 @@ async def update_inventory_location(
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     existing = SHOPIFY_INVENTORY_LOCATIONS.get(location_id)
-    if not existing:
+    if existing is None:
         raise HTTPException(status_code=404, detail="Location not found")
 
     existing.update(location.model_dump())
@@ -1362,7 +1362,7 @@ async def get_product_publications(
 ):
     """Get publication status for a product across channels"""
     product = SHOPIFY_PRODUCTS.get(product_id)
-    if not product:
+    if product is None:
         raise HTTPException(status_code=404, detail="Product not found")
 
     publications = product.get("publications", {})
@@ -1396,7 +1396,7 @@ async def publish_product(
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     product = SHOPIFY_PRODUCTS.get(product_id)
-    if not product:
+    if product is None:
         raise HTTPException(status_code=404, detail="Product not found")
 
     if publication.channel_id not in SHOPIFY_CHANNELS:
@@ -1552,7 +1552,7 @@ async def get_product_seo(
 ):
     """Get SEO data for a product"""
     product = SHOPIFY_PRODUCTS.get(product_id)
-    if not product:
+    if product is None:
         raise HTTPException(status_code=404, detail="Product not found")
 
     return {
@@ -1579,7 +1579,7 @@ async def update_product_seo(
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     product = SHOPIFY_PRODUCTS.get(product_id)
-    if not product:
+    if product is None:
         raise HTTPException(status_code=404, detail="Product not found")
 
     product["seo"] = {

@@ -123,7 +123,7 @@ async def create_product(
     if repo is not None:
         # Check if SKU already exists
         existing = repo.find_by_sku(product.sku)
-        if existing:
+        if existing is not None:
             raise HTTPException(
                 status_code=400, detail="Product with this SKU already exists"
             )
@@ -216,7 +216,7 @@ async def update_product(
 
     if repo is not None:
         existing = repo.find_by_id(product_id)
-        if not existing:
+        if existing is None:
             raise HTTPException(status_code=404, detail="Product not found")
 
         update_data = product.model_dump(exclude_unset=True)
