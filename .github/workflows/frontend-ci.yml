@@ -1,4 +1,4 @@
-name: Frontend Tests & Build
+hname: Frontend Tests & Build
 
 on:
   push:
@@ -71,7 +71,7 @@ jobs:
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: actions/upload-artifact@v4
         with:
-          name: frontend-build
+          name: frontend-build-${{ matrix.node-version }}
           path: frontend/dist/
           retention-days: 30
 
