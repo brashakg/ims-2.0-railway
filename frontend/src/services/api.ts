@@ -81,7 +81,7 @@ api.interceptors.request.use(
 // Response interceptor - handle errors with retry logic
 api.interceptors.response.use(
   (response) => response,
-  async (error: AxiosError<{ message?: string; detail?: string }>) => {
+  async (error: AxiosError<{ message?: string; detail?: string | Array<Record<string, unknown>> }>) => {
     const config = error.config;
 
     // Don't retry if no config or already exceeded retries
@@ -108,7 +108,7 @@ api.interceptors.response.use(
 );
 
 // Handle final error after retries exhausted
-const handleFinalError = (error: AxiosError<{ message?: string; detail?: string }>) => {
+const handleFinalError = (error: AxiosError<{ message?: string; detail?: string | Array<Record<string, unknown>> }>) => {
   if (error.response?.status === 401) {
     // Clear auth state on unauthorized
     localStorage.removeItem('ims_token');
@@ -125,12 +125,15 @@ const handleFinalError = (error: AxiosError<{ message?: string; detail?: string 
   } else if (error.response.status >= 500) {
     message = 'Server error. Please try again in a moment.';
   } else {
-    message =
-      error.response?.data?.message ||
-      error.response?.data?.detail ||
-      error.message ||
-      'An error occurred';
-  }
+    // Handle various API error formats (detail can be string or array)
+    const rawDetail = error.response?.data?.detail;
+    if (typeof rawDetail === 'string') {
+      message = rawDetail;
+    } else if (Array.isArray(rawDetail) && rawDetail.length > 0) {
+      message = rawDetail.map((d: Record<string, unknown>) => (d.msg as string) || String(d)).join('. ');
+    } else {
+      message = error.response?.data?.message || error.message || 'An error occurred';
+    }
 
   return Promise.reject(new Error(message));
 };
