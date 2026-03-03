@@ -9,6 +9,7 @@ import {
   Plus,
   Trash2,
   Loader2,
+  Search,
   CheckCircle,
   AlertCircle,
   Building2,
@@ -100,6 +101,10 @@ export function AddCustomerModal({ isOpen, onClose, onSave }: AddCustomerModalPr
   const [gstVerified, setGstVerified] = useState<boolean | null>(null);
   const [gstError, setGstError] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchResults, setSearchResults] = useState<any[]>([]);
+  const [searching, setSearching] = useState(false);
+  const [showSearch, setShowSearch] = useState(true);
   const [showAddPatient, setShowAddPatient] = useState(false);
   const [newPatient, setNewPatient] = useState<PatientFormData>({
     id: '',
@@ -227,6 +232,41 @@ export function AddCustomerModal({ isOpen, onClose, onSave }: AddCustomerModalPr
     }));
   };
 
+  const handleSearch = async (query: string) => {
+    setSearchQuery(query);
+    if (query.length < 3) { setSearchResults([]); return; }
+    setSearching(true);
+    try {
+      const token = localStorage.getItem('ims_token');
+      const baseUrl = import.meta.env.VITE_API_URL || 'https://ims-20-railway-production.up.railway.app';
+      const resp = await fetch(
+        baseUrl + '/api/v1/customers/search?q=' + encodeURIComponent(query),
+        { headers: token ? { Authorization: 'Bearer ' + token } : {} }
+      );
+      if (resp.ok) {
+        const data = await resp.json();
+        setSearchResults(Array.isArray(data) ? data : data.customers || []);
+      }
+    } catch { setSearchResults([]); }
+    setSearching(false);
+  };
+
+  const selectExistingCustomer = (customer: any) => {
+    setFormData(prev => ({
+      ...prev,
+      fullName: customer.name || customer.full_name || '',
+      mobileNumber: customer.phone || customer.mobile || '',
+      email: customer.email || '',
+      city: customer.city || '',
+      state: customer.state || '',
+      pincode: customer.pincode || '',
+      gstNumber: customer.gstin || customer.gst_number || '',
+      businessName: customer.business_name || '',
+      customerType: customer.customer_type === 'B2B' ? 'B2B' : 'B2C',
+    }));
+    setShowSearch(false);
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
 
@@ -255,7 +295,7 @@ export function AddCustomerModal({ isOpen, onClose, onSave }: AddCustomerModalPr
 
   return (
     <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
-      <div className="bg-white rounded-xl shadow-xl w-full max-w-2xl max-h-[90vh] overflow-hidden flex flex-col">
+      <div className="bg-white rounded-xl shadow-xl w-full max-w-4xl max-h-[90vh] overflow-hidden flex flex-col">
         {/* Header */}
         <div className="flex items-center justify-between p-4 border-b border-gray-200">
           <h2 className="text-lg font-semibold text-gray-900">Add New Customer</h2>
@@ -266,6 +306,41 @@ export function AddCustomerModal({ isOpen, onClose, onSave }: AddCustomerModalPr
             <X className="w-5 h-5" />
           </button>
         </div>
+
+        {/* Customer Search */}
+        {showSearch && (
+          <div className="px-4 pt-3 pb-2 border-b border-gray-100 bg-gray-50">
+            <div className="relative">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+              <input
+                type="text"
+                value={searchQuery}
+                onChange={(e) => handleSearch(e.target.value)}
+                placeholder="Search existing customer by name or phone..."
+                className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-bv-gold-500 focus:border-transparent"
+              />
+              {searching && <Loader2 className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 animate-spin text-gray-400" />}
+            </div>
+            {searchResults.length > 0 && (
+              <div className="mt-2 max-h-32 overflow-y-auto rounded-lg border border-gray-200 bg-white">
+                {searchResults.map((cust: any, i: number) => (
+                  <button
+                    key={cust._id || cust.customer_id || i}
+                    type="button"
+                    onClick={() => selectExistingCustomer(cust)}
+                    className="w-full text-left px-3 py-2 text-sm hover:bg-bv-gold-50 flex justify-between border-b last:border-b-0"
+                  >
+                    <span className="font-medium">{cust.name || cust.full_name}</span>
+                    <span className="text-gray-500">{cust.phone || cust.mobile}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+            {searchQuery.length >= 3 && searchResults.length === 0 && !searching && (
+              <p className="mt-1 text-xs text-gray-500">No match found. Fill the form below to create new.</p>
+            )}
+          </div>
+        )}
 
         {/* Form */}
         <form onSubmit={handleSubmit} className="flex-1 overflow-y-auto p-4 space-y-6">
