@@ -21,10 +21,10 @@ export interface Toast {
 
 interface ToastContextType {
   toasts: Toast[];
-  success: (message: string, duration?: number) => void;
-  error: (message: string, duration?: number) => void;
-  warning: (message: string, duration?: number) => void;
-  info: (message: string, duration?: number) => void;
+  success: (message: unknown, duration?: number) => void;
+  error: (message: unknown, duration?: number) => void;
+  warning: (message: unknown, duration?: number) => void;
+  info: (message: unknown, duration?: number) => void;
   dismiss: (id: string) => void;
   dismissAll: () => void;
 }
@@ -46,9 +46,24 @@ interface ToastProviderProps {
 export function ToastProvider({ children }: ToastProviderProps) {
   const [toasts, setToasts] = useState<Toast[]>([]);
 
-  const addToast = useCallback((type: ToastType, message: string, duration = 5000) => {
+  // Safety: convert any input to readable string (prevents [object Object])
+  const safeMessage = (msg: unknown): string => {
+    if (typeof msg === 'string') return msg;
+    if (msg instanceof Error) return msg.message;
+    if (msg && typeof msg === 'object') {
+      const obj = msg as Record<string, unknown>;
+      if (typeof obj.detail === 'string') return obj.detail;
+      if (Array.isArray(obj.detail))
+        return obj.detail.map((d: Record<string, unknown>) => (d.msg as string) || String(d)).join('. ');
+      if (typeof obj.message === 'string') return obj.message;
+    }
+    return String(msg || 'An error occurred');
+  };
+
+  const addToast = useCallback((type: ToastType, message: unknown, duration = 5000) => {
+    const safeMsg = safeMessage(message);
     const id = `toast-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-    const toast: Toast = { id, type, message, duration };
+    const toast: Toast = { id, type, message: safeMsg, duration };
 
     setToasts((prev) => [...prev, toast]);
 
@@ -62,19 +77,19 @@ export function ToastProvider({ children }: ToastProviderProps) {
     return id;
   }, []);
 
-  const success = useCallback((message: string, duration?: number) => {
+  const success = useCallback((message: unknown, duration?: number) => {
     addToast('success', message, duration);
   }, [addToast]);
 
-  const error = useCallback((message: string, duration?: number) => {
+  const error = useCallback((message: unknown, duration?: number) => {
     addToast('error', message, duration);
   }, [addToast]);
 
-  const warning = useCallback((message: string, duration?: number) => {
+  const warning = useCallback((message: unknown, duration?: number) => {
     addToast('warning', message, duration);
   }, [addToast]);
 
-  const info = useCallback((message: string, duration?: number) => {
+  const info = useCallback((message: unknown, duration?: number) => {
     addToast('info', message, duration);
   }, [addToast]);
 

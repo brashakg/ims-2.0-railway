@@ -63,7 +63,11 @@ export function AppLayout() {
       const storesArr = stores?.stores || stores || [];
       if (Array.isArray(storesArr)) {
         const nameMap: Record<string, string> = {};
-        storesArr.forEach((s: any) => { if (s.id && s.storeName) nameMap[s.id] = s.storeName; });
+        storesArr.forEach((s: any) => {
+          const id = s.store_id || s.id || s._id;
+          const name = s.store_name || s.storeName || s.name;
+          if (id && name) nameMap[id] = name;
+        });
         setStoreNames(nameMap);
       }
     }).catch(() => {});
