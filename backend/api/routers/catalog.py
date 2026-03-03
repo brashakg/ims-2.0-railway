@@ -895,6 +895,13 @@ def generate_product_title(
 # ============================================================================
 
 
+
+@router.get("/")
+async def get_catalog_root():
+    """Root endpoint for product catalog overview"""
+    return {"module": "catalog", "status": "active", "message": "catalog overview endpoint ready"}
+
+
 @router.get("/categories")
 async def list_categories(current_user: dict = Depends(get_current_user)):
     """List all product categories with their display names"""

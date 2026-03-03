@@ -277,6 +277,13 @@ SHOPIFY_METAFIELDS: Dict[str, List[Dict]] = {}
 # ============================================================================
 
 
+
+@router.get("/")
+async def get_shopify_root():
+    """Root endpoint for Shopify integration status"""
+    return {"module": "shopify", "status": "active", "message": "Shopify overview endpoint ready"}
+
+
 @router.get("/products")
 async def list_products(
     status: Optional[ProductStatus] = None,

@@ -1516,6 +1516,13 @@ jarvis_instance = Jarvis()
 # ============================================================================
 
 
+
+@router.get("/")
+async def get_jarvis_root():
+    """Root endpoint for AI assistant status"""
+    return {"module": "jarvis", "status": "active", "message": "JARVIS status endpoint ready"}
+
+
 @router.get("/status")
 async def get_jarvis_status(current_user: dict = Depends(require_superadmin)):
     """Check JARVIS status - SUPERADMIN ONLY"""

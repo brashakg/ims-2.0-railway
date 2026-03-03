@@ -136,6 +136,13 @@ def calculate_bill(
 # ============================================================================
 
 
+
+@router.get("/")
+async def get_billing_root():
+    """Root endpoint for billing/invoice list"""
+    return {"module": "billing", "status": "active", "message": "billing records endpoint ready"}
+
+
 @router.post("/create-invoice")
 async def create_invoice(
     current_user: dict = Depends(get_current_user),

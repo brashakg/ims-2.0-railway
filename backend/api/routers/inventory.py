@@ -55,6 +55,13 @@ def generate_barcode(store_id: str, product_id: str) -> str:
 # ============================================================================
 
 
+
+@router.get("/")
+async def get_inventory_root():
+    """Root endpoint for inventory stock list"""
+    return {"module": "inventory", "status": "active", "message": "stock overview endpoint ready"}
+
+
 @router.get("/stock")
 async def get_stock(
     store_id: Optional[str] = Query(None),

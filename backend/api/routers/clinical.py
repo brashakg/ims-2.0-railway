@@ -95,6 +95,13 @@ def _get_empty_tests() -> List[dict]:
 # ============================================================================
 
 
+
+@router.get("/")
+async def get_clinical_root():
+    """Root endpoint for clinical/eye test queue"""
+    return {"module": "clinical", "status": "active", "message": "clinical queue endpoint ready"}
+
+
 @router.get("/queue")
 async def get_queue(
     store_id: str = Query(..., alias="store_id"),

@@ -138,6 +138,13 @@ class ShopifyOrderSync(BaseModel):
 # ============================================================================
 
 
+
+@router.get("/")
+async def get_admin_root():
+    """Root endpoint for admin integrations overview"""
+    return {"module": "admin", "status": "active", "message": "integrations endpoint ready"}
+
+
 @router.get("/integrations/shopify")
 async def get_shopify_config(current_user: dict = Depends(get_current_user)):
     """Get Shopify integration configuration"""

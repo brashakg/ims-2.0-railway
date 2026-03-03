@@ -242,6 +242,13 @@ MOCK_STOCK_AUDIT = [
 # ============================================================================
 
 
+
+@router.get("/")
+async def get_supply_chain_root():
+    """Root endpoint for supply chain summary"""
+    return {"module": "supply_chain", "status": "active", "message": "supply chain overview endpoint ready"}
+
+
 @router.get("/purchase-orders")
 def list_purchase_orders(
     status: Optional[str] = Query(None),

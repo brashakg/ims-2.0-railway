@@ -19,6 +19,13 @@ from ..dependencies import (
 router = APIRouter()
 
 
+
+@router.get("/")
+async def get_reports_root():
+    """Root endpoint for available reports"""
+    return {"module": "reports", "status": "active", "message": "reports overview endpoint ready"}
+
+
 @router.get("/dashboard")
 async def dashboard_stats(
     store_id: Optional[str] = Query(None),

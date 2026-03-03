@@ -228,6 +228,13 @@ class AuditLogEntry(BaseModel):
 # ============================================================================
 
 
+
+@router.get("/")
+async def get_settings_root():
+    """Root endpoint for system settings"""
+    return {"module": "settings", "status": "active", "message": "settings overview endpoint ready"}
+
+
 @router.get("/profile")
 async def get_profile(current_user: dict = Depends(get_current_user)):
     """Get current user's profile"""

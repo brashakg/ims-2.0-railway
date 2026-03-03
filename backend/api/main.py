@@ -274,6 +274,48 @@ async def root():
     }
 
 
+# Database seed endpoint (for initial setup)
+@app.post("/api/v1/admin/seed-database", tags=["Admin"])
+async def seed_database(secret: str = ""):
+    """
+    Seed the database with Better Vision Opticals store data.
+    Requires secret key. Only inserts into empty collections.
+    """
+    if secret != "bv-seed-2026":
+        raise HTTPException(status_code=403, detail="Invalid seed secret")
+
+    if not DATABASE_AVAILABLE:
+        return {"status": "error", "message": "Database not connected"}
+
+    db = get_db()
+    if not db or not db.is_connected:
+        return {"status": "error", "message": "Database not connected"}
+
+    try:
+        import sys as _sys, os as _os
+        _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+        from database.seed_data import get_all_seed_data
+
+        seed_data = get_all_seed_data()
+        results = {}
+
+        for coll_name, documents in seed_data.items():
+            collection = db.get_collection(coll_name)
+            existing = collection.count_documents({})
+            if existing > 0:
+                results[coll_name] = f"SKIPPED ({existing} existing)"
+                continue
+            if documents:
+                collection.insert_many(documents)
+                results[coll_name] = f"SEEDED ({len(documents)} docs)"
+            else:
+                results[coll_name] = "EMPTY"
+
+        return {"status": "success", "message": "Database seeded", "results": results}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
 # Include routers
 app.include_router(auth_router, prefix="/api/v1/auth", tags=["Authentication"])
 app.include_router(users_router, prefix="/api/v1/users", tags=["Users"])

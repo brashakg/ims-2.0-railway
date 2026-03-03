@@ -115,6 +115,13 @@ def calculate_metrics_for_period(
 # ============================================================================
 
 
+
+@router.get("/")
+async def get_analytics_root():
+    """Root endpoint for analytics dashboard summary"""
+    return {"module": "analytics", "status": "active", "message": "analytics summary endpoint ready"}
+
+
 @router.get("/dashboard-summary")
 async def get_dashboard_summary(
     current_user: dict = Depends(get_current_user),

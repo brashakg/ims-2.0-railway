@@ -126,6 +126,13 @@ class LifecyclePhase(BaseModel):
 # ============================================================================
 
 
+
+@router.get("/")
+async def get_crm_root():
+    """Root endpoint for customer CRM overview"""
+    return {"module": "crm", "status": "active", "message": "CRM overview endpoint ready"}
+
+
 @router.get("/customers/360/{customer_id}", response_model=Customer360Response)
 async def get_customer_360(
     customer_id: str = Path(..., description="Customer ID"),
