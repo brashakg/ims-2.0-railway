@@ -324,6 +324,26 @@ export default function DashboardPage() {
           </div>
         )}
 
+        {/* Quick Access Modules */}
+        <div className="mb-8">
+          <h2 className="text-lg font-semibold text-gray-900 mb-4">
+            Quick Access
+          </h2>
+          <div className="grid grid-cols-2 tablet:grid-cols-3 laptop:grid-cols-6 gap-3">
+            {availableModules.slice(0, 6).map((module) => (
+              <ModuleCard
+                key={module.id}
+                moduleId={module.id}
+                title={module.title}
+                subtitle={module.subtitle}
+                icon={module.icon}
+                color={module.color}
+                bgColor={module.bgColor}
+                onClick={() => handleModuleClick(module.id)}
+              />
+            ))}
+          </div>
+
         {/* KPI Grid - Section 1: Revenue & Transactions */}
         <div className="mb-8">
           <h2 className="text-lg font-semibold text-gray-900 mb-4">
@@ -493,25 +513,6 @@ export default function DashboardPage() {
           </div>
         )}
 
-        {/* Quick Access Modules */}
-        <div className="mb-8">
-          <h2 className="text-lg font-semibold text-gray-900 mb-4">
-            Quick Access
-          </h2>
-          <div className="grid grid-cols-2 tablet:grid-cols-3 laptop:grid-cols-6 gap-3">
-            {availableModules.slice(0, 6).map((module) => (
-              <ModuleCard
-                key={module.id}
-                moduleId={module.id}
-                title={module.title}
-                subtitle={module.subtitle}
-                icon={module.icon}
-                color={module.color}
-                bgColor={module.bgColor}
-                onClick={() => handleModuleClick(module.id)}
-              />
-            ))}
-          </div>
         </div>
       </div>
     </div>
