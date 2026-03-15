@@ -8,6 +8,7 @@
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
 import type { Customer, Patient, Prescription } from '../types';
+import { getGSTRateByCategory } from '../constants/gst';
 
 // ============================================================================
 // Debounced storage — prevents localStorage writes from blocking UI (fixes INP)
@@ -370,16 +371,14 @@ export const usePOSStore = create<POSState>()(
       },
 
       getGrandTotal: () => {
-        // Sum line totals (after discount) + GST per item
+        // Sum line totals (after discount) + GST per item using correct HSN-based rates
         const cart = get().cart || [];
         let subtotal = 0;
         let totalTax = 0;
         for (const item of cart) {
           const lineTotal = item.line_total || 0;
           subtotal += lineTotal;
-          // GST rate by category: Lenses/Contacts 12%, Frames/Watches 18%, Services 18%
-          const cat = (item.category || '').toUpperCase();
-          const gstRate = (cat.includes('LENS') || cat === 'CONTACT_LENSES' || cat === 'RX_LENSES') ? 12 : 18;
+          const gstRate = getGSTRateByCategory(item.category);
           totalTax += lineTotal * (gstRate / 100);
         }
         return Math.round((subtotal + totalTax) * 100) / 100;

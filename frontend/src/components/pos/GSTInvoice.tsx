@@ -5,7 +5,19 @@
 
 import { useRef } from 'react';
 import { Printer, Download } from 'lucide-react';
-import { calculateGST, calculateIGST } from '../../constants/gst';
+import { calculateGST, calculateIGST, getGSTRateByCategory, getHSNByCategory } from '../../constants/gst';
+
+// Generate GST-compliant invoice serial number from order number
+// Format: BV/FY25-26/BOK01/0001 (Brand/FinancialYear/Store/Sequence)
+function generateInvoiceNumber(orderNumber: string, storeCode: string): string {
+  const now = new Date();
+  const fy = now.getMonth() >= 3 ? `${now.getFullYear()}-${(now.getFullYear() + 1) % 100}` : `${now.getFullYear() - 1}-${now.getFullYear() % 100}`;
+  // Extract sequence from order number (last 6 chars)
+  const seq = orderNumber?.replace(/[^A-Z0-9]/gi, '').slice(-6) || String(Date.now()).slice(-6);
+  const brand = storeCode?.includes('WIZ') ? 'WO' : 'BV';
+  const store = storeCode?.replace(/^BV-|^WO-/g, '').slice(0, 5) || 'HQ';
+  return `${brand}/${fy}/${store}/${seq}`;
+}
 import type { Order, Store } from '../../types';
 
 interface GSTInvoiceProps {
@@ -49,8 +61,10 @@ export function GSTInvoice({ order, store, onPrint }: GSTInvoiceProps) {
   const lineItems: InvoiceLineItem[] = order.items.map(item => {
     // Taxable value = item finalPrice reduced by proportional order discount
     const taxableValue = Math.round(item.finalPrice * discountRatio * 100) / 100;
-    const gstRate = (item as any).gstRate || 12;
-    const hsnCode = (item as any).hsnCode || '9004';
+    const category = (item as any).category || (item as any).itemType || '';
+    const gstRate = (item as any).gstRate || getGSTRateByCategory(category);
+    const hsnInfo = getHSNByCategory(category, true);
+    const hsnCode = (item as any).hsnCode || hsnInfo?.code || '9004';
 
     let cgst = 0, sgst = 0, igst = 0;
 
@@ -158,7 +172,7 @@ export function GSTInvoice({ order, store, onPrint }: GSTInvoiceProps) {
             <h2 className="text-lg font-semibold text-gray-900 mb-2">Tax Invoice</h2>
             <div className="text-sm space-y-1">
               <div>
-                <span className="font-medium">Invoice No:</span> {order.orderNumber}
+                <span className="font-medium">Invoice No:</span> {generateInvoiceNumber(order.orderNumber, store.storeCode)}
               </div>
               <div>
                 <span className="font-medium">Date:</span>{' '}
