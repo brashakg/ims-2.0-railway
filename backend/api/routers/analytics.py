@@ -20,6 +20,40 @@ from ..dependencies import (
 
 router = APIRouter(prefix="", tags=["Analytics"])
 
+
+# ============================================================================
+# Order field normalizer (DB stores camelCase, analytics expects snake_case)
+# ============================================================================
+
+def _norm_order(o: dict) -> dict:
+    """Normalize order fields from camelCase to snake_case for analytics"""
+    return {
+        "store_id": o.get("store_id") or o.get("storeId", ""),
+        "customer_id": o.get("customer_id") or o.get("customerId", ""),
+        "created_at": o.get("created_at") or o.get("createdAt", ""),
+        "total_amount": float(o.get("total_amount") or o.get("grandTotal") or o.get("subtotal") or 0),
+        "status": o.get("status") or o.get("orderStatus", ""),
+        "items": [
+            {
+                "product_id": it.get("product_id") or it.get("productId", ""),
+                "product_name": it.get("product_name") or it.get("productName", it.get("name", "Unknown")),
+                "quantity": int(it.get("quantity", 0) or 0),
+                "unit_price": float(it.get("unit_price") or it.get("unitPrice") or 0),
+                "total_amount": float(it.get("total_amount") or it.get("finalPrice") or it.get("unitPrice", 0)),
+                "cost_price": float(it.get("cost_price") or it.get("costPrice") or 0),
+                "sku": it.get("sku", ""),
+            }
+            for it in (o.get("items") or [])
+        ],
+        **{k: v for k, v in o.items() if k not in ("store_id", "storeId", "customer_id", "customerId",
+            "created_at", "createdAt", "total_amount", "grandTotal", "status", "orderStatus", "items")},
+    }
+
+
+def _norm_orders(orders: list) -> list:
+    """Normalize a list of orders"""
+    return [_norm_order(o) for o in (orders or [])]
+
 # ============================================================================
 # Types
 # ============================================================================
@@ -72,7 +106,7 @@ def calculate_metrics_for_period(
         }
 
     # Get all orders and filter in memory
-    all_orders = order_repo.find_by_store(store_id) if store_id else []
+    all_orders = _norm_orders(order_repo.find_by_store(store_id)) if store_id else []
 
     # Filter by date range
     orders = [
@@ -151,7 +185,7 @@ async def get_dashboard_summary(
         out_of_stock = len([i for i in inventory if (i.get("quantity", 0) or 0) == 0])
 
         # Get customer metrics
-        customers = customer_repo.find_many({"store_id": store_id}) if customer_repo is not None else []
+        customers = customer_repo.find_many({"$or": [{"store_id": store_id}, {"primary_store_id": store_id}]}) if customer_repo is not None else []
 
         new_customers = len([
             c for c in customers
@@ -209,7 +243,7 @@ async def get_revenue_trends(
         if order_repo is None:
             return {"period": period, "days": days, "data": []}
 
-        all_orders = order_repo.find_by_store(store_id)
+        all_orders = _norm_orders(order_repo.find_by_store(store_id))
 
         # Get orders for the period
         current_period = [
@@ -499,7 +533,7 @@ async def get_customer_insights(
         order_repo = get_order_repository()
 
         # Total customers
-        all_customers = customer_repo.find_many({"store_id": store_id}) if customer_repo is not None else []
+        all_customers = customer_repo.find_many({"$or": [{"store_id": store_id}, {"primary_store_id": store_id}]}) if customer_repo is not None else []
 
         # New customers this period
         new_customers = [
@@ -512,7 +546,7 @@ async def get_customer_insights(
         ]
 
         # Top customers by spend
-        orders = order_repo.find_by_store(store_id) if order_repo is not None else []
+        orders = _norm_orders(order_repo.find_by_store(store_id)) if order_repo is not None else []
 
         customer_spend = {}
         for order in orders:
@@ -581,7 +615,7 @@ async def get_enterprise_kpis(
             raise HTTPException(status_code=500, detail="Database connection failed")
 
         # ===== REVENUE METRICS =====
-        all_orders = order_repo.find_by_store(store_id)
+        all_orders = _norm_orders(order_repo.find_by_store(store_id))
         current_orders = [
             o for o in all_orders
             if start_date <= datetime.fromisoformat(o.get("created_at", "").replace("Z", "+00:00")) <= end_date

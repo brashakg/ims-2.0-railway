@@ -29,8 +29,8 @@ class CustomerRepository(BaseRepository):
         return self.find_one({"gstin": gstin})
     
     def search_customers(self, query: str, store_id: str = None) -> List[Dict]:
-        filter = {"home_store_id": store_id} if store_id else None
-        return self.search(query, ["name", "mobile", "email"], filter)
+        filter = {"primary_store_id": store_id} if store_id else None
+        return self.search(query, ["name", "phone", "email"], filter)
     
     def find_b2b_customers(self, store_id: str = None) -> List[Dict]:
         filter = {"customer_type": "B2B"}

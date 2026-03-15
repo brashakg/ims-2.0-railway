@@ -38,17 +38,23 @@ class OrderRepository(BaseRepository):
     
     def find_by_store(self, store_id: str, from_date: date = None, 
                       to_date: date = None, status: str = None) -> List[Dict]:
-        """Find orders for store with optional filters"""
-        filter = {"store_id": store_id}
+        """Find orders for store with optional filters.
+        Handles both camelCase (storeId) and snake_case (store_id) field names."""
+        filter = {"$or": [{"store_id": store_id}, {"storeId": store_id}]}
         
         if from_date:
-            filter["created_at"] = {"$gte": datetime.combine(from_date, datetime.min.time())}
-        if to_date:
-            filter.setdefault("created_at", {})["$lte"] = datetime.combine(to_date, datetime.max.time())
+            dt = datetime.combine(from_date, datetime.min.time()).isoformat()
+            filter["$or"] = [
+                {"store_id": store_id, "created_at": {"$gte": dt}},
+                {"storeId": store_id, "createdAt": {"$gte": dt}},
+            ]
         if status:
-            filter["status"] = status
+            filter["$or"] = [
+                {"store_id": store_id, "status": status},
+                {"storeId": store_id, "orderStatus": status},
+            ]
         
-        return self.find_many(filter, sort=[("created_at", -1)])
+        return self.find_many(filter, sort=[("created_at", -1)], limit=500)
     
     def find_by_salesperson(self, user_id: str, from_date: date = None, 
                             to_date: date = None) -> List[Dict]:

@@ -72,9 +72,11 @@ async def list_customers(
 
         # If search provided, use search method
         if search:
-            customers = repo.search_customers(
-                search, current_user.get("active_store_id")
-            )
+            # Admins/Superadmins search all stores, others only their store
+            user_roles = current_user.get("roles", [])
+            is_hq = any(r in user_roles for r in ["SUPERADMIN", "ADMIN", "AREA_MANAGER"])
+            store_filter = None if is_hq else current_user.get("active_store_id")
+            customers = repo.search_customers(search, store_filter)
         else:
             customers = repo.find_many(filter_dict, skip=skip, limit=limit)
 

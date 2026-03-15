@@ -198,7 +198,7 @@ export const usePOSStore = create<POSState>()(
       ...initialState,
 
       // --- Navigation ---
-      setStep: (step) => set({ current_step: step }),
+      setStep: (step: POSStep) => set({ current_step: step }),
 
       nextStep: () => {
         const steps = get().sale_type === 'quick_sale' ? QUICK_SALE_STEPS : STEP_ORDER;
@@ -321,21 +321,21 @@ export const usePOSStore = create<POSState>()(
       // --- Reset ---
       resetTransaction: () => set({ ...initialState }),
 
-      // --- Computed ---
+      // --- Computed (with null guards) ---
       getSubtotal: () => {
-        return get().cart.reduce((sum, item) => sum + item.unit_price * item.quantity, 0);
+        return (get().cart || []).reduce((sum, item) => sum + item.unit_price * item.quantity, 0);
       },
 
       getTotalDiscount: () => {
-        return get().cart.reduce((sum, item) => sum + item.discount_amount, 0);
+        return (get().cart || []).reduce((sum, item) => sum + (item.discount_amount || 0), 0);
       },
 
       getGrandTotal: () => {
-        return get().cart.reduce((sum, item) => sum + item.line_total, 0);
+        return (get().cart || []).reduce((sum, item) => sum + (item.line_total || 0), 0);
       },
 
       getTotalPaid: () => {
-        return get().payments.reduce((sum, p) => sum + p.amount, 0);
+        return (get().payments || []).reduce((sum, p) => sum + p.amount, 0);
       },
 
       getBalance: () => {
@@ -359,6 +359,17 @@ export const usePOSStore = create<POSState>()(
         is_advance_payment: state.is_advance_payment,
         delivery_date: state.delivery_date,
       }),
+      // Safe merge: ensure arrays are never undefined after hydration
+      onRehydrateStorage: () => (state) => {
+        if (state) {
+          if (!Array.isArray(state.cart)) state.cart = [];
+          if (!Array.isArray(state.payments)) state.payments = [];
+          state.current_step = 'customer'; // Always start fresh on page load
+          state.is_processing = false;
+          state.order_id = null;
+          state.order_number = null;
+        }
+      },
     }
   )
 );

@@ -170,6 +170,7 @@ async def list_prescriptions(
 
 
 @router.post("", status_code=201)
+@router.post("/", status_code=201, include_in_schema=False)
 async def create_prescription(
     rx: PrescriptionCreate, current_user: dict = Depends(get_current_user)
 ):

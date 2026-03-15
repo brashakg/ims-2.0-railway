@@ -91,6 +91,19 @@ export function POSLayout() {
   const [discountItem, setDiscountItem] = useState<CartLineItem | null>(null);
   const [showReceipt, setShowReceipt] = useState(false);
   const [holdConfirm, setHoldConfirm] = useState(false);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  // Safe reset: clear zustand + all local state
+  const handleFullReset = () => {
+    setShowPrescriptionModal(false);
+    setShowNewPrescription(false);
+    setShowLensModal(false);
+    setDiscountItem(null);
+    setShowReceipt(false);
+    setHoldConfirm(false);
+    setErrorMsg(null);
+    handleFullReset();
+  };
 
   useEffect(() => {
     if (user && !store.salesperson_id) {
@@ -106,19 +119,19 @@ export function POSLayout() {
   useEffect(() => {
     const handle = (e: KeyboardEvent) => {
       if (e.key === 'F2') { e.preventDefault(); store.setStep('products'); }
-      if (e.key === 'F9' && store.cart.length > 0) { e.preventDefault(); store.setStep('payment'); }
+      if (e.key === 'F9' && (store.cart || []).length > 0) { e.preventDefault(); store.setStep('payment'); }
       if (e.key === 'Escape' && store.current_step !== 'customer') { e.preventDefault(); store.prevStep(); }
     };
     window.addEventListener('keydown', handle);
     return () => window.removeEventListener('keydown', handle);
-  }, [store.cart.length, store.current_step]);
+  }, [(store.cart || []).length, store.current_step]);
 
   const canProceed = useMemo(() => {
     switch (store.current_step) {
       case 'customer': return !!store.customer;
       case 'prescription': return !!store.prescription;
-      case 'products': return store.cart.length > 0;
-      case 'review': return store.cart.length > 0;
+      case 'products': return (store.cart || []).length > 0;
+      case 'review': return (store.cart || []).length > 0;
       case 'payment': return store.getBalance() <= 0;
       default: return true;
     }
@@ -132,7 +145,7 @@ export function POSLayout() {
         store_id: store.store_id,
         order_type: store.sale_type,
         salesperson_id: store.salesperson_id,
-        items: store.cart.map(item => ({
+        items: (store.cart || []).map(item => ({
           item_type: mapCategory(item.category),
           product_id: item.product_id,
           quantity: item.quantity,
@@ -170,14 +183,14 @@ export function POSLayout() {
           </div>
         </div>
         <div className="flex items-center gap-2">
-          <button onClick={() => setHoldConfirm(true)} disabled={store.cart.length === 0}
+          <button onClick={() => setHoldConfirm(true)} disabled={(store.cart || []).length === 0}
             className="flex items-center gap-1.5 px-3 py-2 text-sm bg-amber-50 text-amber-700 border border-amber-200 rounded-lg hover:bg-amber-100 disabled:opacity-40">
             <Pause className="w-4 h-4" /> Hold
           </button>
           <button className="flex items-center gap-1.5 px-3 py-2 text-sm bg-gray-100 text-gray-600 rounded-lg hover:bg-gray-200">
             <Play className="w-4 h-4" /> Recall
           </button>
-          <button onClick={() => { if (window.confirm('Start new transaction?')) store.resetTransaction(); }}
+          <button onClick={() => { if (window.confirm('Start new transaction?')) handleFullReset(); }}
             className="flex items-center gap-1.5 px-3 py-2 text-sm bg-gray-100 text-gray-600 rounded-lg hover:bg-gray-200">
             <RotateCcw className="w-4 h-4" /> New
           </button>
@@ -223,7 +236,7 @@ export function POSLayout() {
           {store.current_step === 'complete' && <StepComplete onPrint={() => setShowReceipt(true)} />}
         </div>
 
-        {(['products', 'review', 'prescription'] as POSStep[]).includes(store.current_step) && store.cart.length > 0 && (
+        {(['products', 'review', 'prescription'] as POSStep[]).includes(store.current_step) && (store.cart || []).length > 0 && (
           <div className="hidden tablet:flex w-80 laptop:w-96 border-l border-gray-200 bg-white flex-col">
             <CartSidebar />
           </div>
@@ -238,9 +251,9 @@ export function POSLayout() {
               <ChevronLeft className="w-4 h-4" /> Back
             </button>
           )}
-          {store.cart.length > 0 && (
+          {(store.cart || []).length > 0 && (
             <div className="text-sm text-gray-500">
-              <span className="font-semibold text-gray-900">{store.cart.length}</span> items · <span className="font-semibold text-gray-900 ml-1">₹{store.getGrandTotal().toLocaleString('en-IN')}</span>
+              <span className="font-semibold text-gray-900">{(store.cart || []).length}</span> items · <span className="font-semibold text-gray-900 ml-1">₹{store.getGrandTotal().toLocaleString('en-IN')}</span>
             </div>
           )}
         </div>
@@ -267,11 +280,19 @@ export function POSLayout() {
           <div className="bg-white rounded-xl shadow-2xl w-full max-w-2xl max-h-[90vh] overflow-y-auto">
             <div className="p-4 border-b border-gray-200 flex items-center justify-between">
               <h3 className="font-semibold text-gray-900">New Prescription</h3>
-              <button onClick={() => setShowNewPrescription(false)} className="p-1 hover:bg-gray-100 rounded"><X className="w-5 h-5" /></button>
+              <button onClick={() => { setShowNewPrescription(false); setErrorMsg(null); }} className="p-1 hover:bg-gray-100 rounded"><X className="w-5 h-5" /></button>
             </div>
+            {errorMsg && (
+              <div className="mx-4 mt-4 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700 flex items-start gap-2">
+                <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />
+                <div><p className="font-medium">Failed to save prescription</p><p className="text-xs mt-0.5">{errorMsg}</p></div>
+                <button onClick={() => setErrorMsg(null)} className="ml-auto text-red-400 hover:text-red-600"><X className="w-4 h-4" /></button>
+              </div>
+            )}
             <div className="p-4">
               <PrescriptionForm
                 onSubmit={async (rxData) => {
+                  setErrorMsg(null);
                   try {
                     // Determine source and optometrist
                     const isOptometrist = user?.roles?.includes('OPTOMETRIST');
@@ -301,18 +322,18 @@ export function POSLayout() {
                         createdAt: new Date().toISOString(),
                         updatedAt: new Date().toISOString(),
                       } as Prescription);
+                      setErrorMsg(null);
                       setShowNewPrescription(false);
                     } else {
-                      alert('Prescription saved but no ID returned. Please try selecting from existing.');
-                      setShowNewPrescription(false);
+                      setErrorMsg('Prescription saved but no ID returned. Try selecting from existing prescriptions.');
                     }
                   } catch (err) {
-                    const msg = err instanceof Error ? err.message : 'Unknown error';
-                    alert('Failed to save prescription: ' + msg);
-                    // Don't close modal — let user retry
+                    const msg = err instanceof Error ? err.message : String(err);
+                    setErrorMsg(msg || 'Network error — check your connection and try again');
+                    console.error('Prescription save error:', err);
                   }
                 }}
-                onCancel={() => setShowNewPrescription(false)}
+                onCancel={() => { setShowNewPrescription(false); setErrorMsg(null); }}
               />
             </div>
           </div>
@@ -334,7 +355,7 @@ export function POSLayout() {
           onClose={() => setDiscountItem(null)} />
       )}
       {showReceipt && (
-        <ReceiptPreview billData={{ bill_number: store.order_number, subtotal: store.getSubtotal(), gst_amount: store.getGrandTotal() - store.getSubtotal(), discount_amount: store.getTotalDiscount(), total_amount: store.getGrandTotal(), payment_method: store.payments.map(p => p.method).join(' + ') }}
+        <ReceiptPreview billData={{ bill_number: store.order_number, subtotal: store.getSubtotal(), gst_amount: store.getGrandTotal() - store.getSubtotal(), discount_amount: store.getTotalDiscount(), total_amount: store.getGrandTotal(), payment_method: (store.payments || []).map(p => p.method).join(' + ') }}
           selectedCustomer={store.customer} cartItems={store.cart as any} onClose={() => setShowReceipt(false)} />
       )}
       {holdConfirm && (
@@ -548,7 +569,7 @@ function StepProducts({ onOpenLensModal }: { onOpenLensModal: () => void }) {
         <div className="grid grid-cols-2 tablet:grid-cols-3 laptop:grid-cols-4 gap-3">
           {(products as any[]).map((product: any) => {
             const mrp = product.mrp || 0; const offer = product.offer_price || mrp; const hasDiscount = offer < mrp;
-            const inCart = store.cart.some(i => i.product_id === (product.product_id || product._id));
+            const inCart = (store.cart || []).some(i => i.product_id === (product.product_id || product._id));
             return (
               <button key={product.product_id || product._id} onClick={() => handleAddProduct(product)} disabled={inCart}
                 className={`bg-white rounded-xl border text-left p-3 transition-all hover:shadow-md ${inCart ? 'border-green-300 bg-green-50 opacity-70' : 'border-gray-200 hover:border-bv-gold-300'}`}>
@@ -601,7 +622,7 @@ function StepReview({ onOpenDiscount }: { onOpenDiscount: (item: CartLineItem) =
             <tr><th className="text-left px-4 py-2">Item</th><th className="text-center px-2 py-2">Qty</th><th className="text-right px-2 py-2">MRP</th><th className="text-right px-2 py-2">Price</th><th className="text-right px-2 py-2">Disc</th><th className="text-right px-4 py-2">Total</th><th className="w-8"></th></tr>
           </thead>
           <tbody>
-            {store.cart.map(item => (
+            {(store.cart || []).map(item => (
               <tr key={item.id} className="border-t border-gray-100">
                 <td className="px-4 py-3">
                   <p className="font-medium text-gray-900">{item.name}</p>
@@ -708,8 +729,8 @@ function StepPayment() {
         </div>
       )}
 
-      {store.payments.length > 0 && <div className="space-y-2">
-        {store.payments.map((p, i) => (
+      {(store.payments || []).length > 0 && <div className="space-y-2">
+        {(store.payments || []).map((p, i) => (
           <div key={i} className="flex items-center justify-between bg-green-50 border border-green-200 rounded-lg px-4 py-2 text-sm">
             <div className="flex items-center gap-2"><CheckCircle className="w-4 h-4 text-green-500" /><span className="font-medium">{p.method}</span>{p.reference && <span className="text-gray-500">({p.reference})</span>}</div>
             <div className="flex items-center gap-2"><span className="font-semibold">₹{p.amount.toLocaleString('en-IN')}</span><button onClick={() => store.removePayment(i)} className="text-gray-400 hover:text-red-500"><X className="w-4 h-4" /></button></div>
@@ -733,7 +754,7 @@ function StepComplete({ onPrint }: { onPrint: () => void }) {
       <div><h2 className="text-2xl font-bold text-gray-900">Order Created!</h2><p className="text-gray-500 mt-1">Order #{store.order_number}</p></div>
       <div className="bg-white border border-gray-200 rounded-xl p-4 text-left space-y-2 text-sm">
         <div className="flex justify-between"><span className="text-gray-500">Customer</span><span className="font-medium">{store.customer?.name}</span></div>
-        <div className="flex justify-between"><span className="text-gray-500">Items</span><span className="font-medium">{store.cart.length}</span></div>
+        <div className="flex justify-between"><span className="text-gray-500">Items</span><span className="font-medium">{(store.cart || []).length}</span></div>
         <div className="flex justify-between"><span className="text-gray-500">Total</span><span className="font-bold text-lg">₹{store.getGrandTotal().toLocaleString('en-IN')}</span></div>
         <div className="flex justify-between"><span className="text-gray-500">Paid</span><span className="font-medium text-green-600">₹{store.getTotalPaid().toLocaleString('en-IN')}</span></div>
         {store.getBalance() > 0 && <div className="flex justify-between"><span className="text-gray-500">Balance due</span><span className="font-medium text-red-600">₹{store.getBalance().toLocaleString('en-IN')}</span></div>}
@@ -754,9 +775,9 @@ function CartSidebar() {
   const store = usePOSStore();
   return (
     <div className="flex flex-col h-full">
-      <div className="px-4 py-3 border-b border-gray-200"><h3 className="font-semibold text-gray-900 flex items-center gap-2"><ShoppingCart className="w-4 h-4" /> Cart ({store.cart.length})</h3></div>
+      <div className="px-4 py-3 border-b border-gray-200"><h3 className="font-semibold text-gray-900 flex items-center gap-2"><ShoppingCart className="w-4 h-4" /> Cart ({(store.cart || []).length})</h3></div>
       <div className="flex-1 overflow-y-auto p-3 space-y-2">
-        {store.cart.map(item => (
+        {(store.cart || []).map(item => (
           <div key={item.id} className="bg-gray-50 rounded-lg p-3">
             <div className="flex items-start justify-between">
               <div className="flex-1 min-w-0"><p className="text-sm font-medium text-gray-900 truncate">{item.name}</p><p className="text-xs text-gray-500">{item.brand}</p>
