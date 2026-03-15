@@ -106,7 +106,7 @@ export function POSLayout() {
     setShowReceipt(false);
     setHoldConfirm(false);
     setErrorMsg(null);
-    handleFullReset();
+    store.resetTransaction();
   };
 
   useEffect(() => {
@@ -410,8 +410,8 @@ export function POSLayout() {
           onClose={() => setDiscountItem(null)} />
       )}
       {showReceipt && (
-        <ReceiptPreview billData={{ bill_number: store.order_number, subtotal: store.getSubtotal(), gst_amount: store.getGrandTotal() - store.getSubtotal(), discount_amount: store.getTotalDiscount(), total_amount: store.getGrandTotal(), payment_method: (store.payments || []).map(p => p.method).join(' + ') }}
-          selectedCustomer={store.customer} cartItems={store.cart as any} onClose={() => setShowReceipt(false)} />
+        <ReceiptPreview billData={{ bill_number: store.order_number || 'N/A', subtotal: store.getSubtotal(), gst_amount: store.getGrandTotal() - store.getSubtotal(), discount_amount: store.getTotalDiscount(), total_amount: store.getGrandTotal(), payment_method: (store.payments || []).map(p => p.method).join(' + ') || 'N/A' }}
+          selectedCustomer={store.customer || { name: 'Walk-in', phone: '' }} cartItems={(store.cart || []) as any} onClose={() => setShowReceipt(false)} />
       )}
       {holdConfirm && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
