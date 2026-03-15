@@ -95,7 +95,69 @@ export function POSLayout() {
   const [discountItem, setDiscountItem] = useState<CartLineItem | null>(null);
   const [showReceipt, setShowReceipt] = useState(false);
   const [holdConfirm, setHoldConfirm] = useState(false);
+  const [showRecallPanel, setShowRecallPanel] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  // Held bills from localStorage
+  const getHeldBills = (): Array<{ id: string; customer: string; items: number; total: number; heldAt: string; state: any }> => {
+    try { return JSON.parse(localStorage.getItem('ims-held-bills') || '[]'); } catch { return []; }
+  };
+
+  const holdCurrentBill = () => {
+    const bills = getHeldBills();
+    bills.push({
+      id: `hold-${Date.now()}`,
+      customer: store.customer?.name || 'Walk-in',
+      items: (store.cart || []).length,
+      total: store.getGrandTotal(),
+      heldAt: new Date().toISOString(),
+      state: {
+        sale_type: store.sale_type,
+        customer: store.customer,
+        patient: store.patient,
+        prescription: store.prescription,
+        cart: store.cart,
+        cart_note: store.cart_note,
+        payments: store.payments,
+        is_advance_payment: store.is_advance_payment,
+      },
+    });
+    localStorage.setItem('ims-held-bills', JSON.stringify(bills));
+    store.resetTransaction();
+    setHoldConfirm(false);
+  };
+
+  const recallBill = (billId: string) => {
+    const bills = getHeldBills();
+    const bill = bills.find(b => b.id === billId);
+    if (!bill) return;
+    // Restore state
+    const s = bill.state;
+    if (s.customer) store.setCustomer(s.customer);
+    if (s.patient) store.setPatient(s.patient);
+    if (s.prescription) store.setPrescription(s.prescription);
+    if (s.sale_type) store.setSaleType(s.sale_type);
+    if (s.cart_note) store.setCartNote(s.cart_note);
+    if (s.is_advance_payment) store.setAdvancePayment(s.is_advance_payment);
+    // Restore cart items
+    for (const item of (s.cart || [])) {
+      store.addToCart(item);
+    }
+    // Restore payments
+    for (const p of (s.payments || [])) {
+      store.addPayment(p);
+    }
+    // Remove from held bills
+    localStorage.setItem('ims-held-bills', JSON.stringify(bills.filter(b => b.id !== billId)));
+    setShowRecallPanel(false);
+    // Navigate to products or review
+    if ((s.cart || []).length > 0) store.setStep('review');
+  };
+
+  const deleteHeldBill = (billId: string) => {
+    const bills = getHeldBills().filter(b => b.id !== billId);
+    localStorage.setItem('ims-held-bills', JSON.stringify(bills));
+  };
 
   // Safe reset: clear zustand + all local state
   const handleFullReset = () => {
@@ -105,6 +167,7 @@ export function POSLayout() {
     setDiscountItem(null);
     setShowReceipt(false);
     setHoldConfirm(false);
+    setShowRecallPanel(false);
     setErrorMsg(null);
     store.resetTransaction();
   };
@@ -231,8 +294,9 @@ export function POSLayout() {
             className="flex items-center gap-1.5 px-3 py-2 text-sm bg-amber-50 text-amber-700 border border-amber-200 rounded-lg hover:bg-amber-100 disabled:opacity-40">
             <Pause className="w-4 h-4" /> Hold
           </button>
-          <button className="flex items-center gap-1.5 px-3 py-2 text-sm bg-gray-100 text-gray-600 rounded-lg hover:bg-gray-200">
+          <button className="flex items-center gap-1.5 px-3 py-2 text-sm bg-gray-100 text-gray-600 rounded-lg hover:bg-gray-200 relative" onClick={() => setShowRecallPanel(true)}>
             <Play className="w-4 h-4" /> Recall
+            {getHeldBills().length > 0 && <span className="absolute -top-1 -right-1 w-4 h-4 bg-amber-500 text-white text-[10px] rounded-full flex items-center justify-center">{getHeldBills().length}</span>}
           </button>
           <button onClick={() => { if (window.confirm('Start new transaction?')) handleFullReset(); }}
             className="flex items-center gap-1.5 px-3 py-2 text-sm bg-gray-100 text-gray-600 rounded-lg hover:bg-gray-200">
@@ -404,7 +468,7 @@ export function POSLayout() {
           }} />
       )}
       {discountItem && (
-        <DiscountModal item={{ product_id: discountItem.product_id, name: discountItem.name, sku: discountItem.sku, unit_price: discountItem.unit_price, quantity: discountItem.quantity, category: discountItem.category, brand: discountItem.brand, discount_percent: discountItem.discount_percent } as any}
+        <DiscountModal item={{ product_id: discountItem.product_id, name: discountItem.name, sku: discountItem.sku, unitPrice: discountItem.unit_price, quantity: discountItem.quantity, category: discountItem.category, brand: discountItem.brand, discountPercent: discountItem.discount_percent } as any}
           maxDiscountPercent={user?.discountCap || 10}
           onApply={(pct) => { store.applyDiscount(discountItem.id, pct); setDiscountItem(null); }}
           onClose={() => setDiscountItem(null)} />
@@ -417,10 +481,40 @@ export function POSLayout() {
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
           <div className="bg-white rounded-xl p-6 max-w-sm">
             <h3 className="font-semibold text-gray-900 mb-2">Hold this bill?</h3>
-            <p className="text-sm text-gray-500 mb-4">Cart will be saved for recall later.</p>
+            <p className="text-sm text-gray-500 mb-1">{store.customer?.name || 'Walk-in'} · {(store.cart || []).length} items · ₹{Math.round(store.getGrandTotal()).toLocaleString('en-IN')}</p>
+            <p className="text-xs text-gray-400 mb-4">Cart will be saved and can be recalled later.</p>
             <div className="flex gap-2">
               <button onClick={() => setHoldConfirm(false)} className="flex-1 px-4 py-2 border border-gray-300 rounded-lg text-sm">Cancel</button>
-              <button onClick={() => setHoldConfirm(false)} className="flex-1 px-4 py-2 bg-amber-500 text-white rounded-lg text-sm font-semibold">Hold Bill</button>
+              <button onClick={holdCurrentBill} className="flex-1 px-4 py-2 bg-amber-500 text-white rounded-lg text-sm font-semibold">Hold Bill</button>
+            </div>
+          </div>
+        </div>
+      )}
+      {showRecallPanel && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-xl shadow-2xl w-full max-w-md max-h-[70vh] overflow-y-auto">
+            <div className="p-4 border-b border-gray-200 flex items-center justify-between">
+              <h3 className="font-semibold text-gray-900">Held Bills ({getHeldBills().length})</h3>
+              <button onClick={() => setShowRecallPanel(false)} className="p-1 hover:bg-gray-100 rounded"><X className="w-5 h-5" /></button>
+            </div>
+            <div className="p-4 space-y-2">
+              {getHeldBills().length === 0 ? (
+                <p className="text-sm text-gray-500 text-center py-8">No held bills</p>
+              ) : getHeldBills().map(bill => (
+                <div key={bill.id} className="bg-amber-50 border border-amber-200 rounded-lg p-3 flex items-center justify-between">
+                  <div>
+                    <p className="font-medium text-sm text-gray-900">{bill.customer}</p>
+                    <p className="text-xs text-gray-500">{bill.items} items · ₹{Math.round(bill.total).toLocaleString('en-IN')}</p>
+                    <p className="text-[10px] text-gray-400">{new Date(bill.heldAt).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}</p>
+                  </div>
+                  <div className="flex gap-2">
+                    <button onClick={() => { deleteHeldBill(bill.id); setShowRecallPanel(false); setTimeout(() => setShowRecallPanel(true), 50); }}
+                      className="text-xs text-red-500 hover:text-red-700 px-2 py-1">Delete</button>
+                    <button onClick={() => recallBill(bill.id)}
+                      className="text-xs bg-bv-gold-500 text-white px-3 py-1 rounded font-semibold hover:bg-bv-gold-600">Recall</button>
+                  </div>
+                </div>
+              ))}
             </div>
           </div>
         </div>
@@ -551,15 +645,16 @@ function StepCustomer() {
       {showCreate && (
         <div className="bg-white border border-gray-200 rounded-xl p-4 space-y-3">
           <h4 className="font-semibold text-gray-900 text-sm">New Customer</h4>
-          <input placeholder="Full name *" value={newCust.name} onChange={(e) => setNewCust(p => ({ ...p, name: e.target.value }))} className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" />
-          <input placeholder="Phone number (10 digits) *" value={newCust.phone} onChange={(e) => setNewCust(p => ({ ...p, phone: e.target.value.replace(/\D/g, '').slice(0, 10) }))} className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" />
-          <input placeholder="Email (optional)" value={newCust.email} onChange={(e) => setNewCust(p => ({ ...p, email: e.target.value }))} className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" />
+          <input placeholder="Full name *" value={newCust.name} onChange={(e) => { setNewCust(p => ({ ...p, name: e.target.value })); setCustError(null); }} className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" />
+          <input placeholder="Phone number (10 digits) *" value={newCust.phone} onChange={(e) => { setNewCust(p => ({ ...p, phone: e.target.value.replace(/\D/g, '').slice(0, 10) })); setCustError(null); }} className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" />
+          <input placeholder="Email (optional)" type="email" value={newCust.email} onChange={(e) => { setNewCust(p => ({ ...p, email: e.target.value })); setCustError(null); }} className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" />
           {custError && <p className="text-xs text-red-600 bg-red-50 px-2 py-1 rounded">{custError}</p>}
           <div className="flex gap-2">
             <button onClick={() => { setShowCreate(false); setCustError(null); }} className="px-4 py-2 text-sm border border-gray-300 rounded-lg">Cancel</button>
             <button onClick={async () => {
               if (!newCust.name.trim()) { setCustError('Name is required'); return; }
               if (!newCust.phone || newCust.phone.length !== 10) { setCustError('Valid 10-digit phone required'); return; }
+              if (newCust.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(newCust.email)) { setCustError('Invalid email format'); return; }
               setCustError(null);
               try {
                 const r = await customerApi.createCustomer({ name: newCust.name.trim(), mobile: newCust.phone, email: newCust.email || undefined, customer_type: 'B2C' } as any);
@@ -768,7 +863,11 @@ function StepProducts({ onOpenLensModal }: { onOpenLensModal: () => void }) {
         </div>
       )}
       {!isLoading && (products as any[]).length === 0 && (
-        <div className="text-center py-12 text-gray-400"><Package className="w-12 h-12 mx-auto mb-2 opacity-50" /><p className="text-sm">No products found</p></div>
+        <div className="text-center py-12 text-gray-400">
+          <Package className="w-12 h-12 mx-auto mb-2 opacity-50" />
+          <p className="text-sm">No products found</p>
+          {categoryFilter && debouncedSearch && <p className="text-xs mt-1">Search is filtered to <span className="font-medium">{categoryFilter.replace(/_/g, ' ')}</span>. <button onClick={() => setCategoryFilter('')} className="text-bv-gold-600 hover:underline">Search all categories</button></p>}
+        </div>
       )}
     </div>
   );
@@ -795,7 +894,8 @@ function StepReview({ onOpenDiscount }: { onOpenDiscount: (item: CartLineItem) =
     return { totalTax: Math.round(totalTax * 100) / 100, rates };
   }, [store.cart]);
 
-  const total = Math.round((subtotal - discount + taxBreakdown.totalTax) * 100) / 100;
+  // Use store's getGrandTotal (includes GST) for consistency with Payment step
+  const total = store.getGrandTotal();
 
   return (
     <div className="max-w-3xl mx-auto space-y-4">
@@ -905,19 +1005,29 @@ function StepPayment() {
   return (
     <div className="max-w-xl mx-auto space-y-4">
       <div className="bg-white border border-gray-200 rounded-xl p-6 text-center">
-        <p className="text-sm text-gray-500 mb-1">{store.is_advance_payment ? 'Advance Due' : 'Total Due'}</p>
-        <p className="text-4xl font-bold text-gray-900">₹{total.toLocaleString('en-IN')}</p>
+        <p className="text-sm text-gray-500 mb-1">{store.is_advance_payment ? 'Advance Due' : 'Total Due (incl. GST)'}</p>
+        <p className="text-4xl font-bold text-gray-900">₹{Math.round(total).toLocaleString('en-IN')}</p>
         {paid > 0 && <div className="mt-3 flex justify-center gap-6 text-sm">
-          <span className="text-green-600">Paid: ₹{paid.toLocaleString('en-IN')}</span>
-          <span className={balance > 0 ? 'text-red-600 font-semibold' : 'text-green-600 font-semibold'}>Balance: ₹{Math.max(0, balance).toLocaleString('en-IN')}</span>
+          <span className="text-green-600">Paid: ₹{Math.round(paid).toLocaleString('en-IN')}</span>
+          <span className={balance > 0 ? 'text-red-600 font-semibold' : 'text-green-600 font-semibold'}>Balance: ₹{Math.round(Math.max(0, balance)).toLocaleString('en-IN')}</span>
         </div>}
       </div>
 
       <div className="grid grid-cols-4 gap-2">
         {methods.map(m => (
-          <button key={m.id} onClick={() => store.addPayment({ method: m.id, amount: balance > 0 ? balance : total })} disabled={balance <= 0}
+          <button key={m.id} onClick={() => {
+            if (m.id === 'CASH') {
+              // Cash: add directly, no ref needed
+              store.addPayment({ method: m.id, amount: Math.round((balance > 0 ? balance : total) * 100) / 100 });
+            } else {
+              // Non-cash: populate split payment fields so user must enter ref
+              setPayMethod(m.id);
+              setPayAmount(String(Math.round((balance > 0 ? balance : total) * 100) / 100));
+              setPayRef('');
+            }
+          }} disabled={balance <= 0}
             className={`flex flex-col items-center gap-1 p-3 rounded-xl border-2 transition-all ${balance <= 0 ? 'opacity-40 border-gray-200' : 'border-gray-200 hover:border-bv-gold-300 hover:bg-bv-gold-50'}`}>
-            <m.icon className="w-6 h-6 text-gray-600" /><span className="text-xs font-medium">Full {m.label}</span>
+            <m.icon className="w-6 h-6 text-gray-600" /><span className="text-xs font-medium">{m.id === 'CASH' ? 'Full Cash' : `${m.label} →`}</span>
           </button>
         ))}
       </div>
@@ -929,8 +1039,10 @@ function StepPayment() {
             {methods.map(m => <button key={m.id} onClick={() => setPayMethod(m.id)} className={`px-3 py-1.5 rounded-lg text-xs font-medium ${payMethod === m.id ? 'bg-bv-gold-500 text-white' : 'bg-gray-100 text-gray-600'}`}>{m.label}</button>)}
           </div>
           <div className="flex gap-2">
-            <input type="number" min="1" max={balance} step="0.01" value={payAmount} onChange={(e) => setPayAmount(e.target.value)} 
-              placeholder={`Amount (max ₹${Math.ceil(balance).toLocaleString('en-IN')})`} className="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm" />
+            <input type="number" min="1" max={balance} step="0.01" value={payAmount} 
+              onChange={(e) => setPayAmount(e.target.value)}
+              onFocus={(e) => e.target.select()} 
+              placeholder={`Amount (max ₹${Math.round(balance).toLocaleString('en-IN')})`} className="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm" />
             {payMethod !== 'CASH' && <input value={payRef} onChange={(e) => setPayRef(e.target.value)} placeholder={payMethod === 'UPI' ? 'UPI Txn ID *' : payMethod === 'CARD' ? 'Approval code' : 'Reference'} className="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm" />}
             <button onClick={() => {
               const a = parseFloat(payAmount);
@@ -954,7 +1066,7 @@ function StepPayment() {
         {(store.payments || []).map((p, i) => (
           <div key={i} className="flex items-center justify-between bg-green-50 border border-green-200 rounded-lg px-4 py-2 text-sm">
             <div className="flex items-center gap-2"><CheckCircle className="w-4 h-4 text-green-500" /><span className="font-medium">{p.method}</span>{p.reference && <span className="text-gray-500">({p.reference})</span>}</div>
-            <div className="flex items-center gap-2"><span className="font-semibold">₹{p.amount.toLocaleString('en-IN')}</span><button onClick={() => store.removePayment(i)} className="text-gray-400 hover:text-red-500"><X className="w-4 h-4" /></button></div>
+            <div className="flex items-center gap-2"><span className="font-semibold">₹{Math.round(p.amount * 100 / 100).toLocaleString('en-IN')}</span><button onClick={() => store.removePayment(i)} className="text-gray-400 hover:text-red-500"><X className="w-4 h-4" /></button></div>
           </div>
         ))}
       </div>}
