@@ -14,7 +14,7 @@ import POSLayout from '../../components/pos/POSLayout';
  */
 export function POSPage() {
   return (
-    <ProtectedRoute allowedRoles={['ADMIN', 'STORE_MANAGER', 'CASHIER', 'SALES_CASHIER']}>
+    <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'CASHIER', 'SALES_CASHIER', 'SALES_STAFF', 'OPTOMETRIST']}>
       <POSLayout />
     </ProtectedRoute>
   );
