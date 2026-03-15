@@ -229,9 +229,15 @@ function ModuleCard({
 // ============================================================================
 
 export default function DashboardPage() {
-  const { user } = useAuth();
+  const { user, hasRole } = useAuth();
   const { setActiveModule, getModulesForRole, goToDashboard } = useModule();
   const navigate = useNavigate();
+
+  // Role-based visibility
+  const isHQ = hasRole(['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'ACCOUNTANT']);
+  const isManager = hasRole(['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER']);
+  const isStaff = hasRole(['SALES_STAFF', 'SALES_CASHIER']);
+  const isOptometrist = hasRole(['OPTOMETRIST']);
 
   // Clear active module when dashboard loads
   useEffect(() => {
@@ -292,6 +298,8 @@ export default function DashboardPage() {
               <h1 className="text-3xl font-bold text-gray-900">Dashboard</h1>
               <p className="text-sm text-gray-500 mt-1">
                 Welcome back, {user?.name}
+                <span className="ml-2 px-2 py-0.5 bg-bv-gold-100 text-bv-gold-700 rounded text-xs font-medium">{(user?.activeRole || '').replace(/_/g, ' ')}</span>
+                {user?.activeStoreId && <span className="ml-1 text-gray-400">· {user.activeStoreId}</span>}
               </p>
             </div>
             <button
@@ -343,6 +351,37 @@ export default function DashboardPage() {
               />
             ))}
           </div>
+        </div>
+
+        {/* Role-Specific Actions */}
+        {(isStaff || isOptometrist) && (
+          <div className="mb-8 grid grid-cols-2 tablet:grid-cols-4 gap-3">
+            {isStaff && <>
+              <button onClick={() => navigate('/pos')} className="bg-bv-gold-50 border border-bv-gold-200 rounded-lg p-4 text-left hover:shadow-md transition-all">
+                <ShoppingCart className="w-6 h-6 text-bv-gold-600 mb-2" />
+                <p className="text-sm font-semibold text-gray-900">New Sale</p>
+                <p className="text-[10px] text-gray-500">Start a transaction</p>
+              </button>
+              <button onClick={() => navigate('/orders')} className="bg-blue-50 border border-blue-200 rounded-lg p-4 text-left hover:shadow-md transition-all">
+                <Activity className="w-6 h-6 text-blue-600 mb-2" />
+                <p className="text-sm font-semibold text-gray-900">My Orders</p>
+                <p className="text-[10px] text-gray-500">Track pending orders</p>
+              </button>
+            </>}
+            {isOptometrist && <>
+              <button onClick={() => navigate('/clinical')} className="bg-purple-50 border border-purple-200 rounded-lg p-4 text-left hover:shadow-md transition-all">
+                <Activity className="w-6 h-6 text-purple-600 mb-2" />
+                <p className="text-sm font-semibold text-gray-900">Eye Test Queue</p>
+                <p className="text-[10px] text-gray-500">Patients waiting</p>
+              </button>
+              <button onClick={() => navigate('/clinical/prescriptions')} className="bg-green-50 border border-green-200 rounded-lg p-4 text-left hover:shadow-md transition-all">
+                <Activity className="w-6 h-6 text-green-600 mb-2" />
+                <p className="text-sm font-semibold text-gray-900">Prescriptions</p>
+                <p className="text-[10px] text-gray-500">View & create Rx</p>
+              </button>
+            </>}
+          </div>
+        )}
 
         {/* KPI Grid - Section 1: Revenue & Transactions */}
         <div className="mb-8">
@@ -386,7 +425,8 @@ export default function DashboardPage() {
           </div>
         </div>
 
-        {/* KPI Grid - Section 2: Margins & Profitability */}
+        {/* KPI Grid - Section 2: Margins & Profitability (HQ only) */}
+        {isHQ && (
         <div className="mb-8">
           <h2 className="text-lg font-semibold text-gray-900 mb-4">
             Margins & Profitability
@@ -424,8 +464,10 @@ export default function DashboardPage() {
             />
           </div>
         </div>
+        )}
 
-        {/* KPI Grid - Section 3: Inventory & Operations */}
+        {/* KPI Grid - Section 3: Inventory & Operations (Manager+) */}
+        {isManager && (
         <div className="mb-8">
           <h2 className="text-lg font-semibold text-gray-900 mb-4">
             Inventory & Operations
@@ -463,9 +505,10 @@ export default function DashboardPage() {
             />
           </div>
         </div>
+        )}
 
-        {/* Top Products */}
-        {kpis?.top_products && kpis.top_products.length > 0 && (
+        {/* Top Products (Manager+) */}
+        {isManager && kpis?.top_products && kpis.top_products.length > 0 && (
           <div className="mb-8">
             <h2 className="text-lg font-semibold text-gray-900 mb-4">
               Top 5 Selling Products
@@ -513,7 +556,6 @@ export default function DashboardPage() {
           </div>
         )}
 
-        </div>
       </div>
     </div>
   );

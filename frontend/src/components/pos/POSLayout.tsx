@@ -17,7 +17,7 @@ import { useAuth } from '../../context/AuthContext';
 import { usePOSStore } from '../../stores/posStore';
 import type { SaleType, POSStep, CartLineItem } from '../../stores/posStore';
 import { useProducts, useCustomerSearch } from '../../hooks/usePOSQueries';
-import { customerApi, orderApi, prescriptionApi, productApi } from '../../services/api';
+import { customerApi, orderApi, prescriptionApi, productApi, workshopApi } from '../../services/api';
 import type { Prescription } from '../../types';
 
 // Backwards-compatible type exports (used by BillingEngine, CartPanel)
@@ -267,6 +267,37 @@ export function POSLayout() {
           }
         }
         store.setOrderResult(result.order_id, result.order_number);
+
+        // Auto-create workshop job for prescription orders
+        if (store.sale_type === 'prescription_order' && store.prescription) {
+          try {
+            const frameItem = (store.cart || []).find(i => i.category === 'FRAMES' || i.category === 'SUNGLASSES');
+            const lensItem = (store.cart || []).find(i => i.category === 'RX_LENSES' || i.lens_details);
+            const expectedDate = new Date();
+            expectedDate.setDate(expectedDate.getDate() + 5); // Default 5 business days
+
+            await workshopApi.createJob({
+              order_id: result.order_id,
+              frame_details: frameItem ? {
+                product_id: frameItem.product_id,
+                name: frameItem.name,
+                sku: frameItem.sku,
+                brand: frameItem.brand,
+              } : {},
+              lens_details: lensItem?.lens_details || {
+                product_id: lensItem?.product_id,
+                name: lensItem?.name,
+              },
+              prescription_id: store.prescription.id || '',
+              fitting_instructions: (store.cart || []).filter(i => i.notes).map(i => `${i.name}: ${i.notes}`).join('; ') || undefined,
+              special_notes: store.cart_note || undefined,
+              expected_date: expectedDate.toISOString().split('T')[0],
+            });
+          } catch {
+            console.warn('Workshop job auto-create failed — can be created manually');
+          }
+        }
+
         store.setStep('complete');
       } else {
         setErrorMsg('Order created but no ID returned. Check order list.');

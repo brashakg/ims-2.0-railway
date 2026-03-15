@@ -471,6 +471,19 @@ export const workshopApi = {
     const response = await api.post(`/workshop/jobs/${jobId}/assign`, { staff_id: staffId });
     return response.data;
   },
+
+  createJob: async (data: {
+    order_id: string;
+    frame_details: Record<string, any>;
+    lens_details: Record<string, any>;
+    prescription_id: string;
+    fitting_instructions?: string;
+    special_notes?: string;
+    expected_date: string;
+  }) => {
+    const response = await api.post('/workshop/jobs', data);
+    return response.data;
+  },
 };
 
 // ============================================================================
