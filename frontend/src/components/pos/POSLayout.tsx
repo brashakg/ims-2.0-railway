@@ -273,21 +273,44 @@ export function POSLayout() {
               <PrescriptionForm
                 onSubmit={async (rxData) => {
                   try {
+                    // Determine source and optometrist
+                    const isOptometrist = user?.roles?.includes('OPTOMETRIST');
+                    const source = isOptometrist ? 'TESTED_AT_STORE' : 'FROM_DOCTOR';
+                    
                     const result = await prescriptionApi.createPrescription({
                       patient_id: store.patient?.id || store.customer?.id,
                       customer_id: store.customer?.id,
-                      source: 'TESTED_AT_STORE',
-                      optometrist_id: user?.id,
-                      right_eye: { sph: String(rxData.sph_od || 0), cyl: String(rxData.cyl_od || 0), axis: rxData.axis_od, add: String(rxData.add_od || 0) },
-                      left_eye: { sph: String(rxData.sph_os || 0), cyl: String(rxData.cyl_os || 0), axis: rxData.axis_os, add: String(rxData.add_os || 0) },
+                      source,
+                      optometrist_id: isOptometrist ? user?.id : (user?.id || 'admin-override'),
+                      validity_months: 12,
+                      right_eye: { sph: String(rxData.sph_od || 0), cyl: String(rxData.cyl_od || 0), axis: rxData.axis_od || 180, add: String(rxData.add_od || 0) },
+                      left_eye: { sph: String(rxData.sph_os || 0), cyl: String(rxData.cyl_os || 0), axis: rxData.axis_os || 180, add: String(rxData.add_os || 0) },
+                      remarks: rxData.doctor_name ? `Dr. ${rxData.doctor_name}` : undefined,
                     } as any);
+
                     if (result?.prescription_id) {
-                      store.setPrescription({ id: result.prescription_id, patientId: store.patient?.id || '', customerId: store.customer?.id || '', storeId: store.store_id,
-                        testDate: new Date().toISOString(), rightEye: { sph: rxData.sph_od, cyl: rxData.cyl_od, axis: rxData.axis_od, add: rxData.add_od } as any,
-                        leftEye: { sph: rxData.sph_os, cyl: rxData.cyl_os, axis: rxData.axis_os, add: rxData.add_os } as any, status: 'COMPLETED', createdAt: new Date().toISOString() } as Prescription);
+                      store.setPrescription({
+                        id: result.prescription_id,
+                        patientId: store.patient?.id || '',
+                        customerId: store.customer?.id || '',
+                        storeId: store.store_id,
+                        testDate: new Date().toISOString(),
+                        rightEye: { sphere: rxData.sph_od || 0, cylinder: rxData.cyl_od || null, axis: rxData.axis_od || null, add: rxData.add_od || null, pd: rxData.pd_od || 0 },
+                        leftEye: { sphere: rxData.sph_os || 0, cylinder: rxData.cyl_os || null, axis: rxData.axis_os || null, add: rxData.add_os || null, pd: rxData.pd_os || 0 },
+                        status: 'COMPLETED',
+                        createdAt: new Date().toISOString(),
+                        updatedAt: new Date().toISOString(),
+                      } as Prescription);
+                      setShowNewPrescription(false);
+                    } else {
+                      alert('Prescription saved but no ID returned. Please try selecting from existing.');
+                      setShowNewPrescription(false);
                     }
-                  } catch { /* error */ }
-                  setShowNewPrescription(false);
+                  } catch (err) {
+                    const msg = err instanceof Error ? err.message : 'Unknown error';
+                    alert('Failed to save prescription: ' + msg);
+                    // Don't close modal — let user retry
+                  }
                 }}
                 onCancel={() => setShowNewPrescription(false)}
               />

@@ -169,7 +169,7 @@ async def list_prescriptions(
     return {"prescriptions": [], "total": 0}
 
 
-@router.post("/", status_code=201)
+@router.post("", status_code=201)
 async def create_prescription(
     rx: PrescriptionCreate, current_user: dict = Depends(get_current_user)
 ):
@@ -178,10 +178,15 @@ async def create_prescription(
     customer_repo = get_customer_repository()
 
     # Validate optometrist requirement
-    if rx.source == "TESTED_AT_STORE" and not rx.optometrist_id:
+    user_roles = current_user.get("roles", [])
+    is_admin = any(r in user_roles for r in ["SUPERADMIN", "ADMIN", "STORE_MANAGER"])
+    if rx.source == "TESTED_AT_STORE" and not rx.optometrist_id and not is_admin:
         raise HTTPException(
             status_code=400, detail="Optometrist required for store tests"
         )
+    # If FROM_DOCTOR, optometrist_id is optional
+    if rx.source == "FROM_DOCTOR" and not rx.optometrist_id:
+        rx.optometrist_id = current_user.get("user_id", "external-doctor")
 
     # Validate axis is whole number
     if rx.right_eye.axis and not isinstance(rx.right_eye.axis, int):
