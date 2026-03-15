@@ -2,58 +2,94 @@
 // IMS 2.0 - GST Constants and Utilities
 // ============================================================================
 // HSN codes, tax rates, and GST utilities for Indian optical retail
+// Updated to GST 2.0 (effective September 22, 2025) — 12% slab eliminated
+// Ref: 56th GST Council Meeting, CBIC notifications
 
 export interface HSNCode {
   code: string;
   description: string;
   gstRate: number;
-  category: 'LENS' | 'FRAME' | 'SPECTACLE' | 'CONTACT_LENS' | 'SUNGLASSES' | 'ACCESSORIES';
+  category: 'LENS' | 'FRAME' | 'SPECTACLE' | 'CONTACT_LENS' | 'SUNGLASSES' | 'ACCESSORIES' | 'WATCH' | 'SMARTWATCH' | 'SERVICE';
 }
 
-// HSN Codes for Optical Products (as per Indian GST)
+// ============================================================================
+// GST 2.0 Rate Structure (Sep 22, 2025):
+//   0% — Life-saving medical equipment
+//   5% — Essential: corrective lenses, frames, spectacles, contact lenses
+//  18% — Standard: sunglasses, watches, accessories, services
+//  40% — Luxury/sin goods (not applicable to optical)
+// ============================================================================
+
+// HSN Codes for Optical & Lifestyle Products (GST 2.0)
 export const HSN_CODES: Record<string, HSNCode> = {
-  // Chapter 90: Optical, photographic, cinematographic apparatus
+  // Chapter 90: Optical instruments
   '900130': {
     code: '900130',
     description: 'Contact lenses',
-    gstRate: 12,
+    gstRate: 5,    // GST 2.0: reduced from 12%
     category: 'CONTACT_LENS',
   },
   '900140': {
     code: '900140',
     description: 'Spectacle lenses of glass',
-    gstRate: 12,
+    gstRate: 5,    // GST 2.0: reduced from 12%
     category: 'LENS',
   },
   '900150': {
     code: '900150',
-    description: 'Spectacle lenses of other materials',
-    gstRate: 12,
+    description: 'Spectacle lenses of other materials (CR-39, polycarbonate, hi-index)',
+    gstRate: 5,    // GST 2.0: reduced from 12%
     category: 'LENS',
   },
   '900311': {
     code: '900311',
     description: 'Frames of plastics for spectacles',
-    gstRate: 18,
+    gstRate: 5,    // GST 2.0: reduced from 18%
     category: 'FRAME',
   },
   '900319': {
     code: '900319',
-    description: 'Frames of other materials for spectacles',
-    gstRate: 18,
+    description: 'Frames of other materials (metal, titanium, wood)',
+    gstRate: 5,    // GST 2.0: reduced from 18%
     category: 'FRAME',
   },
-  '900400': {
-    code: '900400',
-    description: 'Spectacles, goggles and the like, corrective, protective or other',
-    gstRate: 12,
-    category: 'SPECTACLE',
+  '900410': {
+    code: '900410',
+    description: 'Sunglasses',
+    gstRate: 18,   // Unchanged — non-corrective eyewear
+    category: 'SUNGLASSES',
   },
   '900490': {
     code: '900490',
-    description: 'Sunglasses',
+    description: 'Corrective spectacles, goggles and the like',
+    gstRate: 5,    // GST 2.0: reduced from 12%
+    category: 'SPECTACLE',
+  },
+  // Chapter 91: Watches
+  '910111': {
+    code: '910111',
+    description: 'Wrist watches with mechanical display',
     gstRate: 18,
-    category: 'SUNGLASSES',
+    category: 'WATCH',
+  },
+  '910221': {
+    code: '910221',
+    description: 'Wrist watches, smart watches (electronic)',
+    gstRate: 18,
+    category: 'SMARTWATCH',
+  },
+  // Accessories & Services
+  '392690': {
+    code: '392690',
+    description: 'Spectacle cases, cleaning cloths, accessories (plastics)',
+    gstRate: 18,
+    category: 'ACCESSORIES',
+  },
+  '998599': {
+    code: '998599',
+    description: 'Optical services (fitting, repair, adjustment)',
+    gstRate: 18,
+    category: 'SERVICE',
   },
 };
 
@@ -61,61 +97,135 @@ export const HSN_CODES: Record<string, HSNCode> = {
 export const HSN_CODES_4_DIGIT: Record<string, HSNCode> = {
   '9001': {
     code: '9001',
-    description: 'Optical fibres and bundles; optical cables; lenses, prisms, mirrors',
-    gstRate: 12,
+    description: 'Optical lenses, prisms, mirrors',
+    gstRate: 5,    // GST 2.0
     category: 'LENS',
   },
   '9003': {
     code: '9003',
     description: 'Frames and mountings for spectacles',
-    gstRate: 18,
+    gstRate: 5,    // GST 2.0: reduced from 18%
     category: 'FRAME',
   },
   '9004': {
     code: '9004',
     description: 'Spectacles, goggles and the like',
-    gstRate: 12,
+    gstRate: 5,    // GST 2.0: corrective = 5%, sunglasses = 18%
     category: 'SPECTACLE',
   },
+  '9101': {
+    code: '9101',
+    description: 'Wrist watches',
+    gstRate: 18,
+    category: 'WATCH',
+  },
+  '9102': {
+    code: '9102',
+    description: 'Electronic watches, smart watches',
+    gstRate: 18,
+    category: 'SMARTWATCH',
+  },
 };
+
+// ============================================================================
+// Category → GST Rate mapping (used by POS for quick rate lookup)
+// ============================================================================
+export function getGSTRateByCategory(category: string): number {
+  switch (category?.toUpperCase()) {
+    case 'FRAMES':
+    case 'FRAME':
+    case 'EYEGLASS_FRAME':
+      return 5;
+    case 'RX_LENSES':
+    case 'LENS':
+    case 'EYEGLASS_LENS':
+    case 'OPTICAL_LENS':
+      return 5;
+    case 'CONTACT_LENSES':
+    case 'CONTACT_LENS':
+    case 'COLOUR_CONTACTS':
+      return 5;
+    case 'SPECTACLE':
+    case 'COMPLETE_SPECTACLE':
+      return 5;
+    case 'SUNGLASSES':
+      return 18;
+    case 'WRIST_WATCHES':
+    case 'WATCH':
+    case 'SMARTWATCHES':
+    case 'SMARTWATCH':
+      return 18;
+    case 'ACCESSORIES':
+    case 'SERVICE':
+    case 'SERVICES':
+      return 18;
+    default:
+      return 18; // Conservative default
+  }
+}
 
 // Get HSN code by product category
 export function getHSNByCategory(category: string, use6Digit: boolean = false): HSNCode | null {
   if (use6Digit) {
-    // Return 6-digit HSN codes
     switch (category.toUpperCase()) {
       case 'CONTACT_LENS':
+      case 'CONTACT_LENSES':
+      case 'COLOUR_CONTACTS':
         return HSN_CODES['900130'];
       case 'LENS':
+      case 'RX_LENSES':
+      case 'OPTICAL_LENS':
       case 'EYEGLASS_LENS':
-        return HSN_CODES['900140'];
+        return HSN_CODES['900150'];
       case 'FRAME':
+      case 'FRAMES':
       case 'EYEGLASS_FRAME':
         return HSN_CODES['900311'];
       case 'SPECTACLE':
       case 'COMPLETE_SPECTACLE':
-        return HSN_CODES['900400'];
-      case 'SUNGLASSES':
         return HSN_CODES['900490'];
+      case 'SUNGLASSES':
+        return HSN_CODES['900410'];
+      case 'WRIST_WATCHES':
+      case 'WATCH':
+        return HSN_CODES['910111'];
+      case 'SMARTWATCHES':
+      case 'SMARTWATCH':
+        return HSN_CODES['910221'];
+      case 'ACCESSORIES':
+        return HSN_CODES['392690'];
+      case 'SERVICE':
+      case 'SERVICES':
+        return HSN_CODES['998599'];
       default:
-        return HSN_CODES['900400']; // Default to spectacles
+        return HSN_CODES['900490']; // Default to corrective spectacles (5%)
     }
   } else {
-    // Return 4-digit HSN codes
     switch (category.toUpperCase()) {
       case 'CONTACT_LENS':
+      case 'CONTACT_LENSES':
+      case 'COLOUR_CONTACTS':
       case 'LENS':
+      case 'RX_LENSES':
+      case 'OPTICAL_LENS':
       case 'EYEGLASS_LENS':
         return HSN_CODES_4_DIGIT['9001'];
       case 'FRAME':
+      case 'FRAMES':
       case 'EYEGLASS_FRAME':
         return HSN_CODES_4_DIGIT['9003'];
       case 'SPECTACLE':
       case 'COMPLETE_SPECTACLE':
       case 'SUNGLASSES':
         return HSN_CODES_4_DIGIT['9004'];
+      case 'WRIST_WATCHES':
+      case 'WATCH':
+        return HSN_CODES_4_DIGIT['9101'];
+      case 'SMARTWATCHES':
+      case 'SMARTWATCH':
+        return HSN_CODES_4_DIGIT['9102'];
       default:
-        return HSN_CODES_4_DIGIT['9004']; // Default to spectacles
+        return HSN_CODES_4_DIGIT['9004'];
     }
   }
 }

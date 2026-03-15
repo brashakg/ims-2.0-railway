@@ -11,7 +11,7 @@ import {
   ShoppingCart, User, Eye, Package, CreditCard, CheckCircle,
   ChevronRight, ChevronLeft, Search, Plus, X,
   Pause, Play, Printer, RotateCcw, IndianRupee, AlertTriangle,
-  Glasses, Watch, Phone, FileText, Zap,
+  Glasses, Watch, Phone, FileText, Zap, Sparkles,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { usePOSStore } from '../../stores/posStore';
@@ -49,9 +49,12 @@ import { PrescriptionForm } from './PrescriptionForm';
 import { PrescriptionPanel } from './PrescriptionPanel';
 import { PrescriptionSelectModal } from './PrescriptionSelectModal';
 import { LensDetailsModal } from './LensDetailsModal';
+import { LensSuggestionPanel } from './LensSuggestionPanel';
 import { DiscountModal } from './DiscountModal';
 import { ReceiptPreview } from './ReceiptPreview';
 import { BarcodeScanner } from './BarcodeScanner';
+import { getGSTRateByCategory } from '../../constants/gst';
+import type { PrescriptionInput } from '../../utils/lensAutoSuggest';
 
 // ============================================================================
 // Constants
@@ -555,32 +558,91 @@ function StepPrescription({ onShowModal, onShowNew }: { onShowModal: () => void;
 // ============================================================================
 function StepProducts({ onOpenLensModal }: { onOpenLensModal: () => void }) {
   const store = usePOSStore();
-  const [searchQuery, setSearchQuery] = useState('');
+  const [debouncedSearch, setDebouncedSearch] = useState('');
   const [categoryFilter, setCategoryFilter] = useState('');
-  const { data: products = [], isLoading } = useProducts({ search: searchQuery || undefined, category: categoryFilter || undefined });
+  const [showSuggestions, setShowSuggestions] = useState(true);
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const { data: products = [], isLoading } = useProducts({ search: debouncedSearch || undefined, category: categoryFilter || undefined });
   const categories = ['FRAMES', 'SUNGLASSES', 'RX_LENSES', 'CONTACT_LENSES', 'WRIST_WATCHES', 'SMARTWATCHES', 'ACCESSORIES'];
+
+  // Debounce product search — 300ms (INP fix)
+  const handleProductSearch = (val: string) => {
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(() => {
+      startTransition(() => setDebouncedSearch(val));
+    }, 300);
+  };
+
+  // Build prescription input for lens suggestions (optional panel)
+  const rxInput: PrescriptionInput | null = store.prescription ? {
+    rightSphere: store.prescription.rightEye?.sphere ?? null,
+    rightCylinder: store.prescription.rightEye?.cylinder ?? null,
+    rightAxis: store.prescription.rightEye?.axis ?? null,
+    rightAdd: store.prescription.rightEye?.add ?? null,
+    leftSphere: store.prescription.leftEye?.sphere ?? null,
+    leftCylinder: store.prescription.leftEye?.cylinder ?? null,
+    leftAxis: store.prescription.leftEye?.axis ?? null,
+    leftAdd: store.prescription.leftEye?.add ?? null,
+  } : null;
 
   const handleAddProduct = (product: any) => {
     const mrp = product.mrp || 0;
     const offerPrice = product.offer_price || product.offerPrice || mrp;
     if (offerPrice > mrp && mrp > 0) { alert('BLOCKED: Offer Price > MRP. Contact HQ.'); return; }
-    store.addToCart({ product_id: product.product_id || product._id || product.id, name: product.name, sku: product.sku, barcode: product.barcode, brand: product.brand, category: product.category,
-      unit_price: offerPrice || mrp, mrp, offer_price: offerPrice !== mrp ? offerPrice : undefined, quantity: 1,
-      is_optical: ['FRAMES', 'RX_LENSES', 'CONTACT_LENSES', 'COLOUR_CONTACTS'].includes(product.category), image_url: product.image_url });
+    startTransition(() => {
+      store.addToCart({ product_id: product.product_id || product._id || product.id, name: product.name, sku: product.sku, barcode: product.barcode, brand: product.brand, category: product.category,
+        unit_price: offerPrice || mrp, mrp, offer_price: offerPrice !== mrp ? offerPrice : undefined, quantity: 1,
+        is_optical: ['FRAMES', 'RX_LENSES', 'CONTACT_LENSES', 'COLOUR_CONTACTS'].includes(product.category), image_url: product.image_url });
+    });
   };
 
   return (
     <div className="space-y-4">
       <div className="flex gap-3">
         <div className="flex-1">
-          <BarcodeScanner onScan={(b) => setSearchQuery(b)} onManualSearch={(q) => setSearchQuery(q)} placeholder="Scan barcode or search products..." autoFocus />
+          <BarcodeScanner onScan={(b) => setDebouncedSearch(b)} onManualSearch={(q) => handleProductSearch(q)} placeholder="Scan barcode or search products..." autoFocus />
         </div>
         {store.sale_type === 'prescription_order' && store.prescription && (
           <button onClick={onOpenLensModal} className="flex items-center gap-2 px-4 py-2 bg-purple-50 text-purple-700 border border-purple-200 rounded-lg hover:bg-purple-100 whitespace-nowrap text-sm font-medium">
-            <Eye className="w-4 h-4" /> Add Lens
+            <Eye className="w-4 h-4" /> Add Lens (Manual)
           </button>
         )}
       </div>
+
+      {/* Optional Lens Suggestions — only for Rx orders, dismissible */}
+      {store.sale_type === 'prescription_order' && rxInput && showSuggestions && (
+        <div className="relative">
+          <div className="flex items-center justify-between mb-2">
+            <div className="flex items-center gap-2 text-sm font-medium text-purple-700">
+              <Sparkles className="w-4 h-4" /> Recommended Lenses (based on Rx)
+              <span className="text-xs text-gray-400 font-normal">— suggestions only, staff can override</span>
+            </div>
+            <button onClick={() => setShowSuggestions(false)} className="text-xs text-gray-400 hover:text-gray-600 px-2 py-1">Dismiss</button>
+          </div>
+          <LensSuggestionPanel
+            prescriptionInput={rxInput}
+            onSelect={(suggestion) => {
+              // Add suggested lens to cart — staff can still modify or remove
+              store.addToCart({
+                product_id: `lens-sug-${Date.now()}`,
+                name: `${suggestion.lensType} — ${suggestion.material}`,
+                sku: `RX-${suggestion.material.replace(/[^a-zA-Z0-9]/g, '').toUpperCase()}-${Date.now().toString(36)}`,
+                category: 'RX_LENSES',
+                unit_price: suggestion.priceRange.min,
+                mrp: suggestion.priceRange.max,
+                quantity: 2,
+                is_optical: true,
+                linked_prescription_id: store.prescription?.id,
+                lens_details: {
+                  type: suggestion.lensType,
+                  material: suggestion.material,
+                  coatings: suggestion.coatings,
+                },
+              });
+            }}
+          />
+        </div>
+      )}
 
       <div className="flex gap-2 overflow-x-auto pb-1">
         <button onClick={() => setCategoryFilter('')} className={`px-3 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap ${!categoryFilter ? 'bg-bv-gold-500 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}>All</button>
@@ -642,8 +704,22 @@ function StepProducts({ onOpenLensModal }: { onOpenLensModal: () => void }) {
 function StepReview({ onOpenDiscount }: { onOpenDiscount: (item: CartLineItem) => void }) {
   const store = usePOSStore();
   const subtotal = store.getSubtotal(); const discount = store.getTotalDiscount();
-  const taxable = subtotal - discount; const gst = Math.round(taxable * 0.18 * 100) / 100;
-  const cgst = Math.round(gst / 2 * 100) / 100; const total = Math.round((taxable + gst) * 100) / 100;
+
+  // Calculate GST per item based on product category (GST 2.0 rates)
+  const taxBreakdown = useMemo(() => {
+    let totalTax = 0;
+    const rates: Record<number, number> = {}; // rate → taxable amount
+    for (const item of (store.cart || [])) {
+      const rate = getGSTRateByCategory(item.category);
+      const itemTaxable = item.line_total;
+      const itemTax = Math.round(itemTaxable * (rate / 100) * 100) / 100;
+      totalTax += itemTax;
+      rates[rate] = (rates[rate] || 0) + itemTaxable;
+    }
+    return { totalTax: Math.round(totalTax * 100) / 100, rates };
+  }, [store.cart]);
+
+  const total = Math.round((subtotal - discount + taxBreakdown.totalTax) * 100) / 100;
 
   return (
     <div className="max-w-3xl mx-auto space-y-4">
@@ -658,10 +734,12 @@ function StepReview({ onOpenDiscount }: { onOpenDiscount: (item: CartLineItem) =
       <div className="bg-white border border-gray-200 rounded-xl overflow-hidden">
         <table className="w-full text-sm">
           <thead className="bg-gray-50 text-xs text-gray-500 uppercase">
-            <tr><th className="text-left px-4 py-2">Item</th><th className="text-center px-2 py-2">Qty</th><th className="text-right px-2 py-2">MRP</th><th className="text-right px-2 py-2">Price</th><th className="text-right px-2 py-2">Disc</th><th className="text-right px-4 py-2">Total</th><th className="w-8"></th></tr>
+            <tr><th className="text-left px-4 py-2">Item</th><th className="text-center px-2 py-2">Qty</th><th className="text-right px-2 py-2">MRP</th><th className="text-right px-2 py-2">Price</th><th className="text-right px-2 py-2">Disc</th><th className="text-center px-2 py-2">GST</th><th className="text-right px-4 py-2">Total</th><th className="w-8"></th></tr>
           </thead>
           <tbody>
-            {(store.cart || []).map(item => (
+            {(store.cart || []).map(item => {
+              const gstRate = getGSTRateByCategory(item.category);
+              return (
               <tr key={item.id} className="border-t border-gray-100">
                 <td className="px-4 py-3">
                   <p className="font-medium text-gray-900">{item.name}</p>
@@ -683,10 +761,12 @@ function StepReview({ onOpenDiscount }: { onOpenDiscount: (item: CartLineItem) =
                     {item.discount_percent > 0 ? `${item.discount_percent}%` : 'Add'}
                   </button>
                 </td>
+                <td className="text-center px-2 text-xs text-gray-500">{gstRate}%</td>
                 <td className="text-right px-4 font-semibold">₹{item.line_total.toLocaleString('en-IN')}</td>
                 <td><button onClick={() => store.removeFromCart(item.id)} className="p-1 text-gray-400 hover:text-red-500"><X className="w-4 h-4" /></button></td>
               </tr>
-            ))}
+              );
+            })}
           </tbody>
         </table>
       </div>
@@ -696,8 +776,17 @@ function StepReview({ onOpenDiscount }: { onOpenDiscount: (item: CartLineItem) =
       <div className="bg-white border border-gray-200 rounded-xl p-4 space-y-2 text-sm">
         <div className="flex justify-between"><span className="text-gray-500">Subtotal</span><span>₹{subtotal.toLocaleString('en-IN')}</span></div>
         {discount > 0 && <div className="flex justify-between text-green-600"><span>Discount</span><span>-₹{discount.toLocaleString('en-IN')}</span></div>}
-        <div className="flex justify-between text-gray-500"><span>CGST (9%)</span><span>₹{cgst.toLocaleString('en-IN')}</span></div>
-        <div className="flex justify-between text-gray-500"><span>SGST (9%)</span><span>₹{cgst.toLocaleString('en-IN')}</span></div>
+        {Object.entries(taxBreakdown.rates).map(([rate, taxable]) => {
+          const r = Number(rate);
+          const halfRate = r / 2;
+          const tax = Math.round((taxable as number) * (r / 100) * 100) / 100;
+          return (
+            <div key={rate} className="space-y-1">
+              <div className="flex justify-between text-gray-500"><span>CGST ({halfRate}%)</span><span>₹{(tax / 2).toLocaleString('en-IN')}</span></div>
+              <div className="flex justify-between text-gray-500"><span>SGST ({halfRate}%)</span><span>₹{(tax / 2).toLocaleString('en-IN')}</span></div>
+            </div>
+          );
+        })}
         <div className="border-t border-gray-200 pt-2 flex justify-between font-bold text-lg"><span>Grand Total</span><span className="text-bv-gold-600">₹{total.toLocaleString('en-IN')}</span></div>
       </div>
 
