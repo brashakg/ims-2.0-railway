@@ -146,10 +146,44 @@ export function OrdersPage() {
     }).format(amount);
   };
 
+  // Print order invoice in a new window
+  const printOrder = (order: Order) => {
+    const w = window.open('', '_blank', 'width=800,height=600');
+    if (!w) { toast.error('Pop-up blocked — allow pop-ups to print'); return; }
+    const items = (order.items || []).map((item: any, i: number) =>
+      `<tr><td>${i + 1}</td><td>${item.productName || item.product_name || item.name || 'Item'}</td><td>${item.quantity}</td><td>₹${Math.round(item.unitPrice || item.unit_price || 0).toLocaleString('en-IN')}</td><td>₹${Math.round(item.finalPrice || item.item_total || 0).toLocaleString('en-IN')}</td></tr>`
+    ).join('');
+    const payments = (order.payments || []).map((p: any) =>
+      `<div>${p.mode || p.method}: ₹${Math.round(p.amount).toLocaleString('en-IN')}${p.reference ? ` (${p.reference})` : ''}</div>`
+    ).join('');
+    w.document.write(`<!DOCTYPE html><html><head><title>Invoice ${order.orderNumber}</title>
+      <style>body{font-family:Arial,sans-serif;padding:20px;max-width:800px;margin:0 auto}
+      table{width:100%;border-collapse:collapse;margin:15px 0}th,td{border:1px solid #ddd;padding:8px;text-align:left}
+      th{background:#f5f5f5}.total{font-weight:bold;font-size:1.2em}.header{text-align:center;margin-bottom:20px}
+      .row{display:flex;justify-content:space-between;padding:4px 0}@media print{button{display:none}}</style></head><body>
+      <div class="header"><h2>Better Vision Opticals</h2><p>Tax Invoice</p></div>
+      <div class="row"><div><strong>Invoice:</strong> ${order.orderNumber}</div><div><strong>Date:</strong> ${new Date(order.createdAt || '').toLocaleDateString('en-IN')}</div></div>
+      <div class="row"><div><strong>Customer:</strong> ${order.customerName || 'Walk-in'}</div><div><strong>Phone:</strong> ${order.customerPhone || '-'}</div></div>
+      <table><thead><tr><th>#</th><th>Item</th><th>Qty</th><th>Rate</th><th>Amount</th></tr></thead><tbody>${items}</tbody></table>
+      <div style="text-align:right;margin-top:10px">
+      <div class="row"><span>Subtotal:</span><span>₹${Math.round(order.subtotal || 0).toLocaleString('en-IN')}</span></div>
+      ${(order.totalDiscount || 0) > 0 ? `<div class="row"><span>Discount:</span><span>-₹${Math.round(order.totalDiscount).toLocaleString('en-IN')}</span></div>` : ''}
+      <div class="row"><span>Tax:</span><span>₹${Math.round(order.taxAmount || 0).toLocaleString('en-IN')}</span></div>
+      <div class="row total"><span>Grand Total:</span><span>₹${Math.round(order.grandTotal || 0).toLocaleString('en-IN')}</span></div>
+      <div class="row"><span>Paid:</span><span>₹${Math.round(order.amountPaid || 0).toLocaleString('en-IN')}</span></div>
+      ${(order.balanceDue || 0) > 0 ? `<div class="row" style="color:red"><span>Balance Due:</span><span>₹${Math.round(order.balanceDue).toLocaleString('en-IN')}</span></div>` : ''}
+      </div>
+      ${payments ? `<div style="margin-top:15px"><strong>Payments:</strong>${payments}</div>` : ''}
+      <div style="margin-top:30px;text-align:center;color:#666;font-size:12px">Thank you for shopping with Better Vision Opticals</div>
+      <button onclick="window.print()" style="display:block;margin:20px auto;padding:10px 30px;background:#c5a55a;color:white;border:none;border-radius:8px;cursor:pointer;font-size:14px">Print</button>
+      </body></html>`);
+    w.document.close();
+  };
+
   // Open payment modal
   const openPaymentModal = (order: Order) => {
     setPaymentOrder(order);
-    setPaymentAmount(order.balanceDue?.toString() || '');
+    setPaymentAmount(String(Math.round((order.balanceDue || 0) * 100) / 100));
     setPaymentMethod('CASH');
     setPaymentReference('');
     setShowPaymentModal(true);
@@ -351,7 +385,7 @@ export function OrdersPage() {
                       View
                     </button>
                     <button
-                      onClick={(e) => { e.stopPropagation(); toast.info(`Printing invoice for ${order.orderNumber}`); }}
+                      onClick={(e) => { e.stopPropagation(); printOrder(order); }}
                       className="text-xs text-gray-500 hover:text-gray-700 flex items-center gap-1"
                     >
                       <Printer className="w-3 h-3" />
@@ -463,7 +497,7 @@ export function OrdersPage() {
 
                 <div className="flex gap-2 pt-4">
                   <button
-                    onClick={() => toast.info(`Printing invoice for ${selectedOrder.orderNumber}`)}
+                    onClick={() => printOrder(selectedOrder)}
                     className="btn-primary flex-1 flex items-center justify-center gap-2"
                   >
                     <Printer className="w-4 h-4" />
@@ -533,14 +567,14 @@ export function OrdersPage() {
                 <div className="flex gap-2 mt-2">
                   <button
                     type="button"
-                    onClick={() => setPaymentAmount((paymentOrder.balanceDue || 0).toString())}
+                    onClick={() => setPaymentAmount(String(Math.round((paymentOrder.balanceDue || 0) * 100) / 100))}
                     className="text-xs px-2 py-1 bg-gray-100 rounded hover:bg-gray-200"
                   >
                     Full Amount
                   </button>
                   <button
                     type="button"
-                    onClick={() => setPaymentAmount(((paymentOrder.balanceDue || 0) / 2).toString())}
+                    onClick={() => setPaymentAmount(String(Math.round((paymentOrder.balanceDue || 0) / 2 * 100) / 100))}
                     className="text-xs px-2 py-1 bg-gray-100 rounded hover:bg-gray-200"
                   >
                     50%

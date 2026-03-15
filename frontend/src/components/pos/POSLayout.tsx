@@ -70,7 +70,7 @@ const STEPS: { id: POSStep; label: string; icon: typeof User }[] = [
   { id: 'complete', label: 'Complete', icon: CheckCircle },
 ];
 
-const QUICK_STEPS: POSStep[] = ['customer', 'products', 'review', 'payment', 'complete'];
+const QUICK_STEPS: POSStep[] = ['customer', 'products', 'payment', 'complete'];
 
 function mapCategory(cat: string): string {
   const map: Record<string, string> = {
@@ -842,12 +842,23 @@ function StepProducts({ onOpenLensModal }: { onOpenLensModal: () => void }) {
           {(products as any[]).map((product: any) => {
             const mrp = product.mrp || 0; const offer = product.offer_price || mrp; const hasDiscount = offer < mrp;
             const inCart = (store.cart || []).some(i => i.product_id === (product.product_id || product._id));
+            const stock = product.stock ?? product.quantity ?? product.stock_available ?? null;
+            const isLowStock = stock !== null && stock > 0 && stock <= 3;
+            const isOutOfStock = stock !== null && stock <= 0;
             return (
-              <button key={product.product_id || product._id} onClick={() => handleAddProduct(product)} disabled={inCart}
-                className={`bg-white rounded-xl border text-left p-3 transition-all hover:shadow-md ${inCart ? 'border-green-300 bg-green-50 opacity-70' : 'border-gray-200 hover:border-bv-gold-300'}`}>
-                <div className="h-20 bg-gray-50 rounded-lg mb-2 flex items-center justify-center">
-                  {product.category === 'FRAMES' || product.category === 'SUNGLASSES' ? <Glasses className="w-8 h-8 text-gray-300" />
+              <button key={product.product_id || product._id} onClick={() => handleAddProduct(product)} disabled={inCart || isOutOfStock}
+                className={`bg-white rounded-xl border text-left p-3 transition-all hover:shadow-md ${
+                  isOutOfStock ? 'border-red-200 bg-red-50/30 opacity-60 cursor-not-allowed' :
+                  inCart ? 'border-green-300 bg-green-50 opacity-70' : 'border-gray-200 hover:border-bv-gold-300'}`}>
+                <div className="h-16 bg-gray-50 rounded-lg mb-2 flex items-center justify-center relative">
+                  {product.image_url ? <img src={product.image_url} alt="" className="h-14 w-auto object-contain" /> :
+                  product.category === 'FRAMES' || product.category === 'SUNGLASSES' ? <Glasses className="w-8 h-8 text-gray-300" />
                   : product.category?.includes('WATCH') ? <Watch className="w-8 h-8 text-gray-300" /> : <Package className="w-8 h-8 text-gray-300" />}
+                  {stock !== null && (
+                    <span className={`absolute top-1 right-1 text-[9px] px-1 py-0.5 rounded font-medium ${
+                      isOutOfStock ? 'bg-red-100 text-red-600' : isLowStock ? 'bg-amber-100 text-amber-700' : 'bg-green-50 text-green-600'
+                    }`}>{isOutOfStock ? 'Out' : isLowStock ? `${stock} left` : `${stock}`}</span>
+                  )}
                 </div>
                 <p className="text-xs font-semibold text-gray-900 truncate">{product.name}</p>
                 <p className="text-[10px] text-gray-500 truncate">{product.brand} · {product.sku}</p>
@@ -855,8 +866,8 @@ function StepProducts({ onOpenLensModal }: { onOpenLensModal: () => void }) {
                   <span className="text-sm font-bold text-gray-900">₹{offer.toLocaleString('en-IN')}</span>
                   {hasDiscount && <span className="text-[10px] text-gray-400 line-through">₹{mrp.toLocaleString('en-IN')}</span>}
                 </div>
-                {hasDiscount && <span className="inline-block mt-1 text-[9px] px-1.5 py-0.5 bg-amber-50 text-amber-600 rounded font-medium">No further discount</span>}
                 {inCart && <span className="inline-block mt-1 text-[10px] px-1.5 py-0.5 bg-green-100 text-green-700 rounded font-medium">In cart</span>}
+                {isOutOfStock && <span className="inline-block mt-1 text-[10px] px-1.5 py-0.5 bg-red-100 text-red-600 rounded font-medium">Out of stock</span>}
               </button>
             );
           })}
@@ -988,6 +999,44 @@ function StepReview({ onOpenDiscount }: { onOpenDiscount: (item: CartLineItem) =
 }
 
 // ============================================================================
+// Cash Change Calculator (used in StepPayment)
+// ============================================================================
+function CashChangeCalculator({ grandTotal }: { grandTotal: number; totalPaid: number }) {
+  const [cashTendered, setCashTendered] = useState('');
+  const tendered = parseFloat(cashTendered) || 0;
+  const change = tendered - grandTotal;
+  const quickAmounts = [
+    Math.ceil(grandTotal / 100) * 100,
+    Math.ceil(grandTotal / 500) * 500,
+    Math.ceil(grandTotal / 1000) * 1000,
+    Math.ceil(grandTotal / 2000) * 2000,
+  ].filter((v, i, a) => v >= grandTotal && a.indexOf(v) === i).slice(0, 3);
+
+  return (
+    <div className="bg-gray-50 border border-gray-200 rounded-xl p-4 space-y-3">
+      <p className="text-sm font-medium text-gray-700">Cash Tendered</p>
+      <div className="flex gap-2 items-center">
+        <span className="text-gray-400 text-lg">₹</span>
+        <input type="number" value={cashTendered} onChange={(e) => setCashTendered(e.target.value)}
+          onFocus={(e) => e.target.select()} placeholder={String(Math.round(grandTotal))}
+          className="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-lg font-semibold text-center" />
+      </div>
+      <div className="flex gap-2">
+        {quickAmounts.map(amt => (
+          <button key={amt} onClick={() => setCashTendered(String(amt))}
+            className="px-3 py-1 bg-white border border-gray-200 rounded-lg text-xs font-medium hover:bg-gray-100">₹{amt.toLocaleString('en-IN')}</button>
+        ))}
+      </div>
+      {tendered > 0 && (
+        <div className={`text-center py-2 rounded-lg font-bold text-lg ${change >= 0 ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-600'}`}>
+          {change >= 0 ? `Change: ₹${Math.round(change).toLocaleString('en-IN')}` : `Short: ₹${Math.round(Math.abs(change)).toLocaleString('en-IN')}`}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ============================================================================
 // STEP 5: Payment
 // ============================================================================
 function StepPayment() {
@@ -1070,6 +1119,11 @@ function StepPayment() {
           </div>
         ))}
       </div>}
+
+      {/* Cash change calculator — only if cash payment was added */}
+      {(store.payments || []).some(p => p.method === 'CASH') && balance <= 0 && (
+        <CashChangeCalculator grandTotal={total} totalPaid={paid} />
+      )}
 
       {balance <= 0 && <div className="bg-green-50 border border-green-200 rounded-lg p-4 text-center text-green-700 font-semibold">Payment complete — click "Complete Order" to finalize</div>}
     </div>
@@ -1222,7 +1276,10 @@ function CartSidebar() {
   const store = usePOSStore();
   return (
     <div className="flex flex-col h-full">
-      <div className="px-4 py-3 border-b border-gray-200"><h3 className="font-semibold text-gray-900 flex items-center gap-2"><ShoppingCart className="w-4 h-4" /> Cart ({(store.cart || []).length})</h3></div>
+      <div className="px-4 py-3 border-b border-gray-200">
+        <h3 className="font-semibold text-gray-900 flex items-center gap-2"><ShoppingCart className="w-4 h-4" /> Cart ({(store.cart || []).length})</h3>
+        {store.salesperson_name && <p className="text-[10px] text-gray-400 mt-0.5">Sales: {store.salesperson_name}</p>}
+      </div>
       <div className="flex-1 overflow-y-auto p-3 space-y-2">
         {(store.cart || []).map(item => (
           <div key={item.id} className="bg-gray-50 rounded-lg p-3">
@@ -1234,19 +1291,23 @@ function CartSidebar() {
             </div>
             <div className="flex items-center justify-between mt-2">
               <div className="flex items-center gap-1">
-                <button onClick={() => store.updateQuantity(item.id, item.quantity - 1)} className="w-6 h-6 rounded bg-white border text-xs">-</button>
-                <span className="w-6 text-center text-xs font-medium">{item.quantity}</span>
-                <button onClick={() => store.updateQuantity(item.id, item.quantity + 1)} className="w-6 h-6 rounded bg-white border text-xs">+</button>
+                <button onClick={() => store.updateQuantity(item.id, item.quantity - 1)} className="w-6 h-6 rounded bg-white border text-xs hover:bg-gray-100">-</button>
+                <input type="number" min="1" max="99" value={item.quantity}
+                  onChange={(e) => { const v = parseInt(e.target.value) || 1; store.updateQuantity(item.id, Math.max(1, Math.min(99, v))); }}
+                  onFocus={(e) => e.target.select()}
+                  className="w-10 text-center text-xs font-medium border border-gray-200 rounded px-1 py-0.5 [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none" />
+                <button onClick={() => store.updateQuantity(item.id, item.quantity + 1)} className="w-6 h-6 rounded bg-white border text-xs hover:bg-gray-100">+</button>
               </div>
-              <div className="text-right">{item.discount_percent > 0 && <span className="text-xs text-green-600 mr-1">-{item.discount_percent}%</span>}<span className="text-sm font-semibold">₹{item.line_total.toLocaleString('en-IN')}</span></div>
+              <div className="text-right">{item.discount_percent > 0 && <span className="text-xs text-green-600 mr-1">-{item.discount_percent}%</span>}<span className="text-sm font-semibold">₹{Math.round(item.line_total).toLocaleString('en-IN')}</span></div>
             </div>
           </div>
         ))}
       </div>
       <div className="border-t border-gray-200 p-4 space-y-1 text-sm">
-        <div className="flex justify-between text-gray-500"><span>Subtotal</span><span>₹{store.getSubtotal().toLocaleString('en-IN')}</span></div>
-        {store.getTotalDiscount() > 0 && <div className="flex justify-between text-green-600"><span>Discount</span><span>-₹{store.getTotalDiscount().toLocaleString('en-IN')}</span></div>}
-        <div className="flex justify-between font-bold text-base pt-1 border-t border-gray-200"><span>Total</span><span className="text-bv-gold-600">₹{store.getGrandTotal().toLocaleString('en-IN')}</span></div>
+        <div className="flex justify-between text-gray-500"><span>Subtotal</span><span>₹{Math.round(store.getSubtotal()).toLocaleString('en-IN')}</span></div>
+        {store.getTotalDiscount() > 0 && <div className="flex justify-between text-green-600"><span>Discount</span><span>-₹{Math.round(store.getTotalDiscount()).toLocaleString('en-IN')}</span></div>}
+        <div className="flex justify-between text-gray-500"><span>GST</span><span>₹{Math.round(store.getGrandTotal() - store.getSubtotal() + store.getTotalDiscount()).toLocaleString('en-IN')}</span></div>
+        <div className="flex justify-between font-bold text-base pt-1 border-t border-gray-200"><span>Total (incl. GST)</span><span className="text-bv-gold-600">₹{Math.round(store.getGrandTotal()).toLocaleString('en-IN')}</span></div>
       </div>
     </div>
   );
