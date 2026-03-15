@@ -31,28 +31,36 @@ def _norm_order(o: dict) -> dict:
         "store_id": o.get("store_id") or o.get("storeId", ""),
         "customer_id": o.get("customer_id") or o.get("customerId", ""),
         "created_at": o.get("created_at") or o.get("createdAt", ""),
-        "total_amount": float(o.get("total_amount") or o.get("grandTotal") or o.get("subtotal") or 0),
+        "total_amount": _safe_float(o.get("total_amount") or o.get("grandTotal") or o.get("subtotal")),
         "status": o.get("status") or o.get("orderStatus", ""),
         "items": [
             {
                 "product_id": it.get("product_id") or it.get("productId", ""),
                 "product_name": it.get("product_name") or it.get("productName", it.get("name", "Unknown")),
-                "quantity": int(it.get("quantity", 0) or 0),
-                "unit_price": float(it.get("unit_price") or it.get("unitPrice") or 0),
-                "total_amount": float(it.get("total_amount") or it.get("finalPrice") or it.get("unitPrice", 0)),
-                "cost_price": float(it.get("cost_price") or it.get("costPrice") or 0),
+                "quantity": _safe_int(it.get("quantity")),
+                "unit_price": _safe_float(it.get("unit_price") or it.get("unitPrice")),
+                "total_amount": _safe_float(it.get("total_amount") or it.get("finalPrice") or it.get("unitPrice")),
+                "cost_price": _safe_float(it.get("cost_price") or it.get("costPrice")),
                 "sku": it.get("sku", ""),
             }
             for it in (o.get("items") or [])
         ],
-        **{k: v for k, v in o.items() if k not in ("store_id", "storeId", "customer_id", "customerId",
-            "created_at", "createdAt", "total_amount", "grandTotal", "status", "orderStatus", "items")},
     }
 
 
 def _norm_orders(orders: list) -> list:
     """Normalize a list of orders"""
     return [_norm_order(o) for o in (orders or [])]
+
+
+def _filter_orders_by_date(orders: list, start: datetime, end: datetime) -> list:
+    """Safely filter orders by date range"""
+    result = []
+    for o in orders:
+        dt = _safe_parse_date(o.get("created_at", ""))
+        if dt and start <= dt <= end:
+            result.append(o)
+    return result
 
 # ============================================================================
 # Types
@@ -90,6 +98,32 @@ def get_date_range(period: str) -> tuple[datetime, datetime]:
     return start_date, end_date
 
 
+def _safe_parse_date(date_str: Any) -> Optional[datetime]:
+    """Safely parse a date string, return None if invalid"""
+    if not date_str or not isinstance(date_str, str):
+        return None
+    try:
+        return datetime.fromisoformat(date_str.replace("Z", "+00:00").replace("+00:00", ""))
+    except (ValueError, TypeError):
+        return None
+
+
+def _safe_int(val: Any) -> int:
+    """Safely convert to int"""
+    try:
+        return int(float(val)) if val else 0
+    except (ValueError, TypeError):
+        return 0
+
+
+def _safe_float(val: Any) -> float:
+    """Safely convert to float"""
+    try:
+        return float(val) if val else 0.0
+    except (ValueError, TypeError):
+        return 0.0
+
+
 def calculate_metrics_for_period(
     order_repo, store_id: Optional[str], start_date: datetime, end_date: datetime
 ) -> Dict[str, Any]:
@@ -111,11 +145,11 @@ def calculate_metrics_for_period(
     # Filter by date range
     orders = [
         o for o in all_orders
-        if start_date <= datetime.fromisoformat(o.get("created_at", "").replace("Z", "+00:00")) <= end_date
+        if _safe_parse_date(o.get("created_at")) is not None and start_date <= _safe_parse_date(o.get("created_at")) <= end_date
     ]
 
     # Calculate metrics
-    total_revenue = sum(float(o.get("total_amount", 0) or 0) for o in orders)
+    total_revenue = sum(_safe_float(o.get("total_amount")) for o in orders)
     total_orders = len(orders)
     avg_order_value = total_revenue / total_orders if total_orders > 0 else 0
 
@@ -125,10 +159,10 @@ def calculate_metrics_for_period(
 
     prev_orders = [
         o for o in all_orders
-        if prev_start <= datetime.fromisoformat(o.get("created_at", "").replace("Z", "+00:00")) <= prev_end
+        if _safe_parse_date(o.get("created_at")) is not None and prev_start <= _safe_parse_date(o.get("created_at")) <= prev_end
     ]
 
-    prev_revenue = sum(float(o.get("total_amount", 0) or 0) for o in prev_orders)
+    prev_revenue = sum(_safe_float(o.get("total_amount")) for o in prev_orders)
 
     revenue_change = (
         ((total_revenue - prev_revenue) / prev_revenue * 100) if prev_revenue > 0 else 0
@@ -179,10 +213,10 @@ async def get_dashboard_summary(
         inventory = stock_repo.find_many({"store_id": store_id}) if stock_repo is not None else []
 
         total_inventory_value = sum(
-            (i.get("quantity", 0) or 0) * (i.get("unit_price", 0) or 0) for i in inventory
+            _safe_int(i.get("quantity")) * _safe_float(i.get("unit_price")) for i in inventory
         )
-        low_stock_items = len([i for i in inventory if (i.get("quantity", 0) or 0) <= (i.get("reorder_point", 0) or 0)])
-        out_of_stock = len([i for i in inventory if (i.get("quantity", 0) or 0) == 0])
+        low_stock_items = len([i for i in inventory if _safe_int(i.get("quantity")) <= _safe_int(i.get("reorder_point"))])
+        out_of_stock = len([i for i in inventory if _safe_int(i.get("quantity")) == 0])
 
         # Get customer metrics
         customers = customer_repo.find_many({"$or": [{"store_id": store_id}, {"primary_store_id": store_id}]}) if customer_repo is not None else []
@@ -248,7 +282,7 @@ async def get_revenue_trends(
         # Get orders for the period
         current_period = [
             o for o in all_orders
-            if start_date <= datetime.fromisoformat(o.get("created_at", "").replace("Z", "+00:00")) <= end_date
+            if _safe_parse_date(o.get("created_at")) is not None and start_date <= _safe_parse_date(o.get("created_at")) <= end_date
         ]
 
         # Get previous period for YoY
@@ -257,14 +291,16 @@ async def get_revenue_trends(
 
         previous_period = [
             o for o in all_orders
-            if prev_start <= datetime.fromisoformat(o.get("created_at", "").replace("Z", "+00:00")) <= prev_end
+            if _safe_parse_date(o.get("created_at")) is not None and prev_start <= _safe_parse_date(o.get("created_at")) <= prev_end
         ]
 
         # Group by period
         def group_by_period(orders: List[Dict[str, Any]], period_type: str):
             grouped = {}
             for order in orders:
-                created_at = datetime.fromisoformat(order.get("created_at", "").replace("Z", "+00:00"))
+                created_at = _safe_parse_date(order.get("created_at"))
+                if not created_at:
+                    continue
                 if period_type == "daily":
                     key = created_at.date().isoformat()
                 elif period_type == "weekly":
@@ -275,7 +311,7 @@ async def get_revenue_trends(
 
                 if key not in grouped:
                     grouped[key] = 0
-                grouped[key] += float(order.get("total_amount", 0) or 0)
+                grouped[key] += _safe_float(order.get("total_amount"))
 
             return grouped
 
@@ -361,10 +397,10 @@ async def get_store_performance(
             orders = [
                 o for o in all_orders
                 if o.get("store_id") == store_id and
-                start_date <= datetime.fromisoformat(o.get("created_at", "").replace("Z", "+00:00")) <= end_date
+                _safe_parse_date(o.get("created_at")) is not None and start_date <= _safe_parse_date(o.get("created_at")) <= end_date
             ]
 
-            revenue = sum(float(o.get("total_amount", 0) or 0) for o in orders)
+            revenue = sum(_safe_float(o.get("total_amount")) for o in orders)
             order_count = len(orders)
             avg_order_value = revenue / order_count if order_count > 0 else 0
 
@@ -373,10 +409,10 @@ async def get_store_performance(
             prev_orders = [
                 o for o in all_orders
                 if o.get("store_id") == store_id and
-                prev_start <= datetime.fromisoformat(o.get("created_at", "").replace("Z", "+00:00")) <= start_date
+                _safe_parse_date(o.get("created_at")) is not None and prev_start <= _safe_parse_date(o.get("created_at")) <= start_date
             ]
 
-            prev_revenue = sum(float(o.get("total_amount", 0) or 0) for o in prev_orders)
+            prev_revenue = sum(_safe_float(o.get("total_amount")) for o in prev_orders)
             revenue_change = (
                 ((revenue - prev_revenue) / prev_revenue * 100)
                 if prev_revenue > 0
@@ -387,7 +423,7 @@ async def get_store_performance(
             inventory = stock_repo.find_many({"store_id": store_id}) if stock_repo is not None else []
 
             stock_value = sum(
-                (i.get("quantity", 0) or 0) * (i.get("unit_price", 0) or 0) for i in inventory
+                _safe_int(i.get("quantity")) * _safe_float(i.get("unit_price")) for i in inventory
             )
 
             # Staff count (placeholder - would come from actual staff table)
@@ -449,15 +485,15 @@ async def get_inventory_intelligence(
         # Categorize items
         low_stock = [
             i for i in inventory
-            if (i.get("quantity", 0) or 0) <= (i.get("reorder_point", 0) or 0)
+            if _safe_int(i.get("quantity")) <= _safe_int(i.get("reorder_point"))
         ]
         dead_stock = [
             i for i in inventory
-            if (i.get("quantity", 0) or 0) > (i.get("reorder_point", 0) or 0) * 2
+            if _safe_int(i.get("quantity")) > _safe_int(i.get("reorder_point")) * 2
         ]
         fast_moving = [
             i for i in inventory
-            if (i.get("quantity", 0) or 0) < (i.get("reorder_point", 0) or 0) / 2
+            if _safe_int(i.get("quantity")) < _safe_int(i.get("reorder_point")) / 2
         ]
 
         return {
@@ -473,7 +509,7 @@ async def get_inventory_intelligence(
                     for i in low_stock[:10]
                 ],
                 "total_value": sum(
-                    (i.get("quantity", 0) or 0) * (i.get("unit_price", 0) or 0) for i in low_stock
+                    _safe_int(i.get("quantity")) * _safe_float(i.get("unit_price")) for i in low_stock
                 ),
             },
             "dead_stock": {
@@ -483,12 +519,12 @@ async def get_inventory_intelligence(
                         "sku": i.get("sku", ""),
                         "name": i.get("name", ""),
                         "quantity": i.get("quantity", 0),
-                        "value": (i.get("quantity", 0) or 0) * (i.get("unit_price", 0) or 0),
+                        "value": _safe_int(i.get("quantity")) * _safe_float(i.get("unit_price")),
                     }
                     for i in dead_stock[:10]
                 ],
                 "total_value": sum(
-                    (i.get("quantity", 0) or 0) * (i.get("unit_price", 0) or 0) for i in dead_stock
+                    _safe_int(i.get("quantity")) * _safe_float(i.get("unit_price")) for i in dead_stock
                 ),
             },
             "fast_moving": {
@@ -506,7 +542,7 @@ async def get_inventory_intelligence(
             "total_inventory": {
                 "items": len(inventory),
                 "value": sum(
-                    (i.get("quantity", 0) or 0) * (i.get("unit_price", 0) or 0) for i in inventory
+                    _safe_int(i.get("quantity")) * _safe_float(i.get("unit_price")) for i in inventory
                 ),
             },
         }
@@ -554,7 +590,7 @@ async def get_customer_insights(
             if customer_id:
                 if customer_id not in customer_spend:
                     customer_spend[customer_id] = {"spend": 0, "orders": 0}
-                customer_spend[customer_id]["spend"] += float(order.get("total_amount", 0) or 0)
+                customer_spend[customer_id]["spend"] += _safe_float(order.get("total_amount"))
                 customer_spend[customer_id]["orders"] += 1
 
         top_customers = sorted(
@@ -618,10 +654,10 @@ async def get_enterprise_kpis(
         all_orders = _norm_orders(order_repo.find_by_store(store_id))
         current_orders = [
             o for o in all_orders
-            if start_date <= datetime.fromisoformat(o.get("created_at", "").replace("Z", "+00:00")) <= end_date
+            if _safe_parse_date(o.get("created_at")) is not None and start_date <= _safe_parse_date(o.get("created_at")) <= end_date
         ]
 
-        total_revenue = sum(float(o.get("total_amount", 0) or 0) for o in current_orders)
+        total_revenue = sum(_safe_float(o.get("total_amount")) for o in current_orders)
         total_orders_count = len(current_orders)
 
         # Previous period for comparison
@@ -629,15 +665,15 @@ async def get_enterprise_kpis(
         prev_end = start_date
         prev_orders = [
             o for o in all_orders
-            if prev_start <= datetime.fromisoformat(o.get("created_at", "").replace("Z", "+00:00")) <= prev_end
+            if _safe_parse_date(o.get("created_at")) is not None and prev_start <= _safe_parse_date(o.get("created_at")) <= prev_end
         ]
-        prev_revenue = sum(float(o.get("total_amount", 0) or 0) for o in prev_orders)
+        prev_revenue = sum(_safe_float(o.get("total_amount")) for o in prev_orders)
         revenue_change = (((total_revenue - prev_revenue) / prev_revenue * 100) if prev_revenue > 0 else 0)
 
         # ===== MARGIN METRICS =====
         # Calculate from order line items
         total_cost = sum(
-            float(item.get("quantity", 0) or 0) * float(item.get("cost_price", 0) or 0)
+            _safe_float(item.get("quantity")) * _safe_float(item.get("cost_price"))
             for order in current_orders
             for item in order.get("items", [])
         )
@@ -659,11 +695,11 @@ async def get_enterprise_kpis(
 
         # Calculate inventory turnover (COGS / Average Inventory Value)
         avg_inventory_value = sum(
-            (i.get("quantity", 0) or 0) * (i.get("unit_price", 0) or 0) for i in inventory
+            _safe_int(i.get("quantity")) * _safe_float(i.get("unit_price")) for i in inventory
         ) / 2  # Simplified average
         inventory_turnover = (total_cogs / avg_inventory_value) if avg_inventory_value > 0 else 0
 
-        low_stock_count = len([i for i in inventory if (i.get("quantity", 0) or 0) <= (i.get("reorder_point", 0) or 0)])
+        low_stock_count = len([i for i in inventory if _safe_int(i.get("quantity")) <= _safe_int(i.get("reorder_point"))])
 
         # ===== TOP 5 PRODUCTS =====
         product_sales = {}
@@ -677,8 +713,8 @@ async def get_enterprise_kpis(
                         "revenue": 0.0,
                         "sku": item.get("sku", "")
                     }
-                product_sales[product_id]["units"] += int(item.get("quantity", 0) or 0)
-                product_sales[product_id]["revenue"] += float(item.get("total_amount", 0) or 0)
+                product_sales[product_id]["units"] += _safe_int(item.get("quantity"))
+                product_sales[product_id]["revenue"] += _safe_float(item.get("total_amount"))
 
         top_products = sorted(
             [{"product_id": pid, **data} for pid, data in product_sales.items()],
@@ -705,7 +741,7 @@ async def get_enterprise_kpis(
             order_date_str = order.get("created_at", "")[:10]
             current_date_str = end_date.date().isoformat()
             if order_date_str == current_date_str:  # Same day for today
-                stores_by_id[order_store_id]["revenue"] += float(order.get("total_amount", 0) or 0)
+                stores_by_id[order_store_id]["revenue"] += _safe_float(order.get("total_amount"))
                 stores_by_id[order_store_id]["orders"] += 1
 
         store_comparison = sorted(
