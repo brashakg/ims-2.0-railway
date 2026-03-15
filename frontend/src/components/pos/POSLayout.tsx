@@ -6,7 +6,7 @@
 // Wires all 12 previously orphaned components + adds 6 missing features
 // Theme: Better Vision gold/white (matches app design system)
 
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef, startTransition } from 'react';
 import {
   ShoppingCart, User, Eye, Package, CreditCard, CheckCircle,
   ChevronRight, ChevronLeft, Search, Plus, X,
@@ -379,10 +379,30 @@ export function POSLayout() {
 // ============================================================================
 function StepCustomer() {
   const store = usePOSStore();
-  const [searchQuery, setSearchQuery] = useState('');
+  const [searchInput, setSearchInput] = useState('');
+  const [debouncedQuery, setDebouncedQuery] = useState('');
   const [showCreate, setShowCreate] = useState(false);
   const [newCust, setNewCust] = useState({ name: '', phone: '', email: '' });
-  const { data: searchResults = [], isLoading } = useCustomerSearch(searchQuery);
+  const { data: searchResults = [], isLoading } = useCustomerSearch(debouncedQuery);
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Debounce search — 300ms prevents keystroke-level API spam (INP fix)
+  const handleSearchInput = (val: string) => {
+    setSearchInput(val);
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(() => {
+      startTransition(() => setDebouncedQuery(val));
+    }, 300);
+  };
+
+  const isWalkin = store.customer?.id?.toString().startsWith('walkin-') || store.customer?.name === 'Walk-in Customer';
+
+  // Force quick_sale if walk-in is selected
+  useEffect(() => {
+    if (isWalkin && store.sale_type === 'prescription_order') {
+      store.setSaleType('quick_sale');
+    }
+  }, [isWalkin]);
 
   return (
     <div className="max-w-3xl mx-auto space-y-6">
@@ -390,17 +410,22 @@ function StepCustomer() {
         <label className="block text-sm font-medium text-gray-700 mb-2">Sale Type</label>
         <div className="grid grid-cols-2 gap-3">
           {([
-            { id: 'quick_sale' as SaleType, label: 'Quick Sale', desc: 'Frames, sunglasses, accessories — immediate delivery', icon: Zap },
-            { id: 'prescription_order' as SaleType, label: 'Prescription Order', desc: 'Frame + lens with Rx — workshop job created', icon: Eye },
+            { id: 'quick_sale' as SaleType, label: 'Quick Sale', desc: 'Frames, sunglasses, accessories — immediate delivery', icon: Zap, blocked: false },
+            { id: 'prescription_order' as SaleType, label: 'Prescription Order', desc: isWalkin ? 'Register customer first for Rx orders' : 'Frame + lens with Rx — workshop job created', icon: Eye, blocked: isWalkin },
           ]).map(opt => (
-            <button key={opt.id} onClick={() => store.setSaleType(opt.id)}
-              className={`flex items-start gap-3 p-4 rounded-xl border-2 text-left transition-all ${store.sale_type === opt.id ? 'border-bv-gold-500 bg-bv-gold-50' : 'border-gray-200 hover:border-gray-300'}`}>
-              <div className={`w-10 h-10 rounded-lg flex items-center justify-center flex-shrink-0 ${store.sale_type === opt.id ? 'bg-bv-gold-500 text-white' : 'bg-gray-100 text-gray-500'}`}>
+            <button key={opt.id} onClick={() => { if (!opt.blocked) store.setSaleType(opt.id); }}
+              title={opt.blocked ? 'Select a registered customer for prescription orders' : ''}
+              className={`flex items-start gap-3 p-4 rounded-xl border-2 text-left transition-all ${
+                opt.blocked ? 'border-gray-100 bg-gray-50 opacity-50 cursor-not-allowed' :
+                store.sale_type === opt.id ? 'border-bv-gold-500 bg-bv-gold-50' : 'border-gray-200 hover:border-gray-300'}`}>
+              <div className={`w-10 h-10 rounded-lg flex items-center justify-center flex-shrink-0 ${
+                opt.blocked ? 'bg-gray-200 text-gray-400' :
+                store.sale_type === opt.id ? 'bg-bv-gold-500 text-white' : 'bg-gray-100 text-gray-500'}`}>
                 <opt.icon className="w-5 h-5" />
               </div>
               <div>
-                <p className="font-semibold text-gray-900">{opt.label}</p>
-                <p className="text-xs text-gray-500 mt-0.5">{opt.desc}</p>
+                <p className={`font-semibold ${opt.blocked ? 'text-gray-400' : 'text-gray-900'}`}>{opt.label}</p>
+                <p className={`text-xs mt-0.5 ${opt.blocked ? 'text-red-400' : 'text-gray-500'}`}>{opt.desc}</p>
               </div>
             </button>
           ))}
@@ -410,12 +435,13 @@ function StepCustomer() {
       <div>
         <label className="block text-sm font-medium text-gray-700 mb-2">Customer</label>
         {store.customer ? (
-          <div className="bg-bv-gold-50 border border-bv-gold-200 rounded-xl p-4 flex items-center justify-between">
+          <div className={`${isWalkin ? 'bg-gray-50 border-gray-200' : 'bg-bv-gold-50 border-bv-gold-200'} border rounded-xl p-4 flex items-center justify-between`}>
             <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-full bg-bv-gold-500 text-white flex items-center justify-center font-semibold">{store.customer.name.charAt(0)}</div>
+              <div className={`w-10 h-10 rounded-full ${isWalkin ? 'bg-gray-400' : 'bg-bv-gold-500'} text-white flex items-center justify-center font-semibold`}>{store.customer.name?.charAt(0) || 'W'}</div>
               <div>
                 <p className="font-semibold text-gray-900">{store.customer.name}</p>
-                <p className="text-sm text-gray-500">{store.customer.phone}</p>
+                <p className="text-sm text-gray-500">{store.customer.phone || 'No phone'}</p>
+                {isWalkin && <p className="text-xs text-amber-600 mt-0.5">Walk-in — Quick Sale only</p>}
                 {store.patient && <p className="text-xs text-bv-gold-600 mt-0.5">Patient: {store.patient.name}</p>}
               </div>
             </div>
@@ -425,14 +451,19 @@ function StepCustomer() {
           <>
             <div className="relative">
               <Search className="absolute left-3 top-3 w-4 h-4 text-gray-400" />
-              <input type="text" value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} placeholder="Search by phone number or name..." autoFocus
+              <input type="text" value={searchInput} onChange={(e) => handleSearchInput(e.target.value)} placeholder="Search by phone number or name..." autoFocus
                 className="w-full pl-10 pr-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-bv-gold-500 focus:border-bv-gold-500" />
             </div>
-            {searchQuery.length >= 2 && (
+            {searchInput.length >= 2 && (
               <div className="mt-2 border border-gray-200 rounded-lg overflow-hidden">
                 {isLoading ? <div className="p-4 text-center text-sm text-gray-500">Searching...</div>
                 : (searchResults as any[]).length > 0 ? (searchResults as any[]).slice(0, 8).map((cust: any) => (
-                  <button key={cust.customer_id || cust._id || cust.id} onClick={() => { store.setCustomer({ ...cust, id: cust.customer_id || cust._id || cust.id } as any); setSearchQuery(''); }}
+                  <button key={cust.customer_id || cust._id || cust.id} onClick={() => {
+                    startTransition(() => {
+                      store.setCustomer({ ...cust, id: cust.customer_id || cust._id || cust.id } as any);
+                    });
+                    setSearchInput(''); setDebouncedQuery('');
+                  }}
                     className="w-full flex items-center gap-3 px-4 py-3 hover:bg-gray-50 border-b border-gray-100 last:border-0 text-left">
                     <div className="w-8 h-8 rounded-full bg-gray-200 flex items-center justify-center text-sm font-medium text-gray-600">{cust.name?.charAt(0)}</div>
                     <div className="flex-1 min-w-0">
@@ -451,11 +482,11 @@ function StepCustomer() {
                   const r = await customerApi.createCustomer({ name: 'Walk-in Customer', mobile: '0000000000', customer_type: 'B2C' } as any);
                   store.setCustomer({ id: r?.customer_id || r?.id || `walkin-${Date.now()}`, name: 'Walk-in Customer', phone: '0000000000', email: '', customerType: 'B2C' } as any);
                 } catch {
-                  // If create fails (duplicate phone), just use a local-only walk-in
                   store.setCustomer({ id: `walkin-${Date.now()}`, name: 'Walk-in Customer', phone: '', email: '', customerType: 'B2C' } as any);
                 }
+                store.setSaleType('quick_sale');
               }}
-                className="flex items-center gap-2 text-sm text-gray-500 hover:text-gray-700"><User className="w-4 h-4" /> Walk-in</button>
+                className="flex items-center gap-2 text-sm text-gray-500 hover:text-gray-700"><User className="w-4 h-4" /> Walk-in (Quick Sale only)</button>
             </div>
           </>
         )}
