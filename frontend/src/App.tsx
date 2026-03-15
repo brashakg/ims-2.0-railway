@@ -39,6 +39,9 @@ const TaskManagementPage = lazy(() => import('./pages/tasks/TaskManagementPage')
 const HRPage = lazy(() => import('./pages/hr/HRPage').then(m => ({ default: m.HRPage })));
 const ReportsPage = lazy(() => import('./pages/reports/ReportsPage').then(m => ({ default: m.ReportsPage })));
 const SettingsPage = lazy(() => import('./pages/settings/SettingsPage').then(m => ({ default: m.SettingsPage })));
+const DayEndReport = lazy(() => import('./pages/reports/DayEndReport'));
+const ReturnsPage = lazy(() => import('./pages/orders/ReturnsPage'));
+const SetupPage = lazy(() => import('./pages/settings/SetupPage'));
 
 // Phase 4: Supply Chain & Procurement
 const PurchaseOrderDashboard = lazy(() => import('./pages/purchase/PurchaseOrderDashboard').then(m => ({ default: m.PurchaseOrderDashboard })));
@@ -256,6 +259,18 @@ function App() {
                     }
                   />
 
+                  {/* Returns & Exchanges */}
+                  <Route
+                    path="returns"
+                    element={
+                      <ProtectedRoute
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'CASHIER', 'SALES_CASHIER']}
+                      >
+                        <ReturnsPage />
+                      </ProtectedRoute>
+                    }
+                  />
+
                   {/* Clinical / Eye Tests */}
                   <Route
                     path="clinical"
@@ -414,12 +429,34 @@ function App() {
                     }
                   />
 
+                  {/* Day-End Closing Report */}
+                  <Route
+                    path="reports/day-end"
+                    element={
+                      <ProtectedRoute
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'CASHIER', 'SALES_CASHIER']}
+                      >
+                        <DayEndReport />
+                      </ProtectedRoute>
+                    }
+                  />
+
                   {/* Settings */}
                   <Route
                     path="settings"
                     element={
                       <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'STORE_MANAGER']}>
                         <SettingsPage />
+                      </ProtectedRoute>
+                    }
+                  />
+
+                  {/* Store Setup & Employee Onboarding */}
+                  <Route
+                    path="setup"
+                    element={
+                      <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN']}>
+                        <SetupPage />
                       </ProtectedRoute>
                     }
                   />

@@ -40,7 +40,10 @@ const pathToModule: Record<string, ModuleId> = {
   '/inventory/replenishment': 'inventory',
   '/inventory/audit': 'inventory',
   '/reports': 'reports',
+  '/reports/day-end': 'reports',
+  '/returns': 'pos',
   '/settings': 'settings',
+  '/setup': 'settings',
 };
 
 export function AppLayout() {

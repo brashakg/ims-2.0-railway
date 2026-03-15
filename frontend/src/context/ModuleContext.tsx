@@ -70,8 +70,10 @@ export const MODULE_CONFIGS: ModuleConfig[] = [
     sidebarItems: [
       { id: 'pos-new', label: 'New Sale', path: '/pos' },
       { id: 'pos-orders', label: 'All Orders', path: '/orders' },
+      { id: 'pos-returns', label: 'Returns & Exchanges', path: '/returns' },
       { id: 'pos-pending', label: 'Pending Orders', path: '/orders?status=IN_PROGRESS' },
       { id: 'pos-deliveries', label: 'Ready for Delivery', path: '/orders?status=READY' },
+      { id: 'pos-dayend', label: 'Day-End Report', path: '/reports/day-end' },
     ],
   },
   {
@@ -177,6 +179,7 @@ export const MODULE_CONFIGS: ModuleConfig[] = [
     allowedRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'],
     sidebarItems: [
       { id: 'rpt-dashboard', label: 'Analytics Dashboard', path: '/reports' },
+      { id: 'rpt-dayend', label: 'Day-End Closing', path: '/reports/day-end' },
       { id: 'rpt-sales', label: 'Sales Reports', path: '/reports?tab=sales' },
       { id: 'rpt-inventory', label: 'Inventory Reports', path: '/reports?tab=inventory' },
       { id: 'rpt-gst', label: 'GST Reports', path: '/reports?tab=gst' },
@@ -193,6 +196,7 @@ export const MODULE_CONFIGS: ModuleConfig[] = [
     bgColor: 'bg-gray-100',
     allowedRoles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER'],
     sidebarItems: [
+      { id: 'set-setup', label: 'Store & Employee Setup', path: '/setup' },
       { id: 'set-profile', label: 'My Profile', path: '/settings?tab=profile' },
       { id: 'set-business', label: 'Business Profile', path: '/settings?tab=business' },
       { id: 'set-stores', label: 'Store Management', path: '/settings?tab=stores' },

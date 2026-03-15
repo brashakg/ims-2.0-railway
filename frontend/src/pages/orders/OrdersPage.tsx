@@ -143,26 +143,24 @@ export function OrdersPage() {
       style: 'currency',
       currency: 'INR',
       maximumFractionDigits: 0,
-    }).format(amount);
+    }).format(Math.round(amount || 0));
   };
 
-  // Print order invoice in a new window
+  // Print order invoice — use hidden iframe if popup blocked
   const printOrder = (order: Order) => {
-    const w = window.open('', '_blank', 'width=800,height=600');
-    if (!w) { toast.error('Pop-up blocked — allow pop-ups to print'); return; }
     const items = (order.items || []).map((item: any, i: number) =>
       `<tr><td>${i + 1}</td><td>${item.productName || item.product_name || item.name || 'Item'}</td><td>${item.quantity}</td><td>₹${Math.round(item.unitPrice || item.unit_price || 0).toLocaleString('en-IN')}</td><td>₹${Math.round(item.finalPrice || item.item_total || 0).toLocaleString('en-IN')}</td></tr>`
     ).join('');
     const payments = (order.payments || []).map((p: any) =>
       `<div>${p.mode || p.method}: ₹${Math.round(p.amount).toLocaleString('en-IN')}${p.reference ? ` (${p.reference})` : ''}</div>`
     ).join('');
-    w.document.write(`<!DOCTYPE html><html><head><title>Invoice ${order.orderNumber}</title>
+    const html = `<!DOCTYPE html><html><head><title>Invoice ${order.orderNumber || 'N/A'}</title>
       <style>body{font-family:Arial,sans-serif;padding:20px;max-width:800px;margin:0 auto}
       table{width:100%;border-collapse:collapse;margin:15px 0}th,td{border:1px solid #ddd;padding:8px;text-align:left}
       th{background:#f5f5f5}.total{font-weight:bold;font-size:1.2em}.header{text-align:center;margin-bottom:20px}
-      .row{display:flex;justify-content:space-between;padding:4px 0}@media print{button{display:none}}</style></head><body>
+      .row{display:flex;justify-content:space-between;padding:4px 0}@media print{button,.no-print{display:none}}</style></head><body>
       <div class="header"><h2>Better Vision Opticals</h2><p>Tax Invoice</p></div>
-      <div class="row"><div><strong>Invoice:</strong> ${order.orderNumber}</div><div><strong>Date:</strong> ${new Date(order.createdAt || '').toLocaleDateString('en-IN')}</div></div>
+      <div class="row"><div><strong>Invoice:</strong> ${order.orderNumber || 'N/A'}</div><div><strong>Date:</strong> ${new Date(order.createdAt || '').toLocaleDateString('en-IN')}</div></div>
       <div class="row"><div><strong>Customer:</strong> ${order.customerName || 'Walk-in'}</div><div><strong>Phone:</strong> ${order.customerPhone || '-'}</div></div>
       <table><thead><tr><th>#</th><th>Item</th><th>Qty</th><th>Rate</th><th>Amount</th></tr></thead><tbody>${items}</tbody></table>
       <div style="text-align:right;margin-top:10px">
@@ -175,9 +173,30 @@ export function OrdersPage() {
       </div>
       ${payments ? `<div style="margin-top:15px"><strong>Payments:</strong>${payments}</div>` : ''}
       <div style="margin-top:30px;text-align:center;color:#666;font-size:12px">Thank you for shopping with Better Vision Opticals</div>
-      <button onclick="window.print()" style="display:block;margin:20px auto;padding:10px 30px;background:#c5a55a;color:white;border:none;border-radius:8px;cursor:pointer;font-size:14px">Print</button>
-      </body></html>`);
-    w.document.close();
+      <button class="no-print" onclick="window.print()" style="display:block;margin:20px auto;padding:10px 30px;background:#c5a55a;color:white;border:none;border-radius:8px;cursor:pointer;font-size:14px">Print</button>
+      </body></html>`;
+
+    // Try popup first, fallback to iframe
+    const w = window.open('', '_blank', 'width=800,height=600');
+    if (w) {
+      w.document.write(html);
+      w.document.close();
+    } else {
+      // Popup blocked — use hidden iframe
+      const iframe = document.createElement('iframe');
+      iframe.style.cssText = 'position:fixed;right:0;bottom:0;width:0;height:0;border:0';
+      document.body.appendChild(iframe);
+      const doc = iframe.contentDocument || iframe.contentWindow?.document;
+      if (doc) {
+        doc.open();
+        doc.write(html);
+        doc.close();
+        setTimeout(() => {
+          iframe.contentWindow?.print();
+          setTimeout(() => document.body.removeChild(iframe), 1000);
+        }, 300);
+      }
+    }
   };
 
   // Open payment modal
@@ -378,6 +397,7 @@ export function OrdersPage() {
                   {/* Quick Actions */}
                   <div className="mt-3 ml-14 flex items-center gap-2">
                     <button
+                      onMouseDown={(e) => { e.preventDefault(); (document.activeElement as HTMLElement)?.blur?.(); }}
                       onClick={(e) => { e.stopPropagation(); setSelectedOrder(order); }}
                       className="text-xs text-bv-red-600 hover:text-bv-red-700 flex items-center gap-1"
                     >
@@ -385,6 +405,7 @@ export function OrdersPage() {
                       View
                     </button>
                     <button
+                      onMouseDown={(e) => { e.preventDefault(); (document.activeElement as HTMLElement)?.blur?.(); }}
                       onClick={(e) => { e.stopPropagation(); printOrder(order); }}
                       className="text-xs text-gray-500 hover:text-gray-700 flex items-center gap-1"
                     >
@@ -393,6 +414,7 @@ export function OrdersPage() {
                     </button>
                     {order.paymentStatus !== 'PAID' && (
                       <button
+                        onMouseDown={(e) => { e.preventDefault(); (document.activeElement as HTMLElement)?.blur?.(); }}
                         onClick={(e) => { e.stopPropagation(); openPaymentModal(order); }}
                         className="text-xs text-green-600 hover:text-green-700 flex items-center gap-1"
                       >
