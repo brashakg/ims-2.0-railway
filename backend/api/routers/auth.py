@@ -70,13 +70,22 @@ class RefreshTokenRequest(BaseModel):
 
 
 def hash_password(password: str) -> str:
-    """Hash password using SHA-256"""
-    return hashlib.sha256(password.encode()).hexdigest()
+    """Hash password using bcrypt via passlib"""
+    from passlib.hash import bcrypt
+    return bcrypt.hash(password)
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
-    """Verify password against hash"""
-    return hash_password(plain_password) == hashed_password
+    """Verify password against bcrypt hash (with SHA-256 fallback for legacy)"""
+    # Try bcrypt first (seed data and new users)
+    if hashed_password.startswith("$2b$") or hashed_password.startswith("$2a$"):
+        from passlib.hash import bcrypt
+        try:
+            return bcrypt.verify(plain_password, hashed_password)
+        except Exception:
+            return False
+    # Fallback to SHA-256 for any legacy hashes
+    return hashlib.sha256(plain_password.encode()).hexdigest() == hashed_password
 
 
 def create_access_token(data: dict, expires_delta: timedelta = None) -> str:
@@ -167,13 +176,13 @@ async def login(request: LoginRequest):
     
     # Fallback: hardcoded superadmin (emergency access)
     if user is None:
-        from ..routers.auth import hash_password as _hp
+        from passlib.hash import bcrypt as _bcrypt
         fallback_users = {
             "admin": {
                 "user_id": "user-superadmin",
                 "username": "admin",
                 "email": "admin@bettervision.in",
-                "password_hash": _hp("admin123"),
+                "password_hash": _bcrypt.hash("admin123"),
                 "full_name": "Avinash (Superadmin)",
                 "roles": ["SUPERADMIN"],
                 "store_ids": ["BV-BOK-01", "BV-BOK-02", "BV-DHN-01", "BV-DHN-02", "WO-DHN-01", "BV-PUN-01"],

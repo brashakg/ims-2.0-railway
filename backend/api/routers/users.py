@@ -65,8 +65,9 @@ class UserResponse(BaseModel):
 
 
 def hash_password(password: str) -> str:
-    """Hash password using SHA-256"""
-    return hashlib.sha256(password.encode()).hexdigest()
+    """Hash password using bcrypt via passlib"""
+    from passlib.hash import bcrypt
+    return bcrypt.hash(password)
 
 
 def sanitize_user(user: dict) -> dict:

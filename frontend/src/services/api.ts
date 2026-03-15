@@ -134,6 +134,7 @@ const handleFinalError = (error: AxiosError<{ message?: string; detail?: string 
     } else {
       message = error.response?.data?.message || error.message || 'An error occurred';
     }
+  }
 
   return Promise.reject(new Error(message));
 };
