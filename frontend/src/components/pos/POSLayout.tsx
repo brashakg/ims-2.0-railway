@@ -136,12 +136,37 @@ export function POSLayout() {
       case 'prescription': return !!store.prescription;
       case 'products': return (store.cart || []).length > 0;
       case 'review': return (store.cart || []).length > 0;
-      case 'payment': return store.getBalance() <= 0;
+      case 'payment': {
+        // Advance payment: at least one payment recorded is enough
+        if (store.is_advance_payment) return store.getTotalPaid() > 0;
+        // Full payment: balance must be zero
+        return store.getBalance() <= 0.01;
+      }
       default: return true;
     }
-  }, [store.current_step, store.customer, store.prescription, store.cart, store.payments]);
+  }, [store.current_step, store.customer, store.prescription, store.cart, store.payments, store.is_advance_payment]);
 
   async function handleCreateOrder() {
+    if (store.is_processing) return; // Double-click guard
+    
+    // Rx order validation: must have at least one lens if prescription order
+    if (store.sale_type === 'prescription_order') {
+      const hasLens = (store.cart || []).some(i => 
+        i.category === 'RX_LENSES' || i.lens_details || i.is_optical
+      );
+      if (!hasLens) {
+        setErrorMsg('Prescription order requires at least one lens item. Add lenses or switch to Quick Sale.');
+        return;
+      }
+    }
+
+    // Payment validation
+    if (store.getBalance() > 0.01 && !store.is_advance_payment) {
+      setErrorMsg('Payment incomplete. Add payments or enable "Advance payment only".');
+      return;
+    }
+
+    setErrorMsg(null);
     store.setProcessing(true);
     try {
       const result = await orderApi.createOrder({
@@ -166,14 +191,23 @@ export function POSLayout() {
         notes: store.cart_note || undefined,
       } as any);
       if (result?.order_id) {
-        for (const p of store.payments) {
-          await orderApi.addPayment(result.order_id, { method: p.method, amount: p.amount, reference: p.reference } as any);
+        for (const p of (store.payments || [])) {
+          try {
+            await orderApi.addPayment(result.order_id, { method: p.method, amount: p.amount, reference: p.reference } as any);
+          } catch {
+            console.error('Payment recording failed for', p.method, p.amount);
+            // Don't block order — payment can be recorded later
+          }
         }
         store.setOrderResult(result.order_id, result.order_number);
         store.setStep('complete');
+      } else {
+        setErrorMsg('Order created but no ID returned. Check order list.');
       }
     } catch (err) {
-      alert('Failed to create order: ' + (err instanceof Error ? err.message : 'Unknown error'));
+      const msg = err instanceof Error ? err.message : String(err);
+      setErrorMsg('Failed to create order: ' + (msg || 'Network error'));
+      console.error('Order creation error:', err);
     } finally {
       store.setProcessing(false);
     }
@@ -254,6 +288,13 @@ export function POSLayout() {
       </div>
 
       {/* FOOTER NAV */}
+      {errorMsg && (
+        <div className="bg-red-50 border-t border-red-200 px-4 py-2.5 flex items-center gap-2 text-sm text-red-700">
+          <AlertTriangle className="w-4 h-4 flex-shrink-0" />
+          <span className="flex-1">{errorMsg}</span>
+          <button onClick={() => setErrorMsg(null)} className="text-red-400 hover:text-red-600 ml-2"><X className="w-4 h-4" /></button>
+        </div>
+      )}
       <footer className="bg-white border-t border-gray-200 px-4 py-3 flex items-center justify-between">
         <div className="flex items-center gap-3">
           {currentStepIndex > 0 && store.current_step !== 'complete' && (
@@ -268,12 +309,16 @@ export function POSLayout() {
           )}
         </div>
         {store.current_step !== 'complete' && (
-          <button onClick={() => { store.current_step === 'payment' ? handleCreateOrder() : store.nextStep(); }}
-            disabled={!canProceed}
+          <button onClick={() => { setErrorMsg(null); store.current_step === 'payment' ? handleCreateOrder() : store.nextStep(); }}
+            disabled={!canProceed || store.is_processing}
             className={`flex items-center gap-1.5 px-6 py-2.5 rounded-lg text-sm font-semibold transition-colors ${
-              canProceed ? 'bg-bv-gold-500 text-white hover:bg-bv-gold-600' : 'bg-gray-200 text-gray-400 cursor-not-allowed'
+              !canProceed || store.is_processing ? 'bg-gray-200 text-gray-400 cursor-not-allowed' : 'bg-bv-gold-500 text-white hover:bg-bv-gold-600'
             }`}>
-            {store.current_step === 'payment' ? 'Complete Order' : 'Continue'} <ChevronRight className="w-4 h-4" />
+            {store.is_processing ? (
+              <><span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" /> Processing...</>
+            ) : (
+              <>{store.current_step === 'payment' ? 'Complete Order' : 'Continue'} <ChevronRight className="w-4 h-4" /></>
+            )}
           </button>
         )}
       </footer>
@@ -392,6 +437,7 @@ function StepCustomer() {
   const [searchInput, setSearchInput] = useState('');
   const [debouncedQuery, setDebouncedQuery] = useState('');
   const [showCreate, setShowCreate] = useState(false);
+  const [custError, setCustError] = useState<string | null>(null);
   const [newCust, setNewCust] = useState({ name: '', phone: '', email: '' });
   const { data: searchResults = [], isLoading } = useCustomerSearch(debouncedQuery);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -506,13 +552,23 @@ function StepCustomer() {
         <div className="bg-white border border-gray-200 rounded-xl p-4 space-y-3">
           <h4 className="font-semibold text-gray-900 text-sm">New Customer</h4>
           <input placeholder="Full name *" value={newCust.name} onChange={(e) => setNewCust(p => ({ ...p, name: e.target.value }))} className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" />
-          <input placeholder="Phone number *" value={newCust.phone} onChange={(e) => setNewCust(p => ({ ...p, phone: e.target.value }))} className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" />
+          <input placeholder="Phone number (10 digits) *" value={newCust.phone} onChange={(e) => setNewCust(p => ({ ...p, phone: e.target.value.replace(/\D/g, '').slice(0, 10) }))} className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" />
           <input placeholder="Email (optional)" value={newCust.email} onChange={(e) => setNewCust(p => ({ ...p, email: e.target.value }))} className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" />
+          {custError && <p className="text-xs text-red-600 bg-red-50 px-2 py-1 rounded">{custError}</p>}
           <div className="flex gap-2">
-            <button onClick={() => setShowCreate(false)} className="px-4 py-2 text-sm border border-gray-300 rounded-lg">Cancel</button>
+            <button onClick={() => { setShowCreate(false); setCustError(null); }} className="px-4 py-2 text-sm border border-gray-300 rounded-lg">Cancel</button>
             <button onClick={async () => {
-              if (!newCust.name || !newCust.phone) return;
-              try { const r = await customerApi.createCustomer(newCust as any); store.setCustomer({ id: r?.customer_id || r?.id || `new-${Date.now()}`, name: newCust.name, phone: newCust.phone, email: newCust.email, customerType: 'B2C' } as any); setShowCreate(false); } catch { alert('Failed'); }
+              if (!newCust.name.trim()) { setCustError('Name is required'); return; }
+              if (!newCust.phone || newCust.phone.length !== 10) { setCustError('Valid 10-digit phone required'); return; }
+              setCustError(null);
+              try {
+                const r = await customerApi.createCustomer({ name: newCust.name.trim(), mobile: newCust.phone, email: newCust.email || undefined, customer_type: 'B2C' } as any);
+                store.setCustomer({ id: r?.customer_id || r?.id || `new-${Date.now()}`, name: newCust.name.trim(), phone: newCust.phone, email: newCust.email, customerType: 'B2C' } as any);
+                setShowCreate(false);
+              } catch (err) {
+                const msg = err instanceof Error ? err.message : 'Could not create customer';
+                setCustError(msg.includes('already exists') ? 'Phone number already registered. Search for existing customer.' : msg);
+              }
             }} className="px-4 py-2 text-sm bg-bv-gold-500 text-white rounded-lg font-semibold">Create & Select</button>
           </div>
         </div>
@@ -568,6 +624,7 @@ function StepProducts({ onOpenLensModal }: { onOpenLensModal: () => void }) {
   const [debouncedSearch, setDebouncedSearch] = useState('');
   const [categoryFilter, setCategoryFilter] = useState('');
   const [showSuggestions, setShowSuggestions] = useState(true);
+  const [blockMsg, setBlockMsg] = useState<string | null>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const { data: products = [], isLoading } = useProducts({ search: debouncedSearch || undefined, category: categoryFilter || undefined });
   const categories = ['FRAMES', 'SUNGLASSES', 'RX_LENSES', 'CONTACT_LENSES', 'WRIST_WATCHES', 'SMARTWATCHES', 'ACCESSORIES'];
@@ -595,7 +652,12 @@ function StepProducts({ onOpenLensModal }: { onOpenLensModal: () => void }) {
   const handleAddProduct = (product: any) => {
     const mrp = product.mrp || 0;
     const offerPrice = product.offer_price || product.offerPrice || mrp;
-    if (offerPrice > mrp && mrp > 0) { alert('BLOCKED: Offer Price > MRP. Contact HQ.'); return; }
+    if (offerPrice > mrp && mrp > 0) {
+      setBlockMsg(`BLOCKED: ${product.name} — Offer Price (₹${offerPrice.toLocaleString('en-IN')}) exceeds MRP (₹${mrp.toLocaleString('en-IN')}). Contact HQ to fix pricing.`);
+      setTimeout(() => setBlockMsg(null), 6000);
+      return;
+    }
+    setBlockMsg(null);
     startTransition(() => {
       store.addToCart({ product_id: product.product_id || product._id || product.id, name: product.name, sku: product.sku, barcode: product.barcode, brand: product.brand, subbrand: product.subbrand || product.sub_brand, category: product.category,
         unit_price: offerPrice || mrp, mrp, offer_price: offerPrice !== mrp ? offerPrice : undefined, quantity: 1,
@@ -605,6 +667,13 @@ function StepProducts({ onOpenLensModal }: { onOpenLensModal: () => void }) {
 
   return (
     <div className="space-y-4">
+      {blockMsg && (
+        <div className="bg-red-50 border border-red-200 rounded-lg p-3 flex items-center gap-2 text-sm text-red-700">
+          <AlertTriangle className="w-4 h-4 flex-shrink-0" />
+          <span className="flex-1">{blockMsg}</span>
+          <button onClick={() => setBlockMsg(null)} className="text-red-400 hover:text-red-600"><X className="w-3.5 h-3.5" /></button>
+        </div>
+      )}
       <div className="flex gap-3">
         <div className="flex-1">
           <BarcodeScanner onScan={(b) => setDebouncedSearch(b)} onManualSearch={(q) => handleProductSearch(q)} placeholder="Scan barcode or search products..." autoFocus />
@@ -763,10 +832,14 @@ function StepReview({ onOpenDiscount }: { onOpenDiscount: (item: CartLineItem) =
                 <td className="text-right px-2 text-gray-500">₹{item.mrp.toLocaleString('en-IN')}</td>
                 <td className="text-right px-2">₹{item.unit_price.toLocaleString('en-IN')}</td>
                 <td className="text-right px-2">
-                  <button onClick={() => { if (item.offer_price && item.offer_price < item.mrp) { alert('MRP > Offer: No further discount.'); return; } onOpenDiscount(item); }}
-                    className={`px-2 py-0.5 rounded text-xs ${item.discount_percent > 0 ? 'bg-green-50 text-green-700 font-medium' : 'bg-gray-50 text-gray-500 hover:bg-gray-100'}`}>
-                    {item.discount_percent > 0 ? `${item.discount_percent}%` : 'Add'}
-                  </button>
+                  {item.offer_price && item.offer_price < item.mrp ? (
+                    <span className="px-2 py-0.5 rounded text-xs bg-gray-100 text-gray-400 cursor-not-allowed" title="MRP > Offer Price: No further discount allowed">N/A</span>
+                  ) : (
+                    <button onClick={() => onOpenDiscount(item)}
+                      className={`px-2 py-0.5 rounded text-xs ${item.discount_percent > 0 ? 'bg-green-50 text-green-700 font-medium' : 'bg-gray-50 text-gray-500 hover:bg-gray-100'}`}>
+                      {item.discount_percent > 0 ? `${item.discount_percent}%` : 'Add'}
+                    </button>
+                  )}
                 </td>
                 <td className="text-center px-2 text-xs text-gray-500">{gstRate}%</td>
                 <td className="text-right px-4 font-semibold">₹{item.line_total.toLocaleString('en-IN')}</td>
@@ -856,11 +929,24 @@ function StepPayment() {
             {methods.map(m => <button key={m.id} onClick={() => setPayMethod(m.id)} className={`px-3 py-1.5 rounded-lg text-xs font-medium ${payMethod === m.id ? 'bg-bv-gold-500 text-white' : 'bg-gray-100 text-gray-600'}`}>{m.label}</button>)}
           </div>
           <div className="flex gap-2">
-            <input type="number" value={payAmount} onChange={(e) => setPayAmount(e.target.value)} placeholder="Amount" className="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm" />
-            {payMethod !== 'CASH' && <input value={payRef} onChange={(e) => setPayRef(e.target.value)} placeholder={payMethod === 'UPI' ? 'UPI Ref' : 'Reference'} className="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm" />}
-            <button onClick={() => { const a = parseFloat(payAmount); if (a > 0) { store.addPayment({ method: payMethod, amount: a, reference: payRef || undefined }); setPayAmount(''); setPayRef(''); } }}
-              className="px-4 py-2 bg-bv-gold-500 text-white rounded-lg text-sm font-semibold">Add</button>
+            <input type="number" min="1" max={balance} step="0.01" value={payAmount} onChange={(e) => setPayAmount(e.target.value)} 
+              placeholder={`Amount (max ₹${Math.ceil(balance).toLocaleString('en-IN')})`} className="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm" />
+            {payMethod !== 'CASH' && <input value={payRef} onChange={(e) => setPayRef(e.target.value)} placeholder={payMethod === 'UPI' ? 'UPI Txn ID *' : payMethod === 'CARD' ? 'Approval code' : 'Reference'} className="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm" />}
+            <button onClick={() => {
+              const a = parseFloat(payAmount);
+              if (!a || a <= 0) return;
+              if (a > balance + 0.01) { setPayAmount(String(Math.ceil(balance * 100) / 100)); return; }
+              if (payMethod !== 'CASH' && !payRef.trim()) return; // Require ref for non-cash
+              store.addPayment({ method: payMethod, amount: Math.min(a, balance), reference: payRef.trim() || undefined });
+              setPayAmount(''); setPayRef('');
+            }}
+              disabled={!payAmount || parseFloat(payAmount) <= 0 || (payMethod !== 'CASH' && !payRef.trim())}
+              className={`px-4 py-2 rounded-lg text-sm font-semibold ${
+                !payAmount || parseFloat(payAmount) <= 0 || (payMethod !== 'CASH' && !payRef.trim())
+                  ? 'bg-gray-200 text-gray-400 cursor-not-allowed' : 'bg-bv-gold-500 text-white hover:bg-bv-gold-600'
+              }`}>Add</button>
           </div>
+          {payMethod !== 'CASH' && !payRef.trim() && payAmount && <p className="text-xs text-amber-600">Reference/Txn ID required for {payMethod}</p>}
         </div>
       )}
 
