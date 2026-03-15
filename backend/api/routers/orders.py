@@ -342,11 +342,18 @@ async def get_status_counts(
 
 
 def generate_order_number(store_id: str) -> str:
-    """Generate unique order number"""
-    prefix = store_id[:3].upper() if store_id else "IMS"
+    """Generate unique order number: ORD-BOK01-2026-A1B2C3"""
+    # Extract store short code from store_id like "BV-BOK-01" → "BOK01"
+    parts = store_id.split("-") if store_id else []
+    if len(parts) >= 3:
+        prefix = parts[1] + parts[2]  # BOK + 01 = BOK01
+    elif len(parts) >= 2:
+        prefix = parts[1][:5]
+    else:
+        prefix = (store_id or "IMS")[:5].upper()
     year = datetime.now().year
     short_uuid = str(uuid.uuid4())[:6].upper()
-    return f"BV-{prefix}-{year}-{short_uuid}"
+    return f"ORD-{prefix}-{year}-{short_uuid}"
 
 
 @router.post("", status_code=201)
