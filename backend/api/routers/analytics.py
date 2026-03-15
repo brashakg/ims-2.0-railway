@@ -27,10 +27,14 @@ router = APIRouter(prefix="", tags=["Analytics"])
 
 def _norm_order(o: dict) -> dict:
     """Normalize order fields from camelCase to snake_case for analytics"""
+    raw_date = o.get("created_at") or o.get("createdAt", "")
+    # Convert datetime to string if needed
+    if isinstance(raw_date, datetime):
+        raw_date = raw_date.isoformat()
     return {
         "store_id": o.get("store_id") or o.get("storeId", ""),
         "customer_id": o.get("customer_id") or o.get("customerId", ""),
-        "created_at": o.get("created_at") or o.get("createdAt", ""),
+        "created_at": raw_date,
         "total_amount": _safe_float(o.get("total_amount") or o.get("grandTotal") or o.get("subtotal")),
         "status": o.get("status") or o.get("orderStatus", ""),
         "items": [
@@ -98,12 +102,19 @@ def get_date_range(period: str) -> tuple[datetime, datetime]:
     return start_date, end_date
 
 
-def _safe_parse_date(date_str: Any) -> Optional[datetime]:
-    """Safely parse a date string, return None if invalid"""
-    if not date_str or not isinstance(date_str, str):
+def _safe_parse_date(date_val: Any) -> Optional[datetime]:
+    """Safely parse a date value — handles strings, datetime objects, and None"""
+    if date_val is None:
+        return None
+    # Already a datetime
+    if isinstance(date_val, datetime):
+        return date_val.replace(tzinfo=None)  # Strip timezone for comparison
+    if not isinstance(date_val, str):
         return None
     try:
-        return datetime.fromisoformat(date_str.replace("Z", "+00:00").replace("+00:00", ""))
+        # Remove timezone info for naive comparison
+        clean = date_val.replace("Z", "").replace("+00:00", "")
+        return datetime.fromisoformat(clean)
     except (ValueError, TypeError):
         return None
 
@@ -381,7 +392,7 @@ async def get_store_performance(
         stock_repo = get_stock_repository()
 
         # Get all orders
-        all_orders = order_repo.find_many({}) if order_repo is not None else []
+        all_orders = _norm_orders(order_repo.find_many({})) if order_repo is not None else []
 
         # Group by store
         stores = {}
@@ -730,7 +741,7 @@ async def get_enterprise_kpis(
         closing_balance = opening_balance + sales_amount - expenses_amount
 
         # ===== STORE COMPARISON (if applicable) =====
-        all_store_orders = order_repo.find_many({})
+        all_store_orders = _norm_orders(order_repo.find_many({}))
         store_comparison = []
         stores_by_id = {}
 
