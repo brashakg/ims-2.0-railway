@@ -162,11 +162,17 @@ class PaymentMethod(str, Enum):
 class OrderItemCreate(BaseModel):
     item_type: str  # FRAME, LENS, CONTACT_LENS, ACCESSORY, SERVICE
     product_id: str
+    product_name: Optional[str] = None
+    sku: Optional[str] = None
+    brand: Optional[str] = None
+    subbrand: Optional[str] = None
+    category: Optional[str] = None
     quantity: int = Field(default=1, ge=1)
     unit_price: float = Field(..., ge=0)
     discount_percent: float = Field(default=0, ge=0, le=100)
     prescription_id: Optional[str] = None
     lens_options: Optional[dict] = None  # coating, tint, etc.
+    lens_details: Optional[dict] = None  # type, material, coatings
 
 
 class PaymentCreate(BaseModel):
@@ -391,11 +397,102 @@ async def create_order(
             discount_amount = item_total * (item.discount_percent / 100)
             item_subtotal = item_total - discount_amount
 
+            # ============================================================
+            # INCENTIVE AUTO-TAGGING
+            # Detects qualifying items for kicker tracking at POS time
+            # Tags: brand group, subbrand, kicker type, item value, discount
+            # Replaces the manual PRODUCT_INCENTIVE Excel entirely
+            # ============================================================
+            INCENTIVE_BRANDS = {
+                'ZEISS': 'ZEISS', 'SAFILO': 'SAFILO', 'CARRERA': 'SAFILO', 
+                'POLAROID': 'SAFILO', 'MARC JACOB': 'SAFILO', 'HUGO': 'SAFILO',
+                'SEVENTH STREET': 'SAFILO', 'BOSS': 'SAFILO', 'TOMMY HILFIGER': 'SAFILO',
+                'PIERRE CARDIN': 'SAFILO', 'UNDER ARMOUR': 'SAFILO',
+            }
+            brand_upper = (item.brand or '').upper()
+            subbrand_upper = (item.subbrand or '').upper()
+            product_name_upper = (item.product_name or '').upper()
+            
+            # Check brand, subbrand, AND product name for matches
+            # (lens details like "1.5 ZEISS PROGRESSIVE LIGHT..." appear in product name)
+            incentive_brand = None
+            matched_key = None
+            for key, group in INCENTIVE_BRANDS.items():
+                if key in brand_upper or key in subbrand_upper or key in product_name_upper:
+                    incentive_brand = group
+                    matched_key = key
+                    break
+            
+            # Detect kicker type from lens_details, subbrand, or product name
+            incentive_kicker = None
+            incentive_lens_type = None
+            incentive_addon = None
+            
+            if incentive_brand == 'ZEISS':
+                # Check lens_details dict first (structured data from LensDetailsModal)
+                lens_type_str = ''
+                if item.lens_details:
+                    lens_type_str = (item.lens_details.get('type', '') or '').upper()
+                    lens_material = (item.lens_details.get('material', '') or '').upper()
+                    lens_coatings = ' '.join(item.lens_details.get('coatings', []) or []).upper()
+                    lens_type_str = f"{lens_type_str} {lens_material} {lens_coatings}"
+                
+                # Also check product name (e.g., "1.5 ZEISS PROGRESSIVE LIGHT 2 3D DVP UV")
+                full_check = f"{lens_type_str} {product_name_upper} {subbrand_upper}"
+                
+                if 'SMARTLIFE' in full_check or 'SMART LIFE' in full_check:
+                    incentive_kicker = 'ZEISS_SMARTLIFE'
+                    incentive_lens_type = 'PAL' if 'PROGRESS' in full_check else 'SV'
+                    incentive_addon = 'SMART LIFE'
+                elif 'PHOTOFUSION' in full_check or 'PFX' in full_check:
+                    incentive_kicker = 'ZEISS_PHOTOFUSION'
+                    incentive_lens_type = 'PAL' if 'PROGRESS' in full_check else 'SV'
+                    incentive_addon = 'PFX'
+                elif 'PROGRESSIVE' in full_check or 'PAL' in full_check:
+                    incentive_kicker = 'ZEISS_PROGRESSIVE'
+                    incentive_lens_type = 'PAL'
+                elif 'FSV' in full_check or 'SINGLE' in full_check:
+                    incentive_kicker = 'ZEISS_SV'
+                    incentive_lens_type = 'SV'
+                else:
+                    incentive_kicker = 'ZEISS_OTHER'
+                    
+            elif incentive_brand == 'SAFILO':
+                if item.item_type in ('FRAME',):
+                    incentive_kicker = 'SAFILO_FRAME'
+                elif item.item_type in ('SUNGLASS',) or (item.category and 'SG' in item.category.upper()):
+                    incentive_kicker = 'SAFILO_SG'
+                else:
+                    incentive_kicker = 'SAFILO_OTHER'
+
+            # Build incentive tag (None if not qualifying)
+            incentive_tag = None
+            if incentive_brand:
+                incentive_tag = {
+                    "brand_group": incentive_brand,
+                    "brand": item.brand,
+                    "subbrand": item.subbrand or matched_key,
+                    "kicker": incentive_kicker,
+                    "lens_type": incentive_lens_type,
+                    "addon": incentive_addon,
+                    "item_value": item_subtotal,
+                    "item_mrp": item.unit_price * item.quantity,
+                    "discount_percent": item.discount_percent,
+                    "discount_amount": discount_amount,
+                    "salesperson_id": salesperson_id,
+                    "tagged_at": datetime.now().isoformat(),
+                }
+
             items_data.append(
                 {
                     "item_id": str(uuid.uuid4()),
                     "item_type": item.item_type,
                     "product_id": item.product_id,
+                    "product_name": item.product_name,
+                    "sku": item.sku,
+                    "brand": item.brand,
+                    "subbrand": item.subbrand,
+                    "category": item.category,
                     "quantity": item.quantity,
                     "unit_price": item.unit_price,
                     "discount_percent": item.discount_percent,
@@ -403,6 +500,8 @@ async def create_order(
                     "item_total": item_subtotal,
                     "prescription_id": item.prescription_id,
                     "lens_options": item.lens_options,
+                    "lens_details": item.lens_details,
+                    "incentive_tag": incentive_tag,
                 }
             )
             subtotal += item_subtotal

@@ -51,6 +51,7 @@ import { PrescriptionSelectModal } from './PrescriptionSelectModal';
 import { LensDetailsModal } from './LensDetailsModal';
 import { LensSuggestionPanel } from './LensSuggestionPanel';
 import { DiscountModal } from './DiscountModal';
+import { GSTInvoice } from './GSTInvoice';
 import { ReceiptPreview } from './ReceiptPreview';
 import { BarcodeScanner } from './BarcodeScanner';
 import { getGSTRateByCategory } from '../../constants/gst';
@@ -151,10 +152,16 @@ export function POSLayout() {
         items: (store.cart || []).map(item => ({
           item_type: mapCategory(item.category),
           product_id: item.product_id,
+          product_name: item.name,
+          sku: item.sku,
+          brand: item.brand,
+          subbrand: item.subbrand,
+          category: item.category,
           quantity: item.quantity,
           unit_price: item.unit_price,
           discount_percent: item.discount_percent,
           prescription_id: item.linked_prescription_id,
+          lens_details: item.lens_details,
         })),
         notes: store.cart_note || undefined,
       } as any);
@@ -236,7 +243,7 @@ export function POSLayout() {
           {store.current_step === 'products' && <StepProducts onOpenLensModal={() => setShowLensModal(true)} />}
           {store.current_step === 'review' && <StepReview onOpenDiscount={(item) => setDiscountItem(item)} />}
           {store.current_step === 'payment' && <StepPayment />}
-          {store.current_step === 'complete' && <StepComplete onPrint={() => setShowReceipt(true)} />}
+          {store.current_step === 'complete' && <StepComplete onPrint={() => setShowReceipt(true)} onReset={handleFullReset} />}
         </div>
 
         {(['products', 'review', 'prescription'] as POSStep[]).includes(store.current_step) && (store.cart || []).length > 0 && (
@@ -590,7 +597,7 @@ function StepProducts({ onOpenLensModal }: { onOpenLensModal: () => void }) {
     const offerPrice = product.offer_price || product.offerPrice || mrp;
     if (offerPrice > mrp && mrp > 0) { alert('BLOCKED: Offer Price > MRP. Contact HQ.'); return; }
     startTransition(() => {
-      store.addToCart({ product_id: product.product_id || product._id || product.id, name: product.name, sku: product.sku, barcode: product.barcode, brand: product.brand, category: product.category,
+      store.addToCart({ product_id: product.product_id || product._id || product.id, name: product.name, sku: product.sku, barcode: product.barcode, brand: product.brand, subbrand: product.subbrand || product.sub_brand, category: product.category,
         unit_price: offerPrice || mrp, mrp, offer_price: offerPrice !== mrp ? offerPrice : undefined, quantity: 1,
         is_optical: ['FRAMES', 'RX_LENSES', 'CONTACT_LENSES', 'COLOUR_CONTACTS'].includes(product.category), image_url: product.image_url });
     });
@@ -874,8 +881,65 @@ function StepPayment() {
 // ============================================================================
 // STEP 6: Complete
 // ============================================================================
-function StepComplete({ onPrint }: { onPrint: () => void }) {
+function StepComplete({ onPrint, onReset }: { onPrint: () => void; onReset: () => void }) {
   const store = usePOSStore();
+  const [showGSTInvoice, setShowGSTInvoice] = useState(false);
+
+  // Build Order-shaped object from POS store for GSTInvoice
+  const orderForInvoice = useMemo(() => ({
+    id: store.order_id || '',
+    orderNumber: store.order_number || '',
+    storeId: store.store_id,
+    customerId: store.customer?.id || '',
+    customerName: store.customer?.name || 'Walk-in',
+    customerPhone: store.customer?.phone || '',
+    patientName: store.patient?.name,
+    items: (store.cart || []).map(item => ({
+      id: item.id,
+      itemType: item.category || 'FRAMES',
+      productId: item.product_id,
+      productName: item.name,
+      sku: item.sku || '',
+      quantity: item.quantity,
+      unitPrice: item.unit_price,
+      discountPercent: item.discount_percent || 0,
+      discountAmount: item.discount_amount || 0,
+      finalPrice: item.line_total || item.unit_price * item.quantity,
+    })),
+    payments: (store.payments || []).map((p, i) => ({
+      id: `pay-${i}`,
+      mode: p.method,
+      amount: p.amount,
+      reference: p.reference,
+      paidAt: new Date().toISOString(),
+    })),
+    subtotal: store.getSubtotal(),
+    totalDiscount: store.getTotalDiscount(),
+    taxAmount: store.getGrandTotal() - store.getSubtotal(),
+    grandTotal: store.getGrandTotal(),
+    amountPaid: store.getTotalPaid(),
+    balanceDue: store.getBalance(),
+    orderStatus: 'CONFIRMED',
+    createdAt: new Date().toISOString(),
+  }), [store.order_id]);
+
+  const storeForInvoice = useMemo(() => ({
+    id: store.store_id,
+    storeCode: store.store_id,
+    storeName: store.store_id?.includes('BOK') ? 'Better Vision Opticals' : store.store_id?.includes('DHB') ? 'Better Vision Opticals' : store.store_id?.includes('WIZ') ? 'WizOpt' : 'Better Vision Opticals',
+    brand: 'BETTER_VISION' as any,
+    gstin: '', // Fetched from store setup in production
+    address: '',
+    city: store.store_id?.includes('BOK') ? 'Bokaro Steel City' : store.store_id?.includes('DHB') ? 'Dhanbad' : store.store_id?.includes('PUN') ? 'Pune' : '',
+    state: store.store_id?.includes('PUN') ? 'Maharashtra' : 'Jharkhand',
+    stateCode: store.store_id?.includes('PUN') ? '27' : '20',
+    pincode: '',
+    latitude: 0, longitude: 0, geoFenceRadius: 0,
+    isActive: true, isHQ: false,
+    enabledCategories: [],
+    openingTime: '10:00', closingTime: '21:00',
+  }), [store.store_id]);
+
   return (
     <div className="max-w-md mx-auto text-center py-8 space-y-6">
       <div className="w-20 h-20 bg-green-100 rounded-full flex items-center justify-center mx-auto"><CheckCircle className="w-10 h-10 text-green-500" /></div>
@@ -888,10 +952,67 @@ function StepComplete({ onPrint }: { onPrint: () => void }) {
         {store.getBalance() > 0 && <div className="flex justify-between"><span className="text-gray-500">Balance due</span><span className="font-medium text-red-600">₹{store.getBalance().toLocaleString('en-IN')}</span></div>}
         {store.sale_type === 'prescription_order' && <div className="flex justify-between"><span className="text-gray-500">Type</span><span className="px-2 py-0.5 bg-purple-50 text-purple-600 rounded text-xs font-medium">Rx Order → Workshop</span></div>}
       </div>
-      <div className="flex gap-3 justify-center">
-        <button onClick={onPrint} className="flex items-center gap-2 px-4 py-2.5 border border-gray-300 rounded-lg text-sm font-medium hover:bg-gray-50"><Printer className="w-4 h-4" /> Print Receipt</button>
-        <button onClick={() => store.resetTransaction()} className="flex items-center gap-2 px-6 py-2.5 bg-bv-gold-500 text-white rounded-lg text-sm font-semibold hover:bg-bv-gold-600"><Plus className="w-4 h-4" /> New Sale</button>
+
+      {/* Incentive qualifying items — auto-tagged for kicker tracking */}
+      {(() => {
+        const INCENTIVE_KEYS = ['ZEISS', 'SAFILO', 'CARRERA', 'POLAROID', 'MARC JACOB', 'HUGO', 'SEVENTH STREET', 'BOSS', 'TOMMY HILFIGER', 'PIERRE CARDIN', 'UNDER ARMOUR'];
+        const qualifying = (store.cart || []).filter(i => {
+          const b = (i.brand || '').toUpperCase();
+          const sb = (i.subbrand || '').toUpperCase();
+          const n = (i.name || '').toUpperCase();
+          return INCENTIVE_KEYS.some(k => b.includes(k) || sb.includes(k) || n.includes(k));
+        });
+        if (qualifying.length === 0) return null;
+        return (
+          <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 text-left text-xs">
+            <div className="flex items-center gap-2 mb-2">
+              <Sparkles className="w-4 h-4 text-amber-600" />
+              <span className="font-semibold text-amber-800">Incentive-qualifying items ({qualifying.length})</span>
+              <span className="text-amber-400 ml-auto">Auto-tagged at POS</span>
+            </div>
+            <div className="space-y-1.5">
+              {qualifying.map(item => {
+                const brandLabel = item.brand || 'Unknown';
+                const subLabel = item.subbrand ? ` · ${item.subbrand}` : '';
+                return (
+                  <div key={item.id} className="flex items-center justify-between gap-2 bg-white/60 rounded-lg px-2.5 py-1.5">
+                    <div className="flex-1 min-w-0">
+                      <span className="font-medium text-amber-900 truncate block">{brandLabel}{subLabel}</span>
+                      <span className="text-amber-500 truncate block">{item.name}</span>
+                    </div>
+                    <div className="text-right flex-shrink-0">
+                      <span className="font-semibold text-amber-800">₹{item.line_total.toLocaleString('en-IN')}</span>
+                      {item.discount_percent > 0 && (
+                        <span className="ml-1.5 text-red-500">-{item.discount_percent}%</span>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        );
+      })()}
+
+      <div className="flex gap-3 justify-center flex-wrap">
+        <button onClick={onPrint} className="flex items-center gap-2 px-4 py-2.5 border border-gray-300 rounded-lg text-sm font-medium hover:bg-gray-50"><Printer className="w-4 h-4" /> Receipt</button>
+        <button onClick={() => setShowGSTInvoice(true)} className="flex items-center gap-2 px-4 py-2.5 border border-blue-300 bg-blue-50 text-blue-700 rounded-lg text-sm font-medium hover:bg-blue-100"><FileText className="w-4 h-4" /> Tax Invoice</button>
+        <button onClick={onReset} className="flex items-center gap-2 px-6 py-2.5 bg-bv-gold-500 text-white rounded-lg text-sm font-semibold hover:bg-bv-gold-600"><Plus className="w-4 h-4" /> New Sale</button>
       </div>
+
+      {showGSTInvoice && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-xl shadow-2xl w-full max-w-4xl max-h-[90vh] overflow-y-auto">
+            <div className="p-4 border-b border-gray-200 flex items-center justify-between no-print">
+              <h3 className="font-semibold text-gray-900">GST Tax Invoice</h3>
+              <button onClick={() => setShowGSTInvoice(false)} className="p-1 hover:bg-gray-100 rounded"><X className="w-5 h-5" /></button>
+            </div>
+            <div className="p-4">
+              <GSTInvoice order={orderForInvoice as any} store={storeForInvoice as any} onPrint={() => setShowGSTInvoice(false)} />
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

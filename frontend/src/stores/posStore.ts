@@ -53,6 +53,7 @@ export interface CartLineItem {
   sku: string;
   barcode?: string;
   brand?: string;
+  subbrand?: string;
   category: string;
   unit_price: number;            // Selling price (Offer Price or MRP)
   mrp: number;                   // Maximum Retail Price
