@@ -371,10 +371,16 @@ async def create_order(
         raise HTTPException(status_code=400, detail="Order must have at least one item")
 
     if order_repo is not None and customer_repo is not None:
-        # Verify customer exists
+        # Verify customer exists (allow walk-in with generated IDs)
         customer = customer_repo.find_by_id(order.customer_id)
-        if not customer:
+        is_walkin = not customer and (
+            order.customer_id.startswith("walkin-") or order.customer_id == "walk-in"
+        )
+        if not customer and not is_walkin:
             raise HTTPException(status_code=404, detail="Customer not found")
+        
+        customer_name = customer.get("name") if customer else "Walk-in Customer"
+        customer_phone = customer.get("phone") or customer.get("mobile") if customer else ""
 
         # Calculate totals
         items_data = []
@@ -413,8 +419,8 @@ async def create_order(
             "order_number": generate_order_number(store_id),
             "store_id": store_id,
             "customer_id": order.customer_id,
-            "customer_name": customer.get("name"),
-            "customer_phone": customer.get("mobile"),
+            "customer_name": customer_name,
+            "customer_phone": customer_phone,
             "patient_id": order.patient_id,
             "salesperson_id": salesperson_id,
             "items": items_data,

@@ -203,7 +203,10 @@ async def create_prescription(
         # Verify customer exists
         if customer_repo is not None:
             customer = customer_repo.find_by_id(rx.customer_id)
-            if not customer:
+            is_walkin = not customer and (
+                rx.customer_id.startswith("walkin-") or rx.customer_id == "walk-in"
+            )
+            if not customer and not is_walkin:
                 raise HTTPException(status_code=404, detail="Customer not found")
 
         prescription_date = datetime.now()

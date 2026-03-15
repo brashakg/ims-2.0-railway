@@ -304,8 +304,8 @@ export function POSLayout() {
                       source,
                       optometrist_id: isOptometrist ? user?.id : (user?.id || 'admin-override'),
                       validity_months: 12,
-                      right_eye: { sph: String(rxData.sph_od || 0), cyl: String(rxData.cyl_od || 0), axis: rxData.axis_od || 180, add: String(rxData.add_od || 0) },
-                      left_eye: { sph: String(rxData.sph_os || 0), cyl: String(rxData.cyl_os || 0), axis: rxData.axis_os || 180, add: String(rxData.add_os || 0) },
+                      right_eye: { sph: String(rxData.sph_od || 0), cyl: String(rxData.cyl_od || 0), axis: rxData.axis_od || 180, add: String(rxData.add_od || 0), pd: String(rxData.pd_od || '') },
+                      left_eye: { sph: String(rxData.sph_os || 0), cyl: String(rxData.cyl_os || 0), axis: rxData.axis_os || 180, add: String(rxData.add_os || 0), pd: String(rxData.pd_os || '') },
                       remarks: rxData.doctor_name ? `Dr. ${rxData.doctor_name}` : undefined,
                     } as any);
 
@@ -446,7 +446,15 @@ function StepCustomer() {
             )}
             <div className="mt-3 flex gap-4">
               <button onClick={() => setShowCreate(true)} className="flex items-center gap-2 text-sm text-bv-gold-600 hover:text-bv-gold-700 font-medium"><Plus className="w-4 h-4" /> Create new customer</button>
-              <button onClick={() => store.setCustomer({ id: 'walk-in', name: 'Walk-in Customer', phone: '', email: '', customerType: 'B2C' } as any)}
+              <button onClick={async () => {
+                try {
+                  const r = await customerApi.createCustomer({ name: 'Walk-in Customer', mobile: '0000000000', customer_type: 'B2C' } as any);
+                  store.setCustomer({ id: r?.customer_id || r?.id || `walkin-${Date.now()}`, name: 'Walk-in Customer', phone: '0000000000', email: '', customerType: 'B2C' } as any);
+                } catch {
+                  // If create fails (duplicate phone), just use a local-only walk-in
+                  store.setCustomer({ id: `walkin-${Date.now()}`, name: 'Walk-in Customer', phone: '', email: '', customerType: 'B2C' } as any);
+                }
+              }}
                 className="flex items-center gap-2 text-sm text-gray-500 hover:text-gray-700"><User className="w-4 h-4" /> Walk-in</button>
             </div>
           </>

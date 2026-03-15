@@ -6,8 +6,31 @@
 // Persists draft cart to localStorage so sales aren't lost on browser crash.
 
 import { create } from 'zustand';
-import { persist } from 'zustand/middleware';
+import { persist, createJSONStorage } from 'zustand/middleware';
 import type { Customer, Patient, Prescription } from '../types';
+
+// ============================================================================
+// Debounced storage — prevents localStorage writes from blocking UI (fixes INP)
+// Writes are batched and delayed 500ms. Reads are instant.
+// ============================================================================
+
+const debouncedLocalStorage = {
+  getItem: (name: string): string | null => {
+    return localStorage.getItem(name);
+  },
+  setItem: (() => {
+    let timeout: ReturnType<typeof setTimeout> | null = null;
+    return (name: string, value: string) => {
+      if (timeout) clearTimeout(timeout);
+      timeout = setTimeout(() => {
+        try { localStorage.setItem(name, value); } catch { /* quota exceeded */ }
+      }, 500);
+    };
+  })(),
+  removeItem: (name: string) => {
+    localStorage.removeItem(name);
+  },
+};
 
 // ============================================================================
 // Types
@@ -344,20 +367,14 @@ export const usePOSStore = create<POSState>()(
     }),
     {
       name: 'ims-pos-draft',
+      storage: createJSONStorage(() => debouncedLocalStorage),
       // Only persist cart-critical fields, not UI state
       partialize: (state) => ({
-        sale_type: state.sale_type,
-        store_id: state.store_id,
-        salesperson_id: state.salesperson_id,
-        salesperson_name: state.salesperson_name,
-        customer: state.customer,
-        patient: state.patient,
-        prescription: state.prescription,
-        cart: state.cart,
-        cart_note: state.cart_note,
-        payments: state.payments,
-        is_advance_payment: state.is_advance_payment,
-        delivery_date: state.delivery_date,
+        ...state,
+        // Reset transient state
+        is_processing: false,
+        order_id: null,
+        order_number: null,
       }),
       // Safe merge: ensure arrays are never undefined after hydration
       onRehydrateStorage: () => (state) => {
