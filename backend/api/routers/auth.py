@@ -70,18 +70,18 @@ class RefreshTokenRequest(BaseModel):
 
 
 def hash_password(password: str) -> str:
-    """Hash password using bcrypt via passlib"""
-    from passlib.hash import bcrypt
-    return bcrypt.hash(password)
+    """Hash password using bcrypt directly"""
+    import bcrypt as _bc
+    return _bc.hashpw(password.encode(), _bc.gensalt(rounds=12)).decode()
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     """Verify password against bcrypt hash (with SHA-256 fallback for legacy)"""
     # Try bcrypt first (seed data and new users)
     if hashed_password.startswith("$2b$") or hashed_password.startswith("$2a$"):
-        from passlib.hash import bcrypt
+        import bcrypt as _bc
         try:
-            return bcrypt.verify(plain_password, hashed_password)
+            return _bc.checkpw(plain_password.encode(), hashed_password.encode())
         except Exception:
             return False
     # Fallback to SHA-256 for any legacy hashes
@@ -176,13 +176,13 @@ async def login(request: LoginRequest):
     
     # Fallback: hardcoded superadmin (emergency access)
     if user is None:
-        from passlib.hash import bcrypt as _bcrypt
+        import bcrypt as _bc
         fallback_users = {
             "admin": {
                 "user_id": "user-superadmin",
                 "username": "admin",
                 "email": "admin@bettervision.in",
-                "password_hash": _bcrypt.hash("admin123"),
+                "password_hash": _bc.hashpw(b"admin123", _bc.gensalt(rounds=12)).decode(),
                 "full_name": "Avinash (Superadmin)",
                 "roles": ["SUPERADMIN"],
                 "store_ids": ["BV-BOK-01", "BV-BOK-02", "BV-DHN-01", "BV-DHN-02", "WO-DHN-01", "BV-PUN-01"],

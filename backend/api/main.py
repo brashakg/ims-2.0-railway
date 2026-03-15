@@ -276,10 +276,11 @@ async def root():
 
 # Database seed endpoint (for initial setup)
 @app.post("/api/v1/admin/seed-database", tags=["Admin"])
-async def seed_database(secret: str = ""):
+async def seed_database(secret: str = "", force: str = ""):
     """
     Seed the database with Better Vision Opticals store data.
     Requires secret key. Only inserts into empty collections.
+    Use force=users to drop and re-seed users (fixes password hashes).
     """
     if secret != "bv-seed-2026":
         raise HTTPException(status_code=403, detail="Invalid seed secret")
@@ -299,8 +300,16 @@ async def seed_database(secret: str = ""):
         seed_data = get_all_seed_data()
         results = {}
 
+        # Force reseed specific collections
+        force_collections = [f.strip() for f in force.split(",") if f.strip()]
+
         for coll_name, documents in seed_data.items():
             collection = db.get_collection(coll_name)
+
+            if coll_name in force_collections:
+                collection.delete_many({})
+                results[coll_name] = f"FORCE-DROPPED"
+
             existing = collection.count_documents({})
             if existing > 0:
                 results[coll_name] = f"SKIPPED ({existing} existing)"

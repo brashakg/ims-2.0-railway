@@ -10,7 +10,8 @@ import uuid
 
 def _pw():
     """Bcrypt hash for 'admin123' - all seed accounts use this"""
-    return "$2b$12$LQv3c1yqBWVHxkd0LHAkCOYz6TtxMQJqhN8/X4.rP1zLjHZs8HPXW"
+    import bcrypt as _bc
+    return _bc.hashpw(b"admin123", _bc.gensalt(rounds=12)).decode()
 
 
 NOW = datetime.utcnow().isoformat()
