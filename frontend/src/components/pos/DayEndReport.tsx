@@ -8,7 +8,6 @@ import { useState, useEffect, useMemo } from 'react';
 import {
   Printer,
   X,
-  Calendar,
   IndianRupee,
   CreditCard,
   Phone,
@@ -20,7 +19,7 @@ import {
 } from 'lucide-react';
 import { orderApi } from '../../services/api';
 import { getGSTRateByCategory, getHSNByCategory } from '../../constants/gst';
-import { useAuth } from '../../contexts/AuthContext';
+import { useAuth } from '../../context/AuthContext';
 
 interface DayEndReportProps {
   storeId: string;

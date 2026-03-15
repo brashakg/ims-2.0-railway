@@ -11,7 +11,7 @@ import {
   ShoppingCart, User, Eye, Package, CreditCard, CheckCircle,
   ChevronRight, ChevronLeft, Search, Plus, X,
   Pause, Play, Printer, RotateCcw, IndianRupee, AlertTriangle,
-  Glasses, Watch, Phone, FileText, Zap, Sparkles,
+  Glasses, Watch, Phone, FileText, Zap, Sparkles, Receipt,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { usePOSStore } from '../../stores/posStore';
@@ -52,8 +52,10 @@ import { LensDetailsModal } from './LensDetailsModal';
 import { LensSuggestionPanel } from './LensSuggestionPanel';
 import { DiscountModal } from './DiscountModal';
 import { GSTInvoice } from './GSTInvoice';
+import { DayEndReport } from './DayEndReport';
 import { ReceiptPreview } from './ReceiptPreview';
 import { BarcodeScanner } from './BarcodeScanner';
+import { AddCustomerModal, type CustomerFormData } from '../customers/AddCustomerModal';
 import { getGSTRateByCategory } from '../../constants/gst';
 import type { PrescriptionInput } from '../../utils/lensAutoSuggest';
 
@@ -96,6 +98,7 @@ export function POSLayout() {
   const [showReceipt, setShowReceipt] = useState(false);
   const [holdConfirm, setHoldConfirm] = useState(false);
   const [showRecallPanel, setShowRecallPanel] = useState(false);
+  const [showDayEnd, setShowDayEnd] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   // Held bills from localStorage
@@ -168,6 +171,7 @@ export function POSLayout() {
     setShowReceipt(false);
     setHoldConfirm(false);
     setShowRecallPanel(false);
+    setShowDayEnd(false);
     setErrorMsg(null);
     store.resetTransaction();
   };
@@ -301,6 +305,10 @@ export function POSLayout() {
           <button onClick={() => { if (window.confirm('Start new transaction?')) handleFullReset(); }}
             className="flex items-center gap-1.5 px-3 py-2 text-sm bg-gray-100 text-gray-600 rounded-lg hover:bg-gray-200">
             <RotateCcw className="w-4 h-4" /> New
+          </button>
+          <button onClick={() => setShowDayEnd(true)}
+            className="flex items-center gap-1.5 px-3 py-2 text-sm bg-blue-50 text-blue-700 border border-blue-200 rounded-lg hover:bg-blue-100">
+            <Receipt className="w-4 h-4" /> Z-Report
           </button>
           <div className="hidden laptop:flex items-center gap-2 text-xs text-gray-400 ml-2 border-l border-gray-200 pl-3">
             <kbd className="px-1.5 py-0.5 bg-gray-100 border rounded text-[10px]">F2</kbd> Search
@@ -519,6 +527,9 @@ export function POSLayout() {
           </div>
         </div>
       )}
+      {showDayEnd && (
+        <DayEndReport storeId={store.store_id} onClose={() => setShowDayEnd(false)} />
+      )}
     </div>
   );
 }
@@ -587,11 +598,47 @@ function StepCustomer() {
   const store = usePOSStore();
   const [searchInput, setSearchInput] = useState('');
   const [debouncedQuery, setDebouncedQuery] = useState('');
-  const [showCreate, setShowCreate] = useState(false);
-  const [custError, setCustError] = useState<string | null>(null);
-  const [newCust, setNewCust] = useState({ name: '', phone: '', email: '' });
+  const [showAddCustomerModal, setShowAddCustomerModal] = useState(false);
   const { data: searchResults = [], isLoading } = useCustomerSearch(debouncedQuery);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Save customer from AddCustomerModal → create via API → set as POS customer
+  const handleSaveCustomer = async (customerData: CustomerFormData) => {
+    // Map to backend CustomerCreate schema
+    const payload = {
+      name: customerData.fullName,
+      mobile: customerData.mobileNumber,
+      email: customerData.email || undefined,
+      customer_type: customerData.customerType,
+      gstin: customerData.customerType === 'B2B' ? customerData.gstNumber : undefined,
+      billing_address: (customerData.address || customerData.city || customerData.pincode) ? {
+        address: customerData.address,
+        city: customerData.city,
+        state: customerData.state,
+        pincode: customerData.pincode,
+      } : undefined,
+      patients: (customerData.patients || []).map(p => ({
+        name: p.name,
+        mobile: p.mobile || undefined,
+        dob: p.dateOfBirth || undefined,
+        relation: p.relation || 'Self',
+      })),
+    };
+    const r = await customerApi.createCustomer(payload as any);
+    const custId = r?.customer_id || r?.id || `new-${Date.now()}`;
+    store.setCustomer({
+      id: custId,
+      name: customerData.fullName,
+      phone: customerData.mobileNumber,
+      email: customerData.email,
+      customerType: customerData.customerType,
+    } as any);
+    // If patients were added, set the first one
+    if (customerData.patients?.length > 0) {
+      store.setPatient({ name: customerData.patients[0].name, id: customerData.patients[0].id } as any);
+    }
+    setShowAddCustomerModal(false);
+  };
 
   // Debounce search — 300ms prevents keystroke-level API spam (INP fix)
   const handleSearchInput = (val: string) => {
@@ -686,7 +733,7 @@ function StepCustomer() {
               </div>
             )}
             <div className="mt-3 flex gap-4">
-              <button onClick={() => setShowCreate(true)} className="flex items-center gap-2 text-sm text-bv-gold-600 hover:text-bv-gold-700 font-medium"><Plus className="w-4 h-4" /> Create new customer</button>
+              <button onClick={() => setShowAddCustomerModal(true)} className="flex items-center gap-2 text-sm text-bv-gold-600 hover:text-bv-gold-700 font-medium"><Plus className="w-4 h-4" /> Create new customer</button>
               <button onClick={async () => {
                 try {
                   const r = await customerApi.createCustomer({ name: 'Walk-in Customer', mobile: '0000000000', customer_type: 'B2C' } as any);
@@ -702,32 +749,11 @@ function StepCustomer() {
         )}
       </div>
 
-      {showCreate && (
-        <div className="bg-white border border-gray-200 rounded-xl p-4 space-y-3">
-          <h4 className="font-semibold text-gray-900 text-sm">New Customer</h4>
-          <input placeholder="Full name *" value={newCust.name} onChange={(e) => { setNewCust(p => ({ ...p, name: e.target.value })); setCustError(null); }} className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" />
-          <input placeholder="Phone number (10 digits) *" value={newCust.phone} onChange={(e) => { setNewCust(p => ({ ...p, phone: e.target.value.replace(/\D/g, '').slice(0, 10) })); setCustError(null); }} className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" />
-          <input placeholder="Email (optional)" type="email" value={newCust.email} onChange={(e) => { setNewCust(p => ({ ...p, email: e.target.value })); setCustError(null); }} className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" />
-          {custError && <p className="text-xs text-red-600 bg-red-50 px-2 py-1 rounded">{custError}</p>}
-          <div className="flex gap-2">
-            <button onClick={() => { setShowCreate(false); setCustError(null); }} className="px-4 py-2 text-sm border border-gray-300 rounded-lg">Cancel</button>
-            <button onClick={async () => {
-              if (!newCust.name.trim()) { setCustError('Name is required'); return; }
-              if (!newCust.phone || newCust.phone.length !== 10) { setCustError('Valid 10-digit phone required'); return; }
-              if (newCust.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(newCust.email)) { setCustError('Invalid email format'); return; }
-              setCustError(null);
-              try {
-                const r = await customerApi.createCustomer({ name: newCust.name.trim(), mobile: newCust.phone, email: newCust.email || undefined, customer_type: 'B2C' } as any);
-                store.setCustomer({ id: r?.customer_id || r?.id || `new-${Date.now()}`, name: newCust.name.trim(), phone: newCust.phone, email: newCust.email, customerType: 'B2C' } as any);
-                setShowCreate(false);
-              } catch (err) {
-                const msg = err instanceof Error ? err.message : 'Could not create customer';
-                setCustError(msg.includes('already exists') ? 'Phone number already registered. Search for existing customer.' : msg);
-              }
-            }} className="px-4 py-2 text-sm bg-bv-gold-500 text-white rounded-lg font-semibold">Create & Select</button>
-          </div>
-        </div>
-      )}
+      <AddCustomerModal
+        isOpen={showAddCustomerModal}
+        onClose={() => setShowAddCustomerModal(false)}
+        onSave={handleSaveCustomer}
+      />
     </div>
   );
 }

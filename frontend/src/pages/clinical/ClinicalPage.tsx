@@ -188,29 +188,29 @@ export function ClinicalPage() {
   // Save customer and add to queue
   const handleSaveCustomer = async (customerData: CustomerFormData) => {
     try {
-      // Transform CustomerFormData to Customer format
+      // Map to backend CustomerCreate schema (same as POS, same as CustomersPage)
       const customerPayload = {
         name: customerData.fullName,
-        phone: customerData.mobileNumber,
-        email: customerData.email,
-        customerType: customerData.customerType,
-        gstNumber: customerData.gstNumber || undefined,
-        address: customerData.address,
-        city: customerData.city,
-        state: customerData.state,
-        pincode: customerData.pincode,
-        patients: customerData.patients.map(p => ({
-          id: p.id,
-          customerId: '', // Will be set by backend
+        mobile: customerData.mobileNumber,
+        email: customerData.email || undefined,
+        customer_type: customerData.customerType,
+        gstin: customerData.customerType === 'B2B' ? customerData.gstNumber : undefined,
+        billing_address: (customerData.address || customerData.city || customerData.pincode) ? {
+          address: customerData.address,
+          city: customerData.city,
+          state: customerData.state,
+          pincode: customerData.pincode,
+        } : undefined,
+        patients: (customerData.patients || []).map(p => ({
           name: p.name,
-          relation: p.relation,
-          dateOfBirth: p.dateOfBirth,
-          phone: p.mobile,
+          mobile: p.mobile || undefined,
+          dob: p.dateOfBirth || undefined,
+          relation: p.relation || 'Self',
         })),
       };
 
       // Create customer in the system
-      await customerApi.createCustomer(customerPayload);
+      await customerApi.createCustomer(customerPayload as any);
 
       // After customer is created, add the first patient to the queue
       if (customerData.patients && customerData.patients.length > 0) {

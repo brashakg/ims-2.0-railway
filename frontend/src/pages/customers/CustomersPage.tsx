@@ -208,27 +208,27 @@ export function CustomersPage() {
   // Handle creating new customer
   const handleCreateCustomer = async (formData: CustomerFormData) => {
     try {
-      // Transform formData to match Customer type
-      const customerData: Partial<Customer> = {
+      // Map to backend CustomerCreate schema (same as POS, same as ClinicalPage)
+      const customerData = {
         name: formData.fullName,
-        phone: formData.mobileNumber,
-        email: formData.email,
-        customerType: formData.customerType,
-        address: formData.address,
-        city: formData.city,
-        state: formData.state,
-        pincode: formData.pincode,
-        gstNumber: formData.customerType === 'B2B' ? formData.gstNumber : undefined,
-        patients: formData.patients.map(p => ({
-          id: p.id,
-          customerId: '', // Will be set by backend on creation
+        mobile: formData.mobileNumber,
+        email: formData.email || undefined,
+        customer_type: formData.customerType,
+        gstin: formData.customerType === 'B2B' ? formData.gstNumber : undefined,
+        billing_address: (formData.address || formData.city || formData.pincode) ? {
+          address: formData.address,
+          city: formData.city,
+          state: formData.state,
+          pincode: formData.pincode,
+        } : undefined,
+        patients: (formData.patients || []).map(p => ({
           name: p.name,
-          phone: p.mobile,
-          dateOfBirth: p.dateOfBirth,
-          relation: p.relation,
+          mobile: p.mobile || undefined,
+          dob: p.dateOfBirth || undefined,
+          relation: p.relation || 'Self',
         })),
       };
-      await customerApi.createCustomer(customerData);
+      await customerApi.createCustomer(customerData as any);
       toast.success('Customer created successfully');
       loadCustomers();
       setShowAddCustomerModal(false);
