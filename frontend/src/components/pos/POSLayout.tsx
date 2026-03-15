@@ -17,7 +17,7 @@ import { useAuth } from '../../context/AuthContext';
 import { usePOSStore } from '../../stores/posStore';
 import type { SaleType, POSStep, CartLineItem } from '../../stores/posStore';
 import { useProducts, useCustomerSearch } from '../../hooks/usePOSQueries';
-import { customerApi, orderApi, prescriptionApi } from '../../services/api';
+import { customerApi, orderApi, prescriptionApi, productApi } from '../../services/api';
 import type { Prescription } from '../../types';
 
 // Backwards-compatible type exports (used by BillingEngine, CartPanel)
@@ -526,6 +526,63 @@ export function POSLayout() {
 // ============================================================================
 // STEP 1: Customer + Sale Type
 // ============================================================================
+// ============================================================================
+// Customer Purchase History (compact, in StepCustomer)
+// ============================================================================
+function CustomerHistory({ customerId }: { customerId: string }) {
+  const [orders, setOrders] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const result = await orderApi.getOrders({ customer_id: customerId, page_size: 5 } as any);
+        if (!cancelled) setOrders((result?.orders || result || []).slice(0, 5));
+      } catch { /* no history available */ }
+      if (!cancelled) setLoading(false);
+    })();
+    return () => { cancelled = true; };
+  }, [customerId]);
+
+  if (loading) return null;
+  if (orders.length === 0) return <p className="text-xs text-gray-400 mt-2 italic">No previous orders found</p>;
+
+  return (
+    <div className="mt-2 bg-white border border-gray-200 rounded-lg p-3">
+      <p className="text-[10px] font-medium text-gray-500 uppercase tracking-wide mb-1.5">Recent Purchases</p>
+      <div className="space-y-1">
+        {orders.map((o: any, i: number) => {
+          const date = o.createdAt || o.created_at || o.order_date;
+          const ago = date ? getTimeAgo(new Date(date)) : '';
+          const items = o.items?.map((item: any) => item.productName || item.product_name || item.name).filter(Boolean).join(', ') || '';
+          return (
+            <div key={o.order_id || o._id || i} className="flex items-center gap-2 text-xs">
+              <span className="text-gray-400 w-16 flex-shrink-0">{ago}</span>
+              <span className="text-gray-700 truncate flex-1">{items || o.orderNumber || 'Order'}</span>
+              <span className="text-gray-500 flex-shrink-0 font-medium">₹{Math.round(o.grandTotal || o.grand_total || 0).toLocaleString('en-IN')}</span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function getTimeAgo(date: Date): string {
+  const now = new Date();
+  const diffMs = now.getTime() - date.getTime();
+  const days = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+  if (days === 0) return 'Today';
+  if (days === 1) return 'Yesterday';
+  if (days < 30) return `${days}d ago`;
+  const months = Math.floor(days / 30);
+  if (months < 12) return `${months}mo ago`;
+  return `${Math.floor(months / 12)}yr ago`;
+}
+
+// ============================================================================
+// STEP 1: Customer
+// ============================================================================
 function StepCustomer() {
   const store = usePOSStore();
   const [searchInput, setSearchInput] = useState('');
@@ -585,6 +642,7 @@ function StepCustomer() {
       <div>
         <label className="block text-sm font-medium text-gray-700 mb-2">Customer</label>
         {store.customer ? (
+          <>
           <div className={`${isWalkin ? 'bg-gray-50 border-gray-200' : 'bg-bv-gold-50 border-bv-gold-200'} border rounded-xl p-4 flex items-center justify-between`}>
             <div className="flex items-center gap-3">
               <div className={`w-10 h-10 rounded-full ${isWalkin ? 'bg-gray-400' : 'bg-bv-gold-500'} text-white flex items-center justify-center font-semibold`}>{store.customer.name?.charAt(0) || 'W'}</div>
@@ -597,6 +655,8 @@ function StepCustomer() {
             </div>
             <button onClick={() => store.setCustomer(null)} className="text-sm text-gray-500 hover:text-gray-700 px-3 py-1 border border-gray-200 rounded-lg">Change</button>
           </div>
+          {!isWalkin && <CustomerHistory customerId={store.customer.id} />}
+          </>
         ) : (
           <>
             <div className="relative">
@@ -720,16 +780,28 @@ function StepProducts({ onOpenLensModal }: { onOpenLensModal: () => void }) {
   const [categoryFilter, setCategoryFilter] = useState('');
   const [showSuggestions, setShowSuggestions] = useState(true);
   const [blockMsg, setBlockMsg] = useState<string | null>(null);
-  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid');
   const { data: products = [], isLoading } = useProducts({ search: debouncedSearch || undefined, category: categoryFilter || undefined });
   const categories = ['FRAMES', 'SUNGLASSES', 'RX_LENSES', 'CONTACT_LENSES', 'WRIST_WATCHES', 'SMARTWATCHES', 'ACCESSORIES'];
 
-  // Debounce product search — 300ms (INP fix)
-  const handleProductSearch = (val: string) => {
-    if (debounceRef.current) clearTimeout(debounceRef.current);
-    debounceRef.current = setTimeout(() => {
-      startTransition(() => setDebouncedSearch(val));
-    }, 300);
+  // Barcode scan: try exact match → auto-add to cart
+  const handleBarcodeScan = async (barcode: string) => {
+    try {
+      const result = await productApi.getProducts({ search: barcode });
+      const products = result?.products || result || [];
+      if (Array.isArray(products) && products.length === 1) {
+        // Exact single match — auto-add
+        handleAddProduct(products[0]);
+        return;
+      }
+    } catch { /* fall back to search */ }
+    // Fall back to regular search (shows in grid)
+    startTransition(() => setDebouncedSearch(barcode));
+  };
+
+  const handleManualSearch = (q: string) => {
+    // Immediate search on Enter — no debounce delay
+    startTransition(() => setDebouncedSearch(q));
   };
 
   // Build prescription input for lens suggestions (optional panel)
@@ -771,7 +843,7 @@ function StepProducts({ onOpenLensModal }: { onOpenLensModal: () => void }) {
       )}
       <div className="flex gap-3">
         <div className="flex-1">
-          <BarcodeScanner onScan={(b) => setDebouncedSearch(b)} onManualSearch={(q) => handleProductSearch(q)} placeholder="Scan barcode or search products..." autoFocus />
+          <BarcodeScanner onScan={handleBarcodeScan} onManualSearch={handleManualSearch} placeholder="Scan barcode or search products..." autoFocus />
         </div>
         {store.sale_type === 'prescription_order' && store.prescription && (
           <button onClick={onOpenLensModal} className="flex items-center gap-2 px-4 py-2 bg-purple-50 text-purple-700 border border-purple-200 rounded-lg hover:bg-purple-100 whitespace-nowrap text-sm font-medium">
@@ -815,7 +887,7 @@ function StepProducts({ onOpenLensModal }: { onOpenLensModal: () => void }) {
         </div>
       )}
 
-      <div className="flex gap-2 overflow-x-auto pb-1">
+      <div className="flex gap-2 overflow-x-auto pb-1 items-center">
         <button onClick={() => setCategoryFilter('')} className={`px-3 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap ${!categoryFilter ? 'bg-bv-gold-500 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}>All</button>
         {categories.map(cat => (
           <button key={cat} onClick={() => setCategoryFilter(cat === categoryFilter ? '' : cat)}
@@ -823,6 +895,14 @@ function StepProducts({ onOpenLensModal }: { onOpenLensModal: () => void }) {
             {cat.replace(/_/g, ' ')}
           </button>
         ))}
+        <div className="ml-auto flex gap-0.5 bg-gray-100 rounded-lg p-0.5">
+          <button onClick={() => setViewMode('grid')} className={`p-1.5 rounded ${viewMode === 'grid' ? 'bg-white shadow-sm' : 'text-gray-400 hover:text-gray-600'}`} title="Grid view">
+            <Package className="w-3.5 h-3.5" />
+          </button>
+          <button onClick={() => setViewMode('list')} className={`p-1.5 rounded ${viewMode === 'list' ? 'bg-white shadow-sm' : 'text-gray-400 hover:text-gray-600'}`} title="List view">
+            <FileText className="w-3.5 h-3.5" />
+          </button>
+        </div>
       </div>
 
       {store.sale_type === 'prescription_order' && store.prescription && (
@@ -837,7 +917,45 @@ function StepProducts({ onOpenLensModal }: { onOpenLensModal: () => void }) {
         <div className="grid grid-cols-2 tablet:grid-cols-3 laptop:grid-cols-4 gap-3">
           {[...Array(8)].map((_, i) => <div key={i} className="bg-white rounded-xl border border-gray-200 p-3 animate-pulse"><div className="h-20 bg-gray-100 rounded-lg mb-2" /><div className="h-4 bg-gray-100 rounded w-3/4 mb-1" /><div className="h-3 bg-gray-100 rounded w-1/2" /></div>)}
         </div>
+      ) : viewMode === 'list' ? (
+        /* COMPACT LIST VIEW — more products visible per screen */
+        <div className="bg-white border border-gray-200 rounded-xl overflow-hidden">
+          <div className="divide-y divide-gray-100 max-h-[60vh] overflow-y-auto">
+            {(products as any[]).map((product: any) => {
+              const mrp = product.mrp || 0; const offer = product.offer_price || mrp; const hasDiscount = offer < mrp;
+              const inCart = (store.cart || []).some(i => i.product_id === (product.product_id || product._id));
+              const stock = product.stock ?? product.quantity ?? product.stock_available ?? null;
+              const isOutOfStock = stock !== null && stock <= 0;
+              const isLowStock = stock !== null && stock > 0 && stock <= 3;
+              return (
+                <button key={product.product_id || product._id} onClick={() => handleAddProduct(product)} disabled={inCart || isOutOfStock}
+                  className={`w-full flex items-center gap-3 px-3 py-2 text-left hover:bg-gray-50 transition-colors ${
+                    isOutOfStock ? 'opacity-50 cursor-not-allowed bg-red-50/20' : inCart ? 'bg-green-50/50' : ''}`}>
+                  <div className="w-10 h-10 bg-gray-50 rounded flex items-center justify-center flex-shrink-0">
+                    {product.image_url ? <img src={product.image_url} alt="" className="h-8 w-auto object-contain" /> :
+                    <Package className="w-4 h-4 text-gray-300" />}
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-medium text-gray-900 truncate">{product.name}</p>
+                    <p className="text-[10px] text-gray-500">{product.brand} · {product.sku}</p>
+                  </div>
+                  {stock !== null && (
+                    <span className={`text-[10px] px-1.5 py-0.5 rounded flex-shrink-0 ${
+                      isOutOfStock ? 'bg-red-100 text-red-600' : isLowStock ? 'bg-amber-100 text-amber-700' : 'text-gray-400'
+                    }`}>{isOutOfStock ? 'Out' : isLowStock ? `${stock} left` : `×${stock}`}</span>
+                  )}
+                  <div className="text-right flex-shrink-0">
+                    <span className="text-sm font-bold text-gray-900">₹{offer.toLocaleString('en-IN')}</span>
+                    {hasDiscount && <span className="text-[9px] text-gray-400 line-through ml-1">₹{mrp.toLocaleString('en-IN')}</span>}
+                  </div>
+                  {inCart && <span className="text-[9px] px-1 py-0.5 bg-green-100 text-green-700 rounded flex-shrink-0">✓</span>}
+                </button>
+              );
+            })}
+          </div>
+        </div>
       ) : (
+        /* GRID VIEW — visual cards with images */
         <div className="grid grid-cols-2 tablet:grid-cols-3 laptop:grid-cols-4 gap-3">
           {(products as any[]).map((product: any) => {
             const mrp = product.mrp || 0; const offer = product.offer_price || mrp; const hasDiscount = offer < mrp;
@@ -1300,6 +1418,11 @@ function CartSidebar() {
               </div>
               <div className="text-right">{item.discount_percent > 0 && <span className="text-xs text-green-600 mr-1">-{item.discount_percent}%</span>}<span className="text-sm font-semibold">₹{Math.round(item.line_total).toLocaleString('en-IN')}</span></div>
             </div>
+            {/* Item-level notes: PD, fitting, tint, coating */}
+            {item.is_optical && (
+              <input placeholder="PD / Fitting / Tint notes..." value={item.notes || ''} onChange={(e) => store.updateItemNote(item.id, e.target.value)}
+                className="mt-1.5 w-full px-2 py-1 text-[10px] border border-gray-200 rounded bg-white placeholder:text-gray-300 focus:border-purple-300 focus:ring-1 focus:ring-purple-200" />
+            )}
           </div>
         ))}
       </div>

@@ -81,6 +81,9 @@ export interface CartLineItem {
 
   // Calculated
   line_total: number;            // (unit_price * quantity) - discount_amount
+
+  // Item-level notes (PD, fitting, tint, etc.)
+  notes?: string;
 }
 
 export interface PaymentEntry {
@@ -143,6 +146,7 @@ export interface POSState {
   removeFromCart: (lineId: string) => void;
   updateQuantity: (lineId: string, qty: number) => void;
   applyDiscount: (lineId: string, percent: number, reason?: string, approvedBy?: string) => void;
+  updateItemNote: (lineId: string, note: string) => void;
   setCartNote: (note: string) => void;
   linkLensToFrame: (lensLineId: string, frameLineId: string) => void;
 
@@ -304,6 +308,14 @@ export const usePOSStore = create<POSState>()(
               line_total: calcLineTotal({ ...item, discount_percent: percent }),
             };
           }),
+        }));
+      },
+
+      updateItemNote: (lineId, note) => {
+        set((state) => ({
+          cart: state.cart.map((item) =>
+            item.id === lineId ? { ...item, notes: note } : item
+          ),
         }));
       },
 
