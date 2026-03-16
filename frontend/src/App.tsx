@@ -40,6 +40,7 @@ const HRPage = lazy(() => import('./pages/hr/HRPage').then(m => ({ default: m.HR
 const ReportsPage = lazy(() => import('./pages/reports/ReportsPage').then(m => ({ default: m.ReportsPage })));
 const SettingsPage = lazy(() => import('./pages/settings/SettingsPage').then(m => ({ default: m.SettingsPage })));
 const DayEndReport = lazy(() => import('./pages/reports/DayEndReport'));
+const OutstandingPaymentsReport = lazy(() => import('./pages/reports/OutstandingPaymentsReport'));
 const ReturnsPage = lazy(() => import('./pages/orders/ReturnsPage'));
 const SetupPage = lazy(() => import('./pages/settings/SetupPage'));
 
@@ -440,6 +441,18 @@ function App() {
                         allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'CASHIER', 'SALES_CASHIER']}
                       >
                         <DayEndReport />
+                      </ProtectedRoute>
+                    }
+                  />
+
+                  {/* Outstanding Payments Report */}
+                  <Route
+                    path="reports/outstanding"
+                    element={
+                      <ProtectedRoute
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT']}
+                      >
+                        <OutstandingPaymentsReport />
                       </ProtectedRoute>
                     }
                   />

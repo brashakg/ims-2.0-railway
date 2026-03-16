@@ -11,7 +11,7 @@ import {
   ShoppingCart, User, Eye, Package, CreditCard, CheckCircle,
   ChevronRight, ChevronLeft, Search, Plus, X,
   Pause, Play, Printer, RotateCcw, IndianRupee, AlertTriangle,
-  Glasses, Watch, Phone, FileText, Zap, Sparkles, Receipt,
+  Glasses, Watch, Phone, FileText, Zap, Sparkles,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { usePOSStore } from '../../stores/posStore';
@@ -319,34 +319,30 @@ export function POSLayout() {
   }
 
   return (
-    <div className="min-h-screen bg-gray-50 flex flex-col">
+    <div className="min-h-screen min-h-[100dvh] bg-gray-50 flex flex-col">
       {/* HEADER */}
-      <header className="bg-white border-b border-gray-200 px-4 py-3 flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <div className="w-9 h-9 bg-bv-gold-500 rounded-lg flex items-center justify-center">
-            <ShoppingCart className="w-5 h-5 text-white" />
+      <header className="bg-white border-b border-gray-200 px-3 tablet:px-4 py-2.5 flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2 min-w-0">
+          <div className="w-8 h-8 tablet:w-9 tablet:h-9 bg-bv-gold-500 rounded-lg flex items-center justify-center flex-shrink-0">
+            <ShoppingCart className="w-4 h-4 tablet:w-5 tablet:h-5 text-white" />
           </div>
-          <div>
-            <h1 className="text-lg font-bold text-gray-900">Point of Sale</h1>
-            <p className="text-xs text-gray-500">{user?.name} · {store.store_id || 'No store'}</p>
+          <div className="min-w-0">
+            <h1 className="text-base tablet:text-lg font-bold text-gray-900 truncate">Point of Sale</h1>
+            <p className="text-[10px] tablet:text-xs text-gray-500 truncate">{user?.name} · {store.store_id || 'No store'}</p>
           </div>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-1.5 tablet:gap-2 flex-shrink-0">
           <button onClick={() => setHoldConfirm(true)} disabled={(store.cart || []).length === 0}
-            className="flex items-center gap-1.5 px-3 py-2 text-sm bg-amber-50 text-amber-700 border border-amber-200 rounded-lg hover:bg-amber-100 disabled:opacity-40">
-            <Pause className="w-4 h-4" /> Hold
+            className="flex items-center gap-1 px-2.5 py-2 tablet:px-3 text-xs tablet:text-sm bg-amber-50 text-amber-700 border border-amber-200 rounded-lg hover:bg-amber-100 disabled:opacity-40 touch-manipulation">
+            <Pause className="w-4 h-4" /> <span className="hidden tablet:inline">Hold</span>
           </button>
-          <button className="flex items-center gap-1.5 px-3 py-2 text-sm bg-gray-100 text-gray-600 rounded-lg hover:bg-gray-200 relative" onClick={() => setShowRecallPanel(true)}>
-            <Play className="w-4 h-4" /> Recall
+          <button className="flex items-center gap-1 px-2.5 py-2 tablet:px-3 text-xs tablet:text-sm bg-gray-100 text-gray-600 rounded-lg hover:bg-gray-200 relative touch-manipulation" onClick={() => setShowRecallPanel(true)}>
+            <Play className="w-4 h-4" /> <span className="hidden tablet:inline">Recall</span>
             {getHeldBills().length > 0 && <span className="absolute -top-1 -right-1 w-4 h-4 bg-amber-500 text-white text-[10px] rounded-full flex items-center justify-center">{getHeldBills().length}</span>}
           </button>
           <button onClick={() => { if (window.confirm('Start new transaction?')) handleFullReset(); }}
-            className="flex items-center gap-1.5 px-3 py-2 text-sm bg-gray-100 text-gray-600 rounded-lg hover:bg-gray-200">
-            <RotateCcw className="w-4 h-4" /> New
-          </button>
-          <button onClick={() => setShowDayEnd(true)}
-            className="flex items-center gap-1.5 px-3 py-2 text-sm bg-blue-50 text-blue-700 border border-blue-200 rounded-lg hover:bg-blue-100">
-            <Receipt className="w-4 h-4" /> Z-Report
+            className="flex items-center gap-1 px-2.5 py-2 tablet:px-3 text-xs tablet:text-sm bg-gray-100 text-gray-600 rounded-lg hover:bg-gray-200 touch-manipulation">
+            <RotateCcw className="w-4 h-4" /> <span className="hidden tablet:inline">New</span>
           </button>
           <div className="hidden laptop:flex items-center gap-2 text-xs text-gray-400 ml-2 border-l border-gray-200 pl-3">
             <kbd className="px-1.5 py-0.5 bg-gray-100 border rounded text-[10px]">F2</kbd> Search
@@ -354,7 +350,6 @@ export function POSLayout() {
             <kbd className="px-1.5 py-0.5 bg-gray-100 border rounded text-[10px]">F9</kbd> Pay
             <kbd className="px-1.5 py-0.5 bg-gray-100 border rounded text-[10px]">ESC</kbd> Back
             <kbd className="px-1.5 py-0.5 bg-gray-100 border rounded text-[10px]">⏎</kbd> Next
-            <kbd className="px-1.5 py-0.5 bg-gray-100 border rounded text-[10px]">ESC</kbd> Back
           </div>
         </div>
       </header>
@@ -383,8 +378,8 @@ export function POSLayout() {
       </div>
 
       {/* MAIN CONTENT */}
-      <div className="flex-1 flex overflow-hidden">
-        <div className="flex-1 overflow-y-auto p-4 tablet:p-6">
+      <div className="flex-1 flex overflow-hidden relative">
+        <div className="flex-1 overflow-y-auto p-3 tablet:p-5 laptop:p-6 pb-20 tablet:pb-6">
           {store.current_step === 'customer' && <StepCustomer />}
           {store.current_step === 'prescription' && <StepPrescription onShowModal={() => setShowPrescriptionModal(true)} onShowNew={() => setShowNewPrescription(true)} />}
           {store.current_step === 'products' && <StepProducts onOpenLensModal={() => setShowLensModal(true)} />}
@@ -394,8 +389,19 @@ export function POSLayout() {
         </div>
 
         {(['products', 'review', 'prescription'] as POSStep[]).includes(store.current_step) && (store.cart || []).length > 0 && (
-          <div className="hidden tablet:flex w-80 laptop:w-96 border-l border-gray-200 bg-white flex-col">
+          <div className="hidden tablet:flex w-72 laptop:w-80 xl:w-96 border-l border-gray-200 bg-white flex-col">
             <CartSidebar />
+          </div>
+        )}
+
+        {/* Mobile/small tablet: floating cart badge */}
+        {(['products', 'review', 'prescription'] as POSStep[]).includes(store.current_step) && (store.cart || []).length > 0 && (
+          <div className="tablet:hidden fixed bottom-20 right-4 z-30">
+            <button onClick={() => store.setStep('review')}
+              className="w-14 h-14 bg-bv-gold-500 text-white rounded-full shadow-lg flex items-center justify-center relative touch-manipulation">
+              <ShoppingCart className="w-6 h-6" />
+              <span className="absolute -top-1 -right-1 w-6 h-6 bg-red-500 text-white text-xs font-bold rounded-full flex items-center justify-center">{(store.cart || []).length}</span>
+            </button>
           </div>
         )}
       </div>
@@ -408,23 +414,23 @@ export function POSLayout() {
           <button onClick={() => setErrorMsg(null)} className="text-red-400 hover:text-red-600 ml-2"><X className="w-4 h-4" /></button>
         </div>
       )}
-      <footer className="bg-white border-t border-gray-200 px-4 py-3 flex items-center justify-between">
-        <div className="flex items-center gap-3">
+      <footer className="bg-white border-t border-gray-200 px-3 tablet:px-4 py-2.5 flex items-center justify-between pb-[env(safe-area-inset-bottom,0)]">
+        <div className="flex items-center gap-2 tablet:gap-3">
           {currentStepIndex > 0 && store.current_step !== 'complete' && (
-            <button onClick={() => store.prevStep()} className="flex items-center gap-1.5 px-4 py-2 text-sm border border-gray-300 rounded-lg hover:bg-gray-50">
+            <button onClick={() => store.prevStep()} className="flex items-center gap-1.5 px-3 tablet:px-4 py-2.5 text-sm border border-gray-300 rounded-lg hover:bg-gray-50 touch-manipulation min-h-[44px]">
               <ChevronLeft className="w-4 h-4" /> Back
             </button>
           )}
           {(store.cart || []).length > 0 && (
-            <div className="text-sm text-gray-500">
-              <span className="font-semibold text-gray-900">{(store.cart || []).length}</span> items · <span className="font-semibold text-gray-900 ml-1">₹{store.getGrandTotal().toLocaleString('en-IN')}</span>
+            <div className="text-xs tablet:text-sm text-gray-500">
+              <span className="font-semibold text-gray-900">{(store.cart || []).length}</span> items · <span className="font-semibold text-gray-900 ml-1">₹{Math.round(store.getGrandTotal()).toLocaleString('en-IN')}</span>
             </div>
           )}
         </div>
         {store.current_step !== 'complete' && (
           <button onClick={() => { setErrorMsg(null); store.current_step === 'payment' ? handleCreateOrder() : store.nextStep(); }}
             disabled={!canProceed || store.is_processing}
-            className={`flex items-center gap-1.5 px-6 py-2.5 rounded-lg text-sm font-semibold transition-colors ${
+            className={`flex items-center gap-1.5 px-5 tablet:px-6 py-2.5 tablet:py-3 rounded-lg text-sm font-semibold transition-colors touch-manipulation min-h-[44px] ${
               !canProceed || store.is_processing ? 'bg-gray-200 text-gray-400 cursor-not-allowed' : 'bg-bv-gold-500 text-white hover:bg-bv-gold-600'
             }`}>
             {store.is_processing ? (

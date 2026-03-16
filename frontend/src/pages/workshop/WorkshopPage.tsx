@@ -19,7 +19,7 @@ import {
   RefreshCw,
 } from 'lucide-react';
 import type { JobStatus, JobPriority } from '../../types';
-import { workshopApi } from '../../services/api';
+import { workshopApi, orderApi } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
 import clsx from 'clsx';
 
@@ -138,6 +138,54 @@ export function WorkshopPage() {
     return new Date(promisedDate) < new Date();
   };
 
+  const [showCreateJob, setShowCreateJob] = useState(false);
+  const [createOrderSearch, setCreateOrderSearch] = useState('');
+  const [createOrders, setCreateOrders] = useState<any[]>([]);
+  const [createSelectedOrder, setCreateSelectedOrder] = useState<any>(null);
+  const [createFitting, setCreateFitting] = useState('');
+  const [createNotes, setCreateNotes] = useState('');
+  const [createPriority, setCreatePriority] = useState<'NORMAL' | 'EXPRESS' | 'URGENT'>('NORMAL');
+  const [createExpectedDate, setCreateExpectedDate] = useState(new Date(Date.now() + 3 * 86400000).toISOString().split('T')[0]);
+  const [createLoading, setCreateLoading] = useState(false);
+
+  const searchOrdersForJob = async () => {
+    if (!createOrderSearch.trim()) return;
+    try {
+      const res = await orderApi.getOrders({ storeId: user?.activeStoreId });
+      const all = res?.orders || res || [];
+      setCreateOrders(all.filter((o: any) =>
+        (o.orderNumber || '').toLowerCase().includes(createOrderSearch.toLowerCase()) ||
+        (o.customerName || '').toLowerCase().includes(createOrderSearch.toLowerCase())
+      ).slice(0, 10));
+    } catch { setCreateOrders([]); }
+  };
+
+  const handleCreateJob = async () => {
+    if (!createSelectedOrder) return;
+    setCreateLoading(true);
+    try {
+      const rxItem = (createSelectedOrder.items || []).find((i: any) => i.category === 'RX_LENSES' || i.is_optical);
+      await workshopApi.createJob({
+        order_id: createSelectedOrder.id,
+        frame_details: { items: (createSelectedOrder.items || []).filter((i: any) => i.category === 'FRAMES' || i.category === 'SUNGLASSES') },
+        lens_details: rxItem?.lens_details || { type: 'STANDARD' },
+        prescription_id: rxItem?.prescription_id || '',
+        fitting_instructions: createFitting || undefined,
+        special_notes: createNotes || undefined,
+        expected_date: createExpectedDate,
+      });
+      setShowCreateJob(false);
+      setCreateSelectedOrder(null);
+      setCreateFitting('');
+      setCreateNotes('');
+      await loadJobs();
+    } catch {
+      // Error handling — silently retry
+    } finally {
+      setCreateLoading(false);
+    }
+  };
+
   return (
     <div className="space-y-4">
       {/* Header */}
@@ -146,18 +194,24 @@ export function WorkshopPage() {
           <h1 className="text-2xl font-bold text-gray-900">Workshop</h1>
           <p className="text-gray-500">Manage lens fitting and job orders</p>
         </div>
-        <button
-          onClick={loadJobs}
-          disabled={isLoading}
-          className="btn-outline flex items-center gap-2"
-        >
-          {isLoading ? (
-            <Loader2 className="w-4 h-4 animate-spin" />
-          ) : (
-            <RefreshCw className="w-4 h-4" />
-          )}
-          Refresh
-        </button>
+        <div className="flex items-center gap-2">
+          <button onClick={() => setShowCreateJob(true)}
+            className="btn-primary flex items-center gap-2 text-sm">
+            <Wrench className="w-4 h-4" /> Create Job from Order
+          </button>
+          <button
+            onClick={loadJobs}
+            disabled={isLoading}
+            className="btn-outline flex items-center gap-2"
+          >
+            {isLoading ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <RefreshCw className="w-4 h-4" />
+            )}
+            Refresh
+          </button>
+        </div>
       </div>
 
       {/* Error State */}
@@ -501,6 +555,118 @@ export function WorkshopPage() {
                 </button>
               </div>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* CREATE JOB MODAL */}
+      {showCreateJob && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-xl shadow-2xl w-full max-w-lg max-h-[85vh] overflow-y-auto">
+            <div className="p-5 border-b border-gray-200 flex items-center justify-between">
+              <h3 className="font-semibold text-gray-900">Create Workshop Job from Order</h3>
+              <button onClick={() => { setShowCreateJob(false); setCreateSelectedOrder(null); setCreateOrders([]); }} className="p-1 hover:bg-gray-100 rounded">
+                <AlertTriangle className="w-5 h-5 text-gray-400" />
+              </button>
+            </div>
+            <div className="p-5 space-y-4">
+              {!createSelectedOrder ? (
+                <>
+                  <div className="flex gap-2">
+                    <div className="relative flex-1">
+                      <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+                      <input value={createOrderSearch} onChange={e => setCreateOrderSearch(e.target.value)}
+                        onKeyDown={e => e.key === 'Enter' && searchOrdersForJob()}
+                        placeholder="Search order number or customer..."
+                        className="w-full pl-9 pr-4 py-2.5 border border-gray-300 rounded-lg text-sm" />
+                    </div>
+                    <button onClick={searchOrdersForJob} className="px-4 py-2 bg-bv-gold-500 text-white rounded-lg text-sm font-semibold">Search</button>
+                  </div>
+                  {createOrders.length > 0 && (
+                    <div className="space-y-1.5 max-h-60 overflow-y-auto">
+                      {createOrders.map((o: any) => (
+                        <button key={o.id} onClick={() => setCreateSelectedOrder(o)}
+                          className="w-full flex items-center justify-between p-3 rounded-lg border border-gray-200 hover:border-bv-gold-300 hover:bg-bv-gold-50 text-left">
+                          <div>
+                            <p className="text-sm font-medium">{o.orderNumber}</p>
+                            <p className="text-xs text-gray-500">{o.customerName} · {(o.items || []).length} items</p>
+                          </div>
+                          <span className="text-sm font-bold">₹{Math.round(o.grandTotal || 0).toLocaleString('en-IN')}</span>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </>
+              ) : (
+                <>
+                  <div className="bg-gray-50 rounded-lg p-3">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <p className="font-medium text-sm">{createSelectedOrder.orderNumber}</p>
+                        <p className="text-xs text-gray-500">{createSelectedOrder.customerName}</p>
+                      </div>
+                      <button onClick={() => setCreateSelectedOrder(null)} className="text-xs text-bv-gold-600 hover:underline">Change</button>
+                    </div>
+                    <div className="mt-2 space-y-1">
+                      {(createSelectedOrder.items || []).map((item: any, i: number) => (
+                        <div key={i} className="flex items-center justify-between text-xs">
+                          <span className="text-gray-700">{item.productName || item.product_name || item.name}</span>
+                          <span className="text-gray-400">{item.category}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="text-xs text-gray-500 block mb-1">Priority</label>
+                    <div className="flex gap-2">
+                      {(['NORMAL', 'EXPRESS', 'URGENT'] as const).map(p => (
+                        <button key={p} onClick={() => setCreatePriority(p)}
+                          className={clsx('flex-1 py-2 rounded-lg text-xs font-medium border-2 transition-all',
+                            createPriority === p
+                              ? p === 'URGENT' ? 'border-red-500 bg-red-50 text-red-700'
+                                : p === 'EXPRESS' ? 'border-amber-500 bg-amber-50 text-amber-700'
+                                  : 'border-bv-gold-500 bg-bv-gold-50 text-bv-gold-700'
+                              : 'border-gray-200 text-gray-500')}>
+                          {p}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="text-xs text-gray-500 block mb-1">Expected Delivery Date</label>
+                    <input type="date" value={createExpectedDate} onChange={e => setCreateExpectedDate(e.target.value)}
+                      min={new Date().toISOString().split('T')[0]}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" />
+                  </div>
+
+                  <div>
+                    <label className="text-xs text-gray-500 block mb-1">Fitting Instructions</label>
+                    <textarea value={createFitting} onChange={e => setCreateFitting(e.target.value)}
+                      placeholder="PD, segment height, tilt, wrap angle, frame adjustments..."
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm h-16 resize-none" />
+                  </div>
+
+                  <div>
+                    <label className="text-xs text-gray-500 block mb-1">Special Notes for Workshop</label>
+                    <textarea value={createNotes} onChange={e => setCreateNotes(e.target.value)}
+                      placeholder="Tint, drill mount, special coating, customer preferences..."
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm h-16 resize-none" />
+                  </div>
+                </>
+              )}
+            </div>
+            {createSelectedOrder && (
+              <div className="p-5 border-t border-gray-200 flex gap-2">
+                <button onClick={() => { setShowCreateJob(false); setCreateSelectedOrder(null); }}
+                  className="flex-1 px-4 py-2.5 border border-gray-300 rounded-lg text-sm">Cancel</button>
+                <button onClick={handleCreateJob} disabled={createLoading}
+                  className="flex-1 px-4 py-2.5 bg-bv-gold-500 text-white rounded-lg text-sm font-semibold hover:bg-bv-gold-600 disabled:opacity-50">
+                  {createLoading ? 'Creating...' : 'Create Job'}
+                </button>
+              </div>
+            )}
           </div>
         </div>
       )}

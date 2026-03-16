@@ -324,12 +324,27 @@ export const inventoryApi = {
   },
 
   createTransfer: async (data: { fromStoreId: string; toStoreId: string; items: Array<{ stockId: string; quantity: number }> }) => {
-    const response = await api.post('/inventory/transfers', data);
+    // Real transfer API is on /transfers, not /inventory/transfers
+    const response = await api.post('/transfers', {
+      transfer_type: 'inter_store',
+      from_location_id: data.fromStoreId,
+      from_location_name: data.fromStoreId,
+      to_location_id: data.toStoreId,
+      to_location_name: data.toStoreId,
+      priority: 'normal',
+      items: data.items.map(i => ({
+        product_id: i.stockId,
+        product_name: i.stockId,
+        sku: '',
+        quantity_requested: i.quantity,
+        unit_cost: 0,
+      })),
+    });
     return response.data;
   },
 
   getTransfers: async (storeId: string, direction: 'incoming' | 'outgoing') => {
-    const response = await api.get('/inventory/transfers', { params: { store_id: storeId, direction } });
+    const response = await api.get('/transfers', { params: { store_id: storeId, direction } });
     return response.data;
   },
 };

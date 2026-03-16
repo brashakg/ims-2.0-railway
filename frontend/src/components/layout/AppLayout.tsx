@@ -41,6 +41,7 @@ const pathToModule: Record<string, ModuleId> = {
   '/inventory/audit': 'inventory',
   '/reports': 'reports',
   '/reports/day-end': 'reports',
+  '/reports/outstanding': 'reports',
   '/returns': 'pos',
   '/settings': 'settings',
   '/setup': 'settings',

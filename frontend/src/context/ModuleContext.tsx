@@ -182,6 +182,7 @@ export const MODULE_CONFIGS: ModuleConfig[] = [
     sidebarItems: [
       { id: 'rpt-dashboard', label: 'Analytics Dashboard', path: '/reports' },
       { id: 'rpt-dayend', label: 'Day-End Closing', path: '/reports/day-end' },
+      { id: 'rpt-outstanding', label: 'Outstanding Payments', path: '/reports/outstanding' },
       { id: 'rpt-sales', label: 'Sales Reports', path: '/reports?tab=sales' },
       { id: 'rpt-inventory', label: 'Inventory Reports', path: '/reports?tab=inventory' },
       { id: 'rpt-gst', label: 'GST Reports', path: '/reports?tab=gst' },
