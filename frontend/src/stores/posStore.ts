@@ -149,6 +149,7 @@ export interface POSState {
   applyDiscount: (lineId: string, percent: number, reason?: string, approvedBy?: string) => void;
   updateItemNote: (lineId: string, note: string) => void;
   setCartNote: (note: string) => void;
+  setItemNote: (lineId: string, note: string) => void;
   linkLensToFrame: (lensLineId: string, frameLineId: string) => void;
 
   // Payment
@@ -321,6 +322,9 @@ export const usePOSStore = create<POSState>()(
       },
 
       setCartNote: (note) => set({ cart_note: note }),
+      setItemNote: (lineId, note) => set(state => ({
+        cart: (state.cart || []).map(item => item.id === lineId ? { ...item, item_note: note } : item),
+      })),
 
       linkLensToFrame: (lensLineId, frameLineId) => {
         set((state) => ({

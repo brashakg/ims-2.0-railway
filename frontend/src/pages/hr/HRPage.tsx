@@ -158,18 +158,53 @@ export function HRPage() {
           <h1 className="text-2xl font-bold text-gray-900">HR Management</h1>
           <p className="text-gray-500">Attendance tracking and leave management</p>
         </div>
-        <button
-          onClick={loadData}
-          disabled={isLoading}
-          className="btn-outline flex items-center gap-2"
-        >
-          {isLoading ? (
-            <Loader2 className="w-4 h-4 animate-spin" />
-          ) : (
-            <RefreshCw className="w-4 h-4" />
-          )}
-          Refresh
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={async () => {
+              try {
+                const pos = await new Promise<GeolocationPosition>((resolve, reject) => 
+                  navigator.geolocation.getCurrentPosition(resolve, reject, { timeout: 5000 }));
+                await hrApi.checkIn(user?.activeStoreId || '', pos.coords.latitude, pos.coords.longitude);
+                await loadData();
+              } catch (err: any) {
+                if (err?.code === 1) alert('Location access required for check-in');
+                else await hrApi.checkIn(user?.activeStoreId || '', 0, 0).then(() => loadData()).catch(() => {});
+              }
+            }}
+            className="btn-primary flex items-center gap-2 text-sm"
+          >
+            <Clock className="w-4 h-4" /> Check In
+          </button>
+          <button
+            onClick={async () => {
+              try {
+                // Get latest attendance to find the ID
+                const data = await hrApi.getAttendance(user?.activeStoreId || '');
+                const records = data?.records || data || [];
+                const today = records.find((r: any) => r.userId === user?.id && !r.checkOut);
+                if (today?.id) {
+                  await hrApi.checkOut(today.id);
+                  await loadData();
+                }
+              } catch { /* ignore */ }
+            }}
+            className="btn-outline flex items-center gap-2 text-sm"
+          >
+            <Clock className="w-4 h-4" /> Check Out
+          </button>
+          <button
+            onClick={loadData}
+            disabled={isLoading}
+            className="btn-outline flex items-center gap-2"
+          >
+            {isLoading ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <RefreshCw className="w-4 h-4" />
+            )}
+            Refresh
+          </button>
+        </div>
       </div>
 
       {/* Error State */}

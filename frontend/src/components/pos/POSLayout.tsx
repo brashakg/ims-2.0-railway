@@ -187,16 +187,6 @@ export function POSLayout() {
   const currentStepIndex = activeSteps.indexOf(store.current_step);
   const visibleSteps = STEPS.filter(s => activeSteps.includes(s.id));
 
-  useEffect(() => {
-    const handle = (e: KeyboardEvent) => {
-      if (e.key === 'F2') { e.preventDefault(); store.setStep('products'); }
-      if (e.key === 'F9' && (store.cart || []).length > 0) { e.preventDefault(); store.setStep('payment'); }
-      if (e.key === 'Escape' && store.current_step !== 'customer') { e.preventDefault(); store.prevStep(); }
-    };
-    window.addEventListener('keydown', handle);
-    return () => window.removeEventListener('keydown', handle);
-  }, [(store.cart || []).length, store.current_step]);
-
   const canProceed = useMemo(() => {
     switch (store.current_step) {
       case 'customer': return !!store.customer;
@@ -204,14 +194,30 @@ export function POSLayout() {
       case 'products': return (store.cart || []).length > 0;
       case 'review': return (store.cart || []).length > 0;
       case 'payment': {
-        // Advance payment: at least one payment recorded is enough
         if (store.is_advance_payment) return store.getTotalPaid() > 0;
-        // Full payment: balance must be zero
         return store.getBalance() <= 0.01;
       }
       default: return true;
     }
   }, [store.current_step, store.customer, store.prescription, store.cart, store.payments, store.is_advance_payment]);
+
+  useEffect(() => {
+    const handle = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement)?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+      if (e.key === 'F2') { e.preventDefault(); store.setStep('products'); }
+      if (e.key === 'F9' && (store.cart || []).length > 0) { e.preventDefault(); store.setStep('payment'); }
+      if (e.key === 'Escape' && store.current_step !== 'customer') { e.preventDefault(); store.prevStep(); }
+      if (e.key === 'F4' && (store.cart || []).length > 0) { e.preventDefault(); setHoldConfirm(true); }
+      if (e.key === 'Enter' && e.ctrlKey && store.current_step === 'payment') { e.preventDefault(); handleCreateOrder(); }
+      if (e.key === 'Enter' && !e.ctrlKey && store.current_step !== 'complete' && store.current_step !== 'payment') {
+        e.preventDefault();
+        if (canProceed) store.nextStep();
+      }
+    };
+    window.addEventListener('keydown', handle);
+    return () => window.removeEventListener('keydown', handle);
+  }, [(store.cart || []).length, store.current_step, canProceed]);
 
   async function handleCreateOrder() {
     if (store.is_processing) return; // Double-click guard
@@ -254,6 +260,7 @@ export function POSLayout() {
           discount_percent: item.discount_percent,
           prescription_id: item.linked_prescription_id,
           lens_details: item.lens_details,
+          item_note: (item as any).item_note || undefined,
         })),
         notes: store.cart_note || undefined,
       } as any);
@@ -343,7 +350,10 @@ export function POSLayout() {
           </button>
           <div className="hidden laptop:flex items-center gap-2 text-xs text-gray-400 ml-2 border-l border-gray-200 pl-3">
             <kbd className="px-1.5 py-0.5 bg-gray-100 border rounded text-[10px]">F2</kbd> Search
+            <kbd className="px-1.5 py-0.5 bg-gray-100 border rounded text-[10px]">F4</kbd> Hold
             <kbd className="px-1.5 py-0.5 bg-gray-100 border rounded text-[10px]">F9</kbd> Pay
+            <kbd className="px-1.5 py-0.5 bg-gray-100 border rounded text-[10px]">ESC</kbd> Back
+            <kbd className="px-1.5 py-0.5 bg-gray-100 border rounded text-[10px]">⏎</kbd> Next
             <kbd className="px-1.5 py-0.5 bg-gray-100 border rounded text-[10px]">ESC</kbd> Back
           </div>
         </div>
@@ -1107,6 +1117,12 @@ function StepReview({ onOpenDiscount }: { onOpenDiscount: (item: CartLineItem) =
                   <p className="font-medium text-gray-900">{item.name}</p>
                   <p className="text-xs text-gray-500">{item.brand} · {item.sku}</p>
                   {item.lens_details && <p className="text-xs text-purple-500 mt-0.5">{item.lens_details.type} · {item.lens_details.coatings.join(', ')}</p>}
+                  <input
+                    placeholder="Item notes (PD, fitting, tint, coating...)"
+                    defaultValue={(item as any).item_note || ''}
+                    onBlur={(e) => store.setItemNote?.(item.id, e.target.value)}
+                    className="mt-1 w-full text-[11px] px-2 py-1 bg-gray-50 border border-gray-200 rounded text-gray-600 placeholder:text-gray-300 focus:border-bv-gold-300 focus:bg-white"
+                  />
                 </td>
                 <td className="text-center px-2">
                   <div className="flex items-center justify-center gap-1">
