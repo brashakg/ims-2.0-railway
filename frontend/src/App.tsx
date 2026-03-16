@@ -49,6 +49,9 @@ const VendorManagement = lazy(() => import('./pages/purchase/VendorManagement').
 const GoodsReceiptNote = lazy(() => import('./pages/purchase/GoodsReceiptNote').then(m => ({ default: m.GoodsReceiptNote })));
 const StockReplenishment = lazy(() => import('./pages/inventory/StockReplenishment').then(m => ({ default: m.StockReplenishment })));
 const StockAudit = lazy(() => import('./pages/inventory/StockAudit').then(m => ({ default: m.StockAudit })));
+const JarvisPage = lazy(() => import('./pages/jarvis/JarvisPage').then(m => ({ default: m.JarvisPage })));
+const AddProductPage = lazy(() => import('./pages/catalog/AddProductPage'));
+const StorefrontPage = lazy(() => import('./pages/storefront/StorefrontPage').then(m => ({ default: m.StorefrontPage })));
 
 // Loading fallback component
 const PageLoader = () => (
@@ -457,6 +460,36 @@ function App() {
                     element={
                       <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN']}>
                         <SetupPage />
+                      </ProtectedRoute>
+                    }
+                  />
+
+                  {/* AI Intelligence — Superadmin only */}
+                  <Route
+                    path="jarvis"
+                    element={
+                      <ProtectedRoute allowedRoles={['SUPERADMIN']}>
+                        <JarvisPage />
+                      </ProtectedRoute>
+                    }
+                  />
+
+                  {/* Catalog / Add Product */}
+                  <Route
+                    path="catalog/add"
+                    element={
+                      <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER']}>
+                        <AddProductPage />
+                      </ProtectedRoute>
+                    }
+                  />
+
+                  {/* Storefront / E-commerce */}
+                  <Route
+                    path="storefront"
+                    element={
+                      <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN']}>
+                        <StorefrontPage />
                       </ProtectedRoute>
                     }
                   />

@@ -100,10 +100,12 @@ export const MODULE_CONFIGS: ModuleConfig[] = [
     allowedRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'CATALOG_MANAGER', 'WORKSHOP_STAFF'],
     sidebarItems: [
       { id: 'inv-overview', label: 'Stock Overview', path: '/inventory' },
+      { id: 'inv-catalog', label: 'Add Product', path: '/catalog/add' },
       { id: 'inv-lowstock', label: 'Low Stock Alerts', path: '/inventory?tab=low-stock' },
       { id: 'inv-reorders', label: 'Reorder Dashboard', path: '/inventory?tab=reorders' },
       { id: 'inv-transfers', label: 'Stock Transfers', path: '/inventory?tab=transfers' },
       { id: 'inv-movements', label: 'Stock Movements', path: '/inventory?tab=movements' },
+      { id: 'inv-audit', label: 'Stock Audit', path: '/inventory/audit' },
     ],
   },
   {
@@ -206,6 +208,7 @@ export const MODULE_CONFIGS: ModuleConfig[] = [
       { id: 'set-approvals', label: 'Approval Workflows', path: '/settings?tab=approvals' },
       { id: 'set-audit', label: 'Audit Log', path: '/settings?tab=audit-logs' },
       { id: 'set-system', label: 'System Settings', path: '/settings?tab=system' },
+      { id: 'set-jarvis', label: 'AI Intelligence', path: '/jarvis' },
     ],
   },
 ];
