@@ -6,7 +6,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useSearchParams, useNavigate } from 'react-router-dom';
 import {
-  Search,
   Plus,
   Users,
   Phone,
@@ -35,6 +34,7 @@ import { useToast } from '../../context/ToastContext';
 import { AddCustomerModal, type CustomerFormData } from '../../components/customers/AddCustomerModal';
 import { RecallManager } from '../../components/crm/RecallManager';
 import { PromotionEngine } from '../../components/crm/PromotionEngine';
+import { AutoSearch } from '../../components/common/AutoSearch';
 import clsx from 'clsx';
 import { calculateRFMScore, type CustomerRFMData } from '../../utils/rfmSegmentation';
 
@@ -261,15 +261,35 @@ export function CustomersPage() {
         {/* Search and Filters */}
         <div className="card">
           <div className="flex flex-col tablet:flex-row gap-4">
-            <div className="relative flex-1">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" />
-              <input
-                ref={searchInputRef}
-                type="text"
-                value={searchQuery}
-                onChange={e => setSearchQuery(e.target.value)}
-                className="input-field pl-10"
+            <div className="flex-1">
+              <AutoSearch<any>
+                fetchResults={async (q, storeId) => {
+                  try {
+                    const res = await customerApi.getCustomers({ search: q, storeId, limit: 8 });
+                    return res?.customers || res || [];
+                  } catch {
+                    return customers.filter(c =>
+                      c.name?.toLowerCase().includes(q.toLowerCase()) ||
+                      c.phone?.includes(q) ||
+                      c.email?.toLowerCase().includes(q.toLowerCase())
+                    );
+                  }
+                }}
+                renderItem={(cust) => (
+                  <div className="flex items-center gap-3">
+                    <div className="w-8 h-8 rounded-full bg-gray-100 flex items-center justify-center text-sm font-bold text-gray-500">{cust.name?.charAt(0)}</div>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-medium text-gray-900 truncate">{cust.name}</p>
+                      <p className="text-xs text-gray-500">{cust.phone} {cust.email ? `· ${cust.email}` : ''}</p>
+                    </div>
+                    <span className="text-[10px] px-2 py-0.5 bg-gray-100 rounded-full text-gray-500">{cust.customerType || 'B2C'}</span>
+                  </div>
+                )}
+                onSelect={(cust) => { setSelectedCustomer({ ...cust, id: cust.customer_id || cust._id || cust.id } as any); }}
+                onInputChange={(val) => setSearchQuery(val)}
+                getKey={(cust) => cust.customer_id || cust._id || cust.id || String(Math.random())}
                 placeholder="Search by name, phone, or email..."
+                emptyMessage="No customers found"
               />
             </div>
             <div className="flex gap-2">

@@ -266,7 +266,7 @@ export const storeApi = {
 // ============================================================================
 
 export const productApi = {
-  getProducts: async (params?: { category?: string; brand?: string; search?: string }) => {
+  getProducts: async (params?: { category?: string; brand?: string; search?: string; store_id?: string }) => {
     const response = await api.get('/products', { params });
     return response.data;
   },

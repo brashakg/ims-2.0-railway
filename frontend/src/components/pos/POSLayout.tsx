@@ -6,17 +6,17 @@
 // Wires all 12 previously orphaned components + adds 6 missing features
 // Theme: Better Vision gold/white (matches app design system)
 
-import { useState, useEffect, useMemo, useRef, startTransition } from 'react';
+import { useState, useEffect, useMemo, startTransition } from 'react';
 import {
   ShoppingCart, User, Eye, Package, CreditCard, CheckCircle,
-  ChevronRight, ChevronLeft, Search, Plus, X,
+  ChevronRight, ChevronLeft, Plus, X,
   Pause, Play, Printer, RotateCcw, IndianRupee, AlertTriangle,
   Glasses, Watch, Phone, FileText, Zap, Sparkles,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { usePOSStore } from '../../stores/posStore';
 import type { SaleType, POSStep, CartLineItem } from '../../stores/posStore';
-import { useProducts, useCustomerSearch } from '../../hooks/usePOSQueries';
+import { useProducts } from '../../hooks/usePOSQueries';
 import { customerApi, orderApi, prescriptionApi, productApi, workshopApi } from '../../services/api';
 import type { Prescription } from '../../types';
 
@@ -55,6 +55,7 @@ import { GSTInvoice } from './GSTInvoice';
 import { DayEndReport } from './DayEndReport';
 import { ReceiptPreview } from './ReceiptPreview';
 import { BarcodeScanner } from './BarcodeScanner';
+import { AutoSearch } from '../common/AutoSearch';
 import { AddCustomerModal, type CustomerFormData } from '../customers/AddCustomerModal';
 import { getGSTRateByCategory } from '../../constants/gst';
 import type { PrescriptionInput } from '../../utils/lensAutoSuggest';
@@ -677,11 +678,7 @@ function getTimeAgo(date: Date): string {
 // ============================================================================
 function StepCustomer() {
   const store = usePOSStore();
-  const [searchInput, setSearchInput] = useState('');
-  const [debouncedQuery, setDebouncedQuery] = useState('');
   const [showAddCustomerModal, setShowAddCustomerModal] = useState(false);
-  const { data: searchResults = [], isLoading } = useCustomerSearch(debouncedQuery);
-  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Save customer from AddCustomerModal → create via API → set as POS customer
   const handleSaveCustomer = async (customerData: CustomerFormData) => {
@@ -719,15 +716,6 @@ function StepCustomer() {
       store.setPatient({ name: customerData.patients[0].name, id: customerData.patients[0].id } as any);
     }
     setShowAddCustomerModal(false);
-  };
-
-  // Debounce search — 300ms prevents keystroke-level API spam (INP fix)
-  const handleSearchInput = (val: string) => {
-    setSearchInput(val);
-    if (debounceRef.current) clearTimeout(debounceRef.current);
-    debounceRef.current = setTimeout(() => {
-      startTransition(() => setDebouncedQuery(val));
-    }, 300);
   };
 
   const isWalkin = store.customer?.id?.toString().startsWith('walkin-') || store.customer?.name === 'Walk-in Customer';
@@ -787,32 +775,33 @@ function StepCustomer() {
           </>
         ) : (
           <>
-            <div className="relative">
-              <Search className="absolute left-3 top-3 w-4 h-4 text-gray-400" />
-              <input type="text" value={searchInput} onChange={(e) => handleSearchInput(e.target.value)} placeholder="Search by phone number or name..." autoFocus
-                className="w-full pl-10 pr-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-bv-gold-500 focus:border-bv-gold-500" />
-            </div>
-            {searchInput.length >= 2 && (
-              <div className="mt-2 border border-gray-200 rounded-lg overflow-hidden">
-                {isLoading ? <div className="p-4 text-center text-sm text-gray-500">Searching...</div>
-                : (searchResults as any[]).length > 0 ? (searchResults as any[]).slice(0, 8).map((cust: any) => (
-                  <button key={cust.customer_id || cust._id || cust.id} onClick={() => {
-                    startTransition(() => {
-                      store.setCustomer({ ...cust, id: cust.customer_id || cust._id || cust.id } as any);
-                    });
-                    setSearchInput(''); setDebouncedQuery('');
-                  }}
-                    className="w-full flex items-center gap-3 px-4 py-3 hover:bg-gray-50 border-b border-gray-100 last:border-0 text-left">
-                    <div className="w-8 h-8 rounded-full bg-gray-200 flex items-center justify-center text-sm font-medium text-gray-600">{cust.name?.charAt(0)}</div>
-                    <div className="flex-1 min-w-0">
-                      <p className="text-sm font-medium text-gray-900 truncate">{cust.name}</p>
-                      <p className="text-xs text-gray-500">{cust.phone} {cust.city && `· ${cust.city}`}</p>
-                    </div>
-                    <ChevronRight className="w-4 h-4 text-gray-400" />
-                  </button>
-                )) : <div className="p-4 text-center text-sm text-gray-500">No customers found</div>}
-              </div>
-            )}
+            <AutoSearch<any>
+              fetchResults={async (q, sid) => {
+                try {
+                  const res = await customerApi.getCustomers({ search: q, storeId: sid, limit: 8 });
+                  return res?.customers || res || [];
+                } catch { return []; }
+              }}
+              renderItem={(cust) => (
+                <div className="flex items-center gap-3">
+                  <div className="w-8 h-8 rounded-full bg-gray-200 flex items-center justify-center text-sm font-medium text-gray-600">{cust.name?.charAt(0)}</div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-medium text-gray-900 truncate">{cust.name}</p>
+                    <p className="text-xs text-gray-500">{cust.phone || cust.mobile} {cust.city && `· ${cust.city}`}</p>
+                  </div>
+                </div>
+              )}
+              onSelect={(cust) => {
+                startTransition(() => {
+                  store.setCustomer({ ...cust, id: cust.customer_id || cust._id || cust.id } as any);
+                });
+              }}
+              getKey={(cust) => cust.customer_id || cust._id || cust.id || String(Math.random())}
+              placeholder="Search by phone number or name..."
+              autoFocus
+              clearOnSelect
+              emptyMessage="No customers found"
+            />
             <div className="mt-3 flex gap-4">
               <button onClick={() => setShowAddCustomerModal(true)} className="flex items-center gap-2 text-sm text-bv-gold-600 hover:text-bv-gold-700 font-medium"><Plus className="w-4 h-4" /> Create new customer</button>
               <button onClick={async () => {
@@ -888,7 +877,7 @@ function StepProducts({ onOpenLensModal }: { onOpenLensModal: () => void }) {
   const [showSuggestions, setShowSuggestions] = useState(true);
   const [blockMsg, setBlockMsg] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid');
-  const { data: products = [], isLoading } = useProducts({ search: debouncedSearch || undefined, category: categoryFilter || undefined });
+  const { data: products = [], isLoading } = useProducts({ search: debouncedSearch || undefined, category: categoryFilter || undefined, store_id: store.store_id || undefined });
   const categories = ['FRAMES', 'SUNGLASSES', 'RX_LENSES', 'CONTACT_LENSES', 'WRIST_WATCHES', 'SMARTWATCHES', 'ACCESSORIES'];
 
   // Barcode scan: try exact match → auto-add to cart

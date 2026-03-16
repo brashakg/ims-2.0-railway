@@ -82,11 +82,12 @@ async def list_products(
     category: Optional[str] = Query(None),
     brand: Optional[str] = Query(None),
     search: Optional[str] = Query(None),
+    store_id: Optional[str] = Query(None),
     skip: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=100),
     current_user: dict = Depends(get_current_user),
 ):
-    """List products with filtering"""
+    """List products with filtering. If store_id provided, only return products with stock at that store."""
     repo = get_product_repository()
 
     if repo is not None:
@@ -99,11 +100,23 @@ async def list_products(
         else:
             products = repo.find_many({}, skip=skip, limit=limit)
 
-        total = (
-            len(products)
-            if search or brand
-            else repo.count({"category": category} if category else {})
-        )
+        # If store_id provided, filter to products with stock at this store
+        if store_id and products:
+            try:
+                stock_repo = repo.db["stock_units"] if hasattr(repo, 'db') else None
+                if stock_repo:
+                    stock_product_ids = set()
+                    async for su in stock_repo.find(
+                        {"store_id": store_id, "quantity": {"$gt": 0}},
+                        {"product_id": 1}
+                    ):
+                        stock_product_ids.add(su.get("product_id", ""))
+                    if stock_product_ids:
+                        products = [p for p in products if str(p.get("product_id", p.get("_id", ""))) in stock_product_ids]
+            except Exception:
+                pass  # Fallback: return all products if stock lookup fails
+
+        total = len(products)
         return {"products": products, "total": total}
 
     return {"products": [], "total": 0}

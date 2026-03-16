@@ -186,7 +186,18 @@ export function PrescriptionsPage() {
             onChange={e => setSearchQuery(e.target.value)}
             className="input-field pl-10"
             placeholder="Search by patient name or phone..."
+            list="rx-search-suggestions"
           />
+          {searchQuery.length >= 1 && (
+            <datalist id="rx-search-suggestions">
+              {prescriptions.filter(rx =>
+                rx.patientName?.toLowerCase().includes(searchQuery.toLowerCase()) ||
+                rx.customerPhone?.includes(searchQuery)
+              ).slice(0, 8).map((rx: any, i: number) => (
+                <option key={rx.id || i} value={rx.patientName}>{rx.customerPhone} · {new Date(rx.date || '').toLocaleDateString('en-IN')}</option>
+              ))}
+            </datalist>
+          )}
         </div>
       </div>
 

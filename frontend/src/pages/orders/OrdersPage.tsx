@@ -272,6 +272,26 @@ export function OrdersPage() {
               className="input-field pl-10"
               placeholder="Search by order number, customer name, or phone..."
             />
+            {searchQuery.length >= 2 && filteredOrders.length > 0 && filteredOrders.length < orders.length && (
+              <div className="absolute z-40 w-full mt-1 bg-white border border-gray-200 rounded-xl shadow-lg max-h-64 overflow-y-auto">
+                {filteredOrders.slice(0, 6).map(order => {
+                  const sc = ORDER_STATUS_CONFIG[order.orderStatus as OrderStatus];
+                  return (
+                    <button key={order.id} onClick={() => { setSelectedOrder(order); setSearchQuery(''); }}
+                      className="w-full text-left px-3 py-2.5 hover:bg-bv-gold-50 border-b border-gray-50 last:border-0 flex items-center gap-3">
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-medium text-gray-900 truncate">{order.orderNumber}</p>
+                        <p className="text-xs text-gray-500">{order.customerName} {order.customerPhone ? `· ${order.customerPhone}` : ''}</p>
+                      </div>
+                      <div className="text-right flex-shrink-0">
+                        <p className="text-sm font-bold">{formatCurrency(order.grandTotal)}</p>
+                        <span className={clsx('text-[10px] px-1.5 py-0.5 rounded-full', sc?.bgColor, sc?.color)}>{sc?.label}</span>
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
           </div>
           <div className="flex gap-2">
             <select

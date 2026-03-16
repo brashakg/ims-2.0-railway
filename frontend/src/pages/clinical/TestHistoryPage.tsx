@@ -151,7 +151,18 @@ export function TestHistoryPage() {
               onChange={e => setSearchQuery(e.target.value)}
               className="input-field pl-10"
               placeholder="Search by patient name or phone..."
+              list="test-search-suggestions"
             />
+            {searchQuery.length >= 1 && (
+              <datalist id="test-search-suggestions">
+                {tests.filter(t =>
+                  t.patientName?.toLowerCase().includes(searchQuery.toLowerCase()) ||
+                  t.customerPhone?.includes(searchQuery)
+                ).slice(0, 8).map((t: any, i: number) => (
+                  <option key={t.id || i} value={t.patientName}>{t.customerPhone} · {new Date(t.testDate || '').toLocaleDateString('en-IN')}</option>
+                ))}
+              </datalist>
+            )}
           </div>
           <select
             value={dateFilter}

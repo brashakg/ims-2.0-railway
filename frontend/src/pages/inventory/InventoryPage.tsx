@@ -407,7 +407,19 @@ export function InventoryPage() {
               onChange={e => setSearchQuery(e.target.value)}
               className="input-field pl-10"
               placeholder="Search by name, SKU, or brand..."
+              list="inv-search-suggestions"
             />
+            {searchQuery.length >= 2 && (
+              <datalist id="inv-search-suggestions">
+                {inventory.filter(i =>
+                  i.name?.toLowerCase().includes(searchQuery.toLowerCase()) ||
+                  i.sku?.toLowerCase().includes(searchQuery.toLowerCase()) ||
+                  i.brand?.toLowerCase().includes(searchQuery.toLowerCase())
+                ).slice(0, 8).map((item: any) => (
+                  <option key={item.id || item.sku} value={item.name}>{item.sku} · {item.brand} · ₹{Math.round(item.mrp || 0)}</option>
+                ))}
+              </datalist>
+            )}
           </div>
         </div>
 

@@ -56,15 +56,15 @@ export const queryKeys = {
 // ============================================================================
 
 /** Search customers by name or phone */
-export function useCustomerSearch(query: string) {
+export function useCustomerSearch(query: string, storeId?: string) {
   return useQuery({
-    queryKey: queryKeys.customers.search(query),
+    queryKey: [...queryKeys.customers.search(query), storeId],
     queryFn: async () => {
-      const response = await customerApi.getCustomers({ search: query, limit: 10 });
+      const response = await customerApi.getCustomers({ search: query, limit: 10, storeId });
       return response?.customers || response || [];
     },
     enabled: query.length >= 2,
-    staleTime: 1000 * 30, // 30 seconds for search results
+    staleTime: 1000 * 30,
   });
 }
 
@@ -107,7 +107,7 @@ export function useCreateCustomer() {
 // ============================================================================
 
 /** List products with filters */
-export function useProducts(params?: { category?: string; brand?: string; search?: string }) {
+export function useProducts(params?: { category?: string; brand?: string; search?: string; store_id?: string }) {
   return useQuery({
     queryKey: queryKeys.products.list(params || {}),
     queryFn: async () => {
