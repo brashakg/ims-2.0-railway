@@ -1668,3 +1668,47 @@ async def get_quick_insights(current_user: dict = Depends(require_superadmin)):
         "top_recommendation": recommendations[0] if recommendations else None,
         "greeting": JarvisResponseGenerator.generate_greeting(),
     }
+
+
+# ============================================================================
+# SUBAGENT INTELLIGENCE — Specialized domain agents
+# ============================================================================
+
+@router.post("/analyze")
+async def subagent_analyze(
+    query: JarvisQuery, current_user: dict = Depends(require_superadmin)
+):
+    """
+    Route query through specialized subagents for deep analysis.
+    SUPERADMIN ONLY. READ-ONLY — no modifications.
+    """
+    try:
+        from ai.subagents import SubAgentOrchestrator
+        from database.connection import get_seeded_db
+
+        db = get_seeded_db()
+        if db is None:
+            return {
+                "error": "Database not available",
+                "query": query.message,
+                "results": [],
+            }
+
+        store_id = query.context.get("store_id") if query.context else None
+        result = await SubAgentOrchestrator.process(db, query.message, store_id)
+        return result
+
+    except ImportError:
+        return {
+            "error": "Subagent module not loaded",
+            "query": query.message,
+            "results": [],
+            "note": "AI subagent architecture is being deployed",
+        }
+    except Exception as e:
+        logger.error(f"Subagent analysis error: {e}")
+        return {
+            "error": str(e),
+            "query": query.message,
+            "results": [],
+        }
