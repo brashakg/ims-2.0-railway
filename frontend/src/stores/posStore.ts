@@ -268,12 +268,12 @@ export const usePOSStore = create<POSState>()(
           discount_amount: 0,
           line_total: item.unit_price * item.quantity,
         };
-        set((state) => ({ cart: [...state.cart, newItem] }));
+        set((state) => ({ cart: [...(state.cart || []), newItem] }));
       },
 
       removeFromCart: (lineId) => {
         set((state) => ({
-          cart: state.cart.filter((item) => item.id !== lineId),
+          cart: (state.cart || []).filter((item) => item.id !== lineId),
         }));
       },
 
@@ -283,7 +283,7 @@ export const usePOSStore = create<POSState>()(
           return;
         }
         set((state) => ({
-          cart: state.cart.map((item) =>
+          cart: (state.cart || []).map((item) =>
             item.id === lineId
               ? {
                   ...item,
@@ -298,7 +298,7 @@ export const usePOSStore = create<POSState>()(
 
       applyDiscount: (lineId, percent, reason, approvedBy) => {
         set((state) => ({
-          cart: state.cart.map((item) => {
+          cart: (state.cart || []).map((item) => {
             if (item.id !== lineId) return item;
             const discountAmt = item.unit_price * item.quantity * (percent / 100);
             return {
@@ -315,7 +315,7 @@ export const usePOSStore = create<POSState>()(
 
       updateItemNote: (lineId, note) => {
         set((state) => ({
-          cart: state.cart.map((item) =>
+          cart: (state.cart || []).map((item) =>
             item.id === lineId ? { ...item, notes: note } : item
           ),
         }));
@@ -328,7 +328,7 @@ export const usePOSStore = create<POSState>()(
 
       linkLensToFrame: (lensLineId, frameLineId) => {
         set((state) => ({
-          cart: state.cart.map((item) =>
+          cart: (state.cart || []).map((item) =>
             item.id === lensLineId
               ? { ...item, linked_frame_id: frameLineId }
               : item
@@ -340,7 +340,7 @@ export const usePOSStore = create<POSState>()(
       addPayment: (payment) => {
         set((state) => ({
           payments: [
-            ...state.payments,
+            ...(state.payments || []),
             { ...payment, timestamp: new Date().toISOString() },
           ],
         }));
@@ -348,7 +348,7 @@ export const usePOSStore = create<POSState>()(
 
       removePayment: (index) => {
         set((state) => ({
-          payments: state.payments.filter((_, i) => i !== index),
+          payments: (state.payments || []).filter((_, i) => i !== index),
         }));
       },
 

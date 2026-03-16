@@ -174,7 +174,7 @@ export function PrescriptionModal({
       onSelect(newPrescription);
     } catch (err) {
       console.error('Failed to create prescription:', err);
-      alert('Failed to save prescription. Please try again.');
+      setError('Failed to save prescription. Please try again.');
     } finally {
       setIsSaving(false);
     }

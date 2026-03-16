@@ -74,6 +74,11 @@ const STEPS: { id: POSStep; label: string; icon: typeof User }[] = [
 
 const QUICK_STEPS: POSStep[] = ['customer', 'products', 'payment', 'complete'];
 
+/** Safe currency format — never crashes on null/undefined/NaN */
+function fc(amount: number | undefined | null): string {
+  return `₹${Math.round(amount || 0).toLocaleString('en-IN')}`;
+}
+
 function mapCategory(cat: string): string {
   const map: Record<string, string> = {
     FRAMES: 'FRAME', FRAME: 'FRAME', SUNGLASSES: 'SUNGLASS', SUNGLASS: 'SUNGLASS',
@@ -528,10 +533,39 @@ export function POSLayout() {
           onApply={(pct) => { store.applyDiscount(discountItem.id, pct); setDiscountItem(null); }}
           onClose={() => setDiscountItem(null)} />
       )}
-      {showReceipt && (
-        <ReceiptPreview billData={{ bill_number: store.order_number || 'N/A', subtotal: store.getSubtotal(), gst_amount: store.getGrandTotal() - store.getSubtotal(), discount_amount: store.getTotalDiscount(), total_amount: store.getGrandTotal(), payment_method: (store.payments || []).map(p => p.method).join(' + ') || 'N/A' }}
-          selectedCustomer={store.customer || { name: 'Walk-in', phone: '' }} cartItems={(store.cart || []) as any} onClose={() => setShowReceipt(false)} />
-      )}
+      {showReceipt && (() => {
+        const sub = store.getSubtotal();
+        const disc = store.getTotalDiscount();
+        const taxable = sub - disc;
+        const gst = store.getGrandTotal() - taxable;
+        const halfGst = Math.round(gst / 2 * 100) / 100;
+        return (
+          <ReceiptPreview billData={{
+            bill_number: store.order_number || 'N/A',
+            subtotal: Math.round(sub),
+            item_discount: Math.round(disc),
+            order_discount_amount: 0,
+            taxable_amount: Math.round(taxable),
+            cgst_amount: halfGst,
+            sgst_amount: halfGst,
+            igst_amount: 0,
+            total_gst: Math.round(gst),
+            roundoff_amount: 0,
+            total_amount: Math.round(store.getGrandTotal()),
+            payment_method: (store.payments || []).map(p => p.method).join(' + ') || 'N/A',
+          }}
+            selectedCustomer={store.customer || { name: 'Walk-in', phone: '' }}
+            cartItems={(store.cart || []).map(item => ({
+              ...item,
+              unitPrice: item.unit_price,
+              discountPercent: item.discount_percent,
+              discountAmount: item.discount_amount,
+              finalPrice: item.line_total,
+              productName: item.name,
+            })) as any}
+            onClose={() => setShowReceipt(false)} />
+        );
+      })()}
       {holdConfirm && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
           <div className="bg-white rounded-xl p-6 max-w-sm">
@@ -893,7 +927,7 @@ function StepProducts({ onOpenLensModal }: { onOpenLensModal: () => void }) {
     const mrp = product.mrp || 0;
     const offerPrice = product.offer_price || product.offerPrice || mrp;
     if (offerPrice > mrp && mrp > 0) {
-      setBlockMsg(`BLOCKED: ${product.name} — Offer Price (₹${offerPrice.toLocaleString('en-IN')}) exceeds MRP (₹${mrp.toLocaleString('en-IN')}). Contact HQ to fix pricing.`);
+      setBlockMsg(`BLOCKED: ${product.name} — Offer Price (${fc(offerPrice)}) exceeds MRP (${fc(mrp)}). Contact HQ to fix pricing.`);
       setTimeout(() => setBlockMsg(null), 6000);
       return;
     }
@@ -1018,8 +1052,8 @@ function StepProducts({ onOpenLensModal }: { onOpenLensModal: () => void }) {
                     }`}>{isOutOfStock ? 'Out' : isLowStock ? `${stock} left` : `×${stock}`}</span>
                   )}
                   <div className="text-right flex-shrink-0">
-                    <span className="text-sm font-bold text-gray-900">₹{offer.toLocaleString('en-IN')}</span>
-                    {hasDiscount && <span className="text-[9px] text-gray-400 line-through ml-1">₹{mrp.toLocaleString('en-IN')}</span>}
+                    <span className="text-sm font-bold text-gray-900">{fc(offer)}</span>
+                    {hasDiscount && <span className="text-[9px] text-gray-400 line-through ml-1">{fc(mrp)}</span>}
                   </div>
                   {inCart && <span className="text-[9px] px-1 py-0.5 bg-green-100 text-green-700 rounded flex-shrink-0">✓</span>}
                 </button>
@@ -1054,8 +1088,8 @@ function StepProducts({ onOpenLensModal }: { onOpenLensModal: () => void }) {
                 <p className="text-xs font-semibold text-gray-900 truncate">{product.name}</p>
                 <p className="text-[10px] text-gray-500 truncate">{product.brand} · {product.sku}</p>
                 <div className="mt-1.5 flex items-baseline gap-1.5">
-                  <span className="text-sm font-bold text-gray-900">₹{offer.toLocaleString('en-IN')}</span>
-                  {hasDiscount && <span className="text-[10px] text-gray-400 line-through">₹{mrp.toLocaleString('en-IN')}</span>}
+                  <span className="text-sm font-bold text-gray-900">{fc(offer)}</span>
+                  {hasDiscount && <span className="text-[10px] text-gray-400 line-through">{fc(mrp)}</span>}
                 </div>
                 {inCart && <span className="inline-block mt-1 text-[10px] px-1.5 py-0.5 bg-green-100 text-green-700 rounded font-medium">In cart</span>}
                 {isOutOfStock && <span className="inline-block mt-1 text-[10px] px-1.5 py-0.5 bg-red-100 text-red-600 rounded font-medium">Out of stock</span>}
@@ -1137,8 +1171,8 @@ function StepReview({ onOpenDiscount }: { onOpenDiscount: (item: CartLineItem) =
                     <button onClick={() => store.updateQuantity(item.id, item.quantity + 1)} className="w-6 h-6 rounded bg-gray-100 text-xs hover:bg-gray-200">+</button>
                   </div>
                 </td>
-                <td className="text-right px-2 text-gray-500">₹{item.mrp.toLocaleString('en-IN')}</td>
-                <td className="text-right px-2">₹{item.unit_price.toLocaleString('en-IN')}</td>
+                <td className="text-right px-2 text-gray-500">{fc(item.mrp)}</td>
+                <td className="text-right px-2">{fc(item.unit_price)}</td>
                 <td className="text-right px-2">
                   {item.offer_price && item.offer_price < item.mrp ? (
                     <span className="px-2 py-0.5 rounded text-xs bg-gray-100 text-gray-400 cursor-not-allowed" title="MRP > Offer Price: No further discount allowed">N/A</span>
@@ -1150,7 +1184,7 @@ function StepReview({ onOpenDiscount }: { onOpenDiscount: (item: CartLineItem) =
                   )}
                 </td>
                 <td className="text-center px-2 text-xs text-gray-500">{gstRate}%</td>
-                <td className="text-right px-4 font-semibold">₹{item.line_total.toLocaleString('en-IN')}</td>
+                <td className="text-right px-4 font-semibold">{fc(item.line_total)}</td>
                 <td><button onClick={() => store.removeFromCart(item.id)} className="p-1 text-gray-400 hover:text-red-500"><X className="w-4 h-4" /></button></td>
               </tr>
               );
@@ -1162,20 +1196,20 @@ function StepReview({ onOpenDiscount }: { onOpenDiscount: (item: CartLineItem) =
       <textarea value={store.cart_note} onChange={(e) => store.setCartNote(e.target.value)} placeholder="Order notes, fitting instructions..." className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm h-16 resize-none" />
 
       <div className="bg-white border border-gray-200 rounded-xl p-4 space-y-2 text-sm">
-        <div className="flex justify-between"><span className="text-gray-500">Subtotal</span><span>₹{subtotal.toLocaleString('en-IN')}</span></div>
-        {discount > 0 && <div className="flex justify-between text-green-600"><span>Discount</span><span>-₹{discount.toLocaleString('en-IN')}</span></div>}
+        <div className="flex justify-between"><span className="text-gray-500">Subtotal</span><span>{fc(subtotal)}</span></div>
+        {discount > 0 && <div className="flex justify-between text-green-600"><span>Discount</span><span>-{fc(discount)}</span></div>}
         {Object.entries(taxBreakdown.rates).map(([rate, taxable]) => {
           const r = Number(rate);
           const halfRate = r / 2;
           const tax = Math.round((taxable as number) * (r / 100) * 100) / 100;
           return (
             <div key={rate} className="space-y-1">
-              <div className="flex justify-between text-gray-500"><span>CGST ({halfRate}%)</span><span>₹{(tax / 2).toLocaleString('en-IN')}</span></div>
-              <div className="flex justify-between text-gray-500"><span>SGST ({halfRate}%)</span><span>₹{(tax / 2).toLocaleString('en-IN')}</span></div>
+              <div className="flex justify-between text-gray-500"><span>CGST ({halfRate}%)</span><span>{fc(tax / 2)}</span></div>
+              <div className="flex justify-between text-gray-500"><span>SGST ({halfRate}%)</span><span>{fc(tax / 2)}</span></div>
             </div>
           );
         })}
-        <div className="border-t border-gray-200 pt-2 flex justify-between font-bold text-lg"><span>Grand Total</span><span className="text-bv-gold-600">₹{total.toLocaleString('en-IN')}</span></div>
+        <div className="border-t border-gray-200 pt-2 flex justify-between font-bold text-lg"><span>Grand Total</span><span className="text-bv-gold-600">{fc(total)}</span></div>
       </div>
 
       {store.sale_type === 'prescription_order' && (
@@ -1221,7 +1255,7 @@ function CashChangeCalculator({ grandTotal }: { grandTotal: number; totalPaid: n
       <div className="flex gap-2">
         {quickAmounts.map(amt => (
           <button key={amt} onClick={() => setCashTendered(String(amt))}
-            className="px-3 py-1 bg-white border border-gray-200 rounded-lg text-xs font-medium hover:bg-gray-100">₹{amt.toLocaleString('en-IN')}</button>
+            className="px-3 py-1 bg-white border border-gray-200 rounded-lg text-xs font-medium hover:bg-gray-100">{fc(amt)}</button>
         ))}
       </div>
       {tendered > 0 && (
@@ -1372,17 +1406,28 @@ function StepComplete({ onPrint, onReset }: { onPrint: () => void; onReset: () =
     createdAt: new Date().toISOString(),
   }), [store.order_id]);
 
+  // Store details for invoice — maps seeded store IDs to real data
+  const STORE_DETAILS: Record<string, { name: string; gstin: string; address: string; city: string; state: string; stateCode: string; pincode: string }> = {
+    'BV-BOK-01': { name: 'Better Vision Opticals', gstin: '20AABCB1234F1ZP', address: 'City Centre, Sector 4', city: 'Bokaro Steel City', state: 'Jharkhand', stateCode: '20', pincode: '827004' },
+    'BV-BOK-02': { name: 'Better Vision Opticals', gstin: '20AABCB1234F1ZP', address: 'Sector 1 Market', city: 'Bokaro Steel City', state: 'Jharkhand', stateCode: '20', pincode: '827001' },
+    'BV-DHB-01': { name: 'Better Vision Opticals', gstin: '20AABCB5678G1ZQ', address: 'Hirapur Market', city: 'Dhanbad', state: 'Jharkhand', stateCode: '20', pincode: '826001' },
+    'BV-DHB-02': { name: 'Better Vision Opticals', gstin: '20AABCB5678G1ZQ', address: 'Bank More', city: 'Dhanbad', state: 'Jharkhand', stateCode: '20', pincode: '826001' },
+    'WO-DHB-01': { name: 'WizOpt', gstin: '20AABCW9012H1ZR', address: 'Shastri Nagar', city: 'Dhanbad', state: 'Jharkhand', stateCode: '20', pincode: '826001' },
+    'BV-PUN-01': { name: 'Better Vision Opticals', gstin: '27AABCB3456I1ZS', address: 'NIBM Road', city: 'Pune', state: 'Maharashtra', stateCode: '27', pincode: '411048' },
+  };
+  const sd = STORE_DETAILS[store.store_id] || { name: 'Better Vision Opticals', gstin: '', address: '', city: '', state: 'Jharkhand', stateCode: '20', pincode: '' };
+
   const storeForInvoice = useMemo(() => ({
     id: store.store_id,
     storeCode: store.store_id,
-    storeName: store.store_id?.includes('BOK') ? 'Better Vision Opticals' : store.store_id?.includes('DHB') ? 'Better Vision Opticals' : store.store_id?.includes('WIZ') ? 'WizOpt' : 'Better Vision Opticals',
-    brand: 'BETTER_VISION' as any,
-    gstin: '', // Fetched from store setup in production
-    address: '',
-    city: store.store_id?.includes('BOK') ? 'Bokaro Steel City' : store.store_id?.includes('DHB') ? 'Dhanbad' : store.store_id?.includes('PUN') ? 'Pune' : '',
-    state: store.store_id?.includes('PUN') ? 'Maharashtra' : 'Jharkhand',
-    stateCode: store.store_id?.includes('PUN') ? '27' : '20',
-    pincode: '',
+    storeName: sd.name,
+    brand: sd.name === 'WizOpt' ? 'WIZOPT' as any : 'BETTER_VISION' as any,
+    gstin: sd.gstin,
+    address: sd.address,
+    city: sd.city,
+    state: sd.state,
+    stateCode: sd.stateCode,
+    pincode: sd.pincode,
     latitude: 0, longitude: 0, geoFenceRadius: 0,
     isActive: true, isHQ: false,
     enabledCategories: [],
@@ -1396,9 +1441,9 @@ function StepComplete({ onPrint, onReset }: { onPrint: () => void; onReset: () =
       <div className="bg-white border border-gray-200 rounded-xl p-4 text-left space-y-2 text-sm">
         <div className="flex justify-between"><span className="text-gray-500">Customer</span><span className="font-medium">{store.customer?.name}</span></div>
         <div className="flex justify-between"><span className="text-gray-500">Items</span><span className="font-medium">{(store.cart || []).length}</span></div>
-        <div className="flex justify-between"><span className="text-gray-500">Total</span><span className="font-bold text-lg">₹{store.getGrandTotal().toLocaleString('en-IN')}</span></div>
-        <div className="flex justify-between"><span className="text-gray-500">Paid</span><span className="font-medium text-green-600">₹{store.getTotalPaid().toLocaleString('en-IN')}</span></div>
-        {store.getBalance() > 0 && <div className="flex justify-between"><span className="text-gray-500">Balance due</span><span className="font-medium text-red-600">₹{store.getBalance().toLocaleString('en-IN')}</span></div>}
+        <div className="flex justify-between"><span className="text-gray-500">Total</span><span className="font-bold text-lg">{fc(store.getGrandTotal())}</span></div>
+        <div className="flex justify-between"><span className="text-gray-500">Paid</span><span className="font-medium text-green-600">{fc(store.getTotalPaid())}</span></div>
+        {store.getBalance() > 0 && <div className="flex justify-between"><span className="text-gray-500">Balance due</span><span className="font-medium text-red-600">{fc(store.getBalance())}</span></div>}
         {store.sale_type === 'prescription_order' && <div className="flex justify-between"><span className="text-gray-500">Type</span><span className="px-2 py-0.5 bg-purple-50 text-purple-600 rounded text-xs font-medium">Rx Order → Workshop</span></div>}
       </div>
 
@@ -1430,7 +1475,7 @@ function StepComplete({ onPrint, onReset }: { onPrint: () => void; onReset: () =
                       <span className="text-amber-500 truncate block">{item.name}</span>
                     </div>
                     <div className="text-right flex-shrink-0">
-                      <span className="font-semibold text-amber-800">₹{item.line_total.toLocaleString('en-IN')}</span>
+                      <span className="font-semibold text-amber-800">{fc(item.line_total)}</span>
                       {item.discount_percent > 0 && (
                         <span className="ml-1.5 text-red-500">-{item.discount_percent}%</span>
                       )}

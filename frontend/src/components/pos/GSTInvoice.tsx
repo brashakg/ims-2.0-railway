@@ -107,7 +107,8 @@ export function GSTInvoice({ order, store, onPrint }: GSTInvoiceProps) {
 
   const handleDownloadPDF = () => {
     // In production, use a library like jsPDF or call backend API to generate PDF
-    alert('PDF download feature will be implemented with backend integration');
+    // PDF download — future backend integration
+    console.info('PDF download will be available with backend wkhtmltopdf integration');
   };
 
   // Convert number to words (for amount in words)

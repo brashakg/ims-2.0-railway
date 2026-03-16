@@ -43,7 +43,7 @@ export function ReceiptPreview({
 
   const handleDownloadPDF = () => {
     // Placeholder for PDF download functionality
-    alert('PDF download feature coming soon');
+    console.info('PDF download coming soon');
   };
 
   return (
