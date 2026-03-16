@@ -1712,3 +1712,61 @@ async def subagent_analyze(
             "query": query.message,
             "results": [],
         }
+
+
+# ============================================================================
+# SUBAGENT ENDPOINTS
+# ============================================================================
+
+@router.get("/agents")
+async def list_agents(current_user: dict = Depends(require_superadmin)):
+    """List all registered subagents"""
+    try:
+        from ...core.subagents import AGENT_REGISTRY
+        return {
+            "agents": [
+                {
+                    "id": agent_id,
+                    "name": cls.agent_name,
+                    "description": cls.description,
+                    "schedule": cls.schedule,
+                }
+                for agent_id, cls in AGENT_REGISTRY.items()
+            ]
+        }
+    except ImportError:
+        return {"agents": [], "error": "Subagent module not available"}
+
+
+@router.post("/agents/run-all")
+async def run_all(current_user: dict = Depends(require_superadmin)):
+    """Run all subagents and return combined intelligence report"""
+    try:
+        from ...core.subagents import run_all_agents
+        db = get_db_collection("__db__")  # Get the database reference
+        if db is None:
+            return {"error": "Database not available"}
+        results = await run_all_agents(db.client.get_database())
+        return {
+            "ran_at": datetime.utcnow().isoformat(),
+            "agents": results,
+            "total_alerts": sum(r.get("alerts_count", 0) for r in results.values()),
+        }
+    except Exception as e:
+        logger.error(f"Run all agents error: {e}")
+        return {"error": str(e)}
+
+
+@router.post("/agents/{agent_id}/run")
+async def run_single_agent(agent_id: str, current_user: dict = Depends(require_superadmin)):
+    """Run a specific subagent"""
+    try:
+        from ...core.subagents import run_agent
+        db = get_db_collection("__db__")
+        if db is None:
+            return {"error": "Database not available"}
+        result = await run_agent(db.client.get_database(), agent_id)
+        return {"agent_id": agent_id, "ran_at": datetime.utcnow().isoformat(), **result}
+    except Exception as e:
+        logger.error(f"Run agent {agent_id} error: {e}")
+        return {"error": str(e)}
