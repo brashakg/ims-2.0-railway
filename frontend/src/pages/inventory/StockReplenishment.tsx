@@ -3,9 +3,12 @@
 // ============================================================================
 // Auto-replenishment dashboard, EOQ, ABC/XYZ analysis, dead stock, inter-store transfers
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { Plus, TrendingDown, Zap, AlertTriangle } from 'lucide-react';
 import clsx from 'clsx';
+import { inventoryApi } from '../../services/api';
+import { useAuth } from '../../context/AuthContext';
+import { useToast } from '../../context/ToastContext';
 
 interface ReplenishmentItem {
   product_id: string;
@@ -22,69 +25,6 @@ interface ReplenishmentItem {
   stock_status: 'critical' | 'low' | 'normal' | 'excess';
 }
 
-const MOCK_SUGGESTIONS: ReplenishmentItem[] = [
-  {
-    product_id: 'prod-001',
-    product_name: 'Frame Model A',
-    current_stock: 25,
-    reorder_level: 50,
-    eoq: 150,
-    abc_category: 'A',
-    xyz_category: 'Y',
-    preferred_vendor_id: 'v-001',
-    preferred_vendor_name: 'Optical Frames Ltd',
-    estimated_cost: 75000,
-    last_purchase_price: 500,
-    stock_status: 'critical',
-  },
-  {
-    product_id: 'prod-002',
-    product_name: 'Premium Lens Coating',
-    current_stock: 120,
-    reorder_level: 100,
-    eoq: 500,
-    abc_category: 'A',
-    xyz_category: 'Z',
-    preferred_vendor_id: 'v-002',
-    preferred_vendor_name: 'Lens Manufacturers Inc',
-    estimated_cost: 150000,
-    last_purchase_price: 300,
-    stock_status: 'normal',
-  },
-  {
-    product_id: 'prod-003',
-    product_name: 'Lens Case',
-    current_stock: 45,
-    reorder_level: 80,
-    eoq: 200,
-    abc_category: 'B',
-    xyz_category: 'X',
-    preferred_vendor_id: 'v-003',
-    preferred_vendor_name: 'Accessories Wholesale',
-    estimated_cost: 12000,
-    last_purchase_price: 60,
-    stock_status: 'low',
-  },
-];
-
-const DEAD_STOCK = [
-  {
-    product_id: 'prod-010',
-    product_name: 'Vintage Frame Design',
-    current_stock: 120,
-    last_sold: '2023-08-15',
-    days_inactive: 167,
-    estimated_value: 36000,
-  },
-  {
-    product_id: 'prod-011',
-    product_name: 'Discontinued Lens Type',
-    current_stock: 45,
-    last_sold: '2023-07-20',
-    days_inactive: 193,
-    estimated_value: 13500,
-  },
-];
 
 const getStockStatusColor = (status: string) => {
   switch (status) {
@@ -115,8 +55,47 @@ const getCategoryColor = (category: string) => {
 };
 
 export function StockReplenishment() {
+  const { user } = useAuth();
+  const toast = useToast();
   const [activeTab, setActiveTab] = useState<'suggestions' | 'abc-analysis' | 'dead-stock' | 'eoq'>('suggestions');
   const [selectedItems, setSelectedItems] = useState<string[]>([]);
+  const [suggestions, setSuggestions] = useState<ReplenishmentItem[]>([]);
+  const [deadStock, setDeadStock] = useState<any[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+
+  // Load replenishment suggestions on mount
+  useEffect(() => {
+    const loadSuggestions = async () => {
+      try {
+        setIsLoading(true);
+        const storeId = user?.activeStoreId || '';
+        const response = await inventoryApi.getLowStock(storeId);
+        const suggestions = Array.isArray(response) ? response : response.data || [];
+        const transformedSuggestions = suggestions.map((item: any) => ({
+          product_id: item.product_id || item.id,
+          product_name: item.product_name,
+          current_stock: item.current_stock || item.quantity || 0,
+          reorder_level: item.reorder_level || 50,
+          eoq: item.eoq || 100,
+          abc_category: item.abc_category || 'B',
+          xyz_category: item.xyz_category || 'Y',
+          preferred_vendor_id: item.preferred_vendor_id || '',
+          preferred_vendor_name: item.preferred_vendor_name || 'Unknown Vendor',
+          estimated_cost: item.estimated_cost || 0,
+          last_purchase_price: item.last_purchase_price || 0,
+          stock_status: item.stock_status || 'normal',
+        }));
+        setSuggestions(transformedSuggestions);
+      } catch (error) {
+        toast.error('Failed to load replenishment suggestions');
+        console.error(error);
+      } finally {
+        setIsLoading(false);
+      }
+    };
+
+    loadSuggestions();
+  }, [user?.activeStoreId]);
 
   const toggleSelection = (productId: string) => {
     setSelectedItems(prev =>
@@ -124,11 +103,11 @@ export function StockReplenishment() {
     );
   };
 
-  const selectedSuggestions = MOCK_SUGGESTIONS.filter(s => selectedItems.includes(s.product_id));
+  const selectedSuggestions = suggestions.filter(s => selectedItems.includes(s.product_id));
   const totalEstimatedCost = selectedSuggestions.reduce((sum, s) => sum + s.estimated_cost, 0);
 
-  const criticalItems = MOCK_SUGGESTIONS.filter(s => s.stock_status === 'critical');
-  const lowItems = MOCK_SUGGESTIONS.filter(s => s.stock_status === 'low');
+  const criticalItems = suggestions.filter(s => s.stock_status === 'critical');
+  const lowItems = suggestions.filter(s => s.stock_status === 'low');
 
   return (
     <div className="space-y-6">
@@ -158,7 +137,7 @@ export function StockReplenishment() {
         </div>
         <div className="bg-gray-800 rounded-lg p-4">
           <p className="text-gray-400 text-sm mb-1">Dead Stock Items</p>
-          <p className="text-2xl font-bold text-purple-400">{DEAD_STOCK.length}</p>
+          <p className="text-2xl font-bold text-purple-400">{deadStock.length}</p>
         </div>
         <div className="bg-gray-800 rounded-lg p-4">
           <p className="text-gray-400 text-sm mb-1">Est. Replenish Cost</p>
@@ -198,7 +177,7 @@ export function StockReplenishment() {
           )}
 
           <div className="space-y-3">
-            {MOCK_SUGGESTIONS.map((item) => (
+            {suggestions.map((item) => (
               <div
                 key={item.product_id}
                 className={clsx(
@@ -289,7 +268,7 @@ export function StockReplenishment() {
                 <p className={clsx('font-semibold mb-1', cat.color)}>Category {cat.category}</p>
                 <p className="text-gray-400 text-sm">{cat.desc}</p>
                 <p className="text-white font-semibold mt-2">
-                  {MOCK_SUGGESTIONS.filter(s => s.abc_category === cat.category).length} items
+                  {suggestions.filter(s => s.abc_category === cat.category).length} items
                 </p>
               </div>
             ))}
@@ -323,7 +302,7 @@ export function StockReplenishment() {
           </div>
 
           <div className="space-y-3">
-            {DEAD_STOCK.map((item) => (
+            {deadStock.map((item) => (
               <div key={item.product_id} className="bg-gray-800 rounded-lg p-4 border border-gray-700">
                 <div className="flex items-start justify-between mb-3">
                   <div>
@@ -387,7 +366,7 @@ export function StockReplenishment() {
           </div>
 
           <div className="space-y-4">
-            {MOCK_SUGGESTIONS.map((item) => (
+            {suggestions.map((item) => (
               <div key={item.product_id} className="bg-gray-800 rounded-lg p-4 border border-gray-700">
                 <p className="text-white font-semibold mb-2">{item.product_name}</p>
                 <div className="grid grid-cols-2 gap-2 text-sm">

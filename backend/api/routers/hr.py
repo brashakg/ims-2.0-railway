@@ -60,8 +60,43 @@ async def get_attendance(
     store_id: Optional[str] = Query(None),
     current_user: dict = Depends(get_current_user),
 ):
-    # Return sample data in camelCase for demo
-    return {"records": []}
+    """Get attendance records with optional filters"""
+    attendance_repo = get_attendance_repository()
+    active_store = store_id or current_user.get("active_store_id")
+
+    if attendance_repo is None:
+        return {"records": [], "total": 0}
+
+    filter_dict = {}
+    if active_store:
+        filter_dict["store_id"] = active_store
+    if employee_id:
+        filter_dict["employee_id"] = employee_id
+    if from_date:
+        filter_dict["date"] = {"$gte": from_date.isoformat()}
+    if to_date:
+        if "date" in filter_dict:
+            filter_dict["date"]["$lte"] = to_date.isoformat()
+        else:
+            filter_dict["date"] = {"$lte": to_date.isoformat()}
+
+    records = attendance_repo.find_many(filter_dict, limit=500)
+
+    # Convert to camelCase for frontend
+    camel_records = []
+    for r in records:
+        camel_records.append({
+            "attendanceId": r.get("attendance_id", ""),
+            "employeeId": r.get("employee_id", ""),
+            "employeeName": r.get("employee_name", ""),
+            "date": r.get("date", ""),
+            "status": r.get("status", ""),
+            "checkIn": r.get("check_in"),
+            "checkOut": r.get("check_out"),
+            "storeId": r.get("store_id", ""),
+        })
+
+    return {"records": camel_records, "total": len(camel_records)}
 
 
 @router.post("/attendance/check-in")

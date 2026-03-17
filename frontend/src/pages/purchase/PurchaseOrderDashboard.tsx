@@ -3,9 +3,12 @@
 // ============================================================================
 // PO lifecycle: Draft → Approved → Sent → Partial Receipt → Received → Closed
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { Plus, Edit2, Send, Check, Search } from 'lucide-react';
 import clsx from 'clsx';
+import { vendorsApi } from '../../services/api';
+import { useAuth } from '../../context/AuthContext';
+import { useToast } from '../../context/ToastContext';
 
 interface POLineItem {
   product_id: string;
@@ -31,75 +34,6 @@ interface PurchaseOrder {
   approved_at?: string;
 }
 
-const MOCK_POS: PurchaseOrder[] = [
-  {
-    id: 'po-001',
-    po_number: 'PO-2024-001',
-    vendor_id: 'v-001',
-    vendor_name: 'Optical Frames Ltd',
-    items: [
-      {
-        product_id: 'prod-001',
-        product_name: 'Frame Model A',
-        quantity: 100,
-        unit_price: 500,
-        total_price: 50000,
-      },
-    ],
-    status: 'approved',
-    total_amount: 50000,
-    gst_amount: 9000,
-    net_amount: 59000,
-    created_at: '2024-02-01T10:00:00Z',
-    expected_delivery: '2024-02-15',
-    approved_by: 'Manager',
-    approved_at: '2024-02-03T14:00:00Z',
-  },
-  {
-    id: 'po-002',
-    po_number: 'PO-2024-002',
-    vendor_id: 'v-002',
-    vendor_name: 'Lens Manufacturers Inc',
-    items: [
-      {
-        product_id: 'prod-002',
-        product_name: 'Premium Lens Coating',
-        quantity: 500,
-        unit_price: 300,
-        total_price: 150000,
-      },
-    ],
-    status: 'received',
-    total_amount: 150000,
-    gst_amount: 27000,
-    net_amount: 177000,
-    created_at: '2024-02-02T09:30:00Z',
-    expected_delivery: '2024-02-20',
-    approved_by: 'Manager',
-    approved_at: '2024-02-03T11:00:00Z',
-  },
-  {
-    id: 'po-003',
-    po_number: 'PO-2024-003',
-    vendor_id: 'v-001',
-    vendor_name: 'Optical Frames Ltd',
-    items: [
-      {
-        product_id: 'prod-003',
-        product_name: 'Frame Model B',
-        quantity: 75,
-        unit_price: 600,
-        total_price: 45000,
-      },
-    ],
-    status: 'draft',
-    total_amount: 45000,
-    gst_amount: 8100,
-    net_amount: 53100,
-    created_at: '2024-02-08T14:20:00Z',
-    expected_delivery: '2024-02-25',
-  },
-];
 
 const getStatusColor = (status: string) => {
   switch (status) {
@@ -133,11 +67,50 @@ const getStatusLabel = (status: string) => {
 };
 
 export function PurchaseOrderDashboard() {
+  const { user } = useAuth();
+  const toast = useToast();
   const [activeTab, setActiveTab] = useState<'all' | 'pending' | 'received' | 'closed'>('all');
   const [searchTerm, setSearchTerm] = useState('');
   const [filterStatus, setFilterStatus] = useState<string>('all');
+  const [purchaseOrders, setPurchaseOrders] = useState<PurchaseOrder[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
 
-  const filteredPOs = MOCK_POS.filter((po) => {
+  // Load purchase orders on mount
+  useEffect(() => {
+    const loadPurchaseOrders = async () => {
+      try {
+        setIsLoading(true);
+        const storeId = user?.activeStoreId || '';
+        const response = await vendorsApi.getPurchaseOrders({ store_id: storeId });
+        const poList = Array.isArray(response) ? response : response.data || [];
+        const transformedPOs = poList.map((po: any) => ({
+          id: po.id || po._id,
+          po_number: po.po_number,
+          vendor_id: po.vendor_id,
+          vendor_name: po.vendor_name || 'Unknown Vendor',
+          items: po.items || [],
+          status: po.status || 'draft',
+          total_amount: po.total_amount || 0,
+          gst_amount: po.gst_amount || 0,
+          net_amount: po.net_amount || po.total_amount || 0,
+          created_at: po.created_at,
+          expected_delivery: po.expected_delivery || '',
+          approved_by: po.approved_by,
+          approved_at: po.approved_at,
+        }));
+        setPurchaseOrders(transformedPOs);
+      } catch (error) {
+        toast.error('Failed to load purchase orders');
+        console.error(error);
+      } finally {
+        setIsLoading(false);
+      }
+    };
+
+    loadPurchaseOrders();
+  }, [user?.activeStoreId]);
+
+  const filteredPOs = purchaseOrders.filter((po) => {
     const matchesSearch = po.po_number.toLowerCase().includes(searchTerm.toLowerCase()) ||
       po.vendor_name.toLowerCase().includes(searchTerm.toLowerCase());
 
@@ -145,9 +118,9 @@ export function PurchaseOrderDashboard() {
     return matchesSearch && po.status === filterStatus;
   });
 
-  const pendingPOs = MOCK_POS.filter(po => ['draft', 'approved', 'sent', 'partial_receipt'].includes(po.status));
+  const pendingPOs = purchaseOrders.filter(po => ['draft', 'approved', 'sent', 'partial_receipt'].includes(po.status));
 
-  const totalValue = MOCK_POS.reduce((sum, po) => sum + po.net_amount, 0);
+  const totalValue = purchaseOrders.reduce((sum, po) => sum + po.net_amount, 0);
   const pendingValue = pendingPOs.reduce((sum, po) => sum + po.net_amount, 0);
 
   return (
@@ -168,7 +141,7 @@ export function PurchaseOrderDashboard() {
       <div className="grid grid-cols-4 gap-4">
         <div className="bg-gray-800 rounded-lg p-4">
           <p className="text-gray-400 text-sm mb-1">Total POs</p>
-          <p className="text-2xl font-bold text-white">{MOCK_POS.length}</p>
+          <p className="text-2xl font-bold text-white">{purchaseOrders.length}</p>
         </div>
         <div className="bg-gray-800 rounded-lg p-4">
           <p className="text-gray-400 text-sm mb-1">Pending POs</p>

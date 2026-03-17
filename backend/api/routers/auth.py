@@ -291,7 +291,31 @@ async def change_password(
     """
     Change user password
     """
-    # TODO: Verify current password and update in database
+    from ..dependencies import get_user_repository
+    user_repo = get_user_repository()
+
+    if user_repo is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    # Get user from DB
+    user = user_repo.collection.find_one({"user_id": current_user.get("user_id")})
+    if not user:
+        # Also try username lookup
+        user = user_repo.collection.find_one({"username": current_user.get("username")})
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    # Verify current password
+    if not verify_password(request.current_password, user.get("password_hash", "")):
+        raise HTTPException(status_code=400, detail="Current password is incorrect")
+
+    # Hash new password and update
+    new_hash = hash_password(request.new_password)
+    user_repo.collection.update_one(
+        {"_id": user["_id"]},
+        {"$set": {"password_hash": new_hash, "updated_at": datetime.utcnow().isoformat()}}
+    )
+
     return {"message": "Password changed successfully"}
 
 

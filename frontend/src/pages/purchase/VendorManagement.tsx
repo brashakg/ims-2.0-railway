@@ -3,9 +3,12 @@
 // ============================================================================
 // Vendor directory, scorecards, comparison, performance analytics, contracts
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { Star, Phone, Mail, FileText, BarChart3, Filter, Plus } from 'lucide-react';
 import clsx from 'clsx';
+import { vendorsApi } from '../../services/api';
+import { useAuth } from '../../context/AuthContext';
+import { useToast } from '../../context/ToastContext';
 
 interface VendorPerformance {
   delivery_reliability: number;
@@ -30,68 +33,6 @@ interface Vendor {
   contract_expiry: string;
 }
 
-const MOCK_VENDORS: Vendor[] = [
-  {
-    id: 'v-001',
-    name: 'Optical Frames Ltd',
-    contact: 'contact@frames.com',
-    phone: '+91-1234567890',
-    address: '123 Frame Street, Delhi',
-    performance: {
-      delivery_reliability: 4.5,
-      quality_rating: 4.3,
-      price_competitiveness: 4.0,
-      payment_terms: 'Net 30',
-      on_time_delivery_percentage: 92,
-      defect_rate: 2.5,
-      average_lead_days: 7,
-      total_pos: 24,
-      total_orders_received: 23,
-    },
-    contract_status: 'active',
-    contract_expiry: '2024-12-31',
-  },
-  {
-    id: 'v-002',
-    name: 'Lens Manufacturers Inc',
-    contact: 'sales@lensmakers.com',
-    phone: '+91-9876543210',
-    address: '456 Lens Road, Bangalore',
-    performance: {
-      delivery_reliability: 4.8,
-      quality_rating: 4.7,
-      price_competitiveness: 4.2,
-      payment_terms: 'Net 45',
-      on_time_delivery_percentage: 96,
-      defect_rate: 1.2,
-      average_lead_days: 10,
-      total_pos: 18,
-      total_orders_received: 18,
-    },
-    contract_status: 'active',
-    contract_expiry: '2025-06-30',
-  },
-  {
-    id: 'v-003',
-    name: 'Accessories Wholesale',
-    contact: 'bulk@accessories.com',
-    phone: '+91-5555555555',
-    address: '789 Accessories Ave, Mumbai',
-    performance: {
-      delivery_reliability: 3.8,
-      quality_rating: 3.9,
-      price_competitiveness: 4.5,
-      payment_terms: 'Net 15',
-      on_time_delivery_percentage: 85,
-      defect_rate: 4.2,
-      average_lead_days: 5,
-      total_pos: 15,
-      total_orders_received: 13,
-    },
-    contract_status: 'expiring_soon',
-    contract_expiry: '2024-03-15',
-  },
-];
 
 const getRatingColor = (rating: number) => {
   if (rating >= 4.5) return 'text-green-400';
@@ -113,18 +54,62 @@ const getContractStatusColor = (status: string) => {
 };
 
 export function VendorManagement() {
+  const { user } = useAuth();
+  const toast = useToast();
   const [activeTab, setActiveTab] = useState<'directory' | 'performance' | 'contracts'>('directory');
   const [filterRating, setFilterRating] = useState('all');
+  const [vendors, setVendors] = useState<Vendor[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
 
-  const filteredVendors = MOCK_VENDORS.filter((vendor) => {
+  // Load vendors on mount
+  useEffect(() => {
+    const loadVendors = async () => {
+      try {
+        setIsLoading(true);
+        const response = await vendorsApi.getVendors();
+        // Transform API response to match Vendor interface
+        const vendorList = Array.isArray(response) ? response : response.data || [];
+        const transformedVendors = vendorList.map((v: any) => ({
+          id: v.id || v._id,
+          name: v.legal_name || v.trade_name,
+          contact: v.email || '',
+          phone: v.mobile || '',
+          address: v.address || '',
+          performance: {
+            delivery_reliability: v.delivery_reliability || 4.0,
+            quality_rating: v.quality_rating || 4.0,
+            price_competitiveness: v.price_competitiveness || 4.0,
+            payment_terms: v.payment_terms || 'Net 30',
+            on_time_delivery_percentage: v.on_time_delivery_percentage || 85,
+            defect_rate: v.defect_rate || 2.0,
+            average_lead_days: v.average_lead_days || 7,
+            total_pos: v.total_pos || 0,
+            total_orders_received: v.total_orders_received || 0,
+          },
+          contract_status: v.contract_status || 'active',
+          contract_expiry: v.contract_expiry || new Date().toISOString().split('T')[0],
+        }));
+        setVendors(transformedVendors);
+      } catch (error) {
+        toast.error('Failed to load vendors');
+        console.error(error);
+      } finally {
+        setIsLoading(false);
+      }
+    };
+
+    loadVendors();
+  }, []);
+
+  const filteredVendors = vendors.filter((vendor) => {
     if (filterRating === 'all') return true;
     if (filterRating === 'excellent') return vendor.performance.delivery_reliability >= 4.5;
     if (filterRating === 'good') return vendor.performance.delivery_reliability >= 3.5 && vendor.performance.delivery_reliability < 4.5;
     return vendor.performance.delivery_reliability < 3.5;
   });
 
-  const avgDeliveryReliability = (MOCK_VENDORS.reduce((sum, v) => sum + v.performance.delivery_reliability, 0) / MOCK_VENDORS.length).toFixed(1);
-  const avgQualityRating = (MOCK_VENDORS.reduce((sum, v) => sum + v.performance.quality_rating, 0) / MOCK_VENDORS.length).toFixed(1);
+  const avgDeliveryReliability = vendors.length > 0 ? (vendors.reduce((sum, v) => sum + v.performance.delivery_reliability, 0) / vendors.length).toFixed(1) : '0';
+  const avgQualityRating = vendors.length > 0 ? (vendors.reduce((sum, v) => sum + v.performance.quality_rating, 0) / vendors.length).toFixed(1) : '0';
 
   return (
     <div className="space-y-6">
@@ -144,7 +129,7 @@ export function VendorManagement() {
       <div className="grid grid-cols-4 gap-4">
         <div className="bg-gray-800 rounded-lg p-4">
           <p className="text-gray-400 text-sm mb-1">Total Vendors</p>
-          <p className="text-2xl font-bold text-white">{MOCK_VENDORS.length}</p>
+          <p className="text-2xl font-bold text-white">{vendors.length}</p>
         </div>
         <div className="bg-gray-800 rounded-lg p-4">
           <p className="text-gray-400 text-sm mb-1">Avg Delivery Reliability</p>
@@ -157,7 +142,7 @@ export function VendorManagement() {
         <div className="bg-gray-800 rounded-lg p-4">
           <p className="text-gray-400 text-sm mb-1">Active Contracts</p>
           <p className="text-2xl font-bold text-purple-400">
-            {MOCK_VENDORS.filter(v => v.contract_status === 'active').length}/{MOCK_VENDORS.length}
+            {vendors.filter(v => v.contract_status === 'active').length}/{vendors.length}
           </p>
         </div>
       </div>
@@ -332,7 +317,7 @@ export function VendorManagement() {
 
       {activeTab === 'contracts' && (
         <div className="space-y-4">
-          {MOCK_VENDORS.map((vendor) => (
+          {vendors.map((vendor) => (
             <div key={vendor.id} className="bg-gray-800 rounded-lg p-4 border border-gray-700 flex items-center justify-between">
               <div className="flex-1">
                 <h3 className="text-white font-semibold">{vendor.name}</h3>

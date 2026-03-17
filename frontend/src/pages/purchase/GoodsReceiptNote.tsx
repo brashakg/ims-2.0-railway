@@ -3,9 +3,12 @@
 // ============================================================================
 // GRN creation, partial receipt, quality inspection, barcode scanning, discrepancies
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { Check, AlertCircle, Package, FileText } from 'lucide-react';
 import clsx from 'clsx';
+import { vendorsApi } from '../../services/api';
+import { useAuth } from '../../context/AuthContext';
+import { useToast } from '../../context/ToastContext';
 
 interface GRNLineItem {
   product_id: string;
@@ -26,28 +29,6 @@ interface GRN {
   created_by: string;
 }
 
-const MOCK_GRNS: GRN[] = [
-  {
-    id: 'grn-001',
-    grn_number: 'GRN-2024-001',
-    po_id: 'po-001',
-    po_number: 'PO-2024-001',
-    received_at: '2024-02-15T14:30:00Z',
-    items_received: 100,
-    quality_status: 'passed',
-    created_by: 'Store Manager',
-  },
-  {
-    id: 'grn-002',
-    grn_number: 'GRN-2024-002',
-    po_id: 'po-002',
-    po_number: 'PO-2024-002',
-    received_at: '2024-02-12T10:15:00Z',
-    items_received: 450,
-    quality_status: 'conditional',
-    created_by: 'Store Manager',
-  },
-];
 
 const INSPECTION_CHECKLIST = [
   'Product packaging intact',
@@ -73,20 +54,46 @@ const getQualityStatusColor = (status: string) => {
 };
 
 export function GoodsReceiptNote() {
+  const { user } = useAuth();
+  const toast = useToast();
   const [activeTab, setActiveTab] = useState<'create' | 'history' | 'discrepancies'>('create');
-  const [poNumber, setPoNumber] = useState('PO-2024-001');
-  const [receivedItems, setReceivedItems] = useState<GRNLineItem[]>([
-    {
-      product_id: 'prod-001',
-      product_name: 'Frame Model A',
-      po_qty: 100,
-      received_qty: 95,
-      inspection_status: 'passed',
-    },
-  ]);
+  const [poNumber, setPoNumber] = useState('');
+  const [receivedItems, setReceivedItems] = useState<GRNLineItem[]>([]);
   const [inspectionChecks, setInspectionChecks] = useState<Record<string, boolean>>({});
   const [qualityNotes, setQualityNotes] = useState('');
   const [discrepancies, setDiscrepancies] = useState('');
+  const [grns, setGrns] = useState<GRN[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+
+  // Load GRNs on mount
+  useEffect(() => {
+    const loadGRNs = async () => {
+      try {
+        setIsLoading(true);
+        const storeId = user?.activeStoreId || '';
+        const response = await vendorsApi.getGRNs({ store_id: storeId });
+        const grnList = Array.isArray(response) ? response : response.data || [];
+        const transformedGRNs = grnList.map((grn: any) => ({
+          id: grn.id || grn._id,
+          grn_number: grn.grn_number,
+          po_id: grn.po_id,
+          po_number: grn.po_number || 'Unknown PO',
+          received_at: grn.received_at,
+          items_received: grn.items_received || 0,
+          quality_status: grn.quality_status || 'passed',
+          created_by: grn.created_by || 'Unknown',
+        }));
+        setGrns(transformedGRNs);
+      } catch (error) {
+        toast.error('Failed to load GRNs');
+        console.error(error);
+      } finally {
+        setIsLoading(false);
+      }
+    };
+
+    loadGRNs();
+  }, [user?.activeStoreId]);
 
   const toggleInspectionCheck = (item: string) => {
     setInspectionChecks(prev => ({
@@ -112,24 +119,24 @@ export function GoodsReceiptNote() {
       <div className="grid grid-cols-4 gap-4">
         <div className="bg-gray-800 rounded-lg p-4">
           <p className="text-gray-400 text-sm mb-1">Total GRNs</p>
-          <p className="text-2xl font-bold text-white">{MOCK_GRNS.length}</p>
+          <p className="text-2xl font-bold text-white">{grns.length}</p>
         </div>
         <div className="bg-gray-800 rounded-lg p-4">
           <p className="text-gray-400 text-sm mb-1">Quality Passed</p>
           <p className="text-2xl font-bold text-green-400">
-            {MOCK_GRNS.filter(g => g.quality_status === 'passed').length}
+            {grns.filter(g => g.quality_status === 'passed').length}
           </p>
         </div>
         <div className="bg-gray-800 rounded-lg p-4">
           <p className="text-gray-400 text-sm mb-1">Conditional Receipts</p>
           <p className="text-2xl font-bold text-yellow-400">
-            {MOCK_GRNS.filter(g => g.quality_status === 'conditional').length}
+            {grns.filter(g => g.quality_status === 'conditional').length}
           </p>
         </div>
         <div className="bg-gray-800 rounded-lg p-4">
           <p className="text-gray-400 text-sm mb-1">Failed Quality</p>
           <p className="text-2xl font-bold text-red-400">
-            {MOCK_GRNS.filter(g => g.quality_status === 'failed').length}
+            {grns.filter(g => g.quality_status === 'failed').length}
           </p>
         </div>
       </div>
@@ -297,7 +304,7 @@ export function GoodsReceiptNote() {
 
       {activeTab === 'history' && (
         <div className="space-y-4">
-          {MOCK_GRNS.map((grn) => (
+          {grns.map((grn) => (
             <div key={grn.id} className="bg-gray-800 rounded-lg p-4 border border-gray-700 hover:border-gray-600 transition-colors">
               <div className="flex items-start justify-between mb-3">
                 <div>
