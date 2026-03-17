@@ -232,23 +232,42 @@ export function AddCustomerModal({ isOpen, onClose, onSave }: AddCustomerModalPr
     }));
   };
 
+  // Debounced search helper — searches by name or phone
+  const searchTimeoutRef = { current: null as ReturnType<typeof setTimeout> | null };
+
   const handleSearch = async (query: string) => {
     setSearchQuery(query);
-    if (query.length < 3) { setSearchResults([]); return; }
+    if (query.length < 2) { setSearchResults([]); return; }
     setSearching(true);
     try {
       const token = localStorage.getItem('ims_token');
-      const baseUrl = import.meta.env.VITE_API_URL || 'https://ims-20-railway-production.up.railway.app';
-      const resp = await fetch(
-        baseUrl + '/api/v1/customers/search?q=' + encodeURIComponent(query),
-        { headers: token ? { Authorization: 'Bearer ' + token } : {} }
-      );
+      const baseUrl = import.meta.env.VITE_API_URL || 'https://ims-20-railway-production.up.railway.app/api/v1';
+      // Use phone-specific endpoint if query looks like a phone number
+      const isPhone = /^\d{3,}$/.test(query.trim());
+      const url = isPhone
+        ? `${baseUrl}/customers/search/phone?phone=${encodeURIComponent(query)}`
+        : `${baseUrl}/customers/search?q=${encodeURIComponent(query)}`;
+      const resp = await fetch(url, {
+        headers: token ? { Authorization: 'Bearer ' + token } : {},
+      });
       if (resp.ok) {
         const data = await resp.json();
-        setSearchResults(Array.isArray(data) ? data : data.customers || []);
+        const list = Array.isArray(data) ? data : data.customers || (data.customer ? [data.customer] : []);
+        setSearchResults(list);
       }
     } catch { setSearchResults([]); }
     setSearching(false);
+  };
+
+  // Auto-search when typing in name or mobile fields (debounced)
+  const triggerAutoSearch = (value: string) => {
+    if (searchTimeoutRef.current) clearTimeout(searchTimeoutRef.current);
+    searchTimeoutRef.current = setTimeout(() => {
+      if (value.length >= 2) {
+        handleSearch(value);
+        setShowSearch(true);
+      }
+    }, 400);
   };
 
   const selectExistingCustomer = (customer: any) => {
@@ -473,7 +492,10 @@ export function AddCustomerModal({ isOpen, onClose, onSave }: AddCustomerModalPr
                 <input
                   type="text"
                   value={formData.fullName}
-                  onChange={e => setFormData(prev => ({ ...prev, fullName: e.target.value }))}
+                  onChange={e => {
+                    setFormData(prev => ({ ...prev, fullName: e.target.value }));
+                    triggerAutoSearch(e.target.value);
+                  }}
                   placeholder="Enter name"
                   className="input-field"
                   required
@@ -486,7 +508,10 @@ export function AddCustomerModal({ isOpen, onClose, onSave }: AddCustomerModalPr
                 <input
                   type="tel"
                   value={formData.mobileNumber}
-                  onChange={e => setFormData(prev => ({ ...prev, mobileNumber: e.target.value }))}
+                  onChange={e => {
+                    setFormData(prev => ({ ...prev, mobileNumber: e.target.value }));
+                    triggerAutoSearch(e.target.value);
+                  }}
                   placeholder="9876543210"
                   maxLength={10}
                   className="input-field"
@@ -516,6 +541,27 @@ export function AddCustomerModal({ isOpen, onClose, onSave }: AddCustomerModalPr
                   className="input-field"
                 />
               </div>
+              {/* Inline auto-search results when typing in name/mobile */}
+              {searchResults.length > 0 && showSearch && !searchQuery && (
+                <div className="col-span-2">
+                  <div className="rounded-lg border border-amber-200 bg-amber-50 p-2">
+                    <p className="text-xs font-medium text-amber-700 mb-1">Existing customers found — click to auto-fill:</p>
+                    <div className="max-h-24 overflow-y-auto space-y-1">
+                      {searchResults.slice(0, 5).map((cust: any, i: number) => (
+                        <button
+                          key={cust._id || cust.customer_id || i}
+                          type="button"
+                          onClick={() => selectExistingCustomer(cust)}
+                          className="w-full text-left px-2 py-1.5 text-sm rounded hover:bg-amber-100 flex justify-between"
+                        >
+                          <span className="font-medium">{cust.name || cust.full_name}</span>
+                          <span className="text-gray-500">{cust.phone || cust.mobile}</span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              )}
               <div className="col-span-2">
                 <label className="block text-sm font-medium text-gray-700 mb-1">
                   Anniversary
