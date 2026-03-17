@@ -19,6 +19,7 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
+import { inventoryApi } from '../../services/api';
 
 interface AgingProduct {
   id: string;
@@ -57,127 +58,32 @@ export function StockAgingReport() {
   const loadAgingData = async () => {
     setIsLoading(true);
     try {
-      // Mock data - in production, fetch from API
-      await new Promise(resolve => setTimeout(resolve, 1000));
-
-      const mockProducts: AgingProduct[] = [
-        {
-          id: '1',
-          sku: 'FR-001',
-          name: 'Ray-Ban Aviator Classic',
-          brand: 'Ray-Ban',
-          category: 'Frames',
-          quantity: 8,
-          value: 32000,
-          daysInStock: 45,
-          lastSaleDate: '2025-02-01',
-          salesLast30Days: 12,
-          salesLast90Days: 35,
-          turnoverRate: 8.5,
-          classification: 'A',
-          ageCategory: '31-60',
-        },
-        {
-          id: '2',
-          sku: 'SG-078',
-          name: 'Vogue Cat Eye Sunglasses',
-          brand: 'Vogue',
-          category: 'Sunglasses',
-          quantity: 15,
-          value: 22500,
-          daysInStock: 195,
-          lastSaleDate: '2024-11-10',
-          salesLast30Days: 1,
-          salesLast90Days: 2,
-          turnoverRate: 0.8,
-          classification: 'C',
-          ageCategory: '180+',
-        },
-        {
-          id: '3',
-          sku: 'CL-023',
-          name: 'Bausch & Lomb SofLens Daily',
-          brand: 'Bausch & Lomb',
-          category: 'Contact Lenses',
-          quantity: 120,
-          value: 60000,
-          daysInStock: 22,
-          lastSaleDate: '2025-02-04',
-          salesLast30Days: 45,
-          salesLast90Days: 130,
-          turnoverRate: 12.5,
-          classification: 'A',
-          ageCategory: '0-30',
-        },
-        {
-          id: '4',
-          sku: 'FR-112',
-          name: 'Prada Baroque Frame',
-          brand: 'Prada',
-          category: 'Frames',
-          quantity: 3,
-          value: 18000,
-          daysInStock: 145,
-          lastSaleDate: '2024-12-20',
-          salesLast30Days: 0,
-          salesLast90Days: 1,
-          turnoverRate: 1.2,
-          classification: 'C',
-          ageCategory: '91-180',
-        },
-        {
-          id: '5',
-          sku: 'ACC-045',
-          name: 'Lens Cleaning Kit Premium',
-          brand: 'Opticare',
-          category: 'Accessories',
-          quantity: 50,
-          value: 7500,
-          daysInStock: 68,
-          lastSaleDate: '2025-01-28',
-          salesLast30Days: 8,
-          salesLast90Days: 22,
-          turnoverRate: 4.2,
-          classification: 'B',
-          ageCategory: '61-90',
-        },
-        {
-          id: '6',
-          sku: 'WT-089',
-          name: 'Fossil Chronograph Watch',
-          brand: 'Fossil',
-          category: 'Watches',
-          quantity: 5,
-          value: 37500,
-          daysInStock: 210,
-          lastSaleDate: '2024-10-15',
-          salesLast30Days: 0,
-          salesLast90Days: 0,
-          turnoverRate: 0.3,
-          classification: 'C',
-          ageCategory: '180+',
-        },
-        {
-          id: '7',
-          sku: 'SG-134',
-          name: 'Oakley Frogskins',
-          brand: 'Oakley',
-          category: 'Sunglasses',
-          quantity: 12,
-          value: 42000,
-          daysInStock: 55,
-          lastSaleDate: '2025-01-20',
-          salesLast30Days: 5,
-          salesLast90Days: 18,
-          turnoverRate: 5.8,
-          classification: 'B',
-          ageCategory: '31-60',
-        },
-      ];
-
-      setProducts(mockProducts);
+      const storeId = user?.activeStoreId || '';
+      if (!storeId) {
+        setProducts([]);
+        return;
+      }
+      const result = await inventoryApi.getAgingReport(storeId);
+      const items: AgingProduct[] = (result?.products || []).map((p: any) => ({
+        id: p.id || p.product_id || '',
+        sku: p.sku || '',
+        name: p.name || '',
+        brand: p.brand || '',
+        category: p.category || '',
+        quantity: p.quantity || 0,
+        value: p.value || 0,
+        daysInStock: p.daysInStock || 0,
+        lastSaleDate: p.lastSaleDate || undefined,
+        salesLast30Days: p.salesLast30Days || 0,
+        salesLast90Days: p.salesLast90Days || 0,
+        turnoverRate: p.turnoverRate || 0,
+        classification: p.classification || 'C',
+        ageCategory: p.ageCategory || '0-30',
+      }));
+      setProducts(items);
     } catch (error: any) {
       toast.error('Failed to load aging data');
+      setProducts([]);
     } finally {
       setIsLoading(false);
     }

@@ -105,12 +105,16 @@ export function BarcodeGenerator({
     img.src = 'data:image/svg+xml;base64,' + btoa(unescape(encodeURIComponent(svgData)));
   };
 
-  const handlePrint = () => {
+  const handlePrint = (labelSize: 'standard' | 'thermal' = 'standard') => {
     const printWindow = window.open('', '_blank');
     if (!printWindow || !barcodeRef.current) return;
 
     const svg = barcodeRef.current;
     const svgData = new XMLSerializer().serializeToString(svg);
+
+    // Thermal label: 50mm × 25mm (common Zebra/TSC label size)
+    // Standard: A4 sheet with label layout
+    const isThermal = labelSize === 'thermal';
 
     printWindow.document.write(`
       <!DOCTYPE html>
@@ -120,7 +124,7 @@ export function BarcodeGenerator({
           <style>
             body {
               margin: 0;
-              padding: 20px;
+              padding: ${isThermal ? '2mm' : '20px'};
               font-family: Arial, sans-serif;
               display: flex;
               flex-direction: column;
@@ -128,20 +132,27 @@ export function BarcodeGenerator({
             }
             .label {
               border: 1px dashed #ccc;
-              padding: 10px;
-              margin: 10px;
+              padding: ${isThermal ? '1mm 2mm' : '10px'};
+              margin: ${isThermal ? '0' : '10px'};
               text-align: center;
-              width: 250px;
+              width: ${isThermal ? '46mm' : '250px'};
+              ${isThermal ? 'height: 21mm; overflow: hidden;' : ''}
             }
             .product-name {
               font-weight: bold;
-              font-size: 14px;
-              margin-bottom: 10px;
+              font-size: ${isThermal ? '8px' : '14px'};
+              margin-bottom: ${isThermal ? '1px' : '10px'};
+              overflow: hidden;
+              text-overflow: ellipsis;
+              white-space: nowrap;
+            }
+            .barcode-wrap svg {
+              ${isThermal ? 'max-width: 44mm; height: 12mm;' : ''}
             }
             .price {
               font-weight: bold;
-              font-size: 16px;
-              margin-top: 10px;
+              font-size: ${isThermal ? '10px' : '16px'};
+              margin-top: ${isThermal ? '0' : '10px'};
             }
             @media print {
               .no-print { display: none; }
@@ -149,14 +160,17 @@ export function BarcodeGenerator({
                 border: none;
                 page-break-after: always;
               }
+              @page {
+                ${isThermal ? 'size: 50mm 25mm; margin: 1mm;' : ''}
+              }
             }
           </style>
         </head>
         <body>
           <div class="label">
             ${productName ? `<div class="product-name">${productName}</div>` : ''}
-            ${svgData}
-            ${price ? `<div class="price">₹${price.toFixed(2)}</div>` : ''}
+            <div class="barcode-wrap">${svgData}</div>
+            ${price ? `<div class="price">₹${price.toLocaleString('en-IN')}</div>` : ''}
           </div>
           <button class="no-print" onclick="window.print(); window.close();" style="margin-top: 20px; padding: 10px 20px; cursor: pointer;">
             Print
@@ -197,7 +211,7 @@ export function BarcodeGenerator({
       )}
 
       {/* Action Buttons */}
-      <div className="flex gap-2 justify-center">
+      <div className="flex gap-2 justify-center flex-wrap">
         <button
           onClick={handleDownload}
           className="btn-outline text-sm flex items-center gap-2"
@@ -206,11 +220,19 @@ export function BarcodeGenerator({
           Download
         </button>
         <button
-          onClick={handlePrint}
+          onClick={() => handlePrint('standard')}
           className="btn-primary text-sm flex items-center gap-2"
         >
           <Printer className="w-4 h-4" />
-          Print Label
+          Print (A4)
+        </button>
+        <button
+          onClick={() => handlePrint('thermal')}
+          className="btn-outline text-sm flex items-center gap-2"
+          title="50mm × 25mm thermal label"
+        >
+          <Printer className="w-4 h-4" />
+          Print (Thermal)
         </button>
       </div>
 

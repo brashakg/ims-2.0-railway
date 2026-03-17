@@ -340,6 +340,38 @@ export const inventoryApi = {
     const response = await api.get('/transfers', { params: { store_id: storeId, direction } });
     return response.data;
   },
+
+  // Stock Aging / Non-Moving Report
+  getAgingReport: async (storeId: string, params?: { category?: string; classification?: string; min_days?: number }) => {
+    const response = await api.get('/inventory/aging', { params: { store_id: storeId, ...params } });
+    return response.data;
+  },
+
+  // Stock Count / Physical Verification
+  getStockCounts: async (storeId: string, status?: string) => {
+    const response = await api.get('/inventory/stock-count', { params: { store_id: storeId, status } });
+    return response.data;
+  },
+
+  startStockCount: async (data: { category?: string; zone?: string; notes?: string }) => {
+    const response = await api.post('/inventory/stock-count/start', data);
+    return response.data;
+  },
+
+  recordCountItem: async (countId: string, item: { product_id: string; product_name?: string; sku?: string; counted_quantity: number; notes?: string }) => {
+    const response = await api.post(`/inventory/stock-count/${countId}/items`, item);
+    return response.data;
+  },
+
+  completeStockCount: async (countId: string, notes?: string) => {
+    const response = await api.post(`/inventory/stock-count/${countId}/complete`, notes ? { notes } : {});
+    return response.data;
+  },
+
+  getStockCount: async (countId: string) => {
+    const response = await api.get(`/inventory/stock-count/${countId}`);
+    return response.data;
+  },
 };
 
 // ============================================================================
