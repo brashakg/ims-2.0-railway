@@ -12,6 +12,8 @@ import { AppLayout } from './components/layout/AppLayout';
 import { ProtectedRoute } from './components/layout/ProtectedRoute';
 import { ErrorBoundary } from './components/layout/ErrorBoundary';
 import { SessionExpiryWarning } from './components/common/SessionExpiryWarning';
+import { SpeedInsights } from '@vercel/speed-insights/react';
+import { Analytics } from '@vercel/analytics/react';
 
 // Lazy load pages for code splitting
 const LoginPage = lazy(() => import('./pages/auth/LoginPage').then(m => ({ default: m.LoginPage })));
@@ -513,6 +515,8 @@ function App() {
                 </Routes>
               </Suspense>
             </BrowserRouter>
+              <SpeedInsights />
+              <Analytics />
           </ToastProvider>
         </ModuleProvider>
       </AuthProvider>
