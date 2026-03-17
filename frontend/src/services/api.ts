@@ -434,9 +434,17 @@ export const orderApi = {
 // ============================================================================
 
 export const prescriptionApi = {
-  getPrescriptions: async (patientId: string) => {
-    const response = await api.get('/prescriptions', { params: { patient_id: patientId } });
-    return response.data;
+  getPrescriptions: async (patientOrCustomerId: string) => {
+    // Try patient_id first; if empty, fall back to customer_id
+    let response = await api.get('/prescriptions', { params: { patient_id: patientOrCustomerId } });
+    const data = response.data;
+    const rxList = data?.prescriptions || data || [];
+    if (Array.isArray(rxList) && rxList.length === 0) {
+      // No results by patient_id — try as customer_id
+      response = await api.get('/prescriptions', { params: { customer_id: patientOrCustomerId } });
+      return response.data;
+    }
+    return data;
   },
 
   getPrescription: async (prescriptionId: string) => {

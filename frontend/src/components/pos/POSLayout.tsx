@@ -623,6 +623,125 @@ export function POSLayout() {
 // ============================================================================
 // Customer Purchase History (compact, in StepCustomer)
 // ============================================================================
+// Show "Rx Available" badge when customer has valid prescriptions from clinical module
+function RxAvailableBadge({ customerId }: { customerId: string; customerName?: string }) {
+  const store = usePOSStore();
+  const [rxCount, setRxCount] = useState(0);
+  const [latestRx, setLatestRx] = useState<any>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const result = await prescriptionApi.getPrescriptions(customerId);
+        const prescriptions = result?.prescriptions || result || [];
+        if (!cancelled && Array.isArray(prescriptions)) {
+          // Filter to valid (non-expired) prescriptions
+          const now = new Date();
+          const valid = prescriptions.filter((rx: any) => {
+            const testDate = new Date(rx.testDate || rx.test_date || rx.created_at);
+            const months = rx.validityMonths || rx.validity_months || 12;
+            const expiry = new Date(testDate);
+            expiry.setMonth(expiry.getMonth() + months);
+            return now < expiry;
+          });
+          setRxCount(valid.length);
+          if (valid.length > 0) {
+            // Sort by date descending, pick latest
+            valid.sort((a: any, b: any) => {
+              const da = new Date(a.testDate || a.test_date || a.created_at).getTime();
+              const db = new Date(b.testDate || b.test_date || b.created_at).getTime();
+              return db - da;
+            });
+            setLatestRx(valid[0]);
+          }
+        }
+      } catch { /* no prescriptions */ }
+      if (!cancelled) setLoading(false);
+    })();
+    return () => { cancelled = true; };
+  }, [customerId]);
+
+  if (loading || rxCount === 0) return null;
+
+  const handleSwitchToRx = () => {
+    store.setSaleType('prescription_order');
+    // Auto-set the prescription in the store so Step 2 is pre-filled
+    if (latestRx) {
+      const rx: Prescription = {
+        prescriptionId: latestRx.prescriptionId || latestRx.prescription_id || latestRx._id,
+        prescriptionNumber: latestRx.prescriptionNumber || latestRx.prescription_number || '',
+        patientId: latestRx.patientId || latestRx.patient_id || customerId,
+        source: latestRx.source || 'TESTED_AT_STORE',
+        optometristName: latestRx.optometristName || latestRx.optometrist_name || '',
+        rightEye: {
+          sphere: parseFloat(latestRx.rightEye?.sph || latestRx.right_eye?.sph || latestRx.rightEye?.sphere || '0'),
+          cylinder: parseFloat(latestRx.rightEye?.cyl || latestRx.right_eye?.cyl || latestRx.rightEye?.cylinder || '0'),
+          axis: Number(latestRx.rightEye?.axis || latestRx.right_eye?.axis || 180),
+          add: parseFloat(latestRx.rightEye?.add || latestRx.right_eye?.add || '0'),
+          pd: latestRx.rightEye?.pd || latestRx.right_eye?.pd || undefined,
+        },
+        leftEye: {
+          sphere: parseFloat(latestRx.leftEye?.sph || latestRx.left_eye?.sph || latestRx.leftEye?.sphere || '0'),
+          cylinder: parseFloat(latestRx.leftEye?.cyl || latestRx.left_eye?.cyl || latestRx.leftEye?.cylinder || '0'),
+          axis: Number(latestRx.leftEye?.axis || latestRx.left_eye?.axis || 180),
+          add: parseFloat(latestRx.leftEye?.add || latestRx.left_eye?.add || '0'),
+          pd: latestRx.leftEye?.pd || latestRx.left_eye?.pd || undefined,
+        },
+        lensRecommendation: latestRx.lensRecommendation || latestRx.lens_recommendation || '',
+        coatingRecommendation: latestRx.coatingRecommendation || latestRx.coating_recommendation || '',
+        remarks: latestRx.remarks || '',
+        testDate: latestRx.testDate || latestRx.test_date || '',
+        validityMonths: latestRx.validityMonths || latestRx.validity_months || 12,
+        status: 'ACTIVE',
+      } as any;
+      store.setPrescription(rx);
+    }
+  };
+
+  return (
+    <div className="mt-2 bg-blue-50 border border-blue-200 rounded-lg p-3">
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <div className="w-7 h-7 rounded-full bg-blue-500 text-white flex items-center justify-center">
+            <Eye className="w-4 h-4" />
+          </div>
+          <div>
+            <p className="text-sm font-semibold text-blue-800">
+              {rxCount} Valid Prescription{rxCount > 1 ? 's' : ''} Available
+            </p>
+            <p className="text-xs text-blue-600">
+              {latestRx?.optometristName || latestRx?.optometrist_name
+                ? `By ${latestRx.optometristName || latestRx.optometrist_name}`
+                : 'From eye test'}
+              {latestRx?.testDate || latestRx?.test_date
+                ? ` · ${new Date(latestRx.testDate || latestRx.test_date).toLocaleDateString('en-IN')}`
+                : ''}
+            </p>
+          </div>
+        </div>
+        {store.sale_type !== 'prescription_order' && (
+          <button
+            onClick={handleSwitchToRx}
+            className="text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 px-3 py-1.5 rounded-lg transition-colors"
+          >
+            Use Rx → Prescription Order
+          </button>
+        )}
+        {store.sale_type === 'prescription_order' && !store.prescription && (
+          <button
+            onClick={handleSwitchToRx}
+            className="text-xs font-semibold text-blue-700 bg-blue-100 hover:bg-blue-200 px-3 py-1.5 rounded-lg transition-colors"
+          >
+            Attach Latest Rx
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function CustomerHistory({ customerId }: { customerId: string }) {
   const [orders, setOrders] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
@@ -772,6 +891,7 @@ function StepCustomer() {
             </div>
             <button onClick={() => store.setCustomer(null)} className="text-sm text-gray-500 hover:text-gray-700 px-3 py-1 border border-gray-200 rounded-lg">Change</button>
           </div>
+          {!isWalkin && <RxAvailableBadge customerId={store.customer.id} customerName={store.customer.name} />}
           {!isWalkin && <CustomerHistory customerId={store.customer.id} />}
           </>
         ) : (
@@ -834,6 +954,78 @@ function StepCustomer() {
 // ============================================================================
 function StepPrescription({ onShowModal, onShowNew }: { onShowModal: () => void; onShowNew: () => void }) {
   const store = usePOSStore();
+  const [recentRx, setRecentRx] = useState<any[]>([]);
+  const [rxLoading, setRxLoading] = useState(false);
+
+  // Auto-fetch recent prescriptions for the selected customer/patient
+  const lookupId = store.patient?.id || store.customer?.id;
+  useEffect(() => {
+    if (!lookupId || store.prescription) return;
+    let cancelled = false;
+    setRxLoading(true);
+    (async () => {
+      try {
+        const result = await prescriptionApi.getPrescriptions(lookupId);
+        const list = result?.prescriptions || result || [];
+        if (!cancelled && Array.isArray(list)) {
+          // Filter to valid, sort by newest first
+          const now = new Date();
+          const valid = list.filter((rx: any) => {
+            const testDate = new Date(rx.testDate || rx.test_date || rx.created_at);
+            const months = rx.validityMonths || rx.validity_months || 12;
+            const expiry = new Date(testDate);
+            expiry.setMonth(expiry.getMonth() + months);
+            return now < expiry;
+          }).sort((a: any, b: any) => {
+            const da = new Date(a.testDate || a.test_date || a.created_at).getTime();
+            const db = new Date(b.testDate || b.test_date || b.created_at).getTime();
+            return db - da;
+          });
+          setRecentRx(valid.slice(0, 3));
+        }
+      } catch { /* ignore */ }
+      if (!cancelled) setRxLoading(false);
+    })();
+    return () => { cancelled = true; };
+  }, [lookupId, store.prescription]);
+
+  const attachRx = (rx: any) => {
+    const mapped: Prescription = {
+      prescriptionId: rx.prescriptionId || rx.prescription_id || rx._id,
+      prescriptionNumber: rx.prescriptionNumber || rx.prescription_number || '',
+      patientId: rx.patientId || rx.patient_id || lookupId || '',
+      source: rx.source || 'TESTED_AT_STORE',
+      optometristName: rx.optometristName || rx.optometrist_name || '',
+      rightEye: {
+        sphere: parseFloat(rx.rightEye?.sph || rx.right_eye?.sph || rx.rightEye?.sphere || '0'),
+        cylinder: parseFloat(rx.rightEye?.cyl || rx.right_eye?.cyl || rx.rightEye?.cylinder || '0'),
+        axis: Number(rx.rightEye?.axis || rx.right_eye?.axis || 180),
+        add: parseFloat(rx.rightEye?.add || rx.right_eye?.add || '0'),
+        pd: rx.rightEye?.pd || rx.right_eye?.pd || undefined,
+      },
+      leftEye: {
+        sphere: parseFloat(rx.leftEye?.sph || rx.left_eye?.sph || rx.leftEye?.sphere || '0'),
+        cylinder: parseFloat(rx.leftEye?.cyl || rx.left_eye?.cyl || rx.leftEye?.cylinder || '0'),
+        axis: Number(rx.leftEye?.axis || rx.left_eye?.axis || 180),
+        add: parseFloat(rx.leftEye?.add || rx.left_eye?.add || '0'),
+        pd: rx.leftEye?.pd || rx.left_eye?.pd || undefined,
+      },
+      lensRecommendation: rx.lensRecommendation || rx.lens_recommendation || '',
+      coatingRecommendation: rx.coatingRecommendation || rx.coating_recommendation || '',
+      remarks: rx.remarks || '',
+      testDate: rx.testDate || rx.test_date || '',
+      validityMonths: rx.validityMonths || rx.validity_months || 12,
+      status: 'ACTIVE',
+    } as any;
+    store.setPrescription(mapped);
+  };
+
+  const fmtPower = (v: any) => {
+    const n = parseFloat(v);
+    if (!n || isNaN(n)) return '0.00';
+    return n >= 0 ? `+${n.toFixed(2)}` : n.toFixed(2);
+  };
+
   if (store.prescription) {
     return (
       <div className="max-w-3xl mx-auto space-y-4">
@@ -851,19 +1043,61 @@ function StepPrescription({ onShowModal, onShowNew }: { onShowModal: () => void;
   return (
     <div className="max-w-3xl mx-auto space-y-6">
       <div><h3 className="font-semibold text-gray-900 mb-1">Prescription Required</h3><p className="text-sm text-gray-500">Select existing or enter a new prescription.</p></div>
+
+      {/* Auto-loaded recent prescriptions from eye test / clinical */}
+      {rxLoading && (
+        <div className="text-sm text-gray-400 animate-pulse">Checking for prescriptions...</div>
+      )}
+      {!rxLoading && recentRx.length > 0 && (
+        <div className="space-y-2">
+          <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Recent Prescriptions (from eye test)</p>
+          {recentRx.map((rx, i) => {
+            const re = rx.rightEye || rx.right_eye || {};
+            const le = rx.leftEye || rx.left_eye || {};
+            const testDate = rx.testDate || rx.test_date;
+            return (
+              <div key={rx.prescriptionId || rx.prescription_id || rx._id || i}
+                className="flex items-center gap-4 p-3 bg-blue-50 border border-blue-200 rounded-lg hover:bg-blue-100 transition-colors">
+                <div className="w-8 h-8 rounded-full bg-blue-500 text-white flex items-center justify-center flex-shrink-0">
+                  <Eye className="w-4 h-4" />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-medium text-gray-900">
+                    R: {fmtPower(re.sph || re.sphere)}/{fmtPower(re.cyl || re.cylinder)}×{re.axis || 180}
+                    {' · '}
+                    L: {fmtPower(le.sph || le.sphere)}/{fmtPower(le.cyl || le.cylinder)}×{le.axis || 180}
+                  </p>
+                  <p className="text-xs text-gray-500">
+                    {rx.optometristName || rx.optometrist_name ? `By ${rx.optometristName || rx.optometrist_name}` : 'Eye test'}
+                    {testDate ? ` · ${new Date(testDate).toLocaleDateString('en-IN')}` : ''}
+                    {rx.source === 'TESTED_AT_STORE' && ' · Tested at store'}
+                  </p>
+                </div>
+                <button onClick={() => attachRx(rx)}
+                  className="text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 px-3 py-1.5 rounded-lg transition-colors flex-shrink-0">
+                  Attach
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
       <div className="grid grid-cols-1 tablet:grid-cols-2 gap-4">
         <button onClick={onShowModal} className="flex items-start gap-3 p-4 rounded-xl border-2 border-gray-200 hover:border-bv-gold-300 text-left">
           <div className="w-10 h-10 rounded-lg bg-blue-50 text-blue-600 flex items-center justify-center"><FileText className="w-5 h-5" /></div>
-          <div><p className="font-semibold text-gray-900">Existing Prescription</p><p className="text-xs text-gray-500 mt-0.5">From patient history</p></div>
+          <div><p className="font-semibold text-gray-900">Browse All Prescriptions</p><p className="text-xs text-gray-500 mt-0.5">View full prescription history</p></div>
         </button>
         <button onClick={onShowNew} className="flex items-start gap-3 p-4 rounded-xl border-2 border-gray-200 hover:border-bv-gold-300 text-left">
           <div className="w-10 h-10 rounded-lg bg-green-50 text-green-600 flex items-center justify-center"><Plus className="w-5 h-5" /></div>
-          <div><p className="font-semibold text-gray-900">New Prescription</p><p className="text-xs text-gray-500 mt-0.5">Enter a new Rx now</p></div>
+          <div><p className="font-semibold text-gray-900">New Prescription</p><p className="text-xs text-gray-500 mt-0.5">Enter a new Rx manually</p></div>
         </button>
       </div>
-      <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 flex items-center gap-2 text-sm text-amber-700">
-        <AlertTriangle className="w-4 h-4 flex-shrink-0" /> Prescription must be attached before lens selection.
-      </div>
+      {recentRx.length === 0 && !rxLoading && (
+        <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 flex items-center gap-2 text-sm text-amber-700">
+          <AlertTriangle className="w-4 h-4 flex-shrink-0" /> No prescriptions found. Enter manually or send customer for an eye test first.
+        </div>
+      )}
     </div>
   );
 }

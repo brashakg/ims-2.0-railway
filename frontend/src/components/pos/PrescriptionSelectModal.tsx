@@ -26,26 +26,27 @@ export function PrescriptionSelectModal({
   customerId: _customerId,
   currentPrescriptionId,
 }: PrescriptionSelectModalProps) {
-  // customerId may be used for future API calls
-  void _customerId;
   const [prescriptions, setPrescriptions] = useState<Prescription[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
+  // Use patient ID if available, otherwise fall back to customer ID
+  const lookupId = patient?.id || _customerId;
+
   useEffect(() => {
-    if (patient?.id) {
+    if (lookupId) {
       loadPrescriptions();
     }
-  }, [patient?.id]);
+  }, [lookupId]);
 
   const loadPrescriptions = async () => {
-    if (!patient?.id) return;
+    if (!lookupId) return;
 
     setIsLoading(true);
     setErrorMsg(null);
 
     try {
-      const response = await prescriptionApi.getPrescriptions(patient.id);
+      const response = await prescriptionApi.getPrescriptions(lookupId);
       setPrescriptions(response.prescriptions || response || []);
     } catch {
       setErrorMsg('Failed to load prescriptions. Please try again.');

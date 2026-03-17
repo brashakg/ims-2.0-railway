@@ -10,7 +10,7 @@ from typing import List, Optional
 from datetime import datetime, date
 import uuid
 from .auth import get_current_user
-from ..dependencies import get_eye_test_queue_repository, get_eye_test_repository
+from ..dependencies import get_eye_test_queue_repository, get_eye_test_repository, get_prescription_repository, get_customer_repository
 
 router = APIRouter()
 
@@ -313,14 +313,71 @@ async def complete_test(
         )
 
         if success:
-            # Get the test to find queue_id
+            # Get the test to find queue_id and patient info
             test = test_repo.find_by_id(test_id)
             if test and queue_repo:
                 queue_id = test.get("queue_id")
                 if queue_id:
                     queue_repo.update_status(queue_id, "COMPLETED")
 
-            return {"message": "Test completed", "testId": test_id}
+            # ── Auto-create prescription so POS can find it ──
+            prescription_id = None
+            rx_repo = get_prescription_repository()
+            if rx_repo is not None and test:
+                from datetime import timedelta
+                now = datetime.utcnow()
+                rx_number = f"RX-{now.strftime('%y%m%d')}-{str(uuid.uuid4())[:6].upper()}"
+                customer_id = test.get("customer_id", "")
+                store_id = test.get("store_id", "")
+
+                rx_data = {
+                    "prescription_id": str(uuid.uuid4()),
+                    "prescription_number": rx_number,
+                    "patient_id": customer_id,  # In BV, patient_id maps to customer
+                    "customer_id": customer_id,
+                    "store_id": store_id,
+                    "source": "TESTED_AT_STORE",
+                    "optometrist_id": current_user.get("user_id", ""),
+                    "optometrist_name": current_user.get("full_name", current_user.get("username", "")),
+                    "eye_test_id": test_id,
+                    "right_eye": {
+                        "sph": str(data.right_eye.get("sphere", data.right_eye.get("sph", "0"))),
+                        "cyl": str(data.right_eye.get("cylinder", data.right_eye.get("cyl", "0"))),
+                        "axis": data.right_eye.get("axis", 180),
+                        "add": str(data.right_eye.get("add", "0")),
+                        "pd": str(data.right_eye.get("pd", "")),
+                    },
+                    "left_eye": {
+                        "sph": str(data.left_eye.get("sphere", data.left_eye.get("sph", "0"))),
+                        "cyl": str(data.left_eye.get("cylinder", data.left_eye.get("cyl", "0"))),
+                        "axis": data.left_eye.get("axis", 180),
+                        "add": str(data.left_eye.get("add", "0")),
+                        "pd": str(data.left_eye.get("pd", "")),
+                    },
+                    "lens_recommendation": data.lens_recommendation,
+                    "coating_recommendation": data.coating_recommendation,
+                    "remarks": data.notes,
+                    "validity_months": 12,
+                    "test_date": now.isoformat(),
+                    "expiry_date": (now + timedelta(days=365)).isoformat(),
+                    "status": "ACTIVE",
+                    "created_at": now.isoformat(),
+                    "created_by": current_user.get("user_id", ""),
+                }
+                try:
+                    created = rx_repo.create(rx_data)
+                    if created:
+                        prescription_id = rx_data["prescription_id"]
+                except Exception as e:
+                    # Log but don't fail the test completion
+                    import logging
+                    logging.getLogger(__name__).warning(f"Auto-prescription creation failed: {e}")
+
+            return {
+                "message": "Test completed",
+                "testId": test_id,
+                "prescriptionId": prescription_id,
+            }
 
     # Fallback for demo
     return {"message": "Test completed", "testId": test_id}
