@@ -164,6 +164,7 @@ export interface POSState {
 
   // Reset
   resetTransaction: () => void;
+  clearAllOnLogout: () => void;
 
   // Computed getters
   getSubtotal: () => number;
@@ -363,6 +364,15 @@ export const usePOSStore = create<POSState>()(
       resetTransaction: () => {
         const { store_id, salesperson_id, salesperson_name } = get();
         set({ ...initialState, store_id, salesperson_id, salesperson_name });
+      },
+
+      // --- Full clear (for logout) ---
+      clearAllOnLogout: () => {
+        set(initialState);
+        try {
+          localStorage.removeItem('ims-pos-draft');
+          localStorage.removeItem('ims-held-bills');
+        } catch { /* ignore */ }
       },
 
       // --- Computed (with null guards) ---

@@ -91,7 +91,11 @@ async def list_stores(
 async def create_store(
     store: StoreCreate, current_user: dict = Depends(get_current_user)
 ):
-    """Create a new store"""
+    """Create a new store (SUPERADMIN/ADMIN only)"""
+    # RBAC: Only admins can create stores
+    if not any(role in current_user.get("roles", []) for role in ["SUPERADMIN", "ADMIN"]):
+        raise HTTPException(status_code=403, detail="Only admins can create stores")
+
     repo = get_store_repository()
 
     if repo is not None:

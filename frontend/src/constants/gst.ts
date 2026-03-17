@@ -233,14 +233,16 @@ export function getHSNByCategory(category: string, use6Digit: boolean = false): 
 // Calculate GST components
 export function calculateGST(amount: number, gstRate: number) {
   const gstAmount = (amount * gstRate) / (100 + gstRate);
-  const cgst = gstAmount / 2;
-  const sgst = gstAmount / 2;
+  // Round CGST down, assign remainder to SGST to avoid 1-paisa loss on odd amounts
+  const roundedGst = parseFloat(gstAmount.toFixed(2));
+  const cgst = Math.floor(roundedGst * 100 / 2) / 100;
+  const sgst = parseFloat((roundedGst - cgst).toFixed(2));
   const baseAmount = amount - gstAmount;
 
   return {
     baseAmount: parseFloat(baseAmount.toFixed(2)),
-    cgst: parseFloat(cgst.toFixed(2)),
-    sgst: parseFloat(sgst.toFixed(2)),
+    cgst,
+    sgst,
     igst: 0, // For intra-state transactions
     totalGst: parseFloat(gstAmount.toFixed(2)),
     totalAmount: parseFloat(amount.toFixed(2)),

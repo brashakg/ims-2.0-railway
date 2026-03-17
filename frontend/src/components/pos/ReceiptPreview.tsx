@@ -6,6 +6,7 @@ interface ReceiptPreviewProps {
   selectedCustomer: any;
   cartItems: any[];
   onClose: () => void;
+  storeData?: { name?: string; address?: string; phone?: string; gst?: string };
 }
 
 type ReceiptFormat = 'thermal' | 'a4';
@@ -15,13 +16,14 @@ export function ReceiptPreview({
   selectedCustomer,
   cartItems,
   onClose,
+  storeData,
 }: ReceiptPreviewProps) {
   const [format, setFormat] = useState<ReceiptFormat>('thermal');
   const storeInfo = {
-    name: 'Better Vision Opticals',
-    address: '123 Main Street, City, 560001',
-    phone: '+91 98765 43210',
-    gst: '29ABCDE1234F1ZA',
+    name: storeData?.name || 'Better Vision Opticals',
+    address: storeData?.address || '',
+    phone: storeData?.phone || '',
+    gst: storeData?.gst || '',
   };
 
   const handlePrint = () => {
@@ -126,11 +128,11 @@ export function ReceiptPreview({
                     <div className="flex justify-between">
                       <span className="flex-1">{item.name}</span>
                       <span className="w-12 text-right">{item.quantity}</span>
-                      <span className="w-16 text-right">₹{(item.unit_price * item.quantity).toFixed(0)}</span>
+                      <span className="w-16 text-right">₹{(item.unit_price * item.quantity).toFixed(2)}</span>
                     </div>
                     {item.discount_percent && (
                       <div className="text-right text-gray-600">
-                        -{item.discount_percent}% = -₹{(item.unit_price * item.quantity * item.discount_percent / 100).toFixed(0)}
+                        -{item.discount_percent}% = -₹{(item.unit_price * item.quantity * item.discount_percent / 100).toFixed(2)}
                       </div>
                     )}
                   </div>
@@ -141,17 +143,17 @@ export function ReceiptPreview({
               <div className="space-y-1 text-xs mb-2">
                 <div className="flex justify-between">
                   <span>Subtotal:</span>
-                  <span>₹{billData.subtotal.toFixed(0)}</span>
+                  <span>₹{billData.subtotal.toFixed(2)}</span>
                 </div>
                 {(billData.item_discount + billData.order_discount_amount) > 0 && (
                   <div className="flex justify-between text-gray-600">
                     <span>Discount:</span>
-                    <span>-₹{(billData.item_discount + billData.order_discount_amount).toFixed(0)}</span>
+                    <span>-₹{(billData.item_discount + billData.order_discount_amount).toFixed(2)}</span>
                   </div>
                 )}
                 <div className="flex justify-between text-gray-600">
                   <span>{billData.igst_amount > 0 ? 'IGST' : 'CGST+SGST'} (18%):</span>
-                  <span>₹{billData.total_gst.toFixed(0)}</span>
+                  <span>₹{billData.total_gst.toFixed(2)}</span>
                 </div>
                 {Math.abs(billData.roundoff_amount) > 0.01 && (
                   <div className="flex justify-between text-gray-600">

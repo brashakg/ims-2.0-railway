@@ -593,7 +593,9 @@ async def test_integration(
 
 @router.get("/system")
 async def get_system_settings(current_user: dict = Depends(get_current_user)):
-    """Get system settings"""
+    """Get system settings (SUPERADMIN/ADMIN only)"""
+    if not any(role in current_user["roles"] for role in ["SUPERADMIN", "ADMIN"]):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
     collection = _get_settings_collection("system_settings")
     if collection:
         settings = collection.find_one({"_id": "default"})

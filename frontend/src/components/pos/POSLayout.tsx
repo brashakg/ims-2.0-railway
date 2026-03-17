@@ -77,7 +77,8 @@ const QUICK_STEPS: POSStep[] = ['customer', 'products', 'payment', 'complete'];
 
 /** Safe currency format — never crashes on null/undefined/NaN */
 function fc(amount: number | undefined | null): string {
-  return `₹${Math.round(amount || 0).toLocaleString('en-IN')}`;
+  const val = Math.round((amount || 0) * 100) / 100;
+  return `₹${val.toLocaleString('en-IN', { minimumFractionDigits: 0, maximumFractionDigits: 2 })}`;
 }
 
 function mapCategory(cat: string): string {
@@ -915,15 +916,23 @@ function StepProducts({ onOpenLensModal }: { onOpenLensModal: () => void }) {
   const handleAddProduct = (product: any) => {
     const mrp = product.mrp || 0;
     const offerPrice = product.offer_price || product.offerPrice || mrp;
+    // Block: offer price exceeds MRP
     if (offerPrice > mrp && mrp > 0) {
       setBlockMsg(`BLOCKED: ${product.name} — Offer Price (${fc(offerPrice)}) exceeds MRP (${fc(mrp)}). Contact HQ to fix pricing.`);
+      setTimeout(() => setBlockMsg(null), 6000);
+      return;
+    }
+    // Block: invalid price (zero, negative, or NaN)
+    const finalPrice = offerPrice || mrp;
+    if (!finalPrice || finalPrice <= 0 || isNaN(finalPrice)) {
+      setBlockMsg(`BLOCKED: ${product.name} — Invalid pricing (₹${finalPrice}). Contact HQ to fix.`);
       setTimeout(() => setBlockMsg(null), 6000);
       return;
     }
     setBlockMsg(null);
     startTransition(() => {
       store.addToCart({ product_id: product.product_id || product._id || product.id, name: product.name, sku: product.sku, barcode: product.barcode, brand: product.brand, subbrand: product.subbrand || product.sub_brand, category: product.category,
-        unit_price: offerPrice || mrp, mrp, offer_price: offerPrice !== mrp ? offerPrice : undefined, quantity: 1,
+        unit_price: finalPrice, mrp, offer_price: offerPrice !== mrp ? offerPrice : undefined, quantity: 1,
         is_optical: ['FRAMES', 'RX_LENSES', 'CONTACT_LENSES', 'COLOUR_CONTACTS'].includes(product.category), image_url: product.image_url });
     });
   };
@@ -1191,10 +1200,13 @@ function StepReview({ onOpenDiscount }: { onOpenDiscount: (item: CartLineItem) =
           const r = Number(rate);
           const halfRate = r / 2;
           const tax = Math.round((taxable as number) * (r / 100) * 100) / 100;
+          // Fix: split rounding — CGST rounds down, SGST gets remainder to avoid 1 paisa loss
+          const cgst = Math.floor(tax * 100 / 2) / 100;
+          const sgst = Math.round((tax - cgst) * 100) / 100;
           return (
             <div key={rate} className="space-y-1">
-              <div className="flex justify-between text-gray-500"><span>CGST ({halfRate}%)</span><span>{fc(tax / 2)}</span></div>
-              <div className="flex justify-between text-gray-500"><span>SGST ({halfRate}%)</span><span>{fc(tax / 2)}</span></div>
+              <div className="flex justify-between text-gray-500"><span>CGST ({halfRate}%)</span><span>{fc(cgst)}</span></div>
+              <div className="flex justify-between text-gray-500"><span>SGST ({halfRate}%)</span><span>{fc(sgst)}</span></div>
             </div>
           );
         })}
@@ -1261,7 +1273,7 @@ function CashChangeCalculator({ grandTotal }: { grandTotal: number; totalPaid: n
 // ============================================================================
 function StepPayment() {
   const store = usePOSStore();
-  const total = store.getGrandTotal(); const paid = store.getTotalPaid(); const balance = total - paid;
+  const total = store.getGrandTotal(); const paid = store.getTotalPaid(); const balance = Math.round((total - paid) * 100) / 100;
   const [payMethod, setPayMethod] = useState<'CASH' | 'UPI' | 'CARD' | 'BANK_TRANSFER'>('CASH');
   const [payAmount, setPayAmount] = useState(''); const [payRef, setPayRef] = useState('');
   const methods = [

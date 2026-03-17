@@ -10,7 +10,7 @@ from typing import List, Optional
 from datetime import date
 import uuid
 from .auth import get_current_user
-from ..dependencies import get_customer_repository
+from ..dependencies import get_customer_repository, validate_store_access
 
 router = APIRouter()
 
@@ -69,6 +69,14 @@ async def list_customers(
         filter_dict = {}
         if customer_type:
             filter_dict["customer_type"] = customer_type
+
+        # Store scoping: non-admin users only see customers from their store
+        user_roles = current_user.get("roles", [])
+        is_hq_list = any(r in user_roles for r in ["SUPERADMIN", "ADMIN", "AREA_MANAGER"])
+        if not is_hq_list:
+            active_store = current_user.get("active_store_id")
+            if active_store:
+                filter_dict["home_store_id"] = active_store
 
         # If search provided, use search method
         if search:

@@ -44,7 +44,11 @@ export function GSTInvoice({ order, store, onPrint }: GSTInvoiceProps) {
   const invoiceRef = useRef<HTMLDivElement>(null);
 
   // Check if transaction is inter-state (IGST) or intra-state (CGST + SGST)
-  const isInterState = false; // TODO: Implement based on customer state vs store state
+  // Compare store's state with customer's billing state
+  const storeState = store?.state?.toLowerCase?.()?.trim() || '';
+  const customerState = (order as any)?.customer_state?.toLowerCase?.()?.trim()
+    || (order as any)?.billing_address?.state?.toLowerCase?.()?.trim() || '';
+  const isInterState = !!(storeState && customerState && storeState !== customerState);
 
   // Calculate order-level discount (total discount minus sum of item-level discounts)
   const itemDiscountTotal = order.items.reduce((sum, item) => sum + (item.discountAmount ?? 0), 0);

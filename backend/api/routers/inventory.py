@@ -10,7 +10,7 @@ from typing import List, Optional
 from datetime import date
 import uuid
 from .auth import get_current_user
-from ..dependencies import get_stock_repository, get_product_repository
+from ..dependencies import get_stock_repository, get_product_repository, validate_store_access
 
 router = APIRouter()
 
@@ -72,7 +72,7 @@ async def get_stock(
 ):
     """Get stock with filtering"""
     repo = get_stock_repository()
-    active_store = store_id or current_user.get("active_store_id")
+    active_store = validate_store_access(store_id, current_user)
 
     if repo is not None:
         if low_stock:
@@ -98,7 +98,7 @@ async def get_low_stock_alerts(
 ):
     """Get low stock alerts"""
     repo = get_stock_repository()
-    active_store = store_id or current_user.get("active_store_id")
+    active_store = validate_store_access(store_id, current_user)
 
     if repo is not None:
         items = repo.find_low_stock(active_store)

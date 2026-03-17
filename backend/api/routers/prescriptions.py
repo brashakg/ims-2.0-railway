@@ -189,15 +189,28 @@ async def create_prescription(
     if rx.source == "FROM_DOCTOR" and not rx.optometrist_id:
         rx.optometrist_id = current_user.get("user_id", "external-doctor")
 
-    # Validate axis is whole number
-    if rx.right_eye.axis and not isinstance(rx.right_eye.axis, int):
-        raise HTTPException(
-            status_code=400, detail="Right eye axis must be whole number"
-        )
-    if rx.left_eye.axis and not isinstance(rx.left_eye.axis, int):
-        raise HTTPException(
-            status_code=400, detail="Left eye axis must be whole number"
-        )
+    # Validate prescription power ranges
+    def _validate_power(eye_label: str, eye: EyeData):
+        if eye.sph:
+            try:
+                sph_val = float(eye.sph)
+                if sph_val < -20.0 or sph_val > 20.0:
+                    raise HTTPException(status_code=422, detail=f"{eye_label} SPH must be between -20.00 and +20.00")
+            except ValueError:
+                raise HTTPException(status_code=422, detail=f"{eye_label} SPH must be a valid number")
+        if eye.cyl:
+            try:
+                cyl_val = float(eye.cyl)
+                if cyl_val < -10.0 or cyl_val > 10.0:
+                    raise HTTPException(status_code=422, detail=f"{eye_label} CYL must be between -10.00 and +10.00")
+            except ValueError:
+                raise HTTPException(status_code=422, detail=f"{eye_label} CYL must be a valid number")
+        if eye.axis is not None:
+            if not isinstance(eye.axis, int) or eye.axis < 1 or eye.axis > 180:
+                raise HTTPException(status_code=422, detail=f"{eye_label} AXIS must be whole number between 1 and 180")
+
+    _validate_power("Right eye", rx.right_eye)
+    _validate_power("Left eye", rx.left_eye)
 
     if repo is not None:
         # Verify customer exists

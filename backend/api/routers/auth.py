@@ -21,7 +21,12 @@ router = APIRouter()
 security = HTTPBearer(auto_error=False)
 
 # JWT Configuration
-SECRET_KEY = os.getenv("JWT_SECRET_KEY", "ims-2.0-secret-key-change-in-production")
+_default_secret = os.getenv("JWT_SECRET_KEY", "")
+if not _default_secret:
+    logger.warning("JWT_SECRET_KEY not set — generating ephemeral secret. Set JWT_SECRET_KEY env var for production!")
+    import secrets as _sec
+    _default_secret = _sec.token_hex(32)
+SECRET_KEY = _default_secret
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 480  # 8 hours
 
@@ -174,22 +179,25 @@ async def login(request: LoginRequest):
         except Exception as e:
             print(f"DB user lookup error: {e}")
     
-    # Fallback: hardcoded superadmin (emergency access)
-    if user is None:
+    # Emergency access via environment variable only (no hardcoded credentials)
+    if user is None and os.getenv("EMERGENCY_ADMIN_HASH"):
         import bcrypt as _bc
-        fallback_users = {
-            "admin": {
-                "user_id": "user-superadmin",
-                "username": "admin",
-                "email": "admin@bettervision.in",
-                "password_hash": _bc.hashpw(b"admin123", _bc.gensalt(rounds=12)).decode(),
-                "full_name": "Avinash (Superadmin)",
-                "roles": ["SUPERADMIN"],
-                "store_ids": ["BV-BOK-01", "BV-BOK-02", "BV-DHN-01", "BV-DHN-02", "WO-DHN-01", "BV-PUN-01"],
-                "is_active": True,
-            },
-        }
-        user = fallback_users.get(login_input)
+        emergency_hash = os.getenv("EMERGENCY_ADMIN_HASH")
+        if login_input == "admin":
+            try:
+                if _bc.checkpw(request.password.encode(), emergency_hash.encode()):
+                    user = {
+                        "user_id": "user-emergency-admin",
+                        "username": "admin",
+                        "email": "admin@bettervision.in",
+                        "password_hash": emergency_hash,
+                        "full_name": "Emergency Admin",
+                        "roles": ["SUPERADMIN"],
+                        "store_ids": ["BV-BOK-01", "BV-BOK-02", "BV-DHN-01", "BV-DHN-02", "WO-DHN-01", "BV-PUN-01"],
+                        "is_active": True,
+                    }
+            except Exception:
+                pass
 
     if user is None:
         raise HTTPException(status_code=401, detail="Invalid username or password")

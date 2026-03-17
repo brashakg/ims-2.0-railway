@@ -56,6 +56,45 @@ def get_db():
     return None
 
 
+def validate_store_access(store_id: str, current_user: dict) -> str:
+    """
+    Validate that the current user has access to the requested store.
+    Returns the validated store_id (or user's active_store_id if none provided).
+    Raises HTTPException(403) if user doesn't have access.
+    """
+    from fastapi import HTTPException
+
+    user_roles = current_user.get("roles", [])
+    is_admin = any(r in user_roles for r in ["SUPERADMIN", "ADMIN"])
+
+    # If no store_id provided, use user's active store
+    if not store_id:
+        return current_user.get("active_store_id")
+
+    # Admins can access any store
+    if is_admin:
+        return store_id
+
+    # Area managers can access stores in their region
+    if "AREA_MANAGER" in user_roles:
+        user_store_ids = current_user.get("store_ids", [])
+        if store_id in user_store_ids:
+            return store_id
+        raise HTTPException(
+            status_code=403,
+            detail=f"No access to store {store_id}"
+        )
+
+    # Other roles: must be in their store_ids list
+    user_store_ids = current_user.get("store_ids", [])
+    if store_id not in user_store_ids:
+        raise HTTPException(
+            status_code=403,
+            detail=f"No access to store {store_id}"
+        )
+    return store_id
+
+
 def get_customer_repository():
     """Get CustomerRepository instance"""
     db = get_db()

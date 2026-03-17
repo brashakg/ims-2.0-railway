@@ -9,18 +9,12 @@ import type { ApiResponse, LoginCredentials, LoginResponse, User } from '../type
 const API_BASE_URL = import.meta.env.VITE_API_URL ||
   (import.meta.env.PROD ? 'https://ims-20-railway-production.up.railway.app/api/v1' : '/api/v1');
 
-// Log the API URL being used (helpful for debugging)
-console.log(`[IMS API] Base URL: ${API_BASE_URL}`, {
-  env: import.meta.env.MODE,
-  isProd: import.meta.env.PROD,
-  viteUrl: import.meta.env.VITE_API_URL,
-});
+// API URL configured from environment
 
 // Enforce HTTPS in production - convert any HTTP URLs to HTTPS
 function getSecureApiUrl(): string {
   let url = API_BASE_URL;
   if (import.meta.env.PROD && url.startsWith('http://')) {
-    console.warn('Enforcing HTTPS: Converting HTTP to HTTPS');
     url = url.replace('http://', 'https://');
   }
   return url;
@@ -38,7 +32,6 @@ const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 const isRetryableError = (error: AxiosError): boolean => {
   // CORS errors have no response - don't retry these
   if (!error.response) {
-    console.warn('[API] CORS or network error - not retrying:', error.message);
     return false;
   }
   // Server errors (5xx) - these might be temporary
