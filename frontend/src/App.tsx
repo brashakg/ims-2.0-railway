@@ -39,6 +39,7 @@ const WorkshopPage = lazy(() => import('./pages/workshop/WorkshopPage').then(m =
 const PurchaseManagementPage = lazy(() => import('./pages/purchase/PurchaseManagementPage').then(m => ({ default: m.PurchaseManagementPage })));
 const TaskManagementPage = lazy(() => import('./pages/tasks/TaskManagementPage').then(m => ({ default: m.TaskManagementPage })));
 const HRPage = lazy(() => import('./pages/hr/HRPage').then(m => ({ default: m.HRPage })));
+const IncentiveDashboard = lazy(() => import('./pages/hr/IncentiveDashboard').then(m => ({ default: m.IncentiveDashboard })));
 const ReportsPage = lazy(() => import('./pages/reports/ReportsPage').then(m => ({ default: m.ReportsPage })));
 const SettingsPage = lazy(() => import('./pages/settings/SettingsPage').then(m => ({ default: m.SettingsPage })));
 const DayEndReport = lazy(() => import('./pages/reports/DayEndReport'));
@@ -55,6 +56,7 @@ const StockAudit = lazy(() => import('./pages/inventory/StockAudit').then(m => (
 const JarvisPage = lazy(() => import('./pages/jarvis/JarvisPage').then(m => ({ default: m.JarvisPage })));
 const AddProductPage = lazy(() => import('./pages/catalog/AddProductPage'));
 const StorefrontPage = lazy(() => import('./pages/storefront/StorefrontPage').then(m => ({ default: m.StorefrontPage })));
+const ExpenseTracker = lazy(() => import('./pages/finance/ExpenseTracker'));
 
 // Loading fallback component
 const PageLoader = () => (
@@ -423,6 +425,17 @@ function App() {
                     }
                   />
 
+                  <Route
+                    path="hr/incentives"
+                    element={
+                      <ProtectedRoute
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT']}
+                      >
+                        <IncentiveDashboard />
+                      </ProtectedRoute>
+                    }
+                  />
+
                   {/* Reports */}
                   <Route
                     path="reports"
@@ -505,6 +518,16 @@ function App() {
                     element={
                       <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN']}>
                         <StorefrontPage />
+                      </ProtectedRoute>
+                    }
+                  />
+
+                  {/* Expenses */}
+                  <Route
+                    path="finance/expenses"
+                    element={
+                      <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT']}>
+                        <ExpenseTracker />
                       </ProtectedRoute>
                     }
                   />

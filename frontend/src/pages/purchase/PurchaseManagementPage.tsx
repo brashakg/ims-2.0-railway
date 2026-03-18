@@ -29,8 +29,9 @@ import {
   AlertTriangle,
 } from 'lucide-react';
 import { useToast } from '../../context/ToastContext';
+import { VendorReturns } from './VendorReturns';
 
-type TabType = 'purchase-orders' | 'suppliers' | 'analytics';
+type TabType = 'purchase-orders' | 'suppliers' | 'vendor-returns' | 'analytics';
 type POStatus = 'DRAFT' | 'PENDING' | 'APPROVED' | 'ORDERED' | 'RECEIVED' | 'CANCELLED';
 
 interface Supplier {
@@ -125,7 +126,7 @@ export function PurchaseManagementPage() {
   useEffect(() => {
     const tabParam = searchParams.get('tab');
     if (tabParam && tabParam !== activeTab) {
-      const validTabs: TabType[] = ['purchase-orders', 'suppliers', 'analytics'];
+      const validTabs: TabType[] = ['purchase-orders', 'suppliers', 'vendor-returns', 'analytics'];
       if (validTabs.includes(tabParam as TabType)) {
         setActiveTab(tabParam as TabType);
       }
@@ -555,6 +556,19 @@ export function PurchaseManagementPage() {
             </div>
           </button>
           <button
+            onClick={() => setActiveTab('vendor-returns')}
+            className={`pb-3 px-1 border-b-2 font-medium text-sm transition-colors ${
+              activeTab === 'vendor-returns'
+                ? 'border-blue-600 text-blue-600'
+                : 'border-transparent text-gray-500 hover:text-gray-700'
+            }`}
+          >
+            <div className="flex items-center gap-2">
+              <AlertTriangle className="w-4 h-4" />
+              Vendor Returns
+            </div>
+          </button>
+          <button
             onClick={() => setActiveTab('analytics')}
             className={`pb-3 px-1 border-b-2 font-medium text-sm transition-colors ${
               activeTab === 'analytics'
@@ -764,6 +778,8 @@ export function PurchaseManagementPage() {
             </div>
           )}
         </div>
+      ) : activeTab === 'vendor-returns' ? (
+        <VendorReturns />
       ) : (
         /* Analytics */
         <div className="space-y-6">

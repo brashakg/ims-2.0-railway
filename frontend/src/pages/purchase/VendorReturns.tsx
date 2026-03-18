@@ -1,0 +1,636 @@
+// ============================================================================
+// IMS 2.0 - Vendor Returns / Debit Notes
+// ============================================================================
+// Create and manage vendor returns for defective/damaged products
+
+import { useState, useEffect, startTransition } from 'react';
+import {
+  Plus,
+  X as XIcon,
+  AlertTriangle,
+  Package,
+  DollarSign,
+  Calendar,
+  ChevronDown,
+  CheckCircle,
+  Clock,
+  Truck,
+  CreditCard,
+} from 'lucide-react';
+import clsx from 'clsx';
+import { useToast } from '../../context/ToastContext';
+import { useAuth } from '../../context/AuthContext';
+
+interface ReturnItem {
+  product_id: string;
+  product_name: string;
+  quantity: number;
+  reason: string;
+  unit_price: number;
+}
+
+interface VendorReturn {
+  return_id: string;
+  vendor_id: string;
+  vendor_name: string;
+  store_id: string;
+  items: ReturnItem[];
+  return_type: 'credit_note' | 'replacement';
+  status: string;
+  total_value: number;
+  credit_note_number: string | null;
+  credit_note_amount: number | null;
+  created_at: string;
+  created_by: string;
+  notes: string;
+}
+
+interface Vendor {
+  vendor_id: string;
+  legal_name: string;
+  trade_name: string;
+  mobile: string;
+}
+
+const RETURN_REASONS = [
+  { value: 'defective', label: 'Defective' },
+  { value: 'wrong_item', label: 'Wrong Item' },
+  { value: 'expired', label: 'Expired' },
+  { value: 'damaged_in_transit', label: 'Damaged in Transit' },
+  { value: 'quality_issue', label: 'Quality Issue' },
+  { value: 'not_as_ordered', label: 'Not As Ordered' },
+  { value: 'other', label: 'Other' },
+];
+
+const STATUS_COLORS: Record<string, string> = {
+  created: 'bg-blue-900 text-blue-300',
+  approved: 'bg-cyan-900 text-cyan-300',
+  shipped: 'bg-purple-900 text-purple-300',
+  received_by_vendor: 'bg-orange-900 text-orange-300',
+  credit_issued: 'bg-green-900 text-green-300',
+  replaced: 'bg-green-900 text-green-300',
+  cancelled: 'bg-red-900 text-red-300',
+};
+
+const STATUS_LABELS: Record<string, string> = {
+  created: 'Created',
+  approved: 'Approved',
+  shipped: 'Shipped',
+  received_by_vendor: 'Received by Vendor',
+  credit_issued: 'Credit Issued',
+  replaced: 'Replaced',
+  cancelled: 'Cancelled',
+};
+
+export function VendorReturns() {
+  const toast = useToast();
+  const { user } = useAuth();
+
+  const [activeTab, setActiveTab] = useState<'active' | 'history'>('active');
+  const [isLoading, setIsLoading] = useState(true);
+  const [returns, setReturns] = useState<VendorReturn[]>([]);
+  const [vendors, setVendors] = useState<Vendor[]>([]);
+  const [showModal, setShowModal] = useState(false);
+  const [expandedReturn, setExpandedReturn] = useState<string | null>(null);
+
+  // Form state
+  const [selectedVendor, setSelectedVendor] = useState('');
+  const [returnType, setReturnType] = useState<'credit_note' | 'replacement'>('credit_note');
+  const [items, setItems] = useState<ReturnItem[]>([
+    { product_id: '', product_name: '', quantity: 1, reason: 'defective', unit_price: 0 },
+  ]);
+  const [notes, setNotes] = useState('');
+
+  // Load data on mount
+  useEffect(() => {
+    const loadData = async () => {
+      try {
+        setIsLoading(true);
+        // Simulate API call - in real app, fetch from /api/v1/vendor-returns/
+        await new Promise(resolve => setTimeout(resolve, 800));
+
+        // Mock vendors
+        setVendors([
+          {
+            vendor_id: 'V001',
+            legal_name: 'Optical Frames Ltd',
+            trade_name: 'Optical Frames',
+            mobile: '9876543210',
+          },
+          {
+            vendor_id: 'V002',
+            legal_name: 'Lens Manufacturers Inc',
+            trade_name: 'Lens Mfg',
+            mobile: '9876543211',
+          },
+          {
+            vendor_id: 'V003',
+            legal_name: 'Contact Lens Supplier',
+            trade_name: 'CL Supply',
+            mobile: '9876543212',
+          },
+        ]);
+
+        // Mock returns
+        setReturns([
+          {
+            return_id: 'VR-20240318-A1B2C3D4',
+            vendor_id: 'V001',
+            vendor_name: 'Optical Frames Ltd',
+            store_id: 'STORE001',
+            items: [
+              {
+                product_id: 'PROD001',
+                product_name: 'UV Protected Frames',
+                quantity: 5,
+                reason: 'defective',
+                unit_price: 500,
+              },
+            ],
+            return_type: 'credit_note',
+            status: 'credit_issued',
+            total_value: 2500,
+            credit_note_number: 'CN-240318A1B2-ABC123',
+            credit_note_amount: 2500,
+            created_at: '2024-03-18T10:30:00Z',
+            created_by: 'User123',
+            notes: 'Defective frames due to poor quality control',
+          },
+          {
+            return_id: 'VR-20240317-E5F6G7H8',
+            vendor_id: 'V002',
+            vendor_name: 'Lens Manufacturers Inc',
+            store_id: 'STORE001',
+            items: [
+              {
+                product_id: 'PROD002',
+                product_name: 'Progressive Lenses',
+                quantity: 10,
+                reason: 'damaged_in_transit',
+                unit_price: 800,
+              },
+            ],
+            return_type: 'replacement',
+            status: 'received_by_vendor',
+            total_value: 8000,
+            credit_note_number: null,
+            credit_note_amount: null,
+            created_at: '2024-03-17T14:20:00Z',
+            created_by: 'User456',
+            notes: 'Packaging damaged during transit',
+          },
+          {
+            return_id: 'VR-20240316-I9J0K1L2',
+            vendor_id: 'V003',
+            vendor_name: 'Contact Lens Supplier',
+            store_id: 'STORE001',
+            items: [
+              {
+                product_id: 'PROD003',
+                product_name: 'Contact Lens Solution',
+                quantity: 20,
+                reason: 'expired',
+                unit_price: 150,
+              },
+            ],
+            return_type: 'credit_note',
+            status: 'approved',
+            total_value: 3000,
+            credit_note_number: null,
+            credit_note_amount: null,
+            created_at: '2024-03-16T09:15:00Z',
+            created_by: 'User789',
+            notes: 'Received expired batches',
+          },
+        ]);
+      } catch (error) {
+        toast.error('Failed to load vendor returns');
+        console.error(error);
+      } finally {
+        setIsLoading(false);
+      }
+    };
+
+    loadData();
+  }, []);
+
+  const handleAddItem = () => {
+    setItems([
+      ...items,
+      { product_id: '', product_name: '', quantity: 1, reason: 'defective', unit_price: 0 },
+    ]);
+  };
+
+  const handleRemoveItem = (idx: number) => {
+    setItems(items.filter((_, i) => i !== idx));
+  };
+
+  const handleItemChange = (idx: number, field: keyof ReturnItem, value: any) => {
+    const newItems = [...items];
+    newItems[idx] = { ...newItems[idx], [field]: value };
+    setItems(newItems);
+  };
+
+  const handleCreateReturn = async () => {
+    if (!selectedVendor || items.some(i => !i.product_id || i.quantity <= 0)) {
+      toast.error('Please fill all required fields');
+      return;
+    }
+
+    try {
+      const vendor = vendors.find(v => v.vendor_id === selectedVendor);
+      // Call API: POST /api/v1/vendor-returns/
+      toast.success('Vendor return created successfully');
+      setShowModal(false);
+      setSelectedVendor('');
+      setItems([{ product_id: '', product_name: '', quantity: 1, reason: 'defective', unit_price: 0 }]);
+      setNotes('');
+    } catch (error) {
+      toast.error('Failed to create vendor return');
+      console.error(error);
+    }
+  };
+
+  const totalValue = items.reduce((sum, item) => sum + item.quantity * item.unit_price, 0);
+  const activeReturns = returns.filter(r => !['credit_issued', 'replaced', 'cancelled'].includes(r.status));
+  const historyReturns = returns.filter(r => ['credit_issued', 'replaced', 'cancelled'].includes(r.status));
+
+  const displayReturns = activeTab === 'active' ? activeReturns : historyReturns;
+
+  return (
+    <div className="space-y-6">
+      {/* Header */}
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-3xl font-bold text-white">Vendor Returns</h1>
+          <p className="text-gray-400">Manage defective products and debit notes</p>
+        </div>
+        <button
+          onClick={() => setShowModal(true)}
+          className="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg transition"
+        >
+          <Plus className="w-5 h-5" />
+          Create Return
+        </button>
+      </div>
+
+      {/* Summary Stats */}
+      <div className="grid grid-cols-4 gap-4">
+        <div className="bg-gray-800 rounded-lg p-4 border border-gray-700">
+          <div className="flex items-center justify-between mb-2">
+            <p className="text-gray-400 text-sm">Total Returns</p>
+            <Package className="w-5 h-5 text-gray-500" />
+          </div>
+          <p className="text-2xl font-bold text-white">{returns.length}</p>
+        </div>
+        <div className="bg-gray-800 rounded-lg p-4 border border-gray-700">
+          <div className="flex items-center justify-between mb-2">
+            <p className="text-gray-400 text-sm">Pending Credits</p>
+            <Clock className="w-5 h-5 text-yellow-500" />
+          </div>
+          <p className="text-2xl font-bold text-yellow-400">
+            {returns.filter(r => r.status === 'received_by_vendor' || r.status === 'approved').length}
+          </p>
+        </div>
+        <div className="bg-gray-800 rounded-lg p-4 border border-gray-700">
+          <div className="flex items-center justify-between mb-2">
+            <p className="text-gray-400 text-sm">Credit Value</p>
+            <DollarSign className="w-5 h-5 text-green-500" />
+          </div>
+          <p className="text-2xl font-bold text-green-400">
+            ₹{returns.reduce((sum, r) => sum + (r.credit_note_amount || 0), 0).toLocaleString()}
+          </p>
+        </div>
+        <div className="bg-gray-800 rounded-lg p-4 border border-gray-700">
+          <div className="flex items-center justify-between mb-2">
+            <p className="text-gray-400 text-sm">This Month</p>
+            <Calendar className="w-5 h-5 text-blue-500" />
+          </div>
+          <p className="text-2xl font-bold text-blue-400">
+            {returns.filter(r => new Date(r.created_at).getMonth() === new Date().getMonth()).length}
+          </p>
+        </div>
+      </div>
+
+      {/* Tabs */}
+      <div className="flex gap-2 border-b border-gray-700">
+        {(['active', 'history'] as const).map((tab) => (
+          <button
+            key={tab}
+            onClick={() => startTransition(() => setActiveTab(tab))}
+            className={clsx(
+              'px-4 py-3 font-medium border-b-2 transition-colors',
+              activeTab === tab
+                ? 'border-blue-500 text-blue-400'
+                : 'border-transparent text-gray-400 hover:text-gray-300'
+            )}
+          >
+            {tab === 'active' ? 'Active Returns' : 'History'}
+          </button>
+        ))}
+      </div>
+
+      {/* Returns List */}
+      <div className="space-y-4">
+        {isLoading ? (
+          <div className="text-center py-8 text-gray-400">Loading returns...</div>
+        ) : displayReturns.length === 0 ? (
+          <div className="text-center py-8 text-gray-400">
+            {activeTab === 'active' ? 'No active returns' : 'No history'}
+          </div>
+        ) : (
+          displayReturns.map((ret) => (
+            <div
+              key={ret.return_id}
+              className="bg-gray-800 rounded-lg border border-gray-700 overflow-hidden hover:border-gray-600 transition"
+            >
+              {/* Header */}
+              <button
+                onClick={() => setExpandedReturn(expandedReturn === ret.return_id ? null : ret.return_id)}
+                className="w-full px-6 py-4 flex items-center justify-between hover:bg-gray-750 transition text-left"
+              >
+                <div className="flex items-center gap-4 flex-1">
+                  <div className="flex-1">
+                    <div className="flex items-center gap-3 mb-1">
+                      <h3 className="text-lg font-semibold text-white">{ret.vendor_name}</h3>
+                      <span className={clsx(
+                        'px-2 py-1 rounded text-xs font-semibold',
+                        STATUS_COLORS[ret.status]
+                      )}>
+                        {STATUS_LABELS[ret.status]}
+                      </span>
+                      <span className={clsx(
+                        'px-2 py-1 rounded text-xs font-semibold',
+                        ret.return_type === 'credit_note' ? 'bg-blue-900 text-blue-300' : 'bg-purple-900 text-purple-300'
+                      )}>
+                        {ret.return_type === 'credit_note' ? 'Credit Note' : 'Replacement'}
+                      </span>
+                    </div>
+                    <p className="text-gray-400 text-sm">Return ID: {ret.return_id}</p>
+                  </div>
+                  <div className="text-right">
+                    <p className="text-lg font-bold text-white">₹{ret.total_value.toLocaleString()}</p>
+                    <p className="text-gray-400 text-sm">{ret.items.length} item(s)</p>
+                  </div>
+                </div>
+                <ChevronDown
+                  className={clsx(
+                    'w-5 h-5 text-gray-400 transition-transform',
+                    expandedReturn === ret.return_id && 'rotate-180'
+                  )}
+                />
+              </button>
+
+              {/* Expanded Details */}
+              {expandedReturn === ret.return_id && (
+                <div className="border-t border-gray-700 px-6 py-4 bg-gray-750 space-y-4">
+                  {/* Items */}
+                  <div>
+                    <h4 className="font-semibold text-white mb-2">Items</h4>
+                    <div className="space-y-2">
+                      {ret.items.map((item, idx) => (
+                        <div key={idx} className="flex justify-between items-center text-sm">
+                          <div>
+                            <p className="text-gray-300">{item.product_name}</p>
+                            <p className="text-gray-500 text-xs">Qty: {item.quantity} @ ₹{item.unit_price}</p>
+                          </div>
+                          <div className="text-right">
+                            <p className="text-gray-300 font-medium">₹{item.quantity * item.unit_price}</p>
+                            <p className="text-gray-500 text-xs">{RETURN_REASONS.find(r => r.value === item.reason)?.label}</p>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Notes & Credit Info */}
+                  <div className="grid grid-cols-2 gap-4">
+                    {ret.notes && (
+                      <div>
+                        <p className="text-gray-400 text-sm mb-1">Notes</p>
+                        <p className="text-gray-300 text-sm">{ret.notes}</p>
+                      </div>
+                    )}
+                    {ret.credit_note_number && (
+                      <div>
+                        <p className="text-gray-400 text-sm mb-1">Credit Note</p>
+                        <p className="text-green-400 font-semibold">{ret.credit_note_number}</p>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Action Buttons */}
+                  {activeTab === 'active' && (
+                    <div className="flex gap-2 pt-4 border-t border-gray-600">
+                      {ret.status === 'created' && (
+                        <button className="flex-1 bg-green-600 hover:bg-green-700 text-white px-3 py-2 rounded text-sm font-medium transition">
+                          Approve
+                        </button>
+                      )}
+                      {ret.status === 'approved' && (
+                        <button className="flex-1 bg-blue-600 hover:bg-blue-700 text-white px-3 py-2 rounded text-sm font-medium transition">
+                          Mark as Shipped
+                        </button>
+                      )}
+                      {ret.status === 'shipped' && (
+                        <button className="flex-1 bg-purple-600 hover:bg-purple-700 text-white px-3 py-2 rounded text-sm font-medium transition">
+                          Received by Vendor
+                        </button>
+                      )}
+                      {ret.status === 'received_by_vendor' && (
+                        <>
+                          <button className="flex-1 bg-green-600 hover:bg-green-700 text-white px-3 py-2 rounded text-sm font-medium transition">
+                            Issue Credit
+                          </button>
+                          <button className="flex-1 bg-blue-600 hover:bg-blue-700 text-white px-3 py-2 rounded text-sm font-medium transition">
+                            Mark as Replaced
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          ))
+        )}
+      </div>
+
+      {/* Create Return Modal */}
+      {showModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-gray-800 rounded-lg w-full max-w-2xl max-h-[90vh] overflow-y-auto border border-gray-700 shadow-2xl">
+            {/* Modal Header */}
+            <div className="flex items-center justify-between px-6 py-4 border-b border-gray-700">
+              <h2 className="text-xl font-bold text-white">Create Vendor Return</h2>
+              <button
+                onClick={() => setShowModal(false)}
+                className="text-gray-400 hover:text-gray-300 transition"
+              >
+                <XIcon className="w-6 h-6" />
+              </button>
+            </div>
+
+            {/* Modal Content */}
+            <div className="p-6 space-y-4">
+              {/* Vendor Selection */}
+              <div>
+                <label className="block text-sm font-medium text-white mb-2">Vendor *</label>
+                <select
+                  value={selectedVendor}
+                  onChange={(e) => setSelectedVendor(e.target.value)}
+                  className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white hover:bg-gray-650 focus:border-blue-500 outline-none transition"
+                >
+                  <option value="">Select Vendor...</option>
+                  {vendors.map((v) => (
+                    <option key={v.vendor_id} value={v.vendor_id}>
+                      {v.legal_name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Return Type */}
+              <div>
+                <label className="block text-sm font-medium text-white mb-2">Return Type *</label>
+                <div className="flex gap-4">
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="radio"
+                      value="credit_note"
+                      checked={returnType === 'credit_note'}
+                      onChange={(e) => setReturnType(e.target.value as 'credit_note')}
+                      className="w-4 h-4"
+                    />
+                    <span className="text-white">Credit Note</span>
+                  </label>
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="radio"
+                      value="replacement"
+                      checked={returnType === 'replacement'}
+                      onChange={(e) => setReturnType(e.target.value as 'replacement')}
+                      className="w-4 h-4"
+                    />
+                    <span className="text-white">Replacement</span>
+                  </label>
+                </div>
+              </div>
+
+              {/* Items */}
+              <div>
+                <div className="flex items-center justify-between mb-2">
+                  <label className="block text-sm font-medium text-white">Items *</label>
+                  <button
+                    onClick={handleAddItem}
+                    className="text-blue-400 hover:text-blue-300 text-sm font-medium"
+                  >
+                    + Add Item
+                  </button>
+                </div>
+                <div className="space-y-3">
+                  {items.map((item, idx) => (
+                    <div key={idx} className="bg-gray-700 rounded-lg p-4 space-y-3">
+                      <div className="grid grid-cols-2 gap-3">
+                        <div>
+                          <label className="block text-xs text-gray-400 mb-1">Product Name</label>
+                          <input
+                            type="text"
+                            value={item.product_name}
+                            onChange={(e) => handleItemChange(idx, 'product_name', e.target.value)}
+                            placeholder="Enter product name"
+                            className="w-full px-3 py-2 bg-gray-600 border border-gray-500 rounded text-white text-sm placeholder-gray-400 outline-none focus:border-blue-500"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-xs text-gray-400 mb-1">Quantity</label>
+                          <input
+                            type="number"
+                            min="1"
+                            value={item.quantity}
+                            onChange={(e) => handleItemChange(idx, 'quantity', parseInt(e.target.value) || 0)}
+                            className="w-full px-3 py-2 bg-gray-600 border border-gray-500 rounded text-white text-sm outline-none focus:border-blue-500"
+                          />
+                        </div>
+                      </div>
+                      <div className="grid grid-cols-2 gap-3">
+                        <div>
+                          <label className="block text-xs text-gray-400 mb-1">Unit Price</label>
+                          <input
+                            type="number"
+                            min="0"
+                            value={item.unit_price}
+                            onChange={(e) => handleItemChange(idx, 'unit_price', parseFloat(e.target.value) || 0)}
+                            className="w-full px-3 py-2 bg-gray-600 border border-gray-500 rounded text-white text-sm outline-none focus:border-blue-500"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-xs text-gray-400 mb-1">Reason</label>
+                          <select
+                            value={item.reason}
+                            onChange={(e) => handleItemChange(idx, 'reason', e.target.value)}
+                            className="w-full px-3 py-2 bg-gray-600 border border-gray-500 rounded text-white text-sm outline-none focus:border-blue-500"
+                          >
+                            {RETURN_REASONS.map((r) => (
+                              <option key={r.value} value={r.value}>
+                                {r.label}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                      </div>
+                      {items.length > 1 && (
+                        <button
+                          onClick={() => handleRemoveItem(idx)}
+                          className="text-red-400 hover:text-red-300 text-sm font-medium"
+                        >
+                          Remove Item
+                        </button>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Notes */}
+              <div>
+                <label className="block text-sm font-medium text-white mb-2">Notes</label>
+                <textarea
+                  value={notes}
+                  onChange={(e) => setNotes(e.target.value)}
+                  placeholder="Add any additional notes..."
+                  rows={3}
+                  className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white text-sm placeholder-gray-400 outline-none focus:border-blue-500 resize-none"
+                />
+              </div>
+
+              {/* Total */}
+              <div className="bg-gray-700 rounded-lg p-4">
+                <div className="flex justify-between items-center">
+                  <p className="text-gray-300 font-medium">Total Return Value</p>
+                  <p className="text-2xl font-bold text-white">₹{totalValue.toLocaleString()}</p>
+                </div>
+              </div>
+            </div>
+
+            {/* Modal Footer */}
+            <div className="flex gap-3 px-6 py-4 border-t border-gray-700 bg-gray-750">
+              <button
+                onClick={() => setShowModal(false)}
+                className="flex-1 px-4 py-2 bg-gray-700 hover:bg-gray-600 text-white rounded-lg font-medium transition"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleCreateReturn}
+                className="flex-1 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium transition"
+              >
+                Create Return
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}

@@ -12,6 +12,7 @@ from .customers import router as customers_router
 from .orders import router as orders_router
 from .prescriptions import router as prescriptions_router
 from .vendors import router as vendors_router
+from .vendor_returns import router as vendor_returns_router
 from .tasks import router as tasks_router
 from .expenses import router as expenses_router
 from .hr import router as hr_router
@@ -28,6 +29,7 @@ from .analytics import router as analytics_router
 from .billing import router as billing_router
 from .crm import router as crm_router
 from .supply_chain import router as supply_chain_router
+from .incentives import router as incentives_router
 
 __all__ = [
     "auth_router",
@@ -40,6 +42,7 @@ __all__ = [
     "orders_router",
     "prescriptions_router",
     "vendors_router",
+    "vendor_returns_router",
     "tasks_router",
     "expenses_router",
     "hr_router",
@@ -55,4 +58,5 @@ __all__ = [
     "analytics_router",
     "billing_router",
     "supply_chain_router",
+    "incentives_router",
 ]

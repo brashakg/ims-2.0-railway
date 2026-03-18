@@ -41,6 +41,7 @@ from .routers import (
     orders_router,
     prescriptions_router,
     vendors_router,
+    vendor_returns_router,
     tasks_router,
     expenses_router,
     hr_router,
@@ -338,6 +339,7 @@ app.include_router(
     prescriptions_router, prefix="/api/v1/prescriptions", tags=["Prescriptions"]
 )
 app.include_router(vendors_router, prefix="/api/v1/vendors", tags=["Vendors"])
+app.include_router(vendor_returns_router, prefix="/api/v1/vendor-returns", tags=["Vendor Returns"])
 app.include_router(tasks_router, prefix="/api/v1/tasks", tags=["Tasks"])
 app.include_router(expenses_router, prefix="/api/v1/expenses", tags=["Expenses"])
 app.include_router(hr_router, prefix="/api/v1/hr", tags=["HR"])
@@ -357,6 +359,7 @@ app.include_router(billing_router, prefix="/api/v1/billing", tags=["Billing"])
 app.include_router(
     supply_chain_router, prefix="/api/v1/supply-chain", tags=["Supply Chain"]
 )
+app.include_router(incentives_router, prefix="/api/v1/incentives", tags=["Incentives"])
 
 
 if __name__ == "__main__":

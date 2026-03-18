@@ -6,7 +6,7 @@
 import { createContext, useContext, useState, useCallback, type ReactNode } from 'react';
 import type { UserRole } from '../types';
 import {
-  ShoppingCart, Eye, Package, Users, Truck,
+  ShoppingCart, Eye, Package, Users, Truck, DollarSign,
   Users2, BarChart3, Settings, Wrench,
   type LucideIcon,
 } from 'lucide-react';
@@ -25,6 +25,7 @@ export type ModuleId =
   | 'workshop'
   | 'hr'
   | 'reports'
+  | 'finance'
   | 'settings';
 
 export interface SidebarItem {
@@ -160,7 +161,7 @@ export const MODULE_CONFIGS: ModuleConfig[] = [
   {
     id: 'hr',
     title: 'HR & Employees',
-    subtitle: 'Attendance, Leaves, Tasks',
+    subtitle: 'Attendance, Leaves, Incentives, Tasks',
     icon: Users2,
     color: 'text-indigo-600',
     bgColor: 'bg-indigo-50',
@@ -168,6 +169,7 @@ export const MODULE_CONFIGS: ModuleConfig[] = [
     sidebarItems: [
       { id: 'hr-attendance', label: 'Attendance', path: '/hr' },
       { id: 'hr-leaves', label: 'Leave Management', path: '/hr?tab=leave' },
+      { id: 'hr-incentives', label: 'Incentive Tracking', path: '/hr/incentives' },
       { id: 'hr-tasks', label: 'Tasks & Assignments', path: '/tasks' },
     ],
   },
@@ -188,6 +190,20 @@ export const MODULE_CONFIGS: ModuleConfig[] = [
       { id: 'rpt-gst', label: 'GST Reports', path: '/reports?tab=gst' },
       { id: 'rpt-forecast', label: 'Demand Forecast', path: '/reports?tab=forecast' },
       { id: 'rpt-orders', label: 'Orders Overview', path: '/orders' },
+    ],
+  },
+  {
+    id: 'finance',
+    title: 'Finance & Expenses',
+    subtitle: 'Expense Tracking, Approvals',
+    icon: DollarSign,
+    color: 'text-emerald-600',
+    bgColor: 'bg-emerald-50',
+    allowedRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'],
+    sidebarItems: [
+      { id: 'fin-expenses', label: 'Expense Tracker', path: '/finance/expenses' },
+      { id: 'fin-pending', label: 'Pending Approval', path: '/finance/expenses?tab=pending-approval' },
+      { id: 'fin-summary', label: 'Category Summary', path: '/finance/expenses?tab=summary' },
     ],
   },
   {

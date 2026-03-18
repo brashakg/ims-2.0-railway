@@ -636,6 +636,57 @@ export const hrApi = {
 };
 
 // ============================================================================
+// Incentives API - Staff Incentive Tracking
+// ============================================================================
+
+export const incentivesApi = {
+  getDashboard: async (month?: number, year?: number) => {
+    const params: Record<string, any> = {};
+    if (month) params.month = month;
+    if (year) params.year = year;
+    const response = await api.get('/incentives/dashboard', { params });
+    return response.data;
+  },
+
+  getLeaderboard: async (month?: number, year?: number, limit?: number) => {
+    const params: Record<string, any> = {};
+    if (month) params.month = month;
+    if (year) params.year = year;
+    if (limit) params.limit = limit;
+    const response = await api.get('/incentives/leaderboard', { params });
+    return response.data;
+  },
+
+  getStaffTargets: async (staffId: string, month?: number, year?: number) => {
+    const params: Record<string, any> = {};
+    if (month) params.month = month;
+    if (year) params.year = year;
+    const response = await api.get(`/incentives/targets/${staffId}`, { params });
+    return response.data;
+  },
+
+  setTargets: async (data: { staff_id: string; target_amount: number; month: number; year: number; description?: string }) => {
+    const response = await api.post('/incentives/targets', data);
+    return response.data;
+  },
+
+  recordKicker: async (data: { brand: string; product_name?: string; sale_amount: number; sale_date?: string }, staffId?: string) => {
+    const params: Record<string, any> = {};
+    if (staffId) params.staff_id = staffId;
+    const response = await api.post('/incentives/kickers', data, { params });
+    return response.data;
+  },
+
+  getKickers: async (staffId: string, month?: number, year?: number) => {
+    const params: Record<string, any> = {};
+    if (month) params.month = month;
+    if (year) params.year = year;
+    const response = await api.get(`/incentives/kickers/${staffId}`, { params });
+    return response.data;
+  },
+};
+
+// ============================================================================
 // Admin API - Store Management
 // ============================================================================
 
