@@ -205,6 +205,7 @@ export const MODULE_CONFIGS: ModuleConfig[] = [
     bgColor: 'bg-emerald-50',
     allowedRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'],
     sidebarItems: [
+      { id: 'fin-dashboard', label: 'Finance Dashboard', path: '/finance/dashboard' },
       { id: 'fin-expenses', label: 'Expense Tracker', path: '/finance/expenses' },
       { id: 'fin-pending', label: 'Pending Approval', path: '/finance/expenses?tab=pending-approval' },
       { id: 'fin-summary', label: 'Category Summary', path: '/finance/expenses?tab=summary' },

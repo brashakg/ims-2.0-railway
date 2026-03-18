@@ -94,6 +94,13 @@ export interface PaymentEntry {
   timestamp: string;
   voucherCode?: string;
   voucherAmount?: number;
+  
+  // EMI-specific fields
+  emiProvider?: string;          // HDFC, ICICI, Axis, ADITYA BIRLA, etc.
+  emiTenure?: number;            // Months: 3, 6, 9, 12, 18, 24
+  downPayment?: number;          // Down payment amount in rupees
+  monthlyEMI?: number;           // Calculated monthly EMI amount
+  processingFee?: number;        // 2% of loan amount
 }
 
 export interface POSState {

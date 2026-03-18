@@ -60,6 +60,7 @@ const JarvisPage = lazy(() => import('./pages/jarvis/JarvisPage').then(m => ({ d
 const AddProductPage = lazy(() => import('./pages/catalog/AddProductPage'));
 const StorefrontPage = lazy(() => import('./pages/storefront/StorefrontPage').then(m => ({ default: m.StorefrontPage })));
 const ExpenseTracker = lazy(() => import('./pages/finance/ExpenseTracker'));
+const FinanceDashboard = lazy(() => import('./pages/finance/FinanceDashboard'));
 
 // Loading fallback component
 const PageLoader = () => (
@@ -567,6 +568,16 @@ function App() {
                     element={
                       <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT']}>
                         <ExpenseTracker />
+                      </ProtectedRoute>
+                    }
+                  />
+
+                  {/* Finance Dashboard */}
+                  <Route
+                    path="finance/dashboard"
+                    element={
+                      <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT']}>
+                        <FinanceDashboard />
                       </ProtectedRoute>
                     }
                   />

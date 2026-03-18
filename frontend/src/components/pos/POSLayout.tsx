@@ -1512,13 +1512,53 @@ function CashChangeCalculator({ grandTotal }: { grandTotal: number; totalPaid: n
 function StepPayment() {
   const store = usePOSStore();
   const total = store.getGrandTotal(); const paid = store.getTotalPaid(); const balance = Math.round((total - paid) * 100) / 100;
-  const [payMethod, setPayMethod] = useState<'CASH' | 'UPI' | 'CARD' | 'BANK_TRANSFER'>('CASH');
+  const [payMethod, setPayMethod] = useState<'CASH' | 'UPI' | 'CARD' | 'BANK_TRANSFER' | 'EMI'>('CASH');
   const [payAmount, setPayAmount] = useState(''); const [payRef, setPayRef] = useState('');
+  
+  // EMI state
+  const [showEMIForm, setShowEMIForm] = useState(false);
+  const [emiProvider, setEmiProvider] = useState('HDFC');
+  const [emiTenure, setEmiTenure] = useState(12);
+  const [emiDownPayment, setEmiDownPayment] = useState('');
+  
+  const emiProviders = ['HDFC', 'ICICI', 'AXIS', 'ADITYA BIRLA', 'BAJAJ', 'INDIABULLS'];
+  const emiTenures = [3, 6, 9, 12, 18, 24];
+  
+  const calculateEMI = (principal: number, monthlyRate: number, months: number) => {
+    if (monthlyRate === 0) return principal / months;
+    const numerator = principal * monthlyRate * Math.pow(1 + monthlyRate, months);
+    const denominator = Math.pow(1 + monthlyRate, months) - 1;
+    return numerator / denominator;
+  };
+  
+  const handleEMISubmit = () => {
+    const downPayment = parseFloat(emiDownPayment) || 0;
+    if (downPayment < 0 || downPayment >= balance) return;
+    const principal = balance - downPayment;
+    const annualRate = 0.12; // 12% annual
+    const monthlyRate = annualRate / 12;
+    const monthlyEMI = calculateEMI(principal, monthlyRate, emiTenure);
+    const processingFee = (principal * 0.02);
+    store.addPayment({
+      method: 'EMI',
+      amount: downPayment,
+      reference: emiProvider,
+      emiProvider,
+      emiTenure,
+      downPayment,
+      monthlyEMI: Math.round(monthlyEMI * 100) / 100,
+      processingFee: Math.round(processingFee * 100) / 100,
+    });
+    setShowEMIForm(false);
+    setEmiDownPayment('');
+  };
+  
   const methods = [
     { id: 'CASH' as const, label: 'Cash', icon: IndianRupee },
     { id: 'UPI' as const, label: 'UPI', icon: Phone },
     { id: 'CARD' as const, label: 'Card', icon: CreditCard },
     { id: 'BANK_TRANSFER' as const, label: 'Bank', icon: FileText },
+    { id: 'EMI' as const, label: 'EMI', icon: CreditCard },
   ];
 
   return (
@@ -1540,21 +1580,21 @@ function StepPayment() {
         </div>
       )}
 
-      <div className="grid grid-cols-4 gap-2">
+      <div className="grid grid-cols-5 gap-2">
         {methods.map(m => (
           <button key={m.id} onClick={() => {
             if (m.id === 'CASH') {
-              // Cash: add directly, no ref needed
               store.addPayment({ method: m.id, amount: Math.round((balance > 0 ? balance : total) * 100) / 100 });
+            } else if (m.id === 'EMI') {
+              setShowEMIForm(true);
             } else {
-              // Non-cash: populate split payment fields so user must enter ref
               setPayMethod(m.id);
               setPayAmount(String(Math.round((balance > 0 ? balance : total) * 100) / 100));
               setPayRef('');
             }
           }} disabled={balance <= 0}
             className={`flex flex-col items-center gap-1 p-3 rounded-xl border-2 transition-all ${balance <= 0 ? 'opacity-40 border-gray-200' : 'border-gray-200 hover:border-bv-gold-300 hover:bg-bv-gold-50'}`}>
-            <m.icon className="w-6 h-6 text-gray-600" /><span className="text-xs font-medium">{m.id === 'CASH' ? 'Full Cash' : `${m.label} →`}</span>
+            <m.icon className="w-6 h-6 text-gray-600" /><span className="text-xs font-medium">{m.id === 'CASH' ? 'Full Cash' : m.id === 'EMI' ? 'EMI' : `${m.label} →`}</span>
           </button>
         ))}
       </div>
@@ -1586,6 +1626,44 @@ function StepPayment() {
               }`}>Add</button>
           </div>
           {payMethod !== 'CASH' && !payRef.trim() && payAmount && <p className="text-xs text-amber-600">Reference/Txn ID required for {payMethod}</p>}
+        </div>
+      )}
+      
+      {showEMIForm && balance > 0 && (
+        <div className="bg-white border border-gray-200 rounded-xl p-4 space-y-3">
+          <p className="text-sm font-medium text-gray-700">EMI Details</p>
+          <div className="space-y-3">
+            <div>
+              <label className="text-xs font-medium text-gray-600">EMI Provider</label>
+              <select value={emiProvider} onChange={(e) => setEmiProvider(e.target.value)} className="w-full mt-1 px-3 py-2 border border-gray-300 rounded-lg text-sm">
+                {emiProviders.map(p => <option key={p} value={p}>{p}</option>)}
+              </select>
+            </div>
+            <div>
+              <label className="text-xs font-medium text-gray-600">Tenure (months)</label>
+              <select value={emiTenure} onChange={(e) => setEmiTenure(Number(e.target.value))} className="w-full mt-1 px-3 py-2 border border-gray-300 rounded-lg text-sm">
+                {emiTenures.map(t => <option key={t} value={t}>{t} months</option>)}
+              </select>
+            </div>
+            <div>
+              <label className="text-xs font-medium text-gray-600">Down Payment</label>
+              <input type="number" min="0" max={balance - 0.01} step="100" value={emiDownPayment} onChange={(e) => setEmiDownPayment(e.target.value)} placeholder={`Max ₹${Math.round(balance).toLocaleString('en-IN')}`} className="w-full mt-1 px-3 py-2 border border-gray-300 rounded-lg text-sm" onFocus={(e) => e.target.select()} />
+            </div>
+            {emiDownPayment && (
+              <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 space-y-2 text-sm">
+                <div className="flex justify-between"><span className="text-gray-600">Loan Amount:</span><span className="font-semibold">₹{Math.round((balance - (parseFloat(emiDownPayment) || 0)) * 100) / 100}</span></div>
+                <div className="flex justify-between"><span className="text-gray-600">Processing Fee (2%):</span><span className="font-semibold">₹{Math.round(((balance - (parseFloat(emiDownPayment) || 0)) * 0.02) * 100) / 100}</span></div>
+                <div className="flex justify-between"><span className="text-gray-600">Monthly EMI ({emiTenure}m):</span><span className="font-bold text-blue-700">₹{Math.round(calculateEMI(balance - (parseFloat(emiDownPayment) || 0), 0.01, emiTenure) * 100) / 100}</span></div>
+              </div>
+            )}
+            <div className="flex gap-2">
+              <button onClick={() => {
+                setShowEMIForm(false);
+                setEmiDownPayment('');
+              }} className="flex-1 px-4 py-2 rounded-lg text-sm font-semibold bg-gray-200 text-gray-600 hover:bg-gray-300">Cancel</button>
+              <button onClick={handleEMISubmit} disabled={!emiDownPayment || parseFloat(emiDownPayment) < 0 || parseFloat(emiDownPayment) >= balance} className={`flex-1 px-4 py-2 rounded-lg text-sm font-semibold ${!emiDownPayment || parseFloat(emiDownPayment) < 0 || parseFloat(emiDownPayment) >= balance ? 'bg-gray-200 text-gray-400 cursor-not-allowed' : 'bg-bv-gold-500 text-white hover:bg-bv-gold-600'}`}>Add EMI</button>
+            </div>
+          </div>
         </div>
       )}
 
