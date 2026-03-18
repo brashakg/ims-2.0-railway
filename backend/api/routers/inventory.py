@@ -687,3 +687,436 @@ async def receive_transfer(
 ):
     """Receive a stock transfer"""
     return {"message": "Transfer received", "transfer_id": transfer_id}
+
+
+# ============================================================================
+# ADVANCED INVENTORY FEATURES (IMS 2.0)
+# ============================================================================
+
+# ============================================================================
+# 1. NON-MOVING STOCK IDENTIFICATION
+# ============================================================================
+
+@router.get("/non-moving")
+async def get_non_moving_stock(
+    days: int = Query(90, ge=1, le=365),
+    category: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Identify products with 0 sales in the last N days.
+    GET /inventory/non-moving?days=90
+    """
+    db = _get_db()
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database connection error")
+
+    try:
+        products_coll = db["products"]
+        orders_coll = db["orders"]
+        stock_coll = db["stock"]
+
+        # Get all products (optionally filtered by category)
+        query = {} if not category else {"category": category}
+        products = list(products_coll.find(query, {"_id": 1, "name": 1, "sku": 1}))
+
+        # Get products with sales in last N days
+        cutoff_date = datetime.utcnow() - timedelta(days=days)
+        sold_products = set()
+
+        orders = orders_coll.find(
+            {
+                "created_at": {"$gte": cutoff_date},
+                "status": {"$in": ["completed", "delivered"]},
+            },
+            {"items": 1}
+        )
+
+        for order in orders:
+            for item in order.get("items", []):
+                sold_products.add(item.get("product_id"))
+
+        # Find non-moving products
+        non_moving = []
+        for product in products:
+            product_id = str(product.get("_id"))
+            if product_id not in sold_products:
+                # Get current stock
+                stock = stock_coll.find({"product_id": product_id})
+                total_qty = sum(s.get("quantity", 0) for s in stock)
+
+                # Get last sold date
+                last_order = orders_coll.find_one(
+                    {"items.product_id": product_id},
+                    {"created_at": 1},
+                    sort=[("created_at", -1)]
+                )
+
+                non_moving.append({
+                    "product_id": product_id,
+                    "name": product.get("name", ""),
+                    "sku": product.get("sku", ""),
+                    "current_stock": total_qty,
+                    "last_sold_date": last_order.get("created_at") if last_order else None,
+                    "days_since_sale": days,
+                })
+
+        return {
+            "total": len(non_moving),
+            "days_threshold": days,
+            "products": sorted(non_moving, key=lambda x: x["current_stock"], reverse=True)[:100],
+        }
+
+    except Exception as e:
+        logger.error(f"get_non_moving_stock error: {e}")
+        raise HTTPException(status_code=500, detail="Error fetching non-moving stock")
+
+
+# ============================================================================
+# 2. STOCK COUNT SCANNING INTERFACE
+# ============================================================================
+
+class BarcodeScanRequest(BaseModel):
+    barcode: str
+    physical_count: int = Field(..., ge=0)
+    notes: Optional[str] = None
+
+
+@router.post("/stock-count-scan")
+async def scan_barcode_for_count(
+    request: BarcodeScanRequest,
+    store_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Scan barcode and record physical count.
+    POST /inventory/stock-count-scan
+    """
+    db = _get_db()
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database connection error")
+
+    try:
+        stock_coll = db["stock"]
+        products_coll = db["products"]
+
+        # Find stock by barcode
+        stock = stock_coll.find_one({"barcode": request.barcode})
+        if not stock:
+            raise HTTPException(status_code=404, detail="Barcode not found")
+
+        product_id = stock.get("product_id")
+        product = products_coll.find_one({"_id": product_id})
+
+        system_count = stock.get("quantity", 0)
+        variance = request.physical_count - system_count
+
+        return {
+            "barcode": request.barcode,
+            "product_id": product_id,
+            "product_name": product.get("name") if product else "Unknown",
+            "sku": product.get("sku") if product else "",
+            "system_count": system_count,
+            "physical_count": request.physical_count,
+            "variance": variance,
+            "variance_percent": round((variance / max(system_count, 1)) * 100, 2),
+            "notes": request.notes,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"scan_barcode_for_count error: {e}")
+        raise HTTPException(status_code=500, detail="Error processing barcode scan")
+
+
+# ============================================================================
+# 3. CONTACT LENS BATCH/EXPIRY TRACKING
+# ============================================================================
+
+@router.get("/contact-lenses/expiry-status")
+async def get_contact_lens_expiry_status(
+    expiring_within_days: int = Query(90, ge=1, le=365),
+    store_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Get contact lens products with expiry dates.
+    Highlight those expiring within threshold days.
+    GET /inventory/contact-lenses/expiry-status?expiring_within_days=90
+    """
+    db = _get_db()
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database connection error")
+
+    try:
+        stock_coll = db["stock"]
+        products_coll = db["products"]
+
+        # Get all contact lens stocks with expiry dates
+        cutoff_date = datetime.utcnow() + timedelta(days=expiring_within_days)
+        stocks = list(stock_coll.find({
+            "category": {"$in": ["CL", "CONTACT_LENS"]},
+            "expiry_date": {"$exists": True, "$ne": None},
+        }))
+
+        expiring_soon = []
+        expired = []
+        safe = []
+
+        for stock in stocks:
+            product = products_coll.find_one({"_id": stock.get("product_id")})
+            expiry = stock.get("expiry_date")
+            if isinstance(expiry, str):
+                expiry = datetime.fromisoformat(expiry)
+
+            days_until_expiry = (expiry - datetime.utcnow()).days
+
+            item = {
+                "stock_id": str(stock.get("_id")),
+                "product_id": stock.get("product_id"),
+                "product_name": product.get("name") if product else "Unknown",
+                "sku": product.get("sku") if product else "",
+                "quantity": stock.get("quantity", 0),
+                "expiry_date": expiry.isoformat() if expiry else None,
+                "days_until_expiry": days_until_expiry,
+            }
+
+            if days_until_expiry < 0:
+                expired.append(item)
+            elif days_until_expiry <= expiring_within_days:
+                expiring_soon.append(item)
+            else:
+                safe.append(item)
+
+        return {
+            "expired": sorted(expired, key=lambda x: x["days_until_expiry"]),
+            "expiring_soon": sorted(expiring_soon, key=lambda x: x["days_until_expiry"]),
+            "safe": safe[:20],  # Limit to 20 items
+            "summary": {
+                "expired_count": len(expired),
+                "expiring_soon_count": len(expiring_soon),
+                "safe_count": len(safe),
+            }
+        }
+
+    except Exception as e:
+        logger.error(f"get_contact_lens_expiry_status error: {e}")
+        raise HTTPException(status_code=500, detail="Error fetching lens expiry status")
+
+
+# ============================================================================
+# 4. POWER-WISE LENS STOCK GRID
+# ============================================================================
+
+@router.get("/lenses/power-grid")
+async def get_lens_power_grid(
+    store_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Get SPH x CYL matrix for optical lenses.
+    Each cell shows available count.
+    GET /inventory/lenses/power-grid
+    """
+    db = _get_db()
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database connection error")
+
+    try:
+        stock_coll = db["stock"]
+        products_coll = db["products"]
+
+        # Define SPH and CYL ranges
+        sph_values = [str(x / 2) for x in range(-16, 13)]  # -8.00 to +6.00
+        cyl_values = [str(x / 2) for x in range(0, -9, -1)]  # 0 to -4.00
+
+        # Initialize grid
+        grid = {}
+        for sph in sph_values:
+            grid[sph] = {}
+            for cyl in cyl_values:
+                grid[sph][cyl] = {"count": 0, "in_stock": False}
+
+        # Populate grid from stock
+        optical_lenses = list(products_coll.find(
+            {"category": {"$in": ["LS", "OPTICAL_LENS"]}}
+        ))
+
+        for product in optical_lenses:
+            sph = product.get("attributes", {}).get("sph", "")
+            cyl = product.get("attributes", {}).get("cyl", "")
+
+            if sph in grid and cyl in grid.get(sph, {}):
+                stock = stock_coll.find_one({"product_id": str(product.get("_id"))})
+                count = stock.get("quantity", 0) if stock else 0
+                grid[sph][cyl]["count"] = count
+                grid[sph][cyl]["in_stock"] = count > 0
+
+        return {
+            "grid": grid,
+            "sph_range": sph_values,
+            "cyl_range": cyl_values,
+        }
+
+    except Exception as e:
+        logger.error(f"get_lens_power_grid error: {e}")
+        raise HTTPException(status_code=500, detail="Error fetching lens grid")
+
+
+# ============================================================================
+# 5. SELL-THROUGH % BY BRAND GROUP
+# ============================================================================
+
+@router.get("/sell-through-analysis")
+async def get_sell_through_analysis(
+    days: int = Query(30, ge=1, le=365),
+    store_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Get sell-through rate per brand.
+    Sell-through = units sold / units stocked * 100
+    GET /inventory/sell-through-analysis?days=30
+    """
+    db = _get_db()
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database connection error")
+
+    try:
+        orders_coll = db["orders"]
+        stock_coll = db["stock"]
+        products_coll = db["products"]
+
+        cutoff_date = datetime.utcnow() - timedelta(days=days)
+
+        # Get sales by brand from completed orders
+        sales_by_brand = {}
+        orders = orders_coll.find({
+            "created_at": {"$gte": cutoff_date},
+            "status": {"$in": ["completed", "delivered"]},
+        })
+
+        for order in orders:
+            for item in order.get("items", []):
+                product_id = item.get("product_id")
+                product = products_coll.find_one({"_id": product_id})
+                if product:
+                    brand = product.get("brand", "Unknown")
+                    qty = item.get("quantity", 0)
+                    sales_by_brand[brand] = sales_by_brand.get(brand, 0) + qty
+
+        # Get current stock by brand
+        stock_by_brand = {}
+        stocks = stock_coll.find({})
+        for stock in stocks:
+            product = products_coll.find_one({"_id": stock.get("product_id")})
+            if product:
+                brand = product.get("brand", "Unknown")
+                qty = stock.get("quantity", 0)
+                stock_by_brand[brand] = stock_by_brand.get(brand, 0) + qty
+
+        # Calculate sell-through %
+        brands = set(list(sales_by_brand.keys()) + list(stock_by_brand.keys()))
+        results = []
+
+        for brand in brands:
+            units_sold = sales_by_brand.get(brand, 0)
+            units_stocked = stock_by_brand.get(brand, 0)
+            sell_through = (units_sold / max(units_stocked, 1)) * 100 if units_stocked > 0 else 0
+
+            results.append({
+                "brand": brand,
+                "units_sold": units_sold,
+                "units_stocked": units_stocked,
+                "sell_through_percent": round(sell_through, 2),
+            })
+
+        return {
+            "period_days": days,
+            "brands": sorted(results, key=lambda x: x["sell_through_percent"], reverse=True),
+        }
+
+    except Exception as e:
+        logger.error(f"get_sell_through_analysis error: {e}")
+        raise HTTPException(status_code=500, detail="Error calculating sell-through")
+
+
+# ============================================================================
+# 6. STOCK DUMP ANALYSIS (OVERSTOCK)
+# ============================================================================
+
+@router.get("/overstock-analysis")
+async def get_overstock_analysis(
+    overstocking_threshold: float = Query(3.0, ge=1.0),
+    days: int = Query(30, ge=1, le=365),
+    store_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Flag overstocked items: current_stock > threshold * avg_monthly_sales
+    GET /inventory/overstock-analysis?overstocking_threshold=3.0&days=30
+    """
+    db = _get_db()
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database connection error")
+
+    try:
+        orders_coll = db["orders"]
+        stock_coll = db["stock"]
+        products_coll = db["products"]
+
+        cutoff_date = datetime.utcnow() - timedelta(days=days)
+
+        # Get sales volume by product
+        sales_by_product = {}
+        orders = orders_coll.find({
+            "created_at": {"$gte": cutoff_date},
+            "status": {"$in": ["completed", "delivered"]},
+        })
+
+        for order in orders:
+            for item in order.get("items", []):
+                product_id = item.get("product_id")
+                qty = item.get("quantity", 0)
+                sales_by_product[product_id] = sales_by_product.get(product_id, 0) + qty
+
+        # Calculate average monthly sales
+        months = max(days / 30, 1)
+        avg_monthly_sales = {pid: qty / months for pid, qty in sales_by_product.items()}
+
+        # Get current stock and identify overstock
+        overstocked = []
+        all_stocks = list(stock_coll.find({}))
+
+        for stock in all_stocks:
+            product_id = str(stock.get("product_id"))
+            current_qty = stock.get("quantity", 0)
+            avg_monthly = avg_monthly_sales.get(product_id, 0)
+
+            # Flag if current > threshold * average
+            if current_qty > (overstocking_threshold * avg_monthly):
+                product = products_coll.find_one({"_id": product_id})
+                months_of_stock = current_qty / max(avg_monthly, 1)
+
+                overstocked.append({
+                    "product_id": product_id,
+                    "product_name": product.get("name") if product else "Unknown",
+                    "sku": product.get("sku") if product else "",
+                    "current_stock": current_qty,
+                    "avg_monthly_sales": round(avg_monthly, 2),
+                    "months_of_stock": round(months_of_stock, 1),
+                    "overstock_multiple": round(current_qty / max(avg_monthly, 1), 2),
+                })
+
+        return {
+            "threshold_multiple": overstocking_threshold,
+            "analysis_period_days": days,
+            "total_overstocked": len(overstocked),
+            "items": sorted(overstocked, key=lambda x: x["months_of_stock"], reverse=True)[:50],
+        }
+
+    except Exception as e:
+        logger.error(f"get_overstock_analysis error: {e}")
+        raise HTTPException(status_code=500, detail="Error analyzing overstock")
+

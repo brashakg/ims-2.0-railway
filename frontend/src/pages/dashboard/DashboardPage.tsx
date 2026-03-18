@@ -22,6 +22,27 @@ import {
 } from 'lucide-react';
 import clsx from 'clsx';
 import { TargetMeter } from '../../components/dashboard/TargetMeter';
+import {
+  PendingDeliveriesWidget,
+  RemindersWidget,
+  StockCountStatusWidget,
+  TaskCompletionWidget,
+  EyeTestCountWidget,
+  StoreVsTargetWidget,
+  StaffAttendanceWidget,
+  EscalationsWidget,
+  HQEscalationsWidget,
+  HRSummaryWidget,
+  SystemHealthWidget,
+  FinancialSummaryWidget,
+  GSTFilingStatusWidget,
+  PendingReconciliationsWidget,
+  PatientQueueWidget,
+  PrescriptionRedoRateWidget,
+  CatalogSKUCountWidget,
+  PriceChangeRequestsWidget,
+  RecentActivityWidget,
+} from '../../components/dashboard/RoleSpecificWidgets';
 
 interface EnterpriseKPIs {
   period: string;
@@ -603,6 +624,106 @@ export default function DashboardPage() {
             </div>
           </div>
         )}
+
+        {/* ROLE-SPECIFIC WIDGETS SECTION */}
+
+        {/* ALL ROLES */}
+        <div className="mb-8">
+          <h2 className="text-lg font-semibold text-white mb-4">
+            Quick Status
+          </h2>
+          <div className="grid grid-cols-1 tablet:grid-cols-2 laptop:grid-cols-4 gap-4">
+            <PendingDeliveriesWidget />
+            <RemindersWidget />
+          </div>
+        </div>
+
+        {/* STORE MANAGER / AREA MANAGER / ADMIN */}
+        {isManager && (
+        <div className="mb-8">
+          <h2 className="text-lg font-semibold text-white mb-4">
+            Store Operations
+          </h2>
+          <div className="grid grid-cols-1 tablet:grid-cols-2 laptop:grid-cols-4 gap-4">
+            <StockCountStatusWidget />
+            <TaskCompletionWidget />
+            <EyeTestCountWidget />
+            <StoreVsTargetWidget />
+          </div>
+        </div>
+        )}
+
+        {/* AREA MANAGER SPECIFIC */}
+        {hasRole(['AREA_MANAGER']) && (
+        <div className="mb-8">
+          <h2 className="text-lg font-semibold text-white mb-4">
+            Area Management
+          </h2>
+          <div className="grid grid-cols-1 tablet:grid-cols-2 laptop:grid-cols-4 gap-4">
+            <StaffAttendanceWidget />
+            <EscalationsWidget />
+          </div>
+        </div>
+        )}
+
+        {/* ADMIN / SUPERADMIN */}
+        {hasRole(['ADMIN', 'SUPERADMIN']) && (
+        <div className="mb-8">
+          <h2 className="text-lg font-semibold text-white mb-4">
+            System & Administration
+          </h2>
+          <div className="grid grid-cols-1 tablet:grid-cols-2 laptop:grid-cols-4 gap-4">
+            <HQEscalationsWidget />
+            <HRSummaryWidget />
+            <SystemHealthWidget />
+          </div>
+        </div>
+        )}
+
+        {/* ACCOUNTANT */}
+        {hasRole(['ACCOUNTANT']) && (
+        <div className="mb-8">
+          <h2 className="text-lg font-semibold text-white mb-4">
+            Financial Management
+          </h2>
+          <div className="grid grid-cols-1 tablet:grid-cols-2 laptop:grid-cols-4 gap-4">
+            <FinancialSummaryWidget />
+            <GSTFilingStatusWidget />
+            <PendingReconciliationsWidget />
+          </div>
+        </div>
+        )}
+
+        {/* OPTOMETRIST */}
+        {isOptometrist && (
+        <div className="mb-8">
+          <h2 className="text-lg font-semibold text-white mb-4">
+            Clinical Operations
+          </h2>
+          <div className="grid grid-cols-1 tablet:grid-cols-2 laptop:grid-cols-4 gap-4">
+            <EyeTestCountWidget />
+            <PatientQueueWidget />
+            <PrescriptionRedoRateWidget />
+          </div>
+        </div>
+        )}
+
+        {/* CATALOG MANAGER */}
+        {hasRole(['CATALOG_MANAGER']) && (
+        <div className="mb-8">
+          <h2 className="text-lg font-semibold text-white mb-4">
+            Catalog Management
+          </h2>
+          <div className="grid grid-cols-1 tablet:grid-cols-2 laptop:grid-cols-3 gap-4">
+            <CatalogSKUCountWidget />
+            <PriceChangeRequestsWidget />
+          </div>
+          <div className="mt-4">
+            <RecentActivityWidget />
+          </div>
+        </div>
+        )}
+
 
       </div>
     </div>

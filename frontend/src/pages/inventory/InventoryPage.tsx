@@ -35,6 +35,9 @@ import { ReorderDashboard } from '../../components/inventory/ReorderDashboard';
 import { SerialNumberTracker } from '../../components/inventory/SerialNumberTracker';
 import { StockAgingReport } from '../../components/inventory/StockAgingReport';
 import { StockAlertsOverview } from '../../components/inventory/StockAlertsOverview';
+import { NonMovingStockWidget } from '../../components/inventory/NonMovingStockWidget';
+import { StockCountScanningInterface } from '../../components/inventory/StockCountScanningInterface';
+import { ContactLensExpiryWidget, LensPowerGridWidget, SellThroughAnalysisWidget, OverstockAnalysisWidget } from '../../components/inventory/AdvancedInventoryFeatures';
 import clsx from 'clsx';
 
 // Category configuration
@@ -83,7 +86,7 @@ interface StockMovement {
   createdBy: string;
 }
 
-type ViewTab = 'alerts' | 'catalog' | 'low-stock' | 'reorders' | 'serial-numbers' | 'aging' | 'transfers' | 'movements';
+type ViewTab = 'alerts' | 'catalog' | 'low-stock' | 'reorders' | 'serial-numbers' | 'aging' | 'transfers' | 'movements' | 'non-moving' | 'stock-count' | 'contact-lens' | 'power-grid' | 'sell-through' | 'overstock';
 
 export function InventoryPage() {
   const { user, hasRole } = useAuth();
@@ -107,7 +110,7 @@ export function InventoryPage() {
   useEffect(() => {
     const tabParam = searchParams.get('tab');
     if (tabParam && tabParam !== activeTab) {
-      const validTabs: ViewTab[] = ['alerts', 'catalog', 'low-stock', 'reorders', 'serial-numbers', 'aging', 'transfers', 'movements'];
+      const validTabs: ViewTab[] = ['alerts', 'catalog', 'low-stock', 'reorders', 'serial-numbers', 'aging', 'transfers', 'movements', 'non-moving', 'stock-count', 'contact-lens', 'power-grid', 'sell-through', 'overstock'];
       if (validTabs.includes(tabParam as ViewTab)) {
         setActiveTab(tabParam as ViewTab);
       }
@@ -378,6 +381,18 @@ export function InventoryPage() {
           { id: 'aging' as ViewTab, label: 'Stock Aging', icon: Clock },
           { id: 'transfers' as ViewTab, label: 'Transfers', icon: ArrowRightLeft },
           { id: 'movements' as ViewTab, label: 'Movements', icon: Eye },
+
+          { id: 'non-moving' as ViewTab, label: 'Non-Moving Stock', icon: TrendingDown },
+
+          { id: 'stock-count' as ViewTab, label: 'Stock Count Scan', icon: Barcode },
+
+          { id: 'contact-lens' as ViewTab, label: 'Contact Lens Expiry', icon: Eye },
+
+          { id: 'power-grid' as ViewTab, label: 'Lens Power Grid', icon: BarChart3 },
+
+          { id: 'sell-through' as ViewTab, label: 'Sell-Through Analysis', icon: TrendingDown },
+
+          { id: 'overstock' as ViewTab, label: 'Overstock Analysis', icon: Boxes },
         ].map(tab => (
           <button
             key={tab.id}
@@ -770,6 +785,37 @@ export function InventoryPage() {
           </div>
         );
       })()}
+
+
+      {/* Non-Moving Stock Tab */}
+      {activeTab === 'non-moving' && (
+        <NonMovingStockWidget />
+      )}
+
+      {/* Stock Count Scanning Tab */}
+      {activeTab === 'stock-count' && (
+        <StockCountScanningInterface />
+      )}
+
+      {/* Contact Lens Expiry Tab */}
+      {activeTab === 'contact-lens' && (
+        <ContactLensExpiryWidget />
+      )}
+
+      {/* Lens Power Grid Tab */}
+      {activeTab === 'power-grid' && (
+        <LensPowerGridWidget />
+      )}
+
+      {/* Sell-Through Analysis Tab */}
+      {activeTab === 'sell-through' && (
+        <SellThroughAnalysisWidget />
+      )}
+
+      {/* Overstock Analysis Tab */}
+      {activeTab === 'overstock' && (
+        <OverstockAnalysisWidget />
+      )}
 
       {/* Barcode Management Modal */}
       {selectedProduct && (

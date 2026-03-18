@@ -18,6 +18,7 @@ import {
   Loader2,
   RefreshCw,
 } from 'lucide-react';
+import { WorkshopJobCardPrint } from '../../components/print/WorkshopJobCardPrint';
 import type { JobStatus, JobPriority } from '../../types';
 import { workshopApi, orderApi } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
@@ -87,7 +88,7 @@ export function WorkshopPage() {
     loadJobs();
   }, [user?.activeStoreId]);
 
-  const loadJobs = async () => {
+const loadJobs = async () => {
     if (!user?.activeStoreId) {
       setIsLoading(false);
       return;
@@ -100,13 +101,31 @@ export function WorkshopPage() {
       const response = await workshopApi.getJobs(user.activeStoreId);
       const jobsData = response?.jobs || response || [];
       setJobs(Array.isArray(jobsData) ? jobsData : []);
+      
+      // Load store info for printing
+      if (!storeInfo) {
+        try {
+          const store = await (orderApi as any).getStore?.(user.activeStoreId);
+          if (store) {
+            setStoreInfo({
+              storeName: store.storeName || store.name || 'Better Vision Optics',
+              address: store.address || '',
+              city: store.city || '',
+              state: store.state || '',
+              pincode: store.pincode || '',
+            });
+          }
+        } catch {
+          // Store info is optional
+        }
+      }
     } catch {
       setError('Failed to load workshop jobs. Please try again.');
       setJobs([]);
     } finally {
       setIsLoading(false);
     }
-  };
+  };;
 
   // Filter jobs locally
   const filteredJobs = jobs.filter(job => {
@@ -145,6 +164,7 @@ export function WorkshopPage() {
   };
 
   const [showCreateJob, setShowCreateJob] = useState(false);
+  const [printJob, setPrintJob] = useState<Job | null>(null);  const [storeInfo, setStoreInfo] = useState<any>(null);
   const [createOrderSearch, setCreateOrderSearch] = useState('');
   const [createOrders, setCreateOrders] = useState<any[]>([]);
   const [createSelectedOrder, setCreateSelectedOrder] = useState<any>(null);
@@ -553,16 +573,51 @@ export function WorkshopPage() {
                   </div>
                 </div>
 
-                <button
-                  onClick={() => setSelectedJob(null)}
-                  className="btn-outline w-full"
-                >
-                  Close
-                </button>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => {
+                      setPrintJob(selectedJob);
+                      setSelectedJob(null);
+                    }}
+                    className="btn-primary flex-1 flex items-center justify-center gap-2"
+                  >
+                    <Eye className="w-4 h-4" />
+                    Print Card
+                  </button>
+                  <button
+                    onClick={() => setSelectedJob(null)}
+                    className="btn-outline flex-1"
+                  >
+                    Close
+                  </button>
+                </div>
               </div>
             </div>
           </div>
         </div>
+      )}
+
+      {/* Print Job Card Modal */}
+      {printJob && storeInfo && (
+        <WorkshopJobCardPrint
+          job={{
+            jobNumber: printJob.jobNumber,
+            orderNumber: printJob.orderNumber,
+            customerName: printJob.customerName,
+            customerPhone: printJob.customerPhone,
+            frameBrand: (printJob.frameName || '').split(' ')[0],
+            frameModel: (printJob.frameName || '').replace(/^[^ ]+ /, ''),
+            frameColor: '',
+            lensType: printJob.lensType,
+            priority: printJob.priority,
+            dueDate: printJob.promisedDate,
+            assignedTechnician: printJob.assignedTo,
+            status: STATUS_CONFIG[printJob.status].label,
+            createdDate: printJob.createdAt,
+          }}
+          store={storeInfo}
+          onClose={() => setPrintJob(null)}
+        />
       )}
 
       {/* CREATE JOB MODAL */}

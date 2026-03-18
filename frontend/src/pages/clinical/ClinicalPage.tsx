@@ -17,11 +17,12 @@ import {
   RefreshCw,
   AlertTriangle,
 } from 'lucide-react';
-import { clinicalApi, customerApi } from '../../services/api';
+import { clinicalApi, customerApi, storeApi } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { EyeTestForm, type EyeTestData } from '../../components/clinical/EyeTestForm';
 import { AddCustomerModal, type CustomerFormData } from '../../components/customers/AddCustomerModal';
+import { EyeTestTokenPrint } from '../../components/print/EyeTestTokenPrint';
 import clsx from 'clsx';
 
 // Types
@@ -77,6 +78,10 @@ export function ClinicalPage() {
 
   // Add customer modal state (replaces simple patient modal)
   const [showAddCustomerModal, setShowAddCustomerModal] = useState(false);
+  
+  // Print and store state
+  const [printToken, setPrintToken] = useState<any>(null);
+  const [storeInfo, setStoreInfo] = useState<any>(null);
 
   // Loading state
   const [isLoading, setIsLoading] = useState(true);
@@ -102,9 +107,10 @@ export function ClinicalPage() {
     setError(null);
 
     try {
-      const [queueData, testsData] = await Promise.all([
+      const [queueData, testsData, storeData] = await Promise.all([
         clinicalApi.getQueue(user.activeStoreId).catch(() => ({ queue: [] })),
         clinicalApi.getTodayTests(user.activeStoreId).catch(() => ({ tests: [] })),
+        !storeInfo ? storeApi.getStore(user.activeStoreId).catch(() => null) : Promise.resolve(null),
       ]);
 
       const queueItems = queueData?.queue || queueData || [];
@@ -112,6 +118,18 @@ export function ClinicalPage() {
 
       const tests = testsData?.tests || testsData || [];
       setCompletedTests(Array.isArray(tests) ? tests : []);
+      
+      // Load store info for printing tokens
+      if (storeData && !storeInfo) {
+        setStoreInfo({
+          storeName: storeData.storeName || storeData.name || 'Better Vision Optics',
+          address: storeData.address || '',
+          city: storeData.city || '',
+          state: storeData.state || '',
+          pincode: storeData.pincode || '',
+          phone: (storeData as any).phone || '',
+        });
+      }
     } catch {
       setError('Failed to load data. Please try again.');
     } finally {
@@ -405,14 +423,33 @@ export function ClinicalPage() {
                 >
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-4">
-                      {/* Token Number */}
-                      <div className={clsx(
-                        'w-14 h-14 rounded-lg flex items-center justify-center font-bold text-lg',
-                        item.status === 'IN_PROGRESS'
-                          ? 'bg-blue-600 text-white'
-                          : 'bg-gray-700 text-gray-400'
-                      )}>
-                        {item.tokenNumber}
+                      <div className="flex flex-col items-center gap-2">
+                        {/* Token Number */}
+                        <div className={clsx(
+                          'w-14 h-14 rounded-lg flex items-center justify-center font-bold text-lg',
+                          item.status === 'IN_PROGRESS'
+                            ? 'bg-blue-600 text-white'
+                            : 'bg-gray-700 text-gray-400'
+                        )}>
+                          {item.tokenNumber}
+                        </div>
+                        <button
+                          onClick={() => {
+                            if (storeInfo) {
+                              setPrintToken({
+                                tokenNumber: item.tokenNumber,
+                                patientName: item.patientName,
+                                dateTime: item.createdAt,
+                                optometristAssigned: undefined,
+                                queuePosition: [...queue].indexOf(item) + 1,
+                              });
+                            }
+                          }}
+                          className="text-[10px] px-2 py-1 bg-gray-600 hover:bg-gray-500 text-gray-200 rounded"
+                          title="Print Token"
+                        >
+                          Print
+                        </button>
                       </div>
 
                       {/* Patient Info */}
@@ -538,6 +575,15 @@ export function ClinicalPage() {
             </div>
           )}
         </div>
+      )}
+
+      {/* Print Token Modal */}
+      {printToken && storeInfo && (
+        <EyeTestTokenPrint
+          token={printToken}
+          store={storeInfo}
+          onClose={() => setPrintToken(null)}
+        />
       )}
 
       {/* Eye Test Form Modal */}
