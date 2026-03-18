@@ -52,10 +52,12 @@ class WorkshopJobRepository(BaseRepository):
             filter["store_id"] = store_id
         return self.find_many(filter, sort=[("expected_date", 1)])
     
-    def update_status(self, job_id: str, status: str, by_user: str = None) -> bool:
+    def update_status(self, job_id: str, status: str, by_user: str = None, notes: str = None) -> bool:
         update = {"status": status, "status_updated_at": datetime.now()}
         if by_user:
             update["status_updated_by"] = by_user
+        if notes:
+            update["status_notes"] = notes
         if status == "COMPLETED":
             update["completed_at"] = datetime.now()
         return self.update(job_id, update)

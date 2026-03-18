@@ -21,6 +21,7 @@ import {
   Warehouse,
 } from 'lucide-react';
 import clsx from 'clsx';
+import { TargetMeter } from '../../components/dashboard/TargetMeter';
 
 interface EnterpriseKPIs {
   period: string;
@@ -248,11 +249,32 @@ export default function DashboardPage() {
   const [isLoading, setIsLoading] = useState(false);
   const [hasError, setHasError] = useState(false);
   const [kpis, setKpis] = useState<EnterpriseKPIs | null>(null);
+  const [targetsLoading, setTargetsLoading] = useState(false);
+  const [targetsError, setTargetsError] = useState(false);
+  const [dailyTarget, setDailyTarget] = useState(50000);
+  const [monthlyTarget, setMonthlyTarget] = useState(1500000);
 
-  // Load KPIs when period changes
+  // Load KPIs and targets when period changes
   useEffect(() => {
     loadKpis();
+    loadTargets();
   }, [period]);
+
+  const loadTargets = async () => {
+    setTargetsLoading(true);
+    setTargetsError(false);
+    try {
+      const { reportsApi } = await import('../../services/api');
+      const response = await reportsApi.getTargets(user?.activeStoreId);
+      setDailyTarget(response.daily_target || 50000);
+      setMonthlyTarget(response.monthly_target || 1500000);
+    } catch (error) {
+      console.error('Error loading targets:', error);
+      setTargetsError(true);
+    } finally {
+      setTargetsLoading(false);
+    }
+  };
 
   const loadKpis = async () => {
     setIsLoading(true);
@@ -352,6 +374,32 @@ export default function DashboardPage() {
             ))}
           </div>
         </div>
+
+        {/* Sales Target Achievement Meters */}
+        <div className="mb-8">
+          <h2 className="text-lg font-semibold text-white mb-4">
+            Sales Targets vs Achievement
+          </h2>
+          <div className="grid grid-cols-1 tablet:grid-cols-2 gap-4">
+            <TargetMeter
+              actual={kpis?.revenue.total || 0}
+              target={dailyTarget}
+              label="Daily Sales"
+              period="daily"
+              loading={targetsLoading || isLoading}
+              error={targetsError || hasError}
+            />
+            <TargetMeter
+              actual={kpis?.revenue.total || 0}
+              target={monthlyTarget}
+              label="Monthly Sales"
+              period="monthly"
+              loading={targetsLoading || isLoading}
+              error={targetsError || hasError}
+            />
+          </div>
+        </div>
+
 
         {/* Role-Specific Actions */}
         {(isStaff || isOptometrist) && (

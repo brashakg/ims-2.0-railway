@@ -20,6 +20,7 @@ import {
   RefreshCw,
   Loader2,
   AlertCircle,
+  CheckCheck,
 } from 'lucide-react';
 import type { OrderStatus, PaymentStatus, Order } from '../../types';
 import { orderApi } from '../../services/api';
@@ -27,6 +28,7 @@ import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import clsx from 'clsx';
 import { OrderNotificationTracker } from '../../components/orders/OrderNotificationTracker';
+import { OrderStatusTimeline } from '../../components/orders/OrderStatusTimeline';
 
 // Status configurations
 const ORDER_STATUS_CONFIG: Record<OrderStatus, { label: string; color: string; bgColor: string; icon: typeof Clock }> = {
@@ -80,6 +82,11 @@ export function OrdersPage() {
   const [paymentMethod, setPaymentMethod] = useState<'CASH' | 'CARD' | 'UPI' | 'BANK_TRANSFER'>('CASH');
   const [paymentReference, setPaymentReference] = useState('');
   const [isProcessingPayment, setIsProcessingPayment] = useState(false);
+
+  // Deliver confirmation modal state
+  const [showDeliverModal, setShowDeliverModal] = useState(false);
+  const [deliverOrder, setDeliverOrder] = useState<Order | null>(null);
+  const [isDeliveringOrder, setIsDeliveringOrder] = useState(false);
 
   // Role-based permissions
   const canViewAllStores = hasRole(['SUPERADMIN', 'ADMIN', 'AREA_MANAGER']);
@@ -239,6 +246,31 @@ export function OrdersPage() {
       toast.error('Failed to process payment');
     } finally {
       setIsProcessingPayment(false);
+    }
+  };
+
+  // Open deliver confirmation modal
+  const openDeliverModal = (order: Order) => {
+    setDeliverOrder(order);
+    setShowDeliverModal(true);
+  };
+
+  // Mark order as delivered
+  const handleMarkDelivered = async () => {
+    if (!deliverOrder) return;
+
+    setIsDeliveringOrder(true);
+    try {
+      await orderApi.deliverOrder(deliverOrder.id);
+      toast.success('Order marked as delivered');
+      setShowDeliverModal(false);
+      setDeliverOrder(null);
+      setSelectedOrder(null);
+      await loadOrders();
+    } catch (error: any) {
+      toast.error(error?.response?.data?.detail || 'Failed to mark order as delivered');
+    } finally {
+      setIsDeliveringOrder(false);
     }
   };
 
@@ -524,6 +556,13 @@ export function OrdersPage() {
                   )}
                 </div>
 
+                {/* Status Timeline */}
+                <OrderStatusTimeline
+                  statusHistory={selectedOrder.statusHistory}
+                  createdAt={selectedOrder.createdAt}
+                  createdBy={selectedOrder.createdBy}
+                />
+
                 {/* Order Status Timeline & Notifications */}
                 <OrderNotificationTracker
                   orderId={selectedOrder.id}
@@ -537,18 +576,27 @@ export function OrdersPage() {
                   }}
                 />
 
-                <div className="flex gap-2 pt-4">
+                <div className="flex gap-2 pt-4 flex-wrap">
                   <button
                     onClick={() => printOrder(selectedOrder)}
-                    className="btn-primary flex-1 flex items-center justify-center gap-2"
+                    className="btn-primary flex-1 flex items-center justify-center gap-2 min-w-[120px]"
                   >
                     <Printer className="w-4 h-4" />
                     Print Invoice
                   </button>
+                  {selectedOrder.orderStatus === 'READY' && selectedOrder.paymentStatus !== 'PENDING' && (
+                    <button
+                      onClick={() => openDeliverModal(selectedOrder)}
+                      className="btn-success flex-1 flex items-center justify-center gap-2 min-w-[150px]"
+                    >
+                      <CheckCheck className="w-4 h-4" />
+                      Mark Delivered
+                    </button>
+                  )}
                   {selectedOrder.balanceDue > 0 && (
                     <button
                       onClick={() => openPaymentModal(selectedOrder)}
-                      className="btn-outline flex-1 flex items-center justify-center gap-2"
+                      className="btn-outline flex-1 flex items-center justify-center gap-2 min-w-[150px]"
                     >
                       <CreditCard className="w-4 h-4" />
                       Collect Payment
@@ -690,6 +738,74 @@ export function OrdersPage() {
                   </>
                 )}
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Mark Delivered Confirmation Modal */}
+      {showDeliverModal && deliverOrder && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-xl shadow-xl max-w-md w-full">
+            <div className="p-6 border-b border-gray-200">
+              <div className="flex items-center justify-between">
+                <h2 className="text-xl font-bold text-gray-900">Mark Order as Delivered?</h2>
+                <button
+                  onClick={() => setShowDeliverModal(false)}
+                  className="p-2 text-gray-400 hover:text-gray-600 rounded-lg"
+                >
+                  ×
+                </button>
+              </div>
+            </div>
+
+            <div className="p-6 space-y-4">
+              {/* Order Info */}
+              <div className="bg-gray-50 p-4 rounded-lg">
+                <p className="text-sm text-gray-500">Order</p>
+                <p className="font-medium text-gray-900">{deliverOrder.orderNumber}</p>
+                <p className="text-sm text-gray-500 mt-1">{deliverOrder.customerName}</p>
+                <p className="text-sm text-gray-500">{deliverOrder.customerPhone}</p>
+                <div className="flex justify-between mt-3 pt-3 border-t border-gray-200">
+                  <span className="text-sm text-gray-500">Grand Total:</span>
+                  <span className="font-bold text-gray-900">{formatCurrency(deliverOrder.grandTotal || 0)}</span>
+                </div>
+              </div>
+
+              {/* Confirmation message */}
+              <div className="bg-blue-50 border border-blue-200 rounded-lg p-3">
+                <p className="text-sm text-blue-800">
+                  This order will be marked as delivered. Make sure the customer has received all items and the payment is collected.
+                </p>
+              </div>
+
+              {/* Action buttons */}
+              <div className="flex gap-2 pt-4">
+                <button
+                  onClick={() => setShowDeliverModal(false)}
+                  className="btn-outline flex-1"
+                  disabled={isDeliveringOrder}
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleMarkDelivered}
+                  className="btn-primary flex-1 flex items-center justify-center gap-2"
+                  disabled={isDeliveringOrder}
+                >
+                  {isDeliveringOrder ? (
+                    <>
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      Marking...
+                    </>
+                  ) : (
+                    <>
+                      <CheckCheck className="w-4 h-4" />
+                      Confirm Delivery
+                    </>
+                  )}
+                </button>
+              </div>
             </div>
           </div>
         </div>

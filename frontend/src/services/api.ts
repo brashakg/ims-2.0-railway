@@ -555,6 +555,13 @@ export const reportsApi = {
     const response = await api.get('/reports/inventory', { params: { store_id: storeId } });
     return response.data;
   },
+
+  getTargets: async (storeId?: string) => {
+    const response = await api.get('/reports/targets', { 
+      params: storeId ? { store_id: storeId } : {} 
+    });
+    return response.data;
+  },
 };
 
 // ============================================================================

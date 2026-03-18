@@ -108,7 +108,7 @@ class OrderRepository(BaseRepository):
     # =========================================================================
     
     def update_status(self, order_id: str, status: str, by_user: str = None) -> bool:
-        """Update order status"""
+        """Update order status and add to status_history"""
         update_data = {
             "status": status,
             "status_updated_at": datetime.now()
@@ -119,7 +119,25 @@ class OrderRepository(BaseRepository):
         if status == "DELIVERED":
             update_data["delivered_at"] = datetime.now()
         
-        return self.update(order_id, update_data)
+        # Add to status_history array
+        status_history_entry = {
+            "status": status,
+            "timestamp": datetime.now().isoformat(),
+            "changed_by": by_user or "system"
+        }
+        
+        try:
+            self.collection.update_one(
+                {self.id_field: order_id},
+                {
+                    "$set": update_data,
+                    "$push": {"status_history": status_history_entry}
+                }
+            )
+            return True
+        except Exception as e:
+            print(f"Error updating status: {e}")
+            return False
     
     def add_payment(self, order_id: str, payment: Dict) -> bool:
         """Add payment to order"""

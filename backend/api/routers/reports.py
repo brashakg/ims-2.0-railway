@@ -636,3 +636,41 @@ async def task_summary(
             "overdue": overdue_count or 0,
         }
     }
+
+
+# ============================================================================
+# SALES TARGETS ENDPOINT
+# ============================================================================
+
+
+@router.get("/targets")
+async def get_targets(
+    store_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Get sales targets for a store (daily and monthly).
+    Returns configurable defaults or targets from database.
+    """
+    active_store = store_id or current_user.get("active_store_id") or "store-001"
+    
+    # Default targets
+    targets = {
+        "store_id": active_store,
+        "daily_target": 50000,  # ₹50,000 daily target
+        "monthly_target": 1500000,  # ₹15,00,000 monthly target
+        "currency": "INR",
+        "period": datetime.now().strftime("%Y-%m"),
+        "created_at": datetime.now().isoformat(),
+    }
+    
+    # TODO: In future, fetch from targets collection in database
+    # For now, return defaults
+    # If targets collection exists, fetch from there:
+    # targets_repo = get_targets_repository()
+    # if targets_repo:
+    #     stored_targets = targets_repo.find_one({"store_id": active_store})
+    #     if stored_targets:
+    #         targets.update(stored_targets)
+    
+    return targets

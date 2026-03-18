@@ -78,6 +78,16 @@ def order_to_frontend(order: dict) -> dict:
         elif key == "payments" and isinstance(value, list):
             # Convert payment fields
             result["payments"] = [payment_to_frontend(p) for p in value]
+        elif key == "status_history" and isinstance(value, list):
+            # Convert status_history fields (timestamp -> timestamp, changed_by -> changedBy)
+            result["statusHistory"] = []
+            for entry in value:
+                history_entry = {
+                    "status": entry.get("status"),
+                    "timestamp": entry.get("timestamp"),
+                    "changedBy": entry.get("changed_by")
+                }
+                result["statusHistory"].append(history_entry)
         elif key in key_map:
             result[key_map[key]] = value
         else:

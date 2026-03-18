@@ -45,16 +45,19 @@ interface Job {
 }
 
 const STATUS_CONFIG: Record<JobStatus, { label: string; class: string; step: number }> = {
+  PENDING: { label: 'Pending', class: 'bg-gray-700 text-gray-300', step: 1 },
+  IN_PROGRESS: { label: 'Fitting', class: 'bg-yellow-900 text-yellow-300', step: 2 },
+  COMPLETED: { label: 'Completed', class: 'bg-blue-900 text-blue-300', step: 3 },
+  QC_FAILED: { label: 'QC Failed', class: 'bg-red-900 text-red-300', step: 2 },
+  READY: { label: 'Ready for Pickup', class: 'bg-green-900 text-green-300', step: 4 },
+  DELIVERED: { label: 'Delivered', class: 'bg-emerald-900 text-emerald-300', step: 5 },
+  // Fallback for legacy statuses
   CREATED: { label: 'Created', class: 'bg-gray-700 text-gray-400', step: 1 },
-  LENS_ORDERED: { label: 'Lens Ordered', class: 'bg-blue-100 text-blue-600', step: 2 },
-  LENS_RECEIVED: { label: 'Lens Received', class: 'bg-indigo-100 text-indigo-600', step: 3 },
-  IN_PROGRESS: { label: 'Fitting', class: 'bg-yellow-100 text-yellow-600', step: 4 },
-  QC_PENDING: { label: 'QC Pending', class: 'bg-orange-100 text-orange-600', step: 5 },
-  QC_PASSED: { label: 'QC Passed', class: 'bg-teal-100 text-teal-600', step: 6 },
-  QC_FAILED: { label: 'QC Failed', class: 'bg-red-100 text-red-600', step: 5 },
-  READY: { label: 'Ready', class: 'bg-green-100 text-green-600', step: 7 },
-  DELIVERED: { label: 'Delivered', class: 'bg-emerald-100 text-emerald-600', step: 8 },
-  CANCELLED: { label: 'Cancelled', class: 'bg-red-100 text-red-600', step: 0 },
+  LENS_ORDERED: { label: 'Lens Ordered', class: 'bg-blue-900 text-blue-300', step: 2 },
+  LENS_RECEIVED: { label: 'Lens Received', class: 'bg-indigo-900 text-indigo-300', step: 3 },
+  QC_PENDING: { label: 'QC Pending', class: 'bg-orange-900 text-orange-300', step: 3 },
+  QC_PASSED: { label: 'QC Passed', class: 'bg-teal-900 text-teal-300', step: 4 },
+  CANCELLED: { label: 'Cancelled', class: 'bg-red-900 text-red-300', step: 0 },
 };
 
 const PRIORITY_CONFIG: Record<JobPriority, { label: string; class: string; icon: React.ComponentType<{ className?: string }> }> = {
@@ -219,11 +222,11 @@ export function WorkshopPage() {
 
       {/* Error State */}
       {error && (
-        <div className="card bg-red-50 border-red-200">
-          <div className="flex items-center gap-3 text-red-600">
+        <div className="card bg-red-900 border-red-700">
+          <div className="flex items-center gap-3 text-red-200">
             <AlertTriangle className="w-5 h-5" />
             <p>{error}</p>
-            <button onClick={loadJobs} className="ml-auto text-sm underline">
+            <button onClick={loadJobs} className="ml-auto text-sm underline hover:text-red-100">
               Retry
             </button>
           </div>
@@ -234,8 +237,8 @@ export function WorkshopPage() {
       <div className="grid grid-cols-2 tablet:grid-cols-4 gap-4">
         <div className="card">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 bg-blue-100 rounded-lg flex items-center justify-center">
-              <Wrench className="w-5 h-5 text-blue-600" />
+            <div className="w-10 h-10 bg-blue-900 rounded-lg flex items-center justify-center">
+              <Wrench className="w-5 h-5 text-blue-400" />
             </div>
             <div>
               <p className="text-sm text-gray-400">Active Jobs</p>
@@ -245,34 +248,34 @@ export function WorkshopPage() {
         </div>
         <div className="card">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 bg-red-100 rounded-lg flex items-center justify-center">
-              <Zap className="w-5 h-5 text-red-600" />
+            <div className="w-10 h-10 bg-red-900 rounded-lg flex items-center justify-center">
+              <Zap className="w-5 h-5 text-red-400" />
             </div>
             <div>
               <p className="text-sm text-gray-400">Urgent</p>
-              <p className="text-2xl font-bold text-red-600">{urgentJobs.length}</p>
+              <p className="text-2xl font-bold text-red-400">{urgentJobs.length}</p>
             </div>
           </div>
         </div>
         <div className="card">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 bg-green-100 rounded-lg flex items-center justify-center">
-              <CheckCircle className="w-5 h-5 text-green-600" />
+            <div className="w-10 h-10 bg-green-900 rounded-lg flex items-center justify-center">
+              <CheckCircle className="w-5 h-5 text-green-400" />
             </div>
             <div>
               <p className="text-sm text-gray-400">Ready for Pickup</p>
-              <p className="text-2xl font-bold text-green-600">{readyJobs.length}</p>
+              <p className="text-2xl font-bold text-green-400">{readyJobs.length}</p>
             </div>
           </div>
         </div>
         <div className="card">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 bg-orange-100 rounded-lg flex items-center justify-center">
-              <AlertTriangle className="w-5 h-5 text-orange-600" />
+            <div className="w-10 h-10 bg-orange-900 rounded-lg flex items-center justify-center">
+              <AlertTriangle className="w-5 h-5 text-orange-400" />
             </div>
             <div>
               <p className="text-sm text-gray-400">Overdue</p>
-              <p className="text-2xl font-bold text-orange-600">{overdueJobs.length}</p>
+              <p className="text-2xl font-bold text-orange-400">{overdueJobs.length}</p>
             </div>
           </div>
         </div>
@@ -340,8 +343,8 @@ export function WorkshopPage() {
                 key={job.id}
                 className={clsx(
                   'card',
-                  job.priority === 'URGENT' && 'border-red-300 bg-red-50',
-                  overdue && job.priority !== 'URGENT' && 'border-orange-300 bg-orange-50'
+                  job.priority === 'URGENT' && 'border-red-700 bg-red-900/20',
+                  overdue && job.priority !== 'URGENT' && 'border-orange-700 bg-orange-900/20'
                 )}
               >
                 <div className="flex items-start justify-between gap-4">
@@ -384,7 +387,7 @@ export function WorkshopPage() {
                     </div>
 
                     {job.notes && (
-                      <p className="mt-2 text-sm text-yellow-700 bg-yellow-50 px-2 py-1 rounded">
+                      <p className="mt-2 text-sm text-yellow-200 bg-yellow-900/30 px-2 py-1 rounded">
                         Note: {job.notes}
                       </p>
                     )}
@@ -465,7 +468,7 @@ export function WorkshopPage() {
                     {selectedJob.priority}
                   </span>
                   {isOverdue(selectedJob.promisedDate) && !['READY', 'DELIVERED', 'CANCELLED'].includes(selectedJob.status) && (
-                    <span className="px-2 py-1 bg-red-100 text-red-700 text-xs rounded-full font-medium">Overdue</span>
+                    <span className="px-2 py-1 bg-red-900 text-red-300 text-xs rounded-full font-medium">Overdue</span>
                   )}
                 </div>
 
@@ -530,9 +533,9 @@ export function WorkshopPage() {
 
                 {/* Notes */}
                 {selectedJob.notes && (
-                  <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-3">
-                    <p className="text-sm font-medium text-yellow-800">Notes</p>
-                    <p className="text-sm text-yellow-700 mt-1">{selectedJob.notes}</p>
+                  <div className="bg-yellow-900/20 border border-yellow-700 rounded-lg p-3">
+                    <p className="text-sm font-medium text-yellow-300">Notes</p>
+                    <p className="text-sm text-yellow-200 mt-1">{selectedJob.notes}</p>
                   </div>
                 )}
 
@@ -568,8 +571,8 @@ export function WorkshopPage() {
           <div className="bg-gray-800 rounded-xl shadow-2xl w-full max-w-lg max-h-[85vh] overflow-y-auto">
             <div className="p-5 border-b border-gray-700 flex items-center justify-between">
               <h3 className="font-semibold text-white">Create Workshop Job from Order</h3>
-              <button onClick={() => { setShowCreateJob(false); setCreateSelectedOrder(null); setCreateOrders([]); }} className="p-1 hover:bg-gray-700 rounded">
-                <AlertTriangle className="w-5 h-5 text-gray-400" />
+              <button onClick={() => { setShowCreateJob(false); setCreateSelectedOrder(null); setCreateOrders([]); }} className="p-1 hover:bg-gray-700 rounded text-gray-400 hover:text-gray-200">
+                ×
               </button>
             </div>
             <div className="p-5 space-y-4">
@@ -581,20 +584,20 @@ export function WorkshopPage() {
                       <input value={createOrderSearch} onChange={e => setCreateOrderSearch(e.target.value)}
                         onKeyDown={e => e.key === 'Enter' && searchOrdersForJob()}
                         placeholder="Search order number or customer..."
-                        className="w-full pl-9 pr-4 py-2.5 border border-gray-300 rounded-lg text-sm" />
+                        className="w-full pl-9 pr-4 py-2.5 border border-gray-600 bg-gray-700 text-white rounded-lg text-sm placeholder-gray-400" />
                     </div>
-                    <button onClick={searchOrdersForJob} className="px-4 py-2 bg-bv-gold-500 text-white rounded-lg text-sm font-semibold">Search</button>
+                    <button onClick={searchOrdersForJob} className="px-4 py-2 bg-bv-gold-500 text-white rounded-lg text-sm font-semibold hover:bg-bv-gold-600">Search</button>
                   </div>
                   {createOrders.length > 0 && (
                     <div className="space-y-1.5 max-h-60 overflow-y-auto">
                       {createOrders.map((o: any) => (
                         <button key={o.id} onClick={() => setCreateSelectedOrder(o)}
-                          className="w-full flex items-center justify-between p-3 rounded-lg border border-gray-700 hover:border-bv-gold-300 hover:bg-bv-gold-50 text-left">
+                          className="w-full flex items-center justify-between p-3 rounded-lg border border-gray-600 hover:border-bv-gold-400 hover:bg-gray-700 text-left text-white transition-colors">
                           <div>
                             <p className="text-sm font-medium">{o.orderNumber}</p>
                             <p className="text-xs text-gray-400">{o.customerName} · {(o.items || []).length} items</p>
                           </div>
-                          <span className="text-sm font-bold">₹{Math.round(o.grandTotal || 0).toLocaleString('en-IN')}</span>
+                          <span className="text-sm font-bold text-bv-gold-300">₹{Math.round(o.grandTotal || 0).toLocaleString('en-IN')}</span>
                         </button>
                       ))}
                     </div>
@@ -613,8 +616,8 @@ export function WorkshopPage() {
                     <div className="mt-2 space-y-1">
                       {(createSelectedOrder.items || []).map((item: any, i: number) => (
                         <div key={i} className="flex items-center justify-between text-xs">
-                          <span className="text-gray-300">{item.productName || item.product_name || item.name}</span>
-                          <span className="text-gray-400">{item.category}</span>
+                          <span className="text-white">{item.productName || item.product_name || item.name}</span>
+                          <span className="text-gray-400 text-xs">{item.category}</span>
                         </div>
                       ))}
                     </div>
@@ -627,10 +630,10 @@ export function WorkshopPage() {
                         <button key={p} onClick={() => setCreatePriority(p)}
                           className={clsx('flex-1 py-2 rounded-lg text-xs font-medium border-2 transition-all',
                             createPriority === p
-                              ? p === 'URGENT' ? 'border-red-500 bg-red-50 text-red-700'
-                                : p === 'EXPRESS' ? 'border-amber-500 bg-amber-50 text-amber-700'
-                                  : 'border-bv-gold-500 bg-bv-gold-50 text-bv-gold-700'
-                              : 'border-gray-700 text-gray-400')}>
+                              ? p === 'URGENT' ? 'border-red-500 bg-red-900 text-red-300'
+                                : p === 'EXPRESS' ? 'border-amber-500 bg-amber-900 text-amber-300'
+                                  : 'border-bv-gold-500 bg-bv-gold-900 text-bv-gold-300'
+                              : 'border-gray-600 text-gray-300 bg-gray-700')}>
                           {p}
                         </button>
                       ))}
@@ -641,21 +644,21 @@ export function WorkshopPage() {
                     <label className="text-xs text-gray-400 block mb-1">Expected Delivery Date</label>
                     <input type="date" value={createExpectedDate} onChange={e => setCreateExpectedDate(e.target.value)}
                       min={new Date().toISOString().split('T')[0]}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" />
+                      className="w-full px-3 py-2 border border-gray-600 bg-gray-700 text-white rounded-lg text-sm" />
                   </div>
 
                   <div>
                     <label className="text-xs text-gray-400 block mb-1">Fitting Instructions</label>
                     <textarea value={createFitting} onChange={e => setCreateFitting(e.target.value)}
                       placeholder="PD, segment height, tilt, wrap angle, frame adjustments..."
-                      className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm h-16 resize-none" />
+                      className="w-full px-3 py-2 border border-gray-600 bg-gray-700 text-white rounded-lg text-sm h-16 resize-none placeholder-gray-500" />
                   </div>
 
                   <div>
                     <label className="text-xs text-gray-400 block mb-1">Special Notes for Workshop</label>
                     <textarea value={createNotes} onChange={e => setCreateNotes(e.target.value)}
                       placeholder="Tint, drill mount, special coating, customer preferences..."
-                      className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm h-16 resize-none" />
+                      className="w-full px-3 py-2 border border-gray-600 bg-gray-700 text-white rounded-lg text-sm h-16 resize-none placeholder-gray-500" />
                   </div>
                 </>
               )}
@@ -663,7 +666,7 @@ export function WorkshopPage() {
             {createSelectedOrder && (
               <div className="p-5 border-t border-gray-700 flex gap-2">
                 <button onClick={() => { setShowCreateJob(false); setCreateSelectedOrder(null); }}
-                  className="flex-1 px-4 py-2.5 border border-gray-300 rounded-lg text-sm">Cancel</button>
+                  className="flex-1 px-4 py-2.5 border border-gray-600 text-gray-300 rounded-lg text-sm hover:bg-gray-700">Cancel</button>
                 <button onClick={handleCreateJob} disabled={createLoading}
                   className="flex-1 px-4 py-2.5 bg-bv-gold-500 text-white rounded-lg text-sm font-semibold hover:bg-bv-gold-600 disabled:opacity-50">
                   {createLoading ? 'Creating...' : 'Create Job'}

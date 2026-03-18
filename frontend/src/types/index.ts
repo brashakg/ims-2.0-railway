@@ -285,6 +285,12 @@ export interface Payment {
   paidAt: string;
 }
 
+export interface StatusHistory {
+  status: OrderStatus;
+  timestamp: string;
+  changedBy: string;
+}
+
 export interface Order {
   id: string;
   orderNumber: string;
@@ -307,6 +313,7 @@ export interface Order {
   createdBy: string;
   createdAt: string;
   deliveredAt?: string;
+  statusHistory?: StatusHistory[];
 }
 
 // ============================================================================
@@ -314,15 +321,18 @@ export interface Order {
 // ============================================================================
 
 export type JobStatus =
-  | 'CREATED'
-  | 'LENS_ORDERED'
-  | 'LENS_RECEIVED'
+  | 'PENDING'
   | 'IN_PROGRESS'
-  | 'QC_PENDING'
-  | 'QC_PASSED'
+  | 'COMPLETED'
   | 'QC_FAILED'
   | 'READY'
   | 'DELIVERED'
+  // Legacy statuses for backwards compatibility
+  | 'CREATED'
+  | 'LENS_ORDERED'
+  | 'LENS_RECEIVED'
+  | 'QC_PENDING'
+  | 'QC_PASSED'
   | 'CANCELLED';
 
 export type JobPriority = 'NORMAL' | 'EXPRESS' | 'URGENT';
