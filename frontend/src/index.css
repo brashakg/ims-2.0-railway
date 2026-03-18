@@ -74,10 +74,10 @@
            transition-colors duration-200;
   }
 
-  /* Secondary button */
+  /* Secondary button — dark theme */
   .btn-secondary {
-    @apply bg-gray-200 text-gray-800 px-4 py-2 rounded-lg font-medium
-           hover:bg-gray-300 active:bg-gray-400
+    @apply bg-gray-700 text-gray-200 px-4 py-2 rounded-lg font-medium
+           hover:bg-gray-600 active:bg-gray-500
            disabled:opacity-50 disabled:cursor-not-allowed
            transition-colors duration-200;
   }
@@ -98,17 +98,18 @@
            transition-colors duration-200;
   }
 
-  /* Input field */
+  /* Input field — dark theme */
   .input-field {
-    @apply w-full px-3 py-2 border border-gray-300 rounded-lg
+    @apply w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white
+           placeholder:text-gray-400
            focus:border-bv-gold-500 focus:ring-1 focus:ring-bv-gold-500
-           disabled:bg-gray-100 disabled:cursor-not-allowed
+           disabled:bg-gray-800 disabled:cursor-not-allowed
            transition-colors duration-200;
   }
 
-  /* Card */
+  /* Card — dark theme to match app bg-gray-900 */
   .card {
-    @apply bg-white rounded-xl shadow-sm border border-gray-200 p-4;
+    @apply bg-gray-800 rounded-xl shadow-sm border border-gray-700 p-4;
   }
 
   /* Badge */

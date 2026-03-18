@@ -20,6 +20,7 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
+import { ExpenseBillUpload } from '../../components/finance/ExpenseBillUpload';
 import clsx from 'clsx';
 
 type TabType = 'my-expenses' | 'pending-approval' | 'summary';
@@ -610,6 +611,14 @@ export default function ExpenseTracker() {
                   value={formDate}
                   onChange={(e) => setFormDate(e.target.value)}
                   className="w-full px-4 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white focus:outline-none focus:border-blue-500"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-300 mb-2">Attach Bill / Receipt</label>
+                <ExpenseBillUpload
+                  onBillUpload={(_file, _hash) => {
+                    toast.success('Bill attached successfully');
+                  }}
                 />
               </div>
             </div>

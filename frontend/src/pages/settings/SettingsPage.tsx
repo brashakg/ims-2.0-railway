@@ -38,6 +38,7 @@ import {
 } from '../../services/api';
 
 import { ApprovalWorkflows } from '../../components/settings/ApprovalWorkflows';
+import { FeatureToggles } from '../../components/settings/FeatureToggles';
 
 // ============================================================================
 // Types
@@ -58,6 +59,7 @@ type SettingsTab =
   | 'printers'
   | 'audit-logs'
   | 'approvals'
+  | 'feature-toggles'
   | 'system';
 
 interface Store {
@@ -185,6 +187,7 @@ const SETTINGS_SECTIONS = [
 
   // Security & Audit
   { id: 'approvals' as SettingsTab, label: 'Approval Workflows', icon: Shield, description: 'Configure approval rules and thresholds', role: ['SUPERADMIN', 'ADMIN'] },
+  { id: 'feature-toggles' as SettingsTab, label: 'Feature Toggles', icon: ToggleLeft, description: 'Enable/disable system features per store', role: ['SUPERADMIN'] },
   { id: 'audit-logs' as SettingsTab, label: 'Audit Logs', icon: History, description: 'Activity history and logs', role: ['SUPERADMIN', 'ADMIN'] },
   { id: 'system' as SettingsTab, label: 'System', icon: Database, description: 'Backup, sync, maintenance', role: ['SUPERADMIN', 'ADMIN'] },
 ];
@@ -329,7 +332,7 @@ export function SettingsPage() {
   useEffect(() => {
     const tabParam = searchParams.get('tab');
     if (tabParam && tabParam !== activeTab) {
-      const validTabs: SettingsTab[] = ['profile', 'business', 'stores', 'users', 'categories', 'brands', 'lens-master', 'discounts', 'tax-invoice', 'notifications', 'integrations', 'printers', 'approvals', 'audit-logs', 'system'];
+      const validTabs: SettingsTab[] = ['profile', 'business', 'stores', 'users', 'categories', 'brands', 'lens-master', 'discounts', 'tax-invoice', 'notifications', 'integrations', 'printers', 'approvals', 'feature-toggles', 'audit-logs', 'system'];
       if (validTabs.includes(tabParam as SettingsTab)) {
         setActiveTab(tabParam as SettingsTab);
       }
@@ -2423,6 +2426,15 @@ export function SettingsPage() {
               {activeTab === 'approvals' && (
                 <div>
                   <ApprovalWorkflows />
+                </div>
+              )}
+
+              {/* ================================================================ */}
+              {/* FEATURE TOGGLES */}
+              {/* ================================================================ */}
+              {activeTab === 'feature-toggles' && (
+                <div>
+                  <FeatureToggles storeId={user?.activeStoreId || ''} />
                 </div>
               )}
 

@@ -23,6 +23,8 @@ import { useToast } from '../../context/ToastContext';
 import { EyeTestForm, type EyeTestData } from '../../components/clinical/EyeTestForm';
 import { AddCustomerModal, type CustomerFormData } from '../../components/customers/AddCustomerModal';
 import { EyeTestTokenPrint } from '../../components/print/EyeTestTokenPrint';
+import { AbuseDetection } from '../../components/clinical/AbuseDetection';
+import { PrescriptionCard } from '../../components/clinical/PrescriptionCard';
 import clsx from 'clsx';
 
 // Types
@@ -65,7 +67,7 @@ export function ClinicalPage() {
   const [completedTests, setCompletedTests] = useState<CompletedTest[]>([]);
 
   // UI state
-  const [activeTab, setActiveTab] = useState<'queue' | 'completed'>('queue');
+  const [activeTab, setActiveTab] = useState<'queue' | 'completed' | 'abuse-alerts'>('queue');
   const [showEyeTestForm, setShowEyeTestForm] = useState(false);
   const [selectedPatient, setSelectedPatient] = useState<{
     id: string;
@@ -82,6 +84,7 @@ export function ClinicalPage() {
   // Print and store state
   const [printToken, setPrintToken] = useState<any>(null);
   const [storeInfo, setStoreInfo] = useState<any>(null);
+  const [printRxCard, setPrintRxCard] = useState<any>(null);
 
   // Loading state
   const [isLoading, setIsLoading] = useState(true);
@@ -91,6 +94,7 @@ export function ClinicalPage() {
   // Role-based permissions
   const canStartTest = hasRole(['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'OPTOMETRIST']);
   const canAddPatient = hasRole(['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'OPTOMETRIST', 'SALES_CASHIER', 'SALES_STAFF']);
+  const canViewAbuseAlerts = hasRole(['SUPERADMIN', 'ADMIN', 'STORE_MANAGER']);
 
   // Load data on mount
   useEffect(() => {
@@ -395,6 +399,20 @@ export function ClinicalPage() {
           <CheckCircle className="w-4 h-4" />
           Completed Today ({completedCount})
         </button>
+        {canViewAbuseAlerts && (
+          <button
+            onClick={() => setActiveTab('abuse-alerts')}
+            className={clsx(
+              'flex items-center gap-2 px-4 py-3 text-sm font-medium border-b-2 transition-colors',
+              activeTab === 'abuse-alerts'
+                ? 'border-bv-red-600 text-bv-red-600'
+                : 'border-transparent text-gray-400 hover:text-gray-300'
+            )}
+          >
+            <AlertTriangle className="w-4 h-4" />
+            Abuse Alerts
+          </button>
+        )}
       </div>
 
       {/* Queue Tab */}
@@ -563,8 +581,21 @@ export function ClinicalPage() {
                         <p className="text-gray-400">L: {formatPower(test.leftEye.sphere)} / {formatPower(test.leftEye.cylinder)}</p>
                       </div>
                       <button
-                        onClick={() => toast.info(`View prescription for ${test.patientName}`)}
-                        className="p-2 text-gray-400 hover:text-bv-red-600 transition-colors"
+                        onClick={() => setPrintRxCard({
+                          id: test.id,
+                          patientName: test.patientName,
+                          date: test.completedAt,
+                          optometristName: user?.name || 'Optometrist',
+                          rightEye: { sphere: test.rightEye.sphere || 0, cylinder: test.rightEye.cylinder || 0, axis: test.rightEye.axis || 0, add: 0 },
+                          leftEye: { sphere: test.leftEye.sphere || 0, cylinder: test.leftEye.cylinder || 0, axis: test.leftEye.axis || 0, add: 0 },
+                          pd: 0,
+                          visualAcuity: '',
+                          notes: '',
+                          storeName: storeInfo?.storeName || 'Better Vision Optics',
+                          storePhone: storeInfo?.phone || '',
+                        })}
+                        className="p-2 text-gray-400 hover:text-green-500 transition-colors"
+                        title="Print Rx Card"
                       >
                         <FileText className="w-5 h-5" />
                       </button>
@@ -574,6 +605,28 @@ export function ClinicalPage() {
               ))}
             </div>
           )}
+        </div>
+      )}
+
+      {/* Abuse Alerts Tab */}
+      {activeTab === 'abuse-alerts' && canViewAbuseAlerts && (
+        <AbuseDetection />
+      )}
+
+      {/* Prescription Card Print Modal */}
+      {printRxCard && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-lg max-w-2xl w-full max-h-[90vh] overflow-y-auto">
+            <PrescriptionCard prescription={printRxCard} />
+            <div className="flex justify-end p-4 border-t">
+              <button
+                onClick={() => setPrintRxCard(null)}
+                className="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300"
+              >
+                Close
+              </button>
+            </div>
+          </div>
         </div>
       )}
 

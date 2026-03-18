@@ -433,7 +433,7 @@ export function POSLayout() {
           )}
           {(store.cart || []).length > 0 && (
             <div className="text-xs tablet:text-sm text-gray-500">
-              <span className="font-semibold text-gray-900">{(store.cart || []).length}</span> items · <span className="font-semibold text-gray-900 ml-1">₹{Math.round(store.getGrandTotal()).toLocaleString('en-IN')}</span>
+              <span className="font-semibold text-gray-900">{(store.cart || []).length}</span> {(store.cart || []).length === 1 ? 'item' : 'items'} · <span className="font-semibold text-gray-900 ml-1">₹{Math.round(store.getGrandTotal()).toLocaleString('en-IN')}</span>
             </div>
           )}
         </div>
@@ -543,6 +543,10 @@ export function POSLayout() {
         const disc = store.getTotalDiscount();
         const taxable = sub - disc;
         const gst = store.getGrandTotal() - taxable;
+        // Detect inter-state: compare customer billing state with store state
+        const custState = ((store.customer as any)?.billing_address?.state || (store.customer as any)?.state || '').toLowerCase().trim();
+        const stState = ((store as any).store_state || '').toLowerCase().trim();
+        const isInterState = custState && stState && custState !== stState;
         const halfGst = Math.round(gst / 2 * 100) / 100;
         return (
           <ReceiptPreview billData={{
@@ -551,9 +555,9 @@ export function POSLayout() {
             item_discount: Math.round(disc),
             order_discount_amount: 0,
             taxable_amount: Math.round(taxable),
-            cgst_amount: halfGst,
-            sgst_amount: halfGst,
-            igst_amount: 0,
+            cgst_amount: isInterState ? 0 : halfGst,
+            sgst_amount: isInterState ? 0 : halfGst,
+            igst_amount: isInterState ? Math.round(gst) : 0,
             total_gst: Math.round(gst),
             roundoff_amount: 0,
             total_amount: Math.round(store.getGrandTotal()),

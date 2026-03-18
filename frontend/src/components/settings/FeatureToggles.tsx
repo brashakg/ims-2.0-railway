@@ -30,7 +30,7 @@ interface FeatureToggleProps {
   storeId: string;
 }
 
-export function FeatureToggles({  }: FeatureToggleProps) {
+export function FeatureToggles({ storeId: _storeId }: FeatureToggleProps) {
   const { user } = useAuth();
   const toast = useToast();
   
