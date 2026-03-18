@@ -47,7 +47,6 @@ const pathToModule: Record<string, ModuleId> = {
   '/setup': 'settings',
   '/jarvis': 'settings',
   '/catalog/add': 'inventory',
-  '/storefront': 'settings',
 };
 
 export function AppLayout() {

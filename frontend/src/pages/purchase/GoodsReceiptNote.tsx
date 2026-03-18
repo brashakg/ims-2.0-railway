@@ -3,7 +3,7 @@
 // ============================================================================
 // GRN creation, partial receipt, quality inspection, barcode scanning, discrepancies
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, startTransition } from 'react';
 import { Check, AlertCircle, Package, FileText } from 'lucide-react';
 import clsx from 'clsx';
 import { vendorsApi } from '../../services/api';
@@ -96,10 +96,12 @@ export function GoodsReceiptNote() {
   }, [user?.activeStoreId]);
 
   const toggleInspectionCheck = (item: string) => {
-    setInspectionChecks(prev => ({
-      ...prev,
-      [item]: !prev[item],
-    }));
+    startTransition(() => {
+      setInspectionChecks(prev => ({
+        ...prev,
+        [item]: !prev[item],
+      }));
+    });
   };
 
   const allChecksComplete = Object.values(inspectionChecks).every(v => v);
@@ -146,7 +148,7 @@ export function GoodsReceiptNote() {
         {(['create', 'history', 'discrepancies'] as const).map((tab) => (
           <button
             key={tab}
-            onClick={() => setActiveTab(tab)}
+            onClick={() => startTransition(() => setActiveTab(tab))}
             className={clsx(
               'px-4 py-3 font-medium border-b-2 transition-colors',
               activeTab === tab
@@ -211,9 +213,11 @@ export function GoodsReceiptNote() {
                         type="number"
                         value={item.received_qty}
                         onChange={(e) => {
-                          const newItems = [...receivedItems];
-                          newItems[idx].received_qty = parseInt(e.target.value) || 0;
-                          setReceivedItems(newItems);
+                          startTransition(() => {
+                            const newItems = [...receivedItems];
+                            newItems[idx].received_qty = parseInt(e.target.value) || 0;
+                            setReceivedItems(newItems);
+                          });
                         }}
                         className="w-full px-2 py-1 bg-gray-600 border border-gray-500 rounded text-white text-sm"
                       />
@@ -258,7 +262,7 @@ export function GoodsReceiptNote() {
               <label className="block text-gray-400 text-sm mb-2">Quality Notes</label>
               <textarea
                 value={qualityNotes}
-                onChange={(e) => setQualityNotes(e.target.value)}
+                onChange={(e) => startTransition(() => setQualityNotes(e.target.value))}
                 placeholder="Add any observations during inspection..."
                 className="w-full px-4 py-2 bg-gray-700 border border-gray-600 rounded text-white placeholder-gray-500 resize-none"
                 rows={3}
@@ -269,7 +273,7 @@ export function GoodsReceiptNote() {
               <label className="block text-gray-400 text-sm mb-2">Discrepancies Found</label>
               <textarea
                 value={discrepancies}
-                onChange={(e) => setDiscrepancies(e.target.value)}
+                onChange={(e) => startTransition(() => setDiscrepancies(e.target.value))}
                 placeholder="List any damaged items, missing items, or other discrepancies..."
                 className="w-full px-4 py-2 bg-gray-700 border border-gray-600 rounded text-white placeholder-gray-500 resize-none"
                 rows={3}

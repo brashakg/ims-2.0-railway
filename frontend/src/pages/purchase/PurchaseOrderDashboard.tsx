@@ -3,7 +3,7 @@
 // ============================================================================
 // PO lifecycle: Draft → Approved → Sent → Partial Receipt → Received → Closed
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, startTransition } from 'react';
 import { Plus, Edit2, Send, Check, Search } from 'lucide-react';
 import clsx from 'clsx';
 import { vendorsApi } from '../../services/api';
@@ -74,6 +74,7 @@ export function PurchaseOrderDashboard() {
   const [filterStatus, setFilterStatus] = useState<string>('all');
   const [purchaseOrders, setPurchaseOrders] = useState<PurchaseOrder[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [expandedPO, setExpandedPO] = useState<string | null>(null);
 
   // Load purchase orders on mount
   useEffect(() => {
@@ -162,7 +163,7 @@ export function PurchaseOrderDashboard() {
         {(['all', 'pending', 'received', 'closed'] as const).map((tab) => (
           <button
             key={tab}
-            onClick={() => setActiveTab(tab)}
+            onClick={() => startTransition(() => setActiveTab(tab))}
             className={clsx(
               'px-4 py-3 font-medium border-b-2 transition-colors',
               activeTab === tab
@@ -189,7 +190,7 @@ export function PurchaseOrderDashboard() {
         </div>
         <select
           value={filterStatus}
-          onChange={(e) => setFilterStatus(e.target.value)}
+          onChange={(e) => startTransition(() => setFilterStatus(e.target.value))}
           className="px-4 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white text-sm"
         >
           <option value="all">All Status</option>
@@ -205,7 +206,8 @@ export function PurchaseOrderDashboard() {
       {/* PO List */}
       <div className="space-y-3">
         {filteredPOs.map((po) => (
-          <div key={po.id} className="bg-gray-800 rounded-lg p-4 border border-gray-700 hover:border-gray-600 transition-colors">
+          <div key={po.id}>
+            <div className="bg-gray-800 rounded-lg p-4 border border-gray-700 hover:border-gray-600 transition-colors">
             <div className="flex items-start justify-between mb-3">
               <div className="flex-1">
                 <p className="text-white font-semibold">{po.po_number}</p>
@@ -260,9 +262,45 @@ export function PurchaseOrderDashboard() {
                   <Check className="w-4 h-4" /> Record Receipt
                 </button>
               )}
-              <button className="px-3 py-1 bg-gray-700 hover:bg-gray-600 text-white text-sm rounded font-semibold">
-                View Details
+              <button
+                onClick={() => startTransition(() => setExpandedPO(expandedPO === po.id ? null : po.id))}
+                className="px-3 py-1 bg-gray-700 hover:bg-gray-600 text-white text-sm rounded font-semibold"
+              >
+                {expandedPO === po.id ? 'Hide Details' : 'View Details'}
               </button>
+            </div>
+
+            {expandedPO === po.id && (
+              <div className="bg-gray-750 rounded-b-lg p-4 border border-t-0 border-gray-700">
+                <h4 className="text-white font-semibold mb-3">Line Items</h4>
+                {po.items && po.items.length > 0 ? (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="border-b border-gray-600">
+                          <th className="text-left px-3 py-2 text-gray-400">Product</th>
+                          <th className="text-right px-3 py-2 text-gray-400">Qty</th>
+                          <th className="text-right px-3 py-2 text-gray-400">Unit Price</th>
+                          <th className="text-right px-3 py-2 text-gray-400">Total</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {po.items.map((item, idx) => (
+                          <tr key={idx} className="border-b border-gray-700 hover:bg-gray-700/50">
+                            <td className="px-3 py-2 text-white">{item.product_name}</td>
+                            <td className="text-right px-3 py-2 text-white">{item.quantity}</td>
+                            <td className="text-right px-3 py-2 text-white">₹{item.unit_price.toLocaleString('en-IN')}</td>
+                            <td className="text-right px-3 py-2 text-green-400 font-semibold">₹{item.total_price.toLocaleString('en-IN')}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                ) : (
+                  <p className="text-gray-400 text-sm">No line items</p>
+                )}
+              </div>
+            )}
             </div>
           </div>
         ))}
