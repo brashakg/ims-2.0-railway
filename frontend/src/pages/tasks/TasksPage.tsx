@@ -228,10 +228,9 @@ export function TasksPage() {
       await tasksApi.createTask({
         title: newTask.title,
         description: newTask.description || undefined,
-        category: newTask.category,
         priority: newTask.priority,
         assigned_to: user?.id || '',
-        due_at: dueAt,
+        due_date: dueAt,
       });
 
       toast.success('Task created successfully');

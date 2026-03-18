@@ -10,10 +10,6 @@ import {
   Zap,
   Medal,
   Award,
-  Calendar,
-  ChevronUp,
-  ChevronDown,
-  Loader2,
   AlertCircle,
   Gift,
 } from 'lucide-react';

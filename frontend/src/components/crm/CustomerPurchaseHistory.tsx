@@ -4,7 +4,7 @@
 // Shows: Total spend, # of orders, avg order value, favorite brand, last visit
 
 import { useState, useEffect } from 'react';
-import { ShoppingBag, TrendingUp, Calendar, Loader2 } from 'lucide-react';
+import { ShoppingBag, Calendar, Loader2 } from 'lucide-react';
 import { orderApi } from '../../services/api';
 
 interface PurchaseHistoryData {

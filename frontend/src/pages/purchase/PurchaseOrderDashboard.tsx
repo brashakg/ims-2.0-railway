@@ -73,7 +73,7 @@ export function PurchaseOrderDashboard() {
   const [searchTerm, setSearchTerm] = useState('');
   const [filterStatus, setFilterStatus] = useState<string>('all');
   const [purchaseOrders, setPurchaseOrders] = useState<PurchaseOrder[]>([]);
-  const [isLoading, setIsLoading] = useState(true);
+  const [, setIsLoading] = useState(true);
   const [expandedPO, setExpandedPO] = useState<string | null>(null);
 
   // Load purchase orders on mount

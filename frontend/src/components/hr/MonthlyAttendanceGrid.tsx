@@ -35,7 +35,6 @@ export function MonthlyAttendanceGrid() {
   const [isLoading, setIsLoading] = useState(false);
 
   const daysInMonth = new Date(currentDate.getFullYear(), currentDate.getMonth() + 1, 0).getDate();
-  const firstDay = new Date(currentDate.getFullYear(), currentDate.getMonth(), 1).getDay();
 
   useEffect(() => {
     loadMonthlyData();

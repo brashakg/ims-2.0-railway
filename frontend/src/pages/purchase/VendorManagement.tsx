@@ -54,12 +54,12 @@ const getContractStatusColor = (status: string) => {
 };
 
 export function VendorManagement() {
-  const { user } = useAuth();
+  const { } = useAuth();
   const toast = useToast();
   const [activeTab, setActiveTab] = useState<'directory' | 'performance' | 'contracts'>('directory');
   const [filterRating, setFilterRating] = useState('all');
   const [vendors, setVendors] = useState<Vendor[]>([]);
-  const [isLoading, setIsLoading] = useState(true);
+  const [, setIsLoading] = useState(true);
 
   // Load vendors on mount
   useEffect(() => {

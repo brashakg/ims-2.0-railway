@@ -60,8 +60,8 @@ export function StockReplenishment() {
   const [activeTab, setActiveTab] = useState<'suggestions' | 'abc-analysis' | 'dead-stock' | 'eoq'>('suggestions');
   const [selectedItems, setSelectedItems] = useState<string[]>([]);
   const [suggestions, setSuggestions] = useState<ReplenishmentItem[]>([]);
-  const [deadStock, setDeadStock] = useState<any[]>([]);
-  const [isLoading, setIsLoading] = useState(true);
+  const [deadStock] = useState<any[]>([]);
+  const [, setIsLoading] = useState(true);
 
   // Load replenishment suggestions on mount
   useEffect(() => {

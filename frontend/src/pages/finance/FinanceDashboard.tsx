@@ -10,27 +10,15 @@ import {
   TrendingUp,
   TrendingDown,
   Calendar,
-  DollarSign,
   FileText,
   Lock,
   Unlock,
-  CheckCircle,
-  AlertCircle,
   Download,
-  Filter,
-  Search,
   Plus,
-  Edit2,
-  Trash2,
-  Eye,
-  ArrowUpRight,
-  ArrowDownLeft,
   Percent,
-  PieChart,
   Target,
   CreditCard,
   Loader2,
-  GripVertical,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
@@ -145,10 +133,8 @@ export default function FinanceDashboard() {
   // UI states
   const [isLoading, setIsLoading] = useState(true);
   const [selectedYear, setSelectedYear] = useState('2025-2026'); // Financial year format
-  const [searchQuery, setSearchQuery] = useState('');
   const [periodLocked, setPeriodLocked] = useState(false);
   const [showBudgetModal, setShowBudgetModal] = useState(false);
-  const [showReconcileModal, setShowReconcileModal] = useState(false);
 
   // Form states
   const [budgetCategory, setBudgetCategory] = useState('');
@@ -386,7 +372,7 @@ export default function FinanceDashboard() {
   };
 
   const handleLockPeriod = () => {
-    if (user?.role !== 'ACCOUNTANT' && user?.role !== 'ADMIN') {
+    if (user?.activeRole !== 'ACCOUNTANT' && user?.activeRole !== 'ADMIN') {
       toast.error('Only accountants and admins can lock periods');
       return;
     }
@@ -395,7 +381,7 @@ export default function FinanceDashboard() {
   };
 
   const handleUnlockPeriod = () => {
-    if (user?.role !== 'ADMIN' && user?.role !== 'SUPERADMIN') {
+    if (user?.activeRole !== 'ADMIN' && user?.activeRole !== 'SUPERADMIN') {
       toast.error('Only admins can unlock periods');
       return;
     }
@@ -414,7 +400,7 @@ export default function FinanceDashboard() {
     setBudgetAmount('');
   };
 
-  const handleReconcile = (itemId: string) => {
+  const handleReconcile = (_itemId: string) => {
     toast.success('Reconciliation item marked as matched');
   };
 

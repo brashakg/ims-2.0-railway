@@ -3,10 +3,15 @@
 // ============================================================================
 // Save and manage user preferences including dashboard layouts
 
+declare global {
+  namespace Intl {
+    function supportedValuesOf(key: string): string[];
+  }
+}
+
 import { useState, useCallback } from 'react';
 import { Save, RotateCcw, Layout, Settings as SettingsIcon } from 'lucide-react';
 import clsx from 'clsx';
-
 export interface DashboardLayout {
   id: string;
   name: string;
@@ -215,7 +220,7 @@ export function UserPreferencesPanel({
                 onChange={e => onUpdate('timezone', e.target.value)}
                 className="w-full px-3 py-2 border border-gray-300 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-white"
               >
-                {Intl.supportedValuesOf('timeZone').map(tz => (
+                {Intl.supportedValuesOf('timeZone').map((tz: string) => (
                   <option key={tz} value={tz}>
                     {tz}
                   </option>

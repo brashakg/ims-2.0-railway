@@ -2,7 +2,7 @@
 // IMS 2.0 - Feature Toggles Settings (Superadmin Only)
 // ============================================================================
 
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { Save, AlertCircle, Loader2 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
@@ -30,7 +30,7 @@ interface FeatureToggleProps {
   storeId: string;
 }
 
-export function FeatureToggles({ storeId }: FeatureToggleProps) {
+export function FeatureToggles({  }: FeatureToggleProps) {
   const { user } = useAuth();
   const toast = useToast();
   
@@ -39,7 +39,7 @@ export function FeatureToggles({ storeId }: FeatureToggleProps) {
   const [hasChanges, setHasChanges] = useState(false);
 
   // Only superadmins can access this
-  const isSuperAdmin = user?.role === 'SUPERADMIN';
+  const isSuperAdmin = user?.activeRole === 'SUPERADMIN';
 
   const handleToggle = (id: string) => {
     if (!isSuperAdmin) return;

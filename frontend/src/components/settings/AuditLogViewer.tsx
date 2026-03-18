@@ -3,7 +3,7 @@
 // ============================================================================
 
 import { useState, useEffect } from 'react';
-import { Search, Filter, Calendar, Loader2, ChevronDown } from 'lucide-react';
+import { Search, Loader2 } from 'lucide-react';
 import clsx from 'clsx';
 
 interface AuditLog {
@@ -46,7 +46,7 @@ export function AuditLogViewer({ logs = SAMPLE_LOGS }: AuditLogViewerProps) {
   const [userFilter, setUserFilter] = useState<string>('all');
   const [dateFrom, setDateFrom] = useState('');
   const [dateTo, setDateTo] = useState('');
-  const [isLoading, setIsLoading] = useState(false);
+  const [isLoading] = useState(false);
 
   useEffect(() => {
     filterLogs();

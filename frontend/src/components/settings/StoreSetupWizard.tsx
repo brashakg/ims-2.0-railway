@@ -3,7 +3,7 @@
 // ============================================================================
 
 import { useState } from 'react';
-import { ChevronRight, ChevronLeft, Check, AlertCircle, Loader2 } from 'lucide-react';
+import { ChevronRight, ChevronLeft, Check, Loader2 } from 'lucide-react';
 import clsx from 'clsx';
 
 type WizardStep = 'basic' | 'address' | 'categories' | 'staff' | 'features' | 'inventory' | 'review';

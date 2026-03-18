@@ -641,14 +641,6 @@ export function PayrollDashboard() {
                     </div>
                   </div>
                 </div>
-
-                {payslip.bank_account && (
-                  <div className="pt-4 border-t border-gray-700 text-sm">
-                    <p className="text-gray-400">
-                      Bank A/C: <span className="text-white">{payslip.bank_account}</span>
-                    </p>
-                  </div>
-                )}
               </div>
             ) : (
               <div className="text-center py-8 text-gray-400">

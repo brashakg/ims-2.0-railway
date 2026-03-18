@@ -48,9 +48,6 @@ const SAMPLE_PRESCRIPTIONS: FamilyPrescription[] = [
 ];
 
 export function FamilyPrescriptionsView({
-  customerId,
-  customerName,
-  customerPhone,
   familyMembers = SAMPLE_FAMILY,
   prescriptions = SAMPLE_PRESCRIPTIONS,
 }: FamilyPrescriptionsViewProps) {

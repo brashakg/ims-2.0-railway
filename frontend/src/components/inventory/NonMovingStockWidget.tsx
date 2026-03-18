@@ -4,7 +4,7 @@
 // Shows products with 0 sales in last N days
 
 import { useState, useEffect } from 'react';
-import { AlertTriangle, TrendingDown, Package } from 'lucide-react';
+import { TrendingDown } from 'lucide-react';
 import api from '../../services/api';
 
 interface NonMovingProduct {

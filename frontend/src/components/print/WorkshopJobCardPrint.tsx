@@ -227,7 +227,7 @@ export function WorkshopJobCardPrint({
           <div className="mb-3 text-xs">
             <p className="text-gray-600 font-semibold mb-2">Status Pipeline</p>
             <div className="flex items-center justify-between gap-0">
-              {['Pending', 'In Progress', 'QC', 'Ready'].map((step, idx) => (
+              {['Pending', 'In Progress', 'QC', 'Ready'].map((_, idx) => (
                 <div key={idx} className="flex items-center">
                   <div
                     className="w-6 h-6 rounded-full flex items-center justify-center text-[9px] font-bold"

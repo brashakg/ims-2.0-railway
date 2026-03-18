@@ -8,18 +8,15 @@ import {
   DollarSign,
   Plus,
   Search,
-  Filter,
   CheckCircle,
   Clock,
   XCircle,
   TrendingUp,
-  Download,
   Eye,
   Check,
   X as XIcon,
   Loader2,
   BarChart3,
-  Calendar,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
@@ -198,7 +195,7 @@ export default function ExpenseTracker() {
     }
   };
 
-  const handleApproveExpense = async (expenseId: string) => {
+  const handleApproveExpense = async (_expenseId: string) => {
     try {
       toast.success('Expense approved');
       await loadExpenses();

@@ -8,7 +8,7 @@
 // - Prescription expiry reminders
 
 import { useState, useEffect } from 'react';
-import { Phone, Clock, AlertCircle, CheckCircle2, Plus, RotateCcw, Calendar } from 'lucide-react';
+import { Phone, Clock, AlertCircle, CheckCircle2, RotateCcw, Calendar } from 'lucide-react';
 import clsx from 'clsx';
 
 interface FollowUp {

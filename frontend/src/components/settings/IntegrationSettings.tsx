@@ -3,7 +3,7 @@
 // ============================================================================
 
 import { useState } from 'react';
-import { Link, Eye, EyeOff, Zap, Calendar, Copy, Check } from 'lucide-react';
+import { Eye, EyeOff, Zap, Calendar, Copy, Check } from 'lucide-react';
 import clsx from 'clsx';
 
 interface Integration {
@@ -72,7 +72,7 @@ const INTEGRATIONS: Integration[] = [
 ];
 
 export function IntegrationSettings() {
-  const [integrations, setIntegrations] = useState<Integration[]>(INTEGRATIONS);
+  const [integrations] = useState<Integration[]>(INTEGRATIONS);
   const [showApiKey, setShowApiKey] = useState<Record<string, boolean>>({});
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [testingId, setTestingId] = useState<string | null>(null);

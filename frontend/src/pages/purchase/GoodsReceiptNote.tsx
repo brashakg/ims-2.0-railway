@@ -63,7 +63,7 @@ export function GoodsReceiptNote() {
   const [qualityNotes, setQualityNotes] = useState('');
   const [discrepancies, setDiscrepancies] = useState('');
   const [grns, setGrns] = useState<GRN[]>([]);
-  const [isLoading, setIsLoading] = useState(true);
+  const [, setIsLoading] = useState(true);
 
   // Load GRNs on mount
   useEffect(() => {

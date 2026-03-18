@@ -7,15 +7,11 @@ import { useState, useEffect, startTransition } from 'react';
 import {
   Plus,
   X as XIcon,
-  AlertTriangle,
   Package,
   DollarSign,
   Calendar,
   ChevronDown,
-  CheckCircle,
   Clock,
-  Truck,
-  CreditCard,
 } from 'lucide-react';
 import clsx from 'clsx';
 import { useToast } from '../../context/ToastContext';
@@ -84,7 +80,7 @@ const STATUS_LABELS: Record<string, string> = {
 
 export function VendorReturns() {
   const toast = useToast();
-  const { user } = useAuth();
+  const { } = useAuth();
 
   const [activeTab, setActiveTab] = useState<'active' | 'history'>('active');
   const [isLoading, setIsLoading] = useState(true);
@@ -238,7 +234,6 @@ export function VendorReturns() {
     }
 
     try {
-      const vendor = vendors.find(v => v.vendor_id === selectedVendor);
       // Call API: POST /api/v1/vendor-returns/
       toast.success('Vendor return created successfully');
       setShowModal(false);

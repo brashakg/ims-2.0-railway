@@ -3,7 +3,7 @@
 // ============================================================================
 // Visual progress indicator for sales targets vs actual achievement
 
-import { IndianRupee, TrendingUp } from 'lucide-react';
+import { TrendingUp } from 'lucide-react';
 import clsx from 'clsx';
 
 interface TargetMeterProps {
@@ -25,7 +25,6 @@ export function TargetMeter({
 }: TargetMeterProps) {
   // Calculate percentage
   const percentage = target > 0 ? (actual / target) * 100 : 0;
-  const cappedPercentage = Math.min(percentage, 100);
   
   // Determine color based on achievement
   const getColor = (): { bg: string; text: string; icon: string } => {

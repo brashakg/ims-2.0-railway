@@ -7,17 +7,10 @@ import { useState, useEffect } from 'react';
 import {
   Package,
   AlertCircle,
-  CheckCircle,
   Clock,
-  Users,
-  TrendingDown,
   Eye,
   FileText,
   DollarSign,
-  Calendar,
-  Database,
-  Zap,
-  ShoppingCart,
 } from 'lucide-react';
 import clsx from 'clsx';
 import api from '../../services/api';

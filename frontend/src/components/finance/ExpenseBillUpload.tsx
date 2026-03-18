@@ -27,7 +27,7 @@ interface ExpenseBillUploadProps {
   onBillUpload?: (file: File, hash: string) => void;
 }
 
-export function ExpenseBillUpload({ expenseId, onBillUpload }: ExpenseBillUploadProps) {
+export function ExpenseBillUpload({ onBillUpload }: ExpenseBillUploadProps) {
   const [bill, setBill] = useState<BillFile | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [isUploading, setIsUploading] = useState(false);

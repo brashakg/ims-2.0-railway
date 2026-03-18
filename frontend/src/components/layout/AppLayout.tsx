@@ -297,7 +297,7 @@ export function AppLayout() {
                   className="flex items-center gap-2 px-3 py-2 text-sm bg-gray-700 rounded-lg hover:bg-gray-200"
                   onClick={() => setRoleDropdownOpen(!roleDropdownOpen)}
                 >
-                  <span className="font-medium">{user.activeRole.replaceAll('_', ' ')}</span>
+                  <span className="font-medium">{(user.activeRole as string).replaceAll('_', ' ')}</span>
                   <ChevronDown className="w-4 h-4" />
                 </button>
                 {roleDropdownOpen && (
@@ -314,7 +314,7 @@ export function AppLayout() {
                           setRoleDropdownOpen(false);
                         }}
                       >
-                        {role.replaceAll('_', ' ')}
+                        {(role as string).replaceAll('_', ' ')}
                       </button>
                     ))}
                   </div>
@@ -371,7 +371,7 @@ export function AppLayout() {
                   <div className="px-4 py-3 border-b border-gray-700">
                     <div className="text-sm font-medium text-white">{user?.name}</div>
                     <div className="text-xs text-gray-400 mt-1">{user?.email}</div>
-                    <div className="text-xs text-gray-400 mt-1">Role: {user?.activeRole?.replaceAll('_', ' ')}</div>
+                    <div className="text-xs text-gray-400 mt-1">Role: {(user?.activeRole as string)?.replaceAll('_', ' ')}</div>
                   </div>
                   <button
                     onClick={() => {

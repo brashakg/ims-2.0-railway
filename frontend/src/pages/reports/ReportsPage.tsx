@@ -117,13 +117,13 @@ export function ReportsPage() {
   });
   const [categoryBreakdown, setCategoryBreakdown] = useState<CategoryBreakdown[]>([]);
   const [dailyTrend, setDailyTrend] = useState<DailyTrend[]>([]);
-  const [salesComparison, setSalesComparison] = useState<any>(null);
-  const [growthMetrics, setGrowthMetrics] = useState<any>(null);
-  const [staffRanking, setStaffRanking] = useState<any[]>([]);
-  const [stockCount, setStockCount] = useState<any>(null);
-  const [brandSellthrough, setBrandSellthrough] = useState<any[]>([]);
-  const [customerAcquisition, setCustomerAcquisition] = useState<any>(null);
-  const [discountAnalysis, setDiscountAnalysis] = useState<any>(null);
+  const [_salesComparison] = useState<any>(null);
+  const [_growthMetrics] = useState<any>(null);
+  const [staffRanking, ] = useState<any[]>([]);
+  const [stockCount, ] = useState<any>(null);
+  const [brandSellthrough, ] = useState<any[]>([]);
+  const [customerAcquisition, ] = useState<any>(null);
+  const [discountAnalysis, ] = useState<any>(null);
   // Unused - setExpenseVsRevenue not used in this component
   const [expenseVsRevenue] = useState<any>(null);
   // UI state

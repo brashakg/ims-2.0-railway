@@ -2,7 +2,6 @@
 // Order Status Timeline Component
 // ============================================================================
 
-import { Clock, CheckCircle } from 'lucide-react';
 import type { StatusHistory } from '../../types';
 
 interface OrderStatusTimelineProps {
