@@ -45,7 +45,7 @@ interface Job {
 }
 
 const STATUS_CONFIG: Record<JobStatus, { label: string; class: string; step: number }> = {
-  CREATED: { label: 'Created', class: 'bg-gray-100 text-gray-600', step: 1 },
+  CREATED: { label: 'Created', class: 'bg-gray-700 text-gray-400', step: 1 },
   LENS_ORDERED: { label: 'Lens Ordered', class: 'bg-blue-100 text-blue-600', step: 2 },
   LENS_RECEIVED: { label: 'Lens Received', class: 'bg-indigo-100 text-indigo-600', step: 3 },
   IN_PROGRESS: { label: 'Fitting', class: 'bg-yellow-100 text-yellow-600', step: 4 },
@@ -58,7 +58,7 @@ const STATUS_CONFIG: Record<JobStatus, { label: string; class: string; step: num
 };
 
 const PRIORITY_CONFIG: Record<JobPriority, { label: string; class: string; icon: React.ComponentType<{ className?: string }> }> = {
-  NORMAL: { label: 'Normal', class: 'text-gray-500', icon: Clock },
+  NORMAL: { label: 'Normal', class: 'text-gray-400', icon: Clock },
   EXPRESS: { label: 'Express', class: 'text-orange-500', icon: Timer },
   URGENT: { label: 'Urgent', class: 'text-red-500', icon: Zap },
 };
@@ -194,8 +194,8 @@ export function WorkshopPage() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">Workshop</h1>
-          <p className="text-gray-500">Manage lens fitting and job orders</p>
+          <h1 className="text-2xl font-bold text-white">Workshop</h1>
+          <p className="text-gray-400">Manage lens fitting and job orders</p>
         </div>
         <div className="flex items-center gap-2">
           <button onClick={() => setShowCreateJob(true)}
@@ -238,8 +238,8 @@ export function WorkshopPage() {
               <Wrench className="w-5 h-5 text-blue-600" />
             </div>
             <div>
-              <p className="text-sm text-gray-500">Active Jobs</p>
-              <p className="text-2xl font-bold text-gray-900">{activeJobs.length}</p>
+              <p className="text-sm text-gray-400">Active Jobs</p>
+              <p className="text-2xl font-bold text-white">{activeJobs.length}</p>
             </div>
           </div>
         </div>
@@ -249,7 +249,7 @@ export function WorkshopPage() {
               <Zap className="w-5 h-5 text-red-600" />
             </div>
             <div>
-              <p className="text-sm text-gray-500">Urgent</p>
+              <p className="text-sm text-gray-400">Urgent</p>
               <p className="text-2xl font-bold text-red-600">{urgentJobs.length}</p>
             </div>
           </div>
@@ -260,7 +260,7 @@ export function WorkshopPage() {
               <CheckCircle className="w-5 h-5 text-green-600" />
             </div>
             <div>
-              <p className="text-sm text-gray-500">Ready for Pickup</p>
+              <p className="text-sm text-gray-400">Ready for Pickup</p>
               <p className="text-2xl font-bold text-green-600">{readyJobs.length}</p>
             </div>
           </div>
@@ -271,7 +271,7 @@ export function WorkshopPage() {
               <AlertTriangle className="w-5 h-5 text-orange-600" />
             </div>
             <div>
-              <p className="text-sm text-gray-500">Overdue</p>
+              <p className="text-sm text-gray-400">Overdue</p>
               <p className="text-2xl font-bold text-orange-600">{overdueJobs.length}</p>
             </div>
           </div>
@@ -324,7 +324,7 @@ export function WorkshopPage() {
             <Loader2 className="w-8 h-8 animate-spin text-bv-red-600" />
           </div>
         ) : filteredJobs.length === 0 ? (
-          <div className="card text-center py-12 text-gray-500">
+          <div className="card text-center py-12 text-gray-400">
             <Wrench className="w-12 h-12 mx-auto mb-2 opacity-50" />
             <p>{searchQuery || statusFilter !== 'ACTIVE' || priorityFilter !== 'ALL' ? 'No jobs found matching your filters' : 'No workshop jobs'}</p>
           </div>
@@ -348,7 +348,7 @@ export function WorkshopPage() {
                   {/* Job Info */}
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-3 mb-2">
-                      <span className="font-bold text-gray-900">{job.jobNumber}</span>
+                      <span className="font-bold text-white">{job.jobNumber}</span>
                       <span className={clsx('px-2 py-0.5 rounded-full text-xs font-medium', statusConfig.class)}>
                         {statusConfig.label}
                       </span>
@@ -366,20 +366,20 @@ export function WorkshopPage() {
 
                     <div className="grid grid-cols-2 gap-4 text-sm">
                       <div>
-                        <p className="text-gray-500">Customer</p>
+                        <p className="text-gray-400">Customer</p>
                         <p className="font-medium flex items-center gap-1">
                           <User className="w-3 h-3" />
                           {job.customerName}
                         </p>
-                        <p className="text-gray-500 flex items-center gap-1">
+                        <p className="text-gray-400 flex items-center gap-1">
                           <Phone className="w-3 h-3" />
                           {job.customerPhone}
                         </p>
                       </div>
                       <div>
-                        <p className="text-gray-500">Frame & Lens</p>
+                        <p className="text-gray-400">Frame & Lens</p>
                         <p className="font-medium">{job.frameName}</p>
-                        <p className="text-gray-500">{job.lensType}</p>
+                        <p className="text-gray-400">{job.lensType}</p>
                       </div>
                     </div>
 
@@ -393,16 +393,16 @@ export function WorkshopPage() {
                   {/* Dates & Actions */}
                   <div className="text-right">
                     <div className="mb-3">
-                      <p className="text-xs text-gray-500">Promise Date</p>
+                      <p className="text-xs text-gray-400">Promise Date</p>
                       <p className={clsx(
                         'font-medium',
-                        overdue ? 'text-red-600' : 'text-gray-900'
+                        overdue ? 'text-red-600' : 'text-white'
                       )}>
                         {formatDate(job.promisedDate)}
                       </p>
                     </div>
                     {job.assignedTo && (
-                      <p className="text-xs text-gray-500 mb-3">
+                      <p className="text-xs text-gray-400 mb-3">
                         Assigned: {job.assignedTo}
                       </p>
                     )}
@@ -417,10 +417,10 @@ export function WorkshopPage() {
                 </div>
 
                 {/* Progress Bar */}
-                <div className="mt-4 pt-4 border-t border-gray-200">
+                <div className="mt-4 pt-4 border-t border-gray-700">
                   <div className="flex items-center justify-between text-xs mb-2">
-                    <span className="text-gray-500">Progress</span>
-                    <span className="text-gray-500">{statusConfig.label}</span>
+                    <span className="text-gray-400">Progress</span>
+                    <span className="text-gray-400">{statusConfig.label}</span>
                   </div>
                   <div className="h-2 bg-gray-200 rounded-full overflow-hidden">
                     <div
@@ -441,15 +441,15 @@ export function WorkshopPage() {
       {/* Job Detail Modal */}
       {selectedJob && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-xl shadow-xl max-w-lg w-full max-h-[90vh] overflow-y-auto">
+          <div className="bg-gray-800 rounded-xl shadow-xl max-w-lg w-full max-h-[90vh] overflow-y-auto">
             <div className="p-6">
               <div className="flex items-center justify-between mb-6">
-                <h2 className="text-xl font-bold text-gray-900">
+                <h2 className="text-xl font-bold text-white">
                   Job {selectedJob.jobNumber}
                 </h2>
                 <button
                   onClick={() => setSelectedJob(null)}
-                  className="p-2 hover:bg-gray-100 rounded-lg text-gray-500"
+                  className="p-2 hover:bg-gray-700 rounded-lg text-gray-400"
                 >
                   ×
                 </button>
@@ -470,12 +470,12 @@ export function WorkshopPage() {
                 </div>
 
                 {/* Customer */}
-                <div className="bg-gray-50 rounded-lg p-4 space-y-2">
-                  <h3 className="text-sm font-medium text-gray-500">Customer</h3>
-                  <p className="font-medium text-gray-900 flex items-center gap-2">
+                <div className="bg-gray-900 rounded-lg p-4 space-y-2">
+                  <h3 className="text-sm font-medium text-gray-400">Customer</h3>
+                  <p className="font-medium text-white flex items-center gap-2">
                     <User className="w-4 h-4" /> {selectedJob.customerName}
                   </p>
-                  <p className="text-sm text-gray-600 flex items-center gap-2">
+                  <p className="text-sm text-gray-400 flex items-center gap-2">
                     <Phone className="w-4 h-4" /> {selectedJob.customerPhone}
                   </p>
                 </div>
@@ -483,46 +483,46 @@ export function WorkshopPage() {
                 {/* Job Details */}
                 <div className="grid grid-cols-2 gap-4">
                   <div>
-                    <p className="text-sm text-gray-500">Order Number</p>
+                    <p className="text-sm text-gray-400">Order Number</p>
                     <p className="font-medium">{selectedJob.orderNumber}</p>
                   </div>
                   <div>
-                    <p className="text-sm text-gray-500">Frame</p>
+                    <p className="text-sm text-gray-400">Frame</p>
                     <p className="font-medium">{selectedJob.frameName}</p>
                   </div>
                   <div>
-                    <p className="text-sm text-gray-500">Lens Type</p>
+                    <p className="text-sm text-gray-400">Lens Type</p>
                     <p className="font-medium">{selectedJob.lensType}</p>
                   </div>
                   {selectedJob.frameBarcode && (
                     <div>
-                      <p className="text-sm text-gray-500">Frame Barcode</p>
+                      <p className="text-sm text-gray-400">Frame Barcode</p>
                       <p className="font-medium font-mono text-sm">{selectedJob.frameBarcode}</p>
                     </div>
                   )}
                 </div>
 
                 {/* Dates */}
-                <div className="grid grid-cols-2 gap-4 bg-gray-50 rounded-lg p-4">
+                <div className="grid grid-cols-2 gap-4 bg-gray-900 rounded-lg p-4">
                   <div>
-                    <p className="text-sm text-gray-500">Created</p>
+                    <p className="text-sm text-gray-400">Created</p>
                     <p className="font-medium">{formatDate(selectedJob.createdAt)}</p>
                   </div>
                   <div>
-                    <p className="text-sm text-gray-500">Promised Date</p>
+                    <p className="text-sm text-gray-400">Promised Date</p>
                     <p className={clsx('font-medium', isOverdue(selectedJob.promisedDate) && 'text-red-600')}>
                       {formatDate(selectedJob.promisedDate)}
                     </p>
                   </div>
                   {selectedJob.assignedTo && (
                     <div>
-                      <p className="text-sm text-gray-500">Assigned To</p>
+                      <p className="text-sm text-gray-400">Assigned To</p>
                       <p className="font-medium">{selectedJob.assignedTo}</p>
                     </div>
                   )}
                   {selectedJob.completedAt && (
                     <div>
-                      <p className="text-sm text-gray-500">Completed</p>
+                      <p className="text-sm text-gray-400">Completed</p>
                       <p className="font-medium">{formatDate(selectedJob.completedAt)}</p>
                     </div>
                   )}
@@ -538,7 +538,7 @@ export function WorkshopPage() {
 
                 {/* Progress */}
                 <div>
-                  <p className="text-sm text-gray-500 mb-2">Progress: {STATUS_CONFIG[selectedJob.status].label}</p>
+                  <p className="text-sm text-gray-400 mb-2">Progress: {STATUS_CONFIG[selectedJob.status].label}</p>
                   <div className="h-3 bg-gray-200 rounded-full overflow-hidden">
                     <div
                       className={clsx(
@@ -565,10 +565,10 @@ export function WorkshopPage() {
       {/* CREATE JOB MODAL */}
       {showCreateJob && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-xl shadow-2xl w-full max-w-lg max-h-[85vh] overflow-y-auto">
-            <div className="p-5 border-b border-gray-200 flex items-center justify-between">
-              <h3 className="font-semibold text-gray-900">Create Workshop Job from Order</h3>
-              <button onClick={() => { setShowCreateJob(false); setCreateSelectedOrder(null); setCreateOrders([]); }} className="p-1 hover:bg-gray-100 rounded">
+          <div className="bg-gray-800 rounded-xl shadow-2xl w-full max-w-lg max-h-[85vh] overflow-y-auto">
+            <div className="p-5 border-b border-gray-700 flex items-center justify-between">
+              <h3 className="font-semibold text-white">Create Workshop Job from Order</h3>
+              <button onClick={() => { setShowCreateJob(false); setCreateSelectedOrder(null); setCreateOrders([]); }} className="p-1 hover:bg-gray-700 rounded">
                 <AlertTriangle className="w-5 h-5 text-gray-400" />
               </button>
             </div>
@@ -589,10 +589,10 @@ export function WorkshopPage() {
                     <div className="space-y-1.5 max-h-60 overflow-y-auto">
                       {createOrders.map((o: any) => (
                         <button key={o.id} onClick={() => setCreateSelectedOrder(o)}
-                          className="w-full flex items-center justify-between p-3 rounded-lg border border-gray-200 hover:border-bv-gold-300 hover:bg-bv-gold-50 text-left">
+                          className="w-full flex items-center justify-between p-3 rounded-lg border border-gray-700 hover:border-bv-gold-300 hover:bg-bv-gold-50 text-left">
                           <div>
                             <p className="text-sm font-medium">{o.orderNumber}</p>
-                            <p className="text-xs text-gray-500">{o.customerName} · {(o.items || []).length} items</p>
+                            <p className="text-xs text-gray-400">{o.customerName} · {(o.items || []).length} items</p>
                           </div>
                           <span className="text-sm font-bold">₹{Math.round(o.grandTotal || 0).toLocaleString('en-IN')}</span>
                         </button>
@@ -602,18 +602,18 @@ export function WorkshopPage() {
                 </>
               ) : (
                 <>
-                  <div className="bg-gray-50 rounded-lg p-3">
+                  <div className="bg-gray-900 rounded-lg p-3">
                     <div className="flex items-center justify-between">
                       <div>
                         <p className="font-medium text-sm">{createSelectedOrder.orderNumber}</p>
-                        <p className="text-xs text-gray-500">{createSelectedOrder.customerName}</p>
+                        <p className="text-xs text-gray-400">{createSelectedOrder.customerName}</p>
                       </div>
                       <button onClick={() => setCreateSelectedOrder(null)} className="text-xs text-bv-gold-600 hover:underline">Change</button>
                     </div>
                     <div className="mt-2 space-y-1">
                       {(createSelectedOrder.items || []).map((item: any, i: number) => (
                         <div key={i} className="flex items-center justify-between text-xs">
-                          <span className="text-gray-700">{item.productName || item.product_name || item.name}</span>
+                          <span className="text-gray-300">{item.productName || item.product_name || item.name}</span>
                           <span className="text-gray-400">{item.category}</span>
                         </div>
                       ))}
@@ -621,7 +621,7 @@ export function WorkshopPage() {
                   </div>
 
                   <div>
-                    <label className="text-xs text-gray-500 block mb-1">Priority</label>
+                    <label className="text-xs text-gray-400 block mb-1">Priority</label>
                     <div className="flex gap-2">
                       {(['NORMAL', 'EXPRESS', 'URGENT'] as const).map(p => (
                         <button key={p} onClick={() => setCreatePriority(p)}
@@ -630,7 +630,7 @@ export function WorkshopPage() {
                               ? p === 'URGENT' ? 'border-red-500 bg-red-50 text-red-700'
                                 : p === 'EXPRESS' ? 'border-amber-500 bg-amber-50 text-amber-700'
                                   : 'border-bv-gold-500 bg-bv-gold-50 text-bv-gold-700'
-                              : 'border-gray-200 text-gray-500')}>
+                              : 'border-gray-700 text-gray-400')}>
                           {p}
                         </button>
                       ))}
@@ -638,21 +638,21 @@ export function WorkshopPage() {
                   </div>
 
                   <div>
-                    <label className="text-xs text-gray-500 block mb-1">Expected Delivery Date</label>
+                    <label className="text-xs text-gray-400 block mb-1">Expected Delivery Date</label>
                     <input type="date" value={createExpectedDate} onChange={e => setCreateExpectedDate(e.target.value)}
                       min={new Date().toISOString().split('T')[0]}
                       className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" />
                   </div>
 
                   <div>
-                    <label className="text-xs text-gray-500 block mb-1">Fitting Instructions</label>
+                    <label className="text-xs text-gray-400 block mb-1">Fitting Instructions</label>
                     <textarea value={createFitting} onChange={e => setCreateFitting(e.target.value)}
                       placeholder="PD, segment height, tilt, wrap angle, frame adjustments..."
                       className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm h-16 resize-none" />
                   </div>
 
                   <div>
-                    <label className="text-xs text-gray-500 block mb-1">Special Notes for Workshop</label>
+                    <label className="text-xs text-gray-400 block mb-1">Special Notes for Workshop</label>
                     <textarea value={createNotes} onChange={e => setCreateNotes(e.target.value)}
                       placeholder="Tint, drill mount, special coating, customer preferences..."
                       className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm h-16 resize-none" />
@@ -661,7 +661,7 @@ export function WorkshopPage() {
               )}
             </div>
             {createSelectedOrder && (
-              <div className="p-5 border-t border-gray-200 flex gap-2">
+              <div className="p-5 border-t border-gray-700 flex gap-2">
                 <button onClick={() => { setShowCreateJob(false); setCreateSelectedOrder(null); }}
                   className="flex-1 px-4 py-2.5 border border-gray-300 rounded-lg text-sm">Cancel</button>
                 <button onClick={handleCreateJob} disabled={createLoading}

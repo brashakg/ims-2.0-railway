@@ -132,20 +132,20 @@ export function AppLayout() {
       return {
         activeBg: moduleConfig.bgColor,
         activeText: moduleConfig.color,
-        hoverBg: 'hover:bg-gray-100',
+        hoverBg: 'hover:bg-gray-700',
       };
     }
     return {
       activeBg: 'bg-bv-gold-50',
       activeText: 'text-bv-gold-600',
-      hoverBg: 'hover:bg-gray-100',
+      hoverBg: 'hover:bg-gray-700',
     };
   };
 
   const colors = getActiveColors();
 
   return (
-    <div className="min-h-screen bg-gray-50" data-brand={brandClass}>
+    <div className="min-h-screen bg-gray-900" data-brand={brandClass}>
       {/* Mobile sidebar overlay */}
       {sidebarOpen && moduleConfig && (
         <div
@@ -158,29 +158,29 @@ export function AppLayout() {
       {moduleConfig && (
         <aside
           className={clsx(
-            'fixed top-0 left-0 z-50 h-full w-64 bg-white border-r border-gray-200 transition-transform duration-300 flex flex-col',
+            'fixed top-0 left-0 z-50 h-full w-64 bg-gray-800 border-r border-gray-700 transition-transform duration-300 flex flex-col',
             sidebarOpen ? 'translate-x-0' : 'tablet:translate-x-0 -translate-x-full'
           )}
         >
           {/* Module Header */}
-          <div className="h-16 flex items-center justify-between px-4 border-b border-gray-200">
+          <div className="h-16 flex items-center justify-between px-4 border-b border-gray-700">
             <div className="flex items-center gap-2 flex-1">
               <button
                 onClick={handleBackToDashboard}
-                className="p-1.5 rounded-lg hover:bg-gray-100 transition-colors"
+                className="p-1.5 rounded-lg hover:bg-gray-700 transition-colors"
                 title="Back to Dashboard"
               >
-                <ChevronLeft className="w-5 h-5 text-gray-500" />
+                <ChevronLeft className="w-5 h-5 text-gray-400" />
               </button>
               <div className={clsx('w-8 h-8 rounded-lg flex items-center justify-center', moduleConfig.bgColor)}>
                 <moduleConfig.icon className={clsx('w-5 h-5', moduleConfig.color)} />
               </div>
               <div className="flex-1 min-w-0">
-                <span className="font-bold text-gray-900 text-sm truncate block">{moduleConfig.title}</span>
+                <span className="font-bold text-white text-sm truncate block">{moduleConfig.title}</span>
               </div>
             </div>
             <button
-              className="tablet:hidden p-2 text-gray-500 hover:text-gray-700"
+              className="tablet:hidden p-2 text-gray-400 hover:text-gray-300"
               onClick={() => setSidebarOpen(false)}
             >
               <X className="w-5 h-5" />
@@ -192,7 +192,7 @@ export function AppLayout() {
             {/* Back to Dashboard link */}
             <button
               onClick={handleBackToDashboard}
-              className="flex items-center gap-3 px-3 py-2.5 rounded-lg mb-2 w-full text-gray-500 hover:bg-gray-100 transition-colors"
+              className="flex items-center gap-3 px-3 py-2.5 rounded-lg mb-2 w-full text-gray-400 hover:bg-gray-700 transition-colors"
             >
               <Home className="w-5 h-5" />
               <span>Dashboard</span>
@@ -215,7 +215,7 @@ export function AppLayout() {
                     'flex items-center gap-3 px-3 py-2.5 rounded-lg mb-1 transition-colors touch-target',
                     isActive
                       ? `${colors.activeBg} ${colors.activeText} font-medium`
-                      : `text-gray-600 ${colors.hoverBg}`
+                      : `text-gray-400 ${colors.hoverBg}`
                   )
                 }
                 onClick={() => setSidebarOpen(false)}
@@ -229,11 +229,11 @@ export function AppLayout() {
           </nav>
 
           {/* User info */}
-          <div className="border-t border-gray-200 p-4">
-            <div className="text-sm text-gray-500 mb-2">{user?.name}</div>
+          <div className="border-t border-gray-700 p-4">
+            <div className="text-sm text-gray-400 mb-2">{user?.name}</div>
             <button
               onClick={handleLogout}
-              className="flex items-center gap-2 text-gray-600 hover:text-bv-red-600 transition-colors"
+              className="flex items-center gap-2 text-gray-400 hover:text-bv-red-600 transition-colors"
             >
               <LogOut className="w-4 h-4" />
               <span className="text-sm">Logout</span>
@@ -245,13 +245,13 @@ export function AppLayout() {
       {/* Main content - adjust margin based on sidebar presence */}
       <div className={clsx(moduleConfig ? 'tablet:ml-64' : 'w-full')}>
         {/* Top header */}
-        <header className="h-16 bg-white border-b border-gray-200 flex items-center justify-between px-4 tablet:px-6">
+        <header className="h-16 bg-gray-800 border-b border-gray-700 flex items-center justify-between px-4 tablet:px-6">
           {/* Logo and Breadcrumb */}
           <div className="flex items-center gap-4">
             {/* Mobile menu button - only show when module is active */}
             {moduleConfig && (
               <button
-                className="tablet:hidden p-2 text-gray-600 hover:text-gray-900"
+                className="tablet:hidden p-2 text-gray-400 hover:text-white"
                 onClick={() => setSidebarOpen(true)}
               >
                 <Menu className="w-6 h-6" />
@@ -263,7 +263,7 @@ export function AppLayout() {
               <div className="w-8 h-8 bg-bv-gold-500 rounded-lg flex items-center justify-center">
                 <Store className="w-5 h-5 text-white" />
               </div>
-              <span className="font-bold text-gray-900 text-lg">IMS 2.0</span>
+              <span className="font-bold text-white text-lg">IMS 2.0</span>
             </div>
 
             {/* Breadcrumb - only show when module is active */}
@@ -272,7 +272,7 @@ export function AppLayout() {
                 <ChevronDown className="w-4 h-4 text-gray-400 rotate-[-90deg]" />
                 <button
                   onClick={handleBackToDashboard}
-                  className="text-gray-500 hover:text-gray-700 transition-colors flex items-center gap-1"
+                  className="text-gray-400 hover:text-gray-300 transition-colors flex items-center gap-1"
                 >
                   <Home className="w-4 h-4" />
                   Dashboard
@@ -294,19 +294,19 @@ export function AppLayout() {
             {user && user.roles.length > 1 && (
               <div className="relative" ref={roleDropdownRef}>
                 <button
-                  className="flex items-center gap-2 px-3 py-2 text-sm bg-gray-100 rounded-lg hover:bg-gray-200"
+                  className="flex items-center gap-2 px-3 py-2 text-sm bg-gray-700 rounded-lg hover:bg-gray-200"
                   onClick={() => setRoleDropdownOpen(!roleDropdownOpen)}
                 >
                   <span className="font-medium">{user.activeRole.replaceAll('_', ' ')}</span>
                   <ChevronDown className="w-4 h-4" />
                 </button>
                 {roleDropdownOpen && (
-                  <div className="absolute top-full right-0 mt-1 w-48 bg-white border border-gray-200 rounded-lg shadow-lg z-50">
+                  <div className="absolute top-full right-0 mt-1 w-48 bg-gray-800 border border-gray-700 rounded-lg shadow-lg z-50">
                     {user.roles.map((role) => (
                       <button
                         key={role}
                         className={clsx(
-                          'w-full text-left px-4 py-2 text-sm hover:bg-gray-50',
+                          'w-full text-left px-4 py-2 text-sm hover:bg-gray-900',
                           role === user.activeRole && 'bg-bv-gold-50 text-bv-gold-600'
                         )}
                         onClick={() => {
@@ -326,7 +326,7 @@ export function AppLayout() {
             {user && (hasRole(['SUPERADMIN', 'ADMIN', 'AREA_MANAGER']) || (user.storeIds.length > 1 && !hasRole(['OPTOMETRIST']))) && (
               <div className="relative" ref={storeDropdownRef}>
                 <button
-                  className="flex items-center gap-2 px-3 py-2 text-sm bg-gray-100 rounded-lg hover:bg-gray-200"
+                  className="flex items-center gap-2 px-3 py-2 text-sm bg-gray-700 rounded-lg hover:bg-gray-200"
                   onClick={() => setStoreDropdownOpen(!storeDropdownOpen)}
                 >
                   <Store className="w-4 h-4" />
@@ -334,12 +334,12 @@ export function AppLayout() {
                   <ChevronDown className="w-4 h-4" />
                 </button>
                 {storeDropdownOpen && (
-                  <div className="absolute top-full right-0 mt-1 w-56 bg-white border border-gray-200 rounded-lg shadow-lg z-50">
+                  <div className="absolute top-full right-0 mt-1 w-56 bg-gray-800 border border-gray-700 rounded-lg shadow-lg z-50">
                     {user.storeIds.map((storeId) => (
                       <button
                         key={storeId}
                         className={clsx(
-                          'w-full text-left px-4 py-2 text-sm hover:bg-gray-50',
+                          'w-full text-left px-4 py-2 text-sm hover:bg-gray-900',
                           storeId === user.activeStoreId && 'bg-bv-gold-50 text-bv-gold-600'
                         )}
                         onClick={() => {
@@ -367,18 +367,18 @@ export function AppLayout() {
                 </span>
               </button>
               {userDropdownOpen && (
-                <div className="absolute top-full right-0 mt-2 w-48 bg-white border border-gray-200 rounded-lg shadow-lg z-50">
-                  <div className="px-4 py-3 border-b border-gray-100">
-                    <div className="text-sm font-medium text-gray-900">{user?.name}</div>
-                    <div className="text-xs text-gray-500 mt-1">{user?.email}</div>
-                    <div className="text-xs text-gray-500 mt-1">Role: {user?.activeRole?.replaceAll('_', ' ')}</div>
+                <div className="absolute top-full right-0 mt-2 w-48 bg-gray-800 border border-gray-700 rounded-lg shadow-lg z-50">
+                  <div className="px-4 py-3 border-b border-gray-700">
+                    <div className="text-sm font-medium text-white">{user?.name}</div>
+                    <div className="text-xs text-gray-400 mt-1">{user?.email}</div>
+                    <div className="text-xs text-gray-400 mt-1">Role: {user?.activeRole?.replaceAll('_', ' ')}</div>
                   </div>
                   <button
                     onClick={() => {
                       navigate('/settings?tab=profile');
                       setUserDropdownOpen(false);
                     }}
-                    className="w-full text-left px-4 py-2 text-sm text-gray-600 hover:bg-gray-50 transition-colors"
+                    className="w-full text-left px-4 py-2 text-sm text-gray-400 hover:bg-gray-900 transition-colors"
                   >
                     My Profile
                   </button>
@@ -387,7 +387,7 @@ export function AppLayout() {
                       handleLogout();
                       setUserDropdownOpen(false);
                     }}
-                    className="w-full text-left px-4 py-2 text-sm text-red-600 hover:bg-red-50 transition-colors border-t border-gray-100"
+                    className="w-full text-left px-4 py-2 text-sm text-red-600 hover:bg-red-50 transition-colors border-t border-gray-700"
                   >
                     Logout
                   </button>

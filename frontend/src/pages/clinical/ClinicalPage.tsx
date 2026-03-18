@@ -273,8 +273,8 @@ export function ClinicalPage() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">Eye Tests</h1>
-          <p className="text-gray-500">Manage patient queue and eye examinations</p>
+          <h1 className="text-2xl font-bold text-white">Eye Tests</h1>
+          <p className="text-gray-400">Manage patient queue and eye examinations</p>
         </div>
         <div className="flex gap-2">
           <button
@@ -322,7 +322,7 @@ export function ClinicalPage() {
               <Clock className="w-5 h-5 text-yellow-600" />
             </div>
             <div>
-              <p className="text-sm text-gray-500">Waiting</p>
+              <p className="text-sm text-gray-400">Waiting</p>
               <p className="text-2xl font-bold text-yellow-600">{waitingCount}</p>
             </div>
           </div>
@@ -333,7 +333,7 @@ export function ClinicalPage() {
               <Eye className="w-5 h-5 text-blue-600" />
             </div>
             <div>
-              <p className="text-sm text-gray-500">In Progress</p>
+              <p className="text-sm text-gray-400">In Progress</p>
               <p className="text-2xl font-bold text-blue-600">{inProgressCount}</p>
             </div>
           </div>
@@ -344,7 +344,7 @@ export function ClinicalPage() {
               <CheckCircle className="w-5 h-5 text-green-600" />
             </div>
             <div>
-              <p className="text-sm text-gray-500">Completed Today</p>
+              <p className="text-sm text-gray-400">Completed Today</p>
               <p className="text-2xl font-bold text-green-600">{completedCount}</p>
             </div>
           </div>
@@ -352,14 +352,14 @@ export function ClinicalPage() {
       </div>
 
       {/* Tabs */}
-      <div className="flex border-b border-gray-200">
+      <div className="flex border-b border-gray-700">
         <button
           onClick={() => setActiveTab('queue')}
           className={clsx(
             'flex items-center gap-2 px-4 py-3 text-sm font-medium border-b-2 transition-colors',
             activeTab === 'queue'
               ? 'border-bv-red-600 text-bv-red-600'
-              : 'border-transparent text-gray-500 hover:text-gray-700'
+              : 'border-transparent text-gray-400 hover:text-gray-300'
           )}
         >
           <Clock className="w-4 h-4" />
@@ -371,7 +371,7 @@ export function ClinicalPage() {
             'flex items-center gap-2 px-4 py-3 text-sm font-medium border-b-2 transition-colors',
             activeTab === 'completed'
               ? 'border-bv-red-600 text-bv-red-600'
-              : 'border-transparent text-gray-500 hover:text-gray-700'
+              : 'border-transparent text-gray-400 hover:text-gray-300'
           )}
         >
           <CheckCircle className="w-4 h-4" />
@@ -387,13 +387,13 @@ export function ClinicalPage() {
               <Loader2 className="w-8 h-8 animate-spin text-bv-red-600" />
             </div>
           ) : queue.length === 0 ? (
-            <div className="card text-center py-12 text-gray-500">
+            <div className="card text-center py-12 text-gray-400">
               <Eye className="w-12 h-12 mx-auto mb-2 opacity-50" />
               <p>No patients in queue</p>
             </div>
           ) : (
             queue.map((item) => {
-              const statusConfig = STATUS_CONFIG[item.status] || { label: item.status, class: 'bg-gray-100 text-gray-600' };
+              const statusConfig = STATUS_CONFIG[item.status] || { label: item.status, class: 'bg-gray-700 text-gray-400' };
               const isActionLoading = actionLoading === item.id;
               return (
                 <div
@@ -410,7 +410,7 @@ export function ClinicalPage() {
                         'w-14 h-14 rounded-lg flex items-center justify-center font-bold text-lg',
                         item.status === 'IN_PROGRESS'
                           ? 'bg-blue-600 text-white'
-                          : 'bg-gray-100 text-gray-600'
+                          : 'bg-gray-700 text-gray-400'
                       )}>
                         {item.tokenNumber}
                       </div>
@@ -418,12 +418,12 @@ export function ClinicalPage() {
                       {/* Patient Info */}
                       <div>
                         <div className="flex items-center gap-2">
-                          <p className="font-medium text-gray-900">{item.patientName}</p>
+                          <p className="font-medium text-white">{item.patientName}</p>
                           <span className={clsx('px-2 py-0.5 rounded-full text-xs font-medium', statusConfig.class)}>
                             {statusConfig.label}
                           </span>
                         </div>
-                        <div className="flex items-center gap-3 text-sm text-gray-500 mt-1">
+                        <div className="flex items-center gap-3 text-sm text-gray-400 mt-1">
                           <span className="flex items-center gap-1">
                             <Phone className="w-3 h-3" />
                             {item.customerPhone}
@@ -437,10 +437,10 @@ export function ClinicalPage() {
                     <div className="flex items-center gap-4">
                       {/* Wait Time */}
                       <div className="text-right">
-                        <p className="text-sm text-gray-500">Wait Time</p>
+                        <p className="text-sm text-gray-400">Wait Time</p>
                         <p className={clsx(
                           'font-medium',
-                          item.waitTime > 10 ? 'text-red-600' : 'text-gray-600'
+                          item.waitTime > 10 ? 'text-red-600' : 'text-gray-400'
                         )}>
                           {item.waitTime} min
                         </p>
@@ -498,22 +498,22 @@ export function ClinicalPage() {
               <Loader2 className="w-8 h-8 animate-spin text-bv-red-600" />
             </div>
           ) : completedTests.length === 0 ? (
-            <div className="text-center py-12 text-gray-500">
+            <div className="text-center py-12 text-gray-400">
               <CheckCircle className="w-12 h-12 mx-auto mb-2 opacity-50" />
               <p>No tests completed today</p>
             </div>
           ) : (
             <div className="divide-y divide-gray-200">
               {completedTests.map(test => (
-                <div key={test.id} className="p-4 hover:bg-gray-50 transition-colors">
+                <div key={test.id} className="p-4 hover:bg-gray-900 transition-colors">
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-4">
                       <div className="w-10 h-10 bg-green-100 rounded-full flex items-center justify-center">
                         <User className="w-5 h-5 text-green-600" />
                       </div>
                       <div>
-                        <p className="font-medium text-gray-900">{test.patientName}</p>
-                        <p className="text-sm text-gray-500">
+                        <p className="font-medium text-white">{test.patientName}</p>
+                        <p className="text-sm text-gray-400">
                           Completed at {formatTime(test.completedAt)}
                         </p>
                       </div>
@@ -522,8 +522,8 @@ export function ClinicalPage() {
                     {/* Quick Rx Preview */}
                     <div className="flex items-center gap-6">
                       <div className="text-sm">
-                        <p className="text-gray-500">R: {formatPower(test.rightEye.sphere)} / {formatPower(test.rightEye.cylinder)}</p>
-                        <p className="text-gray-500">L: {formatPower(test.leftEye.sphere)} / {formatPower(test.leftEye.cylinder)}</p>
+                        <p className="text-gray-400">R: {formatPower(test.rightEye.sphere)} / {formatPower(test.rightEye.cylinder)}</p>
+                        <p className="text-gray-400">L: {formatPower(test.leftEye.sphere)} / {formatPower(test.leftEye.cylinder)}</p>
                       </div>
                       <button
                         onClick={() => toast.info(`View prescription for ${test.patientName}`)}

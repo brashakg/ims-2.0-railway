@@ -297,7 +297,7 @@ const MOCK_AUDIT_LOGS: AuditLogEntry[] = [
 // Action type styling config
 const AUDIT_ACTION_STYLES: Record<AuditAction, { bg: string; text: string; label: string }> = {
   LOGIN:  { bg: 'bg-purple-100', text: 'text-purple-700', label: 'Login' },
-  LOGOUT: { bg: 'bg-gray-100',   text: 'text-gray-700',   label: 'Logout' },
+  LOGOUT: { bg: 'bg-gray-700',   text: 'text-gray-300',   label: 'Logout' },
   CREATE: { bg: 'bg-green-100',  text: 'text-green-700',  label: 'Create' },
   UPDATE: { bg: 'bg-blue-100',   text: 'text-blue-700',   label: 'Update' },
   DELETE: { bg: 'bg-red-100',    text: 'text-red-700',    label: 'Delete' },
@@ -858,8 +858,8 @@ export function SettingsPage() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">Settings</h1>
-          <p className="text-gray-500">System configuration and master data management</p>
+          <h1 className="text-2xl font-bold text-white">Settings</h1>
+          <p className="text-gray-400">System configuration and master data management</p>
         </div>
         {user?.activeRole === 'SUPERADMIN' && (
           <span className="badge-warning">Superadmin Mode</span>
@@ -889,7 +889,7 @@ export function SettingsPage() {
                   'w-full flex items-center gap-3 px-3 py-3 rounded-lg text-left transition-colors',
                   activeTab === section.id
                     ? 'bg-bv-red-50 text-bv-red-600'
-                    : 'text-gray-600 hover:bg-gray-50'
+                    : 'text-gray-400 hover:bg-gray-900'
                 )}
               >
                 <section.icon className="w-5 h-5" />
@@ -919,7 +919,7 @@ export function SettingsPage() {
                 <div className="space-y-4">
                   <div className="card">
                     <div className="flex items-center justify-between mb-6">
-                      <h2 className="text-lg font-semibold text-gray-900">Store Management</h2>
+                      <h2 className="text-lg font-semibold text-white">Store Management</h2>
                       <button
                         onClick={() => setShowAddStoreModal(true)}
                         className="btn-primary flex items-center gap-2"
@@ -940,21 +940,21 @@ export function SettingsPage() {
                         {stores.map(store => (
                           <div
                             key={store.id}
-                            className="p-4 border border-gray-200 rounded-lg hover:border-bv-red-200 transition-colors"
+                            className="p-4 border border-gray-700 rounded-lg hover:border-bv-red-200 transition-colors"
                           >
                             <div className="flex items-start justify-between">
                               <div>
                                 <div className="flex items-center gap-2">
-                                  <h3 className="font-semibold text-gray-900">{store.storeName}</h3>
-                                  <span className="text-xs bg-gray-100 px-2 py-0.5 rounded">{store.storeCode}</span>
+                                  <h3 className="font-semibold text-white">{store.storeName}</h3>
+                                  <span className="text-xs bg-gray-700 px-2 py-0.5 rounded">{store.storeCode}</span>
                                   {store.isActive ? (
                                     <span className="badge-success">Active</span>
                                   ) : (
                                     <span className="badge-error">Inactive</span>
                                   )}
                                 </div>
-                                <p className="text-sm text-gray-500 mt-1">{store.address}, {store.city}</p>
-                                <div className="flex items-center gap-4 mt-2 text-xs text-gray-500">
+                                <p className="text-sm text-gray-400 mt-1">{store.address}, {store.city}</p>
+                                <div className="flex items-center gap-4 mt-2 text-xs text-gray-400">
                                   <span>GSTIN: {store.gstin || 'Not set'}</span>
                                   <span>Hours: {store.openingTime} - {store.closingTime}</span>
                                   <span>Geo-fence: {store.geoFenceRadius}m</span>
@@ -966,7 +966,7 @@ export function SettingsPage() {
                                     setEditingStore(store);
                                     setShowAddStoreModal(true);
                                   }}
-                                  className="p-2 text-gray-400 hover:text-bv-red-600 hover:bg-gray-100 rounded"
+                                  className="p-2 text-gray-400 hover:text-bv-red-600 hover:bg-gray-700 rounded"
                                   title="Edit store"
                                 >
                                   <Edit2 className="w-4 h-4" />
@@ -1027,9 +1027,9 @@ export function SettingsPage() {
                 <div className="card">
                   <div className="flex items-center justify-between mb-6">
                     <div>
-                      <h2 className="text-lg font-semibold text-gray-900">User Management</h2>
+                      <h2 className="text-lg font-semibold text-white">User Management</h2>
                       {user?.activeRole === 'STORE_MANAGER' && (
-                        <p className="text-xs text-gray-500 mt-1">Showing users from your managed stores</p>
+                        <p className="text-xs text-gray-400 mt-1">Showing users from your managed stores</p>
                       )}
                     </div>
                     <button
@@ -1041,7 +1041,7 @@ export function SettingsPage() {
                     </button>
                   </div>
 
-                  <p className="text-sm text-gray-500 mb-4">
+                  <p className="text-sm text-gray-400 mb-4">
                     {user?.activeRole === 'STORE_MANAGER'
                       ? 'Create and manage store staff. You can assign: Optometrist, Sales Cashier, Sales Staff, Workshop Staff roles.'
                       : 'Create users and assign roles. Users can have multiple roles and access to multiple stores.'}
@@ -1049,14 +1049,14 @@ export function SettingsPage() {
 
                   <div className="overflow-x-auto">
                     <table className="w-full">
-                      <thead className="bg-gray-50 border-b border-gray-200">
+                      <thead className="bg-gray-900 border-b border-gray-700">
                         <tr>
-                          <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">User</th>
-                          <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Roles</th>
-                          <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Stores</th>
-                          <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Discount Cap</th>
-                          <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Status</th>
-                          <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Actions</th>
+                          <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">User</th>
+                          <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">Roles</th>
+                          <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">Stores</th>
+                          <th className="px-4 py-3 text-center text-xs font-medium text-gray-400 uppercase">Discount Cap</th>
+                          <th className="px-4 py-3 text-center text-xs font-medium text-gray-400 uppercase">Status</th>
+                          <th className="px-4 py-3 text-center text-xs font-medium text-gray-400 uppercase">Actions</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-gray-200">
@@ -1074,10 +1074,10 @@ export function SettingsPage() {
                             const canDelete = canManageUser(u) && u.id !== user?.id;
 
                             return (
-                            <tr key={u.id} className="hover:bg-gray-50">
+                            <tr key={u.id} className="hover:bg-gray-900">
                               <td className="px-4 py-3">
-                                <p className="font-medium text-gray-900">{u.fullName}</p>
-                                <p className="text-xs text-gray-500">{u.email}</p>
+                                <p className="font-medium text-white">{u.fullName}</p>
+                                <p className="text-xs text-gray-400">{u.email}</p>
                               </td>
                               <td className="px-4 py-3">
                                 <div className="flex flex-wrap gap-1">
@@ -1088,14 +1088,14 @@ export function SettingsPage() {
                                       role === 'ADMIN' ? 'bg-red-100 text-red-700' :
                                       role === 'AREA_MANAGER' ? 'bg-orange-100 text-orange-700' :
                                       role === 'STORE_MANAGER' ? 'bg-blue-100 text-blue-700' :
-                                      'bg-gray-100 text-gray-700'
+                                      'bg-gray-700 text-gray-300'
                                     )}>
                                       {role.replace('_', ' ')}
                                     </span>
                                   ))}
                                 </div>
                               </td>
-                              <td className="px-4 py-3 text-sm text-gray-600">
+                              <td className="px-4 py-3 text-sm text-gray-400">
                                 {u.accessibleStores?.length || 0} stores
                               </td>
                               <td className="px-4 py-3 text-center">
@@ -1149,13 +1149,13 @@ export function SettingsPage() {
                   </div>
 
                   {/* Available Roles Reference */}
-                  <div className="mt-6 pt-6 border-t border-gray-200">
-                    <h3 className="text-sm font-medium text-gray-700 mb-3">
+                  <div className="mt-6 pt-6 border-t border-gray-700">
+                    <h3 className="text-sm font-medium text-gray-300 mb-3">
                       {user?.activeRole === 'STORE_MANAGER' ? 'Assignable Roles' : 'Available Roles'}
                     </h3>
                     <div className="flex flex-wrap gap-2">
                       {(ASSIGNABLE_ROLES[user?.activeRole || ''] || []).map(role => (
-                        <span key={role} className="text-xs bg-gray-100 px-3 py-1 rounded">
+                        <span key={role} className="text-xs bg-gray-700 px-3 py-1 rounded">
                           {role.replace('_', ' ')}
                         </span>
                       ))}
@@ -1172,8 +1172,8 @@ export function SettingsPage() {
                 <div className="card">
                   <div className="flex items-center justify-between mb-6">
                     <div>
-                      <h2 className="text-lg font-semibold text-gray-900">Category Master</h2>
-                      <p className="text-sm text-gray-500">Product categories with HSN codes and attributes</p>
+                      <h2 className="text-lg font-semibold text-white">Category Master</h2>
+                      <p className="text-sm text-gray-400">Product categories with HSN codes and attributes</p>
                     </div>
                   </div>
 
@@ -1181,22 +1181,22 @@ export function SettingsPage() {
                     {categories.map(cat => (
                       <div
                         key={cat.code}
-                        className="p-4 border border-gray-200 rounded-lg"
+                        className="p-4 border border-gray-700 rounded-lg"
                       >
                         <div className="flex items-center justify-between">
                           <div className="flex items-center gap-3">
                             <div className={clsx(
                               'w-10 h-10 rounded-lg flex items-center justify-center',
-                              cat.isActive ? 'bg-blue-50' : 'bg-gray-100'
+                              cat.isActive ? 'bg-blue-50' : 'bg-gray-700'
                             )}>
                               <Tag className={clsx('w-5 h-5', cat.isActive ? 'text-blue-600' : 'text-gray-400')} />
                             </div>
                             <div>
                               <div className="flex items-center gap-2">
-                                <h3 className="font-medium text-gray-900">{cat.name}</h3>
-                                <span className="text-xs bg-gray-100 px-2 py-0.5 rounded font-mono">{cat.code}</span>
+                                <h3 className="font-medium text-white">{cat.name}</h3>
+                                <span className="text-xs bg-gray-700 px-2 py-0.5 rounded font-mono">{cat.code}</span>
                               </div>
-                              <p className="text-xs text-gray-500">
+                              <p className="text-xs text-gray-400">
                                 HSN: {cat.hsnCode} • GST: {cat.gstRate}%
                               </p>
                             </div>
@@ -1214,8 +1214,8 @@ export function SettingsPage() {
                         </div>
 
                         {/* Attributes */}
-                        <div className="mt-3 pt-3 border-t border-gray-100">
-                          <p className="text-xs text-gray-500 mb-2">Required Attributes:</p>
+                        <div className="mt-3 pt-3 border-t border-gray-700">
+                          <p className="text-xs text-gray-400 mb-2">Required Attributes:</p>
                           <div className="flex flex-wrap gap-1">
                             {cat.attributes.map(attr => (
                               <span key={attr} className="text-xs bg-blue-50 text-blue-700 px-2 py-0.5 rounded">
@@ -1237,8 +1237,8 @@ export function SettingsPage() {
                 <div className="card">
                   <div className="flex items-center justify-between mb-6">
                     <div>
-                      <h2 className="text-lg font-semibold text-gray-900">Brand Master</h2>
-                      <p className="text-sm text-gray-500">Manage brands and subbrands with tier classification</p>
+                      <h2 className="text-lg font-semibold text-white">Brand Master</h2>
+                      <p className="text-sm text-gray-400">Manage brands and subbrands with tier classification</p>
                     </div>
                     <button
                       onClick={() => setShowAddBrandModal(true)}
@@ -1260,23 +1260,23 @@ export function SettingsPage() {
                       {brands.map(brand => (
                         <div
                           key={brand.id}
-                          className="p-4 border border-gray-200 rounded-lg"
+                          className="p-4 border border-gray-700 rounded-lg"
                         >
                           <div className="flex items-center justify-between">
                             <div>
                               <div className="flex items-center gap-2">
-                                <h3 className="font-medium text-gray-900">{brand.brandName}</h3>
-                                <span className="text-xs bg-gray-100 px-2 py-0.5 rounded font-mono">{brand.brandCode}</span>
+                                <h3 className="font-medium text-white">{brand.brandName}</h3>
+                                <span className="text-xs bg-gray-700 px-2 py-0.5 rounded font-mono">{brand.brandCode}</span>
                                 <span className={clsx(
                                   'text-xs px-2 py-0.5 rounded',
                                   brand.tier === 'LUXURY' ? 'bg-purple-100 text-purple-700' :
                                   brand.tier === 'PREMIUM' ? 'bg-blue-100 text-blue-700' :
-                                  'bg-gray-100 text-gray-700'
+                                  'bg-gray-700 text-gray-300'
                                 )}>
                                   {brand.tier}
                                 </span>
                               </div>
-                              <p className="text-xs text-gray-500 mt-1">
+                              <p className="text-xs text-gray-400 mt-1">
                                 Categories: {brand.categories.join(', ')}
                               </p>
                             </div>
@@ -1303,11 +1303,11 @@ export function SettingsPage() {
 
                           {/* Subbrands */}
                           {brand.subbrands && brand.subbrands.length > 0 && (
-                            <div className="mt-3 pt-3 border-t border-gray-100">
-                              <p className="text-xs text-gray-500 mb-2">Subbrands:</p>
+                            <div className="mt-3 pt-3 border-t border-gray-700">
+                              <p className="text-xs text-gray-400 mb-2">Subbrands:</p>
                               <div className="flex flex-wrap gap-2">
                                 {brand.subbrands.map(sb => (
-                                  <span key={sb.id} className="text-xs bg-gray-50 px-2 py-1 rounded border">
+                                  <span key={sb.id} className="text-xs bg-gray-900 px-2 py-1 rounded border">
                                     {sb.name}
                                   </span>
                                 ))}
@@ -1327,15 +1327,15 @@ export function SettingsPage() {
               {activeTab === 'lens-master' && (
                 <div className="space-y-4">
                   <div className="card">
-                    <h2 className="text-lg font-semibold text-gray-900 mb-4">Lens Master</h2>
-                    <p className="text-sm text-gray-500 mb-6">
+                    <h2 className="text-lg font-semibold text-white mb-4">Lens Master</h2>
+                    <p className="text-sm text-gray-400 mb-6">
                       Configure lens brands, indices, coatings, and add-ons for the lens selection workflow in POS.
                     </p>
 
                     {/* Lens Brands */}
                     <div className="mb-6">
                       <div className="flex items-center justify-between mb-3">
-                        <h3 className="text-sm font-medium text-gray-700">Lens Brands</h3>
+                        <h3 className="text-sm font-medium text-gray-300">Lens Brands</h3>
                         <button
                           onClick={async () => {
                             const name = prompt('Enter lens brand name:');
@@ -1362,7 +1362,7 @@ export function SettingsPage() {
                           </div>
                         ) : (
                           lensBrands.map(brand => (
-                            <div key={brand.id} className="p-3 bg-gray-50 rounded-lg flex items-center justify-between">
+                            <div key={brand.id} className="p-3 bg-gray-900 rounded-lg flex items-center justify-between">
                               <span className="text-sm">{brand.name}</span>
                               <div className="flex items-center gap-1">
                                 <Edit2 className="w-3 h-3 text-gray-400 cursor-pointer hover:text-bv-red-600" />
@@ -1390,7 +1390,7 @@ export function SettingsPage() {
                     {/* Lens Indices */}
                     <div className="mb-6">
                       <div className="flex items-center justify-between mb-3">
-                        <h3 className="text-sm font-medium text-gray-700">Lens Indices</h3>
+                        <h3 className="text-sm font-medium text-gray-300">Lens Indices</h3>
                         <button
                           onClick={async () => {
                             const value = prompt('Enter index value (e.g., 1.56):');
@@ -1418,10 +1418,10 @@ export function SettingsPage() {
                           </div>
                         ) : (
                           lensIndices.map(idx => (
-                            <div key={idx.id} className="p-3 bg-gray-50 rounded-lg flex items-center justify-between">
+                            <div key={idx.id} className="p-3 bg-gray-900 rounded-lg flex items-center justify-between">
                               <div>
                                 <span className="text-sm font-medium">{idx.value}</span>
-                                <span className="text-xs text-gray-500 ml-2">{idx.name}</span>
+                                <span className="text-xs text-gray-400 ml-2">{idx.name}</span>
                               </div>
                               <Trash2
                                 className="w-3 h-3 text-gray-400 cursor-pointer hover:text-red-600"
@@ -1446,7 +1446,7 @@ export function SettingsPage() {
                     {/* Coatings */}
                     <div className="mb-6">
                       <div className="flex items-center justify-between mb-3">
-                        <h3 className="text-sm font-medium text-gray-700">Coatings</h3>
+                        <h3 className="text-sm font-medium text-gray-300">Coatings</h3>
                         <button
                           onClick={async () => {
                             const name = prompt('Enter coating name:');
@@ -1478,10 +1478,10 @@ export function SettingsPage() {
                           </div>
                         ) : (
                           lensCoatings.map(coating => (
-                            <div key={coating.id} className="p-3 bg-gray-50 rounded-lg flex items-center justify-between">
+                            <div key={coating.id} className="p-3 bg-gray-900 rounded-lg flex items-center justify-between">
                               <div>
                                 <span className="text-sm">{coating.name}</span>
-                                <span className="text-xs text-gray-500 ml-2">₹{coating.price}</span>
+                                <span className="text-xs text-gray-400 ml-2">₹{coating.price}</span>
                               </div>
                               <div className="flex items-center gap-1">
                                 <Edit2 className="w-3 h-3 text-gray-400 cursor-pointer hover:text-bv-red-600" />
@@ -1509,7 +1509,7 @@ export function SettingsPage() {
                     {/* Add-ons */}
                     <div>
                       <div className="flex items-center justify-between mb-3">
-                        <h3 className="text-sm font-medium text-gray-700">Add-ons</h3>
+                        <h3 className="text-sm font-medium text-gray-300">Add-ons</h3>
                         <button
                           onClick={async () => {
                             const name = prompt('Enter add-on name:');
@@ -1542,10 +1542,10 @@ export function SettingsPage() {
                           </div>
                         ) : (
                           lensAddons.map(addon => (
-                            <div key={addon.id} className="p-3 bg-gray-50 rounded-lg flex items-center justify-between">
+                            <div key={addon.id} className="p-3 bg-gray-900 rounded-lg flex items-center justify-between">
                               <div>
                                 <span className="text-sm">{addon.name}</span>
-                                <span className="text-xs text-gray-500 ml-2">₹{addon.price}</span>
+                                <span className="text-xs text-gray-400 ml-2">₹{addon.price}</span>
                               </div>
                               <div className="flex items-center gap-1">
                                 <Edit2 className="w-3 h-3 text-gray-400 cursor-pointer hover:text-bv-red-600" />
@@ -1580,8 +1580,8 @@ export function SettingsPage() {
                 <div className="card">
                   <div className="flex items-center justify-between mb-6">
                     <div>
-                      <h2 className="text-lg font-semibold text-gray-900">Discount Rules</h2>
-                      <p className="text-sm text-gray-500">Maximum discount by role and brand tier</p>
+                      <h2 className="text-lg font-semibold text-white">Discount Rules</h2>
+                      <p className="text-sm text-gray-400">Maximum discount by role and brand tier</p>
                     </div>
                     <button
                       onClick={() => toast.info('Save changes to update discount rules')}
@@ -1594,12 +1594,12 @@ export function SettingsPage() {
 
                   <div className="overflow-x-auto">
                     <table className="w-full">
-                      <thead className="bg-gray-50 border-b border-gray-200">
+                      <thead className="bg-gray-900 border-b border-gray-700">
                         <tr>
-                          <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Role</th>
-                          <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Mass</th>
-                          <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Premium</th>
-                          <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Luxury</th>
+                          <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">Role</th>
+                          <th className="px-4 py-3 text-center text-xs font-medium text-gray-400 uppercase">Mass</th>
+                          <th className="px-4 py-3 text-center text-xs font-medium text-gray-400 uppercase">Premium</th>
+                          <th className="px-4 py-3 text-center text-xs font-medium text-gray-400 uppercase">Luxury</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-gray-200">
@@ -1622,7 +1622,7 @@ export function SettingsPage() {
                                 defaultValue={row.mass}
                                 min="0"
                                 max="100"
-                                className="w-16 px-2 py-1 text-center border border-gray-200 rounded"
+                                className="w-16 px-2 py-1 text-center border border-gray-700 rounded"
                               />
                               %
                             </td>
@@ -1632,7 +1632,7 @@ export function SettingsPage() {
                                 defaultValue={row.premium}
                                 min="0"
                                 max="100"
-                                className="w-16 px-2 py-1 text-center border border-gray-200 rounded"
+                                className="w-16 px-2 py-1 text-center border border-gray-700 rounded"
                               />
                               %
                             </td>
@@ -1642,7 +1642,7 @@ export function SettingsPage() {
                                 defaultValue={row.luxury}
                                 min="0"
                                 max="100"
-                                className="w-16 px-2 py-1 text-center border border-gray-200 rounded"
+                                className="w-16 px-2 py-1 text-center border border-gray-700 rounded"
                               />
                               %
                             </td>
@@ -1652,9 +1652,9 @@ export function SettingsPage() {
                     </table>
                   </div>
 
-                  <div className="mt-6 pt-6 border-t border-gray-200">
-                    <h3 className="text-sm font-medium text-gray-700 mb-3">MRP Rules (per SYSTEM_INTENT)</h3>
-                    <ul className="space-y-2 text-sm text-gray-600">
+                  <div className="mt-6 pt-6 border-t border-gray-700">
+                    <h3 className="text-sm font-medium text-gray-300 mb-3">MRP Rules (per SYSTEM_INTENT)</h3>
+                    <ul className="space-y-2 text-sm text-gray-400">
                       <li className="flex items-center gap-2">
                         <Check className="w-4 h-4 text-green-600" />
                         If Offer Price = MRP → Store can apply discount up to role cap
@@ -1683,7 +1683,7 @@ export function SettingsPage() {
                         <div className="flex items-center gap-4">
                           <div className={clsx(
                             'w-12 h-12 rounded-lg flex items-center justify-center',
-                            integration.isEnabled ? 'bg-green-50' : 'bg-gray-100'
+                            integration.isEnabled ? 'bg-green-50' : 'bg-gray-700'
                           )}>
                             <integration.icon className={clsx(
                               'w-6 h-6',
@@ -1691,8 +1691,8 @@ export function SettingsPage() {
                             )} />
                           </div>
                           <div>
-                            <h3 className="font-medium text-gray-900">{integration.name}</h3>
-                            <p className="text-sm text-gray-500">{integration.description}</p>
+                            <h3 className="font-medium text-white">{integration.name}</h3>
+                            <p className="text-sm text-gray-400">{integration.description}</p>
                           </div>
                         </div>
 
@@ -1725,29 +1725,29 @@ export function SettingsPage() {
               {activeTab === 'system' && (
                 <div className="space-y-4">
                   <div className="card">
-                    <h2 className="text-lg font-semibold text-gray-900 mb-4">System Status</h2>
+                    <h2 className="text-lg font-semibold text-white mb-4">System Status</h2>
                     <div className="grid grid-cols-3 gap-4">
                       <div className={clsx('p-4 rounded-lg', systemStatus?.database === 'connected' ? 'bg-green-50' : 'bg-yellow-50')}>
-                        <p className="text-sm text-gray-500">Database</p>
+                        <p className="text-sm text-gray-400">Database</p>
                         <p className={clsx('font-medium', systemStatus?.database === 'connected' ? 'text-green-600' : 'text-yellow-600')}>
                           {systemStatus?.database || 'Checking...'}
                         </p>
                       </div>
                       <div className={clsx('p-4 rounded-lg', systemStatus?.api === 'healthy' ? 'bg-green-50' : 'bg-yellow-50')}>
-                        <p className="text-sm text-gray-500">API Status</p>
+                        <p className="text-sm text-gray-400">API Status</p>
                         <p className={clsx('font-medium', systemStatus?.api === 'healthy' ? 'text-green-600' : 'text-yellow-600')}>
                           {systemStatus?.api || 'Checking...'}
                         </p>
                       </div>
                       <div className="p-4 bg-blue-50 rounded-lg">
-                        <p className="text-sm text-gray-500">Version</p>
+                        <p className="text-sm text-gray-400">Version</p>
                         <p className="font-medium text-blue-600">{systemStatus?.version || '2.0.0'}</p>
                       </div>
                     </div>
                   </div>
 
                   <div className="card">
-                    <h2 className="text-lg font-semibold text-gray-900 mb-4">Data Management</h2>
+                    <h2 className="text-lg font-semibold text-white mb-4">Data Management</h2>
                     <div className="space-y-3">
                       <button
                         onClick={() => {
@@ -1770,13 +1770,13 @@ export function SettingsPage() {
                           };
                           input.click();
                         }}
-                        className="w-full p-4 bg-gray-50 rounded-lg text-left hover:bg-gray-100 transition-colors flex items-center justify-between"
+                        className="w-full p-4 bg-gray-900 rounded-lg text-left hover:bg-gray-700 transition-colors flex items-center justify-between"
                       >
                         <div className="flex items-center gap-3">
                           <Upload className="w-5 h-5 text-gray-400" />
                           <div>
-                            <p className="font-medium text-gray-900">Import Data</p>
-                            <p className="text-sm text-gray-500">Import products, customers from CSV/Excel</p>
+                            <p className="font-medium text-white">Import Data</p>
+                            <p className="text-sm text-gray-400">Import products, customers from CSV/Excel</p>
                           </div>
                         </div>
                         <ChevronRight className="w-5 h-5 text-gray-400" />
@@ -1799,13 +1799,13 @@ export function SettingsPage() {
                             }
                           }
                         }}
-                        className="w-full p-4 bg-gray-50 rounded-lg text-left hover:bg-gray-100 transition-colors flex items-center justify-between"
+                        className="w-full p-4 bg-gray-900 rounded-lg text-left hover:bg-gray-700 transition-colors flex items-center justify-between"
                       >
                         <div className="flex items-center gap-3">
                           <Download className="w-5 h-5 text-gray-400" />
                           <div>
-                            <p className="font-medium text-gray-900">Export Data</p>
-                            <p className="text-sm text-gray-500">Export reports and data to Excel</p>
+                            <p className="font-medium text-white">Export Data</p>
+                            <p className="text-sm text-gray-400">Export reports and data to Excel</p>
                           </div>
                         </div>
                         <ChevronRight className="w-5 h-5 text-gray-400" />
@@ -1821,13 +1821,13 @@ export function SettingsPage() {
                             }
                           }
                         }}
-                        className="w-full p-4 bg-gray-50 rounded-lg text-left hover:bg-gray-100 transition-colors flex items-center justify-between"
+                        className="w-full p-4 bg-gray-900 rounded-lg text-left hover:bg-gray-700 transition-colors flex items-center justify-between"
                       >
                         <div className="flex items-center gap-3">
                           <Database className="w-5 h-5 text-gray-400" />
                           <div>
-                            <p className="font-medium text-gray-900">Backup Database</p>
-                            <p className="text-sm text-gray-500">Create full system backup</p>
+                            <p className="font-medium text-white">Backup Database</p>
+                            <p className="text-sm text-gray-400">Create full system backup</p>
                           </div>
                         </div>
                         <ChevronRight className="w-5 h-5 text-gray-400" />
@@ -1843,15 +1843,15 @@ export function SettingsPage() {
               {activeTab === 'profile' && (
                 <div className="space-y-4">
                   <div className="card">
-                    <h2 className="text-lg font-semibold text-gray-900 mb-4">My Profile</h2>
+                    <h2 className="text-lg font-semibold text-white mb-4">My Profile</h2>
                     <div className="space-y-4">
-                      <div className="flex items-center gap-4 p-4 bg-gray-50 rounded-lg">
+                      <div className="flex items-center gap-4 p-4 bg-gray-900 rounded-lg">
                         <div className="w-16 h-16 rounded-full bg-bv-gold-100 flex items-center justify-center">
                           <User className="w-8 h-8 text-bv-gold-600" />
                         </div>
                         <div>
-                          <h3 className="font-semibold text-gray-900">{user?.name || 'User'}</h3>
-                          <p className="text-sm text-gray-500">@{user?.email?.split('@')[0]}</p>
+                          <h3 className="font-semibold text-white">{user?.name || 'User'}</h3>
+                          <p className="text-sm text-gray-400">@{user?.email?.split('@')[0]}</p>
                           <div className="flex gap-2 mt-1">
                             {user?.roles?.map(role => (
                               <span key={role} className="text-xs bg-bv-gold-100 text-bv-gold-700 px-2 py-0.5 rounded">
@@ -1864,7 +1864,7 @@ export function SettingsPage() {
 
                       <div className="grid grid-cols-2 gap-4">
                         <div>
-                          <label className="block text-sm font-medium text-gray-700 mb-1">Full Name</label>
+                          <label className="block text-sm font-medium text-gray-300 mb-1">Full Name</label>
                           <input
                             type="text"
                             value={profileData?.full_name || user?.name || ''}
@@ -1873,7 +1873,7 @@ export function SettingsPage() {
                           />
                         </div>
                         <div>
-                          <label className="block text-sm font-medium text-gray-700 mb-1">Email</label>
+                          <label className="block text-sm font-medium text-gray-300 mb-1">Email</label>
                           <input
                             type="email"
                             value={profileData?.email || ''}
@@ -1882,7 +1882,7 @@ export function SettingsPage() {
                           />
                         </div>
                         <div>
-                          <label className="block text-sm font-medium text-gray-700 mb-1">Phone</label>
+                          <label className="block text-sm font-medium text-gray-300 mb-1">Phone</label>
                           <input
                             type="tel"
                             value={profileData?.phone || ''}
@@ -1918,7 +1918,7 @@ export function SettingsPage() {
 
                       {showChangePassword && (
                         <div className="p-4 bg-yellow-50 rounded-lg border border-yellow-200">
-                          <h4 className="font-medium text-gray-900 mb-3">Change Password</h4>
+                          <h4 className="font-medium text-white mb-3">Change Password</h4>
                           <div className="space-y-3">
                             <input type="password" placeholder="Current Password" className="input-field" />
                             <input type="password" placeholder="New Password (min 8 chars)" className="input-field" />
@@ -1931,19 +1931,19 @@ export function SettingsPage() {
                   </div>
 
                   <div className="card">
-                    <h2 className="text-lg font-semibold text-gray-900 mb-4">Preferences</h2>
+                    <h2 className="text-lg font-semibold text-white mb-4">Preferences</h2>
                     <div className="space-y-4">
-                      <div className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
+                      <div className="flex items-center justify-between p-3 bg-gray-900 rounded-lg">
                         <div>
-                          <p className="font-medium text-gray-900">Email Notifications</p>
-                          <p className="text-sm text-gray-500">Receive email alerts for important updates</p>
+                          <p className="font-medium text-white">Email Notifications</p>
+                          <p className="text-sm text-gray-400">Receive email alerts for important updates</p>
                         </div>
                         <ToggleRight className="w-8 h-8 text-green-600 cursor-pointer" />
                       </div>
-                      <div className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
+                      <div className="flex items-center justify-between p-3 bg-gray-900 rounded-lg">
                         <div>
-                          <p className="font-medium text-gray-900">SMS Notifications</p>
-                          <p className="text-sm text-gray-500">Receive SMS for urgent alerts</p>
+                          <p className="font-medium text-white">SMS Notifications</p>
+                          <p className="text-sm text-gray-400">Receive SMS for urgent alerts</p>
                         </div>
                         <ToggleLeft className="w-8 h-8 text-gray-400 cursor-pointer" />
                       </div>
@@ -1958,21 +1958,21 @@ export function SettingsPage() {
               {activeTab === 'business' && (
                 <div className="space-y-4">
                   <div className="card">
-                    <h2 className="text-lg font-semibold text-gray-900 mb-4">Company Profile</h2>
+                    <h2 className="text-lg font-semibold text-white mb-4">Company Profile</h2>
                     <div className="space-y-4">
-                      <div className="flex items-center gap-4 p-4 bg-gray-50 rounded-lg">
-                        <div className="w-20 h-20 rounded-lg bg-white border-2 border-dashed border-gray-300 flex items-center justify-center cursor-pointer hover:border-bv-gold-500">
+                      <div className="flex items-center gap-4 p-4 bg-gray-900 rounded-lg">
+                        <div className="w-20 h-20 rounded-lg bg-gray-800 border-2 border-dashed border-gray-300 flex items-center justify-center cursor-pointer hover:border-bv-gold-500">
                           <Building2 className="w-8 h-8 text-gray-400" />
                         </div>
                         <div>
-                          <p className="text-sm text-gray-500">Company Logo</p>
+                          <p className="text-sm text-gray-400">Company Logo</p>
                           <button className="text-sm text-bv-gold-600 hover:underline">Upload new logo</button>
                         </div>
                       </div>
 
                       <div className="grid grid-cols-2 gap-4">
                         <div>
-                          <label className="block text-sm font-medium text-gray-700 mb-1">Company Name</label>
+                          <label className="block text-sm font-medium text-gray-300 mb-1">Company Name</label>
                           <input
                             type="text"
                             value={businessSettings?.company_name || ''}
@@ -1981,7 +1981,7 @@ export function SettingsPage() {
                           />
                         </div>
                         <div>
-                          <label className="block text-sm font-medium text-gray-700 mb-1">Short Name</label>
+                          <label className="block text-sm font-medium text-gray-300 mb-1">Short Name</label>
                           <input
                             type="text"
                             value={businessSettings?.company_short_name || ''}
@@ -1990,7 +1990,7 @@ export function SettingsPage() {
                           />
                         </div>
                         <div className="col-span-2">
-                          <label className="block text-sm font-medium text-gray-700 mb-1">Tagline</label>
+                          <label className="block text-sm font-medium text-gray-300 mb-1">Tagline</label>
                           <input
                             type="text"
                             value={businessSettings?.tagline || ''}
@@ -1999,7 +1999,7 @@ export function SettingsPage() {
                           />
                         </div>
                         <div>
-                          <label className="block text-sm font-medium text-gray-700 mb-1">Support Email</label>
+                          <label className="block text-sm font-medium text-gray-300 mb-1">Support Email</label>
                           <input
                             type="email"
                             value={businessSettings?.support_email || ''}
@@ -2008,7 +2008,7 @@ export function SettingsPage() {
                           />
                         </div>
                         <div>
-                          <label className="block text-sm font-medium text-gray-700 mb-1">Support Phone</label>
+                          <label className="block text-sm font-medium text-gray-300 mb-1">Support Phone</label>
                           <input
                             type="tel"
                             value={businessSettings?.support_phone || ''}
@@ -2017,7 +2017,7 @@ export function SettingsPage() {
                           />
                         </div>
                         <div>
-                          <label className="block text-sm font-medium text-gray-700 mb-1">Website</label>
+                          <label className="block text-sm font-medium text-gray-300 mb-1">Website</label>
                           <input
                             type="url"
                             value={businessSettings?.website || ''}
@@ -2026,7 +2026,7 @@ export function SettingsPage() {
                           />
                         </div>
                         <div>
-                          <label className="block text-sm font-medium text-gray-700 mb-1">Primary Color</label>
+                          <label className="block text-sm font-medium text-gray-300 mb-1">Primary Color</label>
                           <div className="flex gap-2">
                             <input
                               type="color"
@@ -2043,7 +2043,7 @@ export function SettingsPage() {
                           </div>
                         </div>
                         <div className="col-span-2">
-                          <label className="block text-sm font-medium text-gray-700 mb-1">Address</label>
+                          <label className="block text-sm font-medium text-gray-300 mb-1">Address</label>
                           <textarea
                             value={businessSettings?.address || ''}
                             onChange={e => setBusinessSettings(prev => prev ? { ...prev, address: e.target.value } : null)}
@@ -2078,12 +2078,12 @@ export function SettingsPage() {
               {activeTab === 'tax-invoice' && (
                 <div className="space-y-4">
                   <div className="card">
-                    <h2 className="text-lg font-semibold text-gray-900 mb-4">Tax Settings</h2>
+                    <h2 className="text-lg font-semibold text-white mb-4">Tax Settings</h2>
                     <div className="space-y-4">
-                      <div className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
+                      <div className="flex items-center justify-between p-3 bg-gray-900 rounded-lg">
                         <div>
-                          <p className="font-medium text-gray-900">GST Enabled</p>
-                          <p className="text-sm text-gray-500">Apply GST to all transactions</p>
+                          <p className="font-medium text-white">GST Enabled</p>
+                          <p className="text-sm text-gray-400">Apply GST to all transactions</p>
                         </div>
                         {taxSettings?.gst_enabled ? (
                           <ToggleRight className="w-8 h-8 text-green-600 cursor-pointer" onClick={() => setTaxSettings(prev => prev ? { ...prev, gst_enabled: false } : null)} />
@@ -2093,7 +2093,7 @@ export function SettingsPage() {
                       </div>
                       <div className="grid grid-cols-2 gap-4">
                         <div>
-                          <label className="block text-sm font-medium text-gray-700 mb-1">Company GSTIN</label>
+                          <label className="block text-sm font-medium text-gray-300 mb-1">Company GSTIN</label>
                           <input
                             type="text"
                             value={taxSettings?.company_gstin || ''}
@@ -2103,7 +2103,7 @@ export function SettingsPage() {
                           />
                         </div>
                         <div>
-                          <label className="block text-sm font-medium text-gray-700 mb-1">Default GST Rate (%)</label>
+                          <label className="block text-sm font-medium text-gray-300 mb-1">Default GST Rate (%)</label>
                           <input
                             type="number"
                             value={taxSettings?.default_gst_rate || 18}
@@ -2112,17 +2112,17 @@ export function SettingsPage() {
                           />
                         </div>
                       </div>
-                      <div className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
+                      <div className="flex items-center justify-between p-3 bg-gray-900 rounded-lg">
                         <div>
-                          <p className="font-medium text-gray-900">E-Invoice Enabled</p>
-                          <p className="text-sm text-gray-500">Generate IRN for B2B transactions</p>
+                          <p className="font-medium text-white">E-Invoice Enabled</p>
+                          <p className="text-sm text-gray-400">Generate IRN for B2B transactions</p>
                         </div>
                         <ToggleLeft className="w-8 h-8 text-gray-400 cursor-pointer" />
                       </div>
-                      <div className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
+                      <div className="flex items-center justify-between p-3 bg-gray-900 rounded-lg">
                         <div>
-                          <p className="font-medium text-gray-900">E-Way Bill Auto-Generate</p>
-                          <p className="text-sm text-gray-500">For invoices above threshold</p>
+                          <p className="font-medium text-white">E-Way Bill Auto-Generate</p>
+                          <p className="text-sm text-gray-400">For invoices above threshold</p>
                         </div>
                         <ToggleLeft className="w-8 h-8 text-gray-400 cursor-pointer" />
                       </div>
@@ -2130,11 +2130,11 @@ export function SettingsPage() {
                   </div>
 
                   <div className="card">
-                    <h2 className="text-lg font-semibold text-gray-900 mb-4">Invoice Settings</h2>
+                    <h2 className="text-lg font-semibold text-white mb-4">Invoice Settings</h2>
                     <div className="space-y-4">
                       <div className="grid grid-cols-3 gap-4">
                         <div>
-                          <label className="block text-sm font-medium text-gray-700 mb-1">Invoice Prefix</label>
+                          <label className="block text-sm font-medium text-gray-300 mb-1">Invoice Prefix</label>
                           <input
                             type="text"
                             value={invoiceSettings?.invoice_prefix || 'INV'}
@@ -2143,16 +2143,16 @@ export function SettingsPage() {
                           />
                         </div>
                         <div>
-                          <label className="block text-sm font-medium text-gray-700 mb-1">Current Number</label>
+                          <label className="block text-sm font-medium text-gray-300 mb-1">Current Number</label>
                           <input
                             type="number"
                             value={invoiceSettings?.current_invoice_number || 1}
                             readOnly
-                            className="input-field bg-gray-100"
+                            className="input-field bg-gray-700"
                           />
                         </div>
                         <div>
-                          <label className="block text-sm font-medium text-gray-700 mb-1">Financial Year</label>
+                          <label className="block text-sm font-medium text-gray-300 mb-1">Financial Year</label>
                           <input
                             type="text"
                             value={invoiceSettings?.financial_year || '2024-25'}
@@ -2162,7 +2162,7 @@ export function SettingsPage() {
                         </div>
                       </div>
                       <div>
-                        <label className="block text-sm font-medium text-gray-700 mb-1">Default Terms & Conditions</label>
+                        <label className="block text-sm font-medium text-gray-300 mb-1">Default Terms & Conditions</label>
                         <textarea
                           value={invoiceSettings?.default_terms || ''}
                           onChange={e => setInvoiceSettings(prev => prev ? { ...prev, default_terms: e.target.value } : null)}
@@ -2172,7 +2172,7 @@ export function SettingsPage() {
                       </div>
                       <div className="grid grid-cols-2 gap-4">
                         <div>
-                          <label className="block text-sm font-medium text-gray-700 mb-1">Default Warranty (days)</label>
+                          <label className="block text-sm font-medium text-gray-300 mb-1">Default Warranty (days)</label>
                           <input
                             type="number"
                             value={invoiceSettings?.default_warranty_days || 365}
@@ -2220,7 +2220,7 @@ export function SettingsPage() {
                 <div className="space-y-4">
                   <div className="card">
                     <div className="flex items-center justify-between mb-4">
-                      <h2 className="text-lg font-semibold text-gray-900">Notification Templates</h2>
+                      <h2 className="text-lg font-semibold text-white">Notification Templates</h2>
                       <button className="btn-primary" onClick={() => toast.info('Create new template')}>
                         <Plus className="w-4 h-4 mr-2" />
                         Add Template
@@ -2235,7 +2235,7 @@ export function SettingsPage() {
                         </div>
                       ) : (
                         notificationTemplates.map(template => (
-                          <div key={template.template_id} className="p-4 border border-gray-200 rounded-lg hover:border-bv-gold-200 transition-colors">
+                          <div key={template.template_id} className="p-4 border border-gray-700 rounded-lg hover:border-bv-gold-200 transition-colors">
                             <div className="flex items-start justify-between">
                               <div className="flex-1">
                                 <div className="flex items-center gap-2">
@@ -2247,14 +2247,14 @@ export function SettingsPage() {
                                   )}>
                                     {template.template_type}
                                   </span>
-                                  <span className="text-xs bg-gray-100 px-2 py-0.5 rounded">{template.trigger_event.replace(/_/g, ' ')}</span>
+                                  <span className="text-xs bg-gray-700 px-2 py-0.5 rounded">{template.trigger_event.replace(/_/g, ' ')}</span>
                                   {template.is_enabled ? (
                                     <span className="badge-success">Active</span>
                                   ) : (
                                     <span className="badge-error">Disabled</span>
                                   )}
                                 </div>
-                                <p className="text-sm text-gray-600 mt-2 line-clamp-2">{template.content}</p>
+                                <p className="text-sm text-gray-400 mt-2 line-clamp-2">{template.content}</p>
                                 <div className="flex flex-wrap gap-1 mt-2">
                                   {template.variables.map(v => (
                                     <span key={v} className="text-xs bg-yellow-50 text-yellow-700 px-1.5 py-0.5 rounded font-mono">{`{${v}}`}</span>
@@ -2264,13 +2264,13 @@ export function SettingsPage() {
                               <div className="flex items-center gap-2 ml-4">
                                 <button
                                   onClick={() => toast.info('Edit template')}
-                                  className="p-2 text-gray-400 hover:text-bv-gold-600 hover:bg-gray-100 rounded"
+                                  className="p-2 text-gray-400 hover:text-bv-gold-600 hover:bg-gray-700 rounded"
                                 >
                                   <Edit2 className="w-4 h-4" />
                                 </button>
                                 <button
                                   onClick={() => toast.info('Test notification sent')}
-                                  className="p-2 text-gray-400 hover:text-green-600 hover:bg-gray-100 rounded"
+                                  className="p-2 text-gray-400 hover:text-green-600 hover:bg-gray-700 rounded"
                                   title="Send test"
                                 >
                                   <Send className="w-4 h-4" />
@@ -2296,11 +2296,11 @@ export function SettingsPage() {
               {activeTab === 'printers' && (
                 <div className="space-y-4">
                   <div className="card">
-                    <h2 className="text-lg font-semibold text-gray-900 mb-4">Printer Configuration</h2>
+                    <h2 className="text-lg font-semibold text-white mb-4">Printer Configuration</h2>
                     <div className="space-y-4">
                       <div className="grid grid-cols-2 gap-4">
                         <div>
-                          <label className="block text-sm font-medium text-gray-700 mb-1">Receipt Printer</label>
+                          <label className="block text-sm font-medium text-gray-300 mb-1">Receipt Printer</label>
                           <select
                             value={printerSettings?.receipt_printer_name || ''}
                             onChange={e => setPrinterSettings(prev => prev ? { ...prev, receipt_printer_name: e.target.value } : null)}
@@ -2313,7 +2313,7 @@ export function SettingsPage() {
                           </select>
                         </div>
                         <div>
-                          <label className="block text-sm font-medium text-gray-700 mb-1">Receipt Width (mm)</label>
+                          <label className="block text-sm font-medium text-gray-300 mb-1">Receipt Width (mm)</label>
                           <select
                             value={printerSettings?.receipt_printer_width || 80}
                             onChange={e => setPrinterSettings(prev => prev ? { ...prev, receipt_printer_width: parseInt(e.target.value) } : null)}
@@ -2324,7 +2324,7 @@ export function SettingsPage() {
                           </select>
                         </div>
                         <div>
-                          <label className="block text-sm font-medium text-gray-700 mb-1">Label Printer</label>
+                          <label className="block text-sm font-medium text-gray-300 mb-1">Label Printer</label>
                           <select
                             value={printerSettings?.label_printer_name || ''}
                             onChange={e => setPrinterSettings(prev => prev ? { ...prev, label_printer_name: e.target.value } : null)}
@@ -2337,7 +2337,7 @@ export function SettingsPage() {
                           </select>
                         </div>
                         <div>
-                          <label className="block text-sm font-medium text-gray-700 mb-1">Label Size</label>
+                          <label className="block text-sm font-medium text-gray-300 mb-1">Label Size</label>
                           <select
                             value={printerSettings?.label_size || '50x25'}
                             onChange={e => setPrinterSettings(prev => prev ? { ...prev, label_size: e.target.value } : null)}
@@ -2351,7 +2351,7 @@ export function SettingsPage() {
                       </div>
 
                       <div className="space-y-2">
-                        <label className="flex items-center gap-2 cursor-pointer p-2 hover:bg-gray-50 rounded">
+                        <label className="flex items-center gap-2 cursor-pointer p-2 hover:bg-gray-900 rounded">
                           <input
                             type="checkbox"
                             checked={printerSettings?.auto_print_receipt}
@@ -2360,7 +2360,7 @@ export function SettingsPage() {
                           />
                           <span className="text-sm">Auto-print receipt after payment</span>
                         </label>
-                        <label className="flex items-center gap-2 cursor-pointer p-2 hover:bg-gray-50 rounded">
+                        <label className="flex items-center gap-2 cursor-pointer p-2 hover:bg-gray-900 rounded">
                           <input
                             type="checkbox"
                             checked={printerSettings?.auto_print_job_card}
@@ -2389,18 +2389,18 @@ export function SettingsPage() {
                   </div>
 
                   <div className="card">
-                    <h2 className="text-lg font-semibold text-gray-900 mb-4">Available Printers</h2>
+                    <h2 className="text-lg font-semibold text-white mb-4">Available Printers</h2>
                     <div className="space-y-2">
                       {availablePrinters.length === 0 ? (
-                        <p className="text-gray-500 text-center py-4">No printers detected on network</p>
+                        <p className="text-gray-400 text-center py-4">No printers detected on network</p>
                       ) : (
                         availablePrinters.map(printer => (
-                          <div key={printer.name} className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
+                          <div key={printer.name} className="flex items-center justify-between p-3 bg-gray-900 rounded-lg">
                             <div className="flex items-center gap-3">
                               <Printer className="w-5 h-5 text-gray-400" />
                               <div>
-                                <p className="font-medium text-gray-900">{printer.name}</p>
-                                <p className="text-xs text-gray-500">{printer.type}</p>
+                                <p className="font-medium text-white">{printer.name}</p>
+                                <p className="text-xs text-gray-400">{printer.type}</p>
                               </div>
                             </div>
                             <span className={clsx(
@@ -2466,28 +2466,28 @@ export function SettingsPage() {
                       <div className="card p-4">
                         <div className="flex items-center gap-2 mb-1">
                           <Shield className="w-4 h-4 text-gray-400" />
-                          <p className="text-sm text-gray-500">Total Actions</p>
+                          <p className="text-sm text-gray-400">Total Actions</p>
                         </div>
-                        <p className="text-2xl font-bold text-gray-900">{auditSummary.today.total_actions}</p>
+                        <p className="text-2xl font-bold text-white">{auditSummary.today.total_actions}</p>
                       </div>
                       <div className="card p-4">
                         <div className="flex items-center gap-2 mb-1">
                           <LogOut className="w-4 h-4 text-green-400" />
-                          <p className="text-sm text-gray-500">Logins</p>
+                          <p className="text-sm text-gray-400">Logins</p>
                         </div>
                         <p className="text-2xl font-bold text-green-600">{auditSummary.today.logins}</p>
                       </div>
                       <div className="card p-4">
                         <div className="flex items-center gap-2 mb-1">
                           <Plus className="w-4 h-4 text-blue-400" />
-                          <p className="text-sm text-gray-500">Orders Created</p>
+                          <p className="text-sm text-gray-400">Orders Created</p>
                         </div>
                         <p className="text-2xl font-bold text-blue-600">{auditSummary.today.orders_created}</p>
                       </div>
                       <div className="card p-4">
                         <div className="flex items-center gap-2 mb-1">
                           <AlertCircle className="w-4 h-4 text-green-400" />
-                          <p className="text-sm text-gray-500">System Health</p>
+                          <p className="text-sm text-gray-400">System Health</p>
                         </div>
                         <p className="text-2xl font-bold text-green-600">Good</p>
                       </div>
@@ -2500,7 +2500,7 @@ export function SettingsPage() {
                     <div className="flex items-center justify-between mb-4">
                       <div className="flex items-center gap-2">
                         <History className="w-5 h-5 text-gray-400" />
-                        <h2 className="text-lg font-semibold text-gray-900">Activity Log</h2>
+                        <h2 className="text-lg font-semibold text-white">Activity Log</h2>
                         <span className="text-sm text-gray-400 ml-1">
                           ({filteredLogs.length}{hasActiveFilters ? ` of ${auditLogs.length}` : ''} entries)
                         </span>
@@ -2512,15 +2512,15 @@ export function SettingsPage() {
                     </div>
 
                     {/* Filters Row */}
-                    <div className="flex flex-wrap items-end gap-3 mb-4 p-3 bg-gray-50 rounded-lg border border-gray-200">
-                      <div className="flex items-center gap-1 text-sm font-medium text-gray-600">
+                    <div className="flex flex-wrap items-end gap-3 mb-4 p-3 bg-gray-900 rounded-lg border border-gray-700">
+                      <div className="flex items-center gap-1 text-sm font-medium text-gray-400">
                         <Filter className="w-4 h-4" />
                         Filters
                       </div>
 
                       {/* Search by user name */}
                       <div className="flex-1 min-w-[180px]">
-                        <label className="block text-xs text-gray-500 mb-1">Search User</label>
+                        <label className="block text-xs text-gray-400 mb-1">Search User</label>
                         <div className="relative">
                           <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
                           <input
@@ -2535,7 +2535,7 @@ export function SettingsPage() {
 
                       {/* Action type filter */}
                       <div className="min-w-[150px]">
-                        <label className="block text-xs text-gray-500 mb-1">Action Type</label>
+                        <label className="block text-xs text-gray-400 mb-1">Action Type</label>
                         <select
                           value={auditActionFilter}
                           onChange={e => setAuditActionFilter(e.target.value as AuditAction | '')}
@@ -2553,7 +2553,7 @@ export function SettingsPage() {
 
                       {/* Date From */}
                       <div className="min-w-[150px]">
-                        <label className="block text-xs text-gray-500 mb-1">
+                        <label className="block text-xs text-gray-400 mb-1">
                           <span className="flex items-center gap-1"><Calendar className="w-3 h-3" /> From</span>
                         </label>
                         <input
@@ -2566,7 +2566,7 @@ export function SettingsPage() {
 
                       {/* Date To */}
                       <div className="min-w-[150px]">
-                        <label className="block text-xs text-gray-500 mb-1">
+                        <label className="block text-xs text-gray-400 mb-1">
                           <span className="flex items-center gap-1"><Calendar className="w-3 h-3" /> To</span>
                         </label>
                         <input
@@ -2595,15 +2595,15 @@ export function SettingsPage() {
                     </div>
 
                     {/* Table */}
-                    <div className="overflow-x-auto rounded-lg border border-gray-200">
+                    <div className="overflow-x-auto rounded-lg border border-gray-700">
                       <table className="w-full">
-                        <thead className="bg-gray-50 border-b border-gray-200">
+                        <thead className="bg-gray-900 border-b border-gray-700">
                           <tr>
-                            <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Timestamp</th>
-                            <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">User</th>
-                            <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Action</th>
-                            <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Details</th>
-                            <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">IP Address</th>
+                            <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">Timestamp</th>
+                            <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">User</th>
+                            <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">Action</th>
+                            <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">Details</th>
+                            <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">IP Address</th>
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-gray-200">
@@ -2624,16 +2624,16 @@ export function SettingsPage() {
                               const rowBg = AUDIT_ACTION_ROW_STYLES[actionKey] || '';
 
                               return (
-                                <tr key={log.id} className={clsx('hover:bg-gray-50 transition-colors', rowBg)}>
+                                <tr key={log.id} className={clsx('hover:bg-gray-900 transition-colors', rowBg)}>
                                   {/* Timestamp */}
-                                  <td className="px-4 py-3 text-sm text-gray-500 whitespace-nowrap">
+                                  <td className="px-4 py-3 text-sm text-gray-400 whitespace-nowrap">
                                     <div>{new Date(log.timestamp).toLocaleDateString()}</div>
                                     <div className="text-xs text-gray-400">{new Date(log.timestamp).toLocaleTimeString()}</div>
                                   </td>
 
                                   {/* User */}
                                   <td className="px-4 py-3 whitespace-nowrap">
-                                    <p className="text-sm font-medium text-gray-900">{log.user_name}</p>
+                                    <p className="text-sm font-medium text-white">{log.user_name}</p>
                                   </td>
 
                                   {/* Action Badge */}
@@ -2652,7 +2652,7 @@ export function SettingsPage() {
                                       'text-sm',
                                       actionKey === 'DELETE' ? 'text-red-700' :
                                       actionKey === 'CREATE' ? 'text-green-700' :
-                                      'text-gray-700'
+                                      'text-gray-300'
                                     )}>
                                       {log.details}
                                     </p>
@@ -2664,7 +2664,7 @@ export function SettingsPage() {
                                   </td>
 
                                   {/* IP Address */}
-                                  <td className="px-4 py-3 text-sm text-gray-500 font-mono whitespace-nowrap">
+                                  <td className="px-4 py-3 text-sm text-gray-400 font-mono whitespace-nowrap">
                                     {log.ip_address || '-'}
                                   </td>
                                 </tr>
@@ -2782,147 +2782,147 @@ function StoreModal({
 
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-      <div className="bg-white rounded-xl w-full max-w-2xl max-h-[90vh] overflow-hidden flex flex-col">
-        <div className="flex items-center justify-between p-4 border-b border-gray-200">
-          <h2 className="text-lg font-semibold text-gray-900">
+      <div className="bg-gray-800 rounded-xl w-full max-w-2xl max-h-[90vh] overflow-hidden flex flex-col">
+        <div className="flex items-center justify-between p-4 border-b border-gray-700">
+          <h2 className="text-lg font-semibold text-white">
             {store ? 'Edit Store' : 'Add New Store'}
           </h2>
-          <button onClick={onClose} className="p-2 hover:bg-gray-100 rounded-lg">
-            <X className="w-5 h-5 text-gray-500" />
+          <button onClick={onClose} className="p-2 hover:bg-gray-700 rounded-lg">
+            <X className="w-5 h-5 text-gray-400" />
           </button>
         </div>
 
         <div className="flex-1 overflow-y-auto p-4 space-y-4">
           <div className="grid grid-cols-2 gap-4">
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Store Code *</label>
+              <label className="block text-sm font-medium text-gray-300 mb-1">Store Code *</label>
               <input
                 type="text"
                 value={formData.storeCode || ''}
                 onChange={e => handleChange('storeCode', e.target.value)}
                 placeholder="BV-KOL-001"
-                className="w-full px-3 py-2 border border-gray-200 rounded-lg focus:border-bv-red-500 focus:outline-none"
+                className="w-full px-3 py-2 border border-gray-700 rounded-lg focus:border-bv-red-500 focus:outline-none"
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Store Name *</label>
+              <label className="block text-sm font-medium text-gray-300 mb-1">Store Name *</label>
               <input
                 type="text"
                 value={formData.storeName || ''}
                 onChange={e => handleChange('storeName', e.target.value)}
                 placeholder="Better Vision - Park Street"
-                className="w-full px-3 py-2 border border-gray-200 rounded-lg focus:border-bv-red-500 focus:outline-none"
+                className="w-full px-3 py-2 border border-gray-700 rounded-lg focus:border-bv-red-500 focus:outline-none"
               />
             </div>
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">GSTIN</label>
+            <label className="block text-sm font-medium text-gray-300 mb-1">GSTIN</label>
             <input
               type="text"
               value={formData.gstin || ''}
               onChange={e => handleChange('gstin', e.target.value.toUpperCase())}
               placeholder="19ABCDE1234F1Z5"
-              className="w-full px-3 py-2 border border-gray-200 rounded-lg focus:border-bv-red-500 focus:outline-none"
+              className="w-full px-3 py-2 border border-gray-700 rounded-lg focus:border-bv-red-500 focus:outline-none"
             />
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Address *</label>
+            <label className="block text-sm font-medium text-gray-300 mb-1">Address *</label>
             <textarea
               value={formData.address || ''}
               onChange={e => handleChange('address', e.target.value)}
               rows={2}
-              className="w-full px-3 py-2 border border-gray-200 rounded-lg focus:border-bv-red-500 focus:outline-none"
+              className="w-full px-3 py-2 border border-gray-700 rounded-lg focus:border-bv-red-500 focus:outline-none"
             />
           </div>
 
           <div className="grid grid-cols-3 gap-4">
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">City *</label>
+              <label className="block text-sm font-medium text-gray-300 mb-1">City *</label>
               <input
                 type="text"
                 value={formData.city || ''}
                 onChange={e => handleChange('city', e.target.value)}
-                className="w-full px-3 py-2 border border-gray-200 rounded-lg focus:border-bv-red-500 focus:outline-none"
+                className="w-full px-3 py-2 border border-gray-700 rounded-lg focus:border-bv-red-500 focus:outline-none"
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">State *</label>
+              <label className="block text-sm font-medium text-gray-300 mb-1">State *</label>
               <input
                 type="text"
                 value={formData.state || ''}
                 onChange={e => handleChange('state', e.target.value)}
-                className="w-full px-3 py-2 border border-gray-200 rounded-lg focus:border-bv-red-500 focus:outline-none"
+                className="w-full px-3 py-2 border border-gray-700 rounded-lg focus:border-bv-red-500 focus:outline-none"
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Pincode *</label>
+              <label className="block text-sm font-medium text-gray-300 mb-1">Pincode *</label>
               <input
                 type="text"
                 value={formData.pincode || ''}
                 onChange={e => handleChange('pincode', e.target.value)}
-                className="w-full px-3 py-2 border border-gray-200 rounded-lg focus:border-bv-red-500 focus:outline-none"
+                className="w-full px-3 py-2 border border-gray-700 rounded-lg focus:border-bv-red-500 focus:outline-none"
               />
             </div>
           </div>
 
           <div className="grid grid-cols-2 gap-4">
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Phone</label>
+              <label className="block text-sm font-medium text-gray-300 mb-1">Phone</label>
               <input
                 type="tel"
                 value={formData.phone || ''}
                 onChange={e => handleChange('phone', e.target.value)}
-                className="w-full px-3 py-2 border border-gray-200 rounded-lg focus:border-bv-red-500 focus:outline-none"
+                className="w-full px-3 py-2 border border-gray-700 rounded-lg focus:border-bv-red-500 focus:outline-none"
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Email</label>
+              <label className="block text-sm font-medium text-gray-300 mb-1">Email</label>
               <input
                 type="email"
                 value={formData.email || ''}
                 onChange={e => handleChange('email', e.target.value)}
-                className="w-full px-3 py-2 border border-gray-200 rounded-lg focus:border-bv-red-500 focus:outline-none"
+                className="w-full px-3 py-2 border border-gray-700 rounded-lg focus:border-bv-red-500 focus:outline-none"
               />
             </div>
           </div>
 
           <div className="grid grid-cols-3 gap-4">
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Opening Time</label>
+              <label className="block text-sm font-medium text-gray-300 mb-1">Opening Time</label>
               <input
                 type="time"
                 value={formData.openingTime || '10:00'}
                 onChange={e => handleChange('openingTime', e.target.value)}
-                className="w-full px-3 py-2 border border-gray-200 rounded-lg focus:border-bv-red-500 focus:outline-none"
+                className="w-full px-3 py-2 border border-gray-700 rounded-lg focus:border-bv-red-500 focus:outline-none"
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Closing Time</label>
+              <label className="block text-sm font-medium text-gray-300 mb-1">Closing Time</label>
               <input
                 type="time"
                 value={formData.closingTime || '20:00'}
                 onChange={e => handleChange('closingTime', e.target.value)}
-                className="w-full px-3 py-2 border border-gray-200 rounded-lg focus:border-bv-red-500 focus:outline-none"
+                className="w-full px-3 py-2 border border-gray-700 rounded-lg focus:border-bv-red-500 focus:outline-none"
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Geo-fence (meters)</label>
+              <label className="block text-sm font-medium text-gray-300 mb-1">Geo-fence (meters)</label>
               <input
                 type="number"
                 value={formData.geoFenceRadius || 100}
                 onChange={e => handleChange('geoFenceRadius', parseInt(e.target.value))}
-                className="w-full px-3 py-2 border border-gray-200 rounded-lg focus:border-bv-red-500 focus:outline-none"
+                className="w-full px-3 py-2 border border-gray-700 rounded-lg focus:border-bv-red-500 focus:outline-none"
               />
             </div>
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">Enabled Categories</label>
+            <label className="block text-sm font-medium text-gray-300 mb-2">Enabled Categories</label>
             <div className="grid grid-cols-3 gap-2">
               {categories.map(cat => (
-                <label key={cat.code} className="flex items-center gap-2 p-2 bg-gray-50 rounded cursor-pointer hover:bg-gray-100">
+                <label key={cat.code} className="flex items-center gap-2 p-2 bg-gray-900 rounded cursor-pointer hover:bg-gray-700">
                   <input
                     type="checkbox"
                     checked={formData.enabledCategories?.includes(cat.code) || false}
@@ -2943,7 +2943,7 @@ function StoreModal({
           </div>
         </div>
 
-        <div className="p-4 border-t border-gray-200 flex justify-end gap-3">
+        <div className="p-4 border-t border-gray-700 flex justify-end gap-3">
           <button onClick={onClose} className="btn-outline">
             Cancel
           </button>
@@ -3000,79 +3000,79 @@ function UserModal({
 
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-      <div className="bg-white rounded-xl w-full max-w-xl max-h-[90vh] overflow-hidden flex flex-col">
-        <div className="flex items-center justify-between p-4 border-b border-gray-200">
-          <h2 className="text-lg font-semibold text-gray-900">
+      <div className="bg-gray-800 rounded-xl w-full max-w-xl max-h-[90vh] overflow-hidden flex flex-col">
+        <div className="flex items-center justify-between p-4 border-b border-gray-700">
+          <h2 className="text-lg font-semibold text-white">
             {user ? 'Edit User' : 'Add New User'}
           </h2>
-          <button onClick={onClose} className="p-2 hover:bg-gray-100 rounded-lg">
-            <X className="w-5 h-5 text-gray-500" />
+          <button onClick={onClose} className="p-2 hover:bg-gray-700 rounded-lg">
+            <X className="w-5 h-5 text-gray-400" />
           </button>
         </div>
 
         <div className="flex-1 overflow-y-auto p-4 space-y-4">
           <div className="grid grid-cols-2 gap-4">
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Username *</label>
+              <label className="block text-sm font-medium text-gray-300 mb-1">Username *</label>
               <input
                 type="text"
                 value={formData.username || ''}
                 onChange={e => setFormData(prev => ({ ...prev, username: e.target.value }))}
-                className="w-full px-3 py-2 border border-gray-200 rounded-lg focus:border-bv-red-500 focus:outline-none"
+                className="w-full px-3 py-2 border border-gray-700 rounded-lg focus:border-bv-red-500 focus:outline-none"
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Full Name *</label>
+              <label className="block text-sm font-medium text-gray-300 mb-1">Full Name *</label>
               <input
                 type="text"
                 value={formData.fullName || ''}
                 onChange={e => setFormData(prev => ({ ...prev, fullName: e.target.value }))}
-                className="w-full px-3 py-2 border border-gray-200 rounded-lg focus:border-bv-red-500 focus:outline-none"
+                className="w-full px-3 py-2 border border-gray-700 rounded-lg focus:border-bv-red-500 focus:outline-none"
               />
             </div>
           </div>
 
           <div className="grid grid-cols-2 gap-4">
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Email *</label>
+              <label className="block text-sm font-medium text-gray-300 mb-1">Email *</label>
               <input
                 type="email"
                 value={formData.email || ''}
                 onChange={e => setFormData(prev => ({ ...prev, email: e.target.value }))}
-                className="w-full px-3 py-2 border border-gray-200 rounded-lg focus:border-bv-red-500 focus:outline-none"
+                className="w-full px-3 py-2 border border-gray-700 rounded-lg focus:border-bv-red-500 focus:outline-none"
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Phone</label>
+              <label className="block text-sm font-medium text-gray-300 mb-1">Phone</label>
               <input
                 type="tel"
                 value={formData.phone || ''}
                 onChange={e => setFormData(prev => ({ ...prev, phone: e.target.value }))}
-                className="w-full px-3 py-2 border border-gray-200 rounded-lg focus:border-bv-red-500 focus:outline-none"
+                className="w-full px-3 py-2 border border-gray-700 rounded-lg focus:border-bv-red-500 focus:outline-none"
               />
             </div>
           </div>
 
           {!user && (
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Password *</label>
+              <label className="block text-sm font-medium text-gray-300 mb-1">Password *</label>
               <input
                 type="password"
                 value={password}
                 onChange={e => setPassword(e.target.value)}
-                className="w-full px-3 py-2 border border-gray-200 rounded-lg focus:border-bv-red-500 focus:outline-none"
+                className="w-full px-3 py-2 border border-gray-700 rounded-lg focus:border-bv-red-500 focus:outline-none"
               />
             </div>
           )}
 
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">Roles *</label>
+            <label className="block text-sm font-medium text-gray-300 mb-2">Roles *</label>
             {allowedRoles.length === 0 ? (
-              <p className="text-sm text-gray-500">You don't have permission to assign roles.</p>
+              <p className="text-sm text-gray-400">You don't have permission to assign roles.</p>
             ) : (
               <div className="grid grid-cols-2 gap-2">
                 {allowedRoles.map(role => (
-                  <label key={role} className="flex items-center gap-2 p-2 bg-gray-50 rounded cursor-pointer hover:bg-gray-100">
+                  <label key={role} className="flex items-center gap-2 p-2 bg-gray-900 rounded cursor-pointer hover:bg-gray-700">
                     <input
                       type="checkbox"
                       checked={formData.roles?.includes(role) || false}
@@ -3092,18 +3092,18 @@ function UserModal({
               </div>
             )}
             {currentUserRole === 'STORE_MANAGER' && (
-              <p className="text-xs text-gray-500 mt-2">As Store Manager, you can only assign store-level roles.</p>
+              <p className="text-xs text-gray-400 mt-2">As Store Manager, you can only assign store-level roles.</p>
             )}
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">Accessible Stores</label>
+            <label className="block text-sm font-medium text-gray-300 mb-2">Accessible Stores</label>
             {allowedStores.length === 0 ? (
-              <p className="text-sm text-gray-500">No stores available.</p>
+              <p className="text-sm text-gray-400">No stores available.</p>
             ) : (
               <div className="grid grid-cols-2 gap-2">
                 {allowedStores.map(store => (
-                  <label key={store.id} className="flex items-center gap-2 p-2 bg-gray-50 rounded cursor-pointer hover:bg-gray-100">
+                  <label key={store.id} className="flex items-center gap-2 p-2 bg-gray-900 rounded cursor-pointer hover:bg-gray-700">
                     <input
                       type="checkbox"
                       checked={formData.accessibleStores?.includes(store.id) || false}
@@ -3123,24 +3123,24 @@ function UserModal({
               </div>
             )}
             {currentUserRole === 'STORE_MANAGER' && (
-              <p className="text-xs text-gray-500 mt-2">You can only assign users to your managed stores.</p>
+              <p className="text-xs text-gray-400 mt-2">You can only assign users to your managed stores.</p>
             )}
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Discount Cap (%)</label>
+            <label className="block text-sm font-medium text-gray-300 mb-1">Discount Cap (%)</label>
             <input
               type="number"
               value={formData.discountCap || 10}
               onChange={e => setFormData(prev => ({ ...prev, discountCap: parseInt(e.target.value) }))}
               min="0"
               max="100"
-              className="w-full px-3 py-2 border border-gray-200 rounded-lg focus:border-bv-red-500 focus:outline-none"
+              className="w-full px-3 py-2 border border-gray-700 rounded-lg focus:border-bv-red-500 focus:outline-none"
             />
           </div>
         </div>
 
-        <div className="p-4 border-t border-gray-200 flex justify-end gap-3">
+        <div className="p-4 border-t border-gray-700 flex justify-end gap-3">
           <button onClick={onClose} className="btn-outline">
             Cancel
           </button>
@@ -3181,46 +3181,46 @@ function BrandModal({
 
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-      <div className="bg-white rounded-xl w-full max-w-xl max-h-[90vh] overflow-hidden flex flex-col">
-        <div className="flex items-center justify-between p-4 border-b border-gray-200">
-          <h2 className="text-lg font-semibold text-gray-900">
+      <div className="bg-gray-800 rounded-xl w-full max-w-xl max-h-[90vh] overflow-hidden flex flex-col">
+        <div className="flex items-center justify-between p-4 border-b border-gray-700">
+          <h2 className="text-lg font-semibold text-white">
             {brand ? 'Edit Brand' : 'Add New Brand'}
           </h2>
-          <button onClick={onClose} className="p-2 hover:bg-gray-100 rounded-lg">
-            <X className="w-5 h-5 text-gray-500" />
+          <button onClick={onClose} className="p-2 hover:bg-gray-700 rounded-lg">
+            <X className="w-5 h-5 text-gray-400" />
           </button>
         </div>
 
         <div className="flex-1 overflow-y-auto p-4 space-y-4">
           <div className="grid grid-cols-2 gap-4">
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Brand Name *</label>
+              <label className="block text-sm font-medium text-gray-300 mb-1">Brand Name *</label>
               <input
                 type="text"
                 value={formData.brandName || ''}
                 onChange={e => setFormData(prev => ({ ...prev, brandName: e.target.value }))}
                 placeholder="Ray-Ban"
-                className="w-full px-3 py-2 border border-gray-200 rounded-lg focus:border-bv-red-500 focus:outline-none"
+                className="w-full px-3 py-2 border border-gray-700 rounded-lg focus:border-bv-red-500 focus:outline-none"
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Brand Code *</label>
+              <label className="block text-sm font-medium text-gray-300 mb-1">Brand Code *</label>
               <input
                 type="text"
                 value={formData.brandCode || ''}
                 onChange={e => setFormData(prev => ({ ...prev, brandCode: e.target.value.toUpperCase() }))}
                 placeholder="RAYBAN"
-                className="w-full px-3 py-2 border border-gray-200 rounded-lg focus:border-bv-red-500 focus:outline-none"
+                className="w-full px-3 py-2 border border-gray-700 rounded-lg focus:border-bv-red-500 focus:outline-none"
               />
             </div>
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Tier *</label>
+            <label className="block text-sm font-medium text-gray-300 mb-1">Tier *</label>
             <select
               value={formData.tier || 'MASS'}
               onChange={e => setFormData(prev => ({ ...prev, tier: e.target.value as Brand['tier'] }))}
-              className="w-full px-3 py-2 border border-gray-200 rounded-lg focus:border-bv-red-500 focus:outline-none"
+              className="w-full px-3 py-2 border border-gray-700 rounded-lg focus:border-bv-red-500 focus:outline-none"
             >
               <option value="MASS">Mass</option>
               <option value="PREMIUM">Premium</option>
@@ -3229,10 +3229,10 @@ function BrandModal({
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">Categories *</label>
+            <label className="block text-sm font-medium text-gray-300 mb-2">Categories *</label>
             <div className="grid grid-cols-3 gap-2">
               {categories.map(cat => (
-                <label key={cat.code} className="flex items-center gap-2 p-2 bg-gray-50 rounded cursor-pointer hover:bg-gray-100">
+                <label key={cat.code} className="flex items-center gap-2 p-2 bg-gray-900 rounded cursor-pointer hover:bg-gray-700">
                   <input
                     type="checkbox"
                     checked={formData.categories?.includes(cat.code) || false}
@@ -3253,7 +3253,7 @@ function BrandModal({
           </div>
         </div>
 
-        <div className="p-4 border-t border-gray-200 flex justify-end gap-3">
+        <div className="p-4 border-t border-gray-700 flex justify-end gap-3">
           <button onClick={onClose} className="btn-outline">
             Cancel
           </button>

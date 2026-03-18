@@ -159,8 +159,8 @@ export function PrescriptionsPage() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">Prescriptions</h1>
-          <p className="text-gray-500">Manage patient prescriptions</p>
+          <h1 className="text-2xl font-bold text-white">Prescriptions</h1>
+          <p className="text-gray-400">Manage patient prescriptions</p>
         </div>
         <button
           onClick={loadPrescriptions}
@@ -220,7 +220,7 @@ export function PrescriptionsPage() {
           <Loader2 className="w-8 h-8 animate-spin text-purple-600" />
         </div>
       ) : filteredPrescriptions.length === 0 ? (
-        <div className="card text-center py-12 text-gray-500">
+        <div className="card text-center py-12 text-gray-400">
           <FileText className="w-12 h-12 mx-auto mb-2 opacity-50" />
           <p>{searchQuery ? 'No prescriptions found matching your search' : 'No prescriptions found'}</p>
         </div>
@@ -238,41 +238,41 @@ export function PrescriptionsPage() {
                     <User className="w-5 h-5 text-purple-600" />
                   </div>
                   <div>
-                    <p className="font-medium text-gray-900">{rx.patientName}</p>
-                    <p className="text-xs text-gray-500">{rx.customerPhone}</p>
+                    <p className="font-medium text-white">{rx.patientName}</p>
+                    <p className="text-xs text-gray-400">{rx.customerPhone}</p>
                   </div>
                 </div>
               </div>
 
               <div className="space-y-2 text-sm">
-                <div className="flex items-center gap-2 text-gray-600">
+                <div className="flex items-center gap-2 text-gray-400">
                   <Calendar className="w-4 h-4" />
                   <span>{formatDate(rx.prescribedAt)}</span>
                 </div>
 
-                <div className="bg-gray-50 rounded-lg p-3 space-y-1">
+                <div className="bg-gray-900 rounded-lg p-3 space-y-1">
                   <div className="flex justify-between">
-                    <span className="text-gray-600">Right (OD):</span>
+                    <span className="text-gray-400">Right (OD):</span>
                     <span className="font-medium">
                       {formatPower(rx.rightEye.sphere)} / {formatPower(rx.rightEye.cylinder)}
                     </span>
                   </div>
                   <div className="flex justify-between">
-                    <span className="text-gray-600">Left (OS):</span>
+                    <span className="text-gray-400">Left (OS):</span>
                     <span className="font-medium">
                       {formatPower(rx.leftEye.sphere)} / {formatPower(rx.leftEye.cylinder)}
                     </span>
                   </div>
                   {rx.pd && (
-                    <div className="flex justify-between border-t border-gray-200 pt-1 mt-1">
-                      <span className="text-gray-600">PD:</span>
+                    <div className="flex justify-between border-t border-gray-700 pt-1 mt-1">
+                      <span className="text-gray-400">PD:</span>
                       <span className="font-medium">{rx.pd} mm</span>
                     </div>
                   )}
                 </div>
               </div>
 
-              <div className="mt-3 pt-3 border-t border-gray-100 flex items-center gap-3">
+              <div className="mt-3 pt-3 border-t border-gray-700 flex items-center gap-3">
                 <button
                   onClick={(e) => {
                     e.stopPropagation();
@@ -288,7 +288,7 @@ export function PrescriptionsPage() {
                     e.stopPropagation();
                     handlePrintPrescription(rx);
                   }}
-                  className="text-sm text-gray-500 hover:text-purple-600 flex items-center gap-1"
+                  className="text-sm text-gray-400 hover:text-purple-600 flex items-center gap-1"
                 >
                   <Printer className="w-4 h-4" />
                   Print
@@ -311,13 +311,13 @@ export function PrescriptionsPage() {
       {/* Prescription Detail Modal */}
       {selectedPrescription && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-xl shadow-xl max-w-2xl w-full max-h-[90vh] overflow-y-auto">
+          <div className="bg-gray-800 rounded-xl shadow-xl max-w-2xl w-full max-h-[90vh] overflow-y-auto">
             <div className="p-6">
               <div className="flex items-center justify-between mb-6">
-                <h2 className="text-xl font-bold text-gray-900">Prescription Details</h2>
+                <h2 className="text-xl font-bold text-white">Prescription Details</h2>
                 <button
                   onClick={() => setSelectedPrescription(null)}
-                  className="p-2 hover:bg-gray-100 rounded-lg"
+                  className="p-2 hover:bg-gray-700 rounded-lg"
                 >
                   ×
                 </button>
@@ -326,23 +326,23 @@ export function PrescriptionsPage() {
               <div className="space-y-6">
                 {/* Patient Info */}
                 <div>
-                  <h3 className="font-medium text-gray-900 mb-2">Patient Information</h3>
-                  <div className="bg-gray-50 rounded-lg p-4 space-y-2">
+                  <h3 className="font-medium text-white mb-2">Patient Information</h3>
+                  <div className="bg-gray-900 rounded-lg p-4 space-y-2">
                     <div className="flex justify-between">
-                      <span className="text-gray-600">Name:</span>
+                      <span className="text-gray-400">Name:</span>
                       <span className="font-medium">{selectedPrescription.patientName}</span>
                     </div>
                     <div className="flex justify-between">
-                      <span className="text-gray-600">Phone:</span>
+                      <span className="text-gray-400">Phone:</span>
                       <span className="font-medium">{selectedPrescription.customerPhone}</span>
                     </div>
                     <div className="flex justify-between">
-                      <span className="text-gray-600">Date:</span>
+                      <span className="text-gray-400">Date:</span>
                       <span className="font-medium">{formatDate(selectedPrescription.prescribedAt)}</span>
                     </div>
                     {selectedPrescription.optometristName && (
                       <div className="flex justify-between">
-                        <span className="text-gray-600">Optometrist:</span>
+                        <span className="text-gray-400">Optometrist:</span>
                         <span className="font-medium">{selectedPrescription.optometristName}</span>
                       </div>
                     )}
@@ -351,46 +351,46 @@ export function PrescriptionsPage() {
 
                 {/* Prescription Table */}
                 <div>
-                  <h3 className="font-medium text-gray-900 mb-2">Prescription</h3>
+                  <h3 className="font-medium text-white mb-2">Prescription</h3>
                   <div className="overflow-x-auto">
                     <table className="w-full border-collapse">
                       <thead>
-                        <tr className="bg-gray-100">
-                          <th className="border border-gray-200 px-4 py-2 text-left">Eye</th>
-                          <th className="border border-gray-200 px-4 py-2 text-center">SPH</th>
-                          <th className="border border-gray-200 px-4 py-2 text-center">CYL</th>
-                          <th className="border border-gray-200 px-4 py-2 text-center">AXIS</th>
-                          <th className="border border-gray-200 px-4 py-2 text-center">ADD</th>
+                        <tr className="bg-gray-700">
+                          <th className="border border-gray-700 px-4 py-2 text-left">Eye</th>
+                          <th className="border border-gray-700 px-4 py-2 text-center">SPH</th>
+                          <th className="border border-gray-700 px-4 py-2 text-center">CYL</th>
+                          <th className="border border-gray-700 px-4 py-2 text-center">AXIS</th>
+                          <th className="border border-gray-700 px-4 py-2 text-center">ADD</th>
                         </tr>
                       </thead>
                       <tbody>
                         <tr>
-                          <td className="border border-gray-200 px-4 py-2 font-medium">Right (OD)</td>
-                          <td className="border border-gray-200 px-4 py-2 text-center">
+                          <td className="border border-gray-700 px-4 py-2 font-medium">Right (OD)</td>
+                          <td className="border border-gray-700 px-4 py-2 text-center">
                             {formatPower(selectedPrescription.rightEye.sphere)}
                           </td>
-                          <td className="border border-gray-200 px-4 py-2 text-center">
+                          <td className="border border-gray-700 px-4 py-2 text-center">
                             {formatPower(selectedPrescription.rightEye.cylinder)}
                           </td>
-                          <td className="border border-gray-200 px-4 py-2 text-center">
+                          <td className="border border-gray-700 px-4 py-2 text-center">
                             {selectedPrescription.rightEye.axis ?? '-'}
                           </td>
-                          <td className="border border-gray-200 px-4 py-2 text-center">
+                          <td className="border border-gray-700 px-4 py-2 text-center">
                             {formatPower(selectedPrescription.rightEye.add)}
                           </td>
                         </tr>
                         <tr>
-                          <td className="border border-gray-200 px-4 py-2 font-medium">Left (OS)</td>
-                          <td className="border border-gray-200 px-4 py-2 text-center">
+                          <td className="border border-gray-700 px-4 py-2 font-medium">Left (OS)</td>
+                          <td className="border border-gray-700 px-4 py-2 text-center">
                             {formatPower(selectedPrescription.leftEye.sphere)}
                           </td>
-                          <td className="border border-gray-200 px-4 py-2 text-center">
+                          <td className="border border-gray-700 px-4 py-2 text-center">
                             {formatPower(selectedPrescription.leftEye.cylinder)}
                           </td>
-                          <td className="border border-gray-200 px-4 py-2 text-center">
+                          <td className="border border-gray-700 px-4 py-2 text-center">
                             {selectedPrescription.leftEye.axis ?? '-'}
                           </td>
-                          <td className="border border-gray-200 px-4 py-2 text-center">
+                          <td className="border border-gray-700 px-4 py-2 text-center">
                             {formatPower(selectedPrescription.leftEye.add)}
                           </td>
                         </tr>
@@ -398,8 +398,8 @@ export function PrescriptionsPage() {
                     </table>
                   </div>
                   {selectedPrescription.pd && (
-                    <div className="mt-4 bg-gray-50 rounded-lg p-3">
-                      <span className="text-gray-600">PD (Pupillary Distance):</span>{' '}
+                    <div className="mt-4 bg-gray-900 rounded-lg p-3">
+                      <span className="text-gray-400">PD (Pupillary Distance):</span>{' '}
                       <span className="font-medium">{selectedPrescription.pd} mm</span>
                     </div>
                   )}
@@ -408,9 +408,9 @@ export function PrescriptionsPage() {
                 {/* Notes */}
                 {selectedPrescription.notes && (
                   <div>
-                    <h3 className="font-medium text-gray-900 mb-2">Notes</h3>
-                    <div className="bg-gray-50 rounded-lg p-4">
-                      <p className="text-gray-700">{selectedPrescription.notes}</p>
+                    <h3 className="font-medium text-white mb-2">Notes</h3>
+                    <div className="bg-gray-900 rounded-lg p-4">
+                      <p className="text-gray-300">{selectedPrescription.notes}</p>
                     </div>
                   </div>
                 )}

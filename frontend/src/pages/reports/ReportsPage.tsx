@@ -353,8 +353,8 @@ export function ReportsPage() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">Reports</h1>
-          <p className="text-gray-500">Analytics and business reports</p>
+          <h1 className="text-2xl font-bold text-white">Reports</h1>
+          <p className="text-gray-400">Analytics and business reports</p>
         </div>
         <div className="flex gap-2">
           <select
@@ -403,11 +403,11 @@ export function ReportsPage() {
               <IndianRupee className="w-5 h-5 text-green-600" />
             </div>
             <div>
-              <p className="text-sm text-gray-500">Total Sales</p>
+              <p className="text-sm text-gray-400">Total Sales</p>
               {isLoading ? (
                 <div className="h-7 w-20 bg-gray-200 animate-pulse rounded mt-1" />
               ) : (
-                <p className="text-xl font-bold text-gray-900">{formatCurrency(salesSummary.totalSales)}</p>
+                <p className="text-xl font-bold text-white">{formatCurrency(salesSummary.totalSales)}</p>
               )}
             </div>
           </div>
@@ -418,11 +418,11 @@ export function ReportsPage() {
               <ShoppingCart className="w-5 h-5 text-blue-600" />
             </div>
             <div>
-              <p className="text-sm text-gray-500">Orders</p>
+              <p className="text-sm text-gray-400">Orders</p>
               {isLoading ? (
                 <div className="h-7 w-12 bg-gray-200 animate-pulse rounded mt-1" />
               ) : (
-                <p className="text-xl font-bold text-gray-900">{salesSummary.orderCount}</p>
+                <p className="text-xl font-bold text-white">{salesSummary.orderCount}</p>
               )}
             </div>
           </div>
@@ -433,11 +433,11 @@ export function ReportsPage() {
               <TrendingUp className="w-5 h-5 text-purple-600" />
             </div>
             <div>
-              <p className="text-sm text-gray-500">Avg Order Value</p>
+              <p className="text-sm text-gray-400">Avg Order Value</p>
               {isLoading ? (
                 <div className="h-7 w-16 bg-gray-200 animate-pulse rounded mt-1" />
               ) : (
-                <p className="text-xl font-bold text-gray-900">{formatCurrency(salesSummary.averageOrderValue)}</p>
+                <p className="text-xl font-bold text-white">{formatCurrency(salesSummary.averageOrderValue)}</p>
               )}
             </div>
           </div>
@@ -448,11 +448,11 @@ export function ReportsPage() {
               <FileText className="w-5 h-5 text-orange-600" />
             </div>
             <div>
-              <p className="text-sm text-gray-500">GST Collected</p>
+              <p className="text-sm text-gray-400">GST Collected</p>
               {isLoading ? (
                 <div className="h-7 w-16 bg-gray-200 animate-pulse rounded mt-1" />
               ) : (
-                <p className="text-xl font-bold text-gray-900">{formatCurrency(salesSummary.gstCollected)}</p>
+                <p className="text-xl font-bold text-white">{formatCurrency(salesSummary.gstCollected)}</p>
               )}
             </div>
           </div>
@@ -460,7 +460,7 @@ export function ReportsPage() {
       </div>
 
       {/* Tabs */}
-      <div className="flex border-b border-gray-200 overflow-x-auto">
+      <div className="flex border-b border-gray-700 overflow-x-auto">
         {[
           { id: 'sales' as ReportType, label: 'Sales', icon: BarChart3 },
           { id: 'inventory' as ReportType, label: 'Inventory', icon: Package },
@@ -475,7 +475,7 @@ export function ReportsPage() {
               'flex items-center gap-2 px-4 py-3 text-sm font-medium border-b-2 transition-colors whitespace-nowrap',
               activeTab === tab.id
                 ? 'border-bv-red-600 text-bv-red-600'
-                : 'border-transparent text-gray-500 hover:text-gray-700'
+                : 'border-transparent text-gray-400 hover:text-gray-300'
             )}
           >
             <tab.icon className="w-4 h-4" />
@@ -490,7 +490,7 @@ export function ReportsPage() {
           {/* Sales Trend */}
           <div className="card">
             <div className="flex items-center justify-between mb-4">
-              <h3 className="font-semibold text-gray-900">Sales Trend</h3>
+              <h3 className="font-semibold text-white">Sales Trend</h3>
               {canExport && (
                 <button
                   onClick={handleExportSalesTrend}
@@ -506,7 +506,7 @@ export function ReportsPage() {
                 <Loader2 className="w-8 h-8 animate-spin text-bv-red-600" />
               </div>
             ) : dailyTrend.length === 0 ? (
-              <div className="h-48 flex items-center justify-center text-gray-500">
+              <div className="h-48 flex items-center justify-center text-gray-400">
                 <p>No sales data available for this period</p>
               </div>
             ) : (
@@ -521,7 +521,7 @@ export function ReportsPage() {
                         style={{ height: `${height}%` }}
                         title={formatCurrency(day.sales)}
                       />
-                      <span className="text-xs text-gray-500">{day.date}</span>
+                      <span className="text-xs text-gray-400">{day.date}</span>
                     </div>
                   );
                 })}
@@ -532,7 +532,7 @@ export function ReportsPage() {
           {/* Category Breakdown */}
           <div className="card">
             <div className="flex items-center justify-between mb-4">
-              <h3 className="font-semibold text-gray-900">Category Breakdown</h3>
+              <h3 className="font-semibold text-white">Category Breakdown</h3>
               {canExport && categoryBreakdown.length > 0 && (
                 <button
                   onClick={handleExportCategoryBreakdown}
@@ -556,7 +556,7 @@ export function ReportsPage() {
                 ))}
               </div>
             ) : categoryBreakdown.length === 0 ? (
-              <div className="py-8 text-center text-gray-500">
+              <div className="py-8 text-center text-gray-400">
                 <p>No category data available</p>
               </div>
             ) : (
@@ -564,7 +564,7 @@ export function ReportsPage() {
                 {categoryBreakdown.map((cat, index) => (
                   <div key={index}>
                     <div className="flex items-center justify-between text-sm mb-1">
-                      <span className="text-gray-600">{cat.category}</span>
+                      <span className="text-gray-400">{cat.category}</span>
                       <span className="font-medium">{formatCurrency(cat.sales)}</span>
                     </div>
                     <div className="h-2 bg-gray-200 rounded-full overflow-hidden">
@@ -583,7 +583,7 @@ export function ReportsPage() {
 
       {/* Report Cards */}
       <div>
-        <h3 className="font-semibold text-gray-900 mb-3">Available Reports</h3>
+        <h3 className="font-semibold text-white mb-3">Available Reports</h3>
         <div className="grid grid-cols-1 tablet:grid-cols-2 laptop:grid-cols-3 gap-4">
           {filteredReports.map(report => (
             <div key={report.id} className="card hover:border-bv-red-300 transition-colors">
@@ -592,8 +592,8 @@ export function ReportsPage() {
                   <report.icon className="w-5 h-5 text-bv-red-600" />
                 </div>
                 <div className="flex-1 min-w-0">
-                  <h4 className="font-medium text-gray-900">{report.title}</h4>
-                  <p className="text-sm text-gray-500 mt-1">{report.description}</p>
+                  <h4 className="font-medium text-white">{report.title}</h4>
+                  <p className="text-sm text-gray-400 mt-1">{report.description}</p>
                   <div className="flex items-center gap-2 mt-3">
                     {report.id === 'gst-report' ? (
                       <button
@@ -615,7 +615,7 @@ export function ReportsPage() {
                     {canExport && (
                       <button
                         onClick={() => handleExportReport(report.id)}
-                        className="text-sm text-gray-600 hover:text-gray-700 flex items-center gap-1"
+                        className="text-sm text-gray-400 hover:text-gray-300 flex items-center gap-1"
                       >
                         <Download className="w-4 h-4" />
                         Export CSV
@@ -623,7 +623,7 @@ export function ReportsPage() {
                     )}
                     <button
                       onClick={() => handlePrintReport(report.title)}
-                      className="text-sm text-gray-600 hover:text-gray-700 flex items-center gap-1"
+                      className="text-sm text-gray-400 hover:text-gray-300 flex items-center gap-1"
                     >
                       <Printer className="w-4 h-4" />
                       Print
@@ -644,8 +644,8 @@ export function ReportsPage() {
               <FileText className="w-5 h-5 text-yellow-600" />
             </div>
             <div>
-              <h4 className="font-medium text-gray-900">GST Filing Data Ready</h4>
-              <p className="text-sm text-gray-600 mt-1">
+              <h4 className="font-medium text-white">GST Filing Data Ready</h4>
+              <p className="text-sm text-gray-400 mt-1">
                 GST data for the period has been compiled. Download the reports for GSTR-1 and GSTR-3B filing.
               </p>
               <div className="flex gap-3 mt-3">
@@ -675,14 +675,14 @@ export function ReportsPage() {
       {/* GSTR-1 Modal */}
       {showGSTR1 && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-xl shadow-xl w-full max-w-7xl max-h-[90vh] overflow-y-auto">
-            <div className="sticky top-0 bg-white border-b border-gray-200 px-6 py-4 flex items-center justify-between">
-              <h2 className="text-xl font-bold text-gray-900">GSTR-1 Report</h2>
+          <div className="bg-gray-800 rounded-xl shadow-xl w-full max-w-7xl max-h-[90vh] overflow-y-auto">
+            <div className="sticky top-0 bg-gray-800 border-b border-gray-700 px-6 py-4 flex items-center justify-between">
+              <h2 className="text-xl font-bold text-white">GSTR-1 Report</h2>
               <button
                 onClick={() => setShowGSTR1(false)}
-                className="p-2 hover:bg-gray-100 rounded-lg"
+                className="p-2 hover:bg-gray-700 rounded-lg"
               >
-                <X className="w-5 h-5 text-gray-500" />
+                <X className="w-5 h-5 text-gray-400" />
               </button>
             </div>
             <div className="p-6">
@@ -695,14 +695,14 @@ export function ReportsPage() {
       {/* GSTR-3B Modal */}
       {showGSTR3B && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-xl shadow-xl w-full max-w-7xl max-h-[90vh] overflow-y-auto">
-            <div className="sticky top-0 bg-white border-b border-gray-200 px-6 py-4 flex items-center justify-between">
-              <h2 className="text-xl font-bold text-gray-900">GSTR-3B Report</h2>
+          <div className="bg-gray-800 rounded-xl shadow-xl w-full max-w-7xl max-h-[90vh] overflow-y-auto">
+            <div className="sticky top-0 bg-gray-800 border-b border-gray-700 px-6 py-4 flex items-center justify-between">
+              <h2 className="text-xl font-bold text-white">GSTR-3B Report</h2>
               <button
                 onClick={() => setShowGSTR3B(false)}
-                className="p-2 hover:bg-gray-100 rounded-lg"
+                className="p-2 hover:bg-gray-700 rounded-lg"
               >
-                <X className="w-5 h-5 text-gray-500" />
+                <X className="w-5 h-5 text-gray-400" />
               </button>
             </div>
             <div className="p-6">

@@ -223,32 +223,32 @@ export function StorefrontPage() {
   const categories = ['all', ...Array.from(new Set(products.map(p => p.category)))];
 
   return (
-    <div className="min-h-screen bg-gray-50">
+    <div className="min-h-screen bg-gray-900">
       {/* Header */}
-      <header className="bg-white shadow-sm sticky top-0 z-50">
+      <header className="bg-gray-800 shadow-sm sticky top-0 z-50">
         <div className="max-w-7xl mx-auto px-4 py-4">
           <div className="flex items-center justify-between">
             {/* Logo */}
             <div className="flex items-center gap-2">
               <Eye className="w-8 h-8 text-purple-600" />
               <div>
-                <h1 className="text-2xl font-bold text-gray-900">Better Vision Optics</h1>
-                <p className="text-xs text-gray-500">Premium Eyewear & Eyecare</p>
+                <h1 className="text-2xl font-bold text-white">Better Vision Optics</h1>
+                <p className="text-xs text-gray-400">Premium Eyewear & Eyecare</p>
               </div>
             </div>
 
             {/* Actions */}
             <div className="flex items-center gap-4">
-              <button className="relative p-2 hover:bg-gray-100 rounded-lg transition-colors">
-                <Heart className="w-6 h-6 text-gray-600" />
+              <button className="relative p-2 hover:bg-gray-700 rounded-lg transition-colors">
+                <Heart className="w-6 h-6 text-gray-400" />
                 {wishlistItems.size > 0 && (
                   <span className="absolute -top-1 -right-1 w-5 h-5 bg-red-500 text-white text-xs rounded-full flex items-center justify-center">
                     {wishlistItems.size}
                   </span>
                 )}
               </button>
-              <button className="relative p-2 hover:bg-gray-100 rounded-lg transition-colors">
-                <ShoppingCart className="w-6 h-6 text-gray-600" />
+              <button className="relative p-2 hover:bg-gray-700 rounded-lg transition-colors">
+                <ShoppingCart className="w-6 h-6 text-gray-400" />
                 {cartCount > 0 && (
                   <span className="absolute -top-1 -right-1 w-5 h-5 bg-purple-600 text-white text-xs rounded-full flex items-center justify-center">
                     {cartCount}
@@ -284,7 +284,7 @@ export function StorefrontPage() {
 
       {/* Search and Filters */}
       <div className="max-w-7xl mx-auto px-4 py-6">
-        <div className="bg-white rounded-lg shadow-sm p-4 mb-6">
+        <div className="bg-gray-800 rounded-lg shadow-sm p-4 mb-6">
           <div className="flex flex-col tablet:flex-row gap-4">
             {/* Search */}
             <div className="flex-1 relative">
@@ -332,7 +332,7 @@ export function StorefrontPage() {
             <Loader2 className="w-12 h-12 animate-spin text-purple-600" />
           </div>
         ) : filteredProducts.length === 0 ? (
-          <div className="text-center py-20 text-gray-500">
+          <div className="text-center py-20 text-gray-400">
             <Package className="w-16 h-16 mx-auto mb-4 opacity-50" />
             <p className="text-xl font-medium">No products found</p>
             <p>Try adjusting your search or filters</p>
@@ -342,10 +342,10 @@ export function StorefrontPage() {
             {filteredProducts.map((product) => (
               <div
                 key={product.id}
-                className="bg-white rounded-lg shadow-sm hover:shadow-md transition-shadow overflow-hidden group"
+                className="bg-gray-800 rounded-lg shadow-sm hover:shadow-md transition-shadow overflow-hidden group"
               >
                 {/* Product Image */}
-                <div className="relative aspect-square bg-gray-100">
+                <div className="relative aspect-square bg-gray-700">
                   <img
                     src={product.images[0]}
                     alt={product.name}
@@ -364,20 +364,20 @@ export function StorefrontPage() {
                   {/* Wishlist Button */}
                   <button
                     onClick={() => toggleWishlist(product.id)}
-                    className="absolute top-2 left-2 p-2 bg-white rounded-full shadow-md hover:bg-gray-50 transition-colors"
+                    className="absolute top-2 left-2 p-2 bg-gray-800 rounded-full shadow-md hover:bg-gray-900 transition-colors"
                   >
                     <Heart
                       className={`w-5 h-5 ${
                         wishlistItems.has(product.id)
                           ? 'fill-red-500 text-red-500'
-                          : 'text-gray-600'
+                          : 'text-gray-400'
                       }`}
                     />
                   </button>
                   {/* Stock Badge */}
                   {!product.inStock && (
                     <div className="absolute inset-0 bg-black bg-opacity-50 flex items-center justify-center">
-                      <span className="bg-white text-gray-900 px-4 py-2 rounded-lg font-medium">
+                      <span className="bg-gray-800 text-white px-4 py-2 rounded-lg font-medium">
                         Out of Stock
                       </span>
                     </div>
@@ -386,25 +386,25 @@ export function StorefrontPage() {
 
                 {/* Product Info */}
                 <div className="p-4">
-                  <p className="text-sm text-gray-500 mb-1">{product.brand}</p>
-                  <h3 className="font-medium text-gray-900 mb-2 line-clamp-2 min-h-[2.5rem]">
+                  <p className="text-sm text-gray-400 mb-1">{product.brand}</p>
+                  <h3 className="font-medium text-white mb-2 line-clamp-2 min-h-[2.5rem]">
                     {product.name}
                   </h3>
 
                   {/* Rating */}
                   <div className="flex items-center gap-1 mb-2">
                     <Star className="w-4 h-4 fill-yellow-400 text-yellow-400" />
-                    <span className="text-sm font-medium text-gray-900">{product.rating}</span>
-                    <span className="text-sm text-gray-500">({product.reviewCount})</span>
+                    <span className="text-sm font-medium text-white">{product.rating}</span>
+                    <span className="text-sm text-gray-400">({product.reviewCount})</span>
                   </div>
 
                   {/* Price */}
                   <div className="flex items-baseline gap-2 mb-3">
-                    <span className="text-2xl font-bold text-gray-900">
+                    <span className="text-2xl font-bold text-white">
                       ₹{product.offerPrice.toLocaleString('en-IN')}
                     </span>
                     {product.discount > 0 && (
-                      <span className="text-sm text-gray-500 line-through">
+                      <span className="text-sm text-gray-400 line-through">
                         ₹{product.mrp.toLocaleString('en-IN')}
                       </span>
                     )}
