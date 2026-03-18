@@ -57,6 +57,7 @@ from .routers import (
     analytics_router,
     billing_router,
     supply_chain_router,
+    follow_ups_router,
 )
 
 
@@ -360,6 +361,7 @@ app.include_router(
     supply_chain_router, prefix="/api/v1/supply-chain", tags=["Supply Chain"]
 )
 app.include_router(incentives_router, prefix="/api/v1/incentives", tags=["Incentives"])
+app.include_router(follow_ups_router, prefix="/api/v1/follow-ups", tags=["Follow-ups"])
 
 
 if __name__ == "__main__":

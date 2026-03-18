@@ -127,6 +127,7 @@ export const MODULE_CONFIGS: ModuleConfig[] = [
       { id: 'crm-referrals', label: 'Referral Tracker', path: '/customers/referrals' },
       { id: 'crm-feedback', label: 'Feedback & NPS', path: '/customers/feedback' },
       { id: 'crm-recalls', label: 'Recalls & Reminders', path: '/customers?tab=recalls' },
+      { id: 'crm-follow-ups', label: 'Follow-ups', path: '/customers/follow-ups' },
     ],
   },
   {

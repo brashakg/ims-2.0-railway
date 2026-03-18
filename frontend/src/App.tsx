@@ -28,6 +28,7 @@ const LoyaltyProgram = lazy(() => import('./pages/customers/LoyaltyProgram').the
 const CampaignManager = lazy(() => import('./pages/customers/CampaignManager').then(m => ({ default: m.CampaignManager })));
 const ReferralTracker = lazy(() => import('./pages/customers/ReferralTracker').then(m => ({ default: m.ReferralTracker })));
 const CustomerFeedback = lazy(() => import('./pages/customers/CustomerFeedback').then(m => ({ default: m.CustomerFeedback })));
+const FollowUpDashboard = lazy(() => import('./pages/customers/FollowUpDashboard').then(m => ({ default: m.FollowUpDashboard })))
 const InventoryPage = lazy(() => import('./pages/inventory/InventoryPage').then(m => ({ default: m.InventoryPage })));
 const OrdersPage = lazy(() => import('./pages/orders/OrdersPage').then(m => ({ default: m.OrdersPage })));
 const ClinicalPage = lazy(() => import('./pages/clinical/ClinicalPage').then(m => ({ default: m.ClinicalPage })));
@@ -239,6 +240,18 @@ function App() {
                         allowedRoles={['SUPERADMIN', 'ADMIN', 'STORE_MANAGER']}
                       >
                         <CustomerFeedback />
+                      </ProtectedRoute>
+                    }
+                  />
+
+                  {/* CRM: Follow-up Management */}
+                  <Route
+                    path="customers/follow-ups"
+                    element={
+                      <ProtectedRoute
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'SALES_STAFF', 'CASHIER']}
+                      >
+                        <FollowUpDashboard />
                       </ProtectedRoute>
                     }
                   />

@@ -30,6 +30,7 @@ from .billing import router as billing_router
 from .crm import router as crm_router
 from .supply_chain import router as supply_chain_router
 from .incentives import router as incentives_router
+from .follow_ups import router as follow_ups_router
 
 __all__ = [
     "auth_router",
@@ -59,4 +60,5 @@ __all__ = [
     "billing_router",
     "supply_chain_router",
     "incentives_router",
+    "follow_ups_router",
 ]
