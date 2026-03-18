@@ -541,7 +541,7 @@ export const workshopApi = {
 export const reportsApi = {
   getSalesSummary: async (storeId: string, startDate: string, endDate: string) => {
     const response = await api.get('/reports/sales/summary', {
-      params: { store_id: storeId, start_date: startDate, end_date: endDate },
+      params: { store_id: storeId, from_date: startDate, to_date: endDate },
     });
     return response.data;
   },
@@ -634,12 +634,12 @@ export const hrApi = {
 
 export const adminStoreApi = {
   getStores: async () => {
-    const response = await api.get('/admin/stores');
+    const response = await api.get('/stores');
     return response.data;
   },
 
   getStore: async (storeId: string) => {
-    const response = await api.get(`/admin/stores/${storeId}`);
+    const response = await api.get(`/stores/${storeId}`);
     return response.data;
   },
 
@@ -654,7 +654,7 @@ export const adminStoreApi = {
     gst: string;
     status?: string;
   }) => {
-    const response = await api.post('/admin/stores', data);
+    const response = await api.post('/stores', data);
     return response.data;
   },
 
@@ -669,17 +669,17 @@ export const adminStoreApi = {
     gst: string;
     status: string;
   }>) => {
-    const response = await api.put(`/admin/stores/${storeId}`, data);
+    const response = await api.put(`/stores/${storeId}`, data);
     return response.data;
   },
 
   deleteStore: async (storeId: string) => {
-    const response = await api.delete(`/admin/stores/${storeId}`);
+    const response = await api.delete(`/stores/${storeId}`);
     return response.data;
   },
 
   getStoreUsers: async (storeId: string) => {
-    const response = await api.get(`/admin/stores/${storeId}/users`);
+    const response = await api.get(`/stores/${storeId}/users`);
     return response.data;
   },
 };
@@ -690,12 +690,12 @@ export const adminStoreApi = {
 
 export const adminUserApi = {
   getUsers: async (params?: { storeId?: string; role?: string; status?: string }) => {
-    const response = await api.get('/admin/users', { params });
+    const response = await api.get('/users', { params });
     return response.data;
   },
 
   getUser: async (userId: string) => {
-    const response = await api.get(`/admin/users/${userId}`);
+    const response = await api.get(`/users/${userId}`);
     return response.data;
   },
 
@@ -708,7 +708,7 @@ export const adminUserApi = {
     password?: string;
     status?: string;
   }) => {
-    const response = await api.post('/admin/users', data);
+    const response = await api.post('/users', data);
     return response.data;
   },
 
@@ -720,22 +720,22 @@ export const adminUserApi = {
     storeId: string;
     status: string;
   }>) => {
-    const response = await api.put(`/admin/users/${userId}`, data);
+    const response = await api.put(`/users/${userId}`, data);
     return response.data;
   },
 
   deleteUser: async (userId: string) => {
-    const response = await api.delete(`/admin/users/${userId}`);
+    const response = await api.delete(`/users/${userId}`);
     return response.data;
   },
 
   resetPassword: async (userId: string, newPassword: string) => {
-    const response = await api.post(`/admin/users/${userId}/reset-password`, { new_password: newPassword });
+    const response = await api.post(`/users/${userId}/reset-password`, { new_password: newPassword });
     return response.data;
   },
 
   assignStore: async (userId: string, storeId: string, role?: string) => {
-    const response = await api.post(`/admin/users/${userId}/assign-store`, { store_id: storeId, role });
+    const response = await api.post(`/users/${userId}/assign-store`, { store_id: storeId, role });
     return response.data;
   },
 };

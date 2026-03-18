@@ -192,12 +192,12 @@ export function ReportsPage() {
 
       if (response) {
         setSalesSummary({
-          totalSales: response.totalSales || 0,
-          orderCount: response.orderCount || 0,
-          averageOrderValue: response.averageOrderValue || 0,
-          topCategory: response.topCategory || '-',
-          grossProfit: response.grossProfit || 0,
-          gstCollected: response.gstCollected || 0,
+          totalSales: response.summary?.total_sales || 0,
+          orderCount: response.summary?.total_orders || 0,
+          averageOrderValue: response.summary?.avg_order_value || 0,
+          topCategory: '-', // Not available from backend summary
+          grossProfit: 0, // Not available from backend summary
+          gstCollected: response.summary?.total_tax || 0,
         });
 
         if (response.categoryBreakdown) {

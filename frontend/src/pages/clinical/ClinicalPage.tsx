@@ -93,7 +93,10 @@ export function ClinicalPage() {
   }, [user?.activeStoreId]);
 
   const loadData = async () => {
-    if (!user?.activeStoreId) return;
+    if (!user?.activeStoreId) {
+      setIsLoading(false);
+      return;
+    }
 
     setIsLoading(true);
     setError(null);

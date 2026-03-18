@@ -85,7 +85,10 @@ export function WorkshopPage() {
   }, [user?.activeStoreId]);
 
   const loadJobs = async () => {
-    if (!user?.activeStoreId) return;
+    if (!user?.activeStoreId) {
+      setIsLoading(false);
+      return;
+    }
 
     setIsLoading(true);
     setError(null);

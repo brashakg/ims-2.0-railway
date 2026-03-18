@@ -115,6 +115,23 @@ def _get_integrations_from_db() -> List[dict]:
     return []
 
 
+def _get_user_from_db(user_id: str) -> Optional[dict]:
+    """Fetch user profile data from database by user_id"""
+    try:
+        from database.connection import get_db
+
+        db = get_db()
+        if db and db.is_connected:
+            users_collection = db.db["users"]
+            user = users_collection.find_one({"_id": user_id})
+            if user:
+                user.pop("_id", None)
+                return user
+    except Exception:
+        pass
+    return None
+
+
 # ============================================================================
 # SCHEMAS
 # ============================================================================
@@ -238,6 +255,23 @@ async def get_settings_root():
 @router.get("/profile")
 async def get_profile(current_user: dict = Depends(get_current_user)):
     """Get current user's profile"""
+    # Try to fetch full user data from database
+    user_data = _get_user_from_db(current_user["user_id"])
+    
+    if user_data:
+        # Merge database fields with JWT data
+        return {
+            "user_id": current_user["user_id"],
+            "username": current_user["username"],
+            "roles": current_user["roles"],
+            "store_ids": current_user["store_ids"],
+            "active_store_id": current_user.get("active_store_id"),
+            "full_name": user_data.get("full_name"),
+            "email": user_data.get("email"),
+            "phone": user_data.get("phone"),
+        }
+    
+    # Fallback to JWT data if database is unavailable
     return {
         "user_id": current_user["user_id"],
         "username": current_user["username"],
