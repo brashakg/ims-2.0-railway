@@ -1395,14 +1395,20 @@ export const tasksApi = {
   createTask: async (task: {
     title: string;
     description?: string;
-    category: string;
     priority?: string;
     assigned_to: string;
-    due_at: string;
-    linked_entity_type?: string;
-    linked_entity_id?: string;
+    due_date: Date | string;
+    type?: string;
   }) => {
-    const response = await api.post('/tasks', task);
+    const payload = {
+      title: task.title,
+      description: task.description,
+      priority: task.priority || 'P3',
+      assigned_to: task.assigned_to,
+      due_date: typeof task.due_date === 'string' ? task.due_date : task.due_date.toISOString(),
+      type: task.type || 'manual',
+    };
+    const response = await api.post('/tasks', payload);
     return response.data;
   },
 
@@ -1424,8 +1430,10 @@ export const tasksApi = {
   },
 
   // Complete a task
-  completeTask: async (taskId: string, notes?: string) => {
-    const response = await api.post(`/tasks/${taskId}/complete`, null, { params: { notes } });
+  completeTask: async (taskId: string, notes: string = '') => {
+    const response = await api.patch(`/tasks/${taskId}/complete`, {
+      completion_notes: notes
+    });
     return response.data;
   },
 
@@ -1434,6 +1442,12 @@ export const tasksApi = {
     const response = await api.post(`/tasks/${taskId}/escalate`, null, {
       params: { escalate_to: escalateTo, level }
     });
+    return response.data;
+  },
+
+  // Acknowledge a task
+  acknowledgeTask: async (taskId: string) => {
+    const response = await api.post(`/tasks/${taskId}/acknowledge`);
     return response.data;
   },
 

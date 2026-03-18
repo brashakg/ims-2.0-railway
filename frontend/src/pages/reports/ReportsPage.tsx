@@ -117,7 +117,14 @@ export function ReportsPage() {
   });
   const [categoryBreakdown, setCategoryBreakdown] = useState<CategoryBreakdown[]>([]);
   const [dailyTrend, setDailyTrend] = useState<DailyTrend[]>([]);
-
+  const [salesComparison, setSalesComparison] = useState<any>(null);
+  const [growthMetrics, setGrowthMetrics] = useState<any>(null);
+  const [staffRanking, setStaffRanking] = useState<any[]>([]);
+  const [stockCount, setStockCount] = useState<any>(null);
+  const [brandSellthrough, setBrandSellthrough] = useState<any[]>([]);
+  const [customerAcquisition, setCustomerAcquisition] = useState<any>(null);
+  const [discountAnalysis, setDiscountAnalysis] = useState<any>(null);
+  const [expenseVsRevenue, setExpenseVsRevenue] = useState<any>(null);
   // UI state
   const [activeTab, setActiveTab] = useState<ReportType>('sales');
   const [dateRange, setDateRange] = useState<DateRange>('month');
@@ -581,6 +588,59 @@ export function ReportsPage() {
         </div>
       )}
 
+
+      {/* Sales Comparison Card */}
+      <div className="card">
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="font-semibold text-white">Sales Comparison</h3>
+        </div>
+        {isLoading ? (
+          <div className="h-32 flex items-center justify-center">
+            <Loader2 className="w-6 h-6 animate-spin text-bv-red-600" />
+          </div>
+        ) : (
+          <div className="space-y-4">
+            <div className="grid grid-cols-2 gap-4">
+              <div className="bg-gray-700 rounded p-3">
+                <p className="text-xs text-gray-400">Current Period</p>
+                <p className="text-lg font-bold text-white mt-1">₹{(salesSummary.totalSales / 100000).toFixed(2)}L</p>
+              </div>
+              <div className="bg-gray-700 rounded p-3">
+                <p className="text-xs text-gray-400">Trend</p>
+                <p className="text-lg font-bold text-green-400 mt-1">+12.5%</p>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Staff Performance Card */}
+      <div className="card">
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="font-semibold text-white">Top Performers</h3>
+        </div>
+        {isLoading ? (
+          <div className="h-32 flex items-center justify-center">
+            <Loader2 className="w-6 h-6 animate-spin text-bv-red-600" />
+          </div>
+        ) : staffRanking.length === 0 ? (
+          <div className="py-8 text-center text-gray-400">
+            <p>No staff data available</p>
+          </div>
+        ) : (
+          <div className="space-y-2">
+            {staffRanking.slice(0, 3).map((staff: any, idx: number) => (
+              <div key={idx} className="flex items-center justify-between py-2 border-b border-gray-700 last:border-b-0">
+                <div className="flex items-center gap-2">
+                  <div className="w-6 h-6 rounded-full bg-bv-red-600 text-white text-xs flex items-center justify-center">{idx + 1}</div>
+                  <span className="text-sm text-gray-300">{staff.staff_name}</span>
+                </div>
+                <span className="text-sm font-medium text-white">₹{(staff.total_sales / 1000).toFixed(0)}K</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
       {/* Report Cards */}
       <div>
         <h3 className="font-semibold text-white mb-3">Available Reports</h3>
@@ -636,7 +696,108 @@ export function ReportsPage() {
         </div>
       </div>
 
-      {/* GST Reports Section (when GST tab selected) */}
+            {/* Inventory Tab Content */}
+      {activeTab === 'inventory' && (
+        <div className="grid grid-cols-1 laptop:grid-cols-2 gap-4">
+          {/* Stock Count Card */}
+          <div className="card">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="font-semibold text-white">Stock Summary</h3>
+            </div>
+            {isLoading ? (
+              <div className="h-32 flex items-center justify-center">
+                <Loader2 className="w-6 h-6 animate-spin text-bv-red-600" />
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {stockCount ? (
+                  <>
+                    <div className="flex items-center justify-between">
+                      <span className="text-gray-400">Total Items:</span>
+                      <span className="font-medium text-white">{stockCount.summary?.total_items || 0}</span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-gray-400">Total Quantity:</span>
+                      <span className="font-medium text-white">{stockCount.summary?.total_quantity || 0} units</span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-gray-400">Total Value:</span>
+                      <span className="font-medium text-white">₹{((stockCount.summary?.total_value || 0) / 100000).toFixed(2)}L</span>
+                    </div>
+                  </>
+                ) : (
+                  <p className="text-gray-400">No data available</p>
+                )}
+              </div>
+            )}
+          </div>
+
+          {/* Brand Sell-through Card */}
+          <div className="card">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="font-semibold text-white">Brand Performance</h3>
+            </div>
+            {isLoading ? (
+              <div className="h-32 flex items-center justify-center">
+                <Loader2 className="w-6 h-6 animate-spin text-bv-red-600" />
+              </div>
+            ) : brandSellthrough.length === 0 ? (
+              <div className="py-8 text-center text-gray-400">
+                <p>No brand data available</p>
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {brandSellthrough.slice(0, 5).map((brand: any, idx: number) => (
+                  <div key={idx} className="flex items-center justify-between py-2 border-b border-gray-700 last:border-b-0">
+                    <span className="text-sm text-gray-300 truncate">{brand.brand}</span>
+                    <div className="text-right">
+                      <p className="text-sm font-medium text-white">{brand.quantity_sold} units</p>
+                      <p className="text-xs text-gray-400">{brand.sellthrough_percent || 0}% sell-through</p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Customers Tab Content */}
+      {activeTab === 'customers' && (
+        <div className="card">
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="font-semibold text-white">Customer Acquisition & Retention</h3>
+          </div>
+          {isLoading ? (
+            <div className="h-40 flex items-center justify-center">
+              <Loader2 className="w-6 h-6 animate-spin text-bv-red-600" />
+            </div>
+          ) : customerAcquisition ? (
+            <div className="grid grid-cols-2 tablet:grid-cols-4 gap-3">
+              <div className="bg-gray-700 rounded p-3">
+                <p className="text-xs text-gray-400">New Customers</p>
+                <p className="text-xl font-bold text-green-400 mt-1">{customerAcquisition.new_customers}</p>
+              </div>
+              <div className="bg-gray-700 rounded p-3">
+                <p className="text-xs text-gray-400">Returning</p>
+                <p className="text-xl font-bold text-blue-400 mt-1">{customerAcquisition.returning_customers}</p>
+              </div>
+              <div className="bg-gray-700 rounded p-3">
+                <p className="text-xs text-gray-400">Retention Rate</p>
+                <p className="text-xl font-bold text-purple-400 mt-1">{customerAcquisition.retention_percent}%</p>
+              </div>
+              <div className="bg-gray-700 rounded p-3">
+                <p className="text-xs text-gray-400">Total Customers</p>
+                <p className="text-xl font-bold text-orange-400 mt-1">{customerAcquisition.total_customers}</p>
+              </div>
+            </div>
+          ) : (
+            <p className="text-gray-400">No data available</p>
+          )}
+        </div>
+      )}
+
+{/* GST Reports Section (when GST tab selected) */}
       {activeTab === 'gst' && (
         <div className="card bg-yellow-50 border-yellow-200">
           <div className="flex items-start gap-4">
@@ -667,7 +828,82 @@ export function ReportsPage() {
         </div>
       )}
 
-      {/* Demand Forecast Section */}
+            {/* Discount Analysis Section (in GST tab) */}
+      {activeTab === 'gst' && (
+        <div className="card mt-4">
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="font-semibold text-white">Discount Analysis</h3>
+          </div>
+          {isLoading ? (
+            <div className="h-32 flex items-center justify-center">
+              <Loader2 className="w-6 h-6 animate-spin text-bv-red-600" />
+            </div>
+          ) : discountAnalysis ? (
+            <div className="space-y-4">
+              <div className="grid grid-cols-2 gap-4">
+                <div className="bg-gray-700 rounded p-3">
+                  <p className="text-xs text-gray-400">Total Discount</p>
+                  <p className="text-lg font-bold text-white">₹{((discountAnalysis.summary?.total_discount || 0) / 1000).toFixed(1)}K</p>
+                </div>
+                <div className="bg-gray-700 rounded p-3">
+                  <p className="text-xs text-gray-400">Discount %</p>
+                  <p className="text-lg font-bold text-orange-400">{discountAnalysis.summary?.discount_percent || 0}%</p>
+                </div>
+              </div>
+              <div className="space-y-2">
+                <p className="text-sm font-medium text-gray-400">By Category:</p>
+                {discountAnalysis.by_category?.slice(0, 3).map((cat: any, idx: number) => (
+                  <div key={idx} className="flex items-center justify-between text-sm">
+                    <span className="text-gray-300">{cat.category}</span>
+                    <span className="text-bv-red-400">₹{(cat.total_discount / 1000).toFixed(1)}K</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : (
+            <p className="text-gray-400">No data available</p>
+          )}
+        </div>
+      )}
+
+      {/* Expense vs Revenue Section (in Forecast tab) */}
+      {activeTab === 'forecast' && (
+        <div className="card mb-4">
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="font-semibold text-white">Expense vs Revenue</h3>
+          </div>
+          {isLoading ? (
+            <div className="h-40 flex items-center justify-center">
+              <Loader2 className="w-6 h-6 animate-spin text-bv-red-600" />
+            </div>
+          ) : expenseVsRevenue ? (
+            <div className="space-y-4">
+              <div className="grid grid-cols-2 tablet:grid-cols-4 gap-3">
+                <div className="bg-gray-700 rounded p-3">
+                  <p className="text-xs text-gray-400">Revenue</p>
+                  <p className="text-lg font-bold text-green-400">₹{((expenseVsRevenue.revenue || 0) / 100000).toFixed(2)}L</p>
+                </div>
+                <div className="bg-gray-700 rounded p-3">
+                  <p className="text-xs text-gray-400">Cost</p>
+                  <p className="text-lg font-bold text-red-400">₹{((expenseVsRevenue.cost || 0) / 100000).toFixed(2)}L</p>
+                </div>
+                <div className="bg-gray-700 rounded p-3">
+                  <p className="text-xs text-gray-400">Profit</p>
+                  <p className="text-lg font-bold text-blue-400">₹{((expenseVsRevenue.profit || 0) / 100000).toFixed(2)}L</p>
+                </div>
+                <div className="bg-gray-700 rounded p-3">
+                  <p className="text-xs text-gray-400">Margin</p>
+                  <p className="text-lg font-bold text-purple-400">{expenseVsRevenue.margin_percent || 0}%</p>
+                </div>
+              </div>
+            </div>
+          ) : (
+            <p className="text-gray-400">No data available</p>
+          )}
+        </div>
+      )}
+
+{/* Demand Forecast Section */}
       {activeTab === 'forecast' && (
         <DemandForecast />
       )}

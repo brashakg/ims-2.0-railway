@@ -162,7 +162,7 @@ export const MODULE_CONFIGS: ModuleConfig[] = [
   {
     id: 'hr',
     title: 'HR & Employees',
-    subtitle: 'Attendance, Leaves, Incentives, Tasks',
+    subtitle: 'Attendance, Leaves, Tasks, Payroll, Incentives',
     icon: Users2,
     color: 'text-indigo-600',
     bgColor: 'bg-indigo-50',
@@ -170,8 +170,11 @@ export const MODULE_CONFIGS: ModuleConfig[] = [
     sidebarItems: [
       { id: 'hr-attendance', label: 'Attendance', path: '/hr' },
       { id: 'hr-leaves', label: 'Leave Management', path: '/hr?tab=leave' },
+      { id: 'hr-payroll', label: 'Payroll & Salary', path: '/hr/payroll' },
       { id: 'hr-incentives', label: 'Incentive Tracking', path: '/hr/incentives' },
-      { id: 'hr-tasks', label: 'Tasks & Assignments', path: '/tasks' },
+      { id: 'hr-tasks', label: 'Tasks Dashboard', path: '/tasks/dashboard' },
+      { id: 'hr-checklists', label: 'Daily Checklists', path: '/tasks/checklists' },
+      { id: 'hr-task-mgmt', label: 'Task Management', path: '/tasks' },
     ],
   },
   {

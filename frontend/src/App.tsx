@@ -39,8 +39,10 @@ const ContactLensFittingPage = lazy(() => import('./pages/clinical/ContactLensFi
 const WorkshopPage = lazy(() => import('./pages/workshop/WorkshopPage').then(m => ({ default: m.WorkshopPage })));
 const PurchaseManagementPage = lazy(() => import('./pages/purchase/PurchaseManagementPage').then(m => ({ default: m.PurchaseManagementPage })));
 const TaskManagementPage = lazy(() => import('./pages/tasks/TaskManagementPage').then(m => ({ default: m.TaskManagementPage })));
+const TasksDashboard = lazy(() => import('./pages/tasks/TasksDashboard').then(m => ({ default: m.TasksDashboard })));
 const HRPage = lazy(() => import('./pages/hr/HRPage').then(m => ({ default: m.HRPage })));
 const IncentiveDashboard = lazy(() => import('./pages/hr/IncentiveDashboard').then(m => ({ default: m.IncentiveDashboard })));
+const PayrollDashboard = lazy(() => import('./pages/hr/PayrollDashboard').then(m => ({ default: m.PayrollDashboard })));
 const ReportsPage = lazy(() => import('./pages/reports/ReportsPage').then(m => ({ default: m.ReportsPage })));
 const SettingsPage = lazy(() => import('./pages/settings/SettingsPage').then(m => ({ default: m.SettingsPage })));
 const DayEndReport = lazy(() => import('./pages/reports/DayEndReport'));
@@ -425,6 +427,22 @@ function App() {
                       </ProtectedRoute>
                     }
                   />
+                  <Route
+                    path="tasks/dashboard"
+                    element={
+                      <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT', 'SALES_STAFF']}>
+                        <TasksDashboard />
+                      </ProtectedRoute>
+                    }
+                  />
+                  <Route
+                    path="tasks/checklists"
+                    element={
+                      <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'SALES_STAFF']}>
+                        <TasksDashboard />
+                      </ProtectedRoute>
+                    }
+                  />
 
                   {/* HR */}
                   <Route
@@ -438,6 +456,14 @@ function App() {
                     }
                   />
 
+                  <Route
+                    path="hr/payroll"
+                    element={(
+                      <ProtectedRoute allowedRoles={["SUPERADMIN", "ADMIN", "AREA_MANAGER", "STORE_MANAGER", "ACCOUNTANT"]}>
+                        <PayrollDashboard />
+                      </ProtectedRoute>
+                    )}
+                  />
                   <Route
                     path="hr/incentives"
                     element={

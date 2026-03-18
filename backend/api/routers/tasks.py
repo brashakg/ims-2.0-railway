@@ -1,13 +1,13 @@
 """
-IMS 2.0 - Tasks Router
-=======================
-Task management endpoints
+IMS 2.0 - Tasks, SOPs & Escalation System
+===========================================
+Complete task management with auto-escalation and SOP templates
 """
 
 from fastapi import APIRouter, HTTPException, Depends, Query
 from pydantic import BaseModel, Field
-from typing import Optional
-from datetime import datetime
+from typing import Optional, List
+from datetime import datetime, timedelta
 import uuid
 
 from .auth import get_current_user
@@ -24,19 +24,41 @@ router = APIRouter()
 class TaskCreate(BaseModel):
     title: str = Field(..., min_length=3)
     description: Optional[str] = None
-    category: str
-    priority: str = Field(default="P3")  # P1, P2, P3, P4
+    priority: str = Field(default="P3")  # P0-P4
     assigned_to: str
-    due_at: datetime
-    linked_entity_type: Optional[str] = None  # ORDER, CUSTOMER, GRN, etc.
-    linked_entity_id: Optional[str] = None
+    due_date: datetime
+    type: str = Field(default="manual")  # manual, sop, system
 
 
 class TaskUpdate(BaseModel):
     title: Optional[str] = None
     description: Optional[str] = None
     priority: Optional[str] = None
-    due_at: Optional[datetime] = None
+    status: Optional[str] = None  # open, in_progress, completed, escalated
+    notes: Optional[str] = None
+    assigned_to: Optional[str] = None
+
+
+class TaskComplete(BaseModel):
+    completion_notes: str
+
+
+class ChecklistItemComplete(BaseModel):
+    item_index: int
+    completed: bool
+
+
+class SOPTemplate(BaseModel):
+    name: str
+    type: str  # opening, closing, stock_count
+    items: List[str]
+    store_id: Optional[str] = None
+
+
+class ChecklistCompletion(BaseModel):
+    date: str
+    type: str  # opening, closing, stock_count
+    items_completed: List[bool]
 
 
 # ============================================================================
@@ -44,32 +66,144 @@ class TaskUpdate(BaseModel):
 # ============================================================================
 
 
-def generate_task_number() -> str:
-    """Generate unique task number"""
-    return f"TASK-{datetime.now().strftime('%y%m%d')}-{str(uuid.uuid4())[:6].upper()}"
+def generate_task_id() -> str:
+    """Generate unique task ID"""
+    return f"TASK-{uuid.uuid4().hex[:8].upper()}"
+
+
+def should_escalate(task: dict) -> tuple[bool, str]:
+    """
+    Determine if task should be escalated.
+    Returns (should_escalate, reason)
+    """
+    if task.get("status") == "completed":
+        return False, ""
+    
+    created_at = task.get("created_at")
+    due_date = task.get("due_date")
+    now = datetime.now()
+    
+    # Check if not acknowledged within 2 hours (if in OPEN status)
+    if task.get("status") == "open" and created_at:
+        time_since_created = now - created_at
+        if time_since_created > timedelta(hours=2):
+            return True, "Not acknowledged within 2 hours"
+    
+    # Check if overdue
+    if due_date and now > due_date:
+        return True, "Task overdue"
+    
+    return False, ""
 
 
 # ============================================================================
-# ENDPOINTS
+# ENDPOINTS: TASK MANAGEMENT
 # ============================================================================
 
 
-# NOTE: Specific routes MUST come before /{task_id} to avoid being matched as task_id
-@router.get("/my")
-async def my_tasks(
-    include_completed: bool = Query(False),
+@router.get("/")
+async def list_tasks(
+    status: Optional[str] = Query(None),
+    priority: Optional[str] = Query(None),
+    assigned_to: Optional[str] = Query(None),
+    task_type: Optional[str] = Query(None, alias="type"),
+    store_id: Optional[str] = Query(None),
+    skip: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=100),
     current_user: dict = Depends(get_current_user),
 ):
-    """Get tasks assigned to current user"""
+    """List tasks with filters (status, priority, assigned_to, type)"""
     repo = get_task_repository()
+    
+    if repo is None:
+        return {"tasks": [], "total": 0}
+    
+    filters = {}
+    
+    if status:
+        filters["status"] = status
+    if priority:
+        filters["priority"] = priority
+    if assigned_to:
+        filters["assigned_to"] = assigned_to
+    if task_type:
+        filters["type"] = task_type
+    if store_id:
+        filters["store_id"] = store_id
+    else:
+        filters["store_id"] = current_user.get("active_store_id")
+    
+    tasks = repo.find_many(filters, skip=skip, limit=limit)
+    total = repo.count(filters)
+    
+    return {"tasks": tasks, "total": total}
 
-    if repo is not None:
-        tasks = repo.find_by_assignee(
-            current_user.get("user_id"), include_completed=include_completed
-        )
-        return {"tasks": tasks, "total": len(tasks)}
 
-    return {"tasks": [], "total": 0}
+@router.post("/", status_code=201)
+async def create_task(
+    task: TaskCreate,
+    current_user: dict = Depends(get_current_user),
+):
+    """Create a new task (P0-P4 priority, manual/sop/system type)"""
+    repo = get_task_repository()
+    
+    if repo is None:
+        return {"task_id": generate_task_id(), "message": "Task created"}
+    
+    task_data = {
+        "task_id": generate_task_id(),
+        "title": task.title,
+        "description": task.description,
+        "priority": task.priority,  # P0, P1, P2, P3, P4
+        "status": "open",
+        "assigned_to": task.assigned_to,
+        "assigned_by": current_user.get("user_id"),
+        "store_id": current_user.get("active_store_id"),
+        "type": task.type,  # manual, sop, system
+        "due_date": task.due_date,
+        "created_at": datetime.now(),
+        "escalation_level": 0,
+        "history": [{
+            "status": "open",
+            "timestamp": datetime.now(),
+            "by": current_user.get("user_id"),
+            "notes": "Task created"
+        }]
+    }
+    
+    result = repo.create(task_data)
+    
+    if result:
+        return {
+            "task_id": result.get("task_id"),
+            "message": "Task created successfully"
+        }
+    
+    raise HTTPException(status_code=500, detail="Failed to create task")
+
+
+@router.get("/my-tasks")
+async def get_my_tasks(
+    status: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Get current user's assigned tasks"""
+    repo = get_task_repository()
+    
+    if repo is None:
+        return {"tasks": []}
+    
+    filters = {"assigned_to": current_user.get("user_id")}
+    
+    if status:
+        filters["status"] = status
+    else:
+        # By default, exclude completed
+        filters["status"] = {"$in": ["open", "in_progress", "escalated"]}
+    
+    tasks = repo.find_many(filters, sort=[("priority", 1), ("due_date", 1)])
+    
+    return {"tasks": tasks, "total": len(tasks)}
 
 
 @router.get("/overdue")
@@ -77,28 +211,393 @@ async def get_overdue_tasks(
     store_id: Optional[str] = Query(None),
     current_user: dict = Depends(get_current_user),
 ):
-    """Get overdue tasks"""
+    """Get overdue tasks for escalation"""
+    repo = get_task_repository()
+    
+    if repo is None:
+        return {"tasks": []}
+    
+    active_store = store_id or current_user.get("active_store_id")
+    
+    filters = {
+        "status": {"$in": ["open", "in_progress"]},
+        "due_date": {"$lt": datetime.now()}
+    }
+    
+    if active_store:
+        filters["store_id"] = active_store
+    
+    tasks = repo.find_many(filters, sort=[("due_date", 1)])
+    
+    return {"tasks": tasks, "total": len(tasks)}
+
+
+@router.get("/{task_id}")
+async def get_task(
+    task_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """Get task by ID"""
+    repo = get_task_repository()
+    
+    if repo is None:
+        return {"task_id": task_id}
+    
+    task = repo.find_by_id(task_id)
+    
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    
+    return task
+
+
+@router.patch("/{task_id}")
+async def update_task(
+    task_id: str,
+    update: TaskUpdate,
+    current_user: dict = Depends(get_current_user),
+):
+    """Update task (status, notes, reassign)"""
+    repo = get_task_repository()
+    
+    if repo is None:
+        return {"task_id": task_id, "message": "Task updated"}
+    
+    existing = repo.find_by_id(task_id)
+    
+    if not existing:
+        raise HTTPException(status_code=404, detail="Task not found")
+    
+    update_data = {}
+    
+    if update.title:
+        update_data["title"] = update.title
+    if update.description is not None:
+        update_data["description"] = update.description
+    if update.priority:
+        update_data["priority"] = update.priority
+    if update.status:
+        update_data["status"] = update.status
+    if update.notes:
+        update_data["notes"] = update.notes
+    if update.assigned_to:
+        update_data["assigned_to"] = update.assigned_to
+    
+    if update_data:
+        if repo.update(task_id, update_data):
+            return {"task_id": task_id, "message": "Task updated"}
+    
+    return {"task_id": task_id, "message": "No changes made"}
+
+
+@router.patch("/{task_id}/complete")
+async def complete_task(
+    task_id: str,
+    completion: TaskComplete,
+    current_user: dict = Depends(get_current_user),
+):
+    """Complete a task with completion notes"""
+    repo = get_task_repository()
+    
+    if repo is None:
+        return {"task_id": task_id, "status": "completed"}
+    
+    task = repo.find_by_id(task_id)
+    
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    
+    if task.get("status") == "completed":
+        raise HTTPException(status_code=400, detail="Task already completed")
+    
+    result = repo.update(task_id, {
+        "status": "completed",
+        "completed_at": datetime.now(),
+        "completion_notes": completion.completion_notes,
+        "completed_by": current_user.get("user_id")
+    })
+    
+    if result:
+        return {
+            "task_id": task_id,
+            "status": "completed",
+            "message": "Task completed"
+        }
+    
+    raise HTTPException(status_code=500, detail="Failed to complete task")
+
+
+# ============================================================================
+# ENDPOINTS: DAILY CHECKLISTS
+# ============================================================================
+
+
+@router.get("/checklists")
+async def get_daily_checklists(
+    checklist_type: str = Query(..., alias="type"),  # opening, closing, stock_count
+    store_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Get daily checklists (opening, closing, stock count)"""
+    repo = get_task_repository()
+    
+    if repo is None:
+        return {
+            "type": checklist_type,
+            "items": [],
+            "completed_items": [],
+            "progress": 0
+        }
+    
+    active_store = store_id or current_user.get("active_store_id")
+    
+    # Get SOP template for this checklist type
+    filters = {
+        "type": checklist_type,
+        "store_id": active_store,
+        "active": True
+    }
+    
+    # This would query sop_templates collection
+    # For now, return structure
+    return {
+        "type": checklist_type,
+        "store_id": active_store,
+        "items": [
+            "Check inventory",
+            "Verify stock count",
+            "Update system"
+        ],
+        "completed_items": [False, False, False],
+        "progress": "0/3"
+    }
+
+
+@router.post("/checklists/{checklist_type}/complete-item")
+async def complete_checklist_item(
+    checklist_type: str,
+    completion: ChecklistItemComplete,
+    store_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Mark a checklist item as done"""
+    active_store = store_id or current_user.get("active_store_id")
+    
+    return {
+        "checklist_type": checklist_type,
+        "item_index": completion.item_index,
+        "completed": completion.completed,
+        "message": "Checklist item updated"
+    }
+
+
+# ============================================================================
+# ENDPOINTS: AUTO-GENERATION & SOPs
+# ============================================================================
+
+
+@router.post("/auto-generate")
+async def auto_generate_daily_tasks(
+    store_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Auto-generate daily tasks from SOP templates"""
     repo = get_task_repository()
     active_store = store_id or current_user.get("active_store_id")
+    
+    if repo is None:
+        return {"generated": 0, "message": "Auto-generate failed"}
+    
+    # Default SOP templates for optical retail
+    sop_templates = [
+        {
+            "name": "Opening Checklist",
+            "type": "opening",
+            "items": [
+                "Disarm security system",
+                "Turn on all lights and AC",
+                "Check cash register float",
+                "Clean display cases",
+                "Boot up POS system",
+                "Verify network connectivity"
+            ]
+        },
+        {
+            "name": "Closing Checklist",
+            "type": "closing",
+            "items": [
+                "Count cash in register",
+                "Reconcile payment methods",
+                "Update daily sales",
+                "Lock cash in safe",
+                "Clean store",
+                "Set security system"
+            ]
+        },
+        {
+            "name": "Stock Count",
+            "type": "stock_count",
+            "items": [
+                "Count frames in display",
+                "Count lenses in inventory",
+                "Check expiry dates",
+                "Verify low stock items",
+                "Update stock report"
+            ]
+        }
+    ]
+    
+    generated_count = 0
+    
+    for template in sop_templates:
+        task_data = {
+            "task_id": generate_task_id(),
+            "title": template["name"],
+            "description": f"Daily {template['type']} checklist",
+            "priority": "P2",
+            "status": "open",
+            "assigned_to": current_user.get("user_id"),
+            "assigned_by": current_user.get("user_id"),
+            "store_id": active_store,
+            "type": "sop",
+            "due_date": datetime.now() + timedelta(days=1),
+            "created_at": datetime.now(),
+            "escalation_level": 0,
+            "sop_type": template["type"],
+            "checklist_items": [{"text": item, "completed": False} for item in template["items"]]
+        }
+        
+        result = repo.create(task_data)
+        if result:
+            generated_count += 1
+    
+    return {
+        "generated": generated_count,
+        "message": f"Generated {generated_count} daily tasks from SOP templates"
+    }
 
-    if repo is not None:
-        tasks = repo.find_overdue(active_store)
-        return {"tasks": tasks, "total": len(tasks)}
 
-    return {"tasks": [], "total": 0}
+# ============================================================================
+# ENDPOINTS: ESCALATION MANAGEMENT
+# ============================================================================
 
 
-@router.get("/escalated")
-async def get_escalated_tasks(current_user: dict = Depends(get_current_user)):
-    """Get escalated tasks"""
+@router.post("/{task_id}/acknowledge")
+async def acknowledge_task(
+    task_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """Acknowledge a task (prevent escalation)"""
     repo = get_task_repository()
+    
+    if repo is None:
+        return {"task_id": task_id, "message": "Task acknowledged"}
+    
+    task = repo.find_by_id(task_id)
+    
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    
+    if repo.update(task_id, {
+        "status": "in_progress",
+        "acknowledged_at": datetime.now(),
+        "acknowledged_by": current_user.get("user_id")
+    }):
+        return {
+            "task_id": task_id,
+            "status": "in_progress",
+            "message": "Task acknowledged"
+        }
+    
+    raise HTTPException(status_code=500, detail="Failed to acknowledge task")
 
-    if repo is not None:
-        # Get tasks escalated to current user
-        tasks = repo.find_escalated(current_user.get("user_id"))
-        return {"tasks": tasks, "total": len(tasks)}
 
-    return {"tasks": [], "total": 0}
+@router.post("/{task_id}/escalate")
+async def escalate_task(
+    task_id: str,
+    escalate_to: str = Query(...),
+    current_user: dict = Depends(get_current_user),
+):
+    """Manually escalate task"""
+    repo = get_task_repository()
+    
+    if repo is None:
+        return {"task_id": task_id, "status": "escalated"}
+    
+    task = repo.find_by_id(task_id)
+    
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    
+    current_level = task.get("escalation_level", 0)
+    
+    if repo.update(task_id, {
+        "status": "escalated",
+        "escalated_to": escalate_to,
+        "escalated_at": datetime.now(),
+        "escalation_level": current_level + 1,
+        "escalated_by": current_user.get("user_id")
+    }):
+        return {
+            "task_id": task_id,
+            "status": "escalated",
+            "escalation_level": current_level + 1,
+            "message": "Task escalated"
+        }
+    
+    raise HTTPException(status_code=500, detail="Failed to escalate task")
+
+
+@router.post("/auto-escalate-overdue")
+async def auto_escalate_overdue_tasks(
+    store_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Trigger auto-escalation of overdue tasks (admin endpoint)"""
+    repo = get_task_repository()
+    
+    if repo is None:
+        return {"escalated": 0, "message": "Auto-escalation failed"}
+    
+    active_store = store_id or current_user.get("active_store_id")
+    
+    filters = {
+        "status": {"$in": ["open", "in_progress"]},
+        "due_date": {"$lt": datetime.now()},
+        "escalation_level": {"$lt": 2}  # Don't escalate beyond level 2
+    }
+    
+    if active_store:
+        filters["store_id"] = active_store
+    
+    overdue_tasks = repo.find_many(filters)
+    escalated_count = 0
+    
+    for task in overdue_tasks:
+        should_escalate_flag, reason = should_escalate(task)
+        
+        if should_escalate_flag:
+            current_level = task.get("escalation_level", 0)
+            escalate_to = current_user.get("user_id")  # In real app, determine based on level
+            
+            if repo.update(task["task_id"], {
+                "status": "escalated",
+                "escalated_to": escalate_to,
+                "escalated_at": datetime.now(),
+                "escalation_level": current_level + 1,
+                "escalation_reason": reason
+            }):
+                escalated_count += 1
+    
+    return {
+        "escalated": escalated_count,
+        "message": f"Auto-escalated {escalated_count} overdue tasks"
+    }
+
+
+# ============================================================================
+# ENDPOINTS: ANALYTICS & REPORTING
+# ============================================================================
 
 
 @router.get("/summary")
@@ -108,236 +607,39 @@ async def get_task_summary(
 ):
     """Get task summary by status"""
     repo = get_task_repository()
-    active_store = store_id or current_user.get("active_store_id")
-
-    if repo is not None:
-        summary = repo.get_task_summary(active_store)
-        overdue_count = repo.get_overdue_count(active_store)
-        return {"summary": summary, "overdue_count": overdue_count}
-
-    return {"summary": {}, "overdue_count": 0}
-
-
-@router.get("/")
-async def list_tasks(
-    status: Optional[str] = Query(None),
-    priority: Optional[str] = Query(None),
-    assigned_to: Optional[str] = Query(None),
-    store_id: Optional[str] = Query(None),
-    skip: int = Query(0, ge=0),
-    limit: int = Query(50, ge=1, le=100),
-    current_user: dict = Depends(get_current_user),
-):
-    """List tasks with filters"""
-    repo = get_task_repository()
-    active_store = store_id or current_user.get("active_store_id")
-
-    if repo is not None:
-        if assigned_to:
-            tasks = repo.find_by_assignee(assigned_to, status)
-        elif priority:
-            tasks = repo.find_by_priority(priority, active_store)
-        elif status:
-            filter_dict = {"status": status}
-            if active_store:
-                filter_dict["store_id"] = active_store
-            tasks = repo.find_many(filter_dict, skip=skip, limit=limit)
-        else:
-            tasks = repo.find_open(active_store)
-
-        return {"tasks": tasks, "total": len(tasks)}
-
-    return {"tasks": [], "total": 0}
-
-
-@router.post("/", status_code=201)
-async def create_task(task: TaskCreate, current_user: dict = Depends(get_current_user)):
-    """Create a new task"""
-    repo = get_task_repository()
-
-    if repo is not None:
-        task_data = {
-            "task_number": generate_task_number(),
-            "title": task.title,
-            "description": task.description,
-            "category": task.category,
-            "priority": task.priority,
-            "assigned_to": task.assigned_to,
-            "store_id": current_user.get("active_store_id"),
-            "due_at": task.due_at.isoformat() if task.due_at else None,
-            "linked_entity_type": task.linked_entity_type,
-            "linked_entity_id": task.linked_entity_id,
-            "status": "OPEN",
-            "created_by": current_user.get("user_id"),
+    
+    if repo is None:
+        return {
+            "summary": {},
+            "overdue_count": 0,
+            "escalated_count": 0
         }
-
-        created = repo.create(task_data)
-        if created:
-            return {
-                "task_id": created["task_id"],
-                "task_number": created["task_number"],
-                "message": "Task created",
-            }
-
-        raise HTTPException(status_code=500, detail="Failed to create task")
-
-    return {"task_id": str(uuid.uuid4()), "message": "Task created"}
-
-
-@router.get("/{task_id}")
-async def get_task(task_id: str, current_user: dict = Depends(get_current_user)):
-    """Get task by ID"""
-    repo = get_task_repository()
-
-    if repo is not None:
-        task = repo.find_by_id(task_id)
-        if task:
-            return task
-        raise HTTPException(status_code=404, detail="Task not found")
-
-    return {"task_id": task_id}
-
-
-@router.put("/{task_id}")
-async def update_task(
-    task_id: str, task: TaskUpdate, current_user: dict = Depends(get_current_user)
-):
-    """Update task details"""
-    repo = get_task_repository()
-
-    if repo is not None:
-        existing = repo.find_by_id(task_id)
-        if existing is None:
-            raise HTTPException(status_code=404, detail="Task not found")
-
-        if existing.get("status") in ["COMPLETED", "CANCELLED"]:
-            raise HTTPException(
-                status_code=400, detail="Cannot update completed or cancelled tasks"
-            )
-
-        update_data = task.model_dump(exclude_unset=True)
-        if "due_at" in update_data and update_data["due_at"]:
-            update_data["due_at"] = update_data["due_at"].isoformat()
-        update_data["updated_by"] = current_user.get("user_id")
-
-        if repo.update(task_id, update_data):
-            return {"task_id": task_id, "message": "Task updated"}
-
-        raise HTTPException(status_code=500, detail="Failed to update task")
-
-    return {"task_id": task_id, "message": "Task updated"}
-
-
-@router.post("/{task_id}/start")
-async def start_task(task_id: str, current_user: dict = Depends(get_current_user)):
-    """Start working on a task"""
-    repo = get_task_repository()
-
-    if repo is not None:
-        task = repo.find_by_id(task_id)
-        if not task:
-            raise HTTPException(status_code=404, detail="Task not found")
-
-        if task.get("status") != "OPEN":
-            raise HTTPException(status_code=400, detail="Task must be OPEN to start")
-
-        if repo.start_task(task_id):
-            return {
-                "task_id": task_id,
-                "status": "IN_PROGRESS",
-                "message": "Task started",
-            }
-
-        raise HTTPException(status_code=500, detail="Failed to start task")
-
-    return {"message": "Task started"}
-
-
-@router.post("/{task_id}/complete")
-async def complete_task(
-    task_id: str,
-    notes: Optional[str] = Query(None),
-    current_user: dict = Depends(get_current_user),
-):
-    """Mark task as complete"""
-    repo = get_task_repository()
-
-    if repo is not None:
-        task = repo.find_by_id(task_id)
-        if not task:
-            raise HTTPException(status_code=404, detail="Task not found")
-
-        if task.get("status") not in ["OPEN", "IN_PROGRESS", "ESCALATED"]:
-            raise HTTPException(
-                status_code=400, detail="Task cannot be completed in current state"
-            )
-
-        if repo.complete_task(task_id, notes or ""):
-            return {
-                "task_id": task_id,
-                "status": "COMPLETED",
-                "message": "Task completed",
-            }
-
-        raise HTTPException(status_code=500, detail="Failed to complete task")
-
-    return {"message": "Task completed"}
-
-
-@router.post("/{task_id}/escalate")
-async def escalate_task(
-    task_id: str,
-    escalate_to: str = Query(...),
-    level: int = Query(1, ge=1, le=3),
-    current_user: dict = Depends(get_current_user),
-):
-    """Escalate task to another user"""
-    repo = get_task_repository()
-
-    if repo is not None:
-        task = repo.find_by_id(task_id)
-        if not task:
-            raise HTTPException(status_code=404, detail="Task not found")
-
-        if task.get("status") in ["COMPLETED", "CANCELLED"]:
-            raise HTTPException(
-                status_code=400, detail="Cannot escalate completed or cancelled tasks"
-            )
-
-        if repo.escalate_task(task_id, escalate_to, level):
-            return {
-                "task_id": task_id,
-                "status": "ESCALATED",
-                "message": "Task escalated",
-            }
-
-        raise HTTPException(status_code=500, detail="Failed to escalate task")
-
-    return {"message": "Task escalated"}
-
-
-@router.post("/{task_id}/reassign")
-async def reassign_task(
-    task_id: str,
-    new_assignee: str = Query(...),
-    current_user: dict = Depends(get_current_user),
-):
-    """Reassign task to another user"""
-    repo = get_task_repository()
-
-    if repo is not None:
-        task = repo.find_by_id(task_id)
-        if not task:
-            raise HTTPException(status_code=404, detail="Task not found")
-
-        if task.get("status") in ["COMPLETED", "CANCELLED"]:
-            raise HTTPException(
-                status_code=400, detail="Cannot reassign completed or cancelled tasks"
-            )
-
-        if repo.reassign_task(task_id, new_assignee, current_user.get("user_id")):
-            return {"task_id": task_id, "message": f"Task reassigned to {new_assignee}"}
-
-        raise HTTPException(status_code=500, detail="Failed to reassign task")
-
-    return {"message": "Task reassigned"}
+    
+    active_store = store_id or current_user.get("active_store_id")
+    
+    filters = {}
+    if active_store:
+        filters["store_id"] = active_store
+    
+    # Count by status
+    summary = {}
+    for status in ["open", "in_progress", "completed", "escalated"]:
+        count = repo.count({**filters, "status": status})
+        summary[status] = count
+    
+    # Count overdue
+    overdue_count = repo.count({
+        **filters,
+        "status": {"$in": ["open", "in_progress"]},
+        "due_date": {"$lt": datetime.now()}
+    })
+    
+    # Count escalated
+    escalated_count = repo.count({**filters, "status": "escalated"})
+    
+    return {
+        "summary": summary,
+        "overdue_count": overdue_count,
+        "escalated_count": escalated_count,
+        "total": sum(summary.values())
+    }

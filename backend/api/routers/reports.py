@@ -639,6 +639,682 @@ async def task_summary(
 
 
 # ============================================================================
+# SALES COMPARISON & GROWTH REPORTS
+# ============================================================================
+
+
+@router.get("/sales/comparison")
+async def sales_comparison(
+    store_id: Optional[str] = Query(None),
+    from_date: date = Query(...),
+    to_date: date = Query(...),
+    period_type: str = Query("daily"),  # daily, monthly, yearly
+    current_user: dict = Depends(get_current_user),
+):
+    """Daily/Monthly/Yearly sales comparison (current vs previous period)"""
+    active_store = store_id or current_user.get("active_store_id")
+    order_repo = get_order_repository()
+
+    if order_repo is None:
+        return {"current_period": {}, "previous_period": {}, "comparison": {}}
+
+    from_dt = datetime.combine(from_date, datetime.min.time())
+    to_dt = datetime.combine(to_date, datetime.max.time())
+
+    # Calculate period difference
+    period_days = (to_date - from_date).days
+    prev_from_date = from_date - timedelta(days=period_days + 1)
+    prev_to_date = from_date - timedelta(days=1)
+
+    prev_from_dt = datetime.combine(prev_from_date, datetime.min.time())
+    prev_to_dt = datetime.combine(prev_to_date, datetime.max.time())
+
+    # Get current period orders
+    current_orders = order_repo.find_many(
+        {
+            "store_id": active_store,
+            "created_at": {"$gte": from_dt.isoformat(), "$lte": to_dt.isoformat()},
+            "status": {"$nin": ["CANCELLED", "DRAFT"]},
+        }
+    )
+
+    # Get previous period orders
+    prev_orders = order_repo.find_many(
+        {
+            "store_id": active_store,
+            "created_at": {"$gte": prev_from_dt.isoformat(), "$lte": prev_to_dt.isoformat()},
+            "status": {"$nin": ["CANCELLED", "DRAFT"]},
+        }
+    )
+
+    current_sales = sum(o.get("final_amount", 0) or o.get("total_amount", 0) for o in current_orders)
+    prev_sales = sum(o.get("final_amount", 0) or o.get("total_amount", 0) for o in prev_orders)
+
+    change = ((current_sales - prev_sales) / prev_sales * 100) if prev_sales > 0 else 0
+
+    return {
+        "current_period": {
+            "sales": round(current_sales, 2),
+            "orders": len(current_orders),
+            "avg_order_value": round(current_sales / len(current_orders), 2) if current_orders else 0,
+        },
+        "previous_period": {
+            "sales": round(prev_sales, 2),
+            "orders": len(prev_orders),
+            "avg_order_value": round(prev_sales / len(prev_orders), 2) if prev_orders else 0,
+        },
+        "comparison": {
+            "sales_change_percent": round(change, 2),
+            "sales_change_amount": round(current_sales - prev_sales, 2),
+            "order_change": len(current_orders) - len(prev_orders),
+        },
+    }
+
+
+@router.get("/sales/growth")
+async def sales_growth(
+    store_id: Optional[str] = Query(None),
+    year: int = Query(...),
+    month: int = Query(...),
+    current_user: dict = Depends(get_current_user),
+):
+    """MoM (Month-over-Month) and YoY (Year-over-Year) growth percentages"""
+    active_store = store_id or current_user.get("active_store_id")
+    order_repo = get_order_repository()
+
+    if order_repo is None:
+        return {"current_month": {}, "mom_growth": {}, "yoy_growth": {}}
+
+    # Current month
+    current_start = datetime(year, month, 1)
+    if month == 12:
+        current_end = datetime(year + 1, 1, 1) - timedelta(seconds=1)
+    else:
+        current_end = datetime(year, month + 1, 1) - timedelta(seconds=1)
+
+    # Previous month (MoM)
+    if month == 1:
+        mom_start = datetime(year - 1, 12, 1)
+        mom_end = datetime(year, 1, 1) - timedelta(seconds=1)
+    else:
+        mom_start = datetime(year, month - 1, 1)
+        mom_end = datetime(year, month, 1) - timedelta(seconds=1)
+
+    # Previous year (YoY)
+    yoy_start = datetime(year - 1, month, 1)
+    if month == 12:
+        yoy_end = datetime(year, 1, 1) - timedelta(seconds=1)
+    else:
+        yoy_end = datetime(year - 1, month + 1, 1) - timedelta(seconds=1)
+
+    current_orders = order_repo.find_many({
+        "store_id": active_store,
+        "created_at": {"$gte": current_start.isoformat(), "$lte": current_end.isoformat()},
+        "status": {"$nin": ["CANCELLED", "DRAFT"]},
+    })
+
+    mom_orders = order_repo.find_many({
+        "store_id": active_store,
+        "created_at": {"$gte": mom_start.isoformat(), "$lte": mom_end.isoformat()},
+        "status": {"$nin": ["CANCELLED", "DRAFT"]},
+    })
+
+    yoy_orders = order_repo.find_many({
+        "store_id": active_store,
+        "created_at": {"$gte": yoy_start.isoformat(), "$lte": yoy_end.isoformat()},
+        "status": {"$nin": ["CANCELLED", "DRAFT"]},
+    })
+
+    current_sales = sum(o.get("final_amount", 0) or o.get("total_amount", 0) for o in current_orders)
+    mom_sales = sum(o.get("final_amount", 0) or o.get("total_amount", 0) for o in mom_orders)
+    yoy_sales = sum(o.get("final_amount", 0) or o.get("total_amount", 0) for o in yoy_orders)
+
+    mom_growth = ((current_sales - mom_sales) / mom_sales * 100) if mom_sales > 0 else 0
+    yoy_growth = ((current_sales - yoy_sales) / yoy_sales * 100) if yoy_sales > 0 else 0
+
+    return {
+        "current_month": {
+            "sales": round(current_sales, 2),
+            "orders": len(current_orders),
+        },
+        "mom_growth": {
+            "percent": round(mom_growth, 2),
+            "previous_month_sales": round(mom_sales, 2),
+        },
+        "yoy_growth": {
+            "percent": round(yoy_growth, 2),
+            "previous_year_sales": round(yoy_sales, 2),
+        },
+    }
+
+
+# ============================================================================
+# PROFIT & DISCOUNT REPORTS
+# ============================================================================
+
+
+@router.get("/profit/by-category")
+async def profit_by_category(
+    store_id: Optional[str] = Query(None),
+    from_date: date = Query(...),
+    to_date: date = Query(...),
+    current_user: dict = Depends(get_current_user),
+):
+    """Profit by product category"""
+    active_store = store_id or current_user.get("active_store_id")
+    order_repo = get_order_repository()
+
+    if order_repo is None:
+        return {"data": [], "total_profit": 0}
+
+    from_dt = datetime.combine(from_date, datetime.min.time())
+    to_dt = datetime.combine(to_date, datetime.max.time())
+
+    orders = order_repo.find_many({
+        "store_id": active_store,
+        "created_at": {"$gte": from_dt.isoformat(), "$lte": to_dt.isoformat()},
+        "status": {"$nin": ["CANCELLED", "DRAFT"]},
+    })
+
+    profit_by_cat = {}
+    for order in orders:
+        for item in order.get("items", []):
+            category = item.get("category", "Other")
+            if category not in profit_by_cat:
+                profit_by_cat[category] = {
+                    "category": category,
+                    "revenue": 0,
+                    "cost": 0,
+                    "profit": 0,
+                    "margin_percent": 0,
+                }
+            selling_price = item.get("total", 0) or (item.get("price", 0) * item.get("quantity", 1))
+            cost_price = item.get("cost_price", 0) * item.get("quantity", 1)
+            profit = selling_price - cost_price
+
+            profit_by_cat[category]["revenue"] += selling_price
+            profit_by_cat[category]["cost"] += cost_price
+            profit_by_cat[category]["profit"] += profit
+
+    # Calculate margin percentages
+    for cat in profit_by_cat.values():
+        if cat["revenue"] > 0:
+            cat["margin_percent"] = round((cat["profit"] / cat["revenue"] * 100), 2)
+
+    total_profit = sum(c["profit"] for c in profit_by_cat.values())
+
+    return {
+        "data": list(profit_by_cat.values()),
+        "total_profit": round(total_profit, 2),
+    }
+
+
+@router.get("/profit/by-store")
+async def profit_by_store(
+    from_date: date = Query(...),
+    to_date: date = Query(...),
+    current_user: dict = Depends(get_current_user),
+):
+    """Profit by store (if multi-store)"""
+    order_repo = get_order_repository()
+
+    if order_repo is None:
+        return {"data": [], "total_profit": 0}
+
+    from_dt = datetime.combine(from_date, datetime.min.time())
+    to_dt = datetime.combine(to_date, datetime.max.time())
+
+    orders = order_repo.find_many({
+        "created_at": {"$gte": from_dt.isoformat(), "$lte": to_dt.isoformat()},
+        "status": {"$nin": ["CANCELLED", "DRAFT"]},
+    })
+
+    profit_by_st = {}
+    for order in orders:
+        store = order.get("store_id", "Unknown")
+        if store not in profit_by_st:
+            profit_by_st[store] = {
+                "store_id": store,
+                "revenue": 0,
+                "cost": 0,
+                "profit": 0,
+                "orders": 0,
+            }
+        profit_by_st[store]["orders"] += 1
+        order_amount = order.get("final_amount", 0) or order.get("total_amount", 0)
+        profit_by_st[store]["revenue"] += order_amount
+        
+        # Calculate cost from items
+        cost = sum(item.get("cost_price", 0) * item.get("quantity", 1) for item in order.get("items", []))
+        profit_by_st[store]["cost"] += cost
+        profit_by_st[store]["profit"] += order_amount - cost
+
+    total_profit = sum(s["profit"] for s in profit_by_st.values())
+
+    return {
+        "data": list(profit_by_st.values()),
+        "total_profit": round(total_profit, 2),
+    }
+
+
+@router.get("/discount/analysis")
+async def discount_analysis(
+    store_id: Optional[str] = Query(None),
+    from_date: date = Query(...),
+    to_date: date = Query(...),
+    current_user: dict = Depends(get_current_user),
+):
+    """Discount average by category and store"""
+    active_store = store_id or current_user.get("active_store_id")
+    order_repo = get_order_repository()
+
+    if order_repo is None:
+        return {"by_category": [], "by_store": [], "summary": {}}
+
+    from_dt = datetime.combine(from_date, datetime.min.time())
+    to_dt = datetime.combine(to_date, datetime.max.time())
+
+    orders = order_repo.find_many({
+        "store_id": active_store,
+        "created_at": {"$gte": from_dt.isoformat(), "$lte": to_dt.isoformat()},
+        "status": {"$nin": ["CANCELLED", "DRAFT"]},
+    })
+
+    by_category = {}
+    total_discount = 0
+    total_revenue = 0
+    
+    for order in orders:
+        for item in order.get("items", []):
+            category = item.get("category", "Other")
+            if category not in by_category:
+                by_category[category] = {
+                    "category": category,
+                    "total_discount": 0,
+                    "total_items": 0,
+                    "avg_discount_percent": 0,
+                }
+            item_discount = item.get("discount", 0)
+            item_price = item.get("price", 0) * item.get("quantity", 1)
+            by_category[category]["total_discount"] += item_discount
+            by_category[category]["total_items"] += item.get("quantity", 1)
+            total_discount += item_discount
+            total_revenue += item_price
+
+    for cat in by_category.values():
+        if cat["total_items"] > 0:
+            cat["avg_discount_percent"] = round((cat["total_discount"] / (cat["total_discount"] + (total_revenue / len(by_category)))) * 100, 2)
+
+    return {
+        "by_category": list(by_category.values()),
+        "summary": {
+            "total_discount": round(total_discount, 2),
+            "discount_percent": round((total_discount / (total_discount + total_revenue) * 100), 2) if (total_discount + total_revenue) > 0 else 0,
+        },
+    }
+
+
+# ============================================================================
+# STAFF & CLINICAL REPORTS
+# ============================================================================
+
+
+@router.get("/staff/ranking")
+async def staff_ranking(
+    store_id: Optional[str] = Query(None),
+    from_date: date = Query(...),
+    to_date: date = Query(...),
+    current_user: dict = Depends(get_current_user),
+):
+    """Staff performance ranking (sales, orders, avg bill)"""
+    active_store = store_id or current_user.get("active_store_id")
+    order_repo = get_order_repository()
+
+    if order_repo is None:
+        return {"data": []}
+
+    from_dt = datetime.combine(from_date, datetime.min.time())
+    to_dt = datetime.combine(to_date, datetime.max.time())
+
+    orders = order_repo.find_many({
+        "store_id": active_store,
+        "created_at": {"$gte": from_dt.isoformat(), "$lte": to_dt.isoformat()},
+        "status": {"$nin": ["CANCELLED", "DRAFT"]},
+    })
+
+    staff_data = {}
+    for order in orders:
+        staff_id = order.get("sales_person_id") or order.get("created_by") or "Unknown"
+        staff_name = order.get("sales_person_name", staff_id)
+        if staff_id not in staff_data:
+            staff_data[staff_id] = {
+                "staff_id": staff_id,
+                "staff_name": staff_name,
+                "total_sales": 0,
+                "order_count": 0,
+                "avg_bill": 0,
+            }
+        order_amount = order.get("final_amount", 0) or order.get("total_amount", 0)
+        staff_data[staff_id]["total_sales"] += order_amount
+        staff_data[staff_id]["order_count"] += 1
+
+    for staff in staff_data.values():
+        if staff["order_count"] > 0:
+            staff["avg_bill"] = round(staff["total_sales"] / staff["order_count"], 2)
+
+    # Sort by total sales descending
+    ranked = sorted(staff_data.values(), key=lambda x: x["total_sales"], reverse=True)
+
+    return {"data": ranked}
+
+
+@router.get("/clinical/eye-tests")
+async def eye_tests_report(
+    store_id: Optional[str] = Query(None),
+    from_date: date = Query(...),
+    to_date: date = Query(...),
+    current_user: dict = Depends(get_current_user),
+):
+    """Eye test count report (by optometrist, by store)"""
+    active_store = store_id or current_user.get("active_store_id")
+    task_repo = get_task_repository()
+
+    if task_repo is None:
+        return {"by_optometrist": [], "by_store": [], "total": 0}
+
+    from_dt = datetime.combine(from_date, datetime.min.time())
+    to_dt = datetime.combine(to_date, datetime.max.time())
+
+    # Get all tasks/appointments (eye tests)
+    tasks = task_repo.find_many({
+        "store_id": active_store,
+        "created_at": {"$gte": from_dt.isoformat(), "$lte": to_dt.isoformat()},
+        "task_type": "eye_test",
+    })
+
+    by_optometrist = {}
+    for task in tasks:
+        optom_id = task.get("assigned_to", "Unknown")
+        optom_name = task.get("assigned_to_name", optom_id)
+        if optom_id not in by_optometrist:
+            by_optometrist[optom_id] = {
+                "optometrist_id": optom_id,
+                "optometrist_name": optom_name,
+                "test_count": 0,
+            }
+        by_optometrist[optom_id]["test_count"] += 1
+
+    return {
+        "by_optometrist": list(by_optometrist.values()),
+        "total": len(tasks),
+    }
+
+
+# ============================================================================
+# WORKSHOP & STOCK REPORTS
+# ============================================================================
+
+
+@router.get("/workshop/pending-jobs")
+async def pending_workshop_jobs(
+    store_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Pending workshop jobs report"""
+    active_store = store_id or current_user.get("active_store_id")
+    task_repo = get_task_repository()
+
+    if task_repo is None:
+        return {"data": [], "total_pending": 0}
+
+    pending_tasks = task_repo.find_many({
+        "store_id": active_store,
+        "task_type": "workshop_job",
+        "status": {"$in": ["OPEN", "IN_PROGRESS"]},
+    })
+
+    data = []
+    for task in pending_tasks:
+        data.append({
+            "job_id": task.get("task_id"),
+            "description": task.get("title"),
+            "status": task.get("status"),
+            "priority": task.get("priority"),
+            "assigned_to": task.get("assigned_to_name"),
+            "due_date": task.get("due_date"),
+            "created_at": task.get("created_at"),
+        })
+
+    return {
+        "data": data,
+        "total_pending": len(pending_tasks),
+    }
+
+
+@router.get("/stock/count")
+async def daily_stock_count(
+    store_id: Optional[str] = Query(None),
+    from_date: date = Query(...),
+    to_date: date = Query(...),
+    current_user: dict = Depends(get_current_user),
+):
+    """Daily stock count report"""
+    active_store = store_id or current_user.get("active_store_id")
+    stock_repo = get_stock_repository()
+
+    if stock_repo is None:
+        return {"data": [], "summary": {}}
+
+    all_stock = stock_repo.find_many({"store_id": active_store})
+
+    by_category = {}
+    total_items = 0
+    total_value = 0
+    
+    for item in all_stock:
+        category = item.get("category", "Other")
+        if category not in by_category:
+            by_category[category] = {
+                "category": category,
+                "item_count": 0,
+                "total_quantity": 0,
+                "total_value": 0,
+            }
+        by_category[category]["item_count"] += 1
+        by_category[category]["total_quantity"] += item.get("quantity", 0)
+        by_category[category]["total_value"] += item.get("quantity", 0) * item.get("cost_price", 0)
+        total_items += 1
+        total_value += item.get("quantity", 0) * item.get("cost_price", 0)
+
+    return {
+        "data": list(by_category.values()),
+        "summary": {
+            "total_items": total_items,
+            "total_value": round(total_value, 2),
+            "total_quantity": sum(item.get("quantity", 0) for item in all_stock),
+        },
+    }
+
+
+# ============================================================================
+# FINANCE & CUSTOMER REPORTS
+# ============================================================================
+
+
+@router.get("/finance/expense-vs-revenue")
+async def expense_vs_revenue(
+    store_id: Optional[str] = Query(None),
+    from_date: date = Query(...),
+    to_date: date = Query(...),
+    current_user: dict = Depends(get_current_user),
+):
+    """Expense vs revenue comparison"""
+    active_store = store_id or current_user.get("active_store_id")
+    order_repo = get_order_repository()
+
+    if order_repo is None:
+        return {"revenue": 0, "cost": 0, "profit": 0, "margin_percent": 0}
+
+    from_dt = datetime.combine(from_date, datetime.min.time())
+    to_dt = datetime.combine(to_date, datetime.max.time())
+
+    orders = order_repo.find_many({
+        "store_id": active_store,
+        "created_at": {"$gte": from_dt.isoformat(), "$lte": to_dt.isoformat()},
+        "status": {"$nin": ["CANCELLED", "DRAFT"]},
+    })
+
+    revenue = sum(o.get("final_amount", 0) or o.get("total_amount", 0) for o in orders)
+    cost = 0
+    
+    for order in orders:
+        for item in order.get("items", []):
+            cost += item.get("cost_price", 0) * item.get("quantity", 1)
+
+    profit = revenue - cost
+    margin_percent = (profit / revenue * 100) if revenue > 0 else 0
+
+    return {
+        "revenue": round(revenue, 2),
+        "cost": round(cost, 2),
+        "profit": round(profit, 2),
+        "margin_percent": round(margin_percent, 2),
+    }
+
+
+@router.get("/customers/acquisition")
+async def customer_acquisition(
+    store_id: Optional[str] = Query(None),
+    from_date: date = Query(...),
+    to_date: date = Query(...),
+    current_user: dict = Depends(get_current_user),
+):
+    """Customer acquisition/retention report"""
+    active_store = store_id or current_user.get("active_store_id")
+    customer_repo = get_customer_repository()
+    order_repo = get_order_repository()
+
+    if customer_repo is None:
+        return {
+            "new_customers": 0,
+            "returning_customers": 0,
+            "total_customers": 0,
+            "retention_percent": 0,
+        }
+
+    from_dt = datetime.combine(from_date, datetime.min.time())
+    to_dt = datetime.combine(to_date, datetime.max.time())
+
+    # Get all customers
+    all_customers = customer_repo.find_many({"store_id": active_store})
+
+    # Count new customers in period
+    new_customers = len([
+        c for c in all_customers
+        if from_dt.isoformat() <= c.get("created_at", "") <= to_dt.isoformat()
+    ])
+
+    # Count returning customers (placed orders in period but created before)
+    if order_repo:
+        orders = order_repo.find_many({
+            "store_id": active_store,
+            "created_at": {"$gte": from_dt.isoformat(), "$lte": to_dt.isoformat()},
+        })
+        repeat_customers = {}
+        for order in orders:
+            cust_id = order.get("customer_id")
+            if cust_id:
+                repeat_customers[cust_id] = repeat_customers.get(cust_id, 0) + 1
+        
+        returning_customers = len([c for c in repeat_customers.values() if c > 1])
+    else:
+        returning_customers = 0
+
+    retention_percent = ((returning_customers / new_customers * 100) if new_customers > 0 else 0)
+
+    return {
+        "new_customers": new_customers,
+        "returning_customers": returning_customers,
+        "total_customers": len(all_customers),
+        "retention_percent": round(retention_percent, 2),
+    }
+
+
+@router.get("/inventory/brand-sellthrough")
+async def brand_sellthrough(
+    store_id: Optional[str] = Query(None),
+    from_date: date = Query(...),
+    to_date: date = Query(...),
+    current_user: dict = Depends(get_current_user),
+):
+    """Brand-wise sell-through report"""
+    active_store = store_id or current_user.get("active_store_id")
+    order_repo = get_order_repository()
+    stock_repo = get_stock_repository()
+
+    if order_repo is None:
+        return {"data": [], "summary": {}}
+
+    from_dt = datetime.combine(from_date, datetime.min.time())
+    to_dt = datetime.combine(to_date, datetime.max.time())
+
+    orders = order_repo.find_many({
+        "store_id": active_store,
+        "created_at": {"$gte": from_dt.isoformat(), "$lte": to_dt.isoformat()},
+        "status": {"$nin": ["CANCELLED", "DRAFT"]},
+    })
+
+    # Track brand sales
+    by_brand = {}
+    for order in orders:
+        for item in order.get("items", []):
+            brand = item.get("brand", "Unbranded")
+            if brand not in by_brand:
+                by_brand[brand] = {
+                    "brand": brand,
+                    "quantity_sold": 0,
+                    "revenue": 0,
+                    "avg_price": 0,
+                    "sellthrough_percent": 0,
+                }
+            by_brand[brand]["quantity_sold"] += item.get("quantity", 1)
+            by_brand[brand]["revenue"] += item.get("total", 0) or (item.get("price", 0) * item.get("quantity", 1))
+
+    # Calculate average price
+    for brand in by_brand.values():
+        if brand["quantity_sold"] > 0:
+            brand["avg_price"] = round(brand["revenue"] / brand["quantity_sold"], 2)
+
+    # Get current stock by brand
+    if stock_repo:
+        current_stock = stock_repo.find_many({"store_id": active_store})
+        by_brand_stock = {}
+        for item in current_stock:
+            brand = item.get("brand", "Unbranded")
+            if brand not in by_brand_stock:
+                by_brand_stock[brand] = 0
+            by_brand_stock[brand] += item.get("quantity", 0)
+
+        # Calculate sell-through percent
+        for brand in by_brand.values():
+            if brand["brand"] in by_brand_stock:
+                total_stock = brand["quantity_sold"] + by_brand_stock[brand["brand"]]
+                brand["sellthrough_percent"] = round(
+                    (brand["quantity_sold"] / total_stock * 100), 2
+                ) if total_stock > 0 else 0
+
+    return {
+        "data": list(by_brand.values()),
+        "summary": {
+            "total_brands": len(by_brand),
+            "total_quantity_sold": sum(b["quantity_sold"] for b in by_brand.values()),
+            "total_revenue": round(sum(b["revenue"] for b in by_brand.values()), 2),
+        },
+    }
+
+
+
+# ============================================================================
 # SALES TARGETS ENDPOINT
 # ============================================================================
 
