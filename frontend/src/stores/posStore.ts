@@ -88,10 +88,12 @@ export interface CartLineItem {
 }
 
 export interface PaymentEntry {
-  method: 'CASH' | 'UPI' | 'CARD' | 'BANK_TRANSFER' | 'EMI' | 'CREDIT';
+  method: 'CASH' | 'UPI' | 'CARD' | 'BANK_TRANSFER' | 'EMI' | 'CREDIT' | 'VOUCHER';
   amount: number;
-  reference?: string;            // UPI ref, card last 4, etc.
+  reference?: string;            // UPI ref, card last 4, voucher code, etc.
   timestamp: string;
+  voucherCode?: string;
+  voucherAmount?: number;
 }
 
 export interface POSState {
@@ -119,6 +121,15 @@ export interface POSState {
   // Order result
   order_id: string | null;
   order_number: string | null;
+
+  // Customer loyalty & history
+  customerLoyaltyPoints: number;
+  customerLastOrder?: { productName: string; monthsAgo: number };
+  customerLastRx?: any[];
+
+  // Voucher & rewards
+  appliedVoucher?: { code: string; discountAmount: number };
+  loyaltyPointsRedeemed: number;
 
   // UI state
   is_processing: boolean;
@@ -162,6 +173,12 @@ export interface POSState {
   setOrderResult: (orderId: string, orderNumber: string) => void;
   setProcessing: (val: boolean) => void;
 
+  // --- Loyalty & Vouchers ---
+  setCustomerLoyaltyPoints: (points: number) => void;
+  setCustomerHistory: (lastOrder?: any, lastRx?: any) => void;
+  applyVoucher: (code: string, discountAmount: number) => void;
+  removeVoucher: () => void;
+  redeemLoyaltyPoints: (pointsToRedeem: number) => void;
   // Reset
   resetTransaction: () => void;
   clearAllOnLogout: () => void;
@@ -217,6 +234,11 @@ const initialState = {
   order_id: null,
   order_number: null,
   is_processing: false,
+  customerLoyaltyPoints: 0,
+  customerLastOrder: undefined,
+  customerLastRx: undefined,
+  appliedVoucher: undefined,
+  loyaltyPointsRedeemed: 0,
 };
 
 // ============================================================================
@@ -359,6 +381,24 @@ export const usePOSStore = create<POSState>()(
       // --- Order ---
       setOrderResult: (orderId, orderNumber) => set({ order_id: orderId, order_number: orderNumber }),
       setProcessing: (val) => set({ is_processing: val }),
+
+      // --- Loyalty & Vouchers ---
+      setCustomerLoyaltyPoints: (points) => set({ customerLoyaltyPoints: points }),
+      
+      setCustomerHistory: (lastOrder, lastRx) => set({ 
+        customerLastOrder: lastOrder, 
+        customerLastRx: lastRx 
+      }),
+      
+      applyVoucher: (code, discountAmount) => set({ 
+        appliedVoucher: { code, discountAmount } 
+      }),
+      
+      removeVoucher: () => set({ appliedVoucher: undefined }),
+      
+      redeemLoyaltyPoints: (pointsToRedeem) => set({ 
+        loyaltyPointsRedeemed: pointsToRedeem 
+      }),
 
       // --- Reset ---
       resetTransaction: () => {

@@ -57,6 +57,9 @@ import { ReceiptPreview } from './ReceiptPreview';
 import { BarcodeScanner } from './BarcodeScanner';
 import { AutoSearch } from '../common/AutoSearch';
 import { AddCustomerModal, type CustomerFormData } from '../customers/AddCustomerModal';
+import { CustomerCardWithLoyalty } from './CustomerCardWithLoyalty';
+import { VoucherRedemption } from './VoucherRedemption';
+import { CreditBillingOption } from './CreditBillingOption';
 import { getGSTRateByCategory } from '../../constants/gst';
 import type { PrescriptionInput } from '../../utils/lensAutoSuggest';
 
@@ -891,6 +894,7 @@ function StepCustomer() {
             </div>
             <button onClick={() => store.setCustomer(null)} className="text-sm text-gray-500 hover:text-gray-700 px-3 py-1 border border-gray-200 rounded-lg">Change</button>
           </div>
+          {!isWalkin && <CustomerCardWithLoyalty />}
           {!isWalkin && <RxAvailableBadge customerId={store.customer.id} customerName={store.customer.name} />}
           {!isWalkin && <CustomerHistory customerId={store.customer.id} />}
           </>
@@ -1527,6 +1531,14 @@ function StepPayment() {
           <span className={balance > 0 ? 'text-red-600 font-semibold' : 'text-green-600 font-semibold'}>Balance: ₹{Math.round(Math.max(0, balance)).toLocaleString('en-IN')}</span>
         </div>}
       </div>
+
+      {/* Loyalty Points & Credit Billing Options */}
+      {store.customer && !store.customer.id?.toString().startsWith('walkin-') && (
+        <div className="space-y-3">
+          <CreditBillingOption />
+          <VoucherRedemption />
+        </div>
+      )}
 
       <div className="grid grid-cols-4 gap-2">
         {methods.map(m => (

@@ -34,6 +34,8 @@ import { useToast } from '../../context/ToastContext';
 import { AddCustomerModal, type CustomerFormData } from '../../components/customers/AddCustomerModal';
 import { RecallManager } from '../../components/crm/RecallManager';
 import { PromotionEngine } from '../../components/crm/PromotionEngine';
+import { CustomerPurchaseHistory } from '../../components/crm/CustomerPurchaseHistory';
+import { PrescriptionQRCode } from '../../components/crm/PrescriptionQRCode';
 import { AutoSearch } from '../../components/common/AutoSearch';
 import clsx from 'clsx';
 import { calculateRFMScore, type CustomerRFMData } from '../../utils/rfmSegmentation';
@@ -683,7 +685,8 @@ export function CustomersPage() {
             ) : prescriptions.length > 0 ? (
               <div className="space-y-3">
                 {prescriptions.map(rx => (
-                  <div key={rx.id} className="p-3 bg-gray-50 rounded-lg">
+                  <div key={rx.id} className="p-3 bg-gray-50 rounded-lg space-y-3">
+                    <PrescriptionQRCode prescription={rx} />
                     <div className="flex items-center justify-between mb-2">
                       <span className="text-sm font-medium">{formatDate(rx.testDate)}</span>
                       <span className="text-xs text-gray-500">by {rx.optometristName || 'Unknown'}</span>
@@ -727,7 +730,14 @@ export function CustomersPage() {
         </div>
       </div>
 
-      {/* Purchase History */}
+      {/* Purchase History Summary */}
+      {selectedCustomer && (
+        <div className="card">
+          <CustomerPurchaseHistory customerId={selectedCustomer.id} />
+        </div>
+      )}
+
+      {/* Purchase History Detail */}
       <div className="card">
         <h2 className="font-semibold text-gray-900 mb-4">Purchase History</h2>
         {isLoadingHistory ? (

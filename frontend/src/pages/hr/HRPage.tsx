@@ -20,6 +20,8 @@ import {
 import { hrApi } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
 import clsx from 'clsx';
+import { MonthlyAttendanceGrid } from '../../components/hr/MonthlyAttendanceGrid';
+import { EmployeeSelfService } from '../../components/hr/EmployeeSelfService';
 
 type AttendanceStatus = 'PRESENT' | 'ABSENT' | 'HALF_DAY' | 'LEAVE' | 'LATE';
 type LeaveStatus = 'PENDING' | 'APPROVED' | 'REJECTED';
@@ -77,7 +79,7 @@ export function HRPage() {
   const [leaveRequests, setLeaveRequests] = useState<LeaveRequest[]>([]);
 
   // UI state
-  const [activeTab, setActiveTab] = useState<'attendance' | 'leave'>('attendance');
+  const [activeTab, setActiveTab] = useState<'attendance' | 'leave' | 'monthly_grid' | 'self_service'>('attendance');
 
   // Sync active tab from URL query params (e.g. /hr?tab=leave)
   useEffect(() => {
@@ -302,6 +304,30 @@ export function HRPage() {
             </span>
           )}
         </button>
+        <button
+          onClick={() => setActiveTab('monthly_grid')}
+          className={clsx(
+            'flex items-center gap-2 px-4 py-3 text-sm font-medium border-b-2 transition-colors',
+            activeTab === 'monthly_grid'
+              ? 'border-bv-red-600 text-bv-red-600'
+              : 'border-transparent text-gray-400 hover:text-gray-300'
+          )}
+        >
+          <Calendar className="w-4 h-4" />
+          Monthly View
+        </button>
+        <button
+          onClick={() => setActiveTab('self_service')}
+          className={clsx(
+            'flex items-center gap-2 px-4 py-3 text-sm font-medium border-b-2 transition-colors',
+            activeTab === 'self_service'
+              ? 'border-bv-red-600 text-bv-red-600'
+              : 'border-transparent text-gray-400 hover:text-gray-300'
+          )}
+        >
+          <User className="w-4 h-4" />
+          My Dashboard
+        </button>
       </div>
 
       {/* Attendance Tab */}
@@ -456,6 +482,20 @@ export function HRPage() {
               );
             })
           )}
+        </div>
+      )}
+
+      {/* Monthly Attendance Grid Tab */}
+      {activeTab === 'monthly_grid' && (
+        <div>
+          <MonthlyAttendanceGrid />
+        </div>
+      )}
+
+      {/* Employee Self Service Tab */}
+      {activeTab === 'self_service' && (
+        <div>
+          <EmployeeSelfService />
         </div>
       )}
     </div>
