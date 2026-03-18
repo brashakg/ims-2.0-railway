@@ -6,7 +6,6 @@
 import { useState, useEffect } from 'react';
 import {
   CheckCircle,
-  Square,
   AlertTriangle,
   Plus,
   Clock,
@@ -14,7 +13,6 @@ import {
   ListChecks,
   Loader2,
   X,
-  ChevronDown,
   AlertCircle,
 } from 'lucide-react';
 import clsx from 'clsx';
@@ -106,10 +104,6 @@ export function TasksDashboard() {
     type: 'manual',
   });
 
-  // Selected task for details
-  const [selectedTask, setSelectedTask] = useState<Task | null>(null);
-  const [showTaskDetails, setShowTaskDetails] = useState(false);
-
   useEffect(() => {
     loadData();
   }, [activeTab]);
@@ -126,7 +120,7 @@ export function TasksDashboard() {
       setSummary(summaryRes || { total: 0, overdue: 0, escalated: 0, open: 0, completed: 0 });
     } catch (error) {
       console.error('Failed to load tasks:', error);
-      toast?.addToast('Failed to load tasks', 'error');
+      toast.error('Failed to load tasks');
     } finally {
       setIsLoading(false);
     }
@@ -135,26 +129,26 @@ export function TasksDashboard() {
   const handleCompleteTask = async (taskId: string) => {
     try {
       await tasksApi.completeTask(taskId, 'Completed');
-      toast?.addToast('Task completed', 'success');
+      toast.success('Task completed');
       loadData();
     } catch (error) {
-      toast?.addToast('Failed to complete task', 'error');
+      toast.error('Failed to complete task');
     }
   };
 
   const handleAcknowledgeTask = async (taskId: string) => {
     try {
       await tasksApi.acknowledgeTask(taskId);
-      toast?.addToast('Task acknowledged', 'success');
+      toast.success('Task acknowledged');
       loadData();
     } catch (error) {
-      toast?.addToast('Failed to acknowledge task', 'error');
+      toast.error('Failed to acknowledge task');
     }
   };
 
   const handleCreateTask = async () => {
     if (!newTask.title.trim()) {
-      toast?.addToast('Task title is required', 'error');
+      toast.error('Task title is required');
       return;
     }
 
@@ -163,12 +157,12 @@ export function TasksDashboard() {
         title: newTask.title,
         description: newTask.description,
         priority: newTask.priority,
-        assigned_to: newTask.assigned_to || user?.user_id || '',
+        assigned_to: newTask.assigned_to || user?.id || '',
         due_date: new Date(newTask.due_date),
         type: newTask.type,
       });
 
-      toast?.addToast('Task created successfully', 'success');
+      toast.success('Task created successfully');
       setShowCreateModal(false);
       setNewTask({
         title: '',
@@ -180,7 +174,7 @@ export function TasksDashboard() {
       });
       loadData();
     } catch (error) {
-      toast?.addToast('Failed to create task', 'error');
+      toast.error('Failed to create task');
     }
   };
 
@@ -199,9 +193,9 @@ export function TasksDashboard() {
   const checklistProgress = Math.round((completedChecklistItems / checklistItems.length) * 100);
 
   // Filter tasks for display
-  const myTasks = tasks.filter(t => t.assigned_to === user?.user_id);
-  const overdueTasks = tasks.filter(t => t.status !== 'completed' && new Date(t.due_date) < new Date());
-  const escalatedTasks = tasks.filter(t => t.status === 'escalated');
+  const myTasks = tasks.filter(t => t.assigned_to === user?.id);
+  // Unused: const overdueTasks = tasks.filter(t => t.status !== 'completed' && new Date(t.due_date) < new Date());
+  // Unused: const escalatedTasks = tasks.filter(t => t.status === 'escalated');
 
   return (
     <div className="min-h-screen bg-gray-900 p-6">
@@ -294,7 +288,7 @@ export function TasksDashboard() {
             Daily Checklists
           </button>
 
-          {(user?.role === 'STORE_MANAGER' || user?.role === 'AREA_MANAGER') && (
+          {(user?.roles?.includes('STORE_MANAGER') || user?.roles?.includes('AREA_MANAGER')) && (
             <button
               onClick={() => setActiveTab('team-tasks')}
               className={clsx(

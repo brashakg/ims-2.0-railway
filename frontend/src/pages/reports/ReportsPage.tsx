@@ -124,7 +124,8 @@ export function ReportsPage() {
   const [brandSellthrough, setBrandSellthrough] = useState<any[]>([]);
   const [customerAcquisition, setCustomerAcquisition] = useState<any>(null);
   const [discountAnalysis, setDiscountAnalysis] = useState<any>(null);
-  const [expenseVsRevenue, setExpenseVsRevenue] = useState<any>(null);
+  // Unused - setExpenseVsRevenue not used in this component
+  const [expenseVsRevenue] = useState<any>(null);
   // UI state
   const [activeTab, setActiveTab] = useState<ReportType>('sales');
   const [dateRange, setDateRange] = useState<DateRange>('month');
