@@ -1,518 +1,370 @@
-# ============================================================================
-# Finance & Accounting Router
-# ============================================================================
+# Finance & Accounting Router — _get_db() pattern (matches working routers)
 
 from datetime import datetime, timedelta
-from typing import Optional, List
+from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, Field
-from enum import Enum
-
-from api.dependencies import get_current_user, get_db
-from api.models.user import UserInDB
-from api.repositories.finance_repository import FinanceRepository
-
-# ============================================================================
-# Enums
-# ============================================================================
-
-class GSTType(str, Enum):
-    """GST classification for transactions"""
-    CGST_SGST = "CGST_SGST"  # Within state
-    IGST = "IGST"  # Inter-state
-    EXEMPT = "EXEMPT"  # Exempt transactions
-
-
-# ============================================================================
-# Request/Response Schemas
-# ============================================================================
-
-class RevenueRecord(BaseModel):
-    """Revenue transaction record"""
-    date: datetime
-    order_id: str
-    amount: float
-    gst_amount: float
-    gst_type: GSTType
-    customer_name: str
-    payment_method: str
-    remarks: Optional[str] = None
-
-    class Config:
-        from_attributes = True
-
-
-class ExpenseSummary(BaseModel):
-    """Expense summary by category"""
-    category: str
-    amount: float
-    gst_amount: float
-    gst_type: GSTType
-    count: int
-    percentage: float
-
-    class Config:
-        from_attributes = True
-
-
-class ProfitLossStatement(BaseModel):
-    """P&L statement for a period"""
-    period_start: datetime
-    period_end: datetime
-    total_revenue: float
-    revenue_gst: float
-    net_revenue: float
-    total_expenses: float
-    expenses_gst: float
-    net_expenses: float
-    gross_profit: float
-    gross_margin_percent: float
-    operating_expenses: float
-    net_profit: float
-    net_margin_percent: float
-
-    class Config:
-        from_attributes = True
-
-
-class GSTSummary(BaseModel):
-    """GST summary for a period"""
-    period: str
-    cgst_collected: float
-    sgst_collected: float
-    total_sgst_cgst: float
-    igst_collected: float
-    total_gst_collected: float
-    gst_payable: float
-    input_tax_credit: float
-    net_gst_payable: float
-
-    class Config:
-        from_attributes = True
-
-
-class OutstandingReceivable(BaseModel):
-    """Outstanding receivable from customer"""
-    customer_id: str
-    customer_name: str
-    total_amount: float
-    outstanding_amount: float
-    overdue_amount: float
-    overdue_days: int
-    last_transaction_date: datetime
-    invoice_count: int
-
-    class Config:
-        from_attributes = True
-
-
-class VendorPayment(BaseModel):
-    """Vendor payment tracking"""
-    vendor_id: str
-    vendor_name: str
-    total_purchase: float
-    paid_amount: float
-    outstanding_amount: float
-    overdue_amount: float
-    overdue_days: int
-    last_purchase_date: datetime
-    payment_terms: str
-
-    class Config:
-        from_attributes = True
-
-
-class CashFlowItem(BaseModel):
-    """Cash flow item"""
-    date: datetime
-    description: str
-    inflow: float
-    outflow: float
-    balance: float
-    transaction_type: str
-
-    class Config:
-        from_attributes = True
-
-
-class CashFlowSummary(BaseModel):
-    """Cash flow summary"""
-    period_start: datetime
-    period_end: datetime
-    opening_balance: float
-    total_inflow: float
-    total_outflow: float
-    closing_balance: float
-    items: List[CashFlowItem]
-
-    class Config:
-        from_attributes = True
-
-
-class PeriodLock(BaseModel):
-    """Period locking information"""
-    period: str  # Format: "YYYY-MM"
-    financial_year: str  # Format: "2024-2025"
-    locked: bool
-    locked_by: Optional[str] = None
-    locked_at: Optional[datetime] = None
-    notes: Optional[str] = None
-
-    class Config:
-        from_attributes = True
-
-
-class ReconciliationItem(BaseModel):
-    """Reconciliation item"""
-    account: str
-    system_balance: float
-    bank_balance: float
-    difference: float
-    status: str  # MATCHED, PENDING, DISPUTED
-    remarks: Optional[str] = None
-
-    class Config:
-        from_attributes = True
-
-
-class BudgetAllocation(BaseModel):
-    """Budget allocation for expense category"""
-    category: str
-    allocated_amount: float
-    spent_amount: float
-    remaining_amount: float
-    spent_percent: float
-    status: str  # ON_TRACK, AT_RISK, EXCEEDED
-    month: str
-
-    class Config:
-        from_attributes = True
-
-
-class RevenueTrackerResponse(BaseModel):
-    """Response for revenue tracker endpoint"""
-    total_revenue: float
-    total_gst: float
-    net_revenue: float
-    transaction_count: int
-    gst_breakdown: dict
-    records: List[RevenueRecord]
-
-    class Config:
-        from_attributes = True
-
-
-# ============================================================================
-# Router Setup
-# ============================================================================
+from .auth import get_current_user
 
 router = APIRouter(prefix="/finance", tags=["finance"])
 
+def _get_db():
+    from database.connection import get_db
+    return get_db().db
 
-def get_finance_repository(db=Depends(get_db)) -> FinanceRepository:
-    """Dependency injection for finance repository"""
-    return FinanceRepository(db)
 
+# === Revenue Tracking ===
 
-# ============================================================================
-# Endpoints
-# ============================================================================
-
-@router.get("/revenue/tracker", response_model=RevenueTrackerResponse)
-async def get_revenue_tracker(
-    current_user: UserInDB = Depends(get_current_user),
-    start_date: Optional[datetime] = Query(None),
-    end_date: Optional[datetime] = Query(None),
-    gst_type: Optional[GSTType] = Query(None),
-    repository: FinanceRepository = Depends(get_finance_repository),
+@router.get("/revenue")
+async def get_revenue(
+    period: str = Query("month", pattern="^(day|week|month|year)$"),
+    store_id: Optional[str] = None,
+    current_user: dict = Depends(get_current_user),
 ):
-    """
-    Get revenue tracking data with GST details
-    
-    - **start_date**: Filter from date (ISO format)
-    - **end_date**: Filter to date (ISO format)
-    - **gst_type**: Filter by GST type (CGST_SGST, IGST, EXEMPT)
-    """
-    return await repository.get_revenue_tracker(
-        store_id=current_user.store_id,
-        start_date=start_date,
-        end_date=end_date,
-        gst_type=gst_type,
-    )
+    db = _get_db()
+    now = datetime.utcnow()
+
+    if period == "day":
+        start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    elif period == "week":
+        start = now - timedelta(days=now.weekday())
+        start = start.replace(hour=0, minute=0, second=0, microsecond=0)
+    elif period == "month":
+        start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    else:
+        start = now.replace(month=4 if now.month >= 4 else 4, day=1, hour=0, minute=0, second=0, microsecond=0)
+        if now.month < 4:
+            start = start.replace(year=now.year - 1)
+
+    match = {"created_at": {"$gte": start.isoformat()}}
+    if store_id:
+        match["store_id"] = store_id
+
+    pipeline = [
+        {"$match": match},
+        {"$group": {
+            "_id": None,
+            "total_revenue": {"$sum": "$total"},
+            "total_orders": {"$sum": 1},
+            "total_tax": {"$sum": "$tax_amount"},
+            "total_discount": {"$sum": {"$ifNull": ["$discount_amount", 0]}},
+        }}
+    ]
+    result = list(db.orders.aggregate(pipeline))
+    current = result[0] if result else {"total_revenue": 0, "total_orders": 0, "total_tax": 0, "total_discount": 0}
+
+    # Previous period for MoM/YoY
+    if period == "month":
+        prev_start = (start - timedelta(days=1)).replace(day=1)
+        prev_match = {"created_at": {"$gte": prev_start.isoformat(), "$lt": start.isoformat()}}
+        if store_id:
+            prev_match["store_id"] = store_id
+        prev_result = list(db.orders.aggregate([{"$match": prev_match}, {"$group": {"_id": None, "total_revenue": {"$sum": "$total"}}}]))
+        prev_revenue = prev_result[0]["total_revenue"] if prev_result else 0
+        mom_growth = ((current["total_revenue"] - prev_revenue) / prev_revenue * 100) if prev_revenue > 0 else 0
+    else:
+        mom_growth = 0
+
+    return {
+        "total_revenue": current["total_revenue"],
+        "total_orders": current["total_orders"],
+        "total_tax": current["total_tax"],
+        "total_discount": current["total_discount"],
+        "avg_order_value": current["total_revenue"] / current["total_orders"] if current["total_orders"] > 0 else 0,
+        "mom_growth": round(mom_growth, 1),
+        "period": period,
+    }
 
 
-@router.get("/expenses/summary", response_model=List[ExpenseSummary])
-async def get_expense_summary(
-    current_user: UserInDB = Depends(get_current_user),
-    start_date: Optional[datetime] = Query(None),
-    end_date: Optional[datetime] = Query(None),
-    category: Optional[str] = Query(None),
-    repository: FinanceRepository = Depends(get_finance_repository),
+# === Profit & Loss ===
+
+@router.get("/pnl")
+async def get_pnl(
+    store_id: Optional[str] = None,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+    current_user: dict = Depends(get_current_user),
 ):
-    """
-    Get expense summary grouped by category
-    
-    - **start_date**: Filter from date (ISO format)
-    - **end_date**: Filter to date (ISO format)
-    - **category**: Filter by specific category
-    """
-    return await repository.get_expense_summary(
-        store_id=current_user.store_id,
-        start_date=start_date,
-        end_date=end_date,
-        category=category,
-    )
+    db = _get_db()
+    match = {}
+    if store_id:
+        match["store_id"] = store_id
+    if from_date:
+        match.setdefault("created_at", {})["$gte"] = from_date
+    if to_date:
+        match.setdefault("created_at", {})["$lte"] = to_date
+
+    # Revenue
+    rev_pipeline = [{"$match": match}, {"$group": {"_id": None, "revenue": {"$sum": "$total"}, "tax": {"$sum": "$tax_amount"}}}]
+    rev = list(db.orders.aggregate(rev_pipeline))
+    revenue = rev[0]["revenue"] if rev else 0
+    tax = rev[0]["tax"] if rev else 0
+
+    # Expenses
+    exp_match = {}
+    if store_id:
+        exp_match["store_id"] = store_id
+    if from_date:
+        exp_match.setdefault("date", {})["$gte"] = from_date
+    if to_date:
+        exp_match.setdefault("date", {})["$lte"] = to_date
+    exp_pipeline = [{"$match": exp_match}, {"$group": {"_id": "$category", "amount": {"$sum": "$amount"}}}]
+    expenses = list(db.expenses.aggregate(exp_pipeline))
+    total_expenses = sum(e["amount"] for e in expenses)
+
+    # COGS estimate (60% of revenue for optical retail)
+    cogs = revenue * 0.6
+    gross_profit = revenue - cogs
+    net_profit = gross_profit - total_expenses
+
+    return {
+        "revenue": revenue,
+        "cogs": cogs,
+        "gross_profit": gross_profit,
+        "gross_margin": round(gross_profit / revenue * 100, 1) if revenue > 0 else 0,
+        "expenses": {e["_id"]: e["amount"] for e in expenses},
+        "total_expenses": total_expenses,
+        "net_profit": net_profit,
+        "net_margin": round(net_profit / revenue * 100, 1) if revenue > 0 else 0,
+        "tax_collected": tax,
+    }
 
 
-@router.get("/pl-statement", response_model=ProfitLossStatement)
-async def get_profit_loss_statement(
-    current_user: UserInDB = Depends(get_current_user),
-    start_date: Optional[datetime] = Query(None),
-    end_date: Optional[datetime] = Query(None),
-    repository: FinanceRepository = Depends(get_finance_repository),
-):
-    """
-    Get Profit & Loss statement for a period
-    Includes revenue, expenses, and profit calculation
-    """
-    if not start_date:
-        # Default to current financial year April-March
-        today = datetime.now()
-        if today.month >= 4:
-            start_date = datetime(today.year, 4, 1)
-            end_date = datetime(today.year + 1, 3, 31)
-        else:
-            start_date = datetime(today.year - 1, 4, 1)
-            end_date = datetime(today.year, 3, 31)
-    
-    if not end_date:
-        end_date = datetime.now()
-    
-    return await repository.get_profit_loss_statement(
-        store_id=current_user.store_id,
-        start_date=start_date,
-        end_date=end_date,
-    )
+# === GST Management ===
 
-
-@router.get("/gst/summary", response_model=GSTSummary)
+@router.get("/gst/summary")
 async def get_gst_summary(
-    current_user: UserInDB = Depends(get_current_user),
-    month: Optional[str] = Query(None),  # Format: YYYY-MM
-    financial_year: Optional[str] = Query(None),  # Format: 2024-2025
-    repository: FinanceRepository = Depends(get_finance_repository),
+    month: Optional[int] = None,
+    year: Optional[int] = None,
+    current_user: dict = Depends(get_current_user),
 ):
-    """
-    Get GST summary (CGST, SGST, IGST) for a period
-    
-    - **month**: Get GST for specific month (YYYY-MM)
-    - **financial_year**: Get GST for financial year (YYYY-YYYY format)
-    """
-    return await repository.get_gst_summary(
-        store_id=current_user.store_id,
-        month=month,
-        financial_year=financial_year,
-    )
+    db = _get_db()
+    now = datetime.utcnow()
+    m = month or now.month
+    y = year or now.year
+
+    start = datetime(y, m, 1)
+    if m == 12:
+        end = datetime(y + 1, 1, 1)
+    else:
+        end = datetime(y, m + 1, 1)
+
+    # GST collected (from sales)
+    sales_match = {"created_at": {"$gte": start.isoformat(), "$lt": end.isoformat()}}
+    collected = list(db.orders.aggregate([
+        {"$match": sales_match},
+        {"$group": {"_id": None, "total_tax": {"$sum": "$tax_amount"}, "total_sales": {"$sum": "$total"}}}
+    ]))
+    gst_collected = collected[0]["total_tax"] if collected else 0
+
+    # GST paid (input credit from purchases)
+    purchase_match = {"date": {"$gte": start.isoformat(), "$lt": end.isoformat()}}
+    paid = list(db.purchase_orders.aggregate([
+        {"$match": purchase_match},
+        {"$group": {"_id": None, "total_tax": {"$sum": {"$ifNull": ["$tax_amount", 0]}}}}
+    ]))
+    gst_paid = paid[0]["total_tax"] if paid else 0
+
+    cgst = gst_collected / 2
+    sgst = gst_collected / 2
+    net_payable = gst_collected - gst_paid
+
+    # Filing status
+    gstr1_due = datetime(y, m + 1 if m < 12 else 1, 11)
+    gstr3b_due = datetime(y, m + 1 if m < 12 else 1, 20)
+
+    return {
+        "month": m, "year": y,
+        "gst_collected": gst_collected,
+        "cgst": cgst, "sgst": sgst,
+        "gst_input_credit": gst_paid,
+        "net_gst_payable": net_payable,
+        "gstr1_due_date": gstr1_due.isoformat(),
+        "gstr3b_due_date": gstr3b_due.isoformat(),
+        "gstr1_filed": False,
+        "gstr3b_filed": False,
+    }
 
 
-@router.get("/receivables/outstanding", response_model=List[OutstandingReceivable])
-async def get_outstanding_receivables(
-    current_user: UserInDB = Depends(get_current_user),
-    min_days_overdue: Optional[int] = Query(0),
-    sort_by: Optional[str] = Query("overdue_amount"),  # overdue_amount, customer_name, days
-    repository: FinanceRepository = Depends(get_finance_repository),
+# === Outstanding Receivables ===
+
+@router.get("/outstanding")
+async def get_outstanding(
+    store_id: Optional[str] = None,
+    current_user: dict = Depends(get_current_user),
 ):
-    """
-    Get outstanding receivables from customers
-    
-    - **min_days_overdue**: Filter by minimum overdue days
-    - **sort_by**: Sort by (overdue_amount, customer_name, days)
-    """
-    return await repository.get_outstanding_receivables(
-        store_id=current_user.store_id,
-        min_days_overdue=min_days_overdue,
-        sort_by=sort_by,
-    )
+    db = _get_db()
+    match = {"payment_status": {"$in": ["unpaid", "partial", "credit"]}}
+    if store_id:
+        match["store_id"] = store_id
+
+    orders = list(db.orders.find(match, {"_id": 0, "order_id": 1, "customer_name": 1, "customer_phone": 1, "total": 1, "amount_paid": 1, "created_at": 1}))
+
+    now = datetime.utcnow()
+    buckets = {"0_30": 0, "31_60": 0, "61_90": 0, "90_plus": 0}
+    items = []
+
+    for o in orders:
+        balance = o.get("total", 0) - o.get("amount_paid", 0)
+        if balance <= 0:
+            continue
+        created = datetime.fromisoformat(o.get("created_at", now.isoformat()))
+        days = (now - created).days
+
+        if days <= 30: buckets["0_30"] += balance
+        elif days <= 60: buckets["31_60"] += balance
+        elif days <= 90: buckets["61_90"] += balance
+        else: buckets["90_plus"] += balance
+
+        items.append({
+            "order_id": o.get("order_id"),
+            "customer_name": o.get("customer_name", "Unknown"),
+            "customer_phone": o.get("customer_phone", ""),
+            "amount": balance,
+            "days_overdue": days,
+        })
+
+    return {"buckets": buckets, "total_outstanding": sum(buckets.values()), "items": sorted(items, key=lambda x: -x["days_overdue"])}
 
 
-@router.get("/vendors/payments", response_model=List[VendorPayment])
-async def get_vendor_payments(
-    current_user: UserInDB = Depends(get_current_user),
-    min_days_overdue: Optional[int] = Query(0),
-    sort_by: Optional[str] = Query("outstanding_amount"),  # outstanding_amount, vendor_name, days
-    repository: FinanceRepository = Depends(get_finance_repository),
+# === Vendor Payments ===
+
+@router.get("/vendor-payments")
+async def get_vendor_payments(current_user: dict = Depends(get_current_user)):
+    db = _get_db()
+    vendors = list(db.vendors.find({}, {"_id": 0, "vendor_id": 1, "name": 1}))
+    result = []
+    for v in vendors:
+        pos = list(db.purchase_orders.find({"vendor_id": v["vendor_id"]}, {"_id": 0, "total": 1, "payment_status": 1}))
+        total = sum(p.get("total", 0) for p in pos)
+        paid = sum(p.get("total", 0) for p in pos if p.get("payment_status") == "paid")
+        result.append({"vendor_id": v["vendor_id"], "vendor_name": v["name"], "total_orders": total, "total_paid": paid, "balance": total - paid})
+    return result
+
+
+# === Cash Flow ===
+
+@router.get("/cash-flow")
+async def get_cash_flow(
+    period: str = Query("month"),
+    current_user: dict = Depends(get_current_user),
 ):
-    """
-    Get vendor payment tracking information
-    
-    - **min_days_overdue**: Filter by minimum overdue days
-    - **sort_by**: Sort by (outstanding_amount, vendor_name, days)
-    """
-    return await repository.get_vendor_payments(
-        store_id=current_user.store_id,
-        min_days_overdue=min_days_overdue,
-        sort_by=sort_by,
-    )
+    db = _get_db()
+    now = datetime.utcnow()
+    start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+    # Inflows (from orders)
+    inflow = list(db.orders.aggregate([
+        {"$match": {"created_at": {"$gte": start.isoformat()}, "payment_status": "paid"}},
+        {"$group": {"_id": None, "total": {"$sum": "$total"}}}
+    ]))
+    total_inflow = inflow[0]["total"] if inflow else 0
+
+    # Outflows (expenses + purchase orders)
+    exp_out = list(db.expenses.aggregate([
+        {"$match": {"date": {"$gte": start.isoformat()}, "status": "approved"}},
+        {"$group": {"_id": None, "total": {"$sum": "$amount"}}}
+    ]))
+    po_out = list(db.purchase_orders.aggregate([
+        {"$match": {"date": {"$gte": start.isoformat()}, "payment_status": "paid"}},
+        {"$group": {"_id": None, "total": {"$sum": "$total"}}}
+    ]))
+    total_outflow = (exp_out[0]["total"] if exp_out else 0) + (po_out[0]["total"] if po_out else 0)
+
+    return {
+        "period": period,
+        "inflows": total_inflow,
+        "outflows": total_outflow,
+        "net_cash_flow": total_inflow - total_outflow,
+        "expense_outflow": exp_out[0]["total"] if exp_out else 0,
+        "purchase_outflow": po_out[0]["total"] if po_out else 0,
+    }
 
 
-@router.get("/cash-flow/summary", response_model=CashFlowSummary)
-async def get_cash_flow_summary(
-    current_user: UserInDB = Depends(get_current_user),
-    start_date: Optional[datetime] = Query(None),
-    end_date: Optional[datetime] = Query(None),
-    repository: FinanceRepository = Depends(get_finance_repository),
-):
-    """
-    Get cash flow analysis for a period
-    Includes inflows, outflows, and balance
-    """
-    if not start_date:
-        start_date = datetime.now() - timedelta(days=30)
-    if not end_date:
-        end_date = datetime.now()
-    
-    return await repository.get_cash_flow_summary(
-        store_id=current_user.store_id,
-        start_date=start_date,
-        end_date=end_date,
-    )
+# === Period Lock ===
 
-
-@router.post("/period/lock", response_model=PeriodLock)
+@router.post("/period-lock")
 async def lock_period(
-    period: str = Query(...),  # Format: YYYY-MM
-    notes: Optional[str] = Query(None),
-    current_user: UserInDB = Depends(get_current_user),
-    repository: FinanceRepository = Depends(get_finance_repository),
+    month: int, year: int,
+    current_user: dict = Depends(get_current_user),
 ):
-    """
-    Lock a financial period to prevent further modifications
-    Only ADMIN, AREA_MANAGER, ACCOUNTANT can lock periods
-    
-    - **period**: Month to lock (YYYY-MM format)
-    - **notes**: Optional locking notes/reason
-    """
-    # Check authorization
-    allowed_roles = ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'ACCOUNTANT']
-    if current_user.role not in allowed_roles:
-        raise HTTPException(status_code=403, detail="Insufficient permissions to lock periods")
-    
-    return await repository.lock_period(
-        store_id=current_user.store_id,
-        period=period,
-        locked_by=current_user.id,
-        notes=notes,
-    )
+    db = _get_db()
+    if "SUPERADMIN" not in current_user.get("roles", []) and "ADMIN" not in current_user.get("roles", []):
+        raise HTTPException(403, "Only admin/superadmin can lock periods")
+
+    existing = db.period_locks.find_one({"month": month, "year": year})
+    if existing:
+        raise HTTPException(400, f"Period {month}/{year} is already locked")
+
+    db.period_locks.insert_one({
+        "month": month, "year": year,
+        "locked_by": current_user.get("user_id"),
+        "locked_at": datetime.utcnow().isoformat(),
+    })
+    return {"message": f"Period {month}/{year} locked", "month": month, "year": year}
+
+@router.get("/period-locks")
+async def get_period_locks(current_user: dict = Depends(get_current_user)):
+    db = _get_db()
+    locks = list(db.period_locks.find({}, {"_id": 0}))
+    return locks
 
 
-@router.post("/period/unlock", response_model=PeriodLock)
-async def unlock_period(
-    period: str = Query(...),  # Format: YYYY-MM
-    current_user: UserInDB = Depends(get_current_user),
-    repository: FinanceRepository = Depends(get_finance_repository),
+# === Budget ===
+
+@router.get("/budget")
+async def get_budget(
+    mode: str = Query("full", pattern="^(full|survival)$"),
+    month: Optional[int] = None,
+    year: Optional[int] = None,
+    current_user: dict = Depends(get_current_user),
 ):
-    """
-    Unlock a previously locked financial period
-    Only SUPERADMIN can unlock periods
-    
-    - **period**: Month to unlock (YYYY-MM format)
-    """
-    if current_user.role != 'SUPERADMIN':
-        raise HTTPException(status_code=403, detail="Only SUPERADMIN can unlock periods")
-    
-    return await repository.unlock_period(
-        store_id=current_user.store_id,
-        period=period,
-    )
+    db = _get_db()
+    now = datetime.utcnow()
+    m = month or now.month
+    y = year or now.year
+
+    budget = db.budgets.find_one({"month": m, "year": y, "mode": mode}, {"_id": 0})
+    if not budget:
+        # Default budget structure
+        budget = {
+            "month": m, "year": y, "mode": mode,
+            "categories": {
+                "rent": {"budget": 50000, "actual": 0},
+                "salaries": {"budget": 200000, "actual": 0},
+                "utilities": {"budget": 15000, "actual": 0},
+                "marketing": {"budget": 30000, "actual": 0},
+                "inventory": {"budget": 500000, "actual": 0},
+                "miscellaneous": {"budget": 20000, "actual": 0},
+            }
+        }
+
+    # Fill actuals from expenses
+    start = datetime(y, m, 1)
+    end = datetime(y, m + 1 if m < 12 else 1, 1) if m < 12 else datetime(y + 1, 1, 1)
+    actuals = list(db.expenses.aggregate([
+        {"$match": {"date": {"$gte": start.isoformat(), "$lt": end.isoformat()}, "status": "approved"}},
+        {"$group": {"_id": "$category", "total": {"$sum": "$amount"}}}
+    ]))
+    for a in actuals:
+        cat = a["_id"].lower() if a["_id"] else "miscellaneous"
+        if cat in budget.get("categories", {}):
+            budget["categories"][cat]["actual"] = a["total"]
+
+    return budget
 
 
-@router.get("/reconciliation/status", response_model=List[ReconciliationItem])
-async def get_reconciliation_status(
-    current_user: UserInDB = Depends(get_current_user),
-    status: Optional[str] = Query(None),  # MATCHED, PENDING, DISPUTED
-    repository: FinanceRepository = Depends(get_finance_repository),
-):
-    """
-    Get bank reconciliation status
-    
-    - **status**: Filter by status (MATCHED, PENDING, DISPUTED)
-    """
-    return await repository.get_reconciliation_status(
-        store_id=current_user.store_id,
-        status=status,
-    )
+# === Reconciliation ===
 
+@router.get("/reconciliation")
+async def get_reconciliation(current_user: dict = Depends(get_current_user)):
+    db = _get_db()
+    # Inter-store transfers needing reconciliation
+    pending = list(db.stock_transfers.find(
+        {"status": {"$in": ["shipped", "in_transit"]}},
+        {"_id": 0, "transfer_id": 1, "from_store": 1, "to_store": 1, "items": 1, "created_at": 1}
+    ).limit(50))
 
-@router.post("/reconciliation/match")
-async def match_reconciliation_item(
-    account: str = Query(...),
-    system_balance: float = Query(...),
-    bank_balance: float = Query(...),
-    remarks: Optional[str] = Query(None),
-    current_user: UserInDB = Depends(get_current_user),
-    repository: FinanceRepository = Depends(get_finance_repository),
-):
-    """
-    Mark a reconciliation item as matched
-    """
-    allowed_roles = ['SUPERADMIN', 'ADMIN', 'ACCOUNTANT']
-    if current_user.role not in allowed_roles:
-        raise HTTPException(status_code=403, detail="Insufficient permissions")
-    
-    return await repository.match_reconciliation_item(
-        store_id=current_user.store_id,
-        account=account,
-        system_balance=system_balance,
-        bank_balance=bank_balance,
-        remarks=remarks,
-    )
-
-
-@router.get("/budget/tracking", response_model=List[BudgetAllocation])
-async def get_budget_tracking(
-    current_user: UserInDB = Depends(get_current_user),
-    month: Optional[str] = Query(None),  # Format: YYYY-MM
-    category: Optional[str] = Query(None),
-    repository: FinanceRepository = Depends(get_finance_repository),
-):
-    """
-    Get budget allocation and spending tracking
-    
-    - **month**: Filter by month (YYYY-MM format)
-    - **category**: Filter by expense category
-    """
-    if not month:
-        month = datetime.now().strftime("%Y-%m")
-    
-    return await repository.get_budget_tracking(
-        store_id=current_user.store_id,
-        month=month,
-        category=category,
-    )
-
-
-@router.post("/budget/allocate", response_model=BudgetAllocation)
-async def allocate_budget(
-    category: str = Query(...),
-    allocated_amount: float = Query(...),
-    month: Optional[str] = Query(None),  # Format: YYYY-MM
-    current_user: UserInDB = Depends(get_current_user),
-    repository: FinanceRepository = Depends(get_finance_repository),
-):
-    """
-    Allocate budget for an expense category
-    Only ADMIN, AREA_MANAGER, ACCOUNTANT can allocate budgets
-    """
-    allowed_roles = ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'ACCOUNTANT']
-    if current_user.role not in allowed_roles:
-        raise HTTPException(status_code=403, detail="Insufficient permissions")
-    
-    if not month:
-        month = datetime.now().strftime("%Y-%m")
-    
-    return await repository.allocate_budget(
-        store_id=current_user.store_id,
-        category=category,
-        allocated_amount=allocated_amount,
-        month=month,
-    )
+    return {
+        "pending_transfers": len(pending),
+        "transfers": pending,
+    }

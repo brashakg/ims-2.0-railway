@@ -342,8 +342,8 @@ async def get_salary_config(
 
 @router.get("/salary-sheet")
 async def get_salary_sheet(
-    month: int = Query(..., ge=1, le=12),
-    year: int = Query(...),
+    month: int,
+    year: int,
     store_id: Optional[str] = Query(None),
     current_user: dict = Depends(get_current_user)
 ):
@@ -632,8 +632,8 @@ async def settle_salary_advance(
 @router.get("/payslip/{employee_id}/{month}/{year}")
 async def get_payslip(
     employee_id: str,
-    month: int = Query(..., ge=1, le=12),
-    year: int = Query(...),
+    month: int,
+    year: int,
     current_user: dict = Depends(get_current_user)
 ):
     """Generate or retrieve payslip for an employee"""
@@ -716,8 +716,8 @@ async def get_latest_payslip(
 @router.get("/incentive-summary/{employee_id}/{month}/{year}")
 async def get_incentive_summary(
     employee_id: str,
-    month: int = Query(..., ge=1, le=12),
-    year: int = Query(...),
+    month: int,
+    year: int,
     current_user: dict = Depends(get_current_user)
 ):
     """Get incentive earned for a month (integrated from incentives module)"""

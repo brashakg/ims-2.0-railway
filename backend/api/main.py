@@ -60,6 +60,7 @@ from .routers import (
     supply_chain_router,
     follow_ups_router,
     payroll_router,
+    incentives_router,
 )
 
 

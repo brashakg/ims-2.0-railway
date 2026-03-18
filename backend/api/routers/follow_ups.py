@@ -16,9 +16,17 @@ from enum import Enum
 import uuid
 
 from .auth import get_current_user
-from ..database.connection import get_db
+from ..dependencies import get_db as _dep_get_db
 
 router = APIRouter()
+
+def _get_db():
+    """Get raw database connection"""
+    try:
+        from database.connection import get_db
+        return get_db().db
+    except Exception:
+        return _dep_get_db()
 
 # ============================================================================
 # SCHEMAS
@@ -112,7 +120,7 @@ async def list_follow_ups(
     - status: pending, completed, skipped
     - date_from/date_to: date range filter
     """
-    db = get_db()
+    db = _get_db()
     if not db or not db.is_connected:
         raise HTTPException(status_code=500, detail="Database connection failed")
 
@@ -150,7 +158,7 @@ async def create_follow_up(
     """
     Create a new follow-up for a customer.
     """
-    db = get_db()
+    db = _get_db()
     if not db or not db.is_connected:
         raise HTTPException(status_code=500, detail="Database connection failed")
 
@@ -190,7 +198,7 @@ async def complete_follow_up(
     """
     Mark a follow-up as completed with outcome.
     """
-    db = get_db()
+    db = _get_db()
     if not db or not db.is_connected:
         raise HTTPException(status_code=500, detail="Database connection failed")
 
@@ -224,7 +232,7 @@ async def get_due_today(
     """
     Get all follow-ups due today for a store.
     """
-    db = get_db()
+    db = _get_db()
     if not db or not db.is_connected:
         raise HTTPException(status_code=500, detail="Database connection failed")
 
@@ -251,7 +259,7 @@ async def auto_generate_follow_ups(
     - Eye test reminder: yearly from last test
     - Prescription expiry: 1 year from issue date
     """
-    db = get_db()
+    db = _get_db()
     if not db or not db.is_connected:
         raise HTTPException(status_code=500, detail="Database connection failed")
 
@@ -384,7 +392,7 @@ async def get_follow_up_summary(
     """
     Get summary statistics of follow-ups for a store.
     """
-    db = get_db()
+    db = _get_db()
     if not db or not db.is_connected:
         raise HTTPException(status_code=500, detail="Database connection failed")
 
