@@ -334,7 +334,7 @@ export function POSLayout() {
       {/* HEADER */}
       <header className="bg-gray-800 border-b border-gray-700 px-3 tablet:px-4 py-2.5 flex items-center justify-between gap-2">
         <div className="flex items-center gap-2 min-w-0">
-          <div className="w-8 h-8 tablet:w-9 tablet:h-9 bg-bv-gold-900/300 rounded-lg flex items-center justify-center flex-shrink-0">
+          <div className="w-8 h-8 tablet:w-9 tablet:h-9 bg-bv-gold-500 rounded-lg flex items-center justify-center flex-shrink-0">
             <ShoppingCart className="w-4 h-4 tablet:w-5 tablet:h-5 text-white" />
           </div>
           <div className="min-w-0">
@@ -349,7 +349,7 @@ export function POSLayout() {
           </button>
           <button className="flex items-center gap-1 px-2.5 py-2 tablet:px-3 text-xs tablet:text-sm bg-gray-700 text-gray-300 rounded-lg hover:bg-gray-600 relative touch-manipulation" onClick={() => setShowRecallPanel(true)}>
             <Play className="w-4 h-4" /> <span className="hidden tablet:inline">Recall</span>
-            {getHeldBills().length > 0 && <span className="absolute -top-1 -right-1 w-4 h-4 bg-amber-900/300 text-white text-[10px] rounded-full flex items-center justify-center">{getHeldBills().length}</span>}
+            {getHeldBills().length > 0 && <span className="absolute -top-1 -right-1 w-4 h-4 bg-amber-500 text-white text-[10px] rounded-full flex items-center justify-center">{getHeldBills().length}</span>}
           </button>
           <button onClick={() => {
               // Only confirm if there's something in the cart
@@ -386,7 +386,7 @@ export function POSLayout() {
                 {idx > 0 && <ChevronRight className="w-4 h-4 text-gray-300 mx-1 flex-shrink-0" />}
                 <button onClick={() => { if (isComplete) store.setStep(step.id); }}
                   className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium whitespace-nowrap transition-colors ${
-                    isActive ? 'bg-bv-gold-900/300 text-white' : isComplete ? 'bg-bv-gold-900/30 text-bv-gold-700 cursor-pointer hover:bg-bv-gold-100' : 'text-gray-400'
+                    isActive ? 'bg-bv-gold-500 text-white' : isComplete ? 'bg-bv-gold-900/30 text-bv-gold-400 cursor-pointer hover:bg-bv-gold-900/50' : 'text-gray-400'
                   }`}>
                   <Icon className="w-4 h-4" /> {step.label} {isComplete && <CheckCircle className="w-3.5 h-3.5" />}
                 </button>
@@ -417,9 +417,9 @@ export function POSLayout() {
         {(['products', 'review', 'prescription'] as POSStep[]).includes(store.current_step) && (store.cart || []).length > 0 && (
           <div className="tablet:hidden fixed bottom-20 right-4 z-30">
             <button onClick={() => store.setStep('review')}
-              className="w-14 h-14 bg-bv-gold-900/300 text-white rounded-full shadow-lg flex items-center justify-center relative touch-manipulation">
+              className="w-14 h-14 bg-bv-gold-500 text-white rounded-full shadow-lg flex items-center justify-center relative touch-manipulation">
               <ShoppingCart className="w-6 h-6" />
-              <span className="absolute -top-1 -right-1 w-6 h-6 bg-red-900/300 text-white text-xs font-bold rounded-full flex items-center justify-center">{(store.cart || []).length}</span>
+              <span className="absolute -top-1 -right-1 w-6 h-6 bg-red-500 text-white text-xs font-bold rounded-full flex items-center justify-center">{(store.cart || []).length}</span>
             </button>
           </div>
         )}
@@ -450,7 +450,7 @@ export function POSLayout() {
           <button onClick={() => { setErrorMsg(null); store.current_step === 'payment' ? handleCreateOrder() : store.nextStep(); }}
             disabled={!canProceed || store.is_processing}
             className={`flex items-center gap-1.5 px-5 tablet:px-6 py-2.5 tablet:py-3 rounded-lg text-sm font-semibold transition-colors touch-manipulation min-h-[44px] ${
-              !canProceed || store.is_processing ? 'bg-gray-700 text-gray-400 cursor-not-allowed' : 'bg-bv-gold-900/300 text-white hover:bg-bv-gold-600'
+              !canProceed || store.is_processing ? 'bg-gray-700 text-gray-400 cursor-not-allowed' : 'bg-bv-gold-500 text-white hover:bg-bv-gold-600'
             }`}>
             {store.is_processing ? (
               <><span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" /> Processing...</>
@@ -592,7 +592,7 @@ export function POSLayout() {
             <p className="text-xs text-gray-400 mb-4">Cart will be saved and can be recalled later.</p>
             <div className="flex gap-2">
               <button onClick={() => setHoldConfirm(false)} className="flex-1 px-4 py-2 border border-gray-600 rounded-lg text-sm">Cancel</button>
-              <button onClick={holdCurrentBill} className="flex-1 px-4 py-2 bg-amber-900/300 text-white rounded-lg text-sm font-semibold">Hold Bill</button>
+              <button onClick={holdCurrentBill} className="flex-1 px-4 py-2 bg-amber-500 text-white rounded-lg text-sm font-semibold">Hold Bill</button>
             </div>
           </div>
         </div>
@@ -632,7 +632,7 @@ export function POSLayout() {
                     <button onClick={() => { deleteHeldBill(bill.id); setShowRecallPanel(false); setTimeout(() => setShowRecallPanel(true), 50); }}
                       className="text-xs text-red-500 hover:text-red-700 px-2 py-1">Delete</button>
                     <button onClick={() => recallBill(bill.id)}
-                      className="text-xs bg-bv-gold-900/300 text-white px-3 py-1 rounded font-semibold hover:bg-bv-gold-600">Recall</button>
+                      className="text-xs bg-bv-gold-500 text-white px-3 py-1 rounded font-semibold hover:bg-bv-gold-600">Recall</button>
                   </div>
                 </div>
               ))}
@@ -734,7 +734,7 @@ function RxAvailableBadge({ customerId }: { customerId: string; customerName?: s
     <div className="mt-2 bg-blue-900/30 border border-blue-200 rounded-lg p-3">
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
-          <div className="w-7 h-7 rounded-full bg-blue-900/300 text-white flex items-center justify-center">
+          <div className="w-7 h-7 rounded-full bg-blue-500 text-white flex items-center justify-center">
             <Eye className="w-4 h-4" />
           </div>
           <div>
@@ -893,7 +893,7 @@ function StepCustomer() {
                 store.sale_type === opt.id ? 'border-bv-gold-500 bg-bv-gold-900/30' : 'border-gray-700 hover:border-gray-600'}`}>
               <div className={`w-10 h-10 rounded-lg flex items-center justify-center flex-shrink-0 ${
                 opt.blocked ? 'bg-gray-700 text-gray-400' :
-                store.sale_type === opt.id ? 'bg-bv-gold-900/300 text-white' : 'bg-gray-700 text-gray-500'}`}>
+                store.sale_type === opt.id ? 'bg-bv-gold-500 text-white' : 'bg-gray-700 text-gray-500'}`}>
                 <opt.icon className="w-5 h-5" />
               </div>
               <div>
@@ -1098,7 +1098,7 @@ function StepPrescription({ onShowModal, onShowNew }: { onShowModal: () => void;
             return (
               <div key={rx.prescriptionId || rx.prescription_id || rx._id || i}
                 className="flex items-center gap-4 p-3 bg-blue-900/30 border border-blue-200 rounded-lg hover:bg-blue-100 transition-colors">
-                <div className="w-8 h-8 rounded-full bg-blue-900/300 text-white flex items-center justify-center flex-shrink-0">
+                <div className="w-8 h-8 rounded-full bg-blue-500 text-white flex items-center justify-center flex-shrink-0">
                   <Eye className="w-4 h-4" />
                 </div>
                 <div className="flex-1 min-w-0">
@@ -1267,10 +1267,10 @@ function StepProducts({ onOpenLensModal }: { onOpenLensModal: () => void }) {
       )}
 
       <div className="flex gap-2 overflow-x-auto pb-1 items-center">
-        <button onClick={() => setCategoryFilter('')} className={`px-3 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap ${!categoryFilter ? 'bg-bv-gold-900/300 text-white' : 'bg-gray-700 text-gray-300 hover:bg-gray-600'}`}>All</button>
+        <button onClick={() => setCategoryFilter('')} className={`px-3 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap ${!categoryFilter ? 'bg-bv-gold-500 text-white' : 'bg-gray-700 text-gray-300 hover:bg-gray-600'}`}>All</button>
         {categories.map(cat => (
           <button key={cat} onClick={() => setCategoryFilter(cat === categoryFilter ? '' : cat)}
-            className={`px-3 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap ${categoryFilter === cat ? 'bg-bv-gold-900/300 text-white' : 'bg-gray-700 text-gray-300 hover:bg-gray-600'}`}>
+            className={`px-3 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap ${categoryFilter === cat ? 'bg-bv-gold-500 text-white' : 'bg-gray-700 text-gray-300 hover:bg-gray-600'}`}>
             {cat.replace(/_/g, ' ')}
           </button>
         ))}
@@ -1639,7 +1639,7 @@ function StepPayment() {
         <div className="bg-gray-800 border border-gray-700 rounded-xl p-4 space-y-3">
           <p className="text-sm font-medium text-gray-300">Split payment</p>
           <div className="flex gap-2">
-            {methods.map(m => <button key={m.id} onClick={() => setPayMethod(m.id)} className={`px-3 py-1.5 rounded-lg text-xs font-medium ${payMethod === m.id ? 'bg-bv-gold-900/300 text-white' : 'bg-gray-700 text-gray-300'}`}>{m.label}</button>)}
+            {methods.map(m => <button key={m.id} onClick={() => setPayMethod(m.id)} className={`px-3 py-1.5 rounded-lg text-xs font-medium ${payMethod === m.id ? 'bg-bv-gold-500 text-white' : 'bg-gray-700 text-gray-300'}`}>{m.label}</button>)}
           </div>
           <div className="flex gap-2">
             <input type="number" min="1" max={balance} step="0.01" value={payAmount} 
@@ -1658,7 +1658,7 @@ function StepPayment() {
               disabled={!payAmount || parseFloat(payAmount) <= 0 || (payMethod !== 'CASH' && !payRef.trim())}
               className={`px-4 py-2 rounded-lg text-sm font-semibold ${
                 !payAmount || parseFloat(payAmount) <= 0 || (payMethod !== 'CASH' && !payRef.trim())
-                  ? 'bg-gray-700 text-gray-400 cursor-not-allowed' : 'bg-bv-gold-900/300 text-white hover:bg-bv-gold-600'
+                  ? 'bg-gray-700 text-gray-400 cursor-not-allowed' : 'bg-bv-gold-500 text-white hover:bg-bv-gold-600'
               }`}>Add</button>
           </div>
           {payMethod !== 'CASH' && !payRef.trim() && payAmount && <p className="text-xs text-amber-600">Reference/Txn ID required for {payMethod}</p>}
@@ -1697,7 +1697,7 @@ function StepPayment() {
                 setShowEMIForm(false);
                 setEmiDownPayment('');
               }} className="flex-1 px-4 py-2 rounded-lg text-sm font-semibold bg-gray-700 text-gray-300 hover:bg-gray-300">Cancel</button>
-              <button onClick={handleEMISubmit} disabled={!emiDownPayment || parseFloat(emiDownPayment) < 0 || parseFloat(emiDownPayment) >= balance} className={`flex-1 px-4 py-2 rounded-lg text-sm font-semibold ${!emiDownPayment || parseFloat(emiDownPayment) < 0 || parseFloat(emiDownPayment) >= balance ? 'bg-gray-700 text-gray-400 cursor-not-allowed' : 'bg-bv-gold-900/300 text-white hover:bg-bv-gold-600'}`}>Add EMI</button>
+              <button onClick={handleEMISubmit} disabled={!emiDownPayment || parseFloat(emiDownPayment) < 0 || parseFloat(emiDownPayment) >= balance} className={`flex-1 px-4 py-2 rounded-lg text-sm font-semibold ${!emiDownPayment || parseFloat(emiDownPayment) < 0 || parseFloat(emiDownPayment) >= balance ? 'bg-gray-700 text-gray-400 cursor-not-allowed' : 'bg-bv-gold-500 text-white hover:bg-bv-gold-600'}`}>Add EMI</button>
             </div>
           </div>
         </div>
@@ -1852,7 +1852,7 @@ function StepComplete({ onPrint, onReset }: { onPrint: () => void; onReset: () =
       <div className="flex gap-3 justify-center flex-wrap">
         <button onClick={onPrint} className="flex items-center gap-2 px-4 py-2.5 border border-gray-600 rounded-lg text-sm font-medium hover:bg-gray-700"><Printer className="w-4 h-4" /> Receipt</button>
         <button onClick={() => setShowGSTInvoice(true)} className="flex items-center gap-2 px-4 py-2.5 border border-blue-300 bg-blue-900/30 text-blue-700 rounded-lg text-sm font-medium hover:bg-blue-100"><FileText className="w-4 h-4" /> Tax Invoice</button>
-        <button onClick={onReset} className="flex items-center gap-2 px-6 py-2.5 bg-bv-gold-900/300 text-white rounded-lg text-sm font-semibold hover:bg-bv-gold-600"><Plus className="w-4 h-4" /> New Sale</button>
+        <button onClick={onReset} className="flex items-center gap-2 px-6 py-2.5 bg-bv-gold-500 text-white rounded-lg text-sm font-semibold hover:bg-bv-gold-600"><Plus className="w-4 h-4" /> New Sale</button>
       </div>
 
       {showGSTInvoice && (
