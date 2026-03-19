@@ -1103,8 +1103,24 @@ export function SettingsPage() {
                                   ))}
                                 </div>
                               </td>
-                              <td className="px-4 py-3 text-sm text-gray-400">
-                                {u.accessibleStores?.length || 0} stores
+                              <td className="px-4 py-3 text-sm">
+                                {u.accessibleStores && u.accessibleStores.length > 0 ? (
+                                  <div className="flex flex-wrap gap-1">
+                                    {u.accessibleStores.slice(0, 3).map(sId => {
+                                      const storeObj = stores.find(s => s.id === sId);
+                                      return (
+                                        <span key={sId} className="text-xs bg-blue-900/30 text-blue-400 px-2 py-0.5 rounded" title={storeObj?.storeName || sId}>
+                                          {storeObj?.storeCode || sId}
+                                        </span>
+                                      );
+                                    })}
+                                    {u.accessibleStores.length > 3 && (
+                                      <span className="text-xs text-gray-400">+{u.accessibleStores.length - 3} more</span>
+                                    )}
+                                  </div>
+                                ) : (
+                                  <span className="text-gray-500 text-xs">No stores</span>
+                                )}
                               </td>
                               <td className="px-4 py-3 text-center">
                                 <span className="font-medium">{u.discountCap}%</span>
@@ -3072,16 +3088,88 @@ function UserModal({
             )}
           </div>
 
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="block text-sm font-medium text-gray-300 mb-1">Discount Cap (%)</label>
+              <input
+                type="number"
+                value={formData.discountCap || 10}
+                onChange={e => setFormData(prev => ({ ...prev, discountCap: parseInt(e.target.value) }))}
+                min="0"
+                max="100"
+                className="w-full px-3 py-2 border border-gray-700 rounded-lg focus:border-bv-red-500 focus:outline-none"
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-300 mb-1">Status</label>
+              <select
+                value={formData.isActive ? 'active' : 'inactive'}
+                onChange={e => setFormData(prev => ({ ...prev, isActive: e.target.value === 'active' }))}
+                className="w-full px-3 py-2 bg-gray-900 border border-gray-700 text-white rounded-lg focus:border-bv-red-500 focus:outline-none"
+              >
+                <option value="active">Active</option>
+                <option value="inactive">Inactive (Suspended)</option>
+              </select>
+            </div>
+          </div>
+
+          {/* User-wise Module Access */}
           <div>
-            <label className="block text-sm font-medium text-gray-300 mb-1">Discount Cap (%)</label>
-            <input
-              type="number"
-              value={formData.discountCap || 10}
-              onChange={e => setFormData(prev => ({ ...prev, discountCap: parseInt(e.target.value) }))}
-              min="0"
-              max="100"
-              className="w-full px-3 py-2 border border-gray-700 rounded-lg focus:border-bv-red-500 focus:outline-none"
-            />
+            <label className="block text-sm font-medium text-gray-300 mb-2">Module Access</label>
+            <p className="text-xs text-gray-500 mb-2">Control which modules this user can access (overrides role defaults)</p>
+            <div className="grid grid-cols-3 gap-2">
+              {['POS', 'Clinical', 'Workshop', 'Inventory', 'Reports', 'HR', 'Finance', 'CRM', 'Tasks'].map(mod => {
+                const moduleKey = mod.toLowerCase();
+                const userModules = (formData as any).moduleAccess || {};
+                const isEnabled = userModules[moduleKey] !== false; // default true
+                return (
+                  <label key={mod} className={clsx('flex items-center gap-2 p-2 rounded cursor-pointer', isEnabled ? 'bg-green-900/30' : 'bg-gray-900')}>
+                    <input
+                      type="checkbox"
+                      checked={isEnabled}
+                      onChange={e => {
+                        const current = (formData as any).moduleAccess || {};
+                        setFormData(prev => ({ ...prev, moduleAccess: { ...current, [moduleKey]: e.target.checked } } as any));
+                      }}
+                      className="rounded border-gray-600"
+                    />
+                    <span className="text-sm text-gray-300">{mod}</span>
+                  </label>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* User-wise Permissions */}
+          <div>
+            <label className="block text-sm font-medium text-gray-300 mb-2">Individual Permissions</label>
+            <div className="grid grid-cols-2 gap-2">
+              {[
+                { key: 'can_void_orders', label: 'Void/Cancel Orders' },
+                { key: 'can_process_returns', label: 'Process Returns' },
+                { key: 'can_export_data', label: 'Export Data' },
+                { key: 'can_view_financials', label: 'View Financial Reports' },
+                { key: 'can_approve_expenses', label: 'Approve Expenses' },
+                { key: 'can_manage_stock', label: 'Manage Stock Levels' },
+              ].map(perm => {
+                const userPerms = (formData as any).permissions || {};
+                const isGranted = userPerms[perm.key] !== false;
+                return (
+                  <label key={perm.key} className="flex items-center gap-2 p-2 bg-gray-900 rounded cursor-pointer hover:bg-gray-700">
+                    <input
+                      type="checkbox"
+                      checked={isGranted}
+                      onChange={e => {
+                        const current = (formData as any).permissions || {};
+                        setFormData(prev => ({ ...prev, permissions: { ...current, [perm.key]: e.target.checked } } as any));
+                      }}
+                      className="rounded border-gray-600"
+                    />
+                    <span className="text-sm text-gray-300">{perm.label}</span>
+                  </label>
+                );
+              })}
+            </div>
           </div>
         </div>
 
