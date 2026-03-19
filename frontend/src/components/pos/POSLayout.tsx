@@ -333,25 +333,25 @@ export function POSLayout() {
       {/* HEADER */}
       <header className="bg-gray-800 border-b border-gray-700 px-3 tablet:px-4 py-2.5 flex items-center justify-between gap-2">
         <div className="flex items-center gap-2 min-w-0">
-          <div className="w-8 h-8 tablet:w-9 tablet:h-9 bg-bv-gold-500 rounded-lg flex items-center justify-center flex-shrink-0">
+          <div className="w-8 h-8 tablet:w-9 tablet:h-9 bg-bv-gold-900/300 rounded-lg flex items-center justify-center flex-shrink-0">
             <ShoppingCart className="w-4 h-4 tablet:w-5 tablet:h-5 text-white" />
           </div>
           <div className="min-w-0">
             <h1 className="text-base tablet:text-lg font-bold text-white truncate">Point of Sale</h1>
-            <p className="text-[10px] tablet:text-xs text-gray-500 truncate">{user?.name} · {store.store_id || 'No store'}</p>
+            <p className="text-[10px] tablet:text-xs text-gray-500 truncate">· {store.store_id || 'BV-BOK-01'}</p>
           </div>
         </div>
         <div className="flex items-center gap-1.5 tablet:gap-2 flex-shrink-0">
           <button onClick={() => setHoldConfirm(true)} disabled={(store.cart || []).length === 0}
-            className="flex items-center gap-1 px-2.5 py-2 tablet:px-3 text-xs tablet:text-sm bg-amber-50 text-amber-700 border border-amber-200 rounded-lg hover:bg-amber-100 disabled:opacity-40 touch-manipulation">
+            className="flex items-center gap-1 px-2.5 py-2 tablet:px-3 text-xs tablet:text-sm bg-amber-900/30 text-amber-700 border border-amber-700 rounded-lg hover:bg-amber-100 disabled:opacity-40 touch-manipulation">
             <Pause className="w-4 h-4" /> <span className="hidden tablet:inline">Hold</span>
           </button>
-          <button className="flex items-center gap-1 px-2.5 py-2 tablet:px-3 text-xs tablet:text-sm bg-gray-700 text-gray-600 rounded-lg hover:bg-gray-200 relative touch-manipulation" onClick={() => setShowRecallPanel(true)}>
+          <button className="flex items-center gap-1 px-2.5 py-2 tablet:px-3 text-xs tablet:text-sm bg-gray-700 text-gray-300 rounded-lg hover:bg-gray-600 relative touch-manipulation" onClick={() => setShowRecallPanel(true)}>
             <Play className="w-4 h-4" /> <span className="hidden tablet:inline">Recall</span>
-            {getHeldBills().length > 0 && <span className="absolute -top-1 -right-1 w-4 h-4 bg-amber-500 text-white text-[10px] rounded-full flex items-center justify-center">{getHeldBills().length}</span>}
+            {getHeldBills().length > 0 && <span className="absolute -top-1 -right-1 w-4 h-4 bg-amber-900/300 text-white text-[10px] rounded-full flex items-center justify-center">{getHeldBills().length}</span>}
           </button>
           <button onClick={() => { if (window.confirm('Start new transaction?')) handleFullReset(); }}
-            className="flex items-center gap-1 px-2.5 py-2 tablet:px-3 text-xs tablet:text-sm bg-gray-700 text-gray-600 rounded-lg hover:bg-gray-200 touch-manipulation">
+            className="flex items-center gap-1 px-2.5 py-2 tablet:px-3 text-xs tablet:text-sm bg-gray-700 text-gray-300 rounded-lg hover:bg-gray-600 touch-manipulation">
             <RotateCcw className="w-4 h-4" /> <span className="hidden tablet:inline">New</span>
           </button>
           <div className="hidden laptop:flex items-center gap-2 text-xs text-gray-400 ml-2 border-l border-gray-700 pl-3">
@@ -377,7 +377,7 @@ export function POSLayout() {
                 {idx > 0 && <ChevronRight className="w-4 h-4 text-gray-300 mx-1 flex-shrink-0" />}
                 <button onClick={() => { if (isComplete) store.setStep(step.id); }}
                   className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium whitespace-nowrap transition-colors ${
-                    isActive ? 'bg-bv-gold-500 text-white' : isComplete ? 'bg-bv-gold-50 text-bv-gold-700 cursor-pointer hover:bg-bv-gold-100' : 'text-gray-400'
+                    isActive ? 'bg-bv-gold-900/300 text-white' : isComplete ? 'bg-bv-gold-900/30 text-bv-gold-700 cursor-pointer hover:bg-bv-gold-100' : 'text-gray-400'
                   }`}>
                   <Icon className="w-4 h-4" /> {step.label} {isComplete && <CheckCircle className="w-3.5 h-3.5" />}
                 </button>
@@ -408,9 +408,9 @@ export function POSLayout() {
         {(['products', 'review', 'prescription'] as POSStep[]).includes(store.current_step) && (store.cart || []).length > 0 && (
           <div className="tablet:hidden fixed bottom-20 right-4 z-30">
             <button onClick={() => store.setStep('review')}
-              className="w-14 h-14 bg-bv-gold-500 text-white rounded-full shadow-lg flex items-center justify-center relative touch-manipulation">
+              className="w-14 h-14 bg-bv-gold-900/300 text-white rounded-full shadow-lg flex items-center justify-center relative touch-manipulation">
               <ShoppingCart className="w-6 h-6" />
-              <span className="absolute -top-1 -right-1 w-6 h-6 bg-red-500 text-white text-xs font-bold rounded-full flex items-center justify-center">{(store.cart || []).length}</span>
+              <span className="absolute -top-1 -right-1 w-6 h-6 bg-red-900/300 text-white text-xs font-bold rounded-full flex items-center justify-center">{(store.cart || []).length}</span>
             </button>
           </div>
         )}
@@ -418,7 +418,7 @@ export function POSLayout() {
 
       {/* FOOTER NAV */}
       {errorMsg && (
-        <div className="bg-red-50 border-t border-red-200 px-4 py-2.5 flex items-center gap-2 text-sm text-red-700">
+        <div className="bg-red-900/30 border-t border-red-200 px-4 py-2.5 flex items-center gap-2 text-sm text-red-700">
           <AlertTriangle className="w-4 h-4 flex-shrink-0" />
           <span className="flex-1">{errorMsg}</span>
           <button onClick={() => setErrorMsg(null)} className="text-red-400 hover:text-red-600 ml-2"><X className="w-4 h-4" /></button>
@@ -441,7 +441,7 @@ export function POSLayout() {
           <button onClick={() => { setErrorMsg(null); store.current_step === 'payment' ? handleCreateOrder() : store.nextStep(); }}
             disabled={!canProceed || store.is_processing}
             className={`flex items-center gap-1.5 px-5 tablet:px-6 py-2.5 tablet:py-3 rounded-lg text-sm font-semibold transition-colors touch-manipulation min-h-[44px] ${
-              !canProceed || store.is_processing ? 'bg-gray-200 text-gray-400 cursor-not-allowed' : 'bg-bv-gold-500 text-white hover:bg-bv-gold-600'
+              !canProceed || store.is_processing ? 'bg-gray-700 text-gray-400 cursor-not-allowed' : 'bg-bv-gold-900/300 text-white hover:bg-bv-gold-600'
             }`}>
             {store.is_processing ? (
               <><span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" /> Processing...</>
@@ -467,7 +467,7 @@ export function POSLayout() {
               <button onClick={() => { setShowNewPrescription(false); setErrorMsg(null); }} className="p-1 hover:bg-gray-700 rounded"><X className="w-5 h-5" /></button>
             </div>
             {errorMsg && (
-              <div className="mx-4 mt-4 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700 flex items-start gap-2">
+              <div className="mx-4 mt-4 p-3 bg-red-900/30 border border-red-200 rounded-lg text-sm text-red-700 flex items-start gap-2">
                 <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />
                 <div><p className="font-medium">Failed to save prescription</p><p className="text-xs mt-0.5">{errorMsg}</p></div>
                 <button onClick={() => setErrorMsg(null)} className="ml-auto text-red-400 hover:text-red-600"><X className="w-4 h-4" /></button>
@@ -583,7 +583,7 @@ export function POSLayout() {
             <p className="text-xs text-gray-400 mb-4">Cart will be saved and can be recalled later.</p>
             <div className="flex gap-2">
               <button onClick={() => setHoldConfirm(false)} className="flex-1 px-4 py-2 border border-gray-600 rounded-lg text-sm">Cancel</button>
-              <button onClick={holdCurrentBill} className="flex-1 px-4 py-2 bg-amber-500 text-white rounded-lg text-sm font-semibold">Hold Bill</button>
+              <button onClick={holdCurrentBill} className="flex-1 px-4 py-2 bg-amber-900/300 text-white rounded-lg text-sm font-semibold">Hold Bill</button>
             </div>
           </div>
         </div>
@@ -599,7 +599,7 @@ export function POSLayout() {
               {getHeldBills().length === 0 ? (
                 <p className="text-sm text-gray-500 text-center py-8">No held bills</p>
               ) : getHeldBills().map(bill => (
-                <div key={bill.id} className="bg-amber-50 border border-amber-200 rounded-lg p-3 flex items-center justify-between">
+                <div key={bill.id} className="bg-amber-900/30 border border-amber-700 rounded-lg p-3 flex items-center justify-between">
                   <div>
                     <p className="font-medium text-sm text-white">{bill.customer}</p>
                     <p className="text-xs text-gray-500">{bill.items} items · ₹{Math.round(bill.total).toLocaleString('en-IN')}</p>
@@ -609,7 +609,7 @@ export function POSLayout() {
                     <button onClick={() => { deleteHeldBill(bill.id); setShowRecallPanel(false); setTimeout(() => setShowRecallPanel(true), 50); }}
                       className="text-xs text-red-500 hover:text-red-700 px-2 py-1">Delete</button>
                     <button onClick={() => recallBill(bill.id)}
-                      className="text-xs bg-bv-gold-500 text-white px-3 py-1 rounded font-semibold hover:bg-bv-gold-600">Recall</button>
+                      className="text-xs bg-bv-gold-900/300 text-white px-3 py-1 rounded font-semibold hover:bg-bv-gold-600">Recall</button>
                   </div>
                 </div>
               ))}
@@ -708,10 +708,10 @@ function RxAvailableBadge({ customerId }: { customerId: string; customerName?: s
   };
 
   return (
-    <div className="mt-2 bg-blue-50 border border-blue-200 rounded-lg p-3">
+    <div className="mt-2 bg-blue-900/30 border border-blue-200 rounded-lg p-3">
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
-          <div className="w-7 h-7 rounded-full bg-blue-500 text-white flex items-center justify-center">
+          <div className="w-7 h-7 rounded-full bg-blue-900/300 text-white flex items-center justify-center">
             <Eye className="w-4 h-4" />
           </div>
           <div>
@@ -778,7 +778,7 @@ function CustomerHistory({ customerId }: { customerId: string }) {
           return (
             <div key={o.order_id || o._id || i} className="flex items-center gap-2 text-xs">
               <span className="text-gray-400 w-16 flex-shrink-0">{ago}</span>
-              <span className="text-gray-700 truncate flex-1">{items || o.orderNumber || 'Order'}</span>
+              <span className="text-gray-300 truncate flex-1">{items || o.orderNumber || 'Order'}</span>
               <span className="text-gray-500 flex-shrink-0 font-medium">₹{Math.round(o.grandTotal || o.grand_total || 0).toLocaleString('en-IN')}</span>
             </div>
           );
@@ -857,7 +857,7 @@ function StepCustomer() {
   return (
     <div className="max-w-3xl mx-auto space-y-6">
       <div>
-        <label className="block text-sm font-medium text-gray-700 mb-2">Sale Type</label>
+        <label className="block text-sm font-medium text-gray-300 mb-2">Sale Type</label>
         <div className="grid grid-cols-2 gap-3">
           {([
             { id: 'quick_sale' as SaleType, label: 'Quick Sale', desc: 'Frames, sunglasses, accessories — immediate delivery', icon: Zap, blocked: false },
@@ -866,11 +866,11 @@ function StepCustomer() {
             <button key={opt.id} onClick={() => { if (!opt.blocked) store.setSaleType(opt.id); }}
               title={opt.blocked ? 'Select a registered customer for prescription orders' : ''}
               className={`flex items-start gap-3 p-4 rounded-xl border-2 text-left transition-all ${
-                opt.blocked ? 'border-gray-100 bg-gray-50 opacity-50 cursor-not-allowed' :
-                store.sale_type === opt.id ? 'border-bv-gold-500 bg-bv-gold-50' : 'border-gray-700 hover:border-gray-600'}`}>
+                opt.blocked ? 'border-gray-700 bg-gray-800 opacity-50 cursor-not-allowed' :
+                store.sale_type === opt.id ? 'border-bv-gold-500 bg-bv-gold-900/30' : 'border-gray-700 hover:border-gray-600'}`}>
               <div className={`w-10 h-10 rounded-lg flex items-center justify-center flex-shrink-0 ${
-                opt.blocked ? 'bg-gray-200 text-gray-400' :
-                store.sale_type === opt.id ? 'bg-bv-gold-500 text-white' : 'bg-gray-700 text-gray-500'}`}>
+                opt.blocked ? 'bg-gray-700 text-gray-400' :
+                store.sale_type === opt.id ? 'bg-bv-gold-900/300 text-white' : 'bg-gray-700 text-gray-500'}`}>
                 <opt.icon className="w-5 h-5" />
               </div>
               <div>
@@ -883,12 +883,12 @@ function StepCustomer() {
       </div>
 
       <div>
-        <label className="block text-sm font-medium text-gray-700 mb-2">Customer</label>
+        <label className="block text-sm font-medium text-gray-300 mb-2">Customer</label>
         {store.customer ? (
           <>
-          <div className={`${isWalkin ? 'bg-gray-50 border-gray-700' : 'bg-bv-gold-50 border-bv-gold-200'} border rounded-xl p-4 flex items-center justify-between`}>
+          <div className={`${isWalkin ? 'bg-gray-800 border-gray-700' : 'bg-bv-gold-900/30 border-bv-gold-600'} border rounded-xl p-4 flex items-center justify-between`}>
             <div className="flex items-center gap-3">
-              <div className={`w-10 h-10 rounded-full ${isWalkin ? 'bg-gray-400' : 'bg-bv-gold-500'} text-white flex items-center justify-center font-semibold`}>{store.customer.name?.charAt(0) || 'W'}</div>
+              <div className={`w-10 h-10 rounded-full ${isWalkin ? 'bg-gray-400' : 'bg-bv-gold-900/300'} text-white flex items-center justify-center font-semibold`}>{store.customer.name?.charAt(0) || 'W'}</div>
               <div>
                 <p className="font-semibold text-white">{store.customer.name}</p>
                 <p className="text-sm text-gray-500">{store.customer.phone || 'No phone'}</p>
@@ -896,7 +896,7 @@ function StepCustomer() {
                 {store.patient && <p className="text-xs text-bv-gold-600 mt-0.5">Patient: {store.patient.name}</p>}
               </div>
             </div>
-            <button onClick={() => store.setCustomer(null)} className="text-sm text-gray-500 hover:text-gray-700 px-3 py-1 border border-gray-700 rounded-lg">Change</button>
+            <button onClick={() => store.setCustomer(null)} className="text-sm text-gray-500 hover:text-gray-300 px-3 py-1 border border-gray-700 rounded-lg">Change</button>
           </div>
           {!isWalkin && <CustomerCardWithLoyalty />}
           {!isWalkin && <RxAvailableBadge customerId={store.customer.id} customerName={store.customer.name} />}
@@ -913,7 +913,7 @@ function StepCustomer() {
               }}
               renderItem={(cust) => (
                 <div className="flex items-center gap-3">
-                  <div className="w-8 h-8 rounded-full bg-gray-200 flex items-center justify-center text-sm font-medium text-gray-600">{cust.name?.charAt(0)}</div>
+                  <div className="w-8 h-8 rounded-full bg-gray-700 flex items-center justify-center text-sm font-medium text-gray-300">{cust.name?.charAt(0)}</div>
                   <div className="flex-1 min-w-0">
                     <p className="text-sm font-medium text-white truncate">{cust.name}</p>
                     <p className="text-xs text-gray-500">{cust.phone || cust.mobile} {cust.city && `· ${cust.city}`}</p>
@@ -942,7 +942,7 @@ function StepCustomer() {
                 }
                 store.setSaleType('quick_sale');
               }}
-                className="flex items-center gap-2 text-sm text-gray-500 hover:text-gray-700"><User className="w-4 h-4" /> Walk-in (Quick Sale only)</button>
+                className="flex items-center gap-2 text-sm text-gray-500 hover:text-gray-300"><User className="w-4 h-4" /> Walk-in (Quick Sale only)</button>
             </div>
           </>
         )}
@@ -1042,7 +1042,7 @@ function StepPrescription({ onShowModal, onShowNew }: { onShowModal: () => void;
           <button onClick={onShowModal} className="text-sm text-bv-gold-600 hover:text-bv-gold-700 font-medium">Change</button>
         </div>
         <PrescriptionPanel prescription={store.prescription} patientName={store.patient?.name || store.customer?.name} readOnly />
-        <div className="bg-green-50 border border-green-200 rounded-lg p-3 flex items-center gap-2 text-sm text-green-700">
+        <div className="bg-green-900/30 border border-green-200 rounded-lg p-3 flex items-center gap-2 text-sm text-green-700">
           <CheckCircle className="w-4 h-4" /> Prescription attached — you can now select lenses
         </div>
       </div>
@@ -1065,8 +1065,8 @@ function StepPrescription({ onShowModal, onShowNew }: { onShowModal: () => void;
             const testDate = rx.testDate || rx.test_date;
             return (
               <div key={rx.prescriptionId || rx.prescription_id || rx._id || i}
-                className="flex items-center gap-4 p-3 bg-blue-50 border border-blue-200 rounded-lg hover:bg-blue-100 transition-colors">
-                <div className="w-8 h-8 rounded-full bg-blue-500 text-white flex items-center justify-center flex-shrink-0">
+                className="flex items-center gap-4 p-3 bg-blue-900/30 border border-blue-200 rounded-lg hover:bg-blue-100 transition-colors">
+                <div className="w-8 h-8 rounded-full bg-blue-900/300 text-white flex items-center justify-center flex-shrink-0">
                   <Eye className="w-4 h-4" />
                 </div>
                 <div className="flex-1 min-w-0">
@@ -1093,16 +1093,16 @@ function StepPrescription({ onShowModal, onShowNew }: { onShowModal: () => void;
 
       <div className="grid grid-cols-1 tablet:grid-cols-2 gap-4">
         <button onClick={onShowModal} className="flex items-start gap-3 p-4 rounded-xl border-2 border-gray-700 hover:border-bv-gold-300 text-left">
-          <div className="w-10 h-10 rounded-lg bg-blue-50 text-blue-600 flex items-center justify-center"><FileText className="w-5 h-5" /></div>
+          <div className="w-10 h-10 rounded-lg bg-blue-900/30 text-blue-600 flex items-center justify-center"><FileText className="w-5 h-5" /></div>
           <div><p className="font-semibold text-white">Browse All Prescriptions</p><p className="text-xs text-gray-500 mt-0.5">View full prescription history</p></div>
         </button>
         <button onClick={onShowNew} className="flex items-start gap-3 p-4 rounded-xl border-2 border-gray-700 hover:border-bv-gold-300 text-left">
-          <div className="w-10 h-10 rounded-lg bg-green-50 text-green-600 flex items-center justify-center"><Plus className="w-5 h-5" /></div>
+          <div className="w-10 h-10 rounded-lg bg-green-900/30 text-green-600 flex items-center justify-center"><Plus className="w-5 h-5" /></div>
           <div><p className="font-semibold text-white">New Prescription</p><p className="text-xs text-gray-500 mt-0.5">Enter a new Rx manually</p></div>
         </button>
       </div>
       {recentRx.length === 0 && !rxLoading && (
-        <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 flex items-center gap-2 text-sm text-amber-700">
+        <div className="bg-amber-900/30 border border-amber-700 rounded-lg p-3 flex items-center gap-2 text-sm text-amber-700">
           <AlertTriangle className="w-4 h-4 flex-shrink-0" /> No prescriptions found. Enter manually or send customer for an eye test first.
         </div>
       )}
@@ -1182,7 +1182,7 @@ function StepProducts({ onOpenLensModal }: { onOpenLensModal: () => void }) {
   return (
     <div className="space-y-4">
       {blockMsg && (
-        <div className="bg-red-50 border border-red-200 rounded-lg p-3 flex items-center gap-2 text-sm text-red-700">
+        <div className="bg-red-900/30 border border-red-200 rounded-lg p-3 flex items-center gap-2 text-sm text-red-700">
           <AlertTriangle className="w-4 h-4 flex-shrink-0" />
           <span className="flex-1">{blockMsg}</span>
           <button onClick={() => setBlockMsg(null)} className="text-red-400 hover:text-red-600"><X className="w-3.5 h-3.5" /></button>
@@ -1193,7 +1193,7 @@ function StepProducts({ onOpenLensModal }: { onOpenLensModal: () => void }) {
           <BarcodeScanner onScan={handleBarcodeScan} onManualSearch={handleManualSearch} placeholder="Scan barcode or search products..." autoFocus />
         </div>
         {store.sale_type === 'prescription_order' && store.prescription && (
-          <button onClick={onOpenLensModal} className="flex items-center gap-2 px-4 py-2 bg-purple-50 text-purple-700 border border-purple-200 rounded-lg hover:bg-purple-100 whitespace-nowrap text-sm font-medium">
+          <button onClick={onOpenLensModal} className="flex items-center gap-2 px-4 py-2 bg-purple-900/30 text-purple-700 border border-purple-200 rounded-lg hover:bg-purple-100 whitespace-nowrap text-sm font-medium">
             <Eye className="w-4 h-4" /> Add Lens (Manual)
           </button>
         )}
@@ -1207,7 +1207,7 @@ function StepProducts({ onOpenLensModal }: { onOpenLensModal: () => void }) {
               <Sparkles className="w-4 h-4" /> Recommended Lenses (based on Rx)
               <span className="text-xs text-gray-400 font-normal">— suggestions only, staff can override</span>
             </div>
-            <button onClick={() => setShowSuggestions(false)} className="text-xs text-gray-400 hover:text-gray-600 px-2 py-1">Dismiss</button>
+            <button onClick={() => setShowSuggestions(false)} className="text-xs text-gray-400 hover:text-gray-300 px-2 py-1">Dismiss</button>
           </div>
           <LensSuggestionPanel
             prescriptionInput={rxInput}
@@ -1235,25 +1235,25 @@ function StepProducts({ onOpenLensModal }: { onOpenLensModal: () => void }) {
       )}
 
       <div className="flex gap-2 overflow-x-auto pb-1 items-center">
-        <button onClick={() => setCategoryFilter('')} className={`px-3 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap ${!categoryFilter ? 'bg-bv-gold-500 text-white' : 'bg-gray-700 text-gray-600 hover:bg-gray-200'}`}>All</button>
+        <button onClick={() => setCategoryFilter('')} className={`px-3 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap ${!categoryFilter ? 'bg-bv-gold-900/300 text-white' : 'bg-gray-700 text-gray-300 hover:bg-gray-600'}`}>All</button>
         {categories.map(cat => (
           <button key={cat} onClick={() => setCategoryFilter(cat === categoryFilter ? '' : cat)}
-            className={`px-3 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap ${categoryFilter === cat ? 'bg-bv-gold-500 text-white' : 'bg-gray-700 text-gray-600 hover:bg-gray-200'}`}>
+            className={`px-3 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap ${categoryFilter === cat ? 'bg-bv-gold-900/300 text-white' : 'bg-gray-700 text-gray-300 hover:bg-gray-600'}`}>
             {cat.replace(/_/g, ' ')}
           </button>
         ))}
         <div className="ml-auto flex gap-0.5 bg-gray-700 rounded-lg p-0.5">
-          <button onClick={() => setViewMode('grid')} className={`p-1.5 rounded ${viewMode === 'grid' ? 'bg-gray-800 shadow-sm' : 'text-gray-400 hover:text-gray-600'}`} title="Grid view">
+          <button onClick={() => setViewMode('grid')} className={`p-1.5 rounded ${viewMode === 'grid' ? 'bg-gray-800 shadow-sm' : 'text-gray-400 hover:text-gray-300'}`} title="Grid view">
             <Package className="w-3.5 h-3.5" />
           </button>
-          <button onClick={() => setViewMode('list')} className={`p-1.5 rounded ${viewMode === 'list' ? 'bg-gray-800 shadow-sm' : 'text-gray-400 hover:text-gray-600'}`} title="List view">
+          <button onClick={() => setViewMode('list')} className={`p-1.5 rounded ${viewMode === 'list' ? 'bg-gray-800 shadow-sm' : 'text-gray-400 hover:text-gray-300'}`} title="List view">
             <FileText className="w-3.5 h-3.5" />
           </button>
         </div>
       </div>
 
       {store.sale_type === 'prescription_order' && store.prescription && (
-        <div className="bg-purple-50 border border-purple-200 rounded-lg p-3 flex items-center gap-3 text-sm">
+        <div className="bg-purple-900/30 border border-purple-200 rounded-lg p-3 flex items-center gap-3 text-sm">
           <Eye className="w-4 h-4 text-purple-600 flex-shrink-0" />
           <span className="text-purple-700 font-medium">Rx:</span>
           <span className="text-purple-500">OD {store.prescription.rightEye?.sphere}/{store.prescription.rightEye?.cylinder} · OS {store.prescription.leftEye?.sphere}/{store.prescription.leftEye?.cylinder}</span>
@@ -1277,8 +1277,8 @@ function StepProducts({ onOpenLensModal }: { onOpenLensModal: () => void }) {
               return (
                 <button key={product.product_id || product._id} onClick={() => handleAddProduct(product)} disabled={inCart || isOutOfStock}
                   className={`w-full flex items-center gap-3 px-3 py-2 text-left hover:bg-gray-700 transition-colors ${
-                    isOutOfStock ? 'opacity-50 cursor-not-allowed bg-red-50/20' : inCart ? 'bg-green-50/50' : ''}`}>
-                  <div className="w-10 h-10 bg-gray-50 rounded flex items-center justify-center flex-shrink-0">
+                    isOutOfStock ? 'opacity-50 cursor-not-allowed bg-red-900/30/20' : inCart ? 'bg-green-900/30/50' : ''}`}>
+                  <div className="w-10 h-10 bg-gray-800 rounded flex items-center justify-center flex-shrink-0">
                     {product.image_url ? <img src={product.image_url} alt="" className="h-8 w-auto object-contain" /> :
                     <Package className="w-4 h-4 text-gray-300" />}
                   </div>
@@ -1313,15 +1313,15 @@ function StepProducts({ onOpenLensModal }: { onOpenLensModal: () => void }) {
             return (
               <button key={product.product_id || product._id} onClick={() => handleAddProduct(product)} disabled={inCart || isOutOfStock}
                 className={`bg-gray-800 rounded-xl border text-left p-3 transition-all hover:shadow-md ${
-                  isOutOfStock ? 'border-red-200 bg-red-50/30 opacity-60 cursor-not-allowed' :
-                  inCart ? 'border-green-300 bg-green-50 opacity-70' : 'border-gray-700 hover:border-bv-gold-300'}`}>
-                <div className="h-16 bg-gray-50 rounded-lg mb-2 flex items-center justify-center relative">
+                  isOutOfStock ? 'border-red-200 bg-red-900/30/30 opacity-60 cursor-not-allowed' :
+                  inCart ? 'border-green-300 bg-green-900/30 opacity-70' : 'border-gray-700 hover:border-bv-gold-300'}`}>
+                <div className="h-16 bg-gray-800 rounded-lg mb-2 flex items-center justify-center relative">
                   {product.image_url ? <img src={product.image_url} alt="" className="h-14 w-auto object-contain" /> :
                   product.category === 'FRAMES' || product.category === 'SUNGLASSES' ? <Glasses className="w-8 h-8 text-gray-300" />
                   : product.category?.includes('WATCH') ? <Watch className="w-8 h-8 text-gray-300" /> : <Package className="w-8 h-8 text-gray-300" />}
                   {stock !== null && (
                     <span className={`absolute top-1 right-1 text-[9px] px-1 py-0.5 rounded font-medium ${
-                      isOutOfStock ? 'bg-red-100 text-red-600' : isLowStock ? 'bg-amber-100 text-amber-700' : 'bg-green-50 text-green-600'
+                      isOutOfStock ? 'bg-red-100 text-red-600' : isLowStock ? 'bg-amber-100 text-amber-700' : 'bg-green-900/30 text-green-600'
                     }`}>{isOutOfStock ? 'Out' : isLowStock ? `${stock} left` : `${stock}`}</span>
                   )}
                 </div>
@@ -1377,22 +1377,22 @@ function StepReview({ onOpenDiscount }: { onOpenDiscount: (item: CartLineItem) =
     <div className="max-w-3xl mx-auto space-y-4">
       <h3 className="font-semibold text-white">Order Review</h3>
       {store.customer && (
-        <div className="bg-gray-50 rounded-lg p-3 flex items-center gap-3 text-sm">
+        <div className="bg-gray-800 rounded-lg p-3 flex items-center gap-3 text-sm">
           <User className="w-4 h-4 text-gray-400" /><span className="font-medium">{store.customer.name}</span><span className="text-gray-500">{store.customer.phone}</span>
-          {store.sale_type === 'prescription_order' && <span className="ml-auto px-2 py-0.5 bg-purple-50 text-purple-600 rounded text-xs font-medium">Prescription Order</span>}
+          {store.sale_type === 'prescription_order' && <span className="ml-auto px-2 py-0.5 bg-purple-900/30 text-purple-600 rounded text-xs font-medium">Prescription Order</span>}
         </div>
       )}
 
       <div className="bg-gray-800 border border-gray-700 rounded-xl overflow-hidden">
         <table className="w-full text-sm">
-          <thead className="bg-gray-50 text-xs text-gray-500 uppercase">
+          <thead className="bg-gray-800 text-xs text-gray-500 uppercase">
             <tr><th className="text-left px-4 py-2">Item</th><th className="text-center px-2 py-2">Qty</th><th className="text-right px-2 py-2">MRP</th><th className="text-right px-2 py-2">Price</th><th className="text-right px-2 py-2">Disc</th><th className="text-center px-2 py-2">GST</th><th className="text-right px-4 py-2">Total</th><th className="w-8"></th></tr>
           </thead>
           <tbody>
             {(store.cart || []).map(item => {
               const gstRate = getGSTRateByCategory(item.category);
               return (
-              <tr key={item.id} className="border-t border-gray-100">
+              <tr key={item.id} className="border-t border-gray-700">
                 <td className="px-4 py-3">
                   <p className="font-medium text-white">{item.name}</p>
                   <p className="text-xs text-gray-500">{item.brand} · {item.sku}</p>
@@ -1401,14 +1401,14 @@ function StepReview({ onOpenDiscount }: { onOpenDiscount: (item: CartLineItem) =
                     placeholder="Item notes (PD, fitting, tint, coating...)"
                     defaultValue={(item as any).item_note || ''}
                     onBlur={(e) => store.setItemNote?.(item.id, e.target.value)}
-                    className="mt-1 w-full text-[11px] px-2 py-1 bg-gray-50 border border-gray-700 rounded text-gray-600 placeholder:text-gray-300 focus:border-bv-gold-300 focus:bg-gray-800"
+                    className="mt-1 w-full text-[11px] px-2 py-1 bg-gray-800 border border-gray-700 rounded text-gray-300 placeholder:text-gray-300 focus:border-bv-gold-300 focus:bg-gray-800"
                   />
                 </td>
                 <td className="text-center px-2">
                   <div className="flex items-center justify-center gap-1">
-                    <button onClick={() => store.updateQuantity(item.id, item.quantity - 1)} className="w-6 h-6 rounded bg-gray-700 text-xs hover:bg-gray-200">-</button>
+                    <button onClick={() => store.updateQuantity(item.id, item.quantity - 1)} className="w-6 h-6 rounded bg-gray-700 text-xs hover:bg-gray-600">-</button>
                     <span className="w-6 text-center font-medium">{item.quantity}</span>
-                    <button onClick={() => store.updateQuantity(item.id, item.quantity + 1)} className="w-6 h-6 rounded bg-gray-700 text-xs hover:bg-gray-200">+</button>
+                    <button onClick={() => store.updateQuantity(item.id, item.quantity + 1)} className="w-6 h-6 rounded bg-gray-700 text-xs hover:bg-gray-600">+</button>
                   </div>
                 </td>
                 <td className="text-right px-2 text-gray-500">{fc(item.mrp)}</td>
@@ -1418,7 +1418,7 @@ function StepReview({ onOpenDiscount }: { onOpenDiscount: (item: CartLineItem) =
                     <span className="px-2 py-0.5 rounded text-xs bg-gray-700 text-gray-400 cursor-not-allowed" title="MRP > Offer Price: No further discount allowed">N/A</span>
                   ) : (
                     <button onClick={() => onOpenDiscount(item)}
-                      className={`px-2 py-0.5 rounded text-xs ${item.discount_percent > 0 ? 'bg-green-50 text-green-700 font-medium' : 'bg-gray-50 text-gray-500 hover:bg-gray-700'}`}>
+                      className={`px-2 py-0.5 rounded text-xs ${item.discount_percent > 0 ? 'bg-green-900/30 text-green-700 font-medium' : 'bg-gray-800 text-gray-500 hover:bg-gray-700'}`}>
                       {item.discount_percent > 0 ? `${item.discount_percent}%` : 'Add'}
                     </button>
                   )}
@@ -1456,7 +1456,7 @@ function StepReview({ onOpenDiscount }: { onOpenDiscount: (item: CartLineItem) =
       </div>
 
       {store.sale_type === 'prescription_order' && (
-        <div className="bg-blue-50 border border-blue-200 rounded-lg p-3">
+        <div className="bg-blue-900/30 border border-blue-200 rounded-lg p-3">
           <label className="flex items-center gap-2 text-sm">
             <input type="checkbox" checked={store.is_advance_payment} onChange={(e) => store.setAdvancePayment(e.target.checked)} className="rounded border-gray-600" />
             <span className="font-medium text-blue-700">Advance payment only</span><span className="text-blue-500 text-xs">(Balance on delivery)</span>
@@ -1487,8 +1487,8 @@ function CashChangeCalculator({ grandTotal }: { grandTotal: number; totalPaid: n
   ].filter((v, i, a) => v >= grandTotal && a.indexOf(v) === i).slice(0, 3);
 
   return (
-    <div className="bg-gray-50 border border-gray-700 rounded-xl p-4 space-y-3">
-      <p className="text-sm font-medium text-gray-700">Cash Tendered</p>
+    <div className="bg-gray-800 border border-gray-700 rounded-xl p-4 space-y-3">
+      <p className="text-sm font-medium text-gray-300">Cash Tendered</p>
       <div className="flex gap-2 items-center">
         <span className="text-gray-400 text-lg">₹</span>
         <input type="number" value={cashTendered} onChange={(e) => setCashTendered(e.target.value)}
@@ -1502,7 +1502,7 @@ function CashChangeCalculator({ grandTotal }: { grandTotal: number; totalPaid: n
         ))}
       </div>
       {tendered > 0 && (
-        <div className={`text-center py-2 rounded-lg font-bold text-lg ${change >= 0 ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-600'}`}>
+        <div className={`text-center py-2 rounded-lg font-bold text-lg ${change >= 0 ? 'bg-green-900/30 text-green-700' : 'bg-red-900/30 text-red-600'}`}>
           {change >= 0 ? `Change: ₹${Math.round(change).toLocaleString('en-IN')}` : `Short: ₹${Math.round(Math.abs(change)).toLocaleString('en-IN')}`}
         </div>
       )}
@@ -1597,17 +1597,17 @@ function StepPayment() {
               setPayRef('');
             }
           }} disabled={balance <= 0}
-            className={`flex flex-col items-center gap-1 p-3 rounded-xl border-2 transition-all ${balance <= 0 ? 'opacity-40 border-gray-700' : 'border-gray-700 hover:border-bv-gold-300 hover:bg-bv-gold-50'}`}>
-            <m.icon className="w-6 h-6 text-gray-600" /><span className="text-xs font-medium">{m.id === 'CASH' ? 'Full Cash' : m.id === 'EMI' ? 'EMI' : `${m.label} →`}</span>
+            className={`flex flex-col items-center gap-1 p-3 rounded-xl border-2 transition-all ${balance <= 0 ? 'opacity-40 border-gray-700' : 'border-gray-700 hover:border-bv-gold-300 hover:bg-bv-gold-900/30'}`}>
+            <m.icon className="w-6 h-6 text-gray-300" /><span className="text-xs font-medium">{m.id === 'CASH' ? 'Full Cash' : m.id === 'EMI' ? 'EMI' : `${m.label} →`}</span>
           </button>
         ))}
       </div>
 
       {balance > 0 && (
         <div className="bg-gray-800 border border-gray-700 rounded-xl p-4 space-y-3">
-          <p className="text-sm font-medium text-gray-700">Split payment</p>
+          <p className="text-sm font-medium text-gray-300">Split payment</p>
           <div className="flex gap-2">
-            {methods.map(m => <button key={m.id} onClick={() => setPayMethod(m.id)} className={`px-3 py-1.5 rounded-lg text-xs font-medium ${payMethod === m.id ? 'bg-bv-gold-500 text-white' : 'bg-gray-700 text-gray-600'}`}>{m.label}</button>)}
+            {methods.map(m => <button key={m.id} onClick={() => setPayMethod(m.id)} className={`px-3 py-1.5 rounded-lg text-xs font-medium ${payMethod === m.id ? 'bg-bv-gold-900/300 text-white' : 'bg-gray-700 text-gray-300'}`}>{m.label}</button>)}
           </div>
           <div className="flex gap-2">
             <input type="number" min="1" max={balance} step="0.01" value={payAmount} 
@@ -1626,7 +1626,7 @@ function StepPayment() {
               disabled={!payAmount || parseFloat(payAmount) <= 0 || (payMethod !== 'CASH' && !payRef.trim())}
               className={`px-4 py-2 rounded-lg text-sm font-semibold ${
                 !payAmount || parseFloat(payAmount) <= 0 || (payMethod !== 'CASH' && !payRef.trim())
-                  ? 'bg-gray-200 text-gray-400 cursor-not-allowed' : 'bg-bv-gold-500 text-white hover:bg-bv-gold-600'
+                  ? 'bg-gray-700 text-gray-400 cursor-not-allowed' : 'bg-bv-gold-900/300 text-white hover:bg-bv-gold-600'
               }`}>Add</button>
           </div>
           {payMethod !== 'CASH' && !payRef.trim() && payAmount && <p className="text-xs text-amber-600">Reference/Txn ID required for {payMethod}</p>}
@@ -1635,37 +1635,37 @@ function StepPayment() {
       
       {showEMIForm && balance > 0 && (
         <div className="bg-gray-800 border border-gray-700 rounded-xl p-4 space-y-3">
-          <p className="text-sm font-medium text-gray-700">EMI Details</p>
+          <p className="text-sm font-medium text-gray-300">EMI Details</p>
           <div className="space-y-3">
             <div>
-              <label className="text-xs font-medium text-gray-600">EMI Provider</label>
+              <label className="text-xs font-medium text-gray-300">EMI Provider</label>
               <select value={emiProvider} onChange={(e) => setEmiProvider(e.target.value)} className="w-full mt-1 px-3 py-2 border border-gray-600 rounded-lg text-sm">
                 {emiProviders.map(p => <option key={p} value={p}>{p}</option>)}
               </select>
             </div>
             <div>
-              <label className="text-xs font-medium text-gray-600">Tenure (months)</label>
+              <label className="text-xs font-medium text-gray-300">Tenure (months)</label>
               <select value={emiTenure} onChange={(e) => setEmiTenure(Number(e.target.value))} className="w-full mt-1 px-3 py-2 border border-gray-600 rounded-lg text-sm">
                 {emiTenures.map(t => <option key={t} value={t}>{t} months</option>)}
               </select>
             </div>
             <div>
-              <label className="text-xs font-medium text-gray-600">Down Payment</label>
+              <label className="text-xs font-medium text-gray-300">Down Payment</label>
               <input type="number" min="0" max={balance - 0.01} step="100" value={emiDownPayment} onChange={(e) => setEmiDownPayment(e.target.value)} placeholder={`Max ₹${Math.round(balance).toLocaleString('en-IN')}`} className="w-full mt-1 px-3 py-2 border border-gray-600 rounded-lg text-sm" onFocus={(e) => e.target.select()} />
             </div>
             {emiDownPayment && (
-              <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 space-y-2 text-sm">
-                <div className="flex justify-between"><span className="text-gray-600">Loan Amount:</span><span className="font-semibold">₹{Math.round((balance - (parseFloat(emiDownPayment) || 0)) * 100) / 100}</span></div>
-                <div className="flex justify-between"><span className="text-gray-600">Processing Fee (2%):</span><span className="font-semibold">₹{Math.round(((balance - (parseFloat(emiDownPayment) || 0)) * 0.02) * 100) / 100}</span></div>
-                <div className="flex justify-between"><span className="text-gray-600">Monthly EMI ({emiTenure}m):</span><span className="font-bold text-blue-700">₹{Math.round(calculateEMI(balance - (parseFloat(emiDownPayment) || 0), 0.01, emiTenure) * 100) / 100}</span></div>
+              <div className="bg-blue-900/30 border border-blue-200 rounded-lg p-3 space-y-2 text-sm">
+                <div className="flex justify-between"><span className="text-gray-300">Loan Amount:</span><span className="font-semibold">₹{Math.round((balance - (parseFloat(emiDownPayment) || 0)) * 100) / 100}</span></div>
+                <div className="flex justify-between"><span className="text-gray-300">Processing Fee (2%):</span><span className="font-semibold">₹{Math.round(((balance - (parseFloat(emiDownPayment) || 0)) * 0.02) * 100) / 100}</span></div>
+                <div className="flex justify-between"><span className="text-gray-300">Monthly EMI ({emiTenure}m):</span><span className="font-bold text-blue-700">₹{Math.round(calculateEMI(balance - (parseFloat(emiDownPayment) || 0), 0.01, emiTenure) * 100) / 100}</span></div>
               </div>
             )}
             <div className="flex gap-2">
               <button onClick={() => {
                 setShowEMIForm(false);
                 setEmiDownPayment('');
-              }} className="flex-1 px-4 py-2 rounded-lg text-sm font-semibold bg-gray-200 text-gray-600 hover:bg-gray-300">Cancel</button>
-              <button onClick={handleEMISubmit} disabled={!emiDownPayment || parseFloat(emiDownPayment) < 0 || parseFloat(emiDownPayment) >= balance} className={`flex-1 px-4 py-2 rounded-lg text-sm font-semibold ${!emiDownPayment || parseFloat(emiDownPayment) < 0 || parseFloat(emiDownPayment) >= balance ? 'bg-gray-200 text-gray-400 cursor-not-allowed' : 'bg-bv-gold-500 text-white hover:bg-bv-gold-600'}`}>Add EMI</button>
+              }} className="flex-1 px-4 py-2 rounded-lg text-sm font-semibold bg-gray-700 text-gray-300 hover:bg-gray-300">Cancel</button>
+              <button onClick={handleEMISubmit} disabled={!emiDownPayment || parseFloat(emiDownPayment) < 0 || parseFloat(emiDownPayment) >= balance} className={`flex-1 px-4 py-2 rounded-lg text-sm font-semibold ${!emiDownPayment || parseFloat(emiDownPayment) < 0 || parseFloat(emiDownPayment) >= balance ? 'bg-gray-700 text-gray-400 cursor-not-allowed' : 'bg-bv-gold-900/300 text-white hover:bg-bv-gold-600'}`}>Add EMI</button>
             </div>
           </div>
         </div>
@@ -1673,7 +1673,7 @@ function StepPayment() {
 
       {(store.payments || []).length > 0 && <div className="space-y-2">
         {(store.payments || []).map((p, i) => (
-          <div key={i} className="flex items-center justify-between bg-green-50 border border-green-200 rounded-lg px-4 py-2 text-sm">
+          <div key={i} className="flex items-center justify-between bg-green-900/30 border border-green-200 rounded-lg px-4 py-2 text-sm">
             <div className="flex items-center gap-2"><CheckCircle className="w-4 h-4 text-green-500" /><span className="font-medium">{p.method}</span>{p.reference && <span className="text-gray-500">({p.reference})</span>}</div>
             <div className="flex items-center gap-2"><span className="font-semibold">₹{Math.round(p.amount * 100 / 100).toLocaleString('en-IN')}</span><button onClick={() => store.removePayment(i)} className="text-gray-400 hover:text-red-500"><X className="w-4 h-4" /></button></div>
           </div>
@@ -1685,7 +1685,7 @@ function StepPayment() {
         <CashChangeCalculator grandTotal={total} totalPaid={paid} />
       )}
 
-      {balance <= 0 && <div className="bg-green-50 border border-green-200 rounded-lg p-4 text-center text-green-700 font-semibold">Payment complete — click "Complete Order" to finalize</div>}
+      {balance <= 0 && <div className="bg-green-900/30 border border-green-200 rounded-lg p-4 text-center text-green-700 font-semibold">Payment complete — click "Complete Order" to finalize</div>}
     </div>
   );
 }
@@ -1773,7 +1773,7 @@ function StepComplete({ onPrint, onReset }: { onPrint: () => void; onReset: () =
         <div className="flex justify-between"><span className="text-gray-500">Total</span><span className="font-bold text-lg">{fc(store.getGrandTotal())}</span></div>
         <div className="flex justify-between"><span className="text-gray-500">Paid</span><span className="font-medium text-green-600">{fc(store.getTotalPaid())}</span></div>
         {store.getBalance() > 0 && <div className="flex justify-between"><span className="text-gray-500">Balance due</span><span className="font-medium text-red-600">{fc(store.getBalance())}</span></div>}
-        {store.sale_type === 'prescription_order' && <div className="flex justify-between"><span className="text-gray-500">Type</span><span className="px-2 py-0.5 bg-purple-50 text-purple-600 rounded text-xs font-medium">Rx Order → Workshop</span></div>}
+        {store.sale_type === 'prescription_order' && <div className="flex justify-between"><span className="text-gray-500">Type</span><span className="px-2 py-0.5 bg-purple-900/30 text-purple-600 rounded text-xs font-medium">Rx Order → Workshop</span></div>}
       </div>
 
       {/* Incentive qualifying items — auto-tagged for kicker tracking */}
@@ -1787,7 +1787,7 @@ function StepComplete({ onPrint, onReset }: { onPrint: () => void; onReset: () =
         });
         if (qualifying.length === 0) return null;
         return (
-          <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 text-left text-xs">
+          <div className="bg-amber-900/30 border border-amber-700 rounded-xl p-4 text-left text-xs">
             <div className="flex items-center gap-2 mb-2">
               <Sparkles className="w-4 h-4 text-amber-600" />
               <span className="font-semibold text-amber-800">Incentive-qualifying items ({qualifying.length})</span>
@@ -1819,8 +1819,8 @@ function StepComplete({ onPrint, onReset }: { onPrint: () => void; onReset: () =
 
       <div className="flex gap-3 justify-center flex-wrap">
         <button onClick={onPrint} className="flex items-center gap-2 px-4 py-2.5 border border-gray-600 rounded-lg text-sm font-medium hover:bg-gray-700"><Printer className="w-4 h-4" /> Receipt</button>
-        <button onClick={() => setShowGSTInvoice(true)} className="flex items-center gap-2 px-4 py-2.5 border border-blue-300 bg-blue-50 text-blue-700 rounded-lg text-sm font-medium hover:bg-blue-100"><FileText className="w-4 h-4" /> Tax Invoice</button>
-        <button onClick={onReset} className="flex items-center gap-2 px-6 py-2.5 bg-bv-gold-500 text-white rounded-lg text-sm font-semibold hover:bg-bv-gold-600"><Plus className="w-4 h-4" /> New Sale</button>
+        <button onClick={() => setShowGSTInvoice(true)} className="flex items-center gap-2 px-4 py-2.5 border border-blue-300 bg-blue-900/30 text-blue-700 rounded-lg text-sm font-medium hover:bg-blue-100"><FileText className="w-4 h-4" /> Tax Invoice</button>
+        <button onClick={onReset} className="flex items-center gap-2 px-6 py-2.5 bg-bv-gold-900/300 text-white rounded-lg text-sm font-semibold hover:bg-bv-gold-600"><Plus className="w-4 h-4" /> New Sale</button>
       </div>
 
       {showGSTInvoice && (
@@ -1853,7 +1853,7 @@ function CartSidebar() {
       </div>
       <div className="flex-1 overflow-y-auto p-3 space-y-2">
         {(store.cart || []).map(item => (
-          <div key={item.id} className="bg-gray-50 rounded-lg p-3">
+          <div key={item.id} className="bg-gray-800 rounded-lg p-3">
             <div className="flex items-start justify-between">
               <div className="flex-1 min-w-0"><p className="text-sm font-medium text-white truncate">{item.name}</p><p className="text-xs text-gray-500">{item.brand}</p>
                 {item.lens_details && <p className="text-xs text-purple-500">{item.lens_details.type}</p>}

@@ -7,6 +7,7 @@ import { useState, useEffect, useRef } from 'react';
 import { Outlet, NavLink, useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
 import { useModule, type ModuleId } from '../../context/ModuleContext';
+import { useTheme } from '../../context/ThemeContext';
 import { storeApi } from '../../services/api';
 import {
   LogOut,
@@ -16,6 +17,8 @@ import {
   Home,
   Menu,
   X,
+  Sun,
+  Moon,
 } from 'lucide-react';
 import clsx from 'clsx';
 
@@ -53,6 +56,7 @@ const pathToModule: Record<string, ModuleId> = {
 export function AppLayout() {
   const { user, logout, hasRole, setActiveRole, setActiveStore } = useAuth();
   const { activeModule, setActiveModule, getModuleConfig, goToDashboard } = useModule();
+  const { isDark, toggleDarkMode } = useTheme();
   const navigate = useNavigate();
   const location = useLocation();
   const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -145,7 +149,7 @@ export function AppLayout() {
   const colors = getActiveColors();
 
   return (
-    <div className="min-h-screen bg-gray-900" data-brand={brandClass}>
+    <div className={clsx('min-h-screen', isDark ? 'bg-gray-900' : 'bg-gray-100')} data-brand={brandClass}>
       {/* Mobile sidebar overlay */}
       {sidebarOpen && moduleConfig && (
         <div
@@ -158,7 +162,8 @@ export function AppLayout() {
       {moduleConfig && (
         <aside
           className={clsx(
-            'fixed top-0 left-0 z-50 h-full w-64 bg-gray-800 border-r border-gray-700 transition-transform duration-300 flex flex-col',
+            'fixed top-0 left-0 z-50 h-full w-64 border-r transition-transform duration-300 flex flex-col',
+            isDark ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200',
             sidebarOpen ? 'translate-x-0' : 'tablet:translate-x-0 -translate-x-full'
           )}
         >
@@ -245,7 +250,7 @@ export function AppLayout() {
       {/* Main content - adjust margin based on sidebar presence */}
       <div className={clsx(moduleConfig ? 'tablet:ml-64' : 'w-full')}>
         {/* Top header */}
-        <header className="h-16 bg-gray-800 border-b border-gray-700 flex items-center justify-between px-4 tablet:px-6">
+        <header className={clsx('h-16 border-b flex items-center justify-between px-4 tablet:px-6', isDark ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200')}>
           {/* Logo and Breadcrumb */}
           <div className="flex items-center gap-4">
             {/* Mobile menu button - only show when module is active */}
@@ -288,8 +293,20 @@ export function AppLayout() {
             )}
           </div>
 
-          {/* Right side - Role selector, Store selector, User avatar */}
+          {/* Right side - Theme toggle, Role selector, Store selector, User avatar */}
           <div className="flex items-center gap-3">
+            {/* Theme toggle */}
+            <button
+              onClick={toggleDarkMode}
+              className={clsx(
+                'p-2 rounded-lg transition-colors',
+                isDark ? 'text-yellow-400 hover:bg-gray-700' : 'text-gray-600 hover:bg-gray-100'
+              )}
+              title={isDark ? 'Switch to light mode' : 'Switch to dark mode'}
+            >
+              {isDark ? <Sun className="w-5 h-5" /> : <Moon className="w-5 h-5" />}
+            </button>
+
             {/* Role selector */}
             {user && user.roles.length > 1 && (
               <div className="relative" ref={roleDropdownRef}>
