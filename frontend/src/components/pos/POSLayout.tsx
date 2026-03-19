@@ -109,6 +109,7 @@ export function POSLayout() {
   const [holdConfirm, setHoldConfirm] = useState(false);
   const [showRecallPanel, setShowRecallPanel] = useState(false);
   const [showDayEnd, setShowDayEnd] = useState(false);
+  const [showNewConfirm, setShowNewConfirm] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   // Held bills from localStorage
@@ -350,7 +351,15 @@ export function POSLayout() {
             <Play className="w-4 h-4" /> <span className="hidden tablet:inline">Recall</span>
             {getHeldBills().length > 0 && <span className="absolute -top-1 -right-1 w-4 h-4 bg-amber-900/300 text-white text-[10px] rounded-full flex items-center justify-center">{getHeldBills().length}</span>}
           </button>
-          <button onClick={() => { if (window.confirm('Start new transaction?')) handleFullReset(); }}
+          <button onClick={() => {
+              // Only confirm if there's something in the cart
+              if ((store.cart || []).length > 0) {
+                setHoldConfirm(false); // reuse existing confirm flow
+                setShowNewConfirm(true);
+              } else {
+                handleFullReset();
+              }
+            }}
             className="flex items-center gap-1 px-2.5 py-2 tablet:px-3 text-xs tablet:text-sm bg-gray-700 text-gray-300 rounded-lg hover:bg-gray-600 touch-manipulation">
             <RotateCcw className="w-4 h-4" /> <span className="hidden tablet:inline">New</span>
           </button>
@@ -584,6 +593,20 @@ export function POSLayout() {
             <div className="flex gap-2">
               <button onClick={() => setHoldConfirm(false)} className="flex-1 px-4 py-2 border border-gray-600 rounded-lg text-sm">Cancel</button>
               <button onClick={holdCurrentBill} className="flex-1 px-4 py-2 bg-amber-900/300 text-white rounded-lg text-sm font-semibold">Hold Bill</button>
+            </div>
+          </div>
+        </div>
+      )}
+      {/* New Transaction Confirm (non-blocking) */}
+      {showNewConfirm && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div className="bg-gray-800 rounded-xl p-6 max-w-sm border border-gray-700">
+            <h3 className="font-semibold text-white mb-2">Start new transaction?</h3>
+            <p className="text-sm text-gray-400 mb-4">Current cart ({(store.cart || []).length} items, ₹{Math.round(store.getGrandTotal()).toLocaleString('en-IN')}) will be cleared. Consider holding the bill first.</p>
+            <div className="flex gap-2">
+              <button onClick={() => setShowNewConfirm(false)} className="flex-1 px-4 py-2 border border-gray-600 text-gray-300 rounded-lg text-sm hover:bg-gray-700">Cancel</button>
+              <button onClick={() => { holdCurrentBill(); setShowNewConfirm(false); }} className="flex-1 px-4 py-2 bg-amber-600 text-white rounded-lg text-sm font-semibold hover:bg-amber-700">Hold & New</button>
+              <button onClick={() => { handleFullReset(); setShowNewConfirm(false); }} className="flex-1 px-4 py-2 bg-red-600 text-white rounded-lg text-sm font-semibold hover:bg-red-700">Discard & New</button>
             </div>
           </div>
         </div>
@@ -888,7 +911,7 @@ function StepCustomer() {
           <>
           <div className={`${isWalkin ? 'bg-gray-800 border-gray-700' : 'bg-bv-gold-900/30 border-bv-gold-600'} border rounded-xl p-4 flex items-center justify-between`}>
             <div className="flex items-center gap-3">
-              <div className={`w-10 h-10 rounded-full ${isWalkin ? 'bg-gray-400' : 'bg-bv-gold-900/300'} text-white flex items-center justify-center font-semibold`}>{store.customer.name?.charAt(0) || 'W'}</div>
+              <div className={`w-10 h-10 rounded-full ${isWalkin ? 'bg-gray-500' : 'bg-bv-gold-600'} text-white flex items-center justify-center font-semibold`}>{store.customer.name?.charAt(0)?.toUpperCase() || 'W'}</div>
               <div>
                 <p className="font-semibold text-white">{store.customer.name}</p>
                 <p className="text-sm text-gray-500">{store.customer.phone || 'No phone'}</p>
@@ -911,18 +934,27 @@ function StepCustomer() {
                   return res?.customers || res || [];
                 } catch { return []; }
               }}
-              renderItem={(cust) => (
-                <div className="flex items-center gap-3">
-                  <div className="w-8 h-8 rounded-full bg-gray-700 flex items-center justify-center text-sm font-medium text-gray-300">{cust.name?.charAt(0)}</div>
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm font-medium text-white truncate">{cust.name}</p>
-                    <p className="text-xs text-gray-500">{cust.phone || cust.mobile} {cust.city && `· ${cust.city}`}</p>
+              renderItem={(cust) => {
+                const custName = cust.name || cust.customer_name || cust.full_name || 'Unknown';
+                const custPhone = cust.phone || cust.mobile || '';
+                return (
+                  <div className="flex items-center gap-3">
+                    <div className="w-8 h-8 rounded-full bg-bv-gold-600 flex items-center justify-center text-sm font-bold text-white">{custName.charAt(0).toUpperCase()}</div>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-medium text-white truncate">{custName}</p>
+                      <p className="text-xs text-gray-400">{custPhone} {cust.city && `· ${cust.city}`}</p>
+                    </div>
                   </div>
-                </div>
-              )}
+                );
+              }}
               onSelect={(cust) => {
                 startTransition(() => {
-                  store.setCustomer({ ...cust, id: cust.customer_id || cust._id || cust.id } as any);
+                  store.setCustomer({
+                    ...cust,
+                    id: cust.customer_id || cust._id || cust.id,
+                    name: cust.name || cust.customer_name || cust.full_name || 'Customer',
+                    phone: cust.phone || cust.mobile || '',
+                  } as any);
                 });
               }}
               getKey={(cust) => cust.customer_id || cust._id || cust.id || String(Math.random())}

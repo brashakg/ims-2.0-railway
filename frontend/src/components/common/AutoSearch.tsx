@@ -197,7 +197,7 @@ export function AutoSearch<T>({
           onFocus={() => { if (results.length > 0 && query.length >= minChars) setIsOpen(true); }}
           placeholder={placeholder}
           autoFocus={autoFocus}
-          className="w-full pl-10 pr-8 py-2.5 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-bv-gold-500 focus:border-bv-gold-500 transition-colors"
+          className="w-full pl-10 pr-8 py-2.5 bg-gray-800 border border-gray-600 rounded-lg text-sm text-white placeholder:text-gray-400 focus:ring-2 focus:ring-bv-gold-500 focus:border-bv-gold-500 transition-colors"
         />
         {query && (
           <button onClick={handleClear} className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600">
@@ -209,7 +209,7 @@ export function AutoSearch<T>({
       {/* Dropdown */}
       {isOpen && (
         <div ref={dropdownRef}
-          className="absolute z-50 w-full mt-1 bg-white border border-gray-200 rounded-xl shadow-lg overflow-hidden max-h-80 overflow-y-auto">
+          className="absolute z-50 w-full mt-1 bg-gray-800 border border-gray-600 rounded-xl shadow-lg overflow-hidden max-h-80 overflow-y-auto">
           {results.length === 0 ? (
             <div className="px-4 py-6 text-center text-sm text-gray-400">{emptyMessage}</div>
           ) : (
@@ -218,8 +218,8 @@ export function AutoSearch<T>({
                 key={getKey(item)}
                 onClick={() => handleSelect(item)}
                 onMouseEnter={() => setHighlightIndex(idx)}
-                className={`w-full text-left px-3 py-2.5 transition-colors border-b border-gray-50 last:border-0 ${
-                  idx === highlightIndex ? 'bg-bv-gold-50' : 'hover:bg-gray-50'
+                className={`w-full text-left px-3 py-2.5 transition-colors border-b border-gray-700 last:border-0 ${
+                  idx === highlightIndex ? 'bg-bv-gold-900/30' : 'hover:bg-gray-700'
                 }`}
               >
                 {renderItem(item, idx === highlightIndex)}
