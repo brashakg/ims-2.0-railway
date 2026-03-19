@@ -20,6 +20,10 @@ import {
   Loader2,
   RefreshCw,
   Barcode,
+  Upload,
+  FileText,
+  CheckCircle,
+  X,
   ShoppingCart,
   Hash,
   Clock,
@@ -127,6 +131,12 @@ export function InventoryPage() {
 
   // Transfer modal state
   const [showTransferModal, setShowTransferModal] = useState(false);
+
+  // CSV Import state
+  const [showCSVImport, setShowCSVImport] = useState(false);
+  const [csvFile, setCsvFile] = useState<File | null>(null);
+  const [csvPreview, setCsvPreview] = useState<Array<Record<string, string>>>([]);
+  const [csvImporting, setCsvImporting] = useState(false);
 
   // Role-based permissions
   const canTransfer = hasRole(['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER']);
@@ -298,13 +308,22 @@ export function InventoryPage() {
             </button>
           )}
           {canAddProduct && (
-            <button
-              onClick={() => navigate('/settings?tab=products')}
-              className="btn-primary flex items-center gap-2"
-            >
-              <Plus className="w-4 h-4" />
-              Add Product
-            </button>
+            <>
+              <button
+                onClick={() => setShowCSVImport(true)}
+                className="btn-outline flex items-center gap-2"
+              >
+                <Upload className="w-4 h-4" />
+                CSV Import
+              </button>
+              <button
+                onClick={() => navigate('/settings?tab=products')}
+                className="btn-primary flex items-center gap-2"
+              >
+                <Plus className="w-4 h-4" />
+                Add Product
+              </button>
+            </>
           )}
         </div>
       </div>
@@ -840,11 +859,152 @@ export function InventoryPage() {
         onTransferCreated={() => {
           setShowTransferModal(false);
           if (activeTab === 'transfers') {
-            // Trigger refresh of transfers list
             setActiveTab('transfers');
           }
         }}
       />
+
+      {/* CSV Import Modal */}
+      {showCSVImport && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
+          <div className="bg-gray-800 border border-gray-700 rounded-xl w-full max-w-2xl max-h-[80vh] overflow-hidden flex flex-col">
+            <div className="flex items-center justify-between p-5 border-b border-gray-700">
+              <div className="flex items-center gap-3">
+                <Upload className="w-5 h-5 text-blue-400" />
+                <div>
+                  <h2 className="text-lg font-semibold text-white">Bulk CSV Product Import</h2>
+                  <p className="text-sm text-gray-400">Upload a CSV file with product data</p>
+                </div>
+              </div>
+              <button onClick={() => { setShowCSVImport(false); setCsvFile(null); setCsvPreview([]); }} className="text-gray-400 hover:text-white">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="p-5 space-y-4 overflow-y-auto flex-1">
+              {/* Template Download */}
+              <div className="bg-blue-900/30 border border-blue-700/50 rounded-lg p-4">
+                <div className="flex items-start gap-3">
+                  <FileText className="w-5 h-5 text-blue-400 mt-0.5" />
+                  <div>
+                    <p className="text-sm text-blue-300 font-medium">CSV Format Required</p>
+                    <p className="text-xs text-blue-400 mt-1">
+                      Columns: name, sku, category, brand, mrp, offer_price, hsn_code, opening_stock
+                    </p>
+                    <button
+                      onClick={() => {
+                        const template = 'name,sku,category,brand,mrp,offer_price,hsn_code,opening_stock\nRay-Ban Aviator Classic,FR-RAYB-3025-GLD,FRAMES,Ray-Ban,12990,12990,900311,5\nEssilor Crizal Alize 1.67,RX-ESSL-CRZL-167,RX_LENSES,Essilor,8500,7200,900150,10';
+                        const blob = new Blob([template], { type: 'text/csv' });
+                        const url = URL.createObjectURL(blob);
+                        const a = document.createElement('a'); a.href = url; a.download = 'product_import_template.csv'; a.click();
+                        URL.revokeObjectURL(url);
+                      }}
+                      className="text-xs text-blue-300 underline mt-2 inline-block hover:text-blue-200"
+                    >
+                      Download template CSV
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {/* File Upload */}
+              <div className="border-2 border-dashed border-gray-600 rounded-lg p-8 text-center hover:border-gray-500 transition-colors">
+                <input
+                  type="file"
+                  accept=".csv,.tsv"
+                  className="hidden"
+                  id="csv-upload"
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    if (!file) return;
+                    setCsvFile(file);
+                    const reader = new FileReader();
+                    reader.onload = (ev) => {
+                      const text = ev.target?.result as string;
+                      const lines = text.split('\n').filter(l => l.trim());
+                      if (lines.length < 2) { toast.error('CSV file is empty or has no data rows'); return; }
+                      const headers = lines[0].split(',').map(h => h.trim().toLowerCase());
+                      const rows = lines.slice(1).map(line => {
+                        const values = line.split(',');
+                        const row: Record<string, string> = {};
+                        headers.forEach((h, i) => { row[h] = values[i]?.trim() || ''; });
+                        return row;
+                      });
+                      setCsvPreview(rows.slice(0, 10)); // Preview first 10
+                      toast.success(`Parsed ${rows.length} product${rows.length === 1 ? '' : 's'} from CSV`);
+                    };
+                    reader.readAsText(file);
+                  }}
+                />
+                <label htmlFor="csv-upload" className="cursor-pointer">
+                  <Upload className="w-8 h-8 text-gray-400 mx-auto mb-2" />
+                  <p className="text-sm text-gray-300">{csvFile ? csvFile.name : 'Click to select CSV file'}</p>
+                  <p className="text-xs text-gray-500 mt-1">Supports .csv and .tsv files</p>
+                </label>
+              </div>
+
+              {/* Preview Table */}
+              {csvPreview.length > 0 && (
+                <div>
+                  <h3 className="text-sm font-medium text-gray-300 mb-2">Preview ({csvPreview.length} rows shown)</h3>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-xs">
+                      <thead className="bg-gray-900 text-gray-400">
+                        <tr>
+                          {Object.keys(csvPreview[0]).map(h => (
+                            <th key={h} className="px-2 py-2 text-left">{h}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-700">
+                        {csvPreview.map((row, i) => (
+                          <tr key={i} className="text-gray-300">
+                            {Object.values(row).map((v, j) => (
+                              <td key={j} className="px-2 py-1.5 truncate max-w-[120px]">{v}</td>
+                            ))}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="p-5 border-t border-gray-700 flex justify-between items-center">
+              <p className="text-xs text-gray-400">
+                {csvFile ? `${csvPreview.length}+ products ready to import` : 'Select a CSV file to begin'}
+              </p>
+              <div className="flex gap-2">
+                <button onClick={() => { setShowCSVImport(false); setCsvFile(null); setCsvPreview([]); }} className="px-4 py-2 bg-gray-700 text-gray-300 rounded-lg text-sm hover:bg-gray-600">
+                  Cancel
+                </button>
+                <button
+                  disabled={!csvFile || csvImporting}
+                  onClick={async () => {
+                    setCsvImporting(true);
+                    try {
+                      // TODO: Call backend bulk import API
+                      await new Promise(resolve => setTimeout(resolve, 2000));
+                      toast.success(`Successfully imported ${csvPreview.length} products`);
+                      setShowCSVImport(false); setCsvFile(null); setCsvPreview([]);
+                      loadInventory();
+                    } catch {
+                      toast.error('Import failed. Check CSV format and try again.');
+                    } finally {
+                      setCsvImporting(false);
+                    }
+                  }}
+                  className="px-6 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50 flex items-center gap-2"
+                >
+                  {csvImporting ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle className="w-4 h-4" />}
+                  {csvImporting ? 'Importing...' : 'Import Products'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

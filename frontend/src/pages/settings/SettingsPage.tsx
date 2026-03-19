@@ -41,6 +41,7 @@ import { ApprovalWorkflows } from '../../components/settings/ApprovalWorkflows';
 import { FeatureToggles } from '../../components/settings/FeatureToggles';
 import { IntegrationSettings } from '../../components/settings/IntegrationSettings';
 import { NotificationSettings } from '../../components/settings/NotificationSettings';
+import { AdminControlPanel } from '../../components/settings/AdminControlPanel';
 
 // ============================================================================
 // Types
@@ -1800,6 +1801,12 @@ export function SettingsPage() {
                         <ChevronRight className="w-5 h-5 text-gray-400" />
                       </button>
                     </div>
+                  </div>
+
+                  {/* Admin Control Panel */}
+                  <div className="card mt-6">
+                    <h2 className="text-lg font-semibold text-white mb-4">Admin Controls — Store & Role Configuration</h2>
+                    <AdminControlPanel />
                   </div>
                 </div>
               )}

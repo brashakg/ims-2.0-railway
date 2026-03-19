@@ -19,6 +19,7 @@ import {
 } from 'lucide-react';
 import { hrApi } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
+import { useToast } from '../../context/ToastContext';
 import clsx from 'clsx';
 import { MonthlyAttendanceGrid } from '../../components/hr/MonthlyAttendanceGrid';
 import { EmployeeSelfService } from '../../components/hr/EmployeeSelfService';
@@ -72,6 +73,7 @@ const LEAVE_STATUS_CONFIG: Record<LeaveStatus, { label: string; class: string }>
 
 export function HRPage() {
   const { user, hasRole } = useAuth();
+  const toast = useToast();
   const [searchParams] = useSearchParams();
 
   // Data state
@@ -167,13 +169,39 @@ export function HRPage() {
           <button
             onClick={async () => {
               try {
-                const pos = await new Promise<GeolocationPosition>((resolve, reject) => 
-                  navigator.geolocation.getCurrentPosition(resolve, reject, { timeout: 5000 }));
-                await hrApi.checkIn(user?.activeStoreId || '', pos.coords.latitude, pos.coords.longitude);
+                const pos = await new Promise<GeolocationPosition>((resolve, reject) =>
+                  navigator.geolocation.getCurrentPosition(resolve, reject, { timeout: 10000, enableHighAccuracy: true }));
+                const lat = pos.coords.latitude;
+                const lng = pos.coords.longitude;
+
+                // Geo-fence enforcement: store locations (Bokaro Steel City area)
+                const STORE_LOCATIONS: Record<string, { lat: number; lng: number; radius: number }> = {
+                  'BV-BOK-01': { lat: 23.6693, lng: 86.1511, radius: 200 }, // 200m radius
+                  'BV-BOK-02': { lat: 23.6750, lng: 86.1480, radius: 200 },
+                };
+                const storeLoc = STORE_LOCATIONS[user?.activeStoreId || ''];
+                if (storeLoc) {
+                  // Haversine distance calculation
+                  const R = 6371000; // Earth's radius in meters
+                  const dLat = (lat - storeLoc.lat) * Math.PI / 180;
+                  const dLng = (lng - storeLoc.lng) * Math.PI / 180;
+                  const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+                    Math.cos(storeLoc.lat * Math.PI / 180) * Math.cos(lat * Math.PI / 180) *
+                    Math.sin(dLng/2) * Math.sin(dLng/2);
+                  const distance = R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+                  if (distance > storeLoc.radius) {
+                    toast.error(`You are ${Math.round(distance)}m from the store. Check-in requires being within ${storeLoc.radius}m.`);
+                    return;
+                  }
+                }
+
+                await hrApi.checkIn(user?.activeStoreId || '', lat, lng);
+                toast.success('Checked in successfully');
                 await loadData();
               } catch (err: any) {
-                if (err?.code === 1) alert('Location access required for check-in');
-                else await hrApi.checkIn(user?.activeStoreId || '', 0, 0).then(() => loadData()).catch(() => {});
+                if (err?.code === 1) toast.error('Location access is required for check-in. Please enable GPS.');
+                else if (err?.code === 3) toast.error('Location request timed out. Please try again.');
+                else toast.error('Check-in failed. Please try again.');
               }
             }}
             className="btn-primary flex items-center gap-2 text-sm"
