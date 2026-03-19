@@ -279,7 +279,7 @@ export function OrdersPage() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">Orders</h1>
+          <h1 className="text-2xl font-bold text-white">Orders</h1>
           <p className="text-gray-500">View and manage all orders</p>
         </div>
         <button
@@ -305,14 +305,14 @@ export function OrdersPage() {
               placeholder="Search by order number, customer name, or phone..."
             />
             {searchQuery.length >= 2 && filteredOrders.length > 0 && filteredOrders.length < orders.length && (
-              <div className="absolute z-40 w-full mt-1 bg-white border border-gray-200 rounded-xl shadow-lg max-h-64 overflow-y-auto">
+              <div className="absolute z-40 w-full mt-1 bg-gray-800 border border-gray-700 rounded-xl shadow-lg max-h-64 overflow-y-auto">
                 {filteredOrders.slice(0, 6).map(order => {
                   const sc = ORDER_STATUS_CONFIG[order.orderStatus as OrderStatus];
                   return (
                     <button key={order.id} onClick={() => { setSelectedOrder(order); setSearchQuery(''); }}
                       className="w-full text-left px-3 py-2.5 hover:bg-bv-gold-50 border-b border-gray-50 last:border-0 flex items-center gap-3">
                       <div className="flex-1 min-w-0">
-                        <p className="text-sm font-medium text-gray-900 truncate">{order.orderNumber}</p>
+                        <p className="text-sm font-medium text-white truncate">{order.orderNumber}</p>
                         <p className="text-xs text-gray-500">{order.customerName} {order.customerPhone ? `· ${order.customerPhone}` : ''}</p>
                       </div>
                       <div className="text-right flex-shrink-0">
@@ -400,7 +400,7 @@ export function OrdersPage() {
                         <StatusIcon className={clsx('w-5 h-5', statusConfig?.color || 'text-gray-600')} />
                       </div>
                       <div>
-                        <p className="font-medium text-gray-900">{order.orderNumber}</p>
+                        <p className="font-medium text-white">{order.orderNumber}</p>
                         <div className="flex items-center gap-2 text-sm text-gray-500">
                           <User className="w-3 h-3" />
                           <span>{order.customerName}</span>
@@ -416,7 +416,7 @@ export function OrdersPage() {
 
                     {/* Status & Amount */}
                     <div className="text-right">
-                      <p className="font-bold text-gray-900">{formatCurrency(order.grandTotal)}</p>
+                      <p className="font-bold text-white">{formatCurrency(order.grandTotal)}</p>
                       <div className="flex items-center gap-2 mt-1">
                         <span className={clsx(
                           'text-xs px-2 py-0.5 rounded-full',
@@ -485,10 +485,10 @@ export function OrdersPage() {
       {/* Order Detail Modal - Placeholder */}
       {selectedOrder && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-xl shadow-xl max-w-2xl w-full max-h-[90vh] overflow-y-auto">
+          <div className="bg-gray-800 rounded-xl shadow-xl max-w-2xl w-full max-h-[90vh] overflow-y-auto">
             <div className="p-6">
               <div className="flex items-center justify-between mb-6">
-                <h2 className="text-xl font-bold text-gray-900">
+                <h2 className="text-xl font-bold text-white">
                   Order {selectedOrder.orderNumber}
                 </h2>
                 <button
@@ -612,10 +612,10 @@ export function OrdersPage() {
       {/* Payment Collection Modal */}
       {showPaymentModal && paymentOrder && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-xl shadow-xl max-w-md w-full">
-            <div className="p-6 border-b border-gray-200">
+          <div className="bg-gray-800 rounded-xl shadow-xl max-w-md w-full">
+            <div className="p-6 border-b border-gray-700">
               <div className="flex items-center justify-between">
-                <h2 className="text-xl font-bold text-gray-900">Collect Payment</h2>
+                <h2 className="text-xl font-bold text-white">Collect Payment</h2>
                 <button
                   onClick={() => setShowPaymentModal(false)}
                   className="p-2 text-gray-400 hover:text-gray-600 rounded-lg"
@@ -629,9 +629,9 @@ export function OrdersPage() {
               {/* Order Info */}
               <div className="bg-gray-50 p-4 rounded-lg">
                 <p className="text-sm text-gray-500">Order</p>
-                <p className="font-medium text-gray-900">{paymentOrder.orderNumber}</p>
+                <p className="font-medium text-white">{paymentOrder.orderNumber}</p>
                 <p className="text-sm text-gray-500 mt-1">{paymentOrder.customerName}</p>
-                <div className="flex justify-between mt-2 pt-2 border-t border-gray-200">
+                <div className="flex justify-between mt-2 pt-2 border-t border-gray-700">
                   <span className="text-sm text-gray-500">Balance Due:</span>
                   <span className="font-bold text-red-600">{formatCurrency(paymentOrder.balanceDue || 0)}</span>
                 </div>
@@ -687,7 +687,7 @@ export function OrdersPage() {
                         'p-2 text-xs rounded-lg border transition-colors',
                         paymentMethod === method
                           ? 'border-bv-gold-600 bg-bv-gold-50 text-bv-gold-700'
-                          : 'border-gray-200 hover:border-gray-300'
+                          : 'border-gray-700 hover:border-gray-300'
                       )}
                     >
                       {method === 'BANK_TRANSFER' ? 'Bank' : method}
@@ -713,7 +713,7 @@ export function OrdersPage() {
               )}
             </div>
 
-            <div className="p-6 border-t border-gray-200 flex justify-end gap-3">
+            <div className="p-6 border-t border-gray-700 flex justify-end gap-3">
               <button
                 onClick={() => setShowPaymentModal(false)}
                 className="btn-secondary"
@@ -746,10 +746,10 @@ export function OrdersPage() {
       {/* Mark Delivered Confirmation Modal */}
       {showDeliverModal && deliverOrder && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-xl shadow-xl max-w-md w-full">
-            <div className="p-6 border-b border-gray-200">
+          <div className="bg-gray-800 rounded-xl shadow-xl max-w-md w-full">
+            <div className="p-6 border-b border-gray-700">
               <div className="flex items-center justify-between">
-                <h2 className="text-xl font-bold text-gray-900">Mark Order as Delivered?</h2>
+                <h2 className="text-xl font-bold text-white">Mark Order as Delivered?</h2>
                 <button
                   onClick={() => setShowDeliverModal(false)}
                   className="p-2 text-gray-400 hover:text-gray-600 rounded-lg"
@@ -763,12 +763,12 @@ export function OrdersPage() {
               {/* Order Info */}
               <div className="bg-gray-50 p-4 rounded-lg">
                 <p className="text-sm text-gray-500">Order</p>
-                <p className="font-medium text-gray-900">{deliverOrder.orderNumber}</p>
+                <p className="font-medium text-white">{deliverOrder.orderNumber}</p>
                 <p className="text-sm text-gray-500 mt-1">{deliverOrder.customerName}</p>
                 <p className="text-sm text-gray-500">{deliverOrder.customerPhone}</p>
-                <div className="flex justify-between mt-3 pt-3 border-t border-gray-200">
+                <div className="flex justify-between mt-3 pt-3 border-t border-gray-700">
                   <span className="text-sm text-gray-500">Grand Total:</span>
-                  <span className="font-bold text-gray-900">{formatCurrency(deliverOrder.grandTotal || 0)}</span>
+                  <span className="font-bold text-white">{formatCurrency(deliverOrder.grandTotal || 0)}</span>
                 </div>
               </div>
 
