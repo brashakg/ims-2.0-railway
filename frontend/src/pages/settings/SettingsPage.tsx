@@ -19,7 +19,7 @@ import {
   ChevronRight, Plus, Edit2, Trash2, X, Check, AlertCircle,
   RefreshCw, ToggleLeft, ToggleRight, Upload, Download,
   Link, CreditCard, MessageSquare, FileText, Boxes, CircleDot,
-  User, Building2, Receipt, Bell, History, Printer, Lock, Save, Send,
+  User, Building2, Receipt, Bell, History, Printer, Lock, Save,
   Search, Calendar, Filter, LogOut, Shield,
 } from 'lucide-react';
 import clsx from 'clsx';
@@ -39,6 +39,8 @@ import {
 
 import { ApprovalWorkflows } from '../../components/settings/ApprovalWorkflows';
 import { FeatureToggles } from '../../components/settings/FeatureToggles';
+import { IntegrationSettings } from '../../components/settings/IntegrationSettings';
+import { NotificationSettings } from '../../components/settings/NotificationSettings';
 
 // ============================================================================
 // Types
@@ -346,7 +348,7 @@ export function SettingsPage() {
   const [users, setUsers] = useState<User[]>([]);
   const [categories] = useState<Category[]>(CATEGORY_DEFINITIONS);
   const [brands, setBrands] = useState<Brand[]>([]);
-  const [integrations, setIntegrations] = useState<Integration[]>(INTEGRATION_DEFINITIONS);
+  const [_integrations, _setIntegrations] = useState<Integration[]>(INTEGRATION_DEFINITIONS);
 
   // Lens master state
   const [lensBrands, setLensBrands] = useState<LensBrand[]>([]);
@@ -406,7 +408,7 @@ export function SettingsPage() {
   } | null>(null);
 
   // Notification templates state
-  const [notificationTemplates, setNotificationTemplates] = useState<Array<{
+  const [_notificationTemplates, _setNotificationTemplates] = useState<Array<{
     template_id: string;
     template_type: string;
     trigger_event: string;
@@ -559,7 +561,7 @@ export function SettingsPage() {
                 isEnabled: config?.is_enabled || config?.enabled || false,
               };
             });
-            setIntegrations(merged);
+            _setIntegrations(merged);
           } catch {
             // Use defaults if API fails
           }
@@ -622,9 +624,9 @@ export function SettingsPage() {
         case 'notifications':
           try {
             const templatesRes = await settingsApi.getNotificationTemplates().catch(() => ({ templates: [] }));
-            setNotificationTemplates(templatesRes.templates || []);
+            _setNotificationTemplates(templatesRes.templates || []);
           } catch {
-            setNotificationTemplates([]);
+            _setNotificationTemplates([]);
           }
           break;
 
@@ -1679,46 +1681,8 @@ export function SettingsPage() {
               {/* INTEGRATIONS */}
               {/* ================================================================ */}
               {activeTab === 'integrations' && (
-                <div className="space-y-4">
-                  {integrations.map(integration => (
-                    <div key={integration.type} className="card">
-                      <div className="flex items-center justify-between">
-                        <div className="flex items-center gap-4">
-                          <div className={clsx(
-                            'w-12 h-12 rounded-lg flex items-center justify-center',
-                            integration.isEnabled ? 'bg-green-50' : 'bg-gray-700'
-                          )}>
-                            <integration.icon className={clsx(
-                              'w-6 h-6',
-                              integration.isEnabled ? 'text-green-600' : 'text-gray-400'
-                            )} />
-                          </div>
-                          <div>
-                            <h3 className="font-medium text-white">{integration.name}</h3>
-                            <p className="text-sm text-gray-400">{integration.description}</p>
-                          </div>
-                        </div>
-
-                        <div className="flex items-center gap-4">
-                          {integration.isConfigured ? (
-                            <span className="badge-success">Configured</span>
-                          ) : (
-                            <span className="badge-warning">Not Configured</span>
-                          )}
-                          <button className="btn-outline">
-                            Configure
-                          </button>
-                          {integration.isConfigured && (
-                            integration.isEnabled ? (
-                              <ToggleRight className="w-8 h-8 text-green-600 cursor-pointer" />
-                            ) : (
-                              <ToggleLeft className="w-8 h-8 text-gray-400 cursor-pointer" />
-                            )
-                          )}
-                        </div>
-                      </div>
-                    </div>
-                  ))}
+                <div>
+                  <IntegrationSettings />
                 </div>
               )}
 
@@ -2220,76 +2184,8 @@ export function SettingsPage() {
               {/* NOTIFICATIONS */}
               {/* ================================================================ */}
               {activeTab === 'notifications' && (
-                <div className="space-y-4">
-                  <div className="card">
-                    <div className="flex items-center justify-between mb-4">
-                      <h2 className="text-lg font-semibold text-white">Notification Templates</h2>
-                      <button className="btn-primary" onClick={() => toast.info('Create new template')}>
-                        <Plus className="w-4 h-4 mr-2" />
-                        Add Template
-                      </button>
-                    </div>
-
-                    <div className="space-y-3">
-                      {notificationTemplates.length === 0 ? (
-                        <div className="text-center py-12 text-gray-400">
-                          <Bell className="w-12 h-12 mx-auto mb-3 opacity-50" />
-                          <p>No notification templates configured</p>
-                        </div>
-                      ) : (
-                        notificationTemplates.map(template => (
-                          <div key={template.template_id} className="p-4 border border-gray-700 rounded-lg hover:border-bv-gold-200 transition-colors">
-                            <div className="flex items-start justify-between">
-                              <div className="flex-1">
-                                <div className="flex items-center gap-2">
-                                  <span className={clsx(
-                                    'text-xs px-2 py-0.5 rounded',
-                                    template.template_type === 'SMS' ? 'bg-blue-100 text-blue-700' :
-                                    template.template_type === 'WHATSAPP' ? 'bg-green-100 text-green-700' :
-                                    'bg-purple-100 text-purple-700'
-                                  )}>
-                                    {template.template_type}
-                                  </span>
-                                  <span className="text-xs bg-gray-700 px-2 py-0.5 rounded">{template.trigger_event.replace(/_/g, ' ')}</span>
-                                  {template.is_enabled ? (
-                                    <span className="badge-success">Active</span>
-                                  ) : (
-                                    <span className="badge-error">Disabled</span>
-                                  )}
-                                </div>
-                                <p className="text-sm text-gray-400 mt-2 line-clamp-2">{template.content}</p>
-                                <div className="flex flex-wrap gap-1 mt-2">
-                                  {template.variables.map(v => (
-                                    <span key={v} className="text-xs bg-yellow-50 text-yellow-700 px-1.5 py-0.5 rounded font-mono">{`{${v}}`}</span>
-                                  ))}
-                                </div>
-                              </div>
-                              <div className="flex items-center gap-2 ml-4">
-                                <button
-                                  onClick={() => toast.info('Edit template')}
-                                  className="p-2 text-gray-400 hover:text-bv-gold-600 hover:bg-gray-700 rounded"
-                                >
-                                  <Edit2 className="w-4 h-4" />
-                                </button>
-                                <button
-                                  onClick={() => toast.info('Test notification sent')}
-                                  className="p-2 text-gray-400 hover:text-green-600 hover:bg-gray-700 rounded"
-                                  title="Send test"
-                                >
-                                  <Send className="w-4 h-4" />
-                                </button>
-                                {template.is_enabled ? (
-                                  <ToggleRight className="w-6 h-6 text-green-600 cursor-pointer" />
-                                ) : (
-                                  <ToggleLeft className="w-6 h-6 text-gray-400 cursor-pointer" />
-                                )}
-                              </div>
-                            </div>
-                          </div>
-                        ))
-                      )}
-                    </div>
-                  </div>
+                <div>
+                  <NotificationSettings />
                 </div>
               )}
 

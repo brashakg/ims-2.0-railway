@@ -19,13 +19,19 @@ import {
   Target,
   CreditCard,
   Loader2,
+  Wallet,
+  Building2,
+  Scale,
+  CheckCircle,
+  AlertTriangle,
+  X,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import clsx from 'clsx';
 
 // Types for Finance Dashboard
-type TabType = 'revenue-pl' | 'gst' | 'outstanding' | 'cash-flow' | 'period';
+type TabType = 'revenue-pl' | 'gst' | 'outstanding' | 'cash-flow' | 'period' | 'budgets' | 'vendor-payments' | 'reconciliation';
 type GSTType = 'CGST_SGST' | 'IGST' | 'EXEMPT';
 type ReconciliationStatus = 'pending' | 'matched' | 'discrepancy';
 
@@ -1171,6 +1177,9 @@ export default function FinanceDashboard() {
             { id: 'outstanding' as TabType, label: 'Outstanding & Collections', icon: CreditCard },
             { id: 'cash-flow' as TabType, label: 'Cash Flow', icon: TrendingDown },
             { id: 'period' as TabType, label: 'Period Management', icon: Calendar },
+            { id: 'budgets' as TabType, label: 'Budgets', icon: Target },
+            { id: 'vendor-payments' as TabType, label: 'Vendor Payments', icon: Building2 },
+            { id: 'reconciliation' as TabType, label: 'Reconciliation', icon: Scale },
           ].map(({ id, label, icon: Icon }) => (
             <button
               key={id}
@@ -1195,8 +1204,262 @@ export default function FinanceDashboard() {
           {activeTab === 'outstanding' && <OutstandingTab />}
           {activeTab === 'cash-flow' && <CashFlowTab />}
           {activeTab === 'period' && <PeriodTab />}
+          {activeTab === 'budgets' && <BudgetTab />}
+          {activeTab === 'vendor-payments' && <VendorPaymentTab />}
+          {activeTab === 'reconciliation' && <ReconciliationTab />}
         </div>
       </div>
     </div>
   );
+
+  // ================================================================
+  // BUDGET TRACKING TAB
+  // ================================================================
+  function BudgetTab() {
+    const totalAllocated = budgets.reduce((s, b) => s + b.allocated, 0);
+    const totalSpent = budgets.reduce((s, b) => s + b.spent, 0);
+    return (
+      <div className="space-y-6">
+        {/* Summary Cards */}
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+          <div className="bg-slate-800 border border-slate-700 rounded-lg p-4">
+            <p className="text-sm text-slate-400">Total Budget</p>
+            <p className="text-2xl font-bold text-white mt-1">{formatCurrency(totalAllocated)}</p>
+          </div>
+          <div className="bg-slate-800 border border-slate-700 rounded-lg p-4">
+            <p className="text-sm text-slate-400">Total Spent</p>
+            <p className="text-2xl font-bold text-blue-400 mt-1">{formatCurrency(totalSpent)}</p>
+          </div>
+          <div className="bg-slate-800 border border-slate-700 rounded-lg p-4">
+            <p className="text-sm text-slate-400">Utilization</p>
+            <p className="text-2xl font-bold text-white mt-1">{totalAllocated > 0 ? ((totalSpent / totalAllocated) * 100).toFixed(1) : 0}%</p>
+          </div>
+        </div>
+
+        {/* Budget Allocation Button */}
+        <div className="flex justify-between items-center">
+          <h3 className="text-lg font-semibold text-white">Budget Allocations — FY {selectedYear}</h3>
+          <button onClick={() => setShowBudgetModal(true)} className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700">
+            <Plus className="w-4 h-4" /> Allocate Budget
+          </button>
+        </div>
+
+        {/* Budget Table */}
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead className="bg-slate-900 text-slate-400 text-left">
+              <tr>
+                <th className="px-4 py-3">Category</th>
+                <th className="px-4 py-3 text-right">Allocated</th>
+                <th className="px-4 py-3 text-right">Spent</th>
+                <th className="px-4 py-3 text-right">Remaining</th>
+                <th className="px-4 py-3 text-right">Variance %</th>
+                <th className="px-4 py-3">Progress</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-700">
+              {budgets.map((b) => {
+                const pct = b.allocated > 0 ? (b.spent / b.allocated) * 100 : 0;
+                const overBudget = b.remaining < 0;
+                return (
+                  <tr key={b.category} className="text-white">
+                    <td className="px-4 py-3 font-medium">{b.category}</td>
+                    <td className="px-4 py-3 text-right">{formatCurrency(b.allocated)}</td>
+                    <td className="px-4 py-3 text-right">{formatCurrency(b.spent)}</td>
+                    <td className={clsx('px-4 py-3 text-right font-medium', overBudget ? 'text-red-400' : 'text-green-400')}>
+                      {formatCurrency(b.remaining)}
+                    </td>
+                    <td className={clsx('px-4 py-3 text-right', b.variance_percent >= 0 ? 'text-green-400' : 'text-red-400')}>
+                      {b.variance_percent > 0 ? '+' : ''}{b.variance_percent}%
+                    </td>
+                    <td className="px-4 py-3">
+                      <div className="w-24 h-2 bg-slate-700 rounded-full overflow-hidden">
+                        <div className={clsx('h-full rounded-full', overBudget ? 'bg-red-500' : pct > 80 ? 'bg-amber-500' : 'bg-green-500')} style={{ width: `${Math.min(pct, 100)}%` }} />
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+
+        {/* Budget Modal */}
+        {showBudgetModal && (
+          <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
+            <div className="bg-slate-800 border border-slate-700 rounded-xl p-6 w-full max-w-md">
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="text-lg font-semibold text-white">Allocate Budget</h3>
+                <button onClick={() => setShowBudgetModal(false)} className="text-slate-400 hover:text-white"><X className="w-5 h-5" /></button>
+              </div>
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-sm text-slate-300 mb-1">Category</label>
+                  <select value={budgetCategory} onChange={(e) => setBudgetCategory(e.target.value)} className="w-full bg-slate-900 border border-slate-600 text-white rounded-lg px-3 py-2 text-sm">
+                    <option value="">Select category...</option>
+                    <option value="Employee Salaries">Employee Salaries</option>
+                    <option value="Rent & Utilities">Rent & Utilities</option>
+                    <option value="Marketing">Marketing</option>
+                    <option value="Inventory">Inventory</option>
+                    <option value="Maintenance">Maintenance</option>
+                    <option value="Technology">Technology</option>
+                    <option value="Miscellaneous">Miscellaneous</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-sm text-slate-300 mb-1">Amount (₹)</label>
+                  <input type="number" value={budgetAmount} onChange={(e) => setBudgetAmount(e.target.value)} placeholder="e.g. 50000" className="w-full bg-slate-900 border border-slate-600 text-white rounded-lg px-3 py-2 text-sm" />
+                </div>
+                <button onClick={handleAllocateBudget} className="w-full py-2.5 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700">Save Allocation</button>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // ================================================================
+  // VENDOR PAYMENTS TAB
+  // ================================================================
+  function VendorPaymentTab() {
+    const totalDue = vendorPayments.reduce((s, v) => s + v.amount_due, 0);
+    const overdueCount = vendorPayments.filter(v => v.days_overdue > 0).length;
+    return (
+      <div className="space-y-6">
+        {/* Summary */}
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+          <div className="bg-slate-800 border border-slate-700 rounded-lg p-4">
+            <p className="text-sm text-slate-400">Total Payable</p>
+            <p className="text-2xl font-bold text-white mt-1">{formatCurrency(totalDue)}</p>
+          </div>
+          <div className="bg-slate-800 border border-slate-700 rounded-lg p-4">
+            <p className="text-sm text-slate-400">Vendors with Dues</p>
+            <p className="text-2xl font-bold text-amber-400 mt-1">{vendorPayments.length}</p>
+          </div>
+          <div className="bg-slate-800 border border-slate-700 rounded-lg p-4">
+            <p className="text-sm text-slate-400">Overdue</p>
+            <p className="text-2xl font-bold text-red-400 mt-1">{overdueCount}</p>
+          </div>
+        </div>
+
+        <h3 className="text-lg font-semibold text-white">Vendor Payment Schedule</h3>
+
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead className="bg-slate-900 text-slate-400 text-left">
+              <tr>
+                <th className="px-4 py-3">Vendor</th>
+                <th className="px-4 py-3 text-right">Amount Due</th>
+                <th className="px-4 py-3">Due Date</th>
+                <th className="px-4 py-3">Status</th>
+                <th className="px-4 py-3 text-right">Overdue</th>
+                <th className="px-4 py-3">Action</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-700">
+              {vendorPayments.map((v) => (
+                <tr key={v.id} className="text-white">
+                  <td className="px-4 py-3 font-medium">{v.vendor_name}</td>
+                  <td className="px-4 py-3 text-right font-semibold">{formatCurrency(v.amount_due)}</td>
+                  <td className="px-4 py-3 text-slate-300">{new Date(v.due_date).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}</td>
+                  <td className="px-4 py-3">
+                    <span className={clsx('px-2 py-1 rounded text-xs font-medium', v.status === 'paid' ? 'bg-green-900/50 text-green-400' : v.status === 'partial' ? 'bg-amber-900/50 text-amber-400' : 'bg-slate-700 text-slate-300')}>
+                      {v.status.charAt(0).toUpperCase() + v.status.slice(1)}
+                    </span>
+                  </td>
+                  <td className={clsx('px-4 py-3 text-right', v.days_overdue > 0 ? 'text-red-400 font-medium' : 'text-slate-400')}>
+                    {v.days_overdue > 0 ? `${v.days_overdue} days` : '—'}
+                  </td>
+                  <td className="px-4 py-3">
+                    <button onClick={() => toast.success(`Payment recorded for ${v.vendor_name}`)} className="px-3 py-1.5 bg-green-600 text-white rounded text-xs hover:bg-green-700">
+                      <Wallet className="w-3 h-3 inline mr-1" /> Pay
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    );
+  }
+
+  // ================================================================
+  // BANK RECONCILIATION TAB
+  // ================================================================
+  function ReconciliationTab() {
+    const matched = reconciliation.filter(r => r.status === 'matched').length;
+    const pending = reconciliation.filter(r => r.status === 'pending').length;
+    const discrepancies = reconciliation.filter(r => r.status === 'discrepancy').length;
+    return (
+      <div className="space-y-6">
+        {/* Summary */}
+        <div className="grid grid-cols-1 sm:grid-cols-4 gap-4">
+          <div className="bg-slate-800 border border-slate-700 rounded-lg p-4">
+            <p className="text-sm text-slate-400">Total Entries</p>
+            <p className="text-2xl font-bold text-white mt-1">{reconciliation.length}</p>
+          </div>
+          <div className="bg-slate-800 border border-slate-700 rounded-lg p-4">
+            <div className="flex items-center gap-2"><CheckCircle className="w-4 h-4 text-green-400" /><p className="text-sm text-slate-400">Matched</p></div>
+            <p className="text-2xl font-bold text-green-400 mt-1">{matched}</p>
+          </div>
+          <div className="bg-slate-800 border border-slate-700 rounded-lg p-4">
+            <div className="flex items-center gap-2"><Loader2 className="w-4 h-4 text-amber-400" /><p className="text-sm text-slate-400">Pending</p></div>
+            <p className="text-2xl font-bold text-amber-400 mt-1">{pending}</p>
+          </div>
+          <div className="bg-slate-800 border border-slate-700 rounded-lg p-4">
+            <div className="flex items-center gap-2"><AlertTriangle className="w-4 h-4 text-red-400" /><p className="text-sm text-slate-400">Discrepancies</p></div>
+            <p className="text-2xl font-bold text-red-400 mt-1">{discrepancies}</p>
+          </div>
+        </div>
+
+        <div className="flex justify-between items-center">
+          <h3 className="text-lg font-semibold text-white">Bank vs System Reconciliation</h3>
+          <button onClick={() => toast.info('Upload bank statement to auto-reconcile')} className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700">
+            <Download className="w-4 h-4" /> Import Bank Statement
+          </button>
+        </div>
+
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead className="bg-slate-900 text-slate-400 text-left">
+              <tr>
+                <th className="px-4 py-3">Date</th>
+                <th className="px-4 py-3 text-right">Bank Amount</th>
+                <th className="px-4 py-3 text-right">System Amount</th>
+                <th className="px-4 py-3 text-right">Difference</th>
+                <th className="px-4 py-3">Status</th>
+                <th className="px-4 py-3">Action</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-700">
+              {reconciliation.map((r) => (
+                <tr key={r.id} className="text-white">
+                  <td className="px-4 py-3">{new Date(r.date).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}</td>
+                  <td className="px-4 py-3 text-right">{formatCurrency(r.bank_amount)}</td>
+                  <td className="px-4 py-3 text-right">{formatCurrency(r.system_amount)}</td>
+                  <td className={clsx('px-4 py-3 text-right font-medium', r.difference === 0 ? 'text-green-400' : 'text-red-400')}>
+                    {r.difference === 0 ? '—' : formatCurrency(r.difference)}
+                  </td>
+                  <td className="px-4 py-3">
+                    <span className={clsx('px-2 py-1 rounded text-xs font-medium', r.status === 'matched' ? 'bg-green-900/50 text-green-400' : r.status === 'discrepancy' ? 'bg-red-900/50 text-red-400' : 'bg-amber-900/50 text-amber-400')}>
+                      {r.status.charAt(0).toUpperCase() + r.status.slice(1)}
+                    </span>
+                  </td>
+                  <td className="px-4 py-3">
+                    {r.status !== 'matched' && (
+                      <button onClick={() => handleReconcile(r.id)} className="px-3 py-1.5 bg-green-600 text-white rounded text-xs hover:bg-green-700">
+                        <CheckCircle className="w-3 h-3 inline mr-1" /> Match
+                      </button>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    );
+  }
 }
