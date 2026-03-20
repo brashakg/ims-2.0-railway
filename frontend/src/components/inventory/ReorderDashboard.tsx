@@ -4,6 +4,7 @@
 // Monitor products requiring reorder and generate purchase orders
 
 import { useState, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 import {
   TrendingDown,
   AlertTriangle,
@@ -16,6 +17,7 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
+import { inventoryApi, vendorsApi, reorderApi } from '../../services/api/inventory';
 import { ReorderPointModal, type ReorderPointData } from './ReorderPointModal';
 
 interface Product {
@@ -40,6 +42,7 @@ interface Product {
 export function ReorderDashboard() {
   const { user } = useAuth();
   const toast = useToast();
+  const navigate = useNavigate();
 
   const [products, setProducts] = useState<Product[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -53,83 +56,73 @@ export function ReorderDashboard() {
   }, [user?.activeStoreId]);
 
   const loadProducts = async () => {
+    if (!user?.activeStoreId) return;
     setIsLoading(true);
     try {
-      // Mock data - in production, fetch from API
-      await new Promise(resolve => setTimeout(resolve, 1000));
+      const storeId = user.activeStoreId;
 
-      const mockProducts: Product[] = [
-        {
-          id: '1',
-          sku: 'FR-001',
-          name: 'Ray-Ban Aviator Classic',
-          brand: 'Ray-Ban',
-          category: 'Frames',
-          currentStock: 5,
-          reservedStock: 2,
-          reorderPoint: 10,
-          reorderQuantity: 50,
-          maxStock: 60,
-          leadTimeDays: 7,
-          averageSalesPerDay: 2.5,
-          lastOrderDate: '2025-01-15',
-          supplierName: 'Luxottica India',
-          unitCost: 1200,
-        },
-        {
-          id: '2',
-          sku: 'CL-045',
-          name: 'Acuvue Oasys Monthly',
-          brand: 'Acuvue',
-          category: 'Contact Lenses',
-          currentStock: 8,
-          reservedStock: 3,
-          reorderPoint: 15,
-          reorderQuantity: 100,
-          maxStock: 115,
-          leadTimeDays: 5,
-          averageSalesPerDay: 4.2,
-          lastOrderDate: '2025-01-20',
-          supplierName: 'Johnson & Johnson',
-          unitCost: 850,
-        },
-        {
-          id: '3',
-          sku: 'SG-112',
-          name: 'Oakley Holbrook',
-          brand: 'Oakley',
-          category: 'Sunglasses',
-          currentStock: 12,
-          reservedStock: 1,
-          reorderPoint: 12,
-          reorderQuantity: 40,
-          maxStock: 52,
-          leadTimeDays: 10,
-          averageSalesPerDay: 1.8,
-          lastOrderDate: '2025-01-10',
-          supplierName: 'Luxottica India',
-          unitCost: 2500,
-        },
-        {
-          id: '4',
-          sku: 'ACC-023',
-          name: 'Lens Cleaning Solution 120ml',
-          brand: 'Opticare',
-          category: 'Accessories',
-          currentStock: 3,
-          reservedStock: 0,
-          reorderPoint: 20,
-          reorderQuantity: 200,
-          maxStock: 220,
-          leadTimeDays: 3,
-          averageSalesPerDay: 6.5,
-          lastOrderDate: '2025-01-28',
-          supplierName: 'Optics Wholesale',
-          unitCost: 85,
-        },
-      ];
+      // Fetch low-stock items and full stock list in parallel
+      const [lowStockData, stockData] = await Promise.all([
+        inventoryApi.getLowStock(storeId).catch(() => ({ items: [] })),
+        inventoryApi.getStock(storeId).catch(() => ({ items: [] })),
+      ]);
 
-      setProducts(mockProducts);
+      // getLowStock returns { items: [{ _id: productId, quantity }] }
+      const lowStockItems: Array<{ _id: string; quantity: number }> =
+        Array.isArray(lowStockData) ? lowStockData : lowStockData?.items ?? [];
+
+      // getStock returns { items: [...stock unit docs] }
+      const stockUnits: Array<Record<string, any>> =
+        Array.isArray(stockData) ? stockData : stockData?.items ?? [];
+
+      // Build a map of product_id -> aggregated counts from stock units
+      const stockByProduct = new Map<string, { available: number; reserved: number; raw: Record<string, any> }>();
+      for (const unit of stockUnits) {
+        const pid: string = unit.product_id ?? unit._id ?? '';
+        if (!pid) continue;
+        const existing = stockByProduct.get(pid) ?? { available: 0, reserved: 0, raw: unit };
+        const qty = Number(unit.quantity ?? 1);
+        if (unit.status === 'RESERVED' || unit.is_reserved) {
+          existing.reserved += qty;
+        } else {
+          existing.available += qty;
+        }
+        stockByProduct.set(pid, existing);
+      }
+
+      // Combine low-stock items with stock unit details
+      // Use low-stock list as the primary source of "products needing reorder"
+      const mapped: Product[] = lowStockItems.map((item) => {
+        const pid = item._id ?? '';
+        const stockEntry = stockByProduct.get(pid);
+        const raw = stockEntry?.raw ?? {};
+
+        const currentStock = stockEntry
+          ? stockEntry.available + stockEntry.reserved
+          : Number(item.quantity ?? 0);
+        const reservedStock = stockEntry?.reserved ?? 0;
+
+        return {
+          id: pid,
+          sku: raw.sku ?? raw.barcode ?? pid.slice(-8).toUpperCase(),
+          name: raw.product_name ?? raw.name ?? raw.title ?? 'Unknown Product',
+          brand: raw.brand ?? raw.brand_name ?? '',
+          category: raw.category ?? '',
+          currentStock,
+          reservedStock,
+          reorderPoint: Number(raw.reorder_point ?? raw.reorder_level ?? 10),
+          reorderQuantity: Number(raw.reorder_quantity ?? raw.reorder_qty ?? 20),
+          maxStock: Number(raw.max_stock ?? raw.maximum_stock ?? 50),
+          leadTimeDays: Number(raw.lead_time_days ?? raw.lead_time ?? 7),
+          averageSalesPerDay: Number(raw.average_sales_per_day ?? raw.avg_daily_sales ?? 0),
+          lastOrderDate: raw.last_order_date ?? raw.last_purchase_date ?? undefined,
+          supplierId: raw.supplier_id ?? raw.vendor_id ?? undefined,
+          supplierName: raw.supplier_name ?? raw.vendor_name ?? undefined,
+          unitCost: raw.unit_cost ?? raw.cost_price ?? raw.mrp ?? undefined,
+        };
+      });
+
+      setProducts(mapped);
     } catch (error: any) {
       toast.error('Failed to load products');
     } finally {
@@ -139,10 +132,14 @@ export function ReorderDashboard() {
 
   const handleSaveReorderPoint = async (data: ReorderPointData) => {
     try {
-      // In production, save to API
-      await new Promise(resolve => setTimeout(resolve, 500));
+      await reorderApi.updateReorderSettings(data.productId, {
+        reorder_point: data.reorderPoint,
+        reorder_quantity: data.reorderQuantity,
+        max_stock: data.maxStock,
+        lead_time_days: data.leadTimeDays,
+      });
 
-      // Update local state
+      // Update local state to reflect saved values
       setProducts(products.map(p =>
         p.id === data.productId
           ? {
@@ -167,18 +164,67 @@ export function ReorderDashboard() {
       return;
     }
 
+    const selectedItems = products.filter(p => selectedProducts.has(p.id));
+
+    // Separate products with and without a known supplier
+    const withSupplier = selectedItems.filter(p => p.supplierId);
+    const withoutSupplier = selectedItems.filter(p => !p.supplierId);
+
+    if (withoutSupplier.length > 0) {
+      toast.error(
+        `${withoutSupplier.length} product(s) have no supplier assigned. Assign a vendor first.`
+      );
+      if (withSupplier.length === 0) return;
+    }
+
+    if (withSupplier.length === 0) {
+      // Nothing to create — navigate to purchase orders so user can create manually
+      navigate('/purchase/orders');
+      return;
+    }
+
     try {
-      const selectedItems = products.filter(p => selectedProducts.has(p.id));
-      const totalCost = selectedItems.reduce((sum, p) => sum + ((p.unitCost || 0) * p.reorderQuantity), 0);
+      // Group by supplier, create one PO per supplier
+      const bySupplier = new Map<string, typeof withSupplier>();
+      for (const item of withSupplier) {
+        const sid = item.supplierId!;
+        if (!bySupplier.has(sid)) bySupplier.set(sid, []);
+        bySupplier.get(sid)!.push(item);
+      }
 
-      // In production, create PO via API
-      await new Promise(resolve => setTimeout(resolve, 1000));
+      const storeId = user?.activeStoreId ?? '';
+      let createdCount = 0;
 
-      toast.success(`Purchase Order created for ${selectedProducts.size} products (₹${totalCost.toLocaleString('en-IN')})`);
+      for (const [vendorId, items] of bySupplier.entries()) {
+        await vendorsApi.createPurchaseOrder({
+          vendor_id: vendorId,
+          delivery_store_id: storeId,
+          items: items.map(p => ({
+            product_id: p.id,
+            product_name: p.name,
+            sku: p.sku,
+            quantity: p.reorderQuantity,
+            unit_price: p.unitCost ?? 0,
+          })),
+          notes: `Auto-generated from Reorder Dashboard`,
+        });
+        createdCount++;
+      }
+
+      const totalCost = withSupplier.reduce(
+        (sum, p) => sum + ((p.unitCost ?? 0) * p.reorderQuantity),
+        0
+      );
+
+      toast.success(
+        `${createdCount} Purchase Order(s) created for ${withSupplier.length} product(s)` +
+        (totalCost > 0 ? ` (Est. \u20B9${totalCost.toLocaleString('en-IN')})` : '')
+      );
+
       setSelectedProducts(new Set());
-      await loadProducts();
+      navigate('/purchase/orders');
     } catch (error: any) {
-      toast.error('Failed to generate purchase order');
+      toast.error(error?.message || 'Failed to generate purchase order');
     }
   };
 
@@ -296,7 +342,7 @@ export function ReorderDashboard() {
             <div>
               <p className="text-sm text-gray-500">Est. PO Value</p>
               <p className="text-2xl font-bold text-green-600">
-                ₹{(totalValue / 100000).toFixed(1)}L
+                &#8377;{(totalValue / 100000).toFixed(1)}L
               </p>
             </div>
           </div>
@@ -443,7 +489,7 @@ export function ReorderDashboard() {
                         <span className="font-medium text-purple-600">{product.reorderQuantity}</span>
                         {product.unitCost && (
                           <p className="text-xs text-gray-500">
-                            ₹{(product.unitCost * product.reorderQuantity).toLocaleString('en-IN')}
+                            &#8377;{(product.unitCost * product.reorderQuantity).toLocaleString('en-IN')}
                           </p>
                         )}
                       </td>
@@ -474,7 +520,7 @@ export function ReorderDashboard() {
                       </td>
                       <td className="px-4 py-3">
                         <div>
-                          <p className="text-sm text-gray-900">{product.supplierName}</p>
+                          <p className="text-sm text-gray-900">{product.supplierName ?? <span className="text-gray-400 italic">None assigned</span>}</p>
                           <p className="text-xs text-gray-500">
                             Lead: {product.leadTimeDays}d
                           </p>

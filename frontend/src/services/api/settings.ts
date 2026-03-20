@@ -306,7 +306,32 @@ export const settingsApi = {
     const response = await api.put('/settings/admin-controls', controls);
     return response.data;
   },
+
+  // Approval Workflows
+  getApprovalWorkflows: async () => {
+    const response = await api.get('/settings/approval-workflows');
+    return response.data as { workflows: ApprovalWorkflow[] };
+  },
+
+  updateApprovalWorkflows: async (workflows: ApprovalWorkflow[]) => {
+    const response = await api.put('/settings/approval-workflows', { workflows });
+    return response.data;
+  },
 };
+
+export interface ApprovalWorkflow {
+  id: string;
+  type: string;
+  name: string;
+  description: string;
+  isEnabled: boolean;
+  thresholdType: 'AMOUNT' | 'PERCENTAGE' | 'ALWAYS';
+  thresholdValue?: number | null;
+  approverRoles: string[];
+  escalationTimeout?: number | null;
+  notifyOnRequest: boolean;
+  notifyOnApproval: boolean;
+}
 
 // ============================================================================
 // Admin API - Integrations

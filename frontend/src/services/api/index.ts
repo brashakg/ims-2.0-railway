@@ -17,7 +17,7 @@ export { storeApi, adminStoreApi, adminUserApi, adminSystemApi } from './stores'
 export { productApi, adminProductApi, adminCategoryApi, adminBrandApi, adminLensApi } from './products';
 
 // Inventory & Vendors
-export { inventoryApi, vendorsApi } from './inventory';
+export { inventoryApi, vendorsApi, reorderApi } from './inventory';
 
 // Sales / Billing / Orders (orders, prescriptions, workshop, discounts)
 export { orderApi, prescriptionApi, workshopApi, adminDiscountApi } from './sales';

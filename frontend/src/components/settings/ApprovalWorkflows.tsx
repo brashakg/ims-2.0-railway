@@ -4,7 +4,7 @@
 // Configure approval rules for discounts, refunds, POs, stock adjustments,
 // and credit sales. Designed for Indian optical retail ERP.
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import {
   Shield,
   ShieldCheck,
@@ -31,6 +31,7 @@ import {
   Info,
 } from 'lucide-react';
 import { useToast } from '../../context/ToastContext';
+import { settingsApi } from '../../services/api/settings';
 
 // ============================================================================
 // Types
@@ -329,7 +330,7 @@ function WorkflowCard({
 }: {
   workflow: ApprovalWorkflow;
   onToggle: (id: string) => void;
-  onSave: (updated: ApprovalWorkflow) => void;
+  onSave: (updated: ApprovalWorkflow) => Promise<void>;
 }) {
   const [expanded, setExpanded] = useState(false);
   const [editing, setEditing] = useState<ApprovalWorkflow>(workflow);
@@ -339,12 +340,15 @@ function WorkflowCard({
 
   const handleSave = useCallback(async () => {
     setSaving(true);
-    // Simulate API call
-    await new Promise((resolve) => setTimeout(resolve, 600));
-    onSave(editing);
-    setSaving(false);
-    setExpanded(false);
-    toast.success(`${editing.name} configuration saved successfully.`);
+    try {
+      await onSave(editing);
+      setExpanded(false);
+      toast.success(`${editing.name} configuration saved successfully.`);
+    } catch {
+      toast.error(`Failed to save ${editing.name} configuration.`);
+    } finally {
+      setSaving(false);
+    }
   }, [editing, onSave, toast]);
 
   const handleRoleToggle = useCallback(
@@ -658,31 +662,63 @@ function WorkflowCard({
 export function ApprovalWorkflows() {
   const toast = useToast();
   const [workflows, setWorkflows] = useState<ApprovalWorkflow[]>(INITIAL_WORKFLOWS);
+  const [loadingWorkflows, setLoadingWorkflows] = useState(true);
   const [pendingApprovals, setPendingApprovals] =
     useState<PendingApproval[]>(INITIAL_PENDING_APPROVALS);
+
+  // Load workflows from backend on mount
+  useEffect(() => {
+    let cancelled = false;
+    setLoadingWorkflows(true);
+    settingsApi
+      .getApprovalWorkflows()
+      .then((data) => {
+        if (!cancelled && data.workflows && data.workflows.length > 0) {
+          setWorkflows(data.workflows as ApprovalWorkflow[]);
+        }
+      })
+      .catch(() => {
+        // Fall back to INITIAL_WORKFLOWS already set
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingWorkflows(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const activeCount = workflows.filter((w) => w.isEnabled).length;
   const pendingCount = pendingApprovals.length;
 
   const handleToggle = useCallback(
-    (id: string) => {
-      setWorkflows((prev) =>
-        prev.map((w) => {
-          if (w.id !== id) return w;
-          const toggled = { ...w, isEnabled: !w.isEnabled };
-          toast.info(
-            `${toggled.name} ${toggled.isEnabled ? 'enabled' : 'disabled'}.`
-          );
-          return toggled;
-        })
-      );
+    async (id: string) => {
+      const next = workflows.map((w) => {
+        if (w.id !== id) return w;
+        return { ...w, isEnabled: !w.isEnabled };
+      });
+      setWorkflows(next);
+      const toggled = next.find((w) => w.id === id)!;
+      toast.info(`${toggled.name} ${toggled.isEnabled ? 'enabled' : 'disabled'}.`);
+      try {
+        await settingsApi.updateApprovalWorkflows(next);
+      } catch {
+        // Revert on failure
+        setWorkflows(workflows);
+        toast.error(`Failed to toggle ${toggled.name}.`);
+      }
     },
-    [toast]
+    [workflows, toast]
   );
 
-  const handleSave = useCallback((updated: ApprovalWorkflow) => {
-    setWorkflows((prev) => prev.map((w) => (w.id === updated.id ? updated : w)));
-  }, []);
+  const handleSave = useCallback(
+    async (updated: ApprovalWorkflow): Promise<void> => {
+      const next = workflows.map((w) => (w.id === updated.id ? updated : w));
+      await settingsApi.updateApprovalWorkflows(next);
+      setWorkflows(next);
+    },
+    [workflows]
+  );
 
   const handleApprove = useCallback(
     (id: string) => {
@@ -769,16 +805,23 @@ export function ApprovalWorkflows() {
             Workflow Rules ({workflows.length})
           </h2>
         </div>
-        <div className="space-y-3">
-          {workflows.map((workflow) => (
-            <WorkflowCard
-              key={workflow.id}
-              workflow={workflow}
-              onToggle={handleToggle}
-              onSave={handleSave}
-            />
-          ))}
-        </div>
+        {loadingWorkflows ? (
+          <div className="flex items-center justify-center py-10 text-gray-400">
+            <Loader2 className="w-5 h-5 animate-spin mr-2" />
+            <span className="text-sm">Loading workflow rules...</span>
+          </div>
+        ) : (
+          <div className="space-y-3">
+            {workflows.map((workflow) => (
+              <WorkflowCard
+                key={workflow.id}
+                workflow={workflow}
+                onToggle={handleToggle}
+                onSave={handleSave}
+              />
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );

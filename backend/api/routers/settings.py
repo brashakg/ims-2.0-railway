@@ -748,6 +748,131 @@ async def update_admin_controls(
 
 
 # ============================================================================
+# APPROVAL WORKFLOWS ENDPOINTS
+# ============================================================================
+
+DEFAULT_APPROVAL_WORKFLOWS = [
+    {
+        "id": "wf-001",
+        "type": "DISCOUNT_APPROVAL",
+        "name": "Discount Approval",
+        "description": "Requires manager approval when a discount exceeds the configured threshold.",
+        "isEnabled": True,
+        "thresholdType": "PERCENTAGE",
+        "thresholdValue": 15,
+        "approverRoles": ["ADMIN", "STORE_MANAGER"],
+        "escalationTimeout": 2,
+        "notifyOnRequest": True,
+        "notifyOnApproval": True,
+    },
+    {
+        "id": "wf-002",
+        "type": "REFUND_APPROVAL",
+        "name": "Refund Approval",
+        "description": "All refund requests must be approved by an authorized manager before processing.",
+        "isEnabled": True,
+        "thresholdType": "ALWAYS",
+        "thresholdValue": None,
+        "approverRoles": ["ADMIN", "STORE_MANAGER", "ACCOUNTANT"],
+        "escalationTimeout": 4,
+        "notifyOnRequest": True,
+        "notifyOnApproval": True,
+    },
+    {
+        "id": "wf-003",
+        "type": "PO_APPROVAL",
+        "name": "Purchase Order Approval",
+        "description": "Purchase orders exceeding the configured amount threshold require approval.",
+        "isEnabled": True,
+        "thresholdType": "AMOUNT",
+        "thresholdValue": 50000,
+        "approverRoles": ["SUPERADMIN", "ADMIN", "AREA_MANAGER"],
+        "escalationTimeout": 8,
+        "notifyOnRequest": True,
+        "notifyOnApproval": False,
+    },
+    {
+        "id": "wf-004",
+        "type": "STOCK_ADJUSTMENT",
+        "name": "Stock Write-off Approval",
+        "description": "Stock write-offs and manual adjustments require approval.",
+        "isEnabled": False,
+        "thresholdType": "ALWAYS",
+        "thresholdValue": None,
+        "approverRoles": ["ADMIN", "STORE_MANAGER"],
+        "escalationTimeout": 24,
+        "notifyOnRequest": True,
+        "notifyOnApproval": False,
+    },
+    {
+        "id": "wf-005",
+        "type": "CREDIT_SALE",
+        "name": "Credit Sale Approval",
+        "description": "Credit sales require manager approval before processing.",
+        "isEnabled": False,
+        "thresholdType": "AMOUNT",
+        "thresholdValue": 5000,
+        "approverRoles": ["ADMIN", "STORE_MANAGER", "ACCOUNTANT"],
+        "escalationTimeout": 1,
+        "notifyOnRequest": True,
+        "notifyOnApproval": True,
+    },
+]
+
+
+class ApprovalWorkflowItem(BaseModel):
+    id: str
+    type: str
+    name: str
+    description: str
+    isEnabled: bool
+    thresholdType: str  # AMOUNT, PERCENTAGE, ALWAYS
+    thresholdValue: Optional[float] = None
+    approverRoles: List[str]
+    escalationTimeout: Optional[int] = None
+    notifyOnRequest: bool = True
+    notifyOnApproval: bool = True
+
+
+class ApprovalWorkflowsPayload(BaseModel):
+    workflows: List[ApprovalWorkflowItem]
+
+
+@router.get("/approval-workflows")
+async def get_approval_workflows(current_user: dict = Depends(get_current_user)):
+    """Get approval workflow configurations"""
+    if not any(role in current_user["roles"] for role in ["SUPERADMIN", "ADMIN"]):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+    collection = _get_settings_collection("approval_workflows")
+    if collection:
+        doc = collection.find_one({"_id": "default"})
+        if doc:
+            doc.pop("_id", None)
+            return doc
+    return {"workflows": DEFAULT_APPROVAL_WORKFLOWS}
+
+
+@router.put("/approval-workflows")
+async def update_approval_workflows(
+    payload: ApprovalWorkflowsPayload,
+    current_user: dict = Depends(get_current_user),
+):
+    """Update approval workflow configurations (SUPERADMIN/ADMIN only)"""
+    if not any(role in current_user["roles"] for role in ["SUPERADMIN", "ADMIN"]):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+    data = {"workflows": [w.model_dump() for w in payload.workflows]}
+    collection = _get_settings_collection("approval_workflows")
+    if collection:
+        collection.update_one(
+            {"_id": "default"},
+            {"$set": {**data, "updated_at": datetime.utcnow().isoformat()}},
+            upsert=True,
+        )
+        return {"message": "Approval workflows saved successfully", **data}
+    return {"message": "Approval workflows saved (no DB)", **data}
+
+
+# ============================================================================
 # FEATURE TOGGLES ENDPOINTS
 # ============================================================================
 

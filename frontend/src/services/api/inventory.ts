@@ -220,3 +220,23 @@ export const vendorsApi = {
     return response.data;
   },
 };
+
+// ============================================================================
+// Reorder Settings API (per-product reorder configuration)
+// ============================================================================
+
+export const reorderApi = {
+  updateReorderSettings: async (
+    productId: string,
+    settings: {
+      reorder_point: number;
+      reorder_quantity: number;
+      max_stock: number;
+      lead_time_days: number;
+    }
+  ) => {
+    // Updates reorder settings on the product record via the admin products endpoint
+    const response = await api.put(`/admin/products/${productId}`, settings);
+    return response.data;
+  },
+};

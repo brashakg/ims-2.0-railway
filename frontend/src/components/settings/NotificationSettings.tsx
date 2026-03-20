@@ -24,9 +24,9 @@ import {
   type NotificationTemplate,
   NOTIFICATION_TEMPLATES,
   getTemplatesByCategory,
-  populateTemplate,
 } from '../../constants/notifications';
 import clsx from 'clsx';
+import { settingsApi } from '../../services/api/settings';
 
 export function NotificationSettings() {
   const { hasRole } = useAuth();
@@ -60,20 +60,56 @@ export function NotificationSettings() {
   }, []);
 
   const loadSettings = async () => {
-    // In production, fetch from API
-    // For now, load from local storage or use defaults
-    const saved = localStorage.getItem('notificationProviderConfig');
-    if (saved) {
-      setProviderConfig(JSON.parse(saved));
+    // Load provider config from API
+    try {
+      const data = await settingsApi.getNotificationProviders();
+      if (data) {
+        setProviderConfig({
+          provider: data.provider ?? 'MSG91',
+          apiKey: data.api_key ?? '',
+          apiSecret: data.api_secret ?? '',
+          senderId: data.sender_id ?? '',
+          webhookUrl: data.webhook_url ?? '',
+          isActive: data.is_active ?? false,
+        });
+      }
+    } catch {
+      // API unavailable — leave default state; no toast needed on initial load
+    }
+
+    // Load notification templates from API, fall back to hardcoded constants
+    try {
+      const templateData = await settingsApi.getNotificationTemplates();
+      if (Array.isArray(templateData) && templateData.length > 0) {
+        const mapped: NotificationTemplate[] = templateData.map((t: any) => ({
+          id: t.template_id ?? t.id,
+          name: t.name ?? t.trigger_event ?? t.template_id,
+          category: t.category ?? 'TRANSACTIONAL',
+          channel: t.channel ?? 'SMS',
+          subject: t.subject,
+          template: t.content ?? t.template ?? '',
+          variables: t.variables ?? [],
+          dltTemplateId: t.dlt_template_id,
+          isActive: t.is_enabled ?? t.isActive ?? true,
+        }));
+        setTemplates(mapped);
+      }
+    } catch {
+      // Fall back to hardcoded NOTIFICATION_TEMPLATES already set as initial state
     }
   };
 
   const handleSaveProvider = async () => {
     setIsSaving(true);
     try {
-      // In production, save to backend API
-      localStorage.setItem('notificationProviderConfig', JSON.stringify(providerConfig));
-      await new Promise(resolve => setTimeout(resolve, 500));
+      await settingsApi.updateNotificationProvider({
+        provider: providerConfig.provider,
+        api_key: providerConfig.apiKey ?? '',
+        api_secret: providerConfig.apiSecret,
+        sender_id: providerConfig.senderId,
+        webhook_url: providerConfig.webhookUrl,
+        is_active: providerConfig.isActive,
+      });
       toast.success('Provider settings saved successfully');
     } catch (error: any) {
       toast.error(error?.message || 'Failed to save settings');
@@ -102,23 +138,7 @@ export function NotificationSettings() {
     }
 
     try {
-      // Mock variables for testing
-      const mockVariables = {
-        customerName: 'John Doe',
-        orderNumber: 'ORD-12345',
-        amount: '2500',
-        deliveryDate: '10 Feb 2026',
-        storeName: 'Better Vision Optics',
-        storeAddress: 'Shop 123, MG Road, Mumbai',
-        storePhone: '+91 98765 43210',
-        trackingLink: 'https://example.com/track',
-      };
-
-      populateTemplate(selectedTemplate.template, mockVariables);
-
-      // In production, call API to send test notification
-      await new Promise(resolve => setTimeout(resolve, 1000));
-
+      await settingsApi.testNotification(selectedTemplate.id, testPhone);
       toast.success(`Test ${selectedTemplate.channel} sent to ${testPhone}`);
     } catch (error: any) {
       toast.error(error?.message || 'Failed to send test notification');
