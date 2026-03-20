@@ -296,7 +296,7 @@ export function AddProductPage() {
 
     setIsSubmitting(true);
     try {
-      const productData = {
+      const _productData = {
         category: selectedCategory,
         attributes,
         description,

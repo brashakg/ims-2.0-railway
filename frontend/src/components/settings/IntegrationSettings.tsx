@@ -75,7 +75,7 @@ export function IntegrationSettings() {
   const [integrations] = useState<Integration[]>(INTEGRATIONS);
   const [showApiKey, setShowApiKey] = useState<Record<string, boolean>>({});
   const [copiedId, setCopiedId] = useState<string | null>(null);
-  const [testingId, setTestingId] = useState<string | null>(null);
+  const [_testingId, setTestingId] = useState<string | null>(null);
 
   const handleCopyApiKey = (id: string, apiKey: string | undefined) => {
     if (!apiKey) return;
