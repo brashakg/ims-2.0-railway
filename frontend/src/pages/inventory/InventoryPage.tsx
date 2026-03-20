@@ -141,6 +141,7 @@ export function InventoryPage() {
   const [showCSVImport, setShowCSVImport] = useState(false);
   const [csvFile, setCsvFile] = useState<File | null>(null);
   const [csvPreview, setCsvPreview] = useState<Array<Record<string, string>>>([]);
+  const [isImporting, setIsImporting] = useState(false);
 
 
   // Role-based permissions
@@ -262,6 +263,31 @@ export function InventoryPage() {
       currency: 'INR',
       maximumFractionDigits: 0,
     }).format(amount);
+  };
+
+  // Handle CSV import
+  const handleImportProducts = async () => {
+    if (!csvFile) {
+      toast.error('Please select a CSV file first');
+      return;
+    }
+    // Detect category from parsed preview rows if possible
+    const detectedCategory = csvPreview.length > 0 ? (csvPreview[0].category || 'FR') : 'FR';
+    setIsImporting(true);
+    try {
+      const result = await adminProductApi.bulkImportProducts(csvFile, detectedCategory);
+      const count = result?.imported ?? result?.count ?? csvPreview.length;
+      toast.success(`Successfully imported ${count} product${count === 1 ? '' : 's'}`);
+      setShowCSVImport(false);
+      setCsvFile(null);
+      setCsvPreview([]);
+      await loadInventory();
+    } catch (err: unknown) {
+      const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail || 'Import failed. Check CSV format and try again.';
+      toast.error(msg);
+    } finally {
+      setIsImporting(false);
+    }
   };
 
   // Handle barcode save
@@ -1004,12 +1030,16 @@ export function InventoryPage() {
                   Cancel
                 </button>
                 <button
-                  disabled
-                  title="Coming soon"
-                  className="px-6 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium disabled:opacity-50 cursor-not-allowed flex items-center gap-2"
+                  onClick={handleImportProducts}
+                  disabled={!csvFile || isImporting}
+                  className="px-6 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2 hover:bg-blue-700 transition-colors"
                 >
-                  <CheckCircle className="w-4 h-4" />
-                  Import Products
+                  {isImporting ? (
+                    <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                  ) : (
+                    <CheckCircle className="w-4 h-4" />
+                  )}
+                  {isImporting ? 'Importing...' : 'Import Products'}
                 </button>
               </div>
             </div>

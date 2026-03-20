@@ -5,6 +5,7 @@
 // Lensometer, Slit Lamp, Auto-Refractometer, Subjective Rx, Final Rx, Uploads
 
 import { useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import {
   X,
   Eye,
@@ -17,6 +18,8 @@ import {
   AlertCircle,
 } from 'lucide-react';
 import clsx from 'clsx';
+import { PrescriptionPrint } from './PrescriptionPrint';
+import type { PrescriptionPrintData } from './PrescriptionPrint';
 
 import type {
   EyeTestFormProps,
@@ -47,8 +50,10 @@ import { UploadsTab } from './UploadsTab';
 export type { EyeTestData } from './eyeTestTypes';
 
 export function EyeTestForm({ isOpen, onClose, onSave, patient, optometristName = '' }: EyeTestFormProps) {
+  const navigate = useNavigate();
   const [activeTab, setActiveTab] = useState<TabId>('lensometer');
   const [isSaving, setIsSaving] = useState(false);
+  const [showPrint, setShowPrint] = useState(false);
 
   // Header data
   const [examDate, setExamDate] = useState(new Date().toISOString().split('T')[0]);
@@ -96,6 +101,35 @@ export function EyeTestForm({ isOpen, onClose, onSave, patient, optometristName 
 
   if (!isOpen || !patient) return null;
 
+  const buildPrintData = (): PrescriptionPrintData => ({
+    id: `eyetest-${Date.now()}`,
+    patientName: patient.name,
+    patientAge: patient.age ?? null,
+    customerPhone: patient.phone,
+    prescribedAt: examDate,
+    rightEye: {
+      sphere: parseFloat(finalRxData.rightEye.sphere) || null,
+      cylinder: parseFloat(finalRxData.rightEye.cylinder) || null,
+      axis: parseFloat(finalRxData.rightEye.axis) || null,
+      add: parseFloat(finalRxData.rightAdd) || null,
+      pd: parseFloat(finalRxData.rightEye.pd) || null,
+      va: finalRxData.rightEye.va || null,
+    },
+    leftEye: {
+      sphere: parseFloat(finalRxData.leftEye.sphere) || null,
+      cylinder: parseFloat(finalRxData.leftEye.cylinder) || null,
+      axis: parseFloat(finalRxData.leftEye.axis) || null,
+      add: parseFloat(finalRxData.leftAdd) || null,
+      pd: parseFloat(finalRxData.leftEye.pd) || null,
+      va: finalRxData.leftEye.va || null,
+    },
+    pd: parseFloat(finalRxData.ipd) || null,
+    lensRecommendation: finalRxData.lensType || null,
+    notes: finalRxData.remarks || null,
+    optometristName: optometrist || null,
+    validityMonths: 12,
+  });
+
   const handleSave = async () => {
     setIsSaving(true);
     try {
@@ -137,7 +171,23 @@ export function EyeTestForm({ isOpen, onClose, onSave, patient, optometristName 
     setUploads(uploads.filter(f => f.id !== id));
   };
 
+  const defaultStore = {
+    storeName: 'Optical Store',
+    address: '',
+    city: '',
+    state: '',
+    pincode: '',
+  };
+
   return (
+    <>
+    {showPrint && (
+      <PrescriptionPrint
+        prescription={buildPrintData()}
+        store={defaultStore}
+        onClose={() => setShowPrint(false)}
+      />
+    )}
     <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
       <div className="bg-white rounded-xl shadow-2xl w-full max-w-6xl max-h-[95vh] flex flex-col">
         {/* Header */}
@@ -155,18 +205,14 @@ export function EyeTestForm({ isOpen, onClose, onSave, patient, optometristName 
           </div>
           <div className="flex items-center gap-2">
             <button
-              disabled
-              title="Coming soon"
-              onClick={() => {/* TODO: View history */}}
+              onClick={() => navigate('/clinical/history')}
               className="btn-outline flex items-center gap-2 text-sm"
             >
               <History className="w-4 h-4" />
               History
             </button>
             <button
-              disabled
-              title="Coming soon"
-              onClick={() => {/* TODO: Print */}}
+              onClick={() => setShowPrint(true)}
               className="btn-outline flex items-center gap-2 text-sm"
             >
               <Printer className="w-4 h-4" />
@@ -280,18 +326,14 @@ export function EyeTestForm({ isOpen, onClose, onSave, patient, optometristName 
         {/* Footer */}
         <div className="flex items-center justify-end gap-3 p-4 border-t border-gray-200 bg-gray-50">
           <button
-            disabled
-            title="Coming soon"
-            onClick={() => {/* TODO: View history */}}
+            onClick={() => navigate('/clinical/history')}
             className="btn-outline flex items-center gap-2"
           >
             <History className="w-4 h-4" />
             View History
           </button>
           <button
-            disabled
-            title="Coming soon"
-            onClick={() => {/* TODO: Print */}}
+            onClick={() => setShowPrint(true)}
             className="btn-outline flex items-center gap-2"
           >
             <Printer className="w-4 h-4" />
@@ -312,6 +354,7 @@ export function EyeTestForm({ isOpen, onClose, onSave, patient, optometristName 
         </div>
       </div>
     </div>
+    </>
   );
 }
 
