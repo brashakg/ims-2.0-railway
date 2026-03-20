@@ -2,14 +2,16 @@
 // IMS 2.0 - Login Page
 // ============================================================================
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useContext } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
-import { useAuth } from '../../context/AuthContext';
+import AuthContext from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { Eye, EyeOff, Store, AlertCircle, RefreshCw } from 'lucide-react';
 
 export function LoginPage() {
-  const { login, isLoading } = useAuth();
+  const authContext = useContext(AuthContext);
+  const login = authContext?.login;
+  const isLoading = authContext?.isLoading ?? false;
   const navigate = useNavigate();
   const location = useLocation();
   const toast = useToast();
@@ -73,6 +75,10 @@ export function LoginPage() {
         }
       }
 
+      if (!login) {
+        setError('Authentication service not ready. Please refresh the page.');
+        return;
+      }
       const response = await login({
         username,
         password,
