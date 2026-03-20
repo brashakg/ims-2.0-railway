@@ -112,14 +112,14 @@ export function MonthlyAttendanceGrid() {
       </div>
 
       {/* Legend */}
-      <div className="flex flex-wrap gap-3 p-3 bg-gray-900 rounded-lg">
+      <div className="flex flex-wrap gap-3 p-3 bg-gray-100 dark:bg-gray-900 rounded-lg">
         {Object.entries(ATTENDANCE_COLORS).map(([code, { bg, label }]) => (
           code !== '-' && (
             <div key={code} className="flex items-center gap-2 text-sm">
               <div className={`w-6 h-6 rounded ${bg} flex items-center justify-center`}>
                 <span className="text-xs font-bold">{code}</span>
               </div>
-              <span className="text-gray-300">{label}</span>
+              <span className="text-gray-600 dark:text-gray-300">{label}</span>
             </div>
           )
         ))}
@@ -137,7 +137,7 @@ export function MonthlyAttendanceGrid() {
       ) : (
         <div className="overflow-x-auto card">
           <table className="w-full text-sm">
-            <thead className="bg-gray-900 border-b border-gray-700 sticky top-0">
+            <thead className="bg-gray-100 dark:bg-gray-900 border-b border-gray-200 dark:border-gray-700 sticky top-0">
               <tr>
                 <th className="px-3 py-2 text-left text-xs font-bold text-gray-400 min-w-max">Employee</th>
                 {Array.from({ length: daysInMonth }, (_, i) => i + 1).map(day => {

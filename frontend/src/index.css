@@ -188,55 +188,167 @@
   }
 }
 
-/* Dark mode overrides — plain CSS (not @layer) so Tailwind v4 always emits them */
+/* =========================================================================
+   Dark mode overrides — plain CSS (not @layer) so Tailwind v4 emits them.
+   These catch hardcoded light-mode colors across all components.
+   ========================================================================= */
+
+/* --- Base --- */
 .dark body {
   background-color: #111827; /* gray-900 */
   color: #f3f4f6; /* gray-100 */
 }
 
+/* --- Text color overrides --- */
+.dark .text-gray-900 { color: #f3f4f6; }    /* gray-100 */
+.dark .text-gray-800 { color: #e5e7eb; }    /* gray-200 */
+.dark .text-gray-700 { color: #d1d5db; }    /* gray-300 */
+.dark .text-gray-600 { color: #9ca3af; }    /* gray-400 */
+
+/* --- Background overrides --- */
+.dark .bg-white { background-color: #1f2937; }   /* gray-800 */
+.dark .bg-gray-50 { background-color: #111827; }  /* gray-900 */
+.dark .bg-gray-100 { background-color: #1f2937; } /* gray-800 */
+.dark .bg-gray-200 { background-color: #374151; } /* gray-700 */
+
+/* --- Border overrides --- */
+.dark .border-gray-100 { border-color: #374151; } /* gray-700 */
+.dark .border-gray-200 { border-color: #374151; } /* gray-700 */
+.dark .border-gray-300 { border-color: #4b5563; } /* gray-600 */
+
+/* --- Divider overrides --- */
+.dark .divide-gray-100 > :not(:last-child) { border-color: #374151; }
+.dark .divide-gray-200 > :not(:last-child) { border-color: #374151; }
+
+/* --- Hover state overrides --- */
+.dark .hover\:bg-gray-50:hover { background-color: #374151 !important; }  /* gray-700 */
+.dark .hover\:bg-gray-100:hover { background-color: #374151 !important; } /* gray-700 */
+
+/* --- Component: Card --- */
 .dark .card {
-  background-color: #1f2937; /* gray-800 */
-  border-color: #374151; /* gray-700 */
+  background-color: #1f2937;
+  border-color: #374151;
 }
 
+/* --- Component: Input field --- */
 .dark .input-field {
-  background-color: #374151; /* gray-700 */
-  border-color: #4b5563; /* gray-600 */
+  background-color: #374151;
+  border-color: #4b5563;
   color: #ffffff;
 }
+.dark .input-field:disabled { background-color: #1f2937; }
+.dark .input-field::placeholder { color: #9ca3af; }
 
-.dark .input-field:disabled {
-  background-color: #1f2937; /* gray-800 */
+/* Generic inputs/selects/textareas inside dark mode */
+.dark input:not(.input-field),
+.dark select:not(.input-field),
+.dark textarea:not(.input-field) {
+  background-color: #374151;
+  border-color: #4b5563;
+  color: #ffffff;
+}
+.dark input::placeholder,
+.dark textarea::placeholder {
+  color: #9ca3af;
 }
 
-.dark .input-field::placeholder {
-  color: #9ca3af; /* gray-400 */
-}
-
+/* --- Component: Buttons --- */
 .dark .btn-secondary {
-  background-color: #374151; /* gray-700 */
-  color: #e5e7eb; /* gray-200 */
+  background-color: #374151;
+  color: #e5e7eb;
+}
+.dark .btn-secondary:hover { background-color: #4b5563; }
+.dark .btn-secondary:active { background-color: #6b7280; }
+
+.dark .btn-outline {
+  border-color: #d4a373;
+  color: #d4a373;
 }
 
-.dark .btn-secondary:hover {
-  background-color: #4b5563; /* gray-600 */
-}
-
-.dark .btn-secondary:active {
-  background-color: #6b7280; /* gray-500 */
-}
-
+/* --- Component: Table --- */
 .dark .table th {
-  background-color: #1f2937; /* gray-800 */
-  color: #9ca3af; /* gray-400 */
+  background-color: #1f2937;
+  color: #9ca3af;
+}
+.dark .table td { border-color: #374151; }
+.dark .table tr:hover td { background-color: #1f2937; }
+
+/* --- Modals --- */
+.dark [class*="bg-white"][class*="rounded-xl"][class*="shadow"] {
+  background-color: #1f2937;
+  border: 1px solid #374151;
 }
 
-.dark .table td {
-  border-color: #374151; /* gray-700 */
+/* --- Form labels --- */
+.dark label {
+  color: #d1d5db; /* gray-300 */
 }
 
-.dark .table tr:hover td {
-  background-color: #1f2937; /* gray-800 */
+/* --- Sidebar active state --- */
+.dark .touch-target.bg-gray-100 {
+  background-color: #374151 !important;
+  color: #f3f4f6 !important;
+}
+
+/* --- Scrollbar in dark mode --- */
+.dark ::-webkit-scrollbar { width: 6px; height: 6px; }
+.dark ::-webkit-scrollbar-track { background: #1f2937; }
+.dark ::-webkit-scrollbar-thumb { background: #4b5563; border-radius: 3px; }
+.dark ::-webkit-scrollbar-thumb:hover { background: #6b7280; }
+
+/* =========================================================================
+   Light mode overrides — fix dark-first hardcoded colors in content area.
+   Scoped to <main> and modals so the always-dark sidebar is untouched.
+   ========================================================================= */
+
+/* Headings in content: text-white → dark */
+:not(.dark) main h1,
+:not(.dark) main h2,
+:not(.dark) main h3,
+:not(.dark) main h4 {
+  color: #111827 !important; /* gray-900 */
+}
+
+/* Content text-white on non-button, non-badge elements */
+:not(.dark) main p.text-white,
+:not(.dark) main span.text-white,
+:not(.dark) main div.text-white {
+  color: #111827;
+}
+
+/* Modal backgrounds: bg-gray-800 → white */
+:not(.dark) .fixed.inset-0 .bg-gray-800,
+:not(.dark) main .bg-gray-800:not(aside *) {
+  background-color: #ffffff;
+}
+
+/* Modal/content borders */
+:not(.dark) .fixed.inset-0 .border-gray-700,
+:not(.dark) main .border-gray-700 {
+  border-color: #e5e7eb; /* gray-200 */
+}
+
+/* Modal/content dividers */
+:not(.dark) .fixed.inset-0 .divide-gray-700 > :not(:last-child),
+:not(.dark) main .divide-gray-700 > :not(:last-child) {
+  border-color: #e5e7eb;
+}
+
+/* Modal headings */
+:not(.dark) .fixed.inset-0 h1,
+:not(.dark) .fixed.inset-0 h2,
+:not(.dark) .fixed.inset-0 h3 {
+  color: #111827 !important;
+}
+
+/* Modal text-white */
+:not(.dark) .fixed.inset-0 .text-white:not(button):not(.btn-primary):not(.btn-success) {
+  color: #111827;
+}
+
+/* Content hover states */
+:not(.dark) main .hover\:bg-gray-900:hover {
+  background-color: #f3f4f6 !important; /* gray-100 */
 }
 
 /* Brand-specific overrides */

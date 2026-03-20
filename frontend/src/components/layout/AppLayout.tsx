@@ -268,7 +268,7 @@ export function AppLayout() {
               <div className="w-8 h-8 bg-bv-gold-500 rounded-lg flex items-center justify-center">
                 <Store className="w-5 h-5 text-white" />
               </div>
-              <span className="font-bold text-white text-lg">IMS 2.0</span>
+              <span className={clsx('font-bold text-lg', isDark ? 'text-white' : 'text-gray-900')}>IMS 2.0</span>
             </div>
 
             {/* Breadcrumb - only show when module is active */}
@@ -311,19 +311,19 @@ export function AppLayout() {
             {user && user.roles.length > 1 && (
               <div className="relative" ref={roleDropdownRef}>
                 <button
-                  className="flex items-center gap-2 px-3 py-2 text-sm bg-gray-700 rounded-lg hover:bg-gray-200"
+                  className={clsx('flex items-center gap-2 px-3 py-2 text-sm rounded-lg', isDark ? 'bg-gray-700 hover:bg-gray-600 text-gray-200' : 'bg-gray-100 hover:bg-gray-200 text-gray-700')}
                   onClick={() => setRoleDropdownOpen(!roleDropdownOpen)}
                 >
                   <span className="font-medium">{(user.activeRole as string).replaceAll('_', ' ')}</span>
                   <ChevronDown className="w-4 h-4" />
                 </button>
                 {roleDropdownOpen && (
-                  <div className="absolute top-full right-0 mt-1 w-48 bg-gray-800 border border-gray-700 rounded-lg shadow-lg z-50">
+                  <div className={clsx('absolute top-full right-0 mt-1 w-48 rounded-lg shadow-lg z-50 border', isDark ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200')}>
                     {user.roles.map((role) => (
                       <button
                         key={role}
                         className={clsx(
-                          'w-full text-left px-4 py-2 text-sm hover:bg-gray-900',
+                          `w-full text-left px-4 py-2 text-sm ${isDark ? 'hover:bg-gray-900' : 'hover:bg-gray-100'}`,
                           role === user.activeRole && 'bg-bv-gold-50 text-bv-gold-600'
                         )}
                         onClick={() => {
@@ -343,7 +343,7 @@ export function AppLayout() {
             {user && (hasRole(['SUPERADMIN', 'ADMIN', 'AREA_MANAGER']) || (user.storeIds.length > 1 && !hasRole(['OPTOMETRIST']))) && (
               <div className="relative" ref={storeDropdownRef}>
                 <button
-                  className="flex items-center gap-2 px-3 py-2 text-sm bg-gray-700 rounded-lg hover:bg-gray-200"
+                  className={clsx('flex items-center gap-2 px-3 py-2 text-sm rounded-lg', isDark ? 'bg-gray-700 hover:bg-gray-600 text-gray-200' : 'bg-gray-100 hover:bg-gray-200 text-gray-700')}
                   onClick={() => setStoreDropdownOpen(!storeDropdownOpen)}
                 >
                   <Store className="w-4 h-4" />
@@ -351,12 +351,12 @@ export function AppLayout() {
                   <ChevronDown className="w-4 h-4" />
                 </button>
                 {storeDropdownOpen && (
-                  <div className="absolute top-full right-0 mt-1 w-56 bg-gray-800 border border-gray-700 rounded-lg shadow-lg z-50">
+                  <div className={clsx('absolute top-full right-0 mt-1 w-56 rounded-lg shadow-lg z-50 border', isDark ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200')}>
                     {user.storeIds.map((storeId) => (
                       <button
                         key={storeId}
                         className={clsx(
-                          'w-full text-left px-4 py-2 text-sm hover:bg-gray-900',
+                          `w-full text-left px-4 py-2 text-sm ${isDark ? 'hover:bg-gray-900' : 'hover:bg-gray-100'}`,
                           storeId === user.activeStoreId && 'bg-bv-gold-50 text-bv-gold-600'
                         )}
                         onClick={() => {
@@ -384,18 +384,18 @@ export function AppLayout() {
                 </span>
               </button>
               {userDropdownOpen && (
-                <div className="absolute top-full right-0 mt-2 w-48 bg-gray-800 border border-gray-700 rounded-lg shadow-lg z-50">
-                  <div className="px-4 py-3 border-b border-gray-700">
-                    <div className="text-sm font-medium text-white">{user?.name}</div>
-                    <div className="text-xs text-gray-400 mt-1">{user?.email}</div>
-                    <div className="text-xs text-gray-400 mt-1">Role: {(user?.activeRole as string)?.replaceAll('_', ' ')}</div>
+                <div className={clsx('absolute top-full right-0 mt-2 w-48 rounded-lg shadow-lg z-50 border', isDark ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200')}>
+                  <div className={clsx('px-4 py-3 border-b', isDark ? 'border-gray-700' : 'border-gray-200')}>
+                    <div className={clsx('text-sm font-medium', isDark ? 'text-white' : 'text-gray-900')}>{user?.name}</div>
+                    <div className={clsx('text-xs mt-1', isDark ? 'text-gray-400' : 'text-gray-500')}>{user?.email}</div>
+                    <div className={clsx('text-xs mt-1', isDark ? 'text-gray-400' : 'text-gray-500')}>Role: {(user?.activeRole as string)?.replaceAll('_', ' ')}</div>
                   </div>
                   <button
                     onClick={() => {
                       navigate('/settings?tab=profile');
                       setUserDropdownOpen(false);
                     }}
-                    className="w-full text-left px-4 py-2 text-sm text-gray-400 hover:bg-gray-900 transition-colors"
+                    className={clsx('w-full text-left px-4 py-2 text-sm transition-colors', isDark ? 'text-gray-400 hover:bg-gray-900' : 'text-gray-600 hover:bg-gray-100')}
                   >
                     My Profile
                   </button>
@@ -404,7 +404,7 @@ export function AppLayout() {
                       handleLogout();
                       setUserDropdownOpen(false);
                     }}
-                    className="w-full text-left px-4 py-2 text-sm text-red-600 hover:bg-red-50 transition-colors border-t border-gray-700"
+                    className={clsx('w-full text-left px-4 py-2 text-sm text-red-600 transition-colors border-t', isDark ? 'hover:bg-gray-900 border-gray-700' : 'hover:bg-red-50 border-gray-200')}
                   >
                     Logout
                   </button>
