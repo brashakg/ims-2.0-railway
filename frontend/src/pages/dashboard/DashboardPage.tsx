@@ -119,12 +119,12 @@ function KpiCard({
   return (
     <div
       className={clsx(
-        'bg-gray-800 rounded-lg p-4 border shadow-sm',
-        error ? 'border-red-200' : 'border-gray-700'
+        'bg-white dark:bg-gray-800 rounded-lg p-4 border shadow-sm',
+        error ? 'border-red-200' : 'border-gray-200 dark:border-gray-700'
       )}
     >
       <div className="flex items-start justify-between mb-2">
-        <div className={clsx('p-2 rounded-lg', error ? 'bg-red-50' : 'bg-blue-50')}>
+        <div className={clsx('p-2 rounded-lg', error ? 'bg-red-50' : 'bg-blue-50 dark:bg-blue-900/30')}>
           <Icon
             className={clsx('w-5 h-5', error ? 'text-red-600' : 'text-blue-600')}
           />
@@ -137,7 +137,7 @@ function KpiCard({
                 ? 'text-green-600'
                 : changeType === 'negative'
                   ? 'text-red-600'
-                  : 'text-gray-400'
+                  : 'text-gray-500 dark:text-gray-400'
             )}
           >
             {changeType === 'positive' && <TrendingUp className="w-3 h-3" />}
@@ -147,20 +147,20 @@ function KpiCard({
         )}
       </div>
 
-      <p className="text-xs text-gray-400 mb-1">{title}</p>
+      <p className="text-xs text-gray-600 dark:text-gray-400 mb-1">{title}</p>
 
       {loading ? (
-        <div className="h-8 bg-gray-200 animate-pulse rounded w-24 mb-1" />
+        <div className="h-8 bg-gray-200 dark:bg-gray-700 animate-pulse rounded w-24 mb-1" />
       ) : error ? (
         <p className="text-sm text-red-600 font-medium">Error loading</p>
       ) : (
-        <p className="text-2xl font-bold text-white">
+        <p className="text-2xl font-bold text-gray-900 dark:text-white">
           {typeof value === 'number' ? value.toLocaleString('en-IN') : value}
-          {suffix && <span className="text-sm text-gray-400 ml-1">{suffix}</span>}
+          {suffix && <span className="text-sm text-gray-500 dark:text-gray-400 ml-1">{suffix}</span>}
         </p>
       )}
 
-      {subtitle && <p className="text-xs text-gray-400 mt-1">{subtitle}</p>}
+      {subtitle && <p className="text-xs text-gray-600 dark:text-gray-400 mt-1">{subtitle}</p>}
     </div>
   );
 }
@@ -193,7 +193,7 @@ function PeriodSelector({
             'px-3 py-1 rounded-lg text-sm font-medium transition-colors',
             period === p.value
               ? 'bg-bv-gold-500 text-white'
-              : 'bg-gray-700 text-gray-300 hover:bg-gray-200'
+              : 'bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-600'
           )}
         >
           {p.label}
@@ -227,7 +227,7 @@ function ModuleCard({
 }: ModuleCardProps) {
   return (
     <div
-      className="bg-gray-800 rounded-lg p-4 border border-gray-700 shadow-sm cursor-pointer hover:border-bv-gold-300 hover:shadow-md transition-all group"
+      className="bg-white dark:bg-gray-800 rounded-lg p-4 border border-gray-200 dark:border-gray-700 shadow-sm cursor-pointer hover:border-bv-gold-300 hover:shadow-md transition-all group"
       onClick={onClick}
     >
       <div
@@ -238,10 +238,10 @@ function ModuleCard({
       >
         <Icon className={clsx('w-5 h-5', color)} />
       </div>
-      <h3 className="font-semibold text-white text-sm group-hover:text-bv-gold-600 transition-colors">
+      <h3 className="font-semibold text-gray-900 dark:text-white text-sm group-hover:text-bv-gold-600 transition-colors">
         {title}
       </h3>
-      <p className="text-xs text-gray-400 mt-1">{subtitle}</p>
+      <p className="text-xs text-gray-600 dark:text-gray-400 mt-1">{subtitle}</p>
     </div>
   );
 }
@@ -330,28 +330,28 @@ export default function DashboardPage() {
   };
 
   return (
-    <div className="min-h-screen bg-gray-900">
+    <div className="min-h-screen bg-gray-50 dark:bg-gray-900">
       {/* Header */}
-      <div className="bg-gray-800 border-b border-gray-700 sticky top-0 z-10">
+      <div className="bg-white dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700 sticky top-0 z-10">
         <div className="max-w-7xl mx-auto px-4 tablet:px-6 py-6">
           <div className="flex items-center justify-between mb-4">
             <div>
-              <h1 className="text-3xl font-bold text-white">Dashboard</h1>
-              <p className="text-sm text-gray-400 mt-1">
+              <h1 className="text-3xl font-bold text-gray-900 dark:text-white">Dashboard</h1>
+              <p className="text-sm text-gray-600 dark:text-gray-400 mt-1">
                 Welcome back, {user?.name}
                 <span className="ml-2 px-2 py-0.5 bg-bv-gold-100 text-bv-gold-700 rounded text-xs font-medium">{(user?.activeRole || '').replace(/_/g, ' ')}</span>
-                {user?.activeStoreId && <span className="ml-1 text-gray-400">· {user.activeStoreId}</span>}
+                {user?.activeStoreId && <span className="ml-1 text-gray-500 dark:text-gray-400">· {user.activeStoreId}</span>}
               </p>
             </div>
             <button
               onClick={loadKpis}
               disabled={isLoading}
-              className="p-2 rounded-lg hover:bg-gray-700 transition-colors disabled:opacity-50"
+              className="p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors disabled:opacity-50"
               title="Refresh"
             >
               <RefreshCw
                 className={clsx(
-                  'w-5 h-5 text-gray-400',
+                  'w-5 h-5 text-gray-500 dark:text-gray-400',
                   isLoading && 'animate-spin'
                 )}
               />
@@ -375,7 +375,7 @@ export default function DashboardPage() {
 
         {/* Quick Access Modules */}
         <div className="mb-8">
-          <h2 className="text-lg font-semibold text-white mb-4">
+          <h2 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">
             Quick Access
           </h2>
           <div className="grid grid-cols-2 tablet:grid-cols-3 laptop:grid-cols-6 gap-3">
@@ -396,7 +396,7 @@ export default function DashboardPage() {
 
         {/* Sales Target Achievement Meters */}
         <div className="mb-8">
-          <h2 className="text-lg font-semibold text-white mb-4">
+          <h2 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">
             Sales Targets vs Achievement
           </h2>
           <div className="grid grid-cols-1 tablet:grid-cols-2 gap-4">
@@ -426,25 +426,25 @@ export default function DashboardPage() {
             {isStaff && <>
               <button onClick={() => navigate('/pos')} className="bg-bv-gold-50 border border-bv-gold-200 rounded-lg p-4 text-left hover:shadow-md transition-all">
                 <ShoppingCart className="w-6 h-6 text-bv-gold-600 mb-2" />
-                <p className="text-sm font-semibold text-white">New Sale</p>
-                <p className="text-[10px] text-gray-400">Start a transaction</p>
+                <p className="text-sm font-semibold text-gray-900 dark:text-white">New Sale</p>
+                <p className="text-[10px] text-gray-600 dark:text-gray-400">Start a transaction</p>
               </button>
               <button onClick={() => navigate('/orders')} className="bg-blue-50 border border-blue-200 rounded-lg p-4 text-left hover:shadow-md transition-all">
                 <Activity className="w-6 h-6 text-blue-600 mb-2" />
-                <p className="text-sm font-semibold text-white">My Orders</p>
-                <p className="text-[10px] text-gray-400">Track pending orders</p>
+                <p className="text-sm font-semibold text-gray-900 dark:text-white">My Orders</p>
+                <p className="text-[10px] text-gray-600 dark:text-gray-400">Track pending orders</p>
               </button>
             </>}
             {isOptometrist && <>
               <button onClick={() => navigate('/clinical')} className="bg-purple-50 border border-purple-200 rounded-lg p-4 text-left hover:shadow-md transition-all">
                 <Activity className="w-6 h-6 text-purple-600 mb-2" />
-                <p className="text-sm font-semibold text-white">Eye Test Queue</p>
-                <p className="text-[10px] text-gray-400">Patients waiting</p>
+                <p className="text-sm font-semibold text-gray-900 dark:text-white">Eye Test Queue</p>
+                <p className="text-[10px] text-gray-600 dark:text-gray-400">Patients waiting</p>
               </button>
               <button onClick={() => navigate('/clinical/prescriptions')} className="bg-green-50 border border-green-200 rounded-lg p-4 text-left hover:shadow-md transition-all">
                 <Activity className="w-6 h-6 text-green-600 mb-2" />
-                <p className="text-sm font-semibold text-white">Prescriptions</p>
-                <p className="text-[10px] text-gray-400">View & create Rx</p>
+                <p className="text-sm font-semibold text-gray-900 dark:text-white">Prescriptions</p>
+                <p className="text-[10px] text-gray-600 dark:text-gray-400">View & create Rx</p>
               </button>
             </>}
           </div>
@@ -452,7 +452,7 @@ export default function DashboardPage() {
 
         {/* KPI Grid - Section 1: Revenue & Transactions */}
         <div className="mb-8">
-          <h2 className="text-lg font-semibold text-white mb-4">
+          <h2 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">
             Revenue & Transactions
           </h2>
           <div className="grid grid-cols-1 tablet:grid-cols-2 laptop:grid-cols-4 gap-4">
@@ -495,7 +495,7 @@ export default function DashboardPage() {
         {/* KPI Grid - Section 2: Margins & Profitability (HQ only) */}
         {isHQ && (
         <div className="mb-8">
-          <h2 className="text-lg font-semibold text-white mb-4">
+          <h2 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">
             Margins & Profitability
           </h2>
           <div className="grid grid-cols-1 tablet:grid-cols-2 laptop:grid-cols-4 gap-4">
@@ -536,7 +536,7 @@ export default function DashboardPage() {
         {/* KPI Grid - Section 3: Inventory & Operations (Manager+) */}
         {isManager && (
         <div className="mb-8">
-          <h2 className="text-lg font-semibold text-white mb-4">
+          <h2 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">
             Inventory & Operations
           </h2>
           <div className="grid grid-cols-1 tablet:grid-cols-2 laptop:grid-cols-4 gap-4">
@@ -577,20 +577,20 @@ export default function DashboardPage() {
         {/* Top Products (Manager+) */}
         {isManager && kpis?.top_products && kpis.top_products.length > 0 && (
           <div className="mb-8">
-            <h2 className="text-lg font-semibold text-white mb-4">
+            <h2 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">
               Top 5 Selling Products
             </h2>
-            <div className="bg-gray-800 rounded-lg border border-gray-700 shadow-sm overflow-hidden">
+            <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 shadow-sm overflow-hidden">
               <table className="w-full">
-                <thead className="bg-gray-900 border-b border-gray-700">
+                <thead className="bg-gray-50 dark:bg-gray-900 border-b border-gray-200 dark:border-gray-700">
                   <tr>
-                    <th className="px-4 py-3 text-left text-xs font-semibold text-gray-400">
+                    <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600 dark:text-gray-400">
                       Product
                     </th>
-                    <th className="px-4 py-3 text-right text-xs font-semibold text-gray-400">
+                    <th className="px-4 py-3 text-right text-xs font-semibold text-gray-600 dark:text-gray-400">
                       Units Sold
                     </th>
-                    <th className="px-4 py-3 text-right text-xs font-semibold text-gray-400">
+                    <th className="px-4 py-3 text-right text-xs font-semibold text-gray-600 dark:text-gray-400">
                       Revenue
                     </th>
                   </tr>
@@ -599,20 +599,20 @@ export default function DashboardPage() {
                   {kpis.top_products.map((product) => (
                     <tr
                       key={product.product_id}
-                      className="border-b border-gray-700 hover:bg-gray-900"
+                      className="border-b border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-900"
                     >
                       <td className="px-4 py-3">
                         <div>
-                          <p className="text-sm font-medium text-white">
+                          <p className="text-sm font-medium text-gray-900 dark:text-white">
                             {product.name}
                           </p>
-                          <p className="text-xs text-gray-400">{product.sku}</p>
+                          <p className="text-xs text-gray-600 dark:text-gray-400">{product.sku}</p>
                         </div>
                       </td>
-                      <td className="px-4 py-3 text-right text-sm font-medium text-white">
+                      <td className="px-4 py-3 text-right text-sm font-medium text-gray-900 dark:text-white">
                         {product.units}
                       </td>
-                      <td className="px-4 py-3 text-right text-sm font-medium text-white">
+                      <td className="px-4 py-3 text-right text-sm font-medium text-gray-900 dark:text-white">
                         {formatCurrency(product.revenue)}
                       </td>
                     </tr>
@@ -627,7 +627,7 @@ export default function DashboardPage() {
 
         {/* ALL ROLES */}
         <div className="mb-8">
-          <h2 className="text-lg font-semibold text-white mb-4">
+          <h2 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">
             Quick Status
           </h2>
           <div className="grid grid-cols-1 tablet:grid-cols-2 laptop:grid-cols-4 gap-4">
@@ -639,7 +639,7 @@ export default function DashboardPage() {
         {/* STORE MANAGER / AREA MANAGER / ADMIN */}
         {isManager && (
         <div className="mb-8">
-          <h2 className="text-lg font-semibold text-white mb-4">
+          <h2 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">
             Store Operations
           </h2>
           <div className="grid grid-cols-1 tablet:grid-cols-2 laptop:grid-cols-4 gap-4">
@@ -654,7 +654,7 @@ export default function DashboardPage() {
         {/* AREA MANAGER SPECIFIC */}
         {hasRole(['AREA_MANAGER']) && (
         <div className="mb-8">
-          <h2 className="text-lg font-semibold text-white mb-4">
+          <h2 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">
             Area Management
           </h2>
           <div className="grid grid-cols-1 tablet:grid-cols-2 laptop:grid-cols-4 gap-4">
@@ -667,7 +667,7 @@ export default function DashboardPage() {
         {/* ADMIN / SUPERADMIN */}
         {hasRole(['ADMIN', 'SUPERADMIN']) && (
         <div className="mb-8">
-          <h2 className="text-lg font-semibold text-white mb-4">
+          <h2 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">
             System & Administration
           </h2>
           <div className="grid grid-cols-1 tablet:grid-cols-2 laptop:grid-cols-4 gap-4">
@@ -681,7 +681,7 @@ export default function DashboardPage() {
         {/* ACCOUNTANT */}
         {hasRole(['ACCOUNTANT']) && (
         <div className="mb-8">
-          <h2 className="text-lg font-semibold text-white mb-4">
+          <h2 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">
             Financial Management
           </h2>
           <div className="grid grid-cols-1 tablet:grid-cols-2 laptop:grid-cols-4 gap-4">
@@ -695,7 +695,7 @@ export default function DashboardPage() {
         {/* OPTOMETRIST */}
         {isOptometrist && (
         <div className="mb-8">
-          <h2 className="text-lg font-semibold text-white mb-4">
+          <h2 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">
             Clinical Operations
           </h2>
           <div className="grid grid-cols-1 tablet:grid-cols-2 laptop:grid-cols-4 gap-4">
@@ -709,7 +709,7 @@ export default function DashboardPage() {
         {/* CATALOG MANAGER */}
         {hasRole(['CATALOG_MANAGER']) && (
         <div className="mb-8">
-          <h2 className="text-lg font-semibold text-white mb-4">
+          <h2 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">
             Catalog Management
           </h2>
           <div className="grid grid-cols-1 tablet:grid-cols-2 laptop:grid-cols-3 gap-4">

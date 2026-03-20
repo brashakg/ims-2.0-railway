@@ -47,7 +47,7 @@ interface Job {
 
 const STATUS_CONFIG: Record<JobStatus, { label: string; class: string; step: number }> = {
   PENDING: { label: 'Pending', class: 'bg-gray-700 text-gray-300', step: 1 },
-  IN_PROGRESS: { label: 'Fitting', class: 'bg-yellow-900 text-yellow-300', step: 2 },
+  PROCESSING: { label: 'Fitting', class: 'bg-yellow-900 text-yellow-300', step: 2 },
   COMPLETED: { label: 'Completed', class: 'bg-blue-900 text-blue-300', step: 3 },
   QC_FAILED: { label: 'QC Failed', class: 'bg-red-900 text-red-300', step: 2 },
   READY: { label: 'Ready for Pickup', class: 'bg-green-900 text-green-300', step: 4 },

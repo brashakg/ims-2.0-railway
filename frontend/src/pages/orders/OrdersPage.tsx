@@ -35,7 +35,7 @@ import { OrderStatusTimeline } from '../../components/orders/OrderStatusTimeline
 const ORDER_STATUS_CONFIG: Record<OrderStatus, { label: string; color: string; bgColor: string; icon: typeof Clock }> = {
   DRAFT: { label: 'Draft', color: 'text-gray-600', bgColor: 'bg-gray-100', icon: FileText },
   CONFIRMED: { label: 'Confirmed', color: 'text-blue-600', bgColor: 'bg-blue-100', icon: CheckCircle },
-  IN_PROGRESS: { label: 'In Progress', color: 'text-yellow-600', bgColor: 'bg-yellow-100', icon: Clock },
+  PROCESSING: { label: 'Processing', color: 'text-yellow-600', bgColor: 'bg-yellow-100', icon: Clock },
   READY: { label: 'Ready', color: 'text-green-600', bgColor: 'bg-green-100', icon: Package },
   DELIVERED: { label: 'Delivered', color: 'text-emerald-600', bgColor: 'bg-emerald-100', icon: Truck },
   CANCELLED: { label: 'Cancelled', color: 'text-red-600', bgColor: 'bg-red-100', icon: XCircle },
@@ -69,7 +69,7 @@ export function OrdersPage() {
   useEffect(() => {
     const statusParam = searchParams.get('status');
     if (statusParam && statusParam !== statusFilter) {
-      const validStatuses: (OrderStatus | 'ALL')[] = ['ALL', 'DRAFT', 'CONFIRMED', 'IN_PROGRESS', 'READY', 'DELIVERED', 'CANCELLED'];
+      const validStatuses: (OrderStatus | 'ALL')[] = ['ALL', 'DRAFT', 'CONFIRMED', 'PROCESSING', 'READY', 'DELIVERED', 'CANCELLED'];
       if (validStatuses.includes(statusParam as OrderStatus)) {
         setStatusFilter(statusParam as OrderStatus);
       }
@@ -352,7 +352,7 @@ export function OrdersPage() {
               <option value="ALL">All Status</option>
               <option value="DRAFT">Draft</option>
               <option value="CONFIRMED">Confirmed</option>
-              <option value="IN_PROGRESS">In Progress</option>
+              <option value="PROCESSING">Processing</option>
               <option value="READY">Ready</option>
               <option value="DELIVERED">Delivered</option>
               <option value="CANCELLED">Cancelled</option>
@@ -595,7 +595,7 @@ export function OrdersPage() {
                   orderNumber={selectedOrder.orderNumber}
                   customerName={selectedOrder.customerName}
                   customerPhone={selectedOrder.customerPhone}
-                  status={selectedOrder.orderStatus as 'DRAFT' | 'CONFIRMED' | 'IN_PROGRESS' | 'READY' | 'DELIVERED' | 'CANCELLED'}
+                  status={selectedOrder.orderStatus as 'DRAFT' | 'CONFIRMED' | 'PROCESSING' | 'READY' | 'DELIVERED' | 'CANCELLED'}
                   createdAt={selectedOrder.createdAt}
                   onSendNotification={(status, channel) => {
                     toast.success(`${channel} notification sent for status: ${status}`);

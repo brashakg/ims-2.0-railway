@@ -77,14 +77,9 @@
   /* Secondary button — theme-aware */
   .btn-secondary {
     @apply px-4 py-2 rounded-lg font-medium
+           bg-gray-200 text-gray-800 hover:bg-gray-300 active:bg-gray-400
            disabled:opacity-50 disabled:cursor-not-allowed
            transition-colors duration-200;
-  }
-  .dark .btn-secondary {
-    @apply bg-gray-700 text-gray-200 hover:bg-gray-600 active:bg-gray-500;
-  }
-  :not(.dark) .btn-secondary {
-    @apply bg-gray-200 text-gray-800 hover:bg-gray-300 active:bg-gray-400;
   }
 
   /* Outline button */
@@ -105,27 +100,16 @@
 
   /* Input field — theme-aware */
   .input-field {
-    @apply w-full px-3 py-2 rounded-lg
+    @apply w-full px-3 py-2 rounded-lg border
+           bg-white border-gray-300 text-gray-900 placeholder:text-gray-400
            focus:border-bv-gold-500 focus:ring-1 focus:ring-bv-gold-500
-           disabled:cursor-not-allowed
+           disabled:cursor-not-allowed disabled:bg-gray-100
            transition-colors duration-200;
-  }
-  .dark .input-field {
-    @apply bg-gray-700 border border-gray-600 text-white placeholder:text-gray-400 disabled:bg-gray-800;
-  }
-  :not(.dark) .input-field {
-    @apply bg-white border border-gray-300 text-gray-900 placeholder:text-gray-400 disabled:bg-gray-100;
   }
 
   /* Card — theme-aware */
   .card {
-    @apply rounded-xl shadow-sm p-4;
-  }
-  .dark .card {
-    @apply bg-gray-800 border border-gray-700;
-  }
-  :not(.dark) .card {
-    @apply bg-white border border-gray-200;
+    @apply rounded-xl shadow-sm p-4 bg-white border border-gray-200;
   }
 
   /* Badge */
@@ -202,6 +186,57 @@
   .bg-bv-gradient {
     background: linear-gradient(135deg, #ba8659 0%, #a67547 100%);
   }
+}
+
+/* Dark mode overrides — plain CSS (not @layer) so Tailwind v4 always emits them */
+.dark body {
+  background-color: #111827; /* gray-900 */
+  color: #f3f4f6; /* gray-100 */
+}
+
+.dark .card {
+  background-color: #1f2937; /* gray-800 */
+  border-color: #374151; /* gray-700 */
+}
+
+.dark .input-field {
+  background-color: #374151; /* gray-700 */
+  border-color: #4b5563; /* gray-600 */
+  color: #ffffff;
+}
+
+.dark .input-field:disabled {
+  background-color: #1f2937; /* gray-800 */
+}
+
+.dark .input-field::placeholder {
+  color: #9ca3af; /* gray-400 */
+}
+
+.dark .btn-secondary {
+  background-color: #374151; /* gray-700 */
+  color: #e5e7eb; /* gray-200 */
+}
+
+.dark .btn-secondary:hover {
+  background-color: #4b5563; /* gray-600 */
+}
+
+.dark .btn-secondary:active {
+  background-color: #6b7280; /* gray-500 */
+}
+
+.dark .table th {
+  background-color: #1f2937; /* gray-800 */
+  color: #9ca3af; /* gray-400 */
+}
+
+.dark .table td {
+  border-color: #374151; /* gray-700 */
+}
+
+.dark .table tr:hover td {
+  background-color: #1f2937; /* gray-800 */
 }
 
 /* Brand-specific overrides */

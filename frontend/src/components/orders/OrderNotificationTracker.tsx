@@ -28,7 +28,7 @@ import {
 type OrderStatus =
   | 'DRAFT'
   | 'CONFIRMED'
-  | 'IN_PROGRESS'
+  | 'PROCESSING'
   | 'READY'
   | 'DELIVERED'
   | 'CANCELLED';
@@ -58,7 +58,7 @@ interface OrderNotificationTrackerProps {
 /** The ordered progression of non-cancelled statuses. */
 const STATUS_STEPS: OrderStatus[] = [
   'CONFIRMED',
-  'IN_PROGRESS',
+  'PROCESSING',
   'READY',
   'DELIVERED',
 ];
@@ -67,7 +67,7 @@ const STATUS_STEPS: OrderStatus[] = [
 const STATUS_LABELS: Record<OrderStatus, string> = {
   DRAFT: 'Draft',
   CONFIRMED: 'Order Confirmed',
-  IN_PROGRESS: 'In Progress',
+  PROCESSING: 'Processing',
   READY: 'Ready for Pickup',
   DELIVERED: 'Delivered',
   CANCELLED: 'Cancelled',
@@ -88,7 +88,7 @@ function getStatusIcon(status: OrderStatus, size = 'w-4 h-4') {
   switch (status) {
     case 'CONFIRMED':
       return <Check className={size} />;
-    case 'IN_PROGRESS':
+    case 'PROCESSING':
       return <Clock className={size} />;
     case 'READY':
       return <Package className={size} />;

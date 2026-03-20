@@ -13,7 +13,7 @@ interface OrderStatusTimelineProps {
 const STATUS_COLORS: Record<string, { icon: string; color: string; bgColor: string }> = {
   DRAFT: { icon: '📝', color: 'text-gray-600', bgColor: 'bg-gray-100' },
   CONFIRMED: { icon: '✓', color: 'text-blue-600', bgColor: 'bg-blue-100' },
-  IN_PROGRESS: { icon: '⏳', color: 'text-yellow-600', bgColor: 'bg-yellow-100' },
+  PROCESSING: { icon: '⏳', color: 'text-yellow-600', bgColor: 'bg-yellow-100' },
   READY: { icon: '📦', color: 'text-green-600', bgColor: 'bg-green-100' },
   DELIVERED: { icon: '🚚', color: 'text-emerald-600', bgColor: 'bg-emerald-100' },
   CANCELLED: { icon: '✕', color: 'text-red-600', bgColor: 'bg-red-100' },

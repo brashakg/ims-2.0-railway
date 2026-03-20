@@ -72,7 +72,7 @@ export const MODULE_CONFIGS: ModuleConfig[] = [
       { id: 'pos-new', label: 'New Sale', path: '/pos' },
       { id: 'pos-orders', label: 'All Orders', path: '/orders' },
       { id: 'pos-returns', label: 'Returns & Exchanges', path: '/returns' },
-      { id: 'pos-pending', label: 'Pending Orders', path: '/orders?status=IN_PROGRESS' },
+      { id: 'pos-pending', label: 'Pending Orders', path: '/orders?status=PROCESSING' },
       { id: 'pos-deliveries', label: 'Ready for Delivery', path: '/orders?status=READY' },
       { id: 'pos-dayend', label: 'Day-End Report', path: '/reports/day-end' },
     ],
@@ -140,7 +140,7 @@ export const MODULE_CONFIGS: ModuleConfig[] = [
     allowedRoles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'WORKSHOP_STAFF'],
     sidebarItems: [
       { id: 'ws-jobs', label: 'All Jobs', path: '/workshop' },
-      { id: 'ws-orders', label: 'Order Pipeline', path: '/orders?status=IN_PROGRESS' },
+      { id: 'ws-orders', label: 'Order Pipeline', path: '/orders?status=PROCESSING' },
     ],
   },
   {

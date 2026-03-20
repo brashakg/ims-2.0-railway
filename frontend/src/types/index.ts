@@ -222,7 +222,7 @@ export interface Prescription {
 export type OrderStatus =
   | 'DRAFT'
   | 'CONFIRMED'
-  | 'IN_PROGRESS'
+  | 'PROCESSING'
   | 'READY'
   | 'DELIVERED'
   | 'CANCELLED';
@@ -322,7 +322,7 @@ export interface Order {
 
 export type JobStatus =
   | 'PENDING'
-  | 'IN_PROGRESS'
+  | 'PROCESSING'
   | 'COMPLETED'
   | 'QC_FAILED'
   | 'READY'
