@@ -39,3 +39,8 @@ logs/
 
 # Build outputs
 /frontend/dist/
+*.tsbuildinfo
+
+# Local dev helpers
+start_backend.*
+start_frontend.*
