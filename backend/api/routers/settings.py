@@ -747,6 +747,82 @@ async def update_admin_controls(
     return {"message": "Admin controls saved (no DB)", "controls": controls}
 
 
+# ============================================================================
+# FEATURE TOGGLES ENDPOINTS
+# ============================================================================
+
+DEFAULT_FEATURE_TOGGLES: Dict[str, bool] = {
+    "pos-quick-sale": True,
+    "eye-test-module": True,
+    "workshop-module": True,
+    "loyalty-points": False,
+    "split-payments": True,
+    "credit-billing": True,
+    "emi-payments": False,
+    "storefront": False,
+}
+
+
+class FeatureTogglesUpdate(BaseModel):
+    features: Dict[str, bool]
+
+
+@router.get("/feature-toggles/{store_id}")
+async def get_feature_toggles(
+    store_id: str, current_user: dict = Depends(get_current_user)
+):
+    """Get feature toggle states for a store (SUPERADMIN only)"""
+    if "SUPERADMIN" not in current_user["roles"]:
+        raise HTTPException(status_code=403, detail="Superadmin access required")
+    collection = _get_settings_collection("feature_toggles")
+    if collection:
+        doc = collection.find_one({"_id": store_id})
+        if doc:
+            doc.pop("_id", None)
+            return {"store_id": store_id, "features": doc.get("features", DEFAULT_FEATURE_TOGGLES)}
+    return {"store_id": store_id, "features": DEFAULT_FEATURE_TOGGLES}
+
+
+@router.put("/feature-toggles/{store_id}")
+async def update_feature_toggles_put(
+    store_id: str,
+    payload: FeatureTogglesUpdate,
+    current_user: dict = Depends(get_current_user),
+):
+    """Update feature toggle states for a store (SUPERADMIN only)"""
+    if "SUPERADMIN" not in current_user["roles"]:
+        raise HTTPException(status_code=403, detail="Superadmin access required")
+    collection = _get_settings_collection("feature_toggles")
+    if collection:
+        collection.update_one(
+            {"_id": store_id},
+            {"$set": {"features": payload.features, "updated_at": datetime.utcnow().isoformat()}},
+            upsert=True,
+        )
+        return {"message": "Feature toggles updated successfully", "store_id": store_id, "features": payload.features}
+    return {"message": "Feature toggles saved (no DB)", "store_id": store_id, "features": payload.features}
+
+
+@router.patch("/feature-toggles/{store_id}")
+async def update_feature_toggles_patch(
+    store_id: str,
+    payload: FeatureTogglesUpdate,
+    current_user: dict = Depends(get_current_user),
+):
+    """Update feature toggle states for a store (SUPERADMIN only)"""
+    if "SUPERADMIN" not in current_user["roles"]:
+        raise HTTPException(status_code=403, detail="Superadmin access required")
+    collection = _get_settings_collection("feature_toggles")
+    if collection:
+        collection.update_one(
+            {"_id": store_id},
+            {"$set": {"features": payload.features, "updated_at": datetime.utcnow().isoformat()}},
+            upsert=True,
+        )
+        return {"message": "Feature toggles updated successfully", "store_id": store_id, "features": payload.features}
+    return {"message": "Feature toggles saved (no DB)", "store_id": store_id, "features": payload.features}
+
+
 @router.get("/audit-logs/summary")
 async def get_audit_summary(current_user: dict = Depends(get_current_user)):
     """Get audit log summary for dashboard"""

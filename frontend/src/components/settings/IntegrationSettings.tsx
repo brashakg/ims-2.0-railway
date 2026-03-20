@@ -3,8 +3,10 @@
 // ============================================================================
 
 import { useState } from 'react';
-import { Eye, EyeOff, Zap, Calendar, Copy, Check } from 'lucide-react';
+import { Eye, EyeOff, Zap, Calendar, Copy, Check, Loader2 } from 'lucide-react';
 import clsx from 'clsx';
+import { useToast } from '../../context/ToastContext';
+import { settingsApi } from '../../services/api/settings';
 
 interface Integration {
   id: string;
@@ -75,7 +77,8 @@ export function IntegrationSettings() {
   const [integrations] = useState<Integration[]>(INTEGRATIONS);
   const [showApiKey, setShowApiKey] = useState<Record<string, boolean>>({});
   const [copiedId, setCopiedId] = useState<string | null>(null);
-  const [_testingId, setTestingId] = useState<string | null>(null);
+  const [testingId, setTestingId] = useState<string | null>(null);
+  const toast = useToast();
 
   const handleCopyApiKey = (id: string, apiKey: string | undefined) => {
     if (!apiKey) return;
@@ -86,10 +89,21 @@ export function IntegrationSettings() {
 
   const handleTestConnection = async (id: string) => {
     setTestingId(id);
-    // Simulate test connection
-    await new Promise(resolve => setTimeout(resolve, 1500));
-    setTestingId(null);
-    // TODO: Call API endpoint to test connection
+    try {
+      const result = await settingsApi.testIntegration(id);
+      if (result?.success === false) {
+        toast.error(result?.message ?? `Connection test failed for ${id}`);
+      } else {
+        toast.success(result?.message ?? `Connection to ${id} is working`);
+      }
+    } catch (err: unknown) {
+      const message =
+        (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ??
+        `Failed to test ${id} connection`;
+      toast.error(message);
+    } finally {
+      setTestingId(null);
+    }
   };
 
   const formatLastSync = (dateString: string | undefined) => {
@@ -187,15 +201,20 @@ export function IntegrationSettings() {
               {integration.testable && (
                 <button
                   onClick={() => handleTestConnection(integration.id)}
-                  disabled
-                  title="Coming soon"
+                  disabled={testingId === integration.id}
                   className={clsx(
                     'flex-1 flex items-center justify-center gap-2 px-3 py-2 rounded text-sm font-medium transition',
-                    'bg-gray-700 text-gray-500 cursor-not-allowed'
+                    testingId === integration.id
+                      ? 'bg-gray-700 text-gray-500 cursor-not-allowed'
+                      : 'bg-gray-700 hover:bg-gray-600 text-gray-300'
                   )}
                 >
-                  <Zap className="w-4 h-4" />
-                  Test Connection
+                  {testingId === integration.id ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <Zap className="w-4 h-4" />
+                  )}
+                  {testingId === integration.id ? 'Testing...' : 'Test Connection'}
                 </button>
               )}
               <button className="flex-1 px-3 py-2 rounded text-sm font-medium bg-blue-600 text-white hover:bg-blue-700 transition">

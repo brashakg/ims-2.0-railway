@@ -4,6 +4,7 @@
 // Dynamic product creation with category-specific fields
 
 import { useState, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 import {
   Package,
   ChevronRight,
@@ -21,6 +22,7 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
+import { productApi } from '../../services/api/products';
 import { getHSNByCategory, getHSNOptions } from '../../constants/gst';
 import clsx from 'clsx';
 
@@ -173,6 +175,7 @@ type Step = 'category' | 'details' | 'pricing' | 'inventory' | 'shopify' | 'revi
 export function AddProductPage() {
   const { hasRole } = useAuth();
   const toast = useToast();
+  const navigate = useNavigate();
 
   // Step management
   const [currentStep, setCurrentStep] = useState<Step>('category');
@@ -293,25 +296,39 @@ export function AddProductPage() {
 
   const handleSubmit = async () => {
     if (!validateCurrentStep()) return;
+    if (!selectedCategory) return;
 
     setIsSubmitting(true);
     try {
-      // TODO: Wire to POST /api/v1/products with form data
-
-      // Simulate API call
-      await new Promise((resolve) => setTimeout(resolve, 1500));
+      await productApi.createProduct({
+        category: selectedCategory,
+        attributes,
+        description: description || undefined,
+        hsn_code: hsnCode || undefined,
+        gst_rate: parseFloat(gstRate),
+        weight: weight ? parseFloat(weight) : undefined,
+        pricing: {
+          mrp: parseFloat(mrp),
+          offer_price: offerPrice ? parseFloat(offerPrice) : undefined,
+          cost_price: costPrice ? parseFloat(costPrice) : undefined,
+          discount_category: discountCategory,
+        },
+        inventory: {
+          initial_quantity: parseInt(initialQuantity, 10),
+          barcode: barcode || undefined,
+          reorder_level: parseInt(reorderLevel, 10),
+        },
+        images: [],
+        shopify: {
+          sync_to_shopify: syncToShopify,
+          shopify_tags: shopifyTags,
+          publish_to_online_store: publishOnlineStore,
+          publish_to_pos: publishPOS,
+        },
+      });
 
       toast.success('Product created successfully!');
-
-      // Reset form
-      setSelectedCategory(null);
-      setAttributes({});
-      setDescription('');
-      setMrp('');
-      setOfferPrice('');
-      setCostPrice('');
-      setInitialQuantity('0');
-      setCurrentStep('category');
+      navigate('/catalog/inventory');
     } catch {
       toast.error('Failed to create product. Please try again.');
     } finally {

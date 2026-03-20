@@ -4,6 +4,33 @@
 
 import api from './client';
 
+export interface CreateProductPayload {
+  category: string;
+  attributes: Record<string, string | number>;
+  description?: string;
+  hsn_code?: string;
+  gst_rate?: number;
+  weight?: number;
+  pricing: {
+    mrp: number;
+    offer_price?: number;
+    cost_price?: number;
+    discount_category?: string;
+  };
+  inventory?: {
+    initial_quantity?: number;
+    barcode?: string;
+    reorder_level?: number;
+  };
+  images?: string[];
+  shopify?: {
+    sync_to_shopify: boolean;
+    shopify_tags?: string[];
+    publish_to_online_store?: boolean;
+    publish_to_pos?: boolean;
+  };
+}
+
 export const productApi = {
   getProducts: async (params?: { category?: string; brand?: string; search?: string; store_id?: string }) => {
     const response = await api.get('/products', { params });
@@ -27,6 +54,11 @@ export const productApi = {
 
   searchProducts: async (query: string, category?: string) => {
     const response = await api.get('/products/search', { params: { q: query, category } });
+    return response.data;
+  },
+
+  createProduct: async (data: CreateProductPayload) => {
+    const response = await api.post('/products', data);
     return response.data;
   },
 };
