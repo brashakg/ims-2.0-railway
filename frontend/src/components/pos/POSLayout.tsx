@@ -1,17 +1,16 @@
 // ============================================================================
-// IMS 2.0 - POS Layout (Complete Rewrite)
+// IMS 2.0 - POS Layout (Wizard Orchestrator)
 // ============================================================================
-// 6-Step Wizard: Customer → Prescription → Products → Review → Payment → Receipt
+// 6-Step Wizard: Customer -> Prescription -> Products -> Review -> Payment -> Receipt
 // Uses posStore (Zustand) for all state with localStorage persistence
-// Wires all 12 previously orphaned components + adds 6 missing features
-// Theme: Better Vision gold/white (matches app design system)
+// Sub-components extracted to: POSCart, POSPayment, POSReceipt, POSInvoice
 
 import { useState, useEffect, useMemo, startTransition } from 'react';
 import {
   ShoppingCart, User, Eye, Package, CreditCard, CheckCircle,
   ChevronRight, ChevronLeft, Plus, X,
-  Pause, Play, Printer, RotateCcw, IndianRupee, AlertTriangle,
-  Glasses, Watch, Phone, FileText, Zap, Sparkles,
+  Pause, Play, RotateCcw, AlertTriangle,
+  Glasses, Watch, FileText, Zap, Sparkles,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { usePOSStore } from '../../stores/posStore';
@@ -51,17 +50,19 @@ import { PrescriptionSelectModal } from './PrescriptionSelectModal';
 import { LensDetailsModal } from './LensDetailsModal';
 import { LensSuggestionPanel } from './LensSuggestionPanel';
 import { DiscountModal } from './DiscountModal';
-import { GSTInvoice } from './GSTInvoice';
 import { DayEndReport } from './DayEndReport';
-import { ReceiptPreview } from './ReceiptPreview';
 import { BarcodeScanner } from './BarcodeScanner';
 import { AutoSearch } from '../common/AutoSearch';
 import { AddCustomerModal, type CustomerFormData } from '../customers/AddCustomerModal';
 import { CustomerCardWithLoyalty } from './CustomerCardWithLoyalty';
-import { VoucherRedemption } from './VoucherRedemption';
-import { CreditBillingOption } from './CreditBillingOption';
 import { getGSTRateByCategory } from '../../constants/gst';
 import type { PrescriptionInput } from '../../utils/lensAutoSuggest';
+
+// Extracted sub-components
+import { CartSidebar } from './POSCart';
+import { StepPayment } from './POSPayment';
+import { POSReceipt } from './POSReceipt';
+import { StepComplete } from './POSInvoice';
 
 // ============================================================================
 // Constants
@@ -81,7 +82,7 @@ const QUICK_STEPS: POSStep[] = ['customer', 'products', 'payment', 'complete'];
 /** Safe currency format — never crashes on null/undefined/NaN */
 function fc(amount: number | undefined | null): string {
   const val = Math.round((amount || 0) * 100) / 100;
-  return `₹${val.toLocaleString('en-IN', { minimumFractionDigits: 0, maximumFractionDigits: 2 })}`;
+  return `\u20B9${val.toLocaleString('en-IN', { minimumFractionDigits: 0, maximumFractionDigits: 2 })}`;
 }
 
 function mapCategory(cat: string): string {
@@ -145,7 +146,6 @@ export function POSLayout() {
     const bills = getHeldBills();
     const bill = bills.find(b => b.id === billId);
     if (!bill) return;
-    // Restore state
     const s = bill.state;
     if (s.customer) store.setCustomer(s.customer);
     if (s.patient) store.setPatient(s.patient);
@@ -153,18 +153,14 @@ export function POSLayout() {
     if (s.sale_type) store.setSaleType(s.sale_type);
     if (s.cart_note) store.setCartNote(s.cart_note);
     if (s.is_advance_payment) store.setAdvancePayment(s.is_advance_payment);
-    // Restore cart items
     for (const item of (s.cart || [])) {
       store.addToCart(item);
     }
-    // Restore payments
     for (const p of (s.payments || [])) {
       store.addPayment(p);
     }
-    // Remove from held bills
     localStorage.setItem('ims-held-bills', JSON.stringify(bills.filter(b => b.id !== billId)));
     setShowRecallPanel(false);
-    // Navigate to products or review
     if ((s.cart || []).length > 0) store.setStep('review');
   };
 
@@ -231,11 +227,10 @@ export function POSLayout() {
   }, [(store.cart || []).length, store.current_step, canProceed]);
 
   async function handleCreateOrder() {
-    if (store.is_processing) return; // Double-click guard
-    
-    // Rx order validation: must have at least one lens if prescription order
+    if (store.is_processing) return;
+
     if (store.sale_type === 'prescription_order') {
-      const hasLens = (store.cart || []).some(i => 
+      const hasLens = (store.cart || []).some(i =>
         i.category === 'RX_LENSES' || i.lens_details || i.is_optical
       );
       if (!hasLens) {
@@ -244,7 +239,6 @@ export function POSLayout() {
       }
     }
 
-    // Payment validation
     if (store.getBalance() > 0.01 && !store.is_advance_payment) {
       setErrorMsg('Payment incomplete. Add payments or enable "Advance payment only".');
       return;
@@ -280,7 +274,6 @@ export function POSLayout() {
           try {
             await orderApi.addPayment(result.order_id, { method: p.method, amount: p.amount, reference: p.reference } as any);
           } catch {
-
             // Don't block order — payment can be recorded later
           }
         }
@@ -292,7 +285,7 @@ export function POSLayout() {
             const frameItem = (store.cart || []).find(i => i.category === 'FRAMES' || i.category === 'SUNGLASSES');
             const lensItem = (store.cart || []).find(i => i.category === 'RX_LENSES' || i.lens_details);
             const expectedDate = new Date();
-            expectedDate.setDate(expectedDate.getDate() + 5); // Default 5 business days
+            expectedDate.setDate(expectedDate.getDate() + 5);
 
             await workshopApi.createJob({
               order_id: result.order_id,
@@ -312,7 +305,6 @@ export function POSLayout() {
               expected_date: expectedDate.toISOString().split('T')[0],
             });
           } catch {
-
           }
         }
 
@@ -323,7 +315,6 @@ export function POSLayout() {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       setErrorMsg('Failed to create order: ' + (msg || 'Network error'));
-
     } finally {
       store.setProcessing(false);
     }
@@ -339,7 +330,7 @@ export function POSLayout() {
           </div>
           <div className="min-w-0">
             <h1 className="text-base tablet:text-lg font-bold text-white truncate">Point of Sale</h1>
-            <p className="text-[10px] tablet:text-xs text-gray-500 truncate">· {store.store_id || 'No store'}</p>
+            <p className="text-[10px] tablet:text-xs text-gray-500 truncate">{'\u00B7'} {store.store_id || 'No store'}</p>
           </div>
         </div>
         <div className="flex items-center gap-1.5 tablet:gap-2 flex-shrink-0">
@@ -352,9 +343,8 @@ export function POSLayout() {
             {getHeldBills().length > 0 && <span className="absolute -top-1 -right-1 w-4 h-4 bg-amber-500 text-white text-[10px] rounded-full flex items-center justify-center">{getHeldBills().length}</span>}
           </button>
           <button onClick={() => {
-              // Only confirm if there's something in the cart
               if ((store.cart || []).length > 0) {
-                setHoldConfirm(false); // reuse existing confirm flow
+                setHoldConfirm(false);
                 setShowNewConfirm(true);
               } else {
                 handleFullReset();
@@ -368,7 +358,7 @@ export function POSLayout() {
             <kbd className="px-1.5 py-0.5 bg-gray-700 border rounded text-[10px]">F4</kbd> Hold
             <kbd className="px-1.5 py-0.5 bg-gray-700 border rounded text-[10px]">F9</kbd> Pay
             <kbd className="px-1.5 py-0.5 bg-gray-700 border rounded text-[10px]">ESC</kbd> Back
-            <kbd className="px-1.5 py-0.5 bg-gray-700 border rounded text-[10px]">⏎</kbd> Next
+            <kbd className="px-1.5 py-0.5 bg-gray-700 border rounded text-[10px]">{'\u23CE'}</kbd> Next
           </div>
         </div>
       </header>
@@ -442,7 +432,7 @@ export function POSLayout() {
           )}
           {(store.cart || []).length > 0 && (
             <div className="text-xs tablet:text-sm text-gray-500">
-              <span className="font-semibold text-white">{(store.cart || []).length}</span> {(store.cart || []).length === 1 ? 'item' : 'items'} · <span className="font-semibold text-white ml-1">₹{Math.round(store.getGrandTotal()).toLocaleString('en-IN')}</span>
+              <span className="font-semibold text-white">{(store.cart || []).length}</span> {(store.cart || []).length === 1 ? 'item' : 'items'} {'\u00B7'} <span className="font-semibold text-white ml-1">{'\u20B9'}{Math.round(store.getGrandTotal()).toLocaleString('en-IN')}</span>
             </div>
           )}
         </div>
@@ -487,10 +477,9 @@ export function POSLayout() {
                 onSubmit={async (rxData) => {
                   setErrorMsg(null);
                   try {
-                    // Determine source and optometrist
                     const isOptometrist = user?.roles?.includes('OPTOMETRIST');
                     const source = isOptometrist ? 'TESTED_AT_STORE' : 'FROM_DOCTOR';
-                    
+
                     const result = await prescriptionApi.createPrescription({
                       patient_id: store.patient?.id || store.customer?.id,
                       customer_id: store.customer?.id,
@@ -522,8 +511,7 @@ export function POSLayout() {
                     }
                   } catch (err) {
                     const msg = err instanceof Error ? err.message : String(err);
-                    setErrorMsg(msg || 'Network error — check your connection and try again');
-
+                    setErrorMsg(msg || 'Network error -- check your connection and try again');
                   }
                 }}
                 onCancel={() => { setShowNewPrescription(false); setErrorMsg(null); }}
@@ -547,48 +535,12 @@ export function POSLayout() {
           onApply={(pct) => { store.applyDiscount(discountItem.id, pct); setDiscountItem(null); }}
           onClose={() => setDiscountItem(null)} />
       )}
-      {showReceipt && (() => {
-        const sub = store.getSubtotal();
-        const disc = store.getTotalDiscount();
-        const taxable = sub - disc;
-        const gst = store.getGrandTotal() - taxable;
-        // Detect inter-state: compare customer billing state with store state
-        const custState = ((store.customer as any)?.billing_address?.state || (store.customer as any)?.state || '').toLowerCase().trim();
-        const stState = ((store as any).store_state || '').toLowerCase().trim();
-        const isInterState = custState && stState && custState !== stState;
-        const halfGst = Math.round(gst / 2 * 100) / 100;
-        return (
-          <ReceiptPreview billData={{
-            bill_number: store.order_number || 'N/A',
-            subtotal: Math.round(sub),
-            item_discount: Math.round(disc),
-            order_discount_amount: 0,
-            taxable_amount: Math.round(taxable),
-            cgst_amount: isInterState ? 0 : halfGst,
-            sgst_amount: isInterState ? 0 : halfGst,
-            igst_amount: isInterState ? Math.round(gst) : 0,
-            total_gst: Math.round(gst),
-            roundoff_amount: 0,
-            total_amount: Math.round(store.getGrandTotal()),
-            payment_method: (store.payments || []).map(p => p.method).join(' + ') || 'N/A',
-          }}
-            selectedCustomer={store.customer || { name: 'Walk-in', phone: '' }}
-            cartItems={(store.cart || []).map(item => ({
-              ...item,
-              unitPrice: item.unit_price,
-              discountPercent: item.discount_percent,
-              discountAmount: item.discount_amount,
-              finalPrice: item.line_total,
-              productName: item.name,
-            })) as any}
-            onClose={() => setShowReceipt(false)} />
-        );
-      })()}
+      {showReceipt && <POSReceipt onClose={() => setShowReceipt(false)} />}
       {holdConfirm && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
           <div className="bg-gray-800 rounded-xl p-6 max-w-sm">
             <h3 className="font-semibold text-white mb-2">Hold this bill?</h3>
-            <p className="text-sm text-gray-500 mb-1">{store.customer?.name || 'Walk-in'} · {(store.cart || []).length} items · ₹{Math.round(store.getGrandTotal()).toLocaleString('en-IN')}</p>
+            <p className="text-sm text-gray-500 mb-1">{store.customer?.name || 'Walk-in'} {'\u00B7'} {(store.cart || []).length} items {'\u00B7'} {'\u20B9'}{Math.round(store.getGrandTotal()).toLocaleString('en-IN')}</p>
             <p className="text-xs text-gray-400 mb-4">Cart will be saved and can be recalled later.</p>
             <div className="flex gap-2">
               <button onClick={() => setHoldConfirm(false)} className="flex-1 px-4 py-2 border border-gray-600 rounded-lg text-sm">Cancel</button>
@@ -597,12 +549,11 @@ export function POSLayout() {
           </div>
         </div>
       )}
-      {/* New Transaction Confirm (non-blocking) */}
       {showNewConfirm && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
           <div className="bg-gray-800 rounded-xl p-6 max-w-sm border border-gray-700">
             <h3 className="font-semibold text-white mb-2">Start new transaction?</h3>
-            <p className="text-sm text-gray-400 mb-4">Current cart ({(store.cart || []).length} items, ₹{Math.round(store.getGrandTotal()).toLocaleString('en-IN')}) will be cleared. Consider holding the bill first.</p>
+            <p className="text-sm text-gray-400 mb-4">Current cart ({(store.cart || []).length} items, {'\u20B9'}{Math.round(store.getGrandTotal()).toLocaleString('en-IN')}) will be cleared. Consider holding the bill first.</p>
             <div className="flex gap-2">
               <button onClick={() => setShowNewConfirm(false)} className="flex-1 px-4 py-2 border border-gray-600 text-gray-300 rounded-lg text-sm hover:bg-gray-700">Cancel</button>
               <button onClick={() => { holdCurrentBill(); setShowNewConfirm(false); }} className="flex-1 px-4 py-2 bg-amber-600 text-white rounded-lg text-sm font-semibold hover:bg-amber-700">Hold & New</button>
@@ -625,7 +576,7 @@ export function POSLayout() {
                 <div key={bill.id} className="bg-amber-900/30 border border-amber-700 rounded-lg p-3 flex items-center justify-between">
                   <div>
                     <p className="font-medium text-sm text-white">{bill.customer}</p>
-                    <p className="text-xs text-gray-500">{bill.items} items · ₹{Math.round(bill.total).toLocaleString('en-IN')}</p>
+                    <p className="text-xs text-gray-500">{bill.items} items {'\u00B7'} {'\u20B9'}{Math.round(bill.total).toLocaleString('en-IN')}</p>
                     <p className="text-[10px] text-gray-400">{new Date(bill.heldAt).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}</p>
                   </div>
                   <div className="flex gap-2">
@@ -648,12 +599,8 @@ export function POSLayout() {
 }
 
 // ============================================================================
-// STEP 1: Customer + Sale Type
-// ============================================================================
-// ============================================================================
 // Customer Purchase History (compact, in StepCustomer)
 // ============================================================================
-// Show "Rx Available" badge when customer has valid prescriptions from clinical module
 function RxAvailableBadge({ customerId }: { customerId: string; customerName?: string }) {
   const store = usePOSStore();
   const [rxCount, setRxCount] = useState(0);
@@ -667,7 +614,6 @@ function RxAvailableBadge({ customerId }: { customerId: string; customerName?: s
         const result = await prescriptionApi.getPrescriptions(customerId);
         const prescriptions = result?.prescriptions || result || [];
         if (!cancelled && Array.isArray(prescriptions)) {
-          // Filter to valid (non-expired) prescriptions
           const now = new Date();
           const valid = prescriptions.filter((rx: any) => {
             const testDate = new Date(rx.testDate || rx.test_date || rx.created_at);
@@ -678,7 +624,6 @@ function RxAvailableBadge({ customerId }: { customerId: string; customerName?: s
           });
           setRxCount(valid.length);
           if (valid.length > 0) {
-            // Sort by date descending, pick latest
             valid.sort((a: any, b: any) => {
               const da = new Date(a.testDate || a.test_date || a.created_at).getTime();
               const db = new Date(b.testDate || b.test_date || b.created_at).getTime();
@@ -697,7 +642,6 @@ function RxAvailableBadge({ customerId }: { customerId: string; customerName?: s
 
   const handleSwitchToRx = () => {
     store.setSaleType('prescription_order');
-    // Auto-set the prescription in the store so Step 2 is pre-filled
     if (latestRx) {
       const rx: Prescription = {
         prescriptionId: latestRx.prescriptionId || latestRx.prescription_id || latestRx._id,
@@ -746,7 +690,7 @@ function RxAvailableBadge({ customerId }: { customerId: string; customerName?: s
                 ? `By ${latestRx.optometristName || latestRx.optometrist_name}`
                 : 'From eye test'}
               {latestRx?.testDate || latestRx?.test_date
-                ? ` · ${new Date(latestRx.testDate || latestRx.test_date).toLocaleDateString('en-IN')}`
+                ? ` \u00B7 ${new Date(latestRx.testDate || latestRx.test_date).toLocaleDateString('en-IN')}`
                 : ''}
             </p>
           </div>
@@ -756,7 +700,7 @@ function RxAvailableBadge({ customerId }: { customerId: string; customerName?: s
             onClick={handleSwitchToRx}
             className="text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 px-3 py-1.5 rounded-lg transition-colors"
           >
-            Use Rx → Prescription Order
+            Use Rx {'\u2192'} Prescription Order
           </button>
         )}
         {store.sale_type === 'prescription_order' && !store.prescription && (
@@ -802,7 +746,7 @@ function CustomerHistory({ customerId }: { customerId: string }) {
             <div key={o.order_id || o._id || i} className="flex items-center gap-2 text-xs">
               <span className="text-gray-400 w-16 flex-shrink-0">{ago}</span>
               <span className="text-gray-300 truncate flex-1">{items || o.orderNumber || 'Order'}</span>
-              <span className="text-gray-500 flex-shrink-0 font-medium">₹{Math.round(o.grandTotal || o.grand_total || 0).toLocaleString('en-IN')}</span>
+              <span className="text-gray-500 flex-shrink-0 font-medium">{'\u20B9'}{Math.round(o.grandTotal || o.grand_total || 0).toLocaleString('en-IN')}</span>
             </div>
           );
         })}
@@ -830,9 +774,7 @@ function StepCustomer() {
   const store = usePOSStore();
   const [showAddCustomerModal, setShowAddCustomerModal] = useState(false);
 
-  // Save customer from AddCustomerModal → create via API → set as POS customer
   const handleSaveCustomer = async (customerData: CustomerFormData) => {
-    // Map to backend CustomerCreate schema
     const payload = {
       name: customerData.fullName,
       mobile: customerData.mobileNumber,
@@ -861,7 +803,6 @@ function StepCustomer() {
       email: customerData.email,
       customerType: customerData.customerType,
     } as any);
-    // If patients were added, set the first one
     if (customerData.patients?.length > 0) {
       store.setPatient({ name: customerData.patients[0].name, id: customerData.patients[0].id } as any);
     }
@@ -870,7 +811,6 @@ function StepCustomer() {
 
   const isWalkin = store.customer?.id?.toString().startsWith('walkin-') || store.customer?.name === 'Walk-in Customer';
 
-  // Force quick_sale if walk-in is selected
   useEffect(() => {
     if (isWalkin && store.sale_type === 'prescription_order') {
       store.setSaleType('quick_sale');
@@ -883,8 +823,8 @@ function StepCustomer() {
         <label className="block text-sm font-medium text-gray-300 mb-2">Sale Type</label>
         <div className="grid grid-cols-2 gap-3">
           {([
-            { id: 'quick_sale' as SaleType, label: 'Quick Sale', desc: 'Frames, sunglasses, accessories — immediate delivery', icon: Zap, blocked: false },
-            { id: 'prescription_order' as SaleType, label: 'Prescription Order', desc: isWalkin ? 'Register customer first for Rx orders' : 'Frame + lens with Rx — workshop job created', icon: Eye, blocked: isWalkin },
+            { id: 'quick_sale' as SaleType, label: 'Quick Sale', desc: 'Frames, sunglasses, accessories -- immediate delivery', icon: Zap, blocked: false },
+            { id: 'prescription_order' as SaleType, label: 'Prescription Order', desc: isWalkin ? 'Register customer first for Rx orders' : 'Frame + lens with Rx -- workshop job created', icon: Eye, blocked: isWalkin },
           ]).map(opt => (
             <button key={opt.id} onClick={() => { if (!opt.blocked) store.setSaleType(opt.id); }}
               title={opt.blocked ? 'Select a registered customer for prescription orders' : ''}
@@ -915,7 +855,7 @@ function StepCustomer() {
               <div>
                 <p className="font-semibold text-white">{store.customer.name}</p>
                 <p className="text-sm text-gray-500">{store.customer.phone || 'No phone'}</p>
-                {isWalkin && <p className="text-xs text-amber-600 mt-0.5">Walk-in — Quick Sale only</p>}
+                {isWalkin && <p className="text-xs text-amber-600 mt-0.5">Walk-in -- Quick Sale only</p>}
                 {store.patient && <p className="text-xs text-bv-gold-600 mt-0.5">Patient: {store.patient.name}</p>}
               </div>
             </div>
@@ -942,7 +882,7 @@ function StepCustomer() {
                     <div className="w-8 h-8 rounded-full bg-bv-gold-600 flex items-center justify-center text-sm font-bold text-white">{custName.charAt(0).toUpperCase()}</div>
                     <div className="flex-1 min-w-0">
                       <p className="text-sm font-medium text-white truncate">{custName}</p>
-                      <p className="text-xs text-gray-400">{custPhone} {cust.city && `· ${cust.city}`}</p>
+                      <p className="text-xs text-gray-400">{custPhone} {cust.city && `\u00B7 ${cust.city}`}</p>
                     </div>
                   </div>
                 );
@@ -997,7 +937,6 @@ function StepPrescription({ onShowModal, onShowNew }: { onShowModal: () => void;
   const [recentRx, setRecentRx] = useState<any[]>([]);
   const [rxLoading, setRxLoading] = useState(false);
 
-  // Auto-fetch recent prescriptions for the selected customer/patient
   const lookupId = store.patient?.id || store.customer?.id;
   useEffect(() => {
     if (!lookupId || store.prescription) return;
@@ -1008,7 +947,6 @@ function StepPrescription({ onShowModal, onShowNew }: { onShowModal: () => void;
         const result = await prescriptionApi.getPrescriptions(lookupId);
         const list = result?.prescriptions || result || [];
         if (!cancelled && Array.isArray(list)) {
-          // Filter to valid, sort by newest first
           const now = new Date();
           const valid = list.filter((rx: any) => {
             const testDate = new Date(rx.testDate || rx.test_date || rx.created_at);
@@ -1075,7 +1013,7 @@ function StepPrescription({ onShowModal, onShowNew }: { onShowModal: () => void;
         </div>
         <PrescriptionPanel prescription={store.prescription} patientName={store.patient?.name || store.customer?.name} readOnly />
         <div className="bg-green-900/30 border border-green-200 rounded-lg p-3 flex items-center gap-2 text-sm text-green-700">
-          <CheckCircle className="w-4 h-4" /> Prescription attached — you can now select lenses
+          <CheckCircle className="w-4 h-4" /> Prescription attached -- you can now select lenses
         </div>
       </div>
     );
@@ -1084,7 +1022,6 @@ function StepPrescription({ onShowModal, onShowNew }: { onShowModal: () => void;
     <div className="max-w-3xl mx-auto space-y-6">
       <div><h3 className="font-semibold text-white mb-1">Prescription Required</h3><p className="text-sm text-gray-500">Select existing or enter a new prescription.</p></div>
 
-      {/* Auto-loaded recent prescriptions from eye test / clinical */}
       {rxLoading && (
         <div className="text-sm text-gray-400 animate-pulse">Checking for prescriptions...</div>
       )}
@@ -1103,14 +1040,14 @@ function StepPrescription({ onShowModal, onShowNew }: { onShowModal: () => void;
                 </div>
                 <div className="flex-1 min-w-0">
                   <p className="text-sm font-medium text-white">
-                    R: {fmtPower(re.sph || re.sphere)}/{fmtPower(re.cyl || re.cylinder)}×{re.axis || 180}
-                    {' · '}
-                    L: {fmtPower(le.sph || le.sphere)}/{fmtPower(le.cyl || le.cylinder)}×{le.axis || 180}
+                    R: {fmtPower(re.sph || re.sphere)}/{fmtPower(re.cyl || re.cylinder)}{'\u00D7'}{re.axis || 180}
+                    {' \u00B7 '}
+                    L: {fmtPower(le.sph || le.sphere)}/{fmtPower(le.cyl || le.cylinder)}{'\u00D7'}{le.axis || 180}
                   </p>
                   <p className="text-xs text-gray-500">
                     {rx.optometristName || rx.optometrist_name ? `By ${rx.optometristName || rx.optometrist_name}` : 'Eye test'}
-                    {testDate ? ` · ${new Date(testDate).toLocaleDateString('en-IN')}` : ''}
-                    {rx.source === 'TESTED_AT_STORE' && ' · Tested at store'}
+                    {testDate ? ` \u00B7 ${new Date(testDate).toLocaleDateString('en-IN')}` : ''}
+                    {rx.source === 'TESTED_AT_STORE' && ' \u00B7 Tested at store'}
                   </p>
                 </div>
                 <button onClick={() => attachRx(rx)}
@@ -1155,27 +1092,22 @@ function StepProducts({ onOpenLensModal }: { onOpenLensModal: () => void }) {
   const { data: products = [], isLoading } = useProducts({ search: debouncedSearch || undefined, category: categoryFilter || undefined, store_id: store.store_id || undefined });
   const categories = ['FRAMES', 'SUNGLASSES', 'RX_LENSES', 'CONTACT_LENSES', 'WRIST_WATCHES', 'SMARTWATCHES', 'ACCESSORIES'];
 
-  // Barcode scan: try exact match → auto-add to cart
   const handleBarcodeScan = async (barcode: string) => {
     try {
       const result = await productApi.getProducts({ search: barcode });
       const products = result?.products || result || [];
       if (Array.isArray(products) && products.length === 1) {
-        // Exact single match — auto-add
         handleAddProduct(products[0]);
         return;
       }
     } catch { /* fall back to search */ }
-    // Fall back to regular search (shows in grid)
     startTransition(() => setDebouncedSearch(barcode));
   };
 
   const handleManualSearch = (q: string) => {
-    // Immediate search on Enter — no debounce delay
     startTransition(() => setDebouncedSearch(q));
   };
 
-  // Build prescription input for lens suggestions (optional panel)
   const rxInput: PrescriptionInput | null = store.prescription ? {
     rightSphere: store.prescription.rightEye?.sphere ?? null,
     rightCylinder: store.prescription.rightEye?.cylinder ?? null,
@@ -1190,16 +1122,14 @@ function StepProducts({ onOpenLensModal }: { onOpenLensModal: () => void }) {
   const handleAddProduct = (product: any) => {
     const mrp = product.mrp || 0;
     const offerPrice = product.offer_price || product.offerPrice || mrp;
-    // Block: offer price exceeds MRP
     if (offerPrice > mrp && mrp > 0) {
-      setBlockMsg(`BLOCKED: ${product.name} — Offer Price (${fc(offerPrice)}) exceeds MRP (${fc(mrp)}). Contact HQ to fix pricing.`);
+      setBlockMsg(`BLOCKED: ${product.name} -- Offer Price (${fc(offerPrice)}) exceeds MRP (${fc(mrp)}). Contact HQ to fix pricing.`);
       setTimeout(() => setBlockMsg(null), 6000);
       return;
     }
-    // Block: invalid price (zero, negative, or NaN)
     const finalPrice = offerPrice || mrp;
     if (!finalPrice || finalPrice <= 0 || isNaN(finalPrice)) {
-      setBlockMsg(`BLOCKED: ${product.name} — Invalid pricing (₹${finalPrice}). Contact HQ to fix.`);
+      setBlockMsg(`BLOCKED: ${product.name} -- Invalid pricing (${fc(finalPrice)}). Contact HQ to fix.`);
       setTimeout(() => setBlockMsg(null), 6000);
       return;
     }
@@ -1231,23 +1161,21 @@ function StepProducts({ onOpenLensModal }: { onOpenLensModal: () => void }) {
         )}
       </div>
 
-      {/* Optional Lens Suggestions — only for Rx orders, dismissible */}
       {store.sale_type === 'prescription_order' && rxInput && showSuggestions && (
         <div className="relative">
           <div className="flex items-center justify-between mb-2">
             <div className="flex items-center gap-2 text-sm font-medium text-purple-700">
               <Sparkles className="w-4 h-4" /> Recommended Lenses (based on Rx)
-              <span className="text-xs text-gray-400 font-normal">— suggestions only, staff can override</span>
+              <span className="text-xs text-gray-400 font-normal">-- suggestions only, staff can override</span>
             </div>
             <button onClick={() => setShowSuggestions(false)} className="text-xs text-gray-400 hover:text-gray-300 px-2 py-1">Dismiss</button>
           </div>
           <LensSuggestionPanel
             prescriptionInput={rxInput}
             onSelect={(suggestion) => {
-              // Add suggested lens to cart — staff can still modify or remove
               store.addToCart({
                 product_id: `lens-sug-${Date.now()}`,
-                name: `${suggestion.lensType} — ${suggestion.material}`,
+                name: `${suggestion.lensType} -- ${suggestion.material}`,
                 sku: `RX-${suggestion.material.replace(/[^a-zA-Z0-9]/g, '').toUpperCase()}-${Date.now().toString(36)}`,
                 category: 'RX_LENSES',
                 unit_price: suggestion.priceRange.min,
@@ -1288,7 +1216,7 @@ function StepProducts({ onOpenLensModal }: { onOpenLensModal: () => void }) {
         <div className="bg-purple-900/30 border border-purple-200 rounded-lg p-3 flex items-center gap-3 text-sm">
           <Eye className="w-4 h-4 text-purple-600 flex-shrink-0" />
           <span className="text-purple-700 font-medium">Rx:</span>
-          <span className="text-purple-500">OD {store.prescription.rightEye?.sphere}/{store.prescription.rightEye?.cylinder} · OS {store.prescription.leftEye?.sphere}/{store.prescription.leftEye?.cylinder}</span>
+          <span className="text-purple-500">OD {store.prescription.rightEye?.sphere}/{store.prescription.rightEye?.cylinder} {'\u00B7'} OS {store.prescription.leftEye?.sphere}/{store.prescription.leftEye?.cylinder}</span>
         </div>
       )}
 
@@ -1297,7 +1225,7 @@ function StepProducts({ onOpenLensModal }: { onOpenLensModal: () => void }) {
           {[...Array(8)].map((_, i) => <div key={i} className="bg-gray-800 rounded-xl border border-gray-700 p-3 animate-pulse"><div className="h-20 bg-gray-700 rounded-lg mb-2" /><div className="h-4 bg-gray-700 rounded w-3/4 mb-1" /><div className="h-3 bg-gray-700 rounded w-1/2" /></div>)}
         </div>
       ) : viewMode === 'list' ? (
-        /* COMPACT LIST VIEW — more products visible per screen */
+        /* COMPACT LIST VIEW */
         <div className="bg-gray-800 border border-gray-700 rounded-xl overflow-hidden">
           <div className="divide-y divide-gray-100 max-h-[60vh] overflow-y-auto">
             {(products as any[]).map((product: any) => {
@@ -1316,25 +1244,25 @@ function StepProducts({ onOpenLensModal }: { onOpenLensModal: () => void }) {
                   </div>
                   <div className="flex-1 min-w-0">
                     <p className="text-sm font-medium text-white truncate">{product.name}</p>
-                    <p className="text-[10px] text-gray-500">{product.brand} · {product.sku}</p>
+                    <p className="text-[10px] text-gray-500">{product.brand} {'\u00B7'} {product.sku}</p>
                   </div>
                   {stock !== null && (
                     <span className={`text-[10px] px-1.5 py-0.5 rounded flex-shrink-0 ${
                       isOutOfStock ? 'bg-red-100 text-red-600' : isLowStock ? 'bg-amber-100 text-amber-700' : 'text-gray-400'
-                    }`}>{isOutOfStock ? 'Out' : isLowStock ? `${stock} left` : `×${stock}`}</span>
+                    }`}>{isOutOfStock ? 'Out' : isLowStock ? `${stock} left` : `\u00D7${stock}`}</span>
                   )}
                   <div className="text-right flex-shrink-0">
                     <span className="text-sm font-bold text-white">{fc(offer)}</span>
                     {hasDiscount && <span className="text-[9px] text-gray-400 line-through ml-1">{fc(mrp)}</span>}
                   </div>
-                  {inCart && <span className="text-[9px] px-1 py-0.5 bg-green-100 text-green-700 rounded flex-shrink-0">✓</span>}
+                  {inCart && <span className="text-[9px] px-1 py-0.5 bg-green-100 text-green-700 rounded flex-shrink-0">{'\u2713'}</span>}
                 </button>
               );
             })}
           </div>
         </div>
       ) : (
-        /* GRID VIEW — visual cards with images */
+        /* GRID VIEW */
         <div className="grid grid-cols-2 tablet:grid-cols-3 laptop:grid-cols-4 gap-3">
           {(products as any[]).map((product: any) => {
             const mrp = product.mrp || 0; const offer = product.offer_price || mrp; const hasDiscount = offer < mrp;
@@ -1358,7 +1286,7 @@ function StepProducts({ onOpenLensModal }: { onOpenLensModal: () => void }) {
                   )}
                 </div>
                 <p className="text-xs font-semibold text-white truncate">{product.name}</p>
-                <p className="text-[10px] text-gray-500 truncate">{product.brand} · {product.sku}</p>
+                <p className="text-[10px] text-gray-500 truncate">{product.brand} {'\u00B7'} {product.sku}</p>
                 <div className="mt-1.5 flex items-baseline gap-1.5">
                   <span className="text-sm font-bold text-white">{fc(offer)}</span>
                   {hasDiscount && <span className="text-[10px] text-gray-400 line-through">{fc(mrp)}</span>}
@@ -1388,10 +1316,9 @@ function StepReview({ onOpenDiscount }: { onOpenDiscount: (item: CartLineItem) =
   const store = usePOSStore();
   const subtotal = store.getSubtotal(); const discount = store.getTotalDiscount();
 
-  // Calculate GST per item based on product category (GST 2.0 rates)
   const taxBreakdown = useMemo(() => {
     let totalTax = 0;
-    const rates: Record<number, number> = {}; // rate → taxable amount
+    const rates: Record<number, number> = {};
     for (const item of (store.cart || [])) {
       const rate = getGSTRateByCategory(item.category);
       const itemTaxable = item.line_total;
@@ -1402,7 +1329,6 @@ function StepReview({ onOpenDiscount }: { onOpenDiscount: (item: CartLineItem) =
     return { totalTax: Math.round(totalTax * 100) / 100, rates };
   }, [store.cart]);
 
-  // Use store's getGrandTotal (includes GST) for consistency with Payment step
   const total = store.getGrandTotal();
 
   return (
@@ -1427,8 +1353,8 @@ function StepReview({ onOpenDiscount }: { onOpenDiscount: (item: CartLineItem) =
               <tr key={item.id} className="border-t border-gray-700">
                 <td className="px-4 py-3">
                   <p className="font-medium text-white">{item.name}</p>
-                  <p className="text-xs text-gray-500">{item.brand} · {item.sku}</p>
-                  {item.lens_details && <p className="text-xs text-purple-500 mt-0.5">{item.lens_details.type} · {item.lens_details.coatings.join(', ')}</p>}
+                  <p className="text-xs text-gray-500">{item.brand} {'\u00B7'} {item.sku}</p>
+                  {item.lens_details && <p className="text-xs text-purple-500 mt-0.5">{item.lens_details.type} {'\u00B7'} {item.lens_details.coatings.join(', ')}</p>}
                   <input
                     placeholder="Item notes (PD, fitting, tint, coating...)"
                     defaultValue={(item as any).item_note || ''}
@@ -1474,7 +1400,6 @@ function StepReview({ onOpenDiscount }: { onOpenDiscount: (item: CartLineItem) =
           const r = Number(rate);
           const halfRate = r / 2;
           const tax = Math.round((taxable as number) * (r / 100) * 100) / 100;
-          // Fix: split rounding — CGST rounds down, SGST gets remainder to avoid 1 paisa loss
           const cgst = Math.floor(tax * 100 / 2) / 100;
           const sgst = Math.round((tax - cgst) * 100) / 100;
           return (
@@ -1500,423 +1425,6 @@ function StepReview({ onOpenDiscount }: { onOpenDiscount: (item: CartLineItem) =
           )}
         </div>
       )}
-    </div>
-  );
-}
-
-// ============================================================================
-// Cash Change Calculator (used in StepPayment)
-// ============================================================================
-function CashChangeCalculator({ grandTotal }: { grandTotal: number; totalPaid: number }) {
-  const [cashTendered, setCashTendered] = useState('');
-  const tendered = parseFloat(cashTendered) || 0;
-  const change = tendered - grandTotal;
-  const quickAmounts = [
-    Math.ceil(grandTotal / 100) * 100,
-    Math.ceil(grandTotal / 500) * 500,
-    Math.ceil(grandTotal / 1000) * 1000,
-    Math.ceil(grandTotal / 2000) * 2000,
-  ].filter((v, i, a) => v >= grandTotal && a.indexOf(v) === i).slice(0, 3);
-
-  return (
-    <div className="bg-gray-800 border border-gray-700 rounded-xl p-4 space-y-3">
-      <p className="text-sm font-medium text-gray-300">Cash Tendered</p>
-      <div className="flex gap-2 items-center">
-        <span className="text-gray-400 text-lg">₹</span>
-        <input type="number" value={cashTendered} onChange={(e) => setCashTendered(e.target.value)}
-          onFocus={(e) => e.target.select()} placeholder={String(Math.round(grandTotal))}
-          className="flex-1 px-3 py-2 border border-gray-600 rounded-lg text-lg font-semibold text-center" />
-      </div>
-      <div className="flex gap-2">
-        {quickAmounts.map(amt => (
-          <button key={amt} onClick={() => setCashTendered(String(amt))}
-            className="px-3 py-1 bg-gray-800 border border-gray-700 rounded-lg text-xs font-medium hover:bg-gray-700">{fc(amt)}</button>
-        ))}
-      </div>
-      {tendered > 0 && (
-        <div className={`text-center py-2 rounded-lg font-bold text-lg ${change >= 0 ? 'bg-green-900/30 text-green-700' : 'bg-red-900/30 text-red-600'}`}>
-          {change >= 0 ? `Change: ₹${Math.round(change).toLocaleString('en-IN')}` : `Short: ₹${Math.round(Math.abs(change)).toLocaleString('en-IN')}`}
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ============================================================================
-// STEP 5: Payment
-// ============================================================================
-function StepPayment() {
-  const store = usePOSStore();
-  const total = store.getGrandTotal(); const paid = store.getTotalPaid(); const balance = Math.round((total - paid) * 100) / 100;
-  const [payMethod, setPayMethod] = useState<'CASH' | 'UPI' | 'CARD' | 'BANK_TRANSFER' | 'EMI'>('CASH');
-  const [payAmount, setPayAmount] = useState(''); const [payRef, setPayRef] = useState('');
-  
-  // EMI state
-  const [showEMIForm, setShowEMIForm] = useState(false);
-  const [emiProvider, setEmiProvider] = useState('HDFC');
-  const [emiTenure, setEmiTenure] = useState(12);
-  const [emiDownPayment, setEmiDownPayment] = useState('');
-  
-  const emiProviders = ['HDFC', 'ICICI', 'AXIS', 'ADITYA BIRLA', 'BAJAJ', 'INDIABULLS'];
-  const emiTenures = [3, 6, 9, 12, 18, 24];
-  
-  const calculateEMI = (principal: number, monthlyRate: number, months: number) => {
-    if (monthlyRate === 0) return principal / months;
-    const numerator = principal * monthlyRate * Math.pow(1 + monthlyRate, months);
-    const denominator = Math.pow(1 + monthlyRate, months) - 1;
-    return numerator / denominator;
-  };
-  
-  const handleEMISubmit = () => {
-    const downPayment = parseFloat(emiDownPayment) || 0;
-    if (downPayment < 0 || downPayment >= balance) return;
-    const principal = balance - downPayment;
-    const annualRate = 0.12; // 12% annual
-    const monthlyRate = annualRate / 12;
-    const monthlyEMI = calculateEMI(principal, monthlyRate, emiTenure);
-    const processingFee = (principal * 0.02);
-    store.addPayment({
-      method: 'EMI',
-      amount: downPayment,
-      reference: emiProvider,
-      emiProvider,
-      emiTenure,
-      downPayment,
-      monthlyEMI: Math.round(monthlyEMI * 100) / 100,
-      processingFee: Math.round(processingFee * 100) / 100,
-    });
-    setShowEMIForm(false);
-    setEmiDownPayment('');
-  };
-  
-  const methods = [
-    { id: 'CASH' as const, label: 'Cash', icon: IndianRupee },
-    { id: 'UPI' as const, label: 'UPI', icon: Phone },
-    { id: 'CARD' as const, label: 'Card', icon: CreditCard },
-    { id: 'BANK_TRANSFER' as const, label: 'Bank', icon: FileText },
-    { id: 'EMI' as const, label: 'EMI', icon: CreditCard },
-  ];
-
-  return (
-    <div className="max-w-xl mx-auto space-y-4">
-      <div className="bg-gray-800 border border-gray-700 rounded-xl p-6 text-center">
-        <p className="text-sm text-gray-500 mb-1">{store.is_advance_payment ? 'Advance Due' : 'Total Due (incl. GST)'}</p>
-        <p className="text-4xl font-bold text-white">₹{Math.round(total).toLocaleString('en-IN')}</p>
-        {paid > 0 && <div className="mt-3 flex justify-center gap-6 text-sm">
-          <span className="text-green-600">Paid: ₹{Math.round(paid).toLocaleString('en-IN')}</span>
-          <span className={balance > 0 ? 'text-red-600 font-semibold' : 'text-green-600 font-semibold'}>Balance: ₹{Math.round(Math.max(0, balance)).toLocaleString('en-IN')}</span>
-        </div>}
-      </div>
-
-      {/* Loyalty Points & Credit Billing Options */}
-      {store.customer && !store.customer.id?.toString().startsWith('walkin-') && (
-        <div className="space-y-3">
-          <CreditBillingOption />
-          <VoucherRedemption />
-        </div>
-      )}
-
-      <div className="grid grid-cols-5 gap-2">
-        {methods.map(m => (
-          <button key={m.id} onClick={() => {
-            if (m.id === 'CASH') {
-              store.addPayment({ method: m.id, amount: Math.round((balance > 0 ? balance : total) * 100) / 100 });
-            } else if (m.id === 'EMI') {
-              setShowEMIForm(true);
-            } else {
-              setPayMethod(m.id);
-              setPayAmount(String(Math.round((balance > 0 ? balance : total) * 100) / 100));
-              setPayRef('');
-            }
-          }} disabled={balance <= 0}
-            className={`flex flex-col items-center gap-1 p-3 rounded-xl border-2 transition-all ${balance <= 0 ? 'opacity-40 border-gray-700' : 'border-gray-700 hover:border-bv-gold-300 hover:bg-bv-gold-900/30'}`}>
-            <m.icon className="w-6 h-6 text-gray-300" /><span className="text-xs font-medium">{m.id === 'CASH' ? 'Full Cash' : m.id === 'EMI' ? 'EMI' : `${m.label} →`}</span>
-          </button>
-        ))}
-      </div>
-
-      {balance > 0 && (
-        <div className="bg-gray-800 border border-gray-700 rounded-xl p-4 space-y-3">
-          <p className="text-sm font-medium text-gray-300">Split payment</p>
-          <div className="flex gap-2">
-            {methods.map(m => <button key={m.id} onClick={() => setPayMethod(m.id)} className={`px-3 py-1.5 rounded-lg text-xs font-medium ${payMethod === m.id ? 'bg-bv-gold-500 text-white' : 'bg-gray-700 text-gray-300'}`}>{m.label}</button>)}
-          </div>
-          <div className="flex gap-2">
-            <input type="number" min="1" max={balance} step="0.01" value={payAmount} 
-              onChange={(e) => setPayAmount(e.target.value)}
-              onFocus={(e) => e.target.select()} 
-              placeholder={`Amount (max ₹${Math.round(balance).toLocaleString('en-IN')})`} className="flex-1 px-3 py-2 border border-gray-600 rounded-lg text-sm" />
-            {payMethod !== 'CASH' && <input value={payRef} onChange={(e) => setPayRef(e.target.value)} placeholder={payMethod === 'UPI' ? 'UPI Txn ID *' : payMethod === 'CARD' ? 'Approval code' : 'Reference'} className="flex-1 px-3 py-2 border border-gray-600 rounded-lg text-sm" />}
-            <button onClick={() => {
-              const a = parseFloat(payAmount);
-              if (!a || a <= 0) return;
-              if (a > balance + 0.01) { setPayAmount(String(Math.ceil(balance * 100) / 100)); return; }
-              if (payMethod !== 'CASH' && !payRef.trim()) return; // Require ref for non-cash
-              store.addPayment({ method: payMethod, amount: Math.min(a, balance), reference: payRef.trim() || undefined });
-              setPayAmount(''); setPayRef('');
-            }}
-              disabled={!payAmount || parseFloat(payAmount) <= 0 || (payMethod !== 'CASH' && !payRef.trim())}
-              className={`px-4 py-2 rounded-lg text-sm font-semibold ${
-                !payAmount || parseFloat(payAmount) <= 0 || (payMethod !== 'CASH' && !payRef.trim())
-                  ? 'bg-gray-700 text-gray-400 cursor-not-allowed' : 'bg-bv-gold-500 text-white hover:bg-bv-gold-600'
-              }`}>Add</button>
-          </div>
-          {payMethod !== 'CASH' && !payRef.trim() && payAmount && <p className="text-xs text-amber-600">Reference/Txn ID required for {payMethod}</p>}
-        </div>
-      )}
-      
-      {showEMIForm && balance > 0 && (
-        <div className="bg-gray-800 border border-gray-700 rounded-xl p-4 space-y-3">
-          <p className="text-sm font-medium text-gray-300">EMI Details</p>
-          <div className="space-y-3">
-            <div>
-              <label className="text-xs font-medium text-gray-300">EMI Provider</label>
-              <select value={emiProvider} onChange={(e) => setEmiProvider(e.target.value)} className="w-full mt-1 px-3 py-2 border border-gray-600 rounded-lg text-sm">
-                {emiProviders.map(p => <option key={p} value={p}>{p}</option>)}
-              </select>
-            </div>
-            <div>
-              <label className="text-xs font-medium text-gray-300">Tenure (months)</label>
-              <select value={emiTenure} onChange={(e) => setEmiTenure(Number(e.target.value))} className="w-full mt-1 px-3 py-2 border border-gray-600 rounded-lg text-sm">
-                {emiTenures.map(t => <option key={t} value={t}>{t} months</option>)}
-              </select>
-            </div>
-            <div>
-              <label className="text-xs font-medium text-gray-300">Down Payment</label>
-              <input type="number" min="0" max={balance - 0.01} step="100" value={emiDownPayment} onChange={(e) => setEmiDownPayment(e.target.value)} placeholder={`Max ₹${Math.round(balance).toLocaleString('en-IN')}`} className="w-full mt-1 px-3 py-2 border border-gray-600 rounded-lg text-sm" onFocus={(e) => e.target.select()} />
-            </div>
-            {emiDownPayment && (
-              <div className="bg-blue-900/30 border border-blue-200 rounded-lg p-3 space-y-2 text-sm">
-                <div className="flex justify-between"><span className="text-gray-300">Loan Amount:</span><span className="font-semibold">₹{Math.round((balance - (parseFloat(emiDownPayment) || 0)) * 100) / 100}</span></div>
-                <div className="flex justify-between"><span className="text-gray-300">Processing Fee (2%):</span><span className="font-semibold">₹{Math.round(((balance - (parseFloat(emiDownPayment) || 0)) * 0.02) * 100) / 100}</span></div>
-                <div className="flex justify-between"><span className="text-gray-300">Monthly EMI ({emiTenure}m):</span><span className="font-bold text-blue-700">₹{Math.round(calculateEMI(balance - (parseFloat(emiDownPayment) || 0), 0.01, emiTenure) * 100) / 100}</span></div>
-              </div>
-            )}
-            <div className="flex gap-2">
-              <button onClick={() => {
-                setShowEMIForm(false);
-                setEmiDownPayment('');
-              }} className="flex-1 px-4 py-2 rounded-lg text-sm font-semibold bg-gray-700 text-gray-300 hover:bg-gray-300">Cancel</button>
-              <button onClick={handleEMISubmit} disabled={!emiDownPayment || parseFloat(emiDownPayment) < 0 || parseFloat(emiDownPayment) >= balance} className={`flex-1 px-4 py-2 rounded-lg text-sm font-semibold ${!emiDownPayment || parseFloat(emiDownPayment) < 0 || parseFloat(emiDownPayment) >= balance ? 'bg-gray-700 text-gray-400 cursor-not-allowed' : 'bg-bv-gold-500 text-white hover:bg-bv-gold-600'}`}>Add EMI</button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {(store.payments || []).length > 0 && <div className="space-y-2">
-        {(store.payments || []).map((p, i) => (
-          <div key={i} className="flex items-center justify-between bg-green-900/30 border border-green-200 rounded-lg px-4 py-2 text-sm">
-            <div className="flex items-center gap-2"><CheckCircle className="w-4 h-4 text-green-500" /><span className="font-medium">{p.method}</span>{p.reference && <span className="text-gray-500">({p.reference})</span>}</div>
-            <div className="flex items-center gap-2"><span className="font-semibold">₹{Math.round(p.amount * 100 / 100).toLocaleString('en-IN')}</span><button onClick={() => store.removePayment(i)} className="text-gray-400 hover:text-red-500"><X className="w-4 h-4" /></button></div>
-          </div>
-        ))}
-      </div>}
-
-      {/* Cash change calculator — only if cash payment was added */}
-      {(store.payments || []).some(p => p.method === 'CASH') && balance <= 0 && (
-        <CashChangeCalculator grandTotal={total} totalPaid={paid} />
-      )}
-
-      {balance <= 0 && <div className="bg-green-900/30 border border-green-200 rounded-lg p-4 text-center text-green-700 font-semibold">Payment complete — click "Complete Order" to finalize</div>}
-    </div>
-  );
-}
-
-// ============================================================================
-// STEP 6: Complete
-// ============================================================================
-function StepComplete({ onPrint, onReset }: { onPrint: () => void; onReset: () => void }) {
-  const store = usePOSStore();
-  const [showGSTInvoice, setShowGSTInvoice] = useState(false);
-
-  // Build Order-shaped object from POS store for GSTInvoice
-  const orderForInvoice = useMemo(() => ({
-    id: store.order_id || '',
-    orderNumber: store.order_number || '',
-    storeId: store.store_id,
-    customerId: store.customer?.id || '',
-    customerName: store.customer?.name || 'Walk-in',
-    customerPhone: store.customer?.phone || '',
-    patientName: store.patient?.name,
-    items: (store.cart || []).map(item => ({
-      id: item.id,
-      itemType: item.category || 'FRAMES',
-      productId: item.product_id,
-      productName: item.name,
-      sku: item.sku || '',
-      quantity: item.quantity,
-      unitPrice: item.unit_price,
-      discountPercent: item.discount_percent || 0,
-      discountAmount: item.discount_amount || 0,
-      finalPrice: item.line_total || item.unit_price * item.quantity,
-    })),
-    payments: (store.payments || []).map((p, i) => ({
-      id: `pay-${i}`,
-      mode: p.method,
-      amount: p.amount,
-      reference: p.reference,
-      paidAt: new Date().toISOString(),
-    })),
-    subtotal: store.getSubtotal(),
-    totalDiscount: store.getTotalDiscount(),
-    taxAmount: store.getGrandTotal() - store.getSubtotal(),
-    grandTotal: store.getGrandTotal(),
-    amountPaid: store.getTotalPaid(),
-    balanceDue: store.getBalance(),
-    orderStatus: 'CONFIRMED',
-    createdAt: new Date().toISOString(),
-  }), [store.order_id]);
-
-  // Store details for invoice — maps seeded store IDs to real data
-  const STORE_DETAILS: Record<string, { name: string; gstin: string; address: string; city: string; state: string; stateCode: string; pincode: string }> = {
-    'BV-BOK-01': { name: 'Better Vision Opticals', gstin: '20AABCB1234F1ZP', address: 'City Centre, Sector 4', city: 'Bokaro Steel City', state: 'Jharkhand', stateCode: '20', pincode: '827004' },
-    'BV-BOK-02': { name: 'Better Vision Opticals', gstin: '20AABCB1234F1ZP', address: 'Sector 1 Market', city: 'Bokaro Steel City', state: 'Jharkhand', stateCode: '20', pincode: '827001' },
-    'BV-DHB-01': { name: 'Better Vision Opticals', gstin: '20AABCB5678G1ZQ', address: 'Hirapur Market', city: 'Dhanbad', state: 'Jharkhand', stateCode: '20', pincode: '826001' },
-    'BV-DHB-02': { name: 'Better Vision Opticals', gstin: '20AABCB5678G1ZQ', address: 'Bank More', city: 'Dhanbad', state: 'Jharkhand', stateCode: '20', pincode: '826001' },
-    'WO-DHB-01': { name: 'WizOpt', gstin: '20AABCW9012H1ZR', address: 'Shastri Nagar', city: 'Dhanbad', state: 'Jharkhand', stateCode: '20', pincode: '826001' },
-    'BV-PUN-01': { name: 'Better Vision Opticals', gstin: '27AABCB3456I1ZS', address: 'NIBM Road', city: 'Pune', state: 'Maharashtra', stateCode: '27', pincode: '411048' },
-  };
-  const sd = STORE_DETAILS[store.store_id] || { name: 'Better Vision Opticals', gstin: '', address: '', city: '', state: '', stateCode: '', pincode: '' };
-
-  const storeForInvoice = useMemo(() => ({
-    id: store.store_id,
-    storeCode: store.store_id,
-    storeName: sd.name,
-    brand: sd.name === 'WizOpt' ? 'WIZOPT' as any : 'BETTER_VISION' as any,
-    gstin: sd.gstin,
-    address: sd.address,
-    city: sd.city,
-    state: sd.state,
-    stateCode: sd.stateCode,
-    pincode: sd.pincode,
-    latitude: 0, longitude: 0, geoFenceRadius: 0,
-    isActive: true, isHQ: false,
-    enabledCategories: [],
-    openingTime: '10:00', closingTime: '21:00',
-  }), [store.store_id]);
-
-  return (
-    <div className="max-w-md mx-auto text-center py-8 space-y-6">
-      <div className="w-20 h-20 bg-green-100 rounded-full flex items-center justify-center mx-auto"><CheckCircle className="w-10 h-10 text-green-500" /></div>
-      <div><h2 className="text-2xl font-bold text-white">Order Created!</h2><p className="text-gray-500 mt-1">Order #{store.order_number}</p></div>
-      <div className="bg-gray-800 border border-gray-700 rounded-xl p-4 text-left space-y-2 text-sm">
-        <div className="flex justify-between"><span className="text-gray-500">Customer</span><span className="font-medium">{store.customer?.name}</span></div>
-        <div className="flex justify-between"><span className="text-gray-500">Items</span><span className="font-medium">{(store.cart || []).length}</span></div>
-        <div className="flex justify-between"><span className="text-gray-500">Total</span><span className="font-bold text-lg">{fc(store.getGrandTotal())}</span></div>
-        <div className="flex justify-between"><span className="text-gray-500">Paid</span><span className="font-medium text-green-600">{fc(store.getTotalPaid())}</span></div>
-        {store.getBalance() > 0 && <div className="flex justify-between"><span className="text-gray-500">Balance due</span><span className="font-medium text-red-600">{fc(store.getBalance())}</span></div>}
-        {store.sale_type === 'prescription_order' && <div className="flex justify-between"><span className="text-gray-500">Type</span><span className="px-2 py-0.5 bg-purple-900/30 text-purple-600 rounded text-xs font-medium">Rx Order → Workshop</span></div>}
-      </div>
-
-      {/* Incentive qualifying items — auto-tagged for kicker tracking */}
-      {(() => {
-        const INCENTIVE_KEYS = ['ZEISS', 'SAFILO', 'CARRERA', 'POLAROID', 'MARC JACOB', 'HUGO', 'SEVENTH STREET', 'BOSS', 'TOMMY HILFIGER', 'PIERRE CARDIN', 'UNDER ARMOUR'];
-        const qualifying = (store.cart || []).filter(i => {
-          const b = (i.brand || '').toUpperCase();
-          const sb = (i.subbrand || '').toUpperCase();
-          const n = (i.name || '').toUpperCase();
-          return INCENTIVE_KEYS.some(k => b.includes(k) || sb.includes(k) || n.includes(k));
-        });
-        if (qualifying.length === 0) return null;
-        return (
-          <div className="bg-amber-900/30 border border-amber-700 rounded-xl p-4 text-left text-xs">
-            <div className="flex items-center gap-2 mb-2">
-              <Sparkles className="w-4 h-4 text-amber-600" />
-              <span className="font-semibold text-amber-800">Incentive-qualifying items ({qualifying.length})</span>
-              <span className="text-amber-400 ml-auto">Auto-tagged at POS</span>
-            </div>
-            <div className="space-y-1.5">
-              {qualifying.map(item => {
-                const brandLabel = item.brand || 'Unknown';
-                const subLabel = item.subbrand ? ` · ${item.subbrand}` : '';
-                return (
-                  <div key={item.id} className="flex items-center justify-between gap-2 bg-gray-800/60 rounded-lg px-2.5 py-1.5">
-                    <div className="flex-1 min-w-0">
-                      <span className="font-medium text-amber-900 truncate block">{brandLabel}{subLabel}</span>
-                      <span className="text-amber-500 truncate block">{item.name}</span>
-                    </div>
-                    <div className="text-right flex-shrink-0">
-                      <span className="font-semibold text-amber-800">{fc(item.line_total)}</span>
-                      {item.discount_percent > 0 && (
-                        <span className="ml-1.5 text-red-500">-{item.discount_percent}%</span>
-                      )}
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-        );
-      })()}
-
-      <div className="flex gap-3 justify-center flex-wrap">
-        <button onClick={onPrint} className="flex items-center gap-2 px-4 py-2.5 border border-gray-600 rounded-lg text-sm font-medium hover:bg-gray-700"><Printer className="w-4 h-4" /> Receipt</button>
-        <button onClick={() => setShowGSTInvoice(true)} className="flex items-center gap-2 px-4 py-2.5 border border-blue-300 bg-blue-900/30 text-blue-700 rounded-lg text-sm font-medium hover:bg-blue-100"><FileText className="w-4 h-4" /> Tax Invoice</button>
-        <button onClick={onReset} className="flex items-center gap-2 px-6 py-2.5 bg-bv-gold-500 text-white rounded-lg text-sm font-semibold hover:bg-bv-gold-600"><Plus className="w-4 h-4" /> New Sale</button>
-      </div>
-
-      {showGSTInvoice && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-gray-800 rounded-xl shadow-2xl w-full max-w-4xl max-h-[90vh] overflow-y-auto">
-            <div className="p-4 border-b border-gray-700 flex items-center justify-between no-print">
-              <h3 className="font-semibold text-white">GST Tax Invoice</h3>
-              <button onClick={() => setShowGSTInvoice(false)} className="p-1 hover:bg-gray-700 rounded"><X className="w-5 h-5" /></button>
-            </div>
-            <div className="p-4">
-              <GSTInvoice order={orderForInvoice as any} store={storeForInvoice as any} onPrint={() => setShowGSTInvoice(false)} />
-            </div>
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ============================================================================
-// Cart Sidebar
-// ============================================================================
-function CartSidebar() {
-  const store = usePOSStore();
-  return (
-    <div className="flex flex-col h-full">
-      <div className="px-4 py-3 border-b border-gray-700">
-        <h3 className="font-semibold text-white flex items-center gap-2"><ShoppingCart className="w-4 h-4" /> Cart ({(store.cart || []).length})</h3>
-        {store.salesperson_name && <p className="text-[10px] text-gray-400 mt-0.5">Sales: {store.salesperson_name}</p>}
-      </div>
-      <div className="flex-1 overflow-y-auto p-3 space-y-2">
-        {(store.cart || []).map(item => (
-          <div key={item.id} className="bg-gray-800 rounded-lg p-3">
-            <div className="flex items-start justify-between">
-              <div className="flex-1 min-w-0"><p className="text-sm font-medium text-white truncate">{item.name}</p><p className="text-xs text-gray-500">{item.brand}</p>
-                {item.lens_details && <p className="text-xs text-purple-500">{item.lens_details.type}</p>}
-              </div>
-              <button onClick={() => store.removeFromCart(item.id)} className="text-gray-400 hover:text-red-500 ml-2"><X className="w-3.5 h-3.5" /></button>
-            </div>
-            <div className="flex items-center justify-between mt-2">
-              <div className="flex items-center gap-1">
-                <button onClick={() => store.updateQuantity(item.id, item.quantity - 1)} className="w-6 h-6 rounded bg-gray-800 border text-xs hover:bg-gray-700">-</button>
-                <input type="number" min="1" max="99" value={item.quantity}
-                  onChange={(e) => { const v = parseInt(e.target.value) || 1; store.updateQuantity(item.id, Math.max(1, Math.min(99, v))); }}
-                  onFocus={(e) => e.target.select()}
-                  className="w-10 text-center text-xs font-medium border border-gray-700 rounded px-1 py-0.5 [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none" />
-                <button onClick={() => store.updateQuantity(item.id, item.quantity + 1)} className="w-6 h-6 rounded bg-gray-800 border text-xs hover:bg-gray-700">+</button>
-              </div>
-              <div className="text-right">{item.discount_percent > 0 && <span className="text-xs text-green-600 mr-1">-{item.discount_percent}%</span>}<span className="text-sm font-semibold">₹{Math.round(item.line_total).toLocaleString('en-IN')}</span></div>
-            </div>
-            {/* Item-level notes: PD, fitting, tint, coating */}
-            {item.is_optical && (
-              <input placeholder="PD / Fitting / Tint notes..." value={item.notes || ''} onChange={(e) => store.updateItemNote(item.id, e.target.value)}
-                className="mt-1.5 w-full px-2 py-1 text-[10px] border border-gray-700 rounded bg-gray-800 placeholder:text-gray-300 focus:border-purple-300 focus:ring-1 focus:ring-purple-200" />
-            )}
-          </div>
-        ))}
-      </div>
-      <div className="border-t border-gray-700 p-4 space-y-1 text-sm">
-        <div className="flex justify-between text-gray-500"><span>Subtotal</span><span>₹{Math.round(store.getSubtotal()).toLocaleString('en-IN')}</span></div>
-        {store.getTotalDiscount() > 0 && <div className="flex justify-between text-green-600"><span>Discount</span><span>-₹{Math.round(store.getTotalDiscount()).toLocaleString('en-IN')}</span></div>}
-        <div className="flex justify-between text-gray-500"><span>GST</span><span>₹{Math.round(store.getGrandTotal() - store.getSubtotal() + store.getTotalDiscount()).toLocaleString('en-IN')}</span></div>
-        <div className="flex justify-between font-bold text-base pt-1 border-t border-gray-700"><span>Total (incl. GST)</span><span className="text-bv-gold-600">₹{Math.round(store.getGrandTotal()).toLocaleString('en-IN')}</span></div>
-      </div>
     </div>
   );
 }
