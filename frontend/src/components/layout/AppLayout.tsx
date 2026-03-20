@@ -387,8 +387,8 @@ export function AppLayout() {
                 <div className={clsx('absolute top-full right-0 mt-2 w-48 rounded-lg shadow-lg z-50 border', isDark ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200')}>
                   <div className={clsx('px-4 py-3 border-b', isDark ? 'border-gray-700' : 'border-gray-200')}>
                     <div className={clsx('text-sm font-medium', isDark ? 'text-white' : 'text-gray-900')}>{user?.name}</div>
-                    <div className={clsx('text-xs mt-1', isDark ? 'text-gray-400' : 'text-gray-500')}>{user?.email}</div>
-                    <div className={clsx('text-xs mt-1', isDark ? 'text-gray-400' : 'text-gray-500')}>Role: {(user?.activeRole as string)?.replaceAll('_', ' ')}</div>
+                    <div className={clsx('text-xs mt-1', isDark ? 'text-gray-400' : 'text-gray-600')}>{user?.email}</div>
+                    <div className={clsx('text-xs mt-1', isDark ? 'text-gray-400' : 'text-gray-600')}>Role: {(user?.activeRole as string)?.replaceAll('_', ' ')}</div>
                   </div>
                   <button
                     onClick={() => {

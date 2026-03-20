@@ -141,7 +141,7 @@ export function PhotochromicLoader({
              Q 8 58 8 44
              Z"
           fill="url(#frameGradient)"
-          stroke="#1a1a1a"
+          stroke="currentColor"
           strokeWidth="1"
         />
 
@@ -175,7 +175,7 @@ export function PhotochromicLoader({
              Q 98 56 98 42
              Z"
           fill="url(#frameGradient)"
-          stroke="#1a1a1a"
+          stroke="currentColor"
           strokeWidth="1"
         />
 
