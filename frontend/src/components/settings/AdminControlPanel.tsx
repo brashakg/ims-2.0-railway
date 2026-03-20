@@ -5,7 +5,7 @@
 // role permissions, discount limits, feature flags, operational rules
 
 import { useState, useEffect } from 'react';
-import { adminStoreApi } from '../../services/api';
+import { adminStoreApi, settingsApi } from '../../services/api';
 import {
   Store, Shield, Eye, EyeOff, Save, Loader2,
   ShoppingCart, Stethoscope, Wrench, Package, BarChart3,
@@ -130,6 +130,7 @@ export function AdminControlPanel() {
   const [storeModules, setStoreModules] = useState<StoreModuleConfig[]>(DEFAULT_STORES);
 
   useEffect(() => {
+    // Fetch stores
     adminStoreApi.getStores().then((data: any) => {
       const storeList = Array.isArray(data?.stores || data) ? (data?.stores || data) : [];
       if (storeList.length > 0) {
@@ -140,15 +141,40 @@ export function AdminControlPanel() {
         })));
       }
     }).catch(() => {});
+
+    // Load saved admin controls
+    settingsApi.getAdminControls().then((data: any) => {
+      if (data?.discount_limits?.length > 0) {
+        setDiscountLimits(data.discount_limits);
+      }
+      if (data?.operational_rules && Object.keys(data.operational_rules).length > 0) {
+        setRules(prev => prev.map(r => ({
+          ...r,
+          value: data.operational_rules[r.id] !== undefined ? data.operational_rules[r.id] : r.value,
+        })));
+      }
+      if (data?.store_modules && Object.keys(data.store_modules).length > 0) {
+        setStoreModules(prev => prev.map(s => ({
+          ...s,
+          modules: data.store_modules[s.storeId] || s.modules,
+        })));
+      }
+      if (data?.role_permissions) {
+        setRolePermissions(prev => prev.map(rp => ({
+          ...rp,
+          permissions: data.role_permissions[rp.roleId] || rp.permissions,
+        })));
+      }
+    }).catch(() => {});
   }, []);
 
   // Role permissions
-  const [rolePermissions] = useState<RolePermission[]>(
+  const [rolePermissions, setRolePermissions] = useState<RolePermission[]>(
     ROLES.map(role => ({
       roleId: role.id,
       roleName: role.name,
       permissions: Object.fromEntries(
-        PERMISSIONS.map(p => [p, ['SUPERADMIN', 'ADMIN'].includes(role.id) ? true : Math.random() > 0.4])
+        PERMISSIONS.map(p => [p, ['SUPERADMIN', 'ADMIN'].includes(role.id)])
       ),
     }))
   );
@@ -162,7 +188,13 @@ export function AdminControlPanel() {
   const handleSave = async () => {
     setIsSaving(true);
     try {
-      await new Promise(resolve => setTimeout(resolve, 1500));
+      const payload = {
+        store_modules: Object.fromEntries(storeModules.map(s => [s.storeId, s.modules])),
+        discount_limits: discountLimits,
+        operational_rules: Object.fromEntries(rules.map(r => [r.id, r.value])),
+        role_permissions: Object.fromEntries(rolePermissions.map(rp => [rp.roleId, rp.permissions])),
+      };
+      await settingsApi.updateAdminControls(payload);
       toast.success('Admin settings saved successfully');
     } catch {
       toast.error('Failed to save settings');
@@ -270,10 +302,23 @@ export function AdminControlPanel() {
                     </td>
                     {rolePermissions.map(role => (
                       <td key={role.roleId} className="px-2 py-2 text-center">
-                        <span className={clsx(
-                          'inline-block w-3 h-3 rounded-full',
-                          role.permissions[perm] ? 'bg-green-500' : 'bg-red-500/30'
-                        )} />
+                        <button
+                          onClick={() => {
+                            if (role.roleId === 'SUPERADMIN') return; // Can't modify superadmin
+                            setRolePermissions(prev => prev.map(rp =>
+                              rp.roleId === role.roleId
+                                ? { ...rp, permissions: { ...rp.permissions, [perm]: !rp.permissions[perm] } }
+                                : rp
+                            ));
+                          }}
+                          className={clsx(
+                            'inline-block w-3 h-3 rounded-full transition-colors',
+                            role.permissions[perm] ? 'bg-green-500' : 'bg-red-500/30',
+                            role.roleId !== 'SUPERADMIN' && 'cursor-pointer hover:ring-2 hover:ring-white/30'
+                          )}
+                          disabled={role.roleId === 'SUPERADMIN'}
+                          title={role.permissions[perm] ? 'Enabled - click to disable' : 'Disabled - click to enable'}
+                        />
                       </td>
                     ))}
                   </tr>

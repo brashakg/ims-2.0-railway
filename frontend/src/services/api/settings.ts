@@ -291,6 +291,21 @@ export const settingsApi = {
     const response = await api.get('/settings/audit-logs/summary');
     return response.data;
   },
+
+  // Admin Control Panel
+  getAdminControls: async () => {
+    const response = await api.get('/settings/admin-controls');
+    return response.data;
+  },
+
+  updateAdminControls: async (controls: {
+    store_modules?: Record<string, Record<string, boolean>>;
+    discount_limits?: Array<{ roleId: string; maxDiscountPercent: number; requiresApproval: boolean; approvalThreshold: number }>;
+    operational_rules?: Record<string, boolean | number | string>;
+  }) => {
+    const response = await api.put('/settings/admin-controls', controls);
+    return response.data;
+  },
 };
 
 // ============================================================================

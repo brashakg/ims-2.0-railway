@@ -706,6 +706,47 @@ async def get_audit_logs(
     return {"logs": [], "total": 0, "limit": limit, "offset": offset}
 
 
+# ============================================================================
+# ADMIN CONTROL PANEL ENDPOINTS
+# ============================================================================
+
+
+@router.get("/admin-controls")
+async def get_admin_controls(current_user: dict = Depends(get_current_user)):
+    """Get admin control panel settings (SUPERADMIN only)"""
+    if "SUPERADMIN" not in current_user["roles"]:
+        raise HTTPException(status_code=403, detail="Superadmin access required")
+    collection = _get_settings_collection("admin_controls")
+    if collection:
+        settings = collection.find_one({"_id": "default"})
+        if settings:
+            settings.pop("_id", None)
+            return settings
+    return {
+        "store_modules": {},
+        "discount_limits": [],
+        "operational_rules": {},
+    }
+
+
+@router.put("/admin-controls")
+async def update_admin_controls(
+    controls: Dict, current_user: dict = Depends(get_current_user)
+):
+    """Update admin control panel settings (SUPERADMIN only)"""
+    if "SUPERADMIN" not in current_user["roles"]:
+        raise HTTPException(status_code=403, detail="Superadmin access required")
+    collection = _get_settings_collection("admin_controls")
+    if collection:
+        collection.update_one(
+            {"_id": "default"},
+            {"$set": controls},
+            upsert=True,
+        )
+        return {"message": "Admin controls saved successfully", "controls": controls}
+    return {"message": "Admin controls saved (no DB)", "controls": controls}
+
+
 @router.get("/audit-logs/summary")
 async def get_audit_summary(current_user: dict = Depends(get_current_user)):
     """Get audit log summary for dashboard"""
