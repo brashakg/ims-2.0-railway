@@ -2,14 +2,15 @@
 // IMS 2.0 - Session Expiry Hook
 // ============================================================================
 
-import { useEffect, useState } from 'react';
-import { useAuth } from '../context/AuthContext';
+import { useContext, useEffect, useState } from 'react';
+import AuthContext from '../context/AuthContext';
 
 const SESSION_WARNING_THRESHOLD = 5 * 60 * 1000; // 5 minutes
 const CHECK_INTERVAL = 10 * 1000; // Check every 10 seconds
 
 export function useSessionExpiry() {
-  const { logout } = useAuth();
+  const context = useContext(AuthContext);
+  const logout = context?.logout;
   const [showWarning, setShowWarning] = useState(false);
   const [timeRemaining, setTimeRemaining] = useState<number | null>(null);
 
@@ -31,7 +32,7 @@ export function useSessionExpiry() {
 
       if (remaining <= 0) {
         // Token has expired
-        logout();
+        logout?.();
         return;
       }
 

@@ -365,9 +365,9 @@ export function CustomersPage() {
           ) : (
             <>
             <div className="divide-y divide-gray-200">
-              {paginatedCustomers.map(customer => (
+              {paginatedCustomers.map((customer, idx) => (
                 <button
-                  key={customer.id}
+                  key={customer.id || idx}
                   onClick={() => handleSelectCustomer(customer)}
                   className="w-full flex items-center justify-between p-4 hover:bg-gray-50 transition-colors text-left"
                 >
