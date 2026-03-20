@@ -5,6 +5,7 @@
 import { useState, useRef } from 'react';
 import { Upload, X, AlertTriangle, File, CheckCircle, Loader2 } from 'lucide-react';
 import clsx from 'clsx';
+import api from '../../services/api/client';
 
 interface BillFile {
   name: string;
@@ -27,10 +28,11 @@ interface ExpenseBillUploadProps {
   onBillUpload?: (file: File, hash: string) => void;
 }
 
-export function ExpenseBillUpload({ onBillUpload }: ExpenseBillUploadProps) {
+export function ExpenseBillUpload({ expenseId, onBillUpload }: ExpenseBillUploadProps) {
   const [bill, setBill] = useState<BillFile | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
+  const [uploadError, setUploadError] = useState<string | null>(null);
   const [duplicate, setDuplicate] = useState<DuplicateMatch | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -41,13 +43,20 @@ export function ExpenseBillUpload({ onBillUpload }: ExpenseBillUploadProps) {
     }
 
     setIsUploading(true);
-    
+    setUploadError(null);
+
     try {
       const hash = await generateFileHash(file);
 
-      // TODO: Wire to POST /api/v1/expenses/{expenseId}/upload-bill once expenseId
-      // is passed as a required prop. The backend endpoint exists but duplicate-hash
-      // checking is not yet implemented server-side.
+      if (expenseId) {
+        // Upload to backend: POST /api/v1/expenses/{expenseId}/upload-bill
+        const formData = new FormData();
+        formData.append('file', file);
+        await api.post(`/expenses/${expenseId}/upload-bill`, formData, {
+          headers: { 'Content-Type': 'multipart/form-data' },
+        });
+      }
+
       setBill({
         name: file.name,
         size: file.size,
@@ -56,6 +65,9 @@ export function ExpenseBillUpload({ onBillUpload }: ExpenseBillUploadProps) {
         status: 'uploaded',
       });
       onBillUpload?.(file, hash);
+    } catch (err: any) {
+      const msg = err?.message || 'Failed to upload bill. Please try again.';
+      setUploadError(msg);
     } finally {
       setIsUploading(false);
     }
@@ -178,9 +190,17 @@ export function ExpenseBillUpload({ onBillUpload }: ExpenseBillUploadProps) {
           {bill.status === 'uploaded' && (
             <div className="mt-3 p-2 bg-green-800 rounded text-green-200 text-sm flex items-center gap-2">
               <CheckCircle className="w-4 h-4" />
-              Bill uploaded successfully. No duplicates detected.
+              {expenseId ? 'Bill uploaded to server successfully.' : 'Bill selected. Save the expense to attach it.'}
             </div>
           )}
+        </div>
+      )}
+
+      {/* Upload Error */}
+      {uploadError && (
+        <div className="p-3 bg-red-900 bg-opacity-30 border border-red-600 rounded text-red-200 text-sm flex items-center gap-2">
+          <AlertTriangle className="w-4 h-4 flex-shrink-0" />
+          {uploadError}
         </div>
       )}
 

@@ -143,6 +143,54 @@ export function StockAgingReport() {
     return { color: 'text-red-600', icon: '⬤' };
   };
 
+  const exportToCSV = (data: AgingProduct[]) => {
+    if (data.length === 0) return;
+
+    const headers = [
+      'SKU',
+      'Name',
+      'Brand',
+      'Category',
+      'Classification',
+      'Age Category',
+      'Days In Stock',
+      'Quantity',
+      'Value (Rs)',
+      'Sales Last 30 Days',
+      'Sales Last 90 Days',
+      'Turnover Rate (x/yr)',
+      'Last Sale Date',
+    ];
+
+    const rows = data.map(p => [
+      p.sku,
+      `"${p.name.replace(/"/g, '""')}"`,
+      `"${p.brand.replace(/"/g, '""')}"`,
+      p.category,
+      p.classification,
+      p.ageCategory,
+      p.daysInStock,
+      p.quantity,
+      p.value,
+      p.salesLast30Days,
+      p.salesLast90Days,
+      p.turnoverRate.toFixed(2),
+      p.lastSaleDate ? new Date(p.lastSaleDate).toLocaleDateString() : 'No sales',
+    ]);
+
+    const csvContent = [headers.join(','), ...rows.map(r => r.join(','))].join('\n');
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `stock-aging-report-${new Date().toISOString().split('T')[0]}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    toast.success(`Exported ${data.length} products to CSV`);
+  };
+
   return (
     <div className="space-y-4">
       {/* Header */}
@@ -170,11 +218,12 @@ export function StockAgingReport() {
             Refresh
           </button>
           <button
-            onClick={() => toast.info('Export feature coming soon')}
+            onClick={() => exportToCSV(filteredProducts)}
+            disabled={isLoading || filteredProducts.length === 0}
             className="btn-outline text-sm flex items-center gap-2"
           >
             <Download className="w-4 h-4" />
-            Export
+            Export CSV
           </button>
         </div>
       </div>

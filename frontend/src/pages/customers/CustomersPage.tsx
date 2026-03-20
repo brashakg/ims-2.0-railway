@@ -97,6 +97,11 @@ export function CustomersPage() {
   const [showEditModal, setShowEditModal] = useState(false);
   const [editForm, setEditForm] = useState({ name: '', phone: '', email: '', address: '' });
 
+  // Add patient modal state
+  const [showAddPatientModal, setShowAddPatientModal] = useState(false);
+  const [patientForm, setPatientForm] = useState({ name: '', mobile: '', dateOfBirth: '', relation: 'Self' });
+  const [isAddingPatient, setIsAddingPatient] = useState(false);
+
   // Reset page when filters change
   useEffect(() => {
     setCurrentPage(1);
@@ -253,6 +258,37 @@ export function CustomersPage() {
       setShowAddCustomerModal(false);
     } catch {
       toast.error('Failed to create customer');
+    }
+  };
+
+  // Handle adding a patient to the selected customer
+  const handleAddPatient = async () => {
+    if (!selectedCustomer || !patientForm.name.trim()) {
+      toast.error('Patient name is required');
+      return;
+    }
+    setIsAddingPatient(true);
+    try {
+      await customerApi.addPatient(selectedCustomer.id, {
+        name: patientForm.name.trim(),
+        phone: patientForm.mobile || undefined,
+        dateOfBirth: patientForm.dateOfBirth || undefined,
+        relation: patientForm.relation || 'Self',
+      });
+      toast.success('Patient added successfully');
+      setShowAddPatientModal(false);
+      setPatientForm({ name: '', mobile: '', dateOfBirth: '', relation: 'Self' });
+      // Reload the customer to get updated patient list
+      const response = await customerApi.getCustomers({ storeId: user?.activeStoreId });
+      const allCustomers: Customer[] = response.customers || response || [];
+      const updated = allCustomers.find((c: Customer) => c.id === selectedCustomer.id);
+      if (updated) {
+        setSelectedCustomer(updated);
+      }
+    } catch {
+      toast.error('Failed to add patient');
+    } finally {
+      setIsAddingPatient(false);
     }
   };
 
@@ -655,7 +691,7 @@ export function CustomersPage() {
             <h2 className="font-semibold text-gray-900">Patients</h2>
             {canAddCustomer && (
               <button
-                onClick={() => toast.info('Add patient modal coming soon')}
+                onClick={() => setShowAddPatientModal(true)}
                 className="text-sm text-bv-red-600 hover:text-bv-red-700 flex items-center gap-1"
               >
                 <Plus className="w-4 h-4" />
@@ -819,6 +855,80 @@ export function CustomersPage() {
           </div>
         </div>
       </div>
+
+      {/* Add Patient Modal */}
+      {showAddPatientModal && selectedCustomer && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-xl shadow-xl max-w-md w-full">
+            <div className="p-6">
+              <div className="flex items-center justify-between mb-6">
+                <h2 className="text-xl font-bold text-gray-900">Add Patient</h2>
+                <button onClick={() => setShowAddPatientModal(false)} className="p-2 hover:bg-gray-100 rounded-lg">
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Patient Name *</label>
+                  <input
+                    type="text"
+                    value={patientForm.name}
+                    onChange={e => setPatientForm(f => ({ ...f, name: e.target.value }))}
+                    placeholder="Full name"
+                    className="input-field"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Relation</label>
+                  <select
+                    value={patientForm.relation}
+                    onChange={e => setPatientForm(f => ({ ...f, relation: e.target.value }))}
+                    className="input-field"
+                  >
+                    {['Self', 'Spouse', 'Child', 'Parent', 'Sibling', 'Other'].map(r => (
+                      <option key={r} value={r}>{r}</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Mobile</label>
+                  <input
+                    type="tel"
+                    value={patientForm.mobile}
+                    onChange={e => setPatientForm(f => ({ ...f, mobile: e.target.value }))}
+                    placeholder="10-digit mobile"
+                    className="input-field"
+                    maxLength={10}
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Date of Birth</label>
+                  <input
+                    type="date"
+                    value={patientForm.dateOfBirth}
+                    onChange={e => setPatientForm(f => ({ ...f, dateOfBirth: e.target.value }))}
+                    className="input-field"
+                  />
+                </div>
+                <button
+                  onClick={handleAddPatient}
+                  disabled={isAddingPatient || !patientForm.name.trim()}
+                  className="btn-primary w-full flex items-center justify-center gap-2"
+                >
+                  {isAddingPatient ? (
+                    <>
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      Adding...
+                    </>
+                  ) : (
+                    'Add Patient'
+                  )}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Edit Customer Modal */}
       {showEditModal && selectedCustomer && (

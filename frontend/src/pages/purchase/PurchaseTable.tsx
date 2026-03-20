@@ -7,7 +7,6 @@ import {
   Download,
   Package,
 } from 'lucide-react';
-import { useToast } from '../../context/ToastContext';
 import { getStatusBadge } from './statusBadge';
 import type { PurchaseOrder } from './purchaseTypes';
 
@@ -16,8 +15,46 @@ interface PurchaseTableProps {
   onViewPO: (po: PurchaseOrder) => void;
 }
 
+function downloadPO(po: PurchaseOrder) {
+  const lines: string[] = [];
+  lines.push('PURCHASE ORDER');
+  lines.push('==============');
+  lines.push(`PO Number : ${po.poNumber}`);
+  lines.push(`Supplier  : ${po.supplierName}`);
+  lines.push(`Date      : ${new Date(po.date).toLocaleDateString()}`);
+  lines.push(`Delivery  : ${new Date(po.expectedDelivery).toLocaleDateString()}`);
+  lines.push(`Status    : ${po.status}`);
+  lines.push('');
+  lines.push('ITEMS');
+  lines.push('-----');
+  po.items.forEach((item, idx) => {
+    lines.push(
+      `${idx + 1}. ${item.productName} (SKU: ${item.sku})` +
+      ` | Qty: ${item.quantity} | Unit: Rs.${item.unitCost.toLocaleString()}` +
+      ` | Total: Rs.${item.total.toLocaleString()}`
+    );
+  });
+  lines.push('');
+  lines.push(`Subtotal  : Rs.${po.subtotal.toLocaleString()}`);
+  lines.push(`Tax       : Rs.${po.taxAmount.toLocaleString()}`);
+  lines.push(`TOTAL     : Rs.${po.total.toLocaleString()}`);
+  if (po.notes) {
+    lines.push('');
+    lines.push(`Notes     : ${po.notes}`);
+  }
+
+  const blob = new Blob([lines.join('\n')], { type: 'text/plain;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `${po.poNumber}.txt`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
 export function PurchaseTable({ purchaseOrders, onViewPO }: PurchaseTableProps) {
-  const toast = useToast();
 
   return (
     <div className="space-y-4">
@@ -39,7 +76,8 @@ export function PurchaseTable({ purchaseOrders, onViewPO }: PurchaseTableProps) 
                 <Eye className="w-5 h-5 text-gray-600" />
               </button>
               <button
-                onClick={() => toast.info('PO download coming soon')}
+                onClick={() => downloadPO(po)}
+                title="Download PO"
                 className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
               >
                 <Download className="w-5 h-5 text-gray-600" />

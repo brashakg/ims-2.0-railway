@@ -87,6 +87,9 @@ export function TasksDashboard() {
   const [activeTab, setActiveTab] = useState<TaskTab>('my-tasks');
   const [isLoading, setIsLoading] = useState(true);
   const [tasks, setTasks] = useState<Task[]>([]);
+  const [teamTasks, setTeamTasks] = useState<Task[]>([]);
+  const [isLoadingTeam, setIsLoadingTeam] = useState(false);
+  const [teamFilter, setTeamFilter] = useState<'all' | 'open' | 'completed' | 'escalated'>('all');
   const [summary, setSummary] = useState({ total: 0, overdue: 0, escalated: 0, open: 0, completed: 0 });
 
   // Checklist state
@@ -108,6 +111,12 @@ export function TasksDashboard() {
     loadData();
   }, [activeTab]);
 
+  useEffect(() => {
+    if (activeTab === 'team-tasks') {
+      loadTeamTasks();
+    }
+  }, [activeTab, teamFilter]);
+
   const loadData = async () => {
     setIsLoading(true);
     try {
@@ -122,6 +131,21 @@ export function TasksDashboard() {
       toast.error('Failed to load tasks');
     } finally {
       setIsLoading(false);
+    }
+  };
+
+  const loadTeamTasks = async () => {
+    setIsLoadingTeam(true);
+    try {
+      const params: { status?: string } = {};
+      if (teamFilter !== 'all') params.status = teamFilter;
+      const res = await tasksApi.getTasks(params);
+      setTeamTasks(res?.tasks || []);
+    } catch {
+      toast.error('Failed to load team tasks');
+      setTeamTasks([]);
+    } finally {
+      setIsLoadingTeam(false);
     }
   };
 
@@ -440,9 +464,106 @@ export function TasksDashboard() {
             </div>
           </div>
         ) : (
-          <div className="text-center py-12 bg-gray-800 rounded-lg border border-gray-700">
-            <Users className="w-12 h-12 text-gray-600 mx-auto mb-3" />
-            <p className="text-gray-400">Team tasks management coming soon</p>
+          /* Team Tasks Panel */
+          <div>
+            {/* Filter bar */}
+            <div className="flex items-center gap-3 mb-6">
+              <span className="text-gray-400 text-sm">Filter:</span>
+              {(['all', 'open', 'completed', 'escalated'] as const).map(f => (
+                <button
+                  key={f}
+                  onClick={() => setTeamFilter(f)}
+                  className={clsx(
+                    'px-3 py-1.5 rounded-lg text-sm font-medium transition-colors capitalize',
+                    teamFilter === f
+                      ? 'bg-blue-600 text-white'
+                      : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+                  )}
+                >
+                  {f}
+                </button>
+              ))}
+              <button
+                onClick={loadTeamTasks}
+                disabled={isLoadingTeam}
+                className="ml-auto px-3 py-1.5 bg-gray-700 hover:bg-gray-600 text-gray-300 rounded-lg text-sm transition-colors flex items-center gap-1.5"
+              >
+                {isLoadingTeam ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  'Refresh'
+                )}
+              </button>
+            </div>
+
+            {isLoadingTeam ? (
+              <div className="flex items-center justify-center h-48">
+                <Loader2 className="w-8 h-8 text-blue-400 animate-spin" />
+              </div>
+            ) : teamTasks.length === 0 ? (
+              <div className="text-center py-12 bg-gray-800 rounded-lg border border-gray-700">
+                <Users className="w-12 h-12 text-gray-600 mx-auto mb-3" />
+                <p className="text-gray-300 font-medium">No team tasks found</p>
+                <p className="text-gray-500 text-sm mt-1">
+                  {teamFilter === 'all' ? 'No tasks have been created for this store yet.' : `No ${teamFilter} tasks.`}
+                </p>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {teamTasks.map(task => {
+                  const isOverdue = task.status !== 'completed' && new Date(task.due_date) < new Date();
+                  return (
+                    <div
+                      key={task.task_id}
+                      className="bg-gray-800 rounded-lg border border-gray-700 p-4"
+                      style={{ borderLeft: `4px solid ${PRIORITY_COLORS[task.priority]?.border || '#2563EB'}` }}
+                    >
+                      <div className="flex items-start justify-between gap-4">
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2 mb-1 flex-wrap">
+                            <h3 className="text-base font-semibold text-white truncate">{task.title}</h3>
+                            <span className={clsx(
+                              'text-xs font-bold px-2 py-0.5 rounded',
+                              PRIORITY_COLORS[task.priority]?.bg,
+                              PRIORITY_COLORS[task.priority]?.text
+                            )}>
+                              {task.priority}
+                            </span>
+                            <span className={clsx(
+                              'text-xs px-2 py-0.5 rounded',
+                              task.status === 'completed' ? 'bg-green-800 text-green-200' :
+                              task.status === 'escalated' ? 'bg-red-800 text-red-200' :
+                              'bg-gray-700 text-gray-300'
+                            )}>
+                              {task.status}
+                            </span>
+                            {isOverdue && (
+                              <span className="text-xs px-2 py-0.5 rounded bg-orange-800 text-orange-200">overdue</span>
+                            )}
+                          </div>
+                          {task.description && (
+                            <p className="text-sm text-gray-400 mb-2">{task.description}</p>
+                          )}
+                          <div className="flex items-center gap-4 text-xs text-gray-500">
+                            <span>Assigned to: <span className="text-gray-300">{task.assigned_to}</span></span>
+                            <span>Due: <span className={isOverdue ? 'text-orange-400' : 'text-gray-300'}>{new Date(task.due_date).toLocaleDateString()}</span></span>
+                            <span>Type: {task.type}</span>
+                          </div>
+                        </div>
+                        {task.status !== 'completed' && (
+                          <button
+                            onClick={() => handleCompleteTask(task.task_id)}
+                            className="flex-shrink-0 px-3 py-1 bg-green-600 hover:bg-green-700 text-sm text-white rounded transition-colors"
+                          >
+                            Complete
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
         )}
       </div>
