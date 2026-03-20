@@ -28,7 +28,7 @@ import {
   PhoneCall,
 } from 'lucide-react';
 import type { Customer } from '../../types';
-import { customerApi, orderApi } from '../../services/api';
+import { customerApi, orderApi, prescriptionApi } from '../../services/api';
 import { useToast } from '../../context/ToastContext';
 import clsx from 'clsx';
 
@@ -145,11 +145,50 @@ export function Customer360Dashboard() {
         memberSince: customerData.created_at,
       });
 
-      // Generate mock prescription data
-      setPrescriptions(generateMockPrescriptions(customerId!));
+      // Fetch real prescription data for this customer
+      try {
+        const rxData = await prescriptionApi.getPrescriptions(customerId!);
+        const rxList: any[] = Array.isArray(rxData?.prescriptions)
+          ? rxData.prescriptions
+          : Array.isArray(rxData)
+            ? rxData
+            : [];
 
-      // Generate mock interaction data
-      setInteractions(generateMockInteractions());
+        const now = Date.now();
+        const mapped: PrescriptionData[] = rxList.map((rx: any) => {
+          const testDate = rx.testDate || rx.test_date || rx.createdAt || rx.created_at || '';
+          const validityMonths: number = rx.validityMonths ?? rx.validity_months ?? 12;
+          const expiryMs = new Date(testDate).getTime() + validityMonths * 30 * 24 * 60 * 60 * 1000;
+          const daysUntilRenewal = Math.round((expiryMs - now) / (24 * 60 * 60 * 1000));
+          let renewalStatus: 'current' | 'upcoming' | 'expired';
+          if (daysUntilRenewal < 0) renewalStatus = 'expired';
+          else if (daysUntilRenewal <= 30) renewalStatus = 'upcoming';
+          else renewalStatus = 'current';
+
+          return {
+            id: rx.id || rx._id || '',
+            customerId: rx.customerId || rx.customer_id || customerId!,
+            testDate,
+            rightEyeSph: rx.rightEye?.sphere ?? rx.right_eye?.sphere,
+            rightEyeCyl: rx.rightEye?.cylinder ?? rx.right_eye?.cylinder,
+            rightEyeAxis: rx.rightEye?.axis ?? rx.right_eye?.axis,
+            leftEyeSph: rx.leftEye?.sphere ?? rx.left_eye?.sphere,
+            leftEyeCyl: rx.leftEye?.cylinder ?? rx.left_eye?.cylinder,
+            leftEyeAxis: rx.leftEye?.axis ?? rx.left_eye?.axis,
+            doctorName: rx.optometristName || rx.optometrist_name,
+            renewalStatus,
+            daysUntilRenewal,
+          };
+        });
+
+        setPrescriptions(mapped);
+      } catch {
+        // Prescription fetch failed; show empty state rather than crashing
+        setPrescriptions([]);
+      }
+
+      // No interaction log API exists yet; start with empty state
+      setInteractions([]);
 
       toast.success('Customer data loaded successfully');
     } catch (err) {
@@ -185,60 +224,6 @@ export function Customer360Dashboard() {
     };
     const nextThreshold = thresholds[tier];
     return Math.max(0, nextThreshold - currentValue);
-  };
-
-  const generateMockPrescriptions = (customerId: string): PrescriptionData[] => {
-    return [
-      {
-        id: `rx-1`,
-        customerId,
-        testDate: new Date(Date.now() - 180 * 24 * 60 * 60 * 1000).toISOString(),
-        rightEyeSph: 1.5,
-        rightEyeCyl: -0.5,
-        rightEyeAxis: 90,
-        leftEyeSph: 1.75,
-        leftEyeCyl: -0.75,
-        leftEyeAxis: 88,
-        doctorName: 'Dr. Raj Kumar',
-        renewalStatus: 'upcoming',
-        daysUntilRenewal: 20,
-      },
-      {
-        id: `rx-2`,
-        customerId,
-        testDate: new Date(Date.now() - 550 * 24 * 60 * 60 * 1000).toISOString(),
-        rightEyeSph: 1.25,
-        rightEyeCyl: -0.25,
-        rightEyeAxis: 92,
-        leftEyeSph: 1.5,
-        leftEyeCyl: -0.5,
-        leftEyeAxis: 90,
-        doctorName: 'Dr. Priya Sharma',
-        renewalStatus: 'expired',
-        daysUntilRenewal: -120,
-      },
-    ];
-  };
-
-  const generateMockInteractions = (): InteractionRecord[] => {
-    const types: Array<'call' | 'sms' | 'email' | 'whatsapp' | 'in_person'> = ['call', 'sms', 'email', 'whatsapp', 'in_person'];
-    const mockNotes = [
-      'Inquiry about lens materials',
-      'Purchase confirmation',
-      'Prescription consultation',
-      'Delivery tracking',
-      'Warranty activation',
-      'Follow-up on fitting',
-    ];
-
-    return Array.from({ length: 6 }, (_, i) => ({
-      id: `interaction-${i}`,
-      type: types[i % types.length],
-      date: new Date(Date.now() - i * 7 * 24 * 60 * 60 * 1000).toISOString(),
-      notes: mockNotes[i % mockNotes.length],
-      duration: ['call'].includes(types[i % types.length]) ? Math.floor(Math.random() * 20) + 5 : undefined,
-      initiatedBy: i % 3 === 0 ? 'Customer' : 'Business',
-    }));
   };
 
   if (isLoading) {
@@ -484,7 +469,12 @@ interface PrescriptionsTabProps {
 
 function PrescriptionsTab({ prescriptions }: PrescriptionsTabProps) {
   if (prescriptions.length === 0) {
-    return <p className="text-gray-400">No prescriptions found</p>;
+    return (
+      <div className="text-center py-12 text-gray-400">
+        <Eye className="w-12 h-12 mx-auto mb-3 opacity-40" />
+        <p>No prescriptions recorded.</p>
+      </div>
+    );
   }
 
   return (
@@ -599,6 +589,15 @@ function InteractionsTab({ interactions }: InteractionsTabProps) {
         return <Clock className="w-5 h-5" />;
     }
   };
+
+  if (interactions.length === 0) {
+    return (
+      <div className="text-center py-12 text-gray-400">
+        <MessageCircleIcon className="w-12 h-12 mx-auto mb-3 opacity-40" />
+        <p>No interactions recorded.</p>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-4">

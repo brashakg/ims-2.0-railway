@@ -5,12 +5,14 @@
 import { useState, useEffect } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
+import { useToast } from '../../context/ToastContext';
 import { Eye, EyeOff, Store, AlertCircle, RefreshCw } from 'lucide-react';
 
 export function LoginPage() {
   const { login, isLoading } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
+  const toast = useToast();
 
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
@@ -190,7 +192,7 @@ export function LoginPage() {
             <div className="mt-4 text-center">
               <button
                 type="button"
-                onClick={() => alert('Password reset functionality coming soon. Please contact your administrator.')}
+                onClick={() => toast.info('Please contact your administrator to reset your password.')}
                 className="text-sm text-gray-600 hover:text-bv-red-600 transition-colors focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-bv-red-600 rounded px-1"
                 aria-label="Request password reset"
               >

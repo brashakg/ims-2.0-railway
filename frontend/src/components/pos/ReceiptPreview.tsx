@@ -44,8 +44,8 @@ export function ReceiptPreview({
   };
 
   const handleDownloadPDF = () => {
-    // Placeholder for PDF download functionality
-    console.info('PDF download coming soon');
+    // Use browser print dialog — user can save as PDF from there
+    window.print();
   };
 
   return (

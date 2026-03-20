@@ -241,7 +241,7 @@ export function SerialNumberTracker() {
         </div>
         <div className="flex items-center gap-2">
           <button
-            onClick={() => toast.info('Export feature coming soon')}
+            onClick={() => toast.info('Export to CSV is not yet available. Use the print option as a workaround.')}
             className="btn-outline text-sm flex items-center gap-2"
           >
             <Download className="w-4 h-4" />

@@ -17,7 +17,7 @@ import {
   Loader2,
   RefreshCw,
 } from 'lucide-react';
-import { hrApi } from '../../services/api';
+import { hrApi, storeApi } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import clsx from 'clsx';
@@ -174,29 +174,34 @@ export function HRPage() {
                 const lat = pos.coords.latitude;
                 const lng = pos.coords.longitude;
 
-                // Geo-fence enforcement: store locations
-                // TODO: Fetch store locations from /api/v1/stores/{storeId} instead of hardcoding
-                const STORE_LOCATIONS: Record<string, { lat: number; lng: number; radius: number }> = {
-                  'BV-BOK-01': { lat: 23.6693, lng: 86.1511, radius: 200 },
-                  'BV-BOK-02': { lat: 23.6750, lng: 86.1480, radius: 200 },
-                  'BV-DHB-01': { lat: 23.7957, lng: 86.4304, radius: 200 },
-                  'BV-DHB-02': { lat: 23.7890, lng: 86.4350, radius: 200 },
-                  'WO-DHB-01': { lat: 23.8000, lng: 86.4400, radius: 200 },
-                  'BV-PUN-01': { lat: 18.4766, lng: 73.9072, radius: 200 },
-                };
-                const storeLoc = STORE_LOCATIONS[user?.activeStoreId || ''];
-                if (storeLoc) {
-                  // Haversine distance calculation
-                  const R = 6371000; // Earth's radius in meters
-                  const dLat = (lat - storeLoc.lat) * Math.PI / 180;
-                  const dLng = (lng - storeLoc.lng) * Math.PI / 180;
-                  const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
-                    Math.cos(storeLoc.lat * Math.PI / 180) * Math.cos(lat * Math.PI / 180) *
-                    Math.sin(dLng/2) * Math.sin(dLng/2);
-                  const distance = R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
-                  if (distance > storeLoc.radius) {
-                    toast.error(`You are ${Math.round(distance)}m from the store. Check-in requires being within ${storeLoc.radius}m.`);
-                    return;
+                // Geo-fence enforcement: fetch store location from API
+                if (user?.activeStoreId) {
+                  try {
+                    const storeData = await storeApi.getStore(user.activeStoreId);
+                    const storeLat: number | undefined = storeData?.latitude ?? storeData?.lat;
+                    const storeLng: number | undefined = storeData?.longitude ?? storeData?.lng;
+                    const radius: number = storeData?.geofence_radius ?? storeData?.geofenceRadius ?? 200;
+
+                    if (storeLat == null || storeLng == null) {
+                      toast.warning('Store location coordinates are not configured. Geo-fence check skipped.');
+                    } else {
+                      // Haversine distance calculation
+                      const R = 6371000; // Earth radius in metres
+                      const dLat = (lat - storeLat) * Math.PI / 180;
+                      const dLng = (lng - storeLng) * Math.PI / 180;
+                      const a =
+                        Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+                        Math.cos(storeLat * Math.PI / 180) * Math.cos(lat * Math.PI / 180) *
+                        Math.sin(dLng / 2) * Math.sin(dLng / 2);
+                      const distance = R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+                      if (distance > radius) {
+                        toast.error(`You are ${Math.round(distance)}m from the store. Check-in requires being within ${radius}m.`);
+                        return;
+                      }
+                    }
+                  } catch {
+                    // If we cannot fetch store data, skip geo-fence rather than blocking check-in
+                    toast.warning('Could not verify store location. Proceeding without geo-fence check.');
                   }
                 }
 
