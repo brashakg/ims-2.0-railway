@@ -132,7 +132,7 @@ class DatabaseConnection:
     def connect(self) -> bool:
         """Establish database connection"""
         if not MONGO_AVAILABLE:
-            print("⚠️ PyMongo not installed. Running in mock mode.")
+            print("[WARN] PyMongo not installed. Running in mock mode.")
             self._connected = False
             return False
         
@@ -148,14 +148,14 @@ class DatabaseConnection:
             self._client.admin.command('ping')
             self._db = self._client[self._config.database]
             self._connected = True
-            print(f"✅ Connected to MongoDB: {self._config.database}")
+            print(f"[OK] Connected to MongoDB: {self._config.database}")
             return True
         except (ConnectionFailure, ServerSelectionTimeoutError) as e:
-            print(f"❌ MongoDB connection failed: {e}")
+            print(f"[ERROR] MongoDB connection failed: {e}")
             self._connected = False
             return False
         except Exception as e:
-            print(f"❌ Unexpected error: {e}")
+            print(f"[ERROR] Unexpected error: {e}")
             self._connected = False
             return False
     
@@ -495,9 +495,9 @@ def get_seeded_mock_db() -> MockDatabase:
                 collection = _seeded_mock_db[collection_name]
                 for doc in data:
                     collection.insert_one(doc)
-            print(f"✅ Seeded mock database with sample data")
+            print("[OK] Seeded mock database with sample data")
         except ImportError as e:
-            print(f"⚠️ Could not load seed data: {e}")
+            print(f"[WARN] Could not load seed data: {e}")
     return _seeded_mock_db
 
 

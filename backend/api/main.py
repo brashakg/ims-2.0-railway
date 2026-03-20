@@ -67,7 +67,7 @@ from .routers import (
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
-    logger.info("🚀 Starting IMS 2.0 API Server...")
+    logger.info("[START] Starting IMS 2.0 API Server...")
 
     # Initialize database connection
     if DATABASE_AVAILABLE:
@@ -78,11 +78,11 @@ async def lifespan(app: FastAPI):
             config = DatabaseConfig.from_env()
 
         if init_db(config):
-            logger.info("✅ Database connection established")
+            logger.info("[OK] Database connection established")
         else:
-            logger.warning("⚠️ Database not connected - running in mock mode")
+            logger.warning("[WARN] Database not connected - running in mock mode")
     else:
-        logger.info("📦 Running without database (stub mode)")
+        logger.info("[INFO] Running without database (stub mode)")
 
     yield
 

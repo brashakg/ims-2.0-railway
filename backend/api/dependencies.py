@@ -45,7 +45,7 @@ try:
 
     DATABASE_AVAILABLE = True
 except ImportError as e:
-    print(f"⚠️ Database import error: {e}")
+    print(f"[WARN] Database import error: {e}")
     DATABASE_AVAILABLE = False
 
 
