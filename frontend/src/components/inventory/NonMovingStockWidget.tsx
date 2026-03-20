@@ -31,7 +31,7 @@ export function NonMovingStockWidget() {
       const response = await api.get(`/inventory/non-moving?days=${days}`);
       setProducts(response.data?.products || []);
     } catch (error) {
-      console.error('Error loading non-moving stock:', error);
+      // silently handle error
     } finally {
       setLoading(false);
     }

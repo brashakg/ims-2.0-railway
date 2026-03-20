@@ -119,7 +119,6 @@ export function TasksDashboard() {
       const summaryRes = await tasksApi.getTaskSummary();
       setSummary(summaryRes || { total: 0, overdue: 0, escalated: 0, open: 0, completed: 0 });
     } catch (error) {
-      console.error('Failed to load tasks:', error);
       toast.error('Failed to load tasks');
     } finally {
       setIsLoading(false);

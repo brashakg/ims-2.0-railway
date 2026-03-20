@@ -30,7 +30,7 @@ interface FeatureToggleProps {
   storeId: string;
 }
 
-export function FeatureToggles({ storeId: _storeId }: FeatureToggleProps) {
+export function FeatureToggles({ storeId }: FeatureToggleProps) {
   const { user } = useAuth();
   const toast = useToast();
   
@@ -53,8 +53,19 @@ export function FeatureToggles({ storeId: _storeId }: FeatureToggleProps) {
   const handleSave = async () => {
     setIsLoading(true);
     try {
-      // TODO: Call API endpoint PATCH /settings/feature-toggles/{storeId}
-      await new Promise(resolve => setTimeout(resolve, 1000));
+      const token = localStorage.getItem('ims_token');
+      const togglePayload = features.reduce((acc, f) => ({ ...acc, [f.id]: f.enabled }), {} as Record<string, boolean>);
+      const response = await fetch(`/api/v1/settings/feature-toggles/${storeId}`, {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({ features: togglePayload }),
+      });
+      if (!response.ok) {
+        throw new Error(`Failed to save: ${response.statusText}`);
+      }
       
       toast.success('Feature toggles updated successfully');
       setHasChanges(false);

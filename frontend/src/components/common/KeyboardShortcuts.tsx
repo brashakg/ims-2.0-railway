@@ -55,7 +55,7 @@ export function KeyboardShortcutsModal() {
       key: 'ctrl+k',
       label: 'Ctrl + K',
       description: 'Open command palette / search',
-      callback: () => console.log('Command palette opened'),
+      callback: () => {},
       category: 'Navigation',
     },
     {

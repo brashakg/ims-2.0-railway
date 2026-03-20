@@ -386,6 +386,16 @@ async def create_order(
     if not order.items:
         raise HTTPException(status_code=400, detail="Order must have at least one item")
 
+    # Validate: offer_price cannot exceed MRP
+    for item in order.items:
+        offer_price = getattr(item, "offer_price", 0) or 0
+        mrp = getattr(item, "mrp", 0) or 0
+        if offer_price > 0 and mrp > 0 and offer_price > mrp:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Offer price (₹{offer_price}) cannot exceed MRP (₹{mrp}) for {getattr(item, 'product_name', 'item')}"
+            )
+
     if order_repo is not None and customer_repo is not None:
         # Verify customer exists (allow walk-in with generated IDs)
         customer = customer_repo.find_by_id(order.customer_id)
@@ -618,6 +628,15 @@ async def add_order_item(
     order_id: str, item: OrderItemCreate, current_user: dict = Depends(get_current_user)
 ):
     """Add item to order (only DRAFT orders)"""
+    # Validate: offer_price cannot exceed MRP
+    offer_price = getattr(item, "offer_price", 0) or 0
+    mrp = getattr(item, "mrp", 0) or 0
+    if offer_price > 0 and mrp > 0 and offer_price > mrp:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Offer price (₹{offer_price}) cannot exceed MRP (₹{mrp})"
+        )
+
     repo = get_order_repository()
 
     if repo is not None:

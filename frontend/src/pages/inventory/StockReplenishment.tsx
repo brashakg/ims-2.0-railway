@@ -88,7 +88,6 @@ export function StockReplenishment() {
         setSuggestions(transformedSuggestions);
       } catch (error) {
         toast.error('Failed to load replenishment suggestions');
-        console.error(error);
       } finally {
         setIsLoading(false);
       }

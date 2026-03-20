@@ -49,7 +49,7 @@ async def get_revenue(
             "total_discount": {"$sum": {"$ifNull": ["$discount_amount", 0]}},
         }}
     ]
-    result = list(db.orders.aggregate(pipeline))
+    result = list(db.get_collection("orders").aggregate(pipeline))
     current = result[0] if result else {"total_revenue": 0, "total_orders": 0, "total_tax": 0, "total_discount": 0}
 
     # Previous period for MoM/YoY
@@ -58,7 +58,7 @@ async def get_revenue(
         prev_match = {"created_at": {"$gte": prev_start.isoformat(), "$lt": start.isoformat()}}
         if store_id:
             prev_match["store_id"] = store_id
-        prev_result = list(db.orders.aggregate([{"$match": prev_match}, {"$group": {"_id": None, "total_revenue": {"$sum": "$total"}}}]))
+        prev_result = list(db.get_collection("orders").aggregate([{"$match": prev_match}, {"$group": {"_id": None, "total_revenue": {"$sum": "$total"}}}]))
         prev_revenue = prev_result[0]["total_revenue"] if prev_result else 0
         mom_growth = ((current["total_revenue"] - prev_revenue) / prev_revenue * 100) if prev_revenue > 0 else 0
     else:
@@ -95,7 +95,7 @@ async def get_pnl(
 
     # Revenue
     rev_pipeline = [{"$match": match}, {"$group": {"_id": None, "revenue": {"$sum": "$total"}, "tax": {"$sum": "$tax_amount"}}}]
-    rev = list(db.orders.aggregate(rev_pipeline))
+    rev = list(db.get_collection("orders").aggregate(rev_pipeline))
     revenue = rev[0]["revenue"] if rev else 0
     tax = rev[0]["tax"] if rev else 0
 
@@ -108,7 +108,7 @@ async def get_pnl(
     if to_date:
         exp_match.setdefault("date", {})["$lte"] = to_date
     exp_pipeline = [{"$match": exp_match}, {"$group": {"_id": "$category", "amount": {"$sum": "$amount"}}}]
-    expenses = list(db.expenses.aggregate(exp_pipeline))
+    expenses = list(db.get_collection("expenses").aggregate(exp_pipeline))
     total_expenses = sum(e["amount"] for e in expenses)
 
     # COGS estimate (60% of revenue for optical retail)
@@ -150,7 +150,7 @@ async def get_gst_summary(
 
     # GST collected (from sales)
     sales_match = {"created_at": {"$gte": start.isoformat(), "$lt": end.isoformat()}}
-    collected = list(db.orders.aggregate([
+    collected = list(db.get_collection("orders").aggregate([
         {"$match": sales_match},
         {"$group": {"_id": None, "total_tax": {"$sum": "$tax_amount"}, "total_sales": {"$sum": "$total"}}}
     ]))
@@ -158,7 +158,7 @@ async def get_gst_summary(
 
     # GST paid (input credit from purchases)
     purchase_match = {"date": {"$gte": start.isoformat(), "$lt": end.isoformat()}}
-    paid = list(db.purchase_orders.aggregate([
+    paid = list(db.get_collection("purchase_orders").aggregate([
         {"$match": purchase_match},
         {"$group": {"_id": None, "total_tax": {"$sum": {"$ifNull": ["$tax_amount", 0]}}}}
     ]))
@@ -197,7 +197,7 @@ async def get_outstanding(
     if store_id:
         match["store_id"] = store_id
 
-    orders = list(db.orders.find(match, {"_id": 0, "order_id": 1, "customer_name": 1, "customer_phone": 1, "total": 1, "amount_paid": 1, "created_at": 1}))
+    orders = list(db.get_collection("orders").find(match, {"_id": 0, "order_id": 1, "customer_name": 1, "customer_phone": 1, "total": 1, "amount_paid": 1, "created_at": 1}))
 
     now = datetime.utcnow()
     buckets = {"0_30": 0, "31_60": 0, "61_90": 0, "90_plus": 0}
@@ -231,10 +231,10 @@ async def get_outstanding(
 @router.get("/vendor-payments")
 async def get_vendor_payments(current_user: dict = Depends(get_current_user)):
     db = _get_db()
-    vendors = list(db.vendors.find({}, {"_id": 0, "vendor_id": 1, "name": 1}))
+    vendors = list(db.get_collection("vendors").find({}, {"_id": 0, "vendor_id": 1, "name": 1}))
     result = []
     for v in vendors:
-        pos = list(db.purchase_orders.find({"vendor_id": v["vendor_id"]}, {"_id": 0, "total": 1, "payment_status": 1}))
+        pos = list(db.get_collection("purchase_orders").find({"vendor_id": v["vendor_id"]}, {"_id": 0, "total": 1, "payment_status": 1}))
         total = sum(p.get("total", 0) for p in pos)
         paid = sum(p.get("total", 0) for p in pos if p.get("payment_status") == "paid")
         result.append({"vendor_id": v["vendor_id"], "vendor_name": v["name"], "total_orders": total, "total_paid": paid, "balance": total - paid})
@@ -253,18 +253,18 @@ async def get_cash_flow(
     start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
 
     # Inflows (from orders)
-    inflow = list(db.orders.aggregate([
+    inflow = list(db.get_collection("orders").aggregate([
         {"$match": {"created_at": {"$gte": start.isoformat()}, "payment_status": "paid"}},
         {"$group": {"_id": None, "total": {"$sum": "$total"}}}
     ]))
     total_inflow = inflow[0]["total"] if inflow else 0
 
     # Outflows (expenses + purchase orders)
-    exp_out = list(db.expenses.aggregate([
+    exp_out = list(db.get_collection("expenses").aggregate([
         {"$match": {"date": {"$gte": start.isoformat()}, "status": "approved"}},
         {"$group": {"_id": None, "total": {"$sum": "$amount"}}}
     ]))
-    po_out = list(db.purchase_orders.aggregate([
+    po_out = list(db.get_collection("purchase_orders").aggregate([
         {"$match": {"date": {"$gte": start.isoformat()}, "payment_status": "paid"}},
         {"$group": {"_id": None, "total": {"$sum": "$total"}}}
     ]))
@@ -291,11 +291,11 @@ async def lock_period(
     if "SUPERADMIN" not in current_user.get("roles", []) and "ADMIN" not in current_user.get("roles", []):
         raise HTTPException(403, "Only admin/superadmin can lock periods")
 
-    existing = db.period_locks.find_one({"month": month, "year": year})
+    existing = db.get_collection("period_locks").find_one({"month": month, "year": year})
     if existing:
         raise HTTPException(400, f"Period {month}/{year} is already locked")
 
-    db.period_locks.insert_one({
+    db.get_collection("period_locks").insert_one({
         "month": month, "year": year,
         "locked_by": current_user.get("user_id"),
         "locked_at": datetime.utcnow().isoformat(),
@@ -305,7 +305,7 @@ async def lock_period(
 @router.get("/period-locks")
 async def get_period_locks(current_user: dict = Depends(get_current_user)):
     db = _get_db()
-    locks = list(db.period_locks.find({}, {"_id": 0}))
+    locks = list(db.get_collection("period_locks").find({}, {"_id": 0}))
     return locks
 
 
@@ -323,7 +323,7 @@ async def get_budget(
     m = month or now.month
     y = year or now.year
 
-    budget = db.budgets.find_one({"month": m, "year": y, "mode": mode}, {"_id": 0})
+    budget = db.get_collection("budgets").find_one({"month": m, "year": y, "mode": mode}, {"_id": 0})
     if not budget:
         # Default budget structure
         budget = {
@@ -341,7 +341,7 @@ async def get_budget(
     # Fill actuals from expenses
     start = datetime(y, m, 1)
     end = datetime(y, m + 1 if m < 12 else 1, 1) if m < 12 else datetime(y + 1, 1, 1)
-    actuals = list(db.expenses.aggregate([
+    actuals = list(db.get_collection("expenses").aggregate([
         {"$match": {"date": {"$gte": start.isoformat(), "$lt": end.isoformat()}, "status": "approved"}},
         {"$group": {"_id": "$category", "total": {"$sum": "$amount"}}}
     ]))
@@ -359,7 +359,7 @@ async def get_budget(
 async def get_reconciliation(current_user: dict = Depends(get_current_user)):
     db = _get_db()
     # Inter-store transfers needing reconciliation
-    pending = list(db.stock_transfers.find(
+    pending = list(db.get_collection("stock_transfers").find(
         {"status": {"$in": ["shipped", "in_transit"]}},
         {"_id": 0, "transfer_id": 1, "from_store": 1, "to_store": 1, "items": 1, "created_at": 1}
     ).limit(50))

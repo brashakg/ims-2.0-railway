@@ -404,7 +404,7 @@ async def list_stock_counts(
 
     if db is not None:
         try:
-            collection = db["stock_counts"]
+            collection = db.get_collection("stock_counts")
             query: Dict = {"store_id": active_store}
             if status:
                 query["status"] = status
@@ -469,7 +469,7 @@ async def start_stock_count(
 
     if db is not None:
         try:
-            db["stock_counts"].insert_one(count_doc)
+            db.get_collection("stock_counts").insert_one(count_doc)
         except Exception as e:
             logger.warning(f"stock_count create error: {e}")
 
@@ -491,7 +491,7 @@ async def record_count_item(
         return {"message": "Item recorded (no DB)", "count_id": count_id}
 
     try:
-        collection = db["stock_counts"]
+        collection = db.get_collection("stock_counts")
         count_doc = collection.find_one({"count_id": count_id})
         if not count_doc:
             raise HTTPException(status_code=404, detail="Stock count session not found")
@@ -548,7 +548,7 @@ async def complete_stock_count(
         return {"message": "Stock count completed", "variances": []}
 
     try:
-        collection = db["stock_counts"]
+        collection = db.get_collection("stock_counts")
         count_doc = collection.find_one({"count_id": count_id})
         if not count_doc:
             raise HTTPException(status_code=404, detail="Stock count session not found")
@@ -631,7 +631,7 @@ async def get_stock_count(
         raise HTTPException(status_code=404, detail="Stock count not found")
 
     try:
-        collection = db["stock_counts"]
+        collection = db.get_collection("stock_counts")
         count_doc = collection.find_one({"count_id": count_id})
         if not count_doc:
             raise HTTPException(status_code=404, detail="Stock count session not found")
@@ -712,9 +712,9 @@ async def get_non_moving_stock(
         raise HTTPException(status_code=500, detail="Database connection error")
 
     try:
-        products_coll = db["products"]
-        orders_coll = db["orders"]
-        stock_coll = db["stock"]
+        products_coll = db.get_collection("products")
+        orders_coll = db.get_collection("orders")
+        stock_coll = db.get_collection("stock")
 
         # Get all products (optionally filtered by category)
         query = {} if not category else {"category": category}
@@ -797,8 +797,8 @@ async def scan_barcode_for_count(
         raise HTTPException(status_code=500, detail="Database connection error")
 
     try:
-        stock_coll = db["stock"]
-        products_coll = db["products"]
+        stock_coll = db.get_collection("stock")
+        products_coll = db.get_collection("products")
 
         # Find stock by barcode
         stock = stock_coll.find_one({"barcode": request.barcode})
@@ -850,8 +850,8 @@ async def get_contact_lens_expiry_status(
         raise HTTPException(status_code=500, detail="Database connection error")
 
     try:
-        stock_coll = db["stock"]
-        products_coll = db["products"]
+        stock_coll = db.get_collection("stock")
+        products_coll = db.get_collection("products")
 
         # Get all contact lens stocks with expiry dates
         cutoff_date = datetime.utcnow() + timedelta(days=expiring_within_days)
@@ -924,8 +924,8 @@ async def get_lens_power_grid(
         raise HTTPException(status_code=500, detail="Database connection error")
 
     try:
-        stock_coll = db["stock"]
-        products_coll = db["products"]
+        stock_coll = db.get_collection("stock")
+        products_coll = db.get_collection("products")
 
         # Define SPH and CYL ranges
         sph_values = [str(x / 2) for x in range(-16, 13)]  # -8.00 to +6.00
@@ -984,9 +984,9 @@ async def get_sell_through_analysis(
         raise HTTPException(status_code=500, detail="Database connection error")
 
     try:
-        orders_coll = db["orders"]
-        stock_coll = db["stock"]
-        products_coll = db["products"]
+        orders_coll = db.get_collection("orders")
+        stock_coll = db.get_collection("stock")
+        products_coll = db.get_collection("products")
 
         cutoff_date = datetime.utcnow() - timedelta(days=days)
 
@@ -1062,9 +1062,9 @@ async def get_overstock_analysis(
         raise HTTPException(status_code=500, detail="Database connection error")
 
     try:
-        orders_coll = db["orders"]
-        stock_coll = db["stock"]
-        products_coll = db["products"]
+        orders_coll = db.get_collection("orders")
+        stock_coll = db.get_collection("stock")
+        products_coll = db.get_collection("products")
 
         cutoff_date = datetime.utcnow() - timedelta(days=days)
 

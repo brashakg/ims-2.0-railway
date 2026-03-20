@@ -86,7 +86,6 @@ export function GoodsReceiptNote() {
         setGrns(transformedGRNs);
       } catch (error) {
         toast.error('Failed to load GRNs');
-        console.error(error);
       } finally {
         setIsLoading(false);
       }

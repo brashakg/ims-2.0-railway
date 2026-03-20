@@ -174,10 +174,15 @@ export function HRPage() {
                 const lat = pos.coords.latitude;
                 const lng = pos.coords.longitude;
 
-                // Geo-fence enforcement: store locations (Bokaro Steel City area)
+                // Geo-fence enforcement: store locations
+                // TODO: Fetch store locations from /api/v1/stores/{storeId} instead of hardcoding
                 const STORE_LOCATIONS: Record<string, { lat: number; lng: number; radius: number }> = {
-                  'BV-BOK-01': { lat: 23.6693, lng: 86.1511, radius: 200 }, // 200m radius
+                  'BV-BOK-01': { lat: 23.6693, lng: 86.1511, radius: 200 },
                   'BV-BOK-02': { lat: 23.6750, lng: 86.1480, radius: 200 },
+                  'BV-DHB-01': { lat: 23.7957, lng: 86.4304, radius: 200 },
+                  'BV-DHB-02': { lat: 23.7890, lng: 86.4350, radius: 200 },
+                  'WO-DHB-01': { lat: 23.8000, lng: 86.4400, radius: 200 },
+                  'BV-PUN-01': { lat: 18.4766, lng: 73.9072, radius: 200 },
                 };
                 const storeLoc = STORE_LOCATIONS[user?.activeStoreId || ''];
                 if (storeLoc) {

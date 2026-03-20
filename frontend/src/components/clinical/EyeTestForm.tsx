@@ -345,6 +345,8 @@ export function EyeTestForm({ isOpen, onClose, onSave, patient, optometristName 
           </div>
           <div className="flex items-center gap-2">
             <button
+              disabled
+              title="Coming soon"
               onClick={() => {/* TODO: View history */}}
               className="btn-outline flex items-center gap-2 text-sm"
             >
@@ -352,6 +354,8 @@ export function EyeTestForm({ isOpen, onClose, onSave, patient, optometristName 
               History
             </button>
             <button
+              disabled
+              title="Coming soon"
               onClick={() => {/* TODO: Print */}}
               className="btn-outline flex items-center gap-2 text-sm"
             >
@@ -1081,6 +1085,8 @@ export function EyeTestForm({ isOpen, onClose, onSave, patient, optometristName 
         {/* Footer */}
         <div className="flex items-center justify-end gap-3 p-4 border-t border-gray-200 bg-gray-50">
           <button
+            disabled
+            title="Coming soon"
             onClick={() => {/* TODO: View history */}}
             className="btn-outline flex items-center gap-2"
           >
@@ -1088,6 +1094,8 @@ export function EyeTestForm({ isOpen, onClose, onSave, patient, optometristName 
             View History
           </button>
           <button
+            disabled
+            title="Coming soon"
             onClick={() => {/* TODO: Print */}}
             className="btn-outline flex items-center gap-2"
           >

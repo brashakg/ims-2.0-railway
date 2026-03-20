@@ -980,25 +980,12 @@ export function InventoryPage() {
                   Cancel
                 </button>
                 <button
-                  disabled={!csvFile || csvImporting}
-                  onClick={async () => {
-                    setCsvImporting(true);
-                    try {
-                      // TODO: Call backend bulk import API
-                      await new Promise(resolve => setTimeout(resolve, 2000));
-                      toast.success(`Successfully imported ${csvPreview.length} products`);
-                      setShowCSVImport(false); setCsvFile(null); setCsvPreview([]);
-                      loadInventory();
-                    } catch {
-                      toast.error('Import failed. Check CSV format and try again.');
-                    } finally {
-                      setCsvImporting(false);
-                    }
-                  }}
-                  className="px-6 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50 flex items-center gap-2"
+                  disabled
+                  title="Coming soon"
+                  className="px-6 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium disabled:opacity-50 cursor-not-allowed flex items-center gap-2"
                 >
-                  {csvImporting ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle className="w-4 h-4" />}
-                  {csvImporting ? 'Importing...' : 'Import Products'}
+                  <CheckCircle className="w-4 h-4" />
+                  Import Products
                 </button>
               </div>
             </div>

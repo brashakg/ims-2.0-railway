@@ -3,7 +3,8 @@
 // ============================================================================
 // Complete stock transfer workflow with approval and receiving
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
+import { useDebounce } from '../../hooks/useDebounce';
 import {
   X,
   ArrowRightLeft,
@@ -66,6 +67,7 @@ export function StockTransferModal({ isOpen, onClose, onTransferCreated }: Stock
   // Items
   const [transferItems, setTransferItems] = useState<TransferItem[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
+  const debouncedSearchQuery = useDebounce(searchQuery);
   const [searchResults, setSearchResults] = useState<StockItem[]>([]);
   const [isSearching, setIsSearching] = useState(false);
 
@@ -103,8 +105,8 @@ export function StockTransferModal({ isOpen, onClose, onTransferCreated }: Stock
     setSearchResults([]);
   };
 
-  const handleSearch = async () => {
-    if (!searchQuery.trim()) {
+  const handleSearch = useCallback(async (query: string) => {
+    if (!query.trim()) {
       setSearchResults([]);
       return;
     }
@@ -118,8 +120,8 @@ export function StockTransferModal({ isOpen, onClose, onTransferCreated }: Stock
       // Filter by search query and availability
       const availableStock = stock.filter((item: StockItem) => {
         const matchesSearch =
-          item.productName?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-          item.sku?.toLowerCase().includes(searchQuery.toLowerCase());
+          item.productName?.toLowerCase().includes(query.toLowerCase()) ||
+          item.sku?.toLowerCase().includes(query.toLowerCase());
 
         const notInTransfer = !transferItems.some(ti => ti.productId === item.productId);
         const hasAvailableQty = (item.quantity - item.reservedQuantity) > 0;
@@ -133,7 +135,12 @@ export function StockTransferModal({ isOpen, onClose, onTransferCreated }: Stock
     } finally {
       setIsSearching(false);
     }
-  };
+  }, [user?.activeStoreId, transferItems, toast]);
+
+  // Auto-trigger search when debounced query changes
+  useEffect(() => {
+    handleSearch(debouncedSearchQuery);
+  }, [debouncedSearchQuery, handleSearch]);
 
   const handleAddItem = (stockItem: StockItem) => {
     const availableQty = stockItem.quantity - stockItem.reservedQuantity;
@@ -364,13 +371,13 @@ export function StockTransferModal({ isOpen, onClose, onTransferCreated }: Stock
                       type="text"
                       value={searchQuery}
                       onChange={(e) => setSearchQuery(e.target.value)}
-                      onKeyPress={(e) => e.key === 'Enter' && handleSearch()}
+                      onKeyPress={(e) => e.key === 'Enter' && handleSearch(searchQuery)}
                       placeholder="Search by name, SKU, or barcode..."
                       className="input-field pl-10 w-full"
                     />
                   </div>
                   <button
-                    onClick={handleSearch}
+                    onClick={() => handleSearch(searchQuery)}
                     disabled={isSearching}
                     className="btn-primary flex items-center gap-2"
                   >

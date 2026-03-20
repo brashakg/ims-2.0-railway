@@ -117,13 +117,6 @@ export function NotificationSettings() {
       const message = populateTemplate(selectedTemplate.template, mockVariables);
 
       // In production, call API to send test notification
-      console.log('Sending test notification:', {
-        phone: testPhone,
-        message,
-        channel: selectedTemplate.channel,
-        provider: providerConfig.provider,
-      });
-
       await new Promise(resolve => setTimeout(resolve, 1000));
 
       toast.success(`Test ${selectedTemplate.channel} sent to ${testPhone}`);

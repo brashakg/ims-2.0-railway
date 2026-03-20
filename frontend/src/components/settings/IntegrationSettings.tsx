@@ -187,12 +187,11 @@ export function IntegrationSettings() {
               {integration.testable && (
                 <button
                   onClick={() => handleTestConnection(integration.id)}
-                  disabled={testingId === integration.id}
+                  disabled
+                  title="Coming soon"
                   className={clsx(
                     'flex-1 flex items-center justify-center gap-2 px-3 py-2 rounded text-sm font-medium transition',
-                    testingId === integration.id
-                      ? 'bg-gray-700 text-gray-500 cursor-not-allowed'
-                      : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+                    'bg-gray-700 text-gray-500 cursor-not-allowed'
                   )}
                 >
                   <Zap className="w-4 h-4" />

@@ -280,7 +280,7 @@ export function POSLayout() {
           try {
             await orderApi.addPayment(result.order_id, { method: p.method, amount: p.amount, reference: p.reference } as any);
           } catch {
-            console.error('Payment recording failed for', p.method, p.amount);
+
             // Don't block order — payment can be recorded later
           }
         }
@@ -312,7 +312,7 @@ export function POSLayout() {
               expected_date: expectedDate.toISOString().split('T')[0],
             });
           } catch {
-            console.warn('Workshop job auto-create failed — can be created manually');
+
           }
         }
 
@@ -323,7 +323,7 @@ export function POSLayout() {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       setErrorMsg('Failed to create order: ' + (msg || 'Network error'));
-      console.error('Order creation error:', err);
+
     } finally {
       store.setProcessing(false);
     }
@@ -339,7 +339,7 @@ export function POSLayout() {
           </div>
           <div className="min-w-0">
             <h1 className="text-base tablet:text-lg font-bold text-white truncate">Point of Sale</h1>
-            <p className="text-[10px] tablet:text-xs text-gray-500 truncate">· {store.store_id || 'BV-BOK-01'}</p>
+            <p className="text-[10px] tablet:text-xs text-gray-500 truncate">· {store.store_id || 'No store'}</p>
           </div>
         </div>
         <div className="flex items-center gap-1.5 tablet:gap-2 flex-shrink-0">
@@ -523,7 +523,7 @@ export function POSLayout() {
                   } catch (err) {
                     const msg = err instanceof Error ? err.message : String(err);
                     setErrorMsg(msg || 'Network error — check your connection and try again');
-                    console.error('Prescription save error:', err);
+
                   }
                 }}
                 onCancel={() => { setShowNewPrescription(false); setErrorMsg(null); }}
@@ -1776,7 +1776,7 @@ function StepComplete({ onPrint, onReset }: { onPrint: () => void; onReset: () =
     'WO-DHB-01': { name: 'WizOpt', gstin: '20AABCW9012H1ZR', address: 'Shastri Nagar', city: 'Dhanbad', state: 'Jharkhand', stateCode: '20', pincode: '826001' },
     'BV-PUN-01': { name: 'Better Vision Opticals', gstin: '27AABCB3456I1ZS', address: 'NIBM Road', city: 'Pune', state: 'Maharashtra', stateCode: '27', pincode: '411048' },
   };
-  const sd = STORE_DETAILS[store.store_id] || { name: 'Better Vision Opticals', gstin: '', address: '', city: '', state: 'Jharkhand', stateCode: '20', pincode: '' };
+  const sd = STORE_DETAILS[store.store_id] || { name: 'Better Vision Opticals', gstin: '', address: '', city: '', state: '', stateCode: '', pincode: '' };
 
   const storeForInvoice = useMemo(() => ({
     id: store.store_id,

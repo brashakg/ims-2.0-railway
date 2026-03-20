@@ -134,7 +134,6 @@ export function TasksPage() {
       });
 
     } catch (err) {
-      console.error('Failed to load tasks:', err);
       setError('Failed to load tasks. Please try again.');
     } finally {
       setIsLoading(false);
@@ -165,7 +164,6 @@ export function TasksPage() {
       await loadTasks();
 
     } catch (err) {
-      console.error('Failed to update task:', err);
       toast.error('Failed to update task');
     } finally {
       setIsUpdating(null);
@@ -182,7 +180,6 @@ export function TasksPage() {
       toast.success('Task started');
       await loadTasks();
     } catch (err) {
-      console.error('Failed to start task:', err);
       toast.error('Failed to start task');
     } finally {
       setIsUpdating(null);
@@ -245,7 +242,6 @@ export function TasksPage() {
       });
       await loadTasks();
     } catch (err) {
-      console.error('Failed to create task:', err);
       toast.error('Failed to create task');
     } finally {
       setIsCreating(false);

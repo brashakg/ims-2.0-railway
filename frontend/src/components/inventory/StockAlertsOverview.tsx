@@ -209,7 +209,7 @@ export function StockAlertsOverview() {
       setAlerts(mockAlerts);
       setStats(alertStats);
     } catch (error) {
-      console.error('Failed to load alerts:', error);
+      // silently handle error
     } finally {
       setIsLoading(false);
     }

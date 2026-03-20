@@ -143,7 +143,6 @@ export function IncentiveDashboard() {
       setLeaderboard(leaderboardData?.leaderboard || []);
     } catch (err) {
       setError('Failed to load incentive data');
-      console.error(err);
     } finally {
       setIsLoading(false);
     }

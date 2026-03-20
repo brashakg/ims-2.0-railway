@@ -67,7 +67,6 @@ export function AdvancedSearch({
           setResults(searchResults);
           setShowResults(true);
         } catch (error) {
-          console.error('Search error:', error);
           setResults([]);
         } finally {
           setIsLoading(false);

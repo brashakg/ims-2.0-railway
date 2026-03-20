@@ -80,7 +80,8 @@ const STATUS_LABELS: Record<string, string> = {
 
 export function VendorReturns() {
   const toast = useToast();
-  const { } = useAuth();
+  const { user } = useAuth();
+  const activeStoreId = user?.activeStoreId || '';
 
   const [activeTab, setActiveTab] = useState<'active' | 'history'>('active');
   const [isLoading, setIsLoading] = useState(true);
@@ -133,7 +134,7 @@ export function VendorReturns() {
             return_id: 'VR-20240318-A1B2C3D4',
             vendor_id: 'V001',
             vendor_name: 'Optical Frames Ltd',
-            store_id: 'STORE001',
+            store_id: activeStoreId,
             items: [
               {
                 product_id: 'PROD001',
@@ -156,7 +157,7 @@ export function VendorReturns() {
             return_id: 'VR-20240317-E5F6G7H8',
             vendor_id: 'V002',
             vendor_name: 'Lens Manufacturers Inc',
-            store_id: 'STORE001',
+            store_id: activeStoreId,
             items: [
               {
                 product_id: 'PROD002',
@@ -179,7 +180,7 @@ export function VendorReturns() {
             return_id: 'VR-20240316-I9J0K1L2',
             vendor_id: 'V003',
             vendor_name: 'Contact Lens Supplier',
-            store_id: 'STORE001',
+            store_id: activeStoreId,
             items: [
               {
                 product_id: 'PROD003',
@@ -201,7 +202,6 @@ export function VendorReturns() {
         ]);
       } catch (error) {
         toast.error('Failed to load vendor returns');
-        console.error(error);
       } finally {
         setIsLoading(false);
       }
@@ -242,7 +242,6 @@ export function VendorReturns() {
       setNotes('');
     } catch (error) {
       toast.error('Failed to create vendor return');
-      console.error(error);
     }
   };
 

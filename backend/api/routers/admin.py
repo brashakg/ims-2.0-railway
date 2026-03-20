@@ -28,7 +28,7 @@ def _get_integrations_collection():
 
         db = get_db()
         if db and db.is_connected:
-            return db.db["integrations"]
+            return db.get_collection("integrations")
     except Exception:
         pass
     return None

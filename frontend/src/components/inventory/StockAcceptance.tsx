@@ -97,7 +97,6 @@ export function StockAcceptance() {
 
       setPendingItems(items);
     } catch (err) {
-      console.error('Failed to load pending stock:', err);
       setError('Failed to load pending stock');
       setPendingItems([]);
     } finally {
@@ -164,7 +163,6 @@ export function StockAcceptance() {
         )
       );
     } catch (err) {
-      console.error('Failed to accept GRN:', err);
       alert('Failed to accept stock. Please try again.');
     }
   };

@@ -99,7 +99,6 @@ export function BulkActionsToolbar({
       await Promise.resolve(onAction(action, selectedIds));
       onDeselectAll?.();
     } catch (error) {
-      console.error(`Error performing ${action}:`, error);
       alert(`Failed to perform ${action}`);
     } finally {
       setActionLoading(false);

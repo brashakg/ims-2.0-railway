@@ -29,7 +29,7 @@ export function PendingDeliveriesWidget() {
         const response = await api.get('/orders?status=pending&limit=1');
         setCount(response.data?.total || 0);
       } catch (error) {
-        console.error('Error loading pending deliveries:', error);
+
       } finally {
         setLoading(false);
       }
@@ -68,7 +68,7 @@ export function RemindersWidget() {
         const response = await api.get('/tasks?status=pending&dueToday=true');
         setCount(response.data?.total || 0);
       } catch (error) {
-        console.error('Error loading reminders:', error);
+
       } finally {
         setLoading(false);
       }
@@ -111,7 +111,7 @@ export function StockCountStatusWidget() {
           percent: response.data?.completion_percent || 0,
         });
       } catch (error) {
-        console.error('Error loading stock count status:', error);
+
       } finally {
         setLoading(false);
       }
@@ -159,7 +159,7 @@ export function TaskCompletionWidget() {
         const response = await api.get('/tasks/completion-stats');
         setPercent(response.data?.completion_percent || 0);
       } catch (error) {
-        console.error('Error loading task completion:', error);
+
       } finally {
         setLoading(false);
       }
@@ -195,7 +195,7 @@ export function EyeTestCountWidget() {
         const response = await api.get('/clinical/eye-tests?status=completed&date=today');
         setCount(response.data?.total || 0);
       } catch (error) {
-        console.error('Error loading eye test count:', error);
+
       } finally {
         setLoading(false);
       }
@@ -238,7 +238,7 @@ export function StoreVsTargetWidget() {
           percent: response.data?.achievement_percent || 0,
         });
       } catch (error) {
-        console.error('Error loading store vs target:', error);
+
       } finally {
         setLoading(false);
       }
@@ -300,7 +300,7 @@ export function StaffAttendanceWidget() {
         const response = await api.get('/hr/attendance-compliance');
         setData(response.data?.stores || []);
       } catch (error) {
-        console.error('Error loading attendance:', error);
+
       } finally {
         setLoading(false);
       }
@@ -356,7 +356,7 @@ export function EscalationsWidget() {
         const response = await api.get('/tasks/escalations?status=open');
         setCount(response.data?.total || 0);
       } catch (error) {
-        console.error('Error loading escalations:', error);
+
       } finally {
         setLoading(false);
       }
@@ -395,7 +395,7 @@ export function HQEscalationsWidget() {
         const response = await api.get('/admin/escalations?level=hq');
         setCount(response.data?.total || 0);
       } catch (error) {
-        console.error('Error loading HQ escalations:', error);
+
       } finally {
         setLoading(false);
       }
@@ -442,7 +442,7 @@ export function HRSummaryWidget() {
           pending: response.data?.pending_leaves || 0,
         });
       } catch (error) {
-        console.error('Error loading HR summary:', error);
+
       } finally {
         setLoading(false);
       }
@@ -575,7 +575,7 @@ export function FinancialSummaryWidget() {
           gstPaid: response.data?.gst_paid || 0,
         });
       } catch (error) {
-        console.error('Error loading financial data:', error);
+
       } finally {
         setLoading(false);
       }
@@ -638,7 +638,7 @@ export function GSTFilingStatusWidget() {
         const response = await api.get('/finance/gst-status');
         setDaysUntilDue(response.data?.days_until_due || 15);
       } catch (error) {
-        console.error('Error loading GST status:', error);
+
       } finally {
         setLoading(false);
       }
@@ -676,7 +676,7 @@ export function PendingReconciliationsWidget() {
         const response = await api.get('/finance/pending-reconciliations');
         setCount(response.data?.total || 0);
       } catch (error) {
-        console.error('Error loading reconciliations:', error);
+
       } finally {
         setLoading(false);
       }
@@ -718,7 +718,7 @@ export function PatientQueueWidget() {
           estimatedWait: response.data?.estimated_wait_minutes || 0,
         });
       } catch (error) {
-        console.error('Error loading patient queue:', error);
+
       } finally {
         setLoading(false);
       }
@@ -760,7 +760,7 @@ export function PrescriptionRedoRateWidget() {
         const response = await api.get('/clinical/prescription-redo-rate');
         setPercent(response.data?.redo_rate_percent || 0);
       } catch (error) {
-        console.error('Error loading redo rate:', error);
+
       } finally {
         setLoading(false);
       }
@@ -804,7 +804,7 @@ export function CatalogSKUCountWidget() {
           pending: response.data?.pending_activation || 0,
         });
       } catch (error) {
-        console.error('Error loading SKU counts:', error);
+
       } finally {
         setLoading(false);
       }
@@ -855,7 +855,7 @@ export function PriceChangeRequestsWidget() {
         const response = await api.get('/catalog/price-change-requests?status=pending');
         setCount(response.data?.total || 0);
       } catch (error) {
-        console.error('Error loading price requests:', error);
+
       } finally {
         setLoading(false);
       }
@@ -894,7 +894,7 @@ export function RecentActivityWidget() {
         const response = await api.get('/catalog/recent-activity?limit=5');
         setActivities(response.data?.activities || []);
       } catch (error) {
-        console.error('Error loading activity:', error);
+
       } finally {
         setLoading(false);
       }

@@ -93,8 +93,9 @@ export function FamilyPrescriptionsView({
             Family Members
           </h3>
           <button
-            onClick={() => setShowAddMember(true)}
-            className="flex items-center gap-2 px-3 py-1 text-sm bg-blue-600 text-white rounded hover:bg-blue-700 transition"
+            disabled
+            title="Coming soon"
+            className="flex items-center gap-2 px-3 py-1 text-sm bg-blue-600 text-white rounded opacity-50 cursor-not-allowed"
           >
             <Plus className="w-4 h-4" />
             Add Member

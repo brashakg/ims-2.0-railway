@@ -8,6 +8,7 @@
 // - Prescription expiry reminders
 
 import { useState, useEffect } from 'react';
+import { useAuth } from '../../context/AuthContext';
 import { Phone, Clock, AlertCircle, CheckCircle2, RotateCcw, Calendar } from 'lucide-react';
 import clsx from 'clsx';
 
@@ -70,7 +71,12 @@ export function FollowUpDashboard() {
   const [loading, setLoading] = useState(true);
   const [completing, setCompleting] = useState<string | null>(null);
   const [selectedOutcome, setSelectedOutcome] = useState<Record<string, string>>({});
-  const storeId = 'STORE001'; // TODO: Get from context
+  const { user } = useAuth();
+  const storeId = user?.activeStoreId;
+
+  if (!storeId) {
+    return <div className="p-8 text-center text-red-600">No store selected. Please select a store from the header.</div>;
+  }
 
   useEffect(() => {
     loadFollowUps();
@@ -89,7 +95,7 @@ export function FollowUpDashboard() {
         setFollowUps(data);
       }
     } catch (error) {
-      console.error('Failed to load follow-ups:', error);
+      // silently handle error
     } finally {
       setLoading(false);
     }
@@ -106,7 +112,7 @@ export function FollowUpDashboard() {
         setSummary(data);
       }
     } catch (error) {
-      console.error('Failed to load summary:', error);
+      // silently handle error
     }
   };
 
@@ -120,13 +126,12 @@ export function FollowUpDashboard() {
         }
       );
       if (response.ok) {
-        const result = await response.json();
-        console.log('Auto-generated:', result);
+        await response.json();
         await loadFollowUps();
         await loadSummary();
       }
     } catch (error) {
-      console.error('Failed to auto-generate follow-ups:', error);
+      // silently handle error
     }
   };
 
@@ -154,7 +159,7 @@ export function FollowUpDashboard() {
         });
       }
     } catch (error) {
-      console.error('Failed to complete follow-up:', error);
+      // silently handle error
     } finally {
       setCompleting(null);
     }

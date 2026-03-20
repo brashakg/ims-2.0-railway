@@ -324,7 +324,6 @@ export function AddProductPage() {
       };
 
       // API call would go here
-      console.log('Submitting product:', productData);
 
       // Simulate API call
       await new Promise((resolve) => setTimeout(resolve, 1500));

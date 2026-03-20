@@ -4,7 +4,8 @@
 // Superadmin controls for the entire software: module access per store,
 // role permissions, discount limits, feature flags, operational rules
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
+import { adminStoreApi } from '../../services/api';
 import {
   Store, Shield, Eye, EyeOff, Save, Loader2,
   ShoppingCart, Stethoscope, Wrench, Package, BarChart3,
@@ -84,16 +85,8 @@ const ROLES = [
   { id: 'WORKSHOP_STAFF', name: 'Workshop Staff' },
 ];
 
-const DEFAULT_STORES: StoreModuleConfig[] = [
-  {
-    storeId: 'BV-BOK-01', storeName: 'Better Vision — Bokaro Steel City 1',
-    modules: { pos: true, clinical: true, workshop: true, inventory: true, reports: true, hr: true, finance: true, crm: true, tasks: true, settings: true },
-  },
-  {
-    storeId: 'BV-BOK-02', storeName: 'Better Vision — Bokaro Steel City 2',
-    modules: { pos: true, clinical: true, workshop: false, inventory: true, reports: true, hr: true, finance: false, crm: true, tasks: true, settings: false },
-  },
-];
+const DEFAULT_STORES: StoreModuleConfig[] = [];
+// Stores are now fetched dynamically from the API
 
 const DEFAULT_DISCOUNT_LIMITS: DiscountLimit[] = [
   { roleId: 'SUPERADMIN', roleName: 'Superadmin', maxDiscountPercent: 100, requiresApproval: false, approvalThreshold: 0 },
@@ -133,8 +126,21 @@ export function AdminControlPanel() {
   const [activeTab, setActiveTab] = useState<PanelTab>('modules');
   const [isSaving, setIsSaving] = useState(false);
 
-  // Store module access
+  // Store module access — fetch dynamically
   const [storeModules, setStoreModules] = useState<StoreModuleConfig[]>(DEFAULT_STORES);
+
+  useEffect(() => {
+    adminStoreApi.getStores().then((data: any) => {
+      const storeList = Array.isArray(data?.stores || data) ? (data?.stores || data) : [];
+      if (storeList.length > 0) {
+        setStoreModules(storeList.map((s: any) => ({
+          storeId: s.store_id || s.store_code || s.id,
+          storeName: s.store_name || s.name || '',
+          modules: s.modules || { pos: true, clinical: true, workshop: true, inventory: true, reports: true, hr: true, finance: true, crm: true, tasks: true, settings: true },
+        })));
+      }
+    }).catch(() => {});
+  }, []);
 
   // Role permissions
   const [rolePermissions] = useState<RolePermission[]>(

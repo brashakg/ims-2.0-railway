@@ -151,7 +151,6 @@ export default function EnterpriseAnalyticsDashboard() {
       setError(null);
     } catch (err) {
       setError('Failed to load dashboard data');
-      console.error('Dashboard error:', err);
     } finally {
       setIsLoading(false);
     }

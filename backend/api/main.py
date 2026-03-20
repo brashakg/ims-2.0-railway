@@ -51,7 +51,6 @@ from .routers import (
     settings_router,
     clinical_router,
     admin_router,
-    # shopify_router,  # REMOVED: Shopify module unused (47 orphan endpoints)
     transfers_router,
     catalog_router,
     jarvis_router,
@@ -353,7 +352,6 @@ app.include_router(reports_router, prefix="/api/v1/reports", tags=["Reports"])
 app.include_router(settings_router, prefix="/api/v1/settings", tags=["Settings"])
 app.include_router(clinical_router, prefix="/api/v1/clinical", tags=["Clinical"])
 app.include_router(admin_router, prefix="/api/v1/admin", tags=["Admin"])
-# app.include_router(shopify_router, prefix="/api/v1/shopify", tags=["Shopify"])  # REMOVED: unused
 app.include_router(
     transfers_router, prefix="/api/v1/transfers", tags=["Stock Transfers"]
 )

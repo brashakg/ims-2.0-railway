@@ -31,12 +31,14 @@ class CartItemData:
         unit_price: float,
         quantity: int,
         discount_percent: Optional[float] = None,
+        category: Optional[str] = None,
     ):
         self.product_id = product_id
         self.name = name
         self.unit_price = unit_price
         self.quantity = quantity
         self.discount_percent = discount_percent or 0
+        self.category = category or ""
 
 
 class BillCalculation:
@@ -72,12 +74,32 @@ def _get_db():
     return None
 
 
+def get_gst_rate_by_category(category: str) -> float:
+    """
+    Get GST rate based on product category.
+    GST 2.0 rates (effective Sep 22, 2025):
+      5% — Frames, Lenses, Spectacles, Contact Lenses
+     18% — Sunglasses, Watches, Accessories, Services
+    """
+    category_upper = (category or "").upper().strip()
+    five_percent_categories = {
+        "FRAMES", "FRAME", "EYEGLASS_FRAME",
+        "LENSES", "LENS", "RX_LENSES", "EYEGLASS_LENS", "OPTICAL_LENS",
+        "CONTACT_LENSES", "CONTACT_LENS", "COLOUR_CONTACTS",
+        "SPECTACLES", "SPECTACLE", "COMPLETE_SPECTACLE",
+    }
+    if category_upper in five_percent_categories:
+        return 0.05
+    # Sunglasses, Watches, Accessories, Services → 18%
+    return 0.18
+
+
 def calculate_bill(
     items: List[CartItemData],
     order_discount_percent: float = 0,
     use_igst: bool = False,
 ) -> BillCalculation:
-    """Calculate bill with all taxes and discounts"""
+    """Calculate bill with per-item GST rates based on product category"""
     bill = BillCalculation()
 
     # Calculate subtotal with item-level discounts
@@ -97,15 +119,24 @@ def calculate_bill(
     bill.order_discount = order_discount_percent
     bill.taxable_amount = bill.subtotal_after_discount - bill.order_discount_amount
 
-    # Calculate GST (18% standard rate for optical goods in India)
-    gst_rate = 0.18
+    # Calculate GST per item using category-based rates
+    for item in items:
+        gst_rate = get_gst_rate_by_category(item.category)
+        item_total = item.unit_price * item.quantity
+        item_discount = item_total * (item.discount_percent / 100) if item.discount_percent > 0 else 0
+        item_after_discount = item_total - item_discount
+        # Apply order-level discount proportionally
+        if bill.subtotal_after_discount > 0:
+            item_taxable = item_after_discount * (1 - order_discount_percent / 100)
+        else:
+            item_taxable = 0
 
-    if use_igst:
-        bill.igst_amount = bill.taxable_amount * gst_rate
-    else:
-        # Split GST equally (9% CGST + 9% SGST) for intra-state
-        bill.cgst_amount = bill.taxable_amount * (gst_rate / 2)
-        bill.sgst_amount = bill.taxable_amount * (gst_rate / 2)
+        if use_igst:
+            bill.igst_amount += item_taxable * gst_rate
+        else:
+            # Split GST equally (CGST + SGST) for intra-state
+            bill.cgst_amount += item_taxable * (gst_rate / 2)
+            bill.sgst_amount += item_taxable * (gst_rate / 2)
 
     bill.total_gst = bill.cgst_amount + bill.sgst_amount + bill.igst_amount
 
@@ -159,9 +190,18 @@ async def create_invoice(
                 unit_price=item["unit_price"],
                 quantity=item["quantity"],
                 discount_percent=item.get("discount_percent", 0),
+                category=item.get("category", ""),
             )
             for item in items
         ]
+
+        # Validate: offer_price cannot exceed MRP (FIX 3)
+        for item in items:
+            if item.get("offer_price", 0) > item.get("mrp", 0) and item.get("mrp", 0) > 0:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Offer price (₹{item['offer_price']}) cannot exceed MRP (₹{item['mrp']}) for {item.get('name', 'item')}"
+                )
 
         # Calculate bill
         bill = calculate_bill(cart_items, order_discount, use_igst)
@@ -246,6 +286,36 @@ async def apply_discount(
         discount_type = discount_data.get("type")  # "coupon", "percent", "loyalty"
         discount_value = discount_data.get("value", 0)
         coupon_code = discount_data.get("coupon_code")
+        product_id = discount_data.get("product_id")
+
+        # Enforce user discount cap (FIX 2)
+        if discount_type in ("item", "order") and discount_value > 0:
+            user_discount_cap = current_user.get("discount_cap", 10.0)
+            if discount_value > user_discount_cap:
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"Discount {discount_value}% exceeds your cap of {user_discount_cap}%"
+                )
+
+            # Enforce category-based discount cap if product_id provided
+            if product_id:
+                db = _get_db()
+                if db is not None:
+                    try:
+                        product = db["products"].find_one({"product_id": product_id})
+                        if product:
+                            category_caps = {"LUXURY": 2.0, "PREMIUM": 5.0, "MASS": 10.0, "NON_DISCOUNTABLE": 0.0}
+                            category_cap = category_caps.get(product.get("discount_category", "MASS"), 10.0)
+                            effective_cap = min(user_discount_cap, category_cap)
+                            if discount_value > effective_cap:
+                                raise HTTPException(
+                                    status_code=403,
+                                    detail=f"Discount {discount_value}% exceeds limit of {effective_cap}% for this product category"
+                                )
+                    except HTTPException:
+                        raise
+                    except Exception:
+                        pass
 
         if discount_type == "coupon" and coupon_code:
             # Query discount_rules collection for valid coupons

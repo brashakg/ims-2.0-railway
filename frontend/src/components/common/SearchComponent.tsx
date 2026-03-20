@@ -3,7 +3,8 @@
 // ============================================================================
 // Reusable search component to eliminate duplication in ProductSearch, CustomerSearch, etc.
 
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
+import { useDebounce } from '../../hooks/useDebounce';
 import { Search as SearchIcon, X } from 'lucide-react';
 import clsx from 'clsx';
 
@@ -103,6 +104,7 @@ export function SearchComponent<T extends SearchItem>({
   resultsClassName,
 }: SearchComponentProps<T>) {
   const [searchQuery, setSearchQuery] = useState('');
+  const debouncedSearchQuery = useDebounce(searchQuery);
   const [results, setResults] = useState<T[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -138,11 +140,13 @@ export function SearchComponent<T extends SearchItem>({
     [onSearch, maxResults, onResultsChange]
   );
 
+  // Trigger search when debounced query changes
+  useEffect(() => {
+    handleSearch(debouncedSearchQuery);
+  }, [debouncedSearchQuery, handleSearch]);
+
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const value = e.target.value;
-    setSearchQuery(value);
-    // Debounce search in production - for now search on each keystroke
-    handleSearch(value);
+    setSearchQuery(e.target.value);
   };
 
   const handleClear = () => {

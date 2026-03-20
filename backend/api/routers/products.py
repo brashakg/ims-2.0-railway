@@ -103,7 +103,7 @@ async def list_products(
         # If store_id provided, filter to products with stock at this store
         if store_id and products:
             try:
-                stock_repo = repo.db["stock_units"] if hasattr(repo, 'db') else None
+                stock_repo = repo.db.get_collection("stock_units") if hasattr(repo, 'db') else None
                 if stock_repo:
                     stock_product_ids = set()
                     async for su in stock_repo.find(

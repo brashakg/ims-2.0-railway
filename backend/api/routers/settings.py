@@ -32,7 +32,7 @@ def _get_settings_collection(collection_name: str):
 
         db = get_db()
         if db and db.is_connected:
-            return db.db[collection_name]
+            return db.get_collection(collection_name)
     except Exception:
         pass
     return None
@@ -122,7 +122,7 @@ def _get_user_from_db(user_id: str) -> Optional[dict]:
 
         db = get_db()
         if db and db.is_connected:
-            users_collection = db.db["users"]
+            users_collection = db.get_collection("users")
             user = users_collection.find_one({"_id": user_id})
             if user:
                 user.pop("_id", None)

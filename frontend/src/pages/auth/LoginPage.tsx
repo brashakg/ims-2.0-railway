@@ -71,7 +71,6 @@ export function LoginPage() {
         }
       }
 
-      console.log('[LoginPage] Submitting login request...');
       const response = await login({
         username,
         password,
@@ -80,16 +79,13 @@ export function LoginPage() {
       });
 
       if (response.success) {
-        console.log('[LoginPage] Login successful, navigating to dashboard');
         navigate(from, { replace: true });
       } else {
         const errorMsg = response.message || 'Login failed. Please check your username and password.';
-        console.error('[LoginPage] Login failed:', errorMsg);
         setError(errorMsg);
       }
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : 'Login failed. Please try again.';
-      console.error('[LoginPage] Login error:', err);
       setError(errorMsg);
     }
   };

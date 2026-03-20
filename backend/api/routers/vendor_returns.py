@@ -93,7 +93,7 @@ async def list_vendor_returns(
         return {"returns": [], "total": 0}
 
     try:
-        collection = db.vendor_returns
+        collection = db.get_collection("vendor_returns")
         filter_dict = {}
 
         if store_id:
@@ -136,7 +136,7 @@ async def create_vendor_return(
         raise HTTPException(status_code=500, detail="Database not available")
 
     try:
-        collection = db.vendor_returns
+        collection = db.get_collection("vendor_returns")
         return_id = generate_return_id()
 
         # Calculate total value
@@ -197,7 +197,7 @@ async def get_vendor_return(
         raise HTTPException(status_code=500, detail="Database not available")
 
     try:
-        collection = db.vendor_returns
+        collection = db.get_collection("vendor_returns")
         return_doc = collection.find_one({"return_id": return_id})
 
         if not return_doc:
@@ -227,7 +227,7 @@ async def update_return_status(
         raise HTTPException(status_code=500, detail="Database not available")
 
     try:
-        collection = db.vendor_returns
+        collection = db.get_collection("vendor_returns")
         return_doc = collection.find_one({"return_id": return_id})
 
         if not return_doc:

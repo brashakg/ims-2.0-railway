@@ -92,7 +92,6 @@ export function VendorManagement() {
         setVendors(transformedVendors);
       } catch (error) {
         toast.error('Failed to load vendors');
-        console.error(error);
       } finally {
         setIsLoading(false);
       }

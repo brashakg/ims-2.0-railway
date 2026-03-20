@@ -55,7 +55,7 @@ export function useUserPreferences(userId: string) {
       try {
         return JSON.parse(stored);
       } catch (error) {
-        console.error('Failed to load user preferences:', error);
+        // silently handle parse error
       }
     }
 

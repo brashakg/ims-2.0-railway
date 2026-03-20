@@ -289,7 +289,6 @@ export function TaskManagementPage() {
       ]);
 
     } catch (err: any) {
-      console.error('Failed to load task data:', err);
       setError('Failed to load task data. Please try again.');
       toast.error('Failed to load task data');
     } finally {

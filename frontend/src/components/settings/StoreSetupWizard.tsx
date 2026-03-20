@@ -96,8 +96,18 @@ export function StoreSetupWizard() {
   const handleComplete = async () => {
     setIsLoading(true);
     try {
-      // TODO: Call API endpoint POST /stores with formData
-      await new Promise(resolve => setTimeout(resolve, 2000));
+      const token = localStorage.getItem('ims_token');
+      const response = await fetch('/api/v1/stores', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify(formData),
+      });
+      if (!response.ok) {
+        throw new Error(`Store creation failed: ${response.statusText}`);
+      }
       // Success handling
     } finally {
       setIsLoading(false);

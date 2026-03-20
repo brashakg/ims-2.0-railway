@@ -90,8 +90,6 @@ api.interceptors.response.use(
 
       // Exponential backoff: 1s, 2s, 4s
       const backoffDelay = RETRY_DELAY_MS * Math.pow(2, retryCount);
-      console.log(`Network error, retrying in ${backoffDelay}ms (attempt ${retryCount + 1}/${MAX_RETRIES})...`);
-
       await delay(backoffDelay);
       return api.request(config);
     }
@@ -154,15 +152,8 @@ export const authApi = {
     }
 
     try {
-      console.log(`[AuthAPI] Attempting login for user: ${credentials.username}`, {
-        apiUrl: getSecureApiUrl(),
-        endpoint: '/auth/login',
-      });
-
       const response = await api.post<BackendLoginResponse>('/auth/login', credentials);
       const data = response.data;
-
-      console.log(`[AuthAPI] Login successful for user: ${credentials.username}`);
 
       // Transform backend response to frontend format
       return {
@@ -188,7 +179,6 @@ export const authApi = {
       let errorMessage = 'Invalid username or password';
 
       if (error instanceof Error) {
-        console.error(`[AuthAPI] Login failed: ${error.message}`);
         errorMessage = error.message;
 
         // Check if it's a network error
@@ -196,8 +186,6 @@ export const authApi = {
           errorMessage = `Network error connecting to API. Please check your internet connection. API URL: ${getSecureApiUrl()}`;
         }
       }
-
-      console.error(`[AuthAPI] Login failed for user: ${credentials.username}`, { error: errorMessage });
 
       return {
         success: false,

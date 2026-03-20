@@ -67,7 +67,28 @@ export function AttendanceWidget() {
       late: isLate,
     };
     saveRecord(updated);
-    // TODO: POST /api/v1/hr/attendance/check-in
+
+    // POST to attendance check-in API
+    try {
+      const token = localStorage.getItem('ims_token');
+      await fetch('/api/v1/hr/attendance/check-in', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({
+          userId: user?.id,
+          storeId: user?.activeStoreId,
+          checkInTime: checkInTime,
+          location: loc || undefined,
+          late: isLate,
+        }),
+      });
+    } catch (err) {
+      // silently handle error
+    }
+
     setIsLoading(false);
   };
 
@@ -81,7 +102,26 @@ export function AttendanceWidget() {
       status: 'CHECKED_OUT',
     };
     saveRecord(updated);
-    // TODO: POST /api/v1/hr/attendance/check-out
+
+    // POST to attendance check-out API
+    try {
+      const token = localStorage.getItem('ims_token');
+      await fetch('/api/v1/hr/attendance/check-out', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({
+          userId: user?.id,
+          storeId: user?.activeStoreId,
+          checkOutTime: checkOutTime,
+        }),
+      });
+    } catch (err) {
+      // silently handle error
+    }
+
     setIsLoading(false);
   };
 

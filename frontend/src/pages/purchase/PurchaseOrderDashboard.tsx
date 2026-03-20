@@ -102,7 +102,6 @@ export function PurchaseOrderDashboard() {
         setPurchaseOrders(transformedPOs);
       } catch (error) {
         toast.error('Failed to load purchase orders');
-        console.error(error);
       } finally {
         setIsLoading(false);
       }

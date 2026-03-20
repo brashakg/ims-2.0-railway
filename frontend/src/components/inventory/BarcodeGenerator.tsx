@@ -48,7 +48,7 @@ export function BarcodeGenerator({
           onGenerate(value);
         }
       } catch (error) {
-        console.error('Error generating barcode:', error);
+        // silently handle error
       }
     }
   }, [value, format, width, height, displayValue, onGenerate]);

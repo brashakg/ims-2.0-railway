@@ -1505,7 +1505,7 @@ export function SettingsPage() {
                             <div key={coating.id} className="p-3 bg-gray-900 rounded-lg flex items-center justify-between">
                               <div>
                                 <span className="text-sm">{coating.name}</span>
-                                <span className="text-xs text-gray-400 ml-2">₹{coating.price}</span>
+                                <span className="text-xs text-gray-400 ml-2">₹{Number(coating.price).toFixed(2)}</span>
                               </div>
                               <div className="flex items-center gap-1">
                                 <Edit2 className="w-3 h-3 text-gray-400 cursor-pointer hover:text-bv-red-600" />
@@ -1569,7 +1569,7 @@ export function SettingsPage() {
                             <div key={addon.id} className="p-3 bg-gray-900 rounded-lg flex items-center justify-between">
                               <div>
                                 <span className="text-sm">{addon.name}</span>
-                                <span className="text-xs text-gray-400 ml-2">₹{addon.price}</span>
+                                <span className="text-xs text-gray-400 ml-2">₹{Number(addon.price).toFixed(2)}</span>
                               </div>
                               <div className="flex items-center gap-1">
                                 <Edit2 className="w-3 h-3 text-gray-400 cursor-pointer hover:text-bv-red-600" />
@@ -2761,7 +2761,7 @@ function StoreModal({
                 type="text"
                 value={formData.storeCode || ''}
                 onChange={e => handleChange('storeCode', e.target.value)}
-                placeholder="BV-KOL-001"
+                placeholder="STORE-XXX-01"
                 className="w-full px-3 py-2 border border-gray-700 rounded-lg focus:border-bv-red-500 focus:outline-none"
               />
             </div>

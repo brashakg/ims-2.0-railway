@@ -43,7 +43,7 @@ export function QuickFiltersSaver({
       try {
         setPresets(JSON.parse(stored));
       } catch (error) {
-        console.error('Failed to load filter presets:', error);
+        // silently handle parse error
       }
     }
   }, [storageKey]);

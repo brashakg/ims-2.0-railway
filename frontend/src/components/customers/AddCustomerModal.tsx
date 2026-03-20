@@ -3,7 +3,8 @@
 // ============================================================================
 // B2C/B2B customer creation with GST verification
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
+import { useDebounce } from '../../hooks/useDebounce';
 import {
   X,
   Plus,
@@ -102,6 +103,7 @@ export function AddCustomerModal({ isOpen, onClose, onSave }: AddCustomerModalPr
   const [gstError, setGstError] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
+  const debouncedSearchQuery = useDebounce(searchQuery, 400);
   const [searchResults, setSearchResults] = useState<any[]>([]);
   const [searching, setSearching] = useState(false);
   const [showSearch, setShowSearch] = useState(true);
@@ -232,11 +234,8 @@ export function AddCustomerModal({ isOpen, onClose, onSave }: AddCustomerModalPr
     }));
   };
 
-  // Debounced search helper — searches by name or phone
-  const searchTimeoutRef = { current: null as ReturnType<typeof setTimeout> | null };
-
-  const handleSearch = async (query: string) => {
-    setSearchQuery(query);
+  // Search API call
+  const performSearch = useCallback(async (query: string) => {
     if (query.length < 2) { setSearchResults([]); return; }
     setSearching(true);
     try {
@@ -257,17 +256,26 @@ export function AddCustomerModal({ isOpen, onClose, onSave }: AddCustomerModalPr
       }
     } catch { setSearchResults([]); }
     setSearching(false);
+  }, []);
+
+  // Trigger search when debounced query changes
+  useEffect(() => {
+    if (debouncedSearchQuery.length >= 2) {
+      performSearch(debouncedSearchQuery);
+      setShowSearch(true);
+    } else {
+      setSearchResults([]);
+    }
+  }, [debouncedSearchQuery, performSearch]);
+
+  // Kept for backward compatibility — now just updates searchQuery (debouncing handled by hook)
+  const handleSearch = (query: string) => {
+    setSearchQuery(query);
   };
 
-  // Auto-search when typing in name or mobile fields (debounced)
+  // Auto-search when typing in name or mobile fields
   const triggerAutoSearch = (value: string) => {
-    if (searchTimeoutRef.current) clearTimeout(searchTimeoutRef.current);
-    searchTimeoutRef.current = setTimeout(() => {
-      if (value.length >= 2) {
-        handleSearch(value);
-        setShowSearch(true);
-      }
-    }, 400);
+    setSearchQuery(value);
   };
 
   const selectExistingCustomer = (customer: any) => {

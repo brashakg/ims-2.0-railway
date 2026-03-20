@@ -41,7 +41,7 @@ export function ContactLensExpiryWidget() {
       setExpired(response.data?.expired || []);
       setExpiringSoon(response.data?.expiring_soon || []);
     } catch (error) {
-      console.error('Error loading expiry status:', error);
+      // silently handle error
     } finally {
       setLoading(false);
     }
@@ -150,7 +150,7 @@ export function LensPowerGridWidget() {
       setSphValues(response.data?.sph_range || []);
       setCylValues(response.data?.cyl_range || []);
     } catch (error) {
-      console.error('Error loading power grid:', error);
+      // silently handle error
     } finally {
       setLoading(false);
     }
@@ -252,7 +252,7 @@ export function SellThroughAnalysisWidget({ days = 30 }: { days?: number }) {
       const response = await api.get(`/inventory/sell-through-analysis?days=${days}`);
       setBrands(response.data?.brands || []);
     } catch (error) {
-      console.error('Error loading sell-through:', error);
+      // silently handle error
     } finally {
       setLoading(false);
     }
@@ -359,7 +359,7 @@ export function OverstockAnalysisWidget() {
       );
       setItems(response.data?.items || []);
     } catch (error) {
-      console.error('Error loading overstock analysis:', error);
+      // silently handle error
     } finally {
       setLoading(false);
     }

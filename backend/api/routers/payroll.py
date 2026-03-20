@@ -12,6 +12,9 @@ from datetime import datetime, date, timedelta
 from calendar import monthrange
 import uuid
 import math
+import logging
+
+logger = logging.getLogger(__name__)
 
 from .auth import get_current_user
 
@@ -153,7 +156,8 @@ def _get_employee_details(db, employee_id: str) -> dict:
         users_coll = db.get_collection("users")
         user = users_coll.find_one({"user_id": employee_id})
         return user or {}
-    except:
+    except Exception as e:
+        logger.error(f"Error in _get_employee_details: {str(e)}", exc_info=True)
         return {}
 
 
@@ -165,7 +169,8 @@ def _get_salary_config(db, employee_id: str) -> Optional[dict]:
         salary_config_coll = db.get_collection("salary_config")
         config = salary_config_coll.find_one({"employee_id": employee_id})
         return config
-    except:
+    except Exception as e:
+        logger.error(f"Error in _get_salary_config: {str(e)}", exc_info=True)
         return None
 
 
@@ -735,7 +740,8 @@ async def get_incentive_summary(
                 "year": year
             })
             return {"incentive": incentive}
-        except:
+        except Exception as e:
+            logger.error(f"Error fetching incentive: {str(e)}", exc_info=True)
             return {"incentive": None, "message": "Incentive data not found"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

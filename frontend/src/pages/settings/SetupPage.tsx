@@ -1,8 +1,9 @@
 // ============================================================================
 // IMS 2.0 — Store Setup & Employee Onboarding
 // ============================================================================
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useAuth } from '../../context/AuthContext';
+import { adminStoreApi } from '../../services/api';
 import {
   Building, Users, Plus, Edit, MapPin, Phone, Clock,
   Shield, Save, X, ChevronRight, CheckCircle, AlertTriangle,
@@ -81,10 +82,32 @@ const DEFAULT_EMPLOYEE: NewEmployee = {
 export default function SetupPage() {
   const { user } = useAuth();
   const [activeTab, setActiveTab] = useState<'stores' | 'employees' | 'wizard'>('stores');
-  const [stores, setStores] = useState<StoreConfig[]>([
-    { id: 'BV-BOK-01', name: 'Better Vision Bokaro 1', code: 'BV-BOK-01', brand: 'BETTER_VISION', address: 'City Centre, Sector 4', city: 'Bokaro Steel City', state: 'Jharkhand', pincode: '827004', phone: '9876543210', email: 'bokaro1@bettervision.in', gstNumber: '20AABCB1234F1ZP', openingTime: '10:00', closingTime: '21:00', categories: ['FRAMES', 'SUNGLASSES', 'RX_LENSES', 'CONTACT_LENSES', 'ACCESSORIES'], isActive: true },
-    { id: 'BV-BOK-02', name: 'Better Vision Bokaro 2', code: 'BV-BOK-02', brand: 'BETTER_VISION', address: 'Sector 1 Market', city: 'Bokaro Steel City', state: 'Jharkhand', pincode: '827001', phone: '9876543211', email: 'bokaro2@bettervision.in', gstNumber: '20AABCB1234F1ZP', openingTime: '10:00', closingTime: '21:00', categories: ['FRAMES', 'SUNGLASSES', 'RX_LENSES', 'CONTACT_LENSES', 'WRIST_WATCHES', 'SMARTWATCHES', 'ACCESSORIES'], isActive: true },
-  ]);
+  const [stores, setStores] = useState<StoreConfig[]>([]);
+
+  useEffect(() => {
+    adminStoreApi.getStores().then((data: any) => {
+      if (Array.isArray(data?.stores || data)) {
+        const storeList = data?.stores || data;
+        setStores(storeList.map((s: any) => ({
+          id: s.store_id || s.store_code || s.id,
+          name: s.store_name || s.name || '',
+          code: s.store_code || s.store_id || '',
+          brand: s.brand || 'BETTER_VISION',
+          address: s.address || '',
+          city: s.city || '',
+          state: s.state || '',
+          pincode: s.pincode || '',
+          phone: s.phone || '',
+          email: s.email || '',
+          gstNumber: s.gstin || s.gst_number || '',
+          openingTime: s.opening_time || '10:00',
+          closingTime: s.closing_time || '21:00',
+          categories: s.categories || [],
+          isActive: s.is_active !== false,
+        })));
+      }
+    }).catch(() => {});
+  }, []);
   const [editStore, setEditStore] = useState<StoreConfig | null>(null);
   const [, setEditEmployee] = useState<NewEmployee | null>(null);
   const [showStoreForm, setShowStoreForm] = useState(false);
