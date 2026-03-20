@@ -23,6 +23,7 @@ import {
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { inventoryApi } from '../../services/api';
+import api from '../../services/api/client';
 
 type TransferDirection = 'outgoing' | 'incoming' | 'all';
 
@@ -95,12 +96,20 @@ export function StockTransferManagement() {
     setShowDetails(true);
   };
 
-  const handleReceiveTransfer = async (_transferId: string) => {
+  const handleReceiveTransfer = async (transferId: string) => {
+    if (!selectedTransfer) return;
     setIsReceiving(true);
     try {
-      // In production, call API to mark transfer as received
-      // await inventoryApi.receiveTransfer(transferId);
-      await new Promise(resolve => setTimeout(resolve, 1000)); // Mock delay
+      // Build receive payload: mark all items as fully received using their IDs.
+      // The backend endpoint is POST /api/v1/transfers/{transfer_id}/receive and
+      // expects a list of { transfer_item_id, quantity_received, quantity_damaged }.
+      const itemsReceived = selectedTransfer.items.map((item, index) => ({
+        transfer_item_id: (item as any).id ?? `item-${index}`,
+        quantity_received: item.quantity,
+        quantity_damaged: 0,
+      }));
+
+      await api.post(`/transfers/${transferId}/receive`, itemsReceived);
 
       toast.success('Transfer received successfully');
       setShowDetails(false);

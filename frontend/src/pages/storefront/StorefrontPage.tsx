@@ -58,9 +58,7 @@ export function StorefrontPage() {
   const loadProducts = async () => {
     setIsLoading(true);
     try {
-      // Mock data - in production, fetch from API
-      await new Promise(resolve => setTimeout(resolve, 1000));
-
+      // No public storefront products API exists yet; display sample catalogue
       const mockProducts: Product[] = [
         {
           id: '1',
@@ -156,7 +154,7 @@ export function StorefrontPage() {
       ];
 
       setProducts(mockProducts);
-    } catch (error: any) {
+    } catch {
       toast.error('Failed to load products');
     } finally {
       setIsLoading(false);

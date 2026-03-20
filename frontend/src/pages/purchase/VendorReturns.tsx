@@ -16,6 +16,7 @@ import {
 import clsx from 'clsx';
 import { useToast } from '../../context/ToastContext';
 import { useAuth } from '../../context/AuthContext';
+import api from '../../services/api/client';
 
 interface ReturnItem {
   product_id: string;
@@ -103,104 +104,18 @@ export function VendorReturns() {
     const loadData = async () => {
       try {
         setIsLoading(true);
-        // Simulate API call - in real app, fetch from /api/v1/vendor-returns/
-        await new Promise(resolve => setTimeout(resolve, 800));
 
-        // Mock vendors
-        setVendors([
-          {
-            vendor_id: 'V001',
-            legal_name: 'Optical Frames Ltd',
-            trade_name: 'Optical Frames',
-            mobile: '9876543210',
-          },
-          {
-            vendor_id: 'V002',
-            legal_name: 'Lens Manufacturers Inc',
-            trade_name: 'Lens Mfg',
-            mobile: '9876543211',
-          },
-          {
-            vendor_id: 'V003',
-            legal_name: 'Contact Lens Supplier',
-            trade_name: 'CL Supply',
-            mobile: '9876543212',
-          },
+        // Fetch vendor returns and vendors in parallel
+        const [returnsResp, vendorsResp] = await Promise.all([
+          api.get('/vendor-returns/', {
+            params: { store_id: activeStoreId || undefined, limit: 100 },
+          }),
+          api.get('/vendors/', { params: { limit: 100 } }),
         ]);
 
-        // Mock returns
-        setReturns([
-          {
-            return_id: 'VR-20240318-A1B2C3D4',
-            vendor_id: 'V001',
-            vendor_name: 'Optical Frames Ltd',
-            store_id: activeStoreId,
-            items: [
-              {
-                product_id: 'PROD001',
-                product_name: 'UV Protected Frames',
-                quantity: 5,
-                reason: 'defective',
-                unit_price: 500,
-              },
-            ],
-            return_type: 'credit_note',
-            status: 'credit_issued',
-            total_value: 2500,
-            credit_note_number: 'CN-240318A1B2-ABC123',
-            credit_note_amount: 2500,
-            created_at: '2024-03-18T10:30:00Z',
-            created_by: 'User123',
-            notes: 'Defective frames due to poor quality control',
-          },
-          {
-            return_id: 'VR-20240317-E5F6G7H8',
-            vendor_id: 'V002',
-            vendor_name: 'Lens Manufacturers Inc',
-            store_id: activeStoreId,
-            items: [
-              {
-                product_id: 'PROD002',
-                product_name: 'Progressive Lenses',
-                quantity: 10,
-                reason: 'damaged_in_transit',
-                unit_price: 800,
-              },
-            ],
-            return_type: 'replacement',
-            status: 'received_by_vendor',
-            total_value: 8000,
-            credit_note_number: null,
-            credit_note_amount: null,
-            created_at: '2024-03-17T14:20:00Z',
-            created_by: 'User456',
-            notes: 'Packaging damaged during transit',
-          },
-          {
-            return_id: 'VR-20240316-I9J0K1L2',
-            vendor_id: 'V003',
-            vendor_name: 'Contact Lens Supplier',
-            store_id: activeStoreId,
-            items: [
-              {
-                product_id: 'PROD003',
-                product_name: 'Contact Lens Solution',
-                quantity: 20,
-                reason: 'expired',
-                unit_price: 150,
-              },
-            ],
-            return_type: 'credit_note',
-            status: 'approved',
-            total_value: 3000,
-            credit_note_number: null,
-            credit_note_amount: null,
-            created_at: '2024-03-16T09:15:00Z',
-            created_by: 'User789',
-            notes: 'Received expired batches',
-          },
-        ]);
-      } catch (error) {
+        setReturns(returnsResp.data.returns || []);
+        setVendors(vendorsResp.data.vendors || vendorsResp.data.items || []);
+      } catch {
         toast.error('Failed to load vendor returns');
       } finally {
         setIsLoading(false);
@@ -208,7 +123,7 @@ export function VendorReturns() {
     };
 
     loadData();
-  }, []);
+  }, [activeStoreId]);
 
   const handleAddItem = () => {
     setItems([
@@ -228,19 +143,39 @@ export function VendorReturns() {
   };
 
   const handleCreateReturn = async () => {
-    if (!selectedVendor || items.some(i => !i.product_id || i.quantity <= 0)) {
+    if (!selectedVendor || items.some(i => !i.product_name.trim() || i.quantity <= 0)) {
       toast.error('Please fill all required fields');
       return;
     }
 
+    const vendor = vendors.find(v => v.vendor_id === selectedVendor);
+
     try {
-      // Call API: POST /api/v1/vendor-returns/
+      await api.post('/vendor-returns/', {
+        vendor_id: selectedVendor,
+        vendor_name: vendor?.legal_name || selectedVendor,
+        store_id: activeStoreId,
+        items: items.map(i => ({
+          ...i,
+          product_id: i.product_id || i.product_name.toLowerCase().replace(/\s+/g, '-'),
+        })),
+        return_type: returnType,
+        notes,
+      });
+
       toast.success('Vendor return created successfully');
       setShowModal(false);
       setSelectedVendor('');
+      setReturnType('credit_note');
       setItems([{ product_id: '', product_name: '', quantity: 1, reason: 'defective', unit_price: 0 }]);
       setNotes('');
-    } catch (error) {
+
+      // Refresh the list
+      const refreshResp = await api.get('/vendor-returns/', {
+        params: { store_id: activeStoreId || undefined, limit: 100 },
+      });
+      setReturns(refreshResp.data.returns || []);
+    } catch {
       toast.error('Failed to create vendor return');
     }
   };
@@ -250,6 +185,17 @@ export function VendorReturns() {
   const historyReturns = returns.filter(r => ['credit_issued', 'replaced', 'cancelled'].includes(r.status));
 
   const displayReturns = activeTab === 'active' ? activeReturns : historyReturns;
+
+  const handleUpdateStatus = async (returnId: string, newStatus: string) => {
+    try {
+      const resp = await api.patch(`/vendor-returns/${returnId}/status`, { status: newStatus });
+      const updated: VendorReturn = resp.data.return;
+      setReturns(prev => prev.map(r => r.return_id === returnId ? updated : r));
+      toast.success(`Status updated to ${STATUS_LABELS[newStatus] || newStatus}`);
+    } catch {
+      toast.error('Failed to update return status');
+    }
+  };
 
   return (
     <div className="space-y-6">
@@ -417,26 +363,41 @@ export function VendorReturns() {
                   {activeTab === 'active' && (
                     <div className="flex gap-2 pt-4 border-t border-gray-600">
                       {ret.status === 'created' && (
-                        <button className="flex-1 bg-green-600 hover:bg-green-700 text-white px-3 py-2 rounded text-sm font-medium transition">
+                        <button
+                          onClick={() => handleUpdateStatus(ret.return_id, 'approved')}
+                          className="flex-1 bg-green-600 hover:bg-green-700 text-white px-3 py-2 rounded text-sm font-medium transition"
+                        >
                           Approve
                         </button>
                       )}
                       {ret.status === 'approved' && (
-                        <button className="flex-1 bg-blue-600 hover:bg-blue-700 text-white px-3 py-2 rounded text-sm font-medium transition">
+                        <button
+                          onClick={() => handleUpdateStatus(ret.return_id, 'shipped')}
+                          className="flex-1 bg-blue-600 hover:bg-blue-700 text-white px-3 py-2 rounded text-sm font-medium transition"
+                        >
                           Mark as Shipped
                         </button>
                       )}
                       {ret.status === 'shipped' && (
-                        <button className="flex-1 bg-purple-600 hover:bg-purple-700 text-white px-3 py-2 rounded text-sm font-medium transition">
+                        <button
+                          onClick={() => handleUpdateStatus(ret.return_id, 'received_by_vendor')}
+                          className="flex-1 bg-purple-600 hover:bg-purple-700 text-white px-3 py-2 rounded text-sm font-medium transition"
+                        >
                           Received by Vendor
                         </button>
                       )}
                       {ret.status === 'received_by_vendor' && (
                         <>
-                          <button className="flex-1 bg-green-600 hover:bg-green-700 text-white px-3 py-2 rounded text-sm font-medium transition">
+                          <button
+                            onClick={() => handleUpdateStatus(ret.return_id, 'credit_issued')}
+                            className="flex-1 bg-green-600 hover:bg-green-700 text-white px-3 py-2 rounded text-sm font-medium transition"
+                          >
                             Issue Credit
                           </button>
-                          <button className="flex-1 bg-blue-600 hover:bg-blue-700 text-white px-3 py-2 rounded text-sm font-medium transition">
+                          <button
+                            onClick={() => handleUpdateStatus(ret.return_id, 'replaced')}
+                            className="flex-1 bg-blue-600 hover:bg-blue-700 text-white px-3 py-2 rounded text-sm font-medium transition"
+                          >
                             Mark as Replaced
                           </button>
                         </>

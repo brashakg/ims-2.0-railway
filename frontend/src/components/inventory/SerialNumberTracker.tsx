@@ -51,9 +51,7 @@ export function SerialNumberTracker() {
   const loadSerializedItems = async () => {
     setIsLoading(true);
     try {
-      // Mock data - in production, fetch from API
-      await new Promise(resolve => setTimeout(resolve, 1000));
-
+      // No serial-number API endpoint exists yet; display placeholder data
       const mockItems: SerializedItem[] = [
         {
           id: '1',
@@ -148,9 +146,7 @@ export function SerialNumberTracker() {
 
   const handleSaveSerial = async (data: SerialNumberData) => {
     try {
-      // In production, save to API
-      await new Promise(resolve => setTimeout(resolve, 500));
-
+      // No serial-number save API exists yet; update local state only
       // Update local state
       if (data.id) {
         // Edit existing

@@ -58,7 +58,8 @@ export function PurchaseManagementPage() {
   const loadData = async () => {
     setIsLoading(true);
     try {
-      await new Promise(resolve => setTimeout(resolve, 800));
+      // TODO: Wire to GET /api/v1/vendors and GET /api/v1/orders?type=purchase
+      // once purchase order and vendor API endpoints are implemented.
 
       // Mock suppliers
       setSuppliers([

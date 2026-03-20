@@ -72,11 +72,8 @@ export function GSTR1Report() {
   const loadReportData = async () => {
     setIsLoading(true);
     try {
-      // In production, this would fetch from the backend API
-      // For now, we'll simulate with mock data
-      await new Promise(resolve => setTimeout(resolve, 1000));
-
-      // Mock data for demonstration
+      // TODO: Wire to GET /api/v1/reports/gstr1?period={selectedMonth} once
+      // the backend GST report endpoint is implemented.
       const mockData: GSTR1Data = {
         period: selectedMonth,
         gstin: '27AABCU9603R1ZM',

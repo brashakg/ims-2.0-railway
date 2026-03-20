@@ -76,9 +76,7 @@ export function StockAlertsOverview() {
   const loadAlerts = async () => {
     setIsLoading(true);
     try {
-      // Mock data - in production, fetch from API
-      await new Promise(resolve => setTimeout(resolve, 800));
-
+      // No dedicated stock-alerts API exists yet; display computed placeholder data
       const mockAlerts: StockAlert[] = [
         {
           id: '1',

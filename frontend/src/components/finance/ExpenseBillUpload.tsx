@@ -43,40 +43,19 @@ export function ExpenseBillUpload({ onBillUpload }: ExpenseBillUploadProps) {
     setIsUploading(true);
     
     try {
-      // Simulate file hashing and duplicate check
       const hash = await generateFileHash(file);
-      
-      // Simulate API call to check for duplicates
-      await new Promise(resolve => setTimeout(resolve, 1500));
 
-      // Simulated duplicate response (in real implementation, comes from API)
-      const isDuplicate = Math.random() > 0.7; // 30% chance of duplicate
-
-      if (isDuplicate) {
-        setDuplicate({
-          expenseId: 'EXP-2024-045',
-          amount: 2500,
-          date: '2024-12-15',
-          description: 'Office supplies',
-          similarity: 98,
-        });
-        setBill({
-          name: file.name,
-          size: file.size,
-          hash: hash,
-          uploadedAt: new Date().toISOString(),
-          status: 'duplicate',
-        });
-      } else {
-        setBill({
-          name: file.name,
-          size: file.size,
-          hash: hash,
-          uploadedAt: new Date().toISOString(),
-          status: 'uploaded',
-        });
-        onBillUpload?.(file, hash);
-      }
+      // TODO: Wire to POST /api/v1/expenses/{expenseId}/upload-bill once expenseId
+      // is passed as a required prop. The backend endpoint exists but duplicate-hash
+      // checking is not yet implemented server-side.
+      setBill({
+        name: file.name,
+        size: file.size,
+        hash: hash,
+        uploadedAt: new Date().toISOString(),
+        status: 'uploaded',
+      });
+      onBillUpload?.(file, hash);
     } finally {
       setIsUploading(false);
     }

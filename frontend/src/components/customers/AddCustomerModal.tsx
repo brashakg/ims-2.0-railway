@@ -98,7 +98,6 @@ export function AddCustomerModal({ isOpen, onClose, onSave }: AddCustomerModalPr
     patients: [],
   });
 
-  const [gstVerifying, setGstVerifying] = useState(false);
   const [gstVerified, setGstVerified] = useState<boolean | null>(null);
   const [gstError, setGstError] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
@@ -136,7 +135,6 @@ export function AddCustomerModal({ isOpen, onClose, onSave }: AddCustomerModalPr
         panNumber: '',
         patients: [],
       });
-      setGstVerifying(false);
       setGstVerified(null);
       setGstError(null);
       setIsSaving(false);
@@ -152,56 +150,41 @@ export function AddCustomerModal({ isOpen, onClose, onSave }: AddCustomerModalPr
     }
   }, [isOpen]);
 
-  // GST Verification (simulated - in production, connect to actual GST API)
-  const verifyGST = async () => {
+  // GST Verification — validates format locally (no external GST API available)
+  const verifyGST = () => {
     if (!formData.gstNumber || formData.gstNumber.length !== 15) {
       setGstError('GST number must be 15 characters');
       return;
     }
 
-    setGstVerifying(true);
     setGstError(null);
     setGstVerified(null);
 
-    try {
-      // Simulate API call - in production, use actual GST verification API
-      // Example: const result = await gstApi.verify(formData.gstNumber);
-      await new Promise(resolve => setTimeout(resolve, 1500));
+    const gstRegex = /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$/;
+    const isValid = gstRegex.test(formData.gstNumber.toUpperCase());
 
-      // Simulate verification result based on GST format
-      const gstRegex = /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$/;
-      const isValid = gstRegex.test(formData.gstNumber.toUpperCase());
+    if (isValid) {
+      const stateCode = formData.gstNumber.substring(0, 2);
+      const panNumber = formData.gstNumber.substring(2, 12);
 
-      if (isValid) {
-        // Simulate fetched data
-        const stateCode = formData.gstNumber.substring(0, 2);
-        const panNumber = formData.gstNumber.substring(2, 12);
+      const stateMap: Record<string, string> = {
+        '01': 'Jammu and Kashmir', '02': 'Himachal Pradesh', '03': 'Punjab',
+        '04': 'Chandigarh', '05': 'Uttarakhand', '06': 'Haryana',
+        '07': 'Delhi', '08': 'Rajasthan', '09': 'Uttar Pradesh',
+        '10': 'Bihar', '11': 'Sikkim', '12': 'Arunachal Pradesh',
+        '27': 'Maharashtra', '29': 'Karnataka', '33': 'Tamil Nadu',
+      };
 
-        // Map state code to state name (partial mapping)
-        const stateMap: Record<string, string> = {
-          '01': 'Jammu and Kashmir', '02': 'Himachal Pradesh', '03': 'Punjab',
-          '04': 'Chandigarh', '05': 'Uttarakhand', '06': 'Haryana',
-          '07': 'Delhi', '08': 'Rajasthan', '09': 'Uttar Pradesh',
-          '10': 'Bihar', '11': 'Sikkim', '12': 'Arunachal Pradesh',
-          '27': 'Maharashtra', '29': 'Karnataka', '33': 'Tamil Nadu',
-        };
-
-        setFormData(prev => ({
-          ...prev,
-          businessName: `Business Entity (${formData.gstNumber.substring(2, 7)})`,
-          panNumber: panNumber,
-          state: stateMap[stateCode] || 'Maharashtra',
-        }));
-        setGstVerified(true);
-      } else {
-        setGstError('Invalid GST number format');
-        setGstVerified(false);
-      }
-    } catch {
-      setGstError('Failed to verify GST. Please try again.');
+      setFormData(prev => ({
+        ...prev,
+        businessName: prev.businessName || `Business Entity (${formData.gstNumber.substring(2, 7)})`,
+        panNumber: panNumber,
+        state: prev.state || stateMap[stateCode] || 'Maharashtra',
+      }));
+      setGstVerified(true);
+    } else {
+      setGstError('Invalid GST number format');
       setGstVerified(false);
-    } finally {
-      setGstVerifying(false);
     }
   };
 
@@ -433,12 +416,10 @@ export function AddCustomerModal({ isOpen, onClose, onSave }: AddCustomerModalPr
                   <button
                     type="button"
                     onClick={verifyGST}
-                    disabled={gstVerifying || !formData.gstNumber}
+                    disabled={!formData.gstNumber}
                     className="btn-primary flex items-center gap-2 disabled:opacity-50"
                   >
-                    {gstVerifying ? (
-                      <Loader2 className="w-4 h-4 animate-spin" />
-                    ) : gstVerified ? (
+                    {gstVerified ? (
                       <CheckCircle className="w-4 h-4" />
                     ) : (
                       'Verify'
