@@ -26,6 +26,7 @@ import type { OrderStatus, PaymentStatus, Order } from '../../types';
 import { orderApi } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
+import { Pagination } from '../../components/common/Pagination';
 import clsx from 'clsx';
 import { OrderNotificationTracker } from '../../components/orders/OrderNotificationTracker';
 import { OrderStatusTimeline } from '../../components/orders/OrderStatusTimeline';
@@ -60,6 +61,10 @@ export function OrdersPage() {
   const [statusFilter, setStatusFilter] = useState<OrderStatus | 'ALL'>('ALL');
   const [dateFilter, setDateFilter] = useState<'today' | 'week' | 'month' | 'all'>('all');
 
+  // Pagination state
+  const [currentPage, setCurrentPage] = useState(1);
+  const pageSize = 50;
+
   // Sync status filter from URL query params (e.g. /orders?status=READY)
   useEffect(() => {
     const statusParam = searchParams.get('status');
@@ -91,16 +96,21 @@ export function OrdersPage() {
   // Role-based permissions
   const canViewAllStores = hasRole(['SUPERADMIN', 'ADMIN', 'AREA_MANAGER']);
 
-  // Load orders on mount
+  // Reset page when filters change
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [statusFilter, dateFilter, searchQuery]);
+
+  // Load orders on mount and when filters/page change
   useEffect(() => {
     loadOrders();
-  }, [statusFilter, dateFilter]);
+  }, [statusFilter, dateFilter, currentPage]);
 
   const loadOrders = async () => {
     setIsLoading(true);
     setError(null);
     try {
-      const params: { storeId?: string; status?: string; date?: string } = {};
+      const params: { storeId?: string; status?: string; date?: string; skip?: number; limit?: number } = {};
       if (!canViewAllStores && user?.activeStoreId) {
         params.storeId = user.activeStoreId;
       }
@@ -110,6 +120,8 @@ export function OrdersPage() {
       if (dateFilter !== 'all') {
         params.date = dateFilter;
       }
+      params.skip = (currentPage - 1) * pageSize;
+      params.limit = pageSize;
       const response = await orderApi.getOrders(params);
       setOrders(response.orders || response || []);
     } catch {
@@ -129,6 +141,12 @@ export function OrdersPage() {
 
     return matchesSearch;
   });
+
+  // Paginate filtered results (client-side slice for local search)
+  const paginatedOrders = filteredOrders.slice(
+    (currentPage - 1) * pageSize,
+    currentPage * pageSize
+  );
 
   const formatDate = (dateStr: string) => {
     return new Date(dateStr).toLocaleDateString('en-IN', {
@@ -378,8 +396,9 @@ export function OrdersPage() {
             <p>{searchQuery ? 'No orders found matching your search' : 'No orders yet'}</p>
           </div>
         ) : (
+          <>
           <div className="divide-y divide-gray-200">
-            {filteredOrders.map(order => {
+            {paginatedOrders.map(order => {
               const statusConfig = ORDER_STATUS_CONFIG[order.orderStatus];
               const paymentConfig = PAYMENT_STATUS_CONFIG[order.paymentStatus];
               const StatusIcon = statusConfig?.icon || FileText;
@@ -479,6 +498,13 @@ export function OrdersPage() {
               );
             })}
           </div>
+          <Pagination
+            currentPage={currentPage}
+            totalItems={filteredOrders.length}
+            pageSize={pageSize}
+            onPageChange={setCurrentPage}
+          />
+          </>
         )}
       </div>
 

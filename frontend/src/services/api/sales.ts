@@ -9,7 +9,7 @@ import api from './client';
 // ============================================================================
 
 export const orderApi = {
-  getOrders: async (params?: { storeId?: string; status?: string; date?: string; customerId?: string; limit?: number }) => {
+  getOrders: async (params?: { storeId?: string; status?: string; date?: string; customerId?: string; limit?: number; skip?: number }) => {
     const response = await api.get('/orders', { params });
     return response.data;
   },

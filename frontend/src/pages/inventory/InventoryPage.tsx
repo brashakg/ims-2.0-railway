@@ -42,6 +42,7 @@ import { StockAlertsOverview } from '../../components/inventory/StockAlertsOverv
 import { NonMovingStockWidget } from '../../components/inventory/NonMovingStockWidget';
 import { StockCountScanningInterface } from '../../components/inventory/StockCountScanningInterface';
 import { ContactLensExpiryWidget, LensPowerGridWidget, SellThroughAnalysisWidget, OverstockAnalysisWidget } from '../../components/inventory/AdvancedInventoryFeatures';
+import { Pagination } from '../../components/common/Pagination';
 import clsx from 'clsx';
 
 // Category configuration
@@ -109,6 +110,10 @@ export function InventoryPage() {
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCategory, setSelectedCategory] = useState<ProductCategory | null>(null);
   const [activeTab, setActiveTab] = useState<ViewTab>('catalog');
+
+  // Pagination state
+  const [currentPage, setCurrentPage] = useState(1);
+  const pageSize = 50;
 
   // Sync active tab from URL query params (e.g. /inventory?tab=transfers)
   useEffect(() => {
@@ -216,6 +221,11 @@ export function InventoryPage() {
     }
   };
 
+  // Reset page when filters change
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [searchQuery, selectedCategory]);
+
   // Filter inventory locally
   const filteredInventory = inventory.filter(item => {
     const matchesSearch = !searchQuery ||
@@ -227,6 +237,12 @@ export function InventoryPage() {
 
     return matchesSearch && matchesCategory;
   });
+
+  // Paginate filtered results
+  const paginatedInventory = filteredInventory.slice(
+    (currentPage - 1) * pageSize,
+    currentPage * pageSize
+  );
 
   // Calculate stats
   const totalSKUs = inventory.length;
@@ -509,6 +525,7 @@ export function InventoryPage() {
               <p>{searchQuery || selectedCategory ? 'No products found matching your filters' : 'No products in inventory'}</p>
             </div>
           ) : (
+            <>
             <div className="overflow-x-auto">
               <table className="w-full">
                 <thead className="bg-gray-50 border-b border-gray-200">
@@ -526,7 +543,7 @@ export function InventoryPage() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-200">
-                  {filteredInventory.map(item => {
+                  {paginatedInventory.map(item => {
                     const status = getStockStatus(item);
                     const category = CATEGORIES.find(c => c.code === item.category);
                     return (
@@ -595,6 +612,13 @@ export function InventoryPage() {
                 </tbody>
               </table>
             </div>
+            <Pagination
+              currentPage={currentPage}
+              totalItems={filteredInventory.length}
+              pageSize={pageSize}
+              onPageChange={setCurrentPage}
+            />
+            </>
           )}
         </div>
       )}

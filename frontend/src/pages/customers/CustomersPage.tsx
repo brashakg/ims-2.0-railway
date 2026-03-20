@@ -37,6 +37,7 @@ import { PromotionEngine } from '../../components/crm/PromotionEngine';
 import { CustomerPurchaseHistory } from '../../components/crm/CustomerPurchaseHistory';
 import { PrescriptionQRCode } from '../../components/crm/PrescriptionQRCode';
 import { AutoSearch } from '../../components/common/AutoSearch';
+import { Pagination } from '../../components/common/Pagination';
 import clsx from 'clsx';
 import { calculateRFMScore, type CustomerRFMData } from '../../utils/rfmSegmentation';
 
@@ -81,6 +82,10 @@ export function CustomersPage() {
   const [viewMode, setViewMode] = useState<ViewMode>('list');
   const [filterType, setFilterType] = useState<'ALL' | 'B2C' | 'B2B'>('ALL');
 
+  // Pagination state
+  const [currentPage, setCurrentPage] = useState(1);
+  const pageSize = 50;
+
   // Loading state
   const [isLoading, setIsLoading] = useState(true);
   const [isLoadingPrescriptions, setIsLoadingPrescriptions] = useState(false);
@@ -92,10 +97,15 @@ export function CustomersPage() {
   const [showEditModal, setShowEditModal] = useState(false);
   const [editForm, setEditForm] = useState({ name: '', phone: '', email: '', address: '' });
 
-  // Load customers on mount
+  // Reset page when filters change
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [searchQuery, filterType]);
+
+  // Load customers on mount and when page changes
   useEffect(() => {
     loadCustomers();
-  }, []);
+  }, [currentPage]);
 
   const loadCustomers = async () => {
     setIsLoading(true);
@@ -103,7 +113,8 @@ export function CustomersPage() {
     try {
       const response = await customerApi.getCustomers({
         storeId: user?.activeStoreId,
-        limit: 100,
+        limit: pageSize,
+        skip: (currentPage - 1) * pageSize,
       });
       setCustomers(response.customers || response || []);
     } catch {
@@ -158,6 +169,12 @@ export function CustomersPage() {
 
     return matchesSearch && matchesType;
   });
+
+  // Paginate filtered results
+  const paginatedCustomers = filteredCustomers.slice(
+    (currentPage - 1) * pageSize,
+    currentPage * pageSize
+  );
 
   const handleSelectCustomer = (customer: Customer) => {
     setSelectedCustomer(customer);
@@ -346,8 +363,9 @@ export function CustomersPage() {
               )}
             </div>
           ) : (
+            <>
             <div className="divide-y divide-gray-200">
-              {filteredCustomers.map(customer => (
+              {paginatedCustomers.map(customer => (
                 <button
                   key={customer.id}
                   onClick={() => handleSelectCustomer(customer)}
@@ -394,6 +412,13 @@ export function CustomersPage() {
                 </button>
               ))}
             </div>
+            <Pagination
+              currentPage={currentPage}
+              totalItems={filteredCustomers.length}
+              pageSize={pageSize}
+              onPageChange={setCurrentPage}
+            />
+            </>
           )}
         </div>
 
