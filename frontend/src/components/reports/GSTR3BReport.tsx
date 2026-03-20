@@ -15,6 +15,8 @@ import {
   IndianRupee,
 } from 'lucide-react';
 import { useToast } from '../../context/ToastContext';
+import { useAuth } from '../../context/AuthContext';
+import { reportsApi } from '../../services/api';
 
 interface GSTR3BTaxLiability {
   integratedTax: number;
@@ -61,6 +63,7 @@ interface GSTR3BData {
 
 export function GSTR3BReport() {
   const toast = useToast();
+  const { user } = useAuth();
 
   const [isLoading, setIsLoading] = useState(false);
   const [reportData, setReportData] = useState<GSTR3BData | null>(null);
@@ -75,70 +78,8 @@ export function GSTR3BReport() {
   const loadReportData = async () => {
     setIsLoading(true);
     try {
-      // TODO: Wire to GET /api/v1/reports/gstr3b?period={selectedMonth} once
-      // the backend GST report endpoint is implemented.
-      const mockData: GSTR3BData = {
-        period: selectedMonth,
-        gstin: '27AABCU9603R1ZM',
-        legalName: 'Better Vision Optics Pvt Ltd',
-
-        outwardTaxableSupplies: {
-          integratedTax: 45000,
-          centralTax: 35000,
-          stateTax: 35000,
-          cess: 0,
-        },
-        outwardTaxableValue: 650000,
-
-        zeroRatedSupplies: {
-          integratedTax: 0,
-          centralTax: 0,
-          stateTax: 0,
-          cess: 0,
-        },
-        zeroRatedValue: 0,
-
-        itcAvailable: {
-          integratedTax: 12000,
-          centralTax: 8000,
-          stateTax: 8000,
-          cess: 0,
-        },
-
-        exemptSupplies: 0,
-
-        taxPayable: {
-          integratedTax: 45000,
-          centralTax: 35000,
-          stateTax: 35000,
-          cess: 0,
-        },
-
-        itcUtilized: {
-          integratedTax: 12000,
-          centralTax: 8000,
-          stateTax: 8000,
-          cess: 0,
-        },
-
-        taxPaidCash: {
-          integratedTax: 33000,
-          centralTax: 27000,
-          stateTax: 27000,
-          cess: 0,
-        },
-
-        interest: {
-          integratedTax: 0,
-          centralTax: 0,
-          stateTax: 0,
-          cess: 0,
-        },
-
-        lateFee: 0,
-      };
-
-      setReportData(mockData);
+      const data = await reportsApi.getGSTR3BReport(selectedMonth, user?.activeStoreId);
+      setReportData(data as GSTR3BData);
     } catch (error: any) {
       toast.error(error?.message || 'Failed to load GSTR-3B report');
     } finally {
@@ -290,9 +231,11 @@ export function GSTR3BReport() {
               <div>
                 <p className="text-sm text-green-700 flex items-center gap-2">
                   <CheckCircle className="w-4 h-4" />
-                  GSTIN: <span className="font-mono font-medium">{reportData.gstin}</span>
+                  GSTIN: <span className="font-mono font-medium">{reportData.gstin || 'Not configured'}</span>
                 </p>
-                <p className="text-sm text-green-900 mt-1 font-medium">{reportData.legalName}</p>
+                {reportData.legalName && (
+                  <p className="text-sm text-green-900 mt-1 font-medium">{reportData.legalName}</p>
+                )}
               </div>
               <div className="text-right">
                 <p className="text-xs text-green-700">Tax Period</p>

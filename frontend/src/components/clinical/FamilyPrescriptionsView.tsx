@@ -5,6 +5,7 @@
 import { useState } from 'react';
 import { Users, Plus, Eye, Calendar } from 'lucide-react';
 import clsx from 'clsx';
+import { customerApi } from '../../services/api/customers';
 
 interface FamilyMember {
   id: string;
@@ -48,24 +49,53 @@ const SAMPLE_PRESCRIPTIONS: FamilyPrescription[] = [
 ];
 
 export function FamilyPrescriptionsView({
-  familyMembers = SAMPLE_FAMILY,
+  customerId,
+  familyMembers: initialFamilyMembers = SAMPLE_FAMILY,
   prescriptions = SAMPLE_PRESCRIPTIONS,
 }: FamilyPrescriptionsViewProps) {
+  const [members, setMembers] = useState<FamilyMember[]>(initialFamilyMembers);
   const [selectedMemberId, setSelectedMemberId] = useState<string | null>(null);
   const [showAddMember, setShowAddMember] = useState(false);
   const [newMemberName, setNewMemberName] = useState('');
   const [newMemberRelationship, setNewMemberRelationship] = useState('');
+  const [addError, setAddError] = useState<string | null>(null);
+  const [isAdding, setIsAdding] = useState(false);
 
   const memberPrescriptions = selectedMemberId
     ? prescriptions.filter(p => p.memberId === selectedMemberId)
     : prescriptions;
 
-  const handleAddMember = () => {
-    if (newMemberName && newMemberRelationship) {
-      // TODO: Call API to add family member
+  const handleAddMember = async () => {
+    if (!newMemberName.trim() || !newMemberRelationship) return;
+    if (!customerId) {
+      setAddError('Customer ID is missing — cannot save family member.');
+      return;
+    }
+
+    setIsAdding(true);
+    setAddError(null);
+
+    try {
+      const result = await customerApi.addPatient(customerId, {
+        name: newMemberName.trim(),
+        relation: newMemberRelationship,
+      });
+
+      const newMember: FamilyMember = {
+        id: result.patient_id ?? result.patientId ?? String(Date.now()),
+        name: newMemberName.trim(),
+        relationship: newMemberRelationship,
+        phone: '',
+      };
+
+      setMembers(prev => [...prev, newMember]);
       setNewMemberName('');
       setNewMemberRelationship('');
       setShowAddMember(false);
+    } catch (err) {
+      setAddError('Failed to add family member. Please try again.');
+    } finally {
+      setIsAdding(false);
     }
   };
 
@@ -103,7 +133,7 @@ export function FamilyPrescriptionsView({
 
         {/* Family Members List */}
         <div className="flex gap-2 flex-wrap">
-          {familyMembers.map(member => (
+          {members.map(member => (
             <button
               key={member.id}
               onClick={() => setSelectedMemberId(selectedMemberId === member.id ? null : member.id)}
@@ -145,15 +175,19 @@ export function FamilyPrescriptionsView({
               <option value="Sibling">Sibling</option>
               <option value="Other">Other</option>
             </select>
+            {addError && (
+              <p className="text-sm text-red-400">{addError}</p>
+            )}
             <div className="flex gap-2">
               <button
                 onClick={handleAddMember}
-                className="flex-1 px-3 py-2 bg-green-600 text-white rounded hover:bg-green-700 transition"
+                disabled={isAdding || !newMemberName.trim() || !newMemberRelationship}
+                className="flex-1 px-3 py-2 bg-green-600 text-white rounded hover:bg-green-700 transition disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                Add
+                {isAdding ? 'Adding...' : 'Add'}
               </button>
               <button
-                onClick={() => setShowAddMember(false)}
+                onClick={() => { setShowAddMember(false); setAddError(null); }}
                 className="flex-1 px-3 py-2 bg-gray-600 text-white rounded hover:bg-gray-700 transition"
               >
                 Cancel

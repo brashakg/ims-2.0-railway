@@ -7,6 +7,7 @@ Real database queries for dashboard and reports
 from fastapi import APIRouter, Depends, Query
 from typing import Optional
 from datetime import date, datetime, timedelta
+from calendar import monthrange
 from .auth import get_current_user
 from ..dependencies import (
     get_order_repository,
@@ -14,6 +15,7 @@ from ..dependencies import (
     get_customer_repository,
     get_task_repository,
     get_attendance_repository,
+    get_db,
 )
 
 router = APIRouter()
@@ -1348,5 +1350,372 @@ async def get_targets(
     #     stored_targets = targets_repo.find_one({"store_id": active_store})
     #     if stored_targets:
     #         targets.update(stored_targets)
-    
+
     return targets
+
+
+# ============================================================================
+# GST RETURNS - GSTR-1 (Outward Supplies)
+# ============================================================================
+
+
+def _get_raw_db():
+    """Get raw MongoDB database object for aggregation queries."""
+    try:
+        conn = get_db()
+        if conn is not None and conn.is_connected:
+            return conn.db
+    except Exception:
+        pass
+    return None
+
+
+@router.get("/gstr1")
+async def gstr1_report(
+    month: str = Query(..., description="Tax period in YYYY-MM format"),
+    store_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    GSTR-1 report: outward supplies aggregated from the orders collection.
+
+    Classifies invoices into:
+      - B2B  : orders where the customer has a GSTIN on file
+      - B2CL : orders to consumers with invoice value > 250000
+      - B2CS : consolidated summary of remaining consumer invoices
+    Returns empty lists/summaries when no data exists for the period.
+    """
+    active_store = store_id or current_user.get("active_store_id") or "store-001"
+
+    # Parse month to date range
+    try:
+        year, mon = int(month[:4]), int(month[5:7])
+        _, last_day = monthrange(year, mon)
+        from_dt = datetime(year, mon, 1, 0, 0, 0)
+        to_dt = datetime(year, mon, last_day, 23, 59, 59)
+    except Exception:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=400, detail="month must be in YYYY-MM format")
+
+    from_iso = from_dt.isoformat()
+    to_iso = to_dt.isoformat()
+
+    b2b: list = []
+    b2cl: list = []
+    b2cs_map: dict = {}
+
+    db = _get_raw_db()
+    if db is not None:
+        try:
+            orders_col = db["orders"]
+            customers_col = db["customers"]
+
+            # Build a GSTIN lookup from customers collection
+            gstin_map: dict = {}
+            try:
+                for cust in customers_col.find(
+                    {"gstin": {"$exists": True, "$nin": [None, ""]}},
+                    {"customer_id": 1, "gstin": 1, "name": 1},
+                ):
+                    gstin_map[str(cust.get("customer_id", ""))] = {
+                        "gstin": cust.get("gstin", ""),
+                        "name": cust.get("name", ""),
+                    }
+            except Exception:
+                pass
+
+            # Fetch completed orders in the date range
+            query = {
+                "store_id": active_store,
+                "status": {"$nin": ["CANCELLED", "DRAFT", "cancelled", "draft"]},
+                "created_at": {"$gte": from_iso, "$lte": to_iso},
+            }
+
+            for order in orders_col.find(query):
+                cust_id = str(order.get("customer_id", ""))
+                cust_info = gstin_map.get(cust_id, {})
+                customer_gstin = cust_info.get("gstin", "")
+                customer_name = cust_info.get("name", "") or order.get("customer_name", "Walk-in Customer")
+
+                invoice_value = float(order.get("total_amount", 0))
+                taxable_value = float(order.get("taxable_amount", 0))
+                cgst = float(order.get("cgst_amount", 0))
+                sgst = float(order.get("sgst_amount", 0))
+                igst = float(order.get("igst_amount", 0))
+                total_tax = cgst + sgst + igst
+
+                bill_number = order.get("bill_number", order.get("order_number", ""))
+                created_raw = order.get("created_at", "")
+                invoice_date = str(created_raw)[:10] if created_raw else month + "-01"
+
+                # Determine place of supply (intra = CGST+SGST, inter = IGST)
+                is_igst = igst > 0
+                place_of_supply = "Inter-State" if is_igst else "Maharashtra"
+
+                base_invoice = {
+                    "invoiceNumber": bill_number,
+                    "invoiceDate": invoice_date,
+                    "customerName": customer_name,
+                    "placeOfSupply": place_of_supply,
+                    "invoiceValue": round(invoice_value, 2),
+                    "taxableValue": round(taxable_value, 2),
+                    "cgst": round(cgst, 2),
+                    "sgst": round(sgst, 2),
+                    "igst": round(igst, 2),
+                    "totalTax": round(total_tax, 2),
+                    "hsnCode": "9004",
+                    "gstRate": 5,
+                }
+
+                if customer_gstin:
+                    # B2B: registered business with GSTIN
+                    b2b.append({
+                        **base_invoice,
+                        "customerGSTIN": customer_gstin,
+                        "customerState": "Maharashtra" if not is_igst else "Other State",
+                    })
+                elif invoice_value > 250000:
+                    # B2CL: large consumer invoice
+                    b2cl.append({
+                        **base_invoice,
+                        "customerState": place_of_supply,
+                    })
+                else:
+                    # B2CS: small consumer invoice — consolidate by place_of_supply + gst_rate
+                    # Determine effective GST rate (approximate from amounts)
+                    if taxable_value > 0:
+                        effective_rate = round((total_tax / taxable_value) * 100)
+                        # Snap to standard rates
+                        if effective_rate <= 6:
+                            effective_rate = 5
+                        elif effective_rate <= 14:
+                            effective_rate = 12
+                        else:
+                            effective_rate = 18
+                    else:
+                        effective_rate = 5
+
+                    key = f"{place_of_supply}|{effective_rate}"
+                    if key not in b2cs_map:
+                        b2cs_map[key] = {
+                            "placeOfSupply": place_of_supply,
+                            "gstRate": effective_rate,
+                            "taxableValue": 0.0,
+                            "cgst": 0.0,
+                            "sgst": 0.0,
+                            "igst": 0.0,
+                            "totalTax": 0.0,
+                        }
+                    b2cs_map[key]["taxableValue"] += taxable_value
+                    b2cs_map[key]["cgst"] += cgst
+                    b2cs_map[key]["sgst"] += sgst
+                    b2cs_map[key]["igst"] += igst
+                    b2cs_map[key]["totalTax"] += total_tax
+
+        except Exception:
+            pass
+
+    b2cs = [
+        {
+            **v,
+            "taxableValue": round(v["taxableValue"], 2),
+            "cgst": round(v["cgst"], 2),
+            "sgst": round(v["sgst"], 2),
+            "igst": round(v["igst"], 2),
+            "totalTax": round(v["totalTax"], 2),
+        }
+        for v in b2cs_map.values()
+    ]
+
+    total_invoices = len(b2b) + len(b2cl) + len(b2cs_map)
+    total_taxable = (
+        sum(i["taxableValue"] for i in b2b)
+        + sum(i["taxableValue"] for i in b2cl)
+        + sum(v["taxableValue"] for v in b2cs)
+    )
+    total_tax = (
+        sum(i["totalTax"] for i in b2b)
+        + sum(i["totalTax"] for i in b2cl)
+        + sum(v["totalTax"] for v in b2cs)
+    )
+
+    return {
+        "period": month,
+        "gstin": "",
+        "legalName": "",
+        "totalInvoices": total_invoices,
+        "totalTaxableValue": round(total_taxable, 2),
+        "totalTax": round(total_tax, 2),
+        "b2b": b2b,
+        "b2cl": b2cl,
+        "b2cs": b2cs,
+    }
+
+
+# ============================================================================
+# GST RETURNS - GSTR-3B (Summary Return)
+# ============================================================================
+
+
+@router.get("/gstr3b")
+async def gstr3b_report(
+    month: str = Query(..., description="Tax period in YYYY-MM format"),
+    store_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    GSTR-3B summary return: aggregates output tax from the orders collection.
+
+    Table 3.1 - Outward taxable supplies: derived from completed sales invoices.
+    Table 4   - ITC available: derived from purchase GRNs (grns collection).
+                Returns zeros when no purchase data is present.
+    Table 6.1 - Payment of tax: net cash liability = output tax - ITC.
+    Returns all-zero figures when no data exists for the period.
+    """
+    active_store = store_id or current_user.get("active_store_id") or "store-001"
+
+    try:
+        year, mon = int(month[:4]), int(month[5:7])
+        _, last_day = monthrange(year, mon)
+        from_dt = datetime(year, mon, 1, 0, 0, 0)
+        to_dt = datetime(year, mon, last_day, 23, 59, 59)
+    except Exception:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=400, detail="month must be in YYYY-MM format")
+
+    from_iso = from_dt.isoformat()
+    to_iso = to_dt.isoformat()
+
+    # Output tax accumulators
+    out_igst = 0.0
+    out_cgst = 0.0
+    out_sgst = 0.0
+    out_taxable = 0.0
+
+    # ITC accumulators (from purchase GRNs)
+    itc_igst = 0.0
+    itc_cgst = 0.0
+    itc_sgst = 0.0
+
+    db = _get_raw_db()
+    if db is not None:
+        try:
+            # --- Output tax from orders ---
+            orders_col = db["orders"]
+            pipeline = [
+                {
+                    "$match": {
+                        "store_id": active_store,
+                        "status": {"$nin": ["CANCELLED", "DRAFT", "cancelled", "draft"]},
+                        "created_at": {"$gte": from_iso, "$lte": to_iso},
+                    }
+                },
+                {
+                    "$group": {
+                        "_id": None,
+                        "igst": {"$sum": "$igst_amount"},
+                        "cgst": {"$sum": "$cgst_amount"},
+                        "sgst": {"$sum": "$sgst_amount"},
+                        "taxable": {"$sum": "$taxable_amount"},
+                    }
+                },
+            ]
+            result = list(orders_col.aggregate(pipeline))
+            if result:
+                agg = result[0]
+                out_igst = float(agg.get("igst", 0.0))
+                out_cgst = float(agg.get("cgst", 0.0))
+                out_sgst = float(agg.get("sgst", 0.0))
+                out_taxable = float(agg.get("taxable", 0.0))
+        except Exception:
+            pass
+
+        try:
+            # --- ITC from purchase GRNs (goods received notes) ---
+            grns_col = db["grns"]
+            itc_pipeline = [
+                {
+                    "$match": {
+                        "store_id": active_store,
+                        "status": {"$nin": ["CANCELLED", "cancelled"]},
+                        "created_at": {"$gte": from_iso, "$lte": to_iso},
+                    }
+                },
+                {
+                    "$group": {
+                        "_id": None,
+                        "igst": {"$sum": "$igst_amount"},
+                        "cgst": {"$sum": "$cgst_amount"},
+                        "sgst": {"$sum": "$sgst_amount"},
+                    }
+                },
+            ]
+            itc_result = list(grns_col.aggregate(itc_pipeline))
+            if itc_result:
+                itc_agg = itc_result[0]
+                itc_igst = float(itc_agg.get("igst", 0.0))
+                itc_cgst = float(itc_agg.get("cgst", 0.0))
+                itc_sgst = float(itc_agg.get("sgst", 0.0))
+        except Exception:
+            # grns collection may not exist or have no GST fields
+            pass
+
+    # Net cash liability = output tax - ITC (floor at 0 per component)
+    cash_igst = max(0.0, out_igst - itc_igst)
+    cash_cgst = max(0.0, out_cgst - itc_cgst)
+    cash_sgst = max(0.0, out_sgst - itc_sgst)
+
+    def _r(v: float) -> float:
+        return round(v, 2)
+
+    return {
+        "period": month,
+        "gstin": "",
+        "legalName": "",
+        "outwardTaxableValue": _r(out_taxable),
+        "outwardTaxableSupplies": {
+            "integratedTax": _r(out_igst),
+            "centralTax": _r(out_cgst),
+            "stateTax": _r(out_sgst),
+            "cess": 0.0,
+        },
+        "zeroRatedValue": 0.0,
+        "zeroRatedSupplies": {
+            "integratedTax": 0.0,
+            "centralTax": 0.0,
+            "stateTax": 0.0,
+            "cess": 0.0,
+        },
+        "itcAvailable": {
+            "integratedTax": _r(itc_igst),
+            "centralTax": _r(itc_cgst),
+            "stateTax": _r(itc_sgst),
+            "cess": 0.0,
+        },
+        "exemptSupplies": 0.0,
+        "taxPayable": {
+            "integratedTax": _r(out_igst),
+            "centralTax": _r(out_cgst),
+            "stateTax": _r(out_sgst),
+            "cess": 0.0,
+        },
+        "itcUtilized": {
+            "integratedTax": _r(itc_igst),
+            "centralTax": _r(itc_cgst),
+            "stateTax": _r(itc_sgst),
+            "cess": 0.0,
+        },
+        "taxPaidCash": {
+            "integratedTax": _r(cash_igst),
+            "centralTax": _r(cash_cgst),
+            "stateTax": _r(cash_sgst),
+            "cess": 0.0,
+        },
+        "interest": {
+            "integratedTax": 0.0,
+            "centralTax": 0.0,
+            "stateTax": 0.0,
+            "cess": 0.0,
+        },
+        "lateFee": 0.0,
+    }

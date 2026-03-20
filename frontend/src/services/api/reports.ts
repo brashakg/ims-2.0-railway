@@ -28,6 +28,20 @@ export const reportsApi = {
     });
     return response.data;
   },
+
+  getGSTR1Report: async (month: string, storeId?: string) => {
+    const response = await api.get('/reports/gstr1', {
+      params: { month, ...(storeId ? { store_id: storeId } : {}) },
+    });
+    return response.data;
+  },
+
+  getGSTR3BReport: async (month: string, storeId?: string) => {
+    const response = await api.get('/reports/gstr3b', {
+      params: { month, ...(storeId ? { store_id: storeId } : {}) },
+    });
+    return response.data;
+  },
 };
 
 // ============================================================================

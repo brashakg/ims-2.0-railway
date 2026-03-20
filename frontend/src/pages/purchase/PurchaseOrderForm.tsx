@@ -8,8 +8,11 @@ import {
   Plus,
   X as XIcon,
   Trash2,
+  Loader2,
 } from 'lucide-react';
 import { useToast } from '../../context/ToastContext';
+import { useAuth } from '../../context/AuthContext';
+import { vendorsApi } from '../../services/api';
 import type { Supplier, PurchaseOrder, POItem } from './purchaseTypes';
 
 interface POFormItem {
@@ -29,8 +32,10 @@ interface PurchaseOrderFormProps {
 
 export function PurchaseOrderForm({ suppliers, existingPOCount, onClose, onCreated }: PurchaseOrderFormProps) {
   const toast = useToast();
+  const { user } = useAuth();
 
   const [supplierId, setSupplierId] = useState('');
+  const [isSaving, setIsSaving] = useState(false);
   const [expectedDelivery, setExpectedDelivery] = useState('');
   const [notes, setNotes] = useState('');
   const [items, setItems] = useState<POFormItem[]>([
@@ -57,7 +62,7 @@ export function PurchaseOrderForm({ suppliers, existingPOCount, onClose, onCreat
   const calcTax = () => items.reduce((sum, item) => sum + item.quantity * item.unitCost * item.taxRate / 100, 0);
   const calcGrandTotal = () => calcSubtotal() + calcTax();
 
-  const handleCreate = () => {
+  const handleCreate = async () => {
     if (!supplierId) {
       toast.error('Please select a supplier');
       return;
@@ -72,37 +77,61 @@ export function PurchaseOrderForm({ suppliers, existingPOCount, onClose, onCreat
       return;
     }
 
+    const storeId = user?.activeStoreId ?? 'default';
     const supplier = suppliers.find(s => s.id === supplierId);
-    const poItems: POItem[] = validItems.map((item, idx) => ({
-      productId: `new-${Date.now()}-${idx}`,
-      productName: item.productName,
-      sku: item.sku || 'N/A',
-      quantity: item.quantity,
-      unitCost: item.unitCost,
-      taxRate: item.taxRate,
-      total: calcLineTotal(item),
-    }));
 
-    const subtotal = validItems.reduce((sum, item) => sum + item.quantity * item.unitCost, 0);
-    const taxAmount = validItems.reduce((sum, item) => sum + item.quantity * item.unitCost * item.taxRate / 100, 0);
+    setIsSaving(true);
+    try {
+      const resp = await vendorsApi.createPurchaseOrder({
+        vendor_id: supplierId,
+        delivery_store_id: storeId,
+        expected_date: expectedDelivery,
+        notes: notes || undefined,
+        items: validItems.map((item, idx) => ({
+          product_id: `new-${Date.now()}-${idx}`,
+          product_name: item.productName,
+          sku: item.sku || 'N/A',
+          quantity: item.quantity,
+          unit_price: item.unitCost,
+        })),
+      });
 
-    const newPO: PurchaseOrder = {
-      id: `po-${Date.now()}`,
-      poNumber: `PO-2024-${String(existingPOCount + 1).padStart(3, '0')}`,
-      supplierId,
-      supplierName: supplier?.name ?? 'Unknown',
-      date: new Date().toISOString().split('T')[0],
-      expectedDelivery,
-      status: 'DRAFT',
-      items: poItems,
-      subtotal,
-      taxAmount,
-      total: subtotal + taxAmount,
-      notes: notes || undefined,
-    };
+      const poItems: POItem[] = validItems.map((item, idx) => ({
+        productId: `new-${Date.now()}-${idx}`,
+        productName: item.productName,
+        sku: item.sku || 'N/A',
+        quantity: item.quantity,
+        unitCost: item.unitCost,
+        taxRate: item.taxRate,
+        total: calcLineTotal(item),
+      }));
 
-    onCreated(newPO);
-    toast.success(`Purchase Order ${newPO.poNumber} created as Draft`);
+      const subtotal = validItems.reduce((sum, item) => sum + item.quantity * item.unitCost, 0);
+      const taxAmount = validItems.reduce((sum, item) => sum + item.quantity * item.unitCost * item.taxRate / 100, 0);
+
+      const newPO: PurchaseOrder = {
+        id: resp.po_id ?? `po-${Date.now()}`,
+        poNumber: resp.po_number ?? `PO-${String(existingPOCount + 1).padStart(3, '0')}`,
+        supplierId,
+        supplierName: supplier?.name ?? 'Unknown',
+        date: new Date().toISOString().split('T')[0],
+        expectedDelivery,
+        status: 'DRAFT',
+        items: poItems,
+        subtotal,
+        taxAmount,
+        total: resp.total_amount ?? subtotal + taxAmount,
+        notes: notes || undefined,
+      };
+
+      onCreated(newPO);
+      toast.success(`Purchase Order ${newPO.poNumber} created as Draft`);
+    } catch (error: unknown) {
+      const msg = error instanceof Error ? error.message : 'Failed to create purchase order';
+      toast.error(msg);
+    } finally {
+      setIsSaving(false);
+    }
   };
 
   return (
@@ -279,10 +308,15 @@ export function PurchaseOrderForm({ suppliers, existingPOCount, onClose, onCreat
           </button>
           <button
             onClick={handleCreate}
-            className="btn-primary flex items-center gap-2"
+            disabled={isSaving}
+            className="btn-primary flex items-center gap-2 disabled:opacity-60 disabled:cursor-not-allowed"
           >
-            <FileText className="w-4 h-4" />
-            Create as Draft
+            {isSaving ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <FileText className="w-4 h-4" />
+            )}
+            {isSaving ? 'Creating...' : 'Create as Draft'}
           </button>
         </div>
       </div>

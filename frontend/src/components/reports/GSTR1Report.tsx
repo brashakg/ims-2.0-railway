@@ -14,6 +14,8 @@ import {
   RefreshCw,
 } from 'lucide-react';
 import { useToast } from '../../context/ToastContext';
+import { useAuth } from '../../context/AuthContext';
+import { reportsApi } from '../../services/api';
 
 interface GSTR1Invoice {
   invoiceNumber: string;
@@ -56,6 +58,7 @@ interface GSTR1Data {
 
 export function GSTR1Report() {
   const toast = useToast();
+  const { user } = useAuth();
 
   const [isLoading, setIsLoading] = useState(false);
   const [reportData, setReportData] = useState<GSTR1Data | null>(null);
@@ -63,7 +66,6 @@ export function GSTR1Report() {
   const [activeSection, setActiveSection] = useState<'b2b' | 'b2cl' | 'b2cs'>('b2b');
 
   useEffect(() => {
-    // Load report data when month changes
     if (selectedMonth) {
       loadReportData();
     }
@@ -72,118 +74,13 @@ export function GSTR1Report() {
   const loadReportData = async () => {
     setIsLoading(true);
     try {
-      // TODO: Wire to GET /api/v1/reports/gstr1?period={selectedMonth} once
-      // the backend GST report endpoint is implemented.
-      const mockData: GSTR1Data = {
-        period: selectedMonth,
-        gstin: '27AABCU9603R1ZM',
-        legalName: 'Better Vision Optics Pvt Ltd',
-        totalInvoices: 156,
-        totalTaxableValue: 487500,
-        totalTax: 73125,
-        b2b: generateMockB2BData(),
-        b2cl: generateMockB2CLData(),
-        b2cs: generateMockB2CSData(),
-      };
-
-      setReportData(mockData);
+      const data = await reportsApi.getGSTR1Report(selectedMonth, user?.activeStoreId);
+      setReportData(data as GSTR1Data);
     } catch (error: any) {
       toast.error(error?.message || 'Failed to load GSTR-1 report');
     } finally {
       setIsLoading(false);
     }
-  };
-
-  const generateMockB2BData = (): GSTR1Invoice[] => {
-    // Mock B2B invoices
-    return [
-      {
-        invoiceNumber: 'INV-2024-001',
-        invoiceDate: '2024-01-15',
-        customerName: 'Vision Care Hospital',
-        customerGSTIN: '27AABCU9603R1ZM',
-        customerState: 'Maharashtra',
-        placeOfSupply: 'Maharashtra',
-        invoiceValue: 23600,
-        taxableValue: 20000,
-        cgst: 1800,
-        sgst: 1800,
-        igst: 0,
-        totalTax: 3600,
-        hsnCode: '9004',
-        gstRate: 18,
-      },
-      {
-        invoiceNumber: 'INV-2024-002',
-        invoiceDate: '2024-01-16',
-        customerName: 'Eye Care Clinic',
-        customerGSTIN: '29AABCU9603R1ZM',
-        customerState: 'Karnataka',
-        placeOfSupply: 'Karnataka',
-        invoiceValue: 33600,
-        taxableValue: 30000,
-        cgst: 0,
-        sgst: 0,
-        igst: 3600,
-        totalTax: 3600,
-        hsnCode: '9001',
-        gstRate: 12,
-      },
-    ];
-  };
-
-  const generateMockB2CLData = (): GSTR1Invoice[] => {
-    // Mock B2CL invoices (large invoices > ₹2.5 lakh to consumers)
-    return [
-      {
-        invoiceNumber: 'INV-2024-150',
-        invoiceDate: '2024-01-20',
-        customerName: 'Rajesh Kumar',
-        customerState: 'Maharashtra',
-        placeOfSupply: 'Maharashtra',
-        invoiceValue: 280000,
-        taxableValue: 250000,
-        cgst: 15000,
-        sgst: 15000,
-        igst: 0,
-        totalTax: 30000,
-        hsnCode: '9004',
-        gstRate: 12,
-      },
-    ];
-  };
-
-  const generateMockB2CSData = (): GSTR1B2CSummary[] => {
-    // Mock B2CS summary (small invoices <= ₹2.5 lakh to consumers)
-    return [
-      {
-        placeOfSupply: 'Maharashtra',
-        gstRate: 12,
-        taxableValue: 150000,
-        cgst: 9000,
-        sgst: 9000,
-        igst: 0,
-        totalTax: 18000,
-      },
-      {
-        placeOfSupply: 'Maharashtra',
-        gstRate: 18,
-        taxableValue: 87500,
-        cgst: 7875,
-        sgst: 7875,
-        igst: 0,
-        totalTax: 15750,
-      },
-      {
-        placeOfSupply: 'Karnataka',
-        gstRate: 12,
-        taxableValue: 45000,
-        cgst: 0,
-        sgst: 0,
-        igst: 5400,
-        totalTax: 5400,
-      },
-    ];
   };
 
   const downloadJSON = () => {
@@ -473,7 +370,9 @@ export function GSTR1Report() {
               <CheckCircle className="w-4 h-4" />
               GSTIN
             </p>
-            <p className="text-lg font-bold text-green-900 font-mono">{reportData.gstin}</p>
+            <p className="text-lg font-bold text-green-900 font-mono">
+              {reportData.gstin || 'Not configured'}
+            </p>
           </div>
         </div>
       )}

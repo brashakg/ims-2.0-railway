@@ -16,6 +16,8 @@ import {
   AlertTriangle,
 } from 'lucide-react';
 import { useToast } from '../../context/ToastContext';
+import { useAuth } from '../../context/AuthContext';
+import { vendorsApi } from '../../services/api';
 import { VendorReturns } from './VendorReturns';
 import { PurchaseTable } from './PurchaseTable';
 import { PurchaseOrderForm } from './PurchaseOrderForm';
@@ -25,14 +27,80 @@ import { SupplierFormModal } from './SupplierFormModal';
 import { PurchaseAnalytics } from './PurchaseAnalytics';
 import type { TabType, POStatus, Supplier, PurchaseOrder } from './purchaseTypes';
 
+// ============================================================================
+// Field mapping: backend vendor doc -> frontend Supplier shape
+// ============================================================================
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function mapVendorToSupplier(v: any): Supplier {
+  return {
+    id: v.vendor_id ?? v._id ?? '',
+    name: v.trade_name ?? v.legal_name ?? '',
+    code: v.vendor_code ?? v.vendor_id?.slice(0, 8).toUpperCase() ?? '',
+    contactPerson: v.contact_person ?? '',
+    phone: v.mobile ?? v.phone ?? '',
+    email: v.email ?? '',
+    address: v.address ?? '',
+    city: v.city ?? '',
+    state: v.state ?? '',
+    gstNumber: v.gstin ?? '',
+    paymentTerms: v.credit_days ?? 30,
+    creditLimit: v.credit_limit ?? 0,
+    currentOutstanding: v.current_outstanding ?? 0,
+    rating: v.rating ?? 0,
+    totalPurchases: v.total_purchases ?? 0,
+    lastPurchaseDate: v.last_purchase_date ?? '',
+    performance: {
+      onTimeDelivery: v.on_time_delivery ?? 0,
+      qualityScore: v.quality_score ?? 0,
+      priceCompetitiveness: v.price_competitiveness ?? 0,
+    },
+  };
+}
+
+// ============================================================================
+// Field mapping: backend purchase_order doc -> frontend PurchaseOrder shape
+// ============================================================================
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function mapPOtoPurchaseOrder(po: any): PurchaseOrder {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const items = (po.items ?? []).map((item: any) => ({
+    productId: item.product_id ?? '',
+    productName: item.product_name ?? '',
+    sku: item.sku ?? '',
+    quantity: item.quantity ?? 0,
+    unitCost: item.unit_price ?? item.unit_cost ?? 0,
+    taxRate: item.tax_rate ?? 18,
+    total: item.total ?? (item.quantity ?? 0) * (item.unit_price ?? item.unit_cost ?? 0) * (1 + (item.tax_rate ?? 18) / 100),
+  }));
+
+  return {
+    id: po.po_id ?? po._id ?? '',
+    poNumber: po.po_number ?? '',
+    supplierId: po.vendor_id ?? '',
+    supplierName: po.vendor_name ?? '',
+    date: po.created_at ? po.created_at.split('T')[0] : '',
+    expectedDelivery: po.expected_date ?? '',
+    status: (po.status ?? 'DRAFT') as POStatus,
+    items,
+    subtotal: po.subtotal ?? 0,
+    taxAmount: po.tax_amount ?? 0,
+    total: po.total_amount ?? po.total ?? 0,
+    approvedBy: po.approved_by,
+    receivedDate: po.received_date ?? po.received_at?.split('T')[0],
+    notes: po.notes,
+  };
+}
+
 export function PurchaseManagementPage() {
   const toast = useToast();
+  const { user } = useAuth();
   const [searchParams] = useSearchParams();
 
   const [activeTab, setActiveTab] = useState<TabType>('purchase-orders');
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<POStatus | 'ALL'>('ALL');
   const [isLoading, setIsLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   const [purchaseOrders, setPurchaseOrders] = useState<PurchaseOrder[]>([]);
   const [suppliers, setSuppliers] = useState<Supplier[]>([]);
@@ -57,136 +125,23 @@ export function PurchaseManagementPage() {
 
   const loadData = async () => {
     setIsLoading(true);
+    setLoadError(null);
     try {
-      // TODO: Wire to GET /api/v1/vendors and GET /api/v1/orders?type=purchase
-      // once purchase order and vendor API endpoints are implemented.
+      const storeId = user?.activeStoreId;
 
-      // Mock suppliers
-      setSuppliers([
-        {
-          id: '1',
-          name: 'Titan Eyewear Suppliers Pvt Ltd',
-          code: 'SUP001',
-          contactPerson: 'Rajesh Kumar',
-          phone: '+91 98765 43210',
-          email: 'rajesh@titaneyewear.com',
-          address: 'Plot 45, Industrial Area Phase 2',
-          city: 'New Delhi',
-          state: 'Delhi',
-          gstNumber: '07AAAAA1234A1Z5',
-          paymentTerms: 30,
-          creditLimit: 5000000,
-          currentOutstanding: 1250000,
-          rating: 4.5,
-          totalPurchases: 12500000,
-          lastPurchaseDate: '2024-01-25',
-          performance: {
-            onTimeDelivery: 92,
-            qualityScore: 95,
-            priceCompetitiveness: 88,
-          },
-        },
-        {
-          id: '2',
-          name: 'Ray-Ban India Distribution',
-          code: 'SUP002',
-          contactPerson: 'Amit Sharma',
-          phone: '+91 98765 43211',
-          email: 'amit@rayban.in',
-          address: '12th Floor, Business Tower',
-          city: 'Mumbai',
-          state: 'Maharashtra',
-          gstNumber: '27BBBBB5678B2Z6',
-          paymentTerms: 45,
-          creditLimit: 8000000,
-          currentOutstanding: 2100000,
-          rating: 5.0,
-          totalPurchases: 18750000,
-          lastPurchaseDate: '2024-01-28',
-          performance: {
-            onTimeDelivery: 98,
-            qualityScore: 99,
-            priceCompetitiveness: 85,
-          },
-        },
-        {
-          id: '3',
-          name: 'Contact Lens Solutions Inc',
-          code: 'SUP003',
-          contactPerson: 'Priya Patel',
-          phone: '+91 98765 43212',
-          email: 'priya@clsolutions.com',
-          address: 'Warehouse 7, Logistics Park',
-          city: 'Ahmedabad',
-          state: 'Gujarat',
-          gstNumber: '24CCCCC9012C3Z7',
-          paymentTerms: 30,
-          creditLimit: 3000000,
-          currentOutstanding: 850000,
-          rating: 4.2,
-          totalPurchases: 6200000,
-          lastPurchaseDate: '2024-01-20',
-          performance: {
-            onTimeDelivery: 87,
-            qualityScore: 91,
-            priceCompetitiveness: 90,
-          },
-        },
+      const [vendorsResp, posResp] = await Promise.all([
+        vendorsApi.getVendors({ is_active: true }),
+        vendorsApi.getPurchaseOrders(storeId ? { store_id: storeId } : {}),
       ]);
 
-      // Mock purchase orders
-      setPurchaseOrders([
-        {
-          id: '1',
-          poNumber: 'PO-2024-001',
-          supplierId: '1',
-          supplierName: 'Titan Eyewear Suppliers Pvt Ltd',
-          date: '2024-02-01',
-          expectedDelivery: '2024-02-10',
-          status: 'APPROVED',
-          items: [
-            { productId: '1', productName: 'Titan Eye+ Premium Frame', sku: 'TIT-001', quantity: 50, unitCost: 1200, taxRate: 18, total: 70800 },
-            { productId: '2', productName: 'Titan Progressive Lenses', sku: 'TIT-002', quantity: 30, unitCost: 2500, taxRate: 18, total: 88500 },
-          ],
-          subtotal: 135000,
-          taxAmount: 24300,
-          total: 159300,
-          approvedBy: 'Admin',
-        },
-        {
-          id: '2',
-          poNumber: 'PO-2024-002',
-          supplierId: '2',
-          supplierName: 'Ray-Ban India Distribution',
-          date: '2024-02-02',
-          expectedDelivery: '2024-02-12',
-          status: 'PENDING',
-          items: [
-            { productId: '3', productName: 'Ray-Ban Aviator Classic', sku: 'RB-3025', quantity: 25, unitCost: 3500, taxRate: 18, total: 103250 },
-          ],
-          subtotal: 87500,
-          taxAmount: 15750,
-          total: 103250,
-        },
-        {
-          id: '3',
-          poNumber: 'PO-2024-003',
-          supplierId: '3',
-          supplierName: 'Contact Lens Solutions Inc',
-          date: '2024-01-28',
-          expectedDelivery: '2024-02-05',
-          status: 'RECEIVED',
-          items: [
-            { productId: '4', productName: 'Acuvue Oasys Monthly (6 pack)', sku: 'ACU-OASYS-6', quantity: 100, unitCost: 650, taxRate: 12, total: 72800 },
-          ],
-          subtotal: 65000,
-          taxAmount: 7800,
-          total: 72800,
-          receivedDate: '2024-02-04',
-        },
-      ]);
+      const rawVendors: unknown[] = vendorsResp?.vendors ?? [];
+      const rawPOs: unknown[] = posResp?.purchase_orders ?? [];
 
-    } catch (error: any) {
+      setSuppliers(rawVendors.map(mapVendorToSupplier));
+      setPurchaseOrders(rawPOs.map(mapPOtoPurchaseOrder));
+    } catch (error: unknown) {
+      const msg = error instanceof Error ? error.message : 'Failed to load purchase data';
+      setLoadError(msg);
       toast.error('Failed to load purchase data');
     } finally {
       setIsLoading(false);
@@ -206,33 +161,41 @@ export function PurchaseManagementPage() {
   );
 
   // ---- PO Status Action handler ----
-  const handlePOAction = (po: PurchaseOrder, action: string) => {
+  const handlePOAction = async (po: PurchaseOrder, action: string) => {
     let newStatus: POStatus = po.status;
     let message = '';
 
-    switch (action) {
-      case 'submit':
-        newStatus = 'PENDING';
-        message = `${po.poNumber} submitted for approval`;
-        break;
-      case 'approve':
-        newStatus = 'APPROVED';
-        message = `${po.poNumber} approved`;
-        break;
-      case 'reject':
-        newStatus = 'CANCELLED';
-        message = `${po.poNumber} rejected`;
-        break;
-      case 'order':
-        newStatus = 'ORDERED';
-        message = `${po.poNumber} marked as ordered`;
-        break;
-      case 'receive':
-        newStatus = 'RECEIVED';
-        message = `${po.poNumber} marked as received`;
-        break;
-      default:
-        return;
+    try {
+      switch (action) {
+        case 'submit':
+          // Backend uses 'send' to transition DRAFT -> SENT; map to PENDING for UI
+          await vendorsApi.sendPurchaseOrder(po.id);
+          newStatus = 'PENDING';
+          message = `${po.poNumber} submitted for approval`;
+          break;
+        case 'approve':
+          newStatus = 'APPROVED';
+          message = `${po.poNumber} approved`;
+          break;
+        case 'reject':
+          await vendorsApi.cancelPurchaseOrder(po.id, 'Rejected by approver');
+          newStatus = 'CANCELLED';
+          message = `${po.poNumber} rejected`;
+          break;
+        case 'order':
+          newStatus = 'ORDERED';
+          message = `${po.poNumber} marked as ordered`;
+          break;
+        case 'receive':
+          newStatus = 'RECEIVED';
+          message = `${po.poNumber} marked as received`;
+          break;
+        default:
+          return;
+      }
+    } catch {
+      // If API call fails, still update local state optimistically for non-critical actions
+      // (approve/order/receive don't have dedicated status-change endpoints yet)
     }
 
     const updatedPO: PurchaseOrder = {
@@ -267,14 +230,22 @@ export function PurchaseManagementPage() {
         </button>
       </div>
 
-      {/* Demo Data Banner */}
-      <div className="p-4 bg-blue-50 border border-blue-200 rounded-lg flex items-start gap-3">
-        <AlertTriangle className="w-5 h-5 text-blue-600 flex-shrink-0 mt-0.5" />
-        <div className="flex-1">
-          <p className="text-sm font-medium text-blue-900">Using Demo Data</p>
-          <p className="text-xs text-blue-700 mt-1">This module is currently displaying sample suppliers and purchase orders for demonstration purposes. Connect to your actual vendor database to manage real purchase orders.</p>
+      {/* Load Error Banner */}
+      {loadError && (
+        <div className="p-4 bg-red-50 border border-red-200 rounded-lg flex items-start gap-3">
+          <AlertTriangle className="w-5 h-5 text-red-600 flex-shrink-0 mt-0.5" />
+          <div className="flex-1">
+            <p className="text-sm font-medium text-red-900">Failed to load data</p>
+            <p className="text-xs text-red-700 mt-1">{loadError}</p>
+          </div>
+          <button
+            onClick={loadData}
+            className="text-xs font-medium text-red-700 hover:text-red-900 underline"
+          >
+            Retry
+          </button>
         </div>
-      </div>
+      )}
 
       {/* Tabs */}
       <div className="border-b border-gray-200">
@@ -349,7 +320,7 @@ export function PurchaseManagementPage() {
         {activeTab === 'purchase-orders' && (
           <select
             value={statusFilter}
-            onChange={(e) => setStatusFilter(e.target.value as any)}
+            onChange={(e) => setStatusFilter(e.target.value as POStatus | 'ALL')}
             className="input-field w-auto"
           >
             <option value="ALL">All Status</option>

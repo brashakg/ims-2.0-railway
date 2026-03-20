@@ -30,6 +30,7 @@ class PatientCreate(BaseModel):
     mobile: Optional[str] = None
     dob: Optional[date] = None
     anniversary: Optional[date] = None
+    relation: Optional[str] = None
 
 
 class CustomerCreate(BaseModel):
@@ -275,7 +276,7 @@ async def add_patient(
             "anniversary": (
                 patient.anniversary.isoformat() if patient.anniversary else None
             ),
-            "relation": "Family",
+            "relation": patient.relation or "Family",
         }
 
         if repo.add_patient(customer_id, patient_data):

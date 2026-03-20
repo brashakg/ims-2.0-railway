@@ -8,8 +8,10 @@ import {
   X as XIcon,
   Truck,
   AlertTriangle,
+  Loader2,
 } from 'lucide-react';
 import { useToast } from '../../context/ToastContext';
+import { vendorsApi } from '../../services/api';
 import type { Supplier } from './purchaseTypes';
 
 interface SupplierFormModalProps {
@@ -32,6 +34,7 @@ export function SupplierFormModal({ onClose, onCreated }: SupplierFormModalProps
   const [paymentTerms, setPaymentTerms] = useState(30);
   const [creditLimit, setCreditLimit] = useState(0);
   const [gstError, setGSTError] = useState('');
+  const [isSaving, setIsSaving] = useState(false);
 
   const validateGST = (gstValue: string): boolean => {
     if (!gstValue) return true; // optional
@@ -39,17 +42,13 @@ export function SupplierFormModal({ onClose, onCreated }: SupplierFormModalProps
     return gstRegex.test(gstValue.toUpperCase());
   };
 
-  const handleAdd = () => {
+  const handleAdd = async () => {
     if (!name.trim()) {
       toast.error('Company name is required');
       return;
     }
-    if (!code.trim()) {
-      toast.error('Supplier code is required');
-      return;
-    }
-    if (!contactPerson.trim()) {
-      toast.error('Contact person is required');
+    if (!phone.trim()) {
+      toast.error('Phone number is required');
       return;
     }
     if (gst && !validateGST(gst)) {
@@ -57,32 +56,53 @@ export function SupplierFormModal({ onClose, onCreated }: SupplierFormModalProps
       return;
     }
 
-    const newSupplier: Supplier = {
-      id: `sup-${Date.now()}`,
-      name: name.trim(),
-      code: code.trim().toUpperCase(),
-      contactPerson: contactPerson.trim(),
-      phone: phone.trim(),
-      email: email.trim(),
-      address: address.trim(),
-      city: city.trim(),
-      state: state.trim(),
-      gstNumber: gst.trim().toUpperCase(),
-      paymentTerms,
-      creditLimit,
-      currentOutstanding: 0,
-      rating: 0,
-      totalPurchases: 0,
-      lastPurchaseDate: '',
-      performance: {
-        onTimeDelivery: 0,
-        qualityScore: 0,
-        priceCompetitiveness: 0,
-      },
-    };
+    setIsSaving(true);
+    try {
+      const resp = await vendorsApi.createVendor({
+        legal_name: name.trim(),
+        trade_name: name.trim(),
+        gstin_status: gst.trim() ? 'REGISTERED' : 'UNREGISTERED',
+        gstin: gst.trim().toUpperCase() || undefined,
+        address: address.trim() || 'N/A',
+        city: city.trim() || 'N/A',
+        state: state.trim() || 'N/A',
+        mobile: phone.trim(),
+        email: email.trim() || undefined,
+        credit_days: paymentTerms,
+      });
 
-    onCreated(newSupplier);
-    toast.success(`Supplier "${newSupplier.name}" added successfully`);
+      const newSupplier: Supplier = {
+        id: resp.vendor_id ?? `sup-${Date.now()}`,
+        name: name.trim(),
+        code: code.trim().toUpperCase() || resp.vendor_id?.slice(0, 8).toUpperCase() || 'NEW',
+        contactPerson: contactPerson.trim(),
+        phone: phone.trim(),
+        email: email.trim(),
+        address: address.trim(),
+        city: city.trim(),
+        state: state.trim(),
+        gstNumber: gst.trim().toUpperCase(),
+        paymentTerms,
+        creditLimit,
+        currentOutstanding: 0,
+        rating: 0,
+        totalPurchases: 0,
+        lastPurchaseDate: '',
+        performance: {
+          onTimeDelivery: 0,
+          qualityScore: 0,
+          priceCompetitiveness: 0,
+        },
+      };
+
+      onCreated(newSupplier);
+      toast.success(`Supplier "${newSupplier.name}" added successfully`);
+    } catch (error: unknown) {
+      const msg = error instanceof Error ? error.message : 'Failed to create supplier';
+      toast.error(msg);
+    } finally {
+      setIsSaving(false);
+    }
   };
 
   return (
@@ -254,10 +274,15 @@ export function SupplierFormModal({ onClose, onCreated }: SupplierFormModalProps
           </button>
           <button
             onClick={handleAdd}
-            className="btn-primary flex items-center gap-2"
+            disabled={isSaving}
+            className="btn-primary flex items-center gap-2 disabled:opacity-60 disabled:cursor-not-allowed"
           >
-            <CheckCircle className="w-4 h-4" />
-            Save Supplier
+            {isSaving ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <CheckCircle className="w-4 h-4" />
+            )}
+            {isSaving ? 'Saving...' : 'Save Supplier'}
           </button>
         </div>
       </div>
