@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   BarChart3,
@@ -17,7 +17,8 @@ import {
   ArrowRight,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
-import { reportsApi } from '../../services/api';
+import { useToast } from '../../context/ToastContext';
+import { reportsApi, analyticsApi, adminStoreApi } from '../../services/api';
 import { EnterpriseKpiCard } from '../../components/dashboard/EnterpriseKpiCard';
 import { LineChart, DonutChart, formatChartValue } from '../../components/dashboard/AdvancedCharts';
 import { MultiStorePerformanceTable } from '../../components/dashboard/MultiStorePerformanceTable';
@@ -44,29 +45,79 @@ interface EnterpriseMetrics {
   aovChange: number;
   aovTarget: number;
 
-  // Margin Metrics
-  grossMarginPercent: number;
+  // Margin Metrics - null means not available
+  grossMarginPercent: number | null;
   marginTarget: number;
 
-  // Inventory Metrics
-  inventoryTurnover: number;
+  // Inventory Metrics - null means not available
+  inventoryTurnover: number | null;
   turnoverTarget: number;
 
   // Customer Metrics
-  customerAcquisition: number;
-  customerAcquisitionChange: number;
-  newCustomers: number;
-  returningCustomers: number;
+  customerAcquisition: number | null;
+  customerAcquisitionChange: number | null;
+  newCustomers: number | null;
+  returningCustomers: number | null;
   topCustomers: Array<{ name: string; spend: number; orders: number }>;
 
   // Inventory Intelligence
   lowStockItems: number;
-  deadStockValue: number;
-  deadStockItems: number;
-  fastMovingItems: number;
+  deadStockValue: number | null;
+  deadStockItems: number | null;
+  fastMovingItems: number | null;
 
   // Prescription Metrics
-  prescriptionRenewals: number;
+  prescriptionRenewals: number | null;
+}
+
+// StoreRow matches StoreMetrics from MultiStorePerformanceTable (all numbers required).
+// When real data lacks certain fields, we pass 0 so the table still renders.
+interface StoreRow {
+  storeId: string;
+  storeName: string;
+  revenue: number;
+  orders: number;
+  averageOrderValue: number;
+  marginPercent: number;
+  stockValue: number;
+  staffCount: number;
+  revenuePerSqft: number;
+  trend: number;
+}
+
+// ============================================================================
+// Helpers
+// ============================================================================
+
+function getTodayDate(): string {
+  return new Date().toISOString().split('T')[0];
+}
+
+function buildRevenueTrend(summaryRevenue: number): number[] {
+  // Produce a flat trend line at the actual revenue value — no randomness.
+  // The line will be overridden with real time-series data if the analytics
+  // endpoint returns it, but this serves as a stable fallback.
+  return Array(14).fill(summaryRevenue);
+}
+
+function buildChartDataFromTrend(
+  trendPoints: Array<{ label: string; value: number; value2?: number }>
+) {
+  return trendPoints;
+}
+
+function buildFlatChartData(baseValue: number, points = 14) {
+  const data = [];
+  for (let i = 0; i < points; i++) {
+    const date = new Date();
+    date.setDate(date.getDate() - (points - i - 1));
+    data.push({
+      label: date.toLocaleDateString('en-IN', { month: 'short', day: 'numeric' }),
+      value: baseValue,
+      value2: baseValue,
+    });
+  }
+  return data;
 }
 
 // ============================================================================
@@ -76,6 +127,7 @@ interface EnterpriseMetrics {
 export default function EnterpriseAnalyticsDashboard() {
   const { user } = useAuth();
   const navigate = useNavigate();
+  const toast = useToast();
 
   // State
   const [timeRange, setTimeRange] = useState<'today' | 'week' | 'month' | 'quarter' | 'year'>('month');
@@ -83,82 +135,233 @@ export default function EnterpriseAnalyticsDashboard() {
   const [error, setError] = useState<string | null>(null);
   const [metrics, setMetrics] = useState<EnterpriseMetrics | null>(null);
   const [chartToggle, setChartToggle] = useState<'daily' | 'weekly' | 'monthly'>('daily');
-  const stores = metrics ? generateMockStores(metrics) : [];
+  const [stores, setStores] = useState<StoreRow[]>([]);
+  const [chartData, setChartData] = useState<Array<{ label: string; value: number; value2?: number }>>([]);
 
   // Load data on mount and when filters change
-  useEffect(() => {
-    loadDashboardData();
-  }, [timeRange, user?.activeStoreId]);
-
-  const loadDashboardData = async () => {
+  const loadDashboardData = useCallback(async () => {
     setIsLoading(true);
     setError(null);
     try {
-      // Call multiple API endpoints in parallel
-      const [dashboardRes, salesRes] = await Promise.all([
-        reportsApi.getDashboardStats(user?.activeStoreId || '').catch(() => null),
-        reportsApi.getSalesSummary(user?.activeStoreId || '', getTodayDate(), getTodayDate()).catch(() => null),
-      ]);
+      // Fetch all data in parallel; individual failures are caught per-call
+      const [dashboardRes, salesRes, analyticsRes, revTrendsRes, storePerformanceRes, invIntelRes, customerInsightsRes] =
+        await Promise.all([
+          reportsApi.getDashboardStats(user?.activeStoreId || '').catch(() => null),
+          reportsApi.getSalesSummary(user?.activeStoreId || '', getTodayDate(), getTodayDate()).catch(() => null),
+          analyticsApi.getDashboardSummary(timeRange).catch(() => null),
+          analyticsApi.getRevenueTrends(chartToggle, 14).catch(() => null),
+          analyticsApi.getStorePerformance(timeRange).catch(() => null),
+          analyticsApi.getInventoryIntelligence().catch(() => null),
+          analyticsApi.getCustomerInsights(timeRange).catch(() => null),
+        ]);
 
-      // Process and set metrics
+      // ---- Revenue ----
+      const totalRevenue =
+        analyticsRes?.total_revenue ??
+        dashboardRes?.totalSales ??
+        0;
+
+      const revenueChange =
+        analyticsRes?.revenue_change ??
+        dashboardRes?.change ??
+        0;
+
+      // ---- Orders ----
+      const totalOrders =
+        analyticsRes?.total_orders ??
+        salesRes?.summary?.total_orders ??
+        0;
+
+      const averageOrderValue =
+        analyticsRes?.avg_order_value ??
+        salesRes?.summary?.avg_order_value ??
+        0;
+
+      // ---- Margin ----
+      // Only show if the analytics endpoint provides it
+      const grossMarginPercent: number | null =
+        analyticsRes?.gross_margin_percent ??
+        analyticsRes?.grossMarginPercent ??
+        null;
+
+      // ---- Inventory Turnover ----
+      const inventoryTurnover: number | null =
+        invIntelRes?.inventory_turnover ??
+        invIntelRes?.inventoryTurnover ??
+        null;
+
+      // ---- Customer data ----
+      const newCustomers: number | null =
+        customerInsightsRes?.new_customers ??
+        customerInsightsRes?.newCustomers ??
+        null;
+
+      const returningCustomers: number | null =
+        customerInsightsRes?.returning_customers ??
+        customerInsightsRes?.returningCustomers ??
+        null;
+
+      const customerAcquisition: number | null =
+        customerInsightsRes?.acquisition_rate ??
+        customerInsightsRes?.customerAcquisition ??
+        null;
+
+      const customerAcquisitionChange: number | null =
+        customerInsightsRes?.acquisition_change ??
+        null;
+
+      // Top customers — use API data if available, otherwise empty
+      const rawTopCustomers =
+        customerInsightsRes?.top_customers ??
+        customerInsightsRes?.topCustomers ??
+        [];
+
+      const topCustomers: Array<{ name: string; spend: number; orders: number }> =
+        Array.isArray(rawTopCustomers) && rawTopCustomers.length > 0
+          ? rawTopCustomers.map((c: Record<string, unknown>) => ({
+              name: (c.name ?? c.customer_name ?? 'Unknown') as string,
+              spend: (c.spend ?? c.total_spend ?? c.total_revenue ?? 0) as number,
+              orders: (c.orders ?? c.order_count ?? 0) as number,
+            }))
+          : [];
+
+      // ---- Inventory Intelligence ----
+      const deadStockValue: number | null =
+        invIntelRes?.dead_stock_value ??
+        invIntelRes?.deadStockValue ??
+        null;
+
+      const deadStockItems: number | null =
+        invIntelRes?.dead_stock_items ??
+        invIntelRes?.deadStockItems ??
+        null;
+
+      const fastMovingItems: number | null =
+        invIntelRes?.fast_moving_items ??
+        invIntelRes?.fastMovingItems ??
+        null;
+
+      // ---- Prescription Renewals ----
+      const prescriptionRenewals: number | null =
+        analyticsRes?.prescription_renewals ??
+        analyticsRes?.prescriptionRenewals ??
+        null;
+
+      // ---- Revenue trend (sparkline) ----
+      let revenueTrend: number[];
+      if (revTrendsRes?.data && Array.isArray(revTrendsRes.data) && revTrendsRes.data.length > 0) {
+        revenueTrend = revTrendsRes.data.map((p: Record<string, unknown>) =>
+          typeof p.value === 'number' ? p.value : (typeof p.revenue === 'number' ? p.revenue : 0)
+        );
+      } else {
+        revenueTrend = buildRevenueTrend(totalRevenue);
+      }
+
+      // ---- Chart data (line chart) ----
+      if (revTrendsRes?.data && Array.isArray(revTrendsRes.data) && revTrendsRes.data.length > 0) {
+        const pts = revTrendsRes.data.map((p: Record<string, unknown>) => ({
+          label: typeof p.label === 'string' ? p.label : String(p.date ?? p.period ?? ''),
+          value: typeof p.value === 'number' ? p.value : (typeof p.revenue === 'number' ? p.revenue : 0),
+          value2: typeof p.value2 === 'number' ? p.value2 : (typeof p.yoy === 'number' ? p.yoy : undefined),
+        }));
+        setChartData(buildChartDataFromTrend(pts));
+      } else {
+        setChartData(buildFlatChartData(totalRevenue, 14));
+      }
+
       const processedMetrics: EnterpriseMetrics = {
-        // Revenue
-        totalRevenue: dashboardRes?.totalSales ?? 0,
-        revenueChange: dashboardRes?.change ?? 0,
-        revenueYoY: dashboardRes?.change ?? 0,
-        revenueTrend: generateTrendData(dashboardRes?.totalSales ?? 0),
+        totalRevenue,
+        revenueChange,
+        revenueYoY: analyticsRes?.revenue_yoy ?? revenueChange,
+        revenueTrend,
 
-        // Orders
-        totalOrders: salesRes?.summary?.total_orders ?? 0,
-        orderChange: 0,
-        conversionRate: calculateConversion(salesRes?.summary?.total_orders ?? 0),
+        totalOrders,
+        orderChange: analyticsRes?.order_change ?? 0,
+        conversionRate: analyticsRes?.conversion_rate ?? 0,
 
-        // Value
-        averageOrderValue: salesRes?.summary?.avg_order_value ?? 0,
-        aovChange: 0,
-        aovTarget: 15000,
+        averageOrderValue,
+        aovChange: analyticsRes?.aov_change ?? 0,
+        aovTarget: analyticsRes?.aov_target ?? 15000,
 
-        // Margin
-        grossMarginPercent: 40,
-        marginTarget: 42,
+        grossMarginPercent,
+        marginTarget: analyticsRes?.margin_target ?? 42,
 
-        // Inventory
-        inventoryTurnover: 8.5,
-        turnoverTarget: 10,
+        inventoryTurnover,
+        turnoverTarget: invIntelRes?.turnover_target ?? analyticsRes?.turnover_target ?? 10,
 
-        // Customer
-        customerAcquisition: 25,
-        customerAcquisitionChange: 12,
-        newCustomers: 45,
-        returningCustomers: 155,
-        topCustomers: [
-          { name: 'Customer 1', spend: 450000, orders: 18 },
-          { name: 'Customer 2', spend: 380000, orders: 15 },
-          { name: 'Customer 3', spend: 320000, orders: 13 },
-        ],
+        customerAcquisition,
+        customerAcquisitionChange,
+        newCustomers,
+        returningCustomers,
+        topCustomers,
 
-        // Inventory Intelligence
-        lowStockItems: dashboardRes?.lowStockItems ?? 0,
-        deadStockValue: 250000,
-        deadStockItems: 45,
-        fastMovingItems: 28,
+        lowStockItems: dashboardRes?.lowStockItems ?? invIntelRes?.low_stock_items ?? 0,
+        deadStockValue,
+        deadStockItems,
+        fastMovingItems,
 
-        // Prescriptions
-        prescriptionRenewals: 32,
+        prescriptionRenewals,
       };
 
       setMetrics(processedMetrics);
+
+      // ---- Stores (multi-store table) ----
+      if (storePerformanceRes?.stores && Array.isArray(storePerformanceRes.stores) && storePerformanceRes.stores.length > 0) {
+        const storeRows: StoreRow[] = storePerformanceRes.stores.map((s: Record<string, unknown>) => ({
+          storeId: (s.store_id ?? s.storeId ?? '') as string,
+          storeName: (s.store_name ?? s.storeName ?? 'Unknown Store') as string,
+          revenue: ((s.revenue ?? 0) as number),
+          orders: ((s.orders ?? s.order_count ?? 0) as number),
+          averageOrderValue: ((s.avg_order_value ?? s.averageOrderValue ?? 0) as number),
+          marginPercent: ((s.margin_percent ?? s.marginPercent ?? 0) as number),
+          stockValue: ((s.stock_value ?? s.stockValue ?? 0) as number),
+          staffCount: ((s.staff_count ?? s.staffCount ?? 0) as number),
+          revenuePerSqft: ((s.revenue_per_sqft ?? s.revenuePerSqft ?? 0) as number),
+          trend: ((s.trend ?? s.revenue_change ?? 0) as number),
+        }));
+        setStores(storeRows);
+      } else {
+        // Fall back: try to fetch all stores and show only what we have metrics for
+        const storesRes = await adminStoreApi.getStores().catch(() => null);
+        if (storesRes && Array.isArray(storesRes) && storesRes.length > 0) {
+          const currentStoreId = user?.activeStoreId || '';
+          // Build a single row for the current store using the data we already have
+          const currentStore = storesRes.find(
+            (s: Record<string, unknown>) =>
+              (s._id ?? s.id ?? s.store_id) === currentStoreId
+          ) ?? storesRes[0];
+          const singleRow: StoreRow = {
+            storeId: currentStoreId,
+            storeName: (currentStore?.name ?? currentStore?.store_name ?? 'Current Store') as string,
+            revenue: totalRevenue,
+            orders: totalOrders,
+            averageOrderValue,
+            marginPercent: grossMarginPercent ?? 0,
+            stockValue: 0,
+            staffCount: 0,
+            revenuePerSqft: 0,
+            trend: revenueChange,
+          };
+          setStores([singleRow]);
+        } else {
+          setStores([]);
+        }
+      }
+
       setError(null);
     } catch (err) {
       setError('Failed to load dashboard data');
     } finally {
       setIsLoading(false);
     }
-  };
+  }, [timeRange, chartToggle, user?.activeStoreId]);
+
+  useEffect(() => {
+    loadDashboardData();
+  }, [loadDashboardData]);
 
   const handleExportReport = () => {
-    // Implementation for report export
-    alert('Report export feature coming soon!');
+    toast.info('Export feature coming soon');
   };
 
   const handleQuickAction = (action: string) => {
@@ -203,7 +406,9 @@ export default function EnterpriseAnalyticsDashboard() {
             <BarChart3 className="w-8 h-8 text-blue-600" />
             Enterprise Analytics Dashboard
           </h1>
-          <p className="text-gray-600 mt-1">Real-time business intelligence for {stores.length || 'all'} locations</p>
+          <p className="text-gray-600 mt-1">
+            Real-time business intelligence{stores.length > 1 ? ` for ${stores.length} locations` : ''}
+          </p>
         </div>
 
         <div className="flex items-center gap-3">
@@ -274,7 +479,11 @@ export default function EnterpriseAnalyticsDashboard() {
             <EnterpriseKpiCard
               label="Total Orders"
               value={metrics.totalOrders}
-              subtext={`Conversion: ${metrics.conversionRate.toFixed(1)}%`}
+              subtext={
+                metrics.conversionRate > 0
+                  ? `Conversion: ${metrics.conversionRate.toFixed(1)}%`
+                  : undefined
+              }
               change={metrics.orderChange}
               icon={ShoppingCart}
               status={metrics.orderChange > 0 ? 'positive' : 'neutral'}
@@ -297,11 +506,17 @@ export default function EnterpriseAnalyticsDashboard() {
             {/* Gross Margin */}
             <EnterpriseKpiCard
               label="Gross Margin %"
-              value={metrics.grossMarginPercent.toFixed(1)}
+              value={metrics.grossMarginPercent !== null ? metrics.grossMarginPercent.toFixed(1) : '--'}
               unit="%"
-              target={metrics.marginTarget}
+              target={metrics.grossMarginPercent !== null ? metrics.marginTarget : undefined}
               icon={Percent}
-              status={metrics.grossMarginPercent >= metrics.marginTarget ? 'success' : 'warning'}
+              status={
+                metrics.grossMarginPercent === null
+                  ? 'neutral'
+                  : metrics.grossMarginPercent >= metrics.marginTarget
+                  ? 'success'
+                  : 'warning'
+              }
               loading={isLoading}
             />
           </div>
@@ -311,11 +526,17 @@ export default function EnterpriseAnalyticsDashboard() {
             {/* Inventory Turnover */}
             <EnterpriseKpiCard
               label="Inventory Turnover Ratio"
-              value={metrics.inventoryTurnover.toFixed(1)}
+              value={metrics.inventoryTurnover !== null ? metrics.inventoryTurnover.toFixed(1) : '--'}
               unit="x"
-              target={metrics.turnoverTarget}
+              target={metrics.inventoryTurnover !== null ? metrics.turnoverTarget : undefined}
               icon={Package}
-              status={metrics.inventoryTurnover >= metrics.turnoverTarget ? 'success' : 'warning'}
+              status={
+                metrics.inventoryTurnover === null
+                  ? 'neutral'
+                  : metrics.inventoryTurnover >= metrics.turnoverTarget
+                  ? 'success'
+                  : 'warning'
+              }
               loading={isLoading}
               onClick={() => navigate('/inventory')}
             />
@@ -323,11 +544,15 @@ export default function EnterpriseAnalyticsDashboard() {
             {/* Customer Acquisition */}
             <EnterpriseKpiCard
               label="Customer Acquisition Rate"
-              value={metrics.customerAcquisition}
-              subtext={`${metrics.newCustomers} new customers`}
-              change={metrics.customerAcquisitionChange}
+              value={metrics.customerAcquisition !== null ? metrics.customerAcquisition : '--'}
+              subtext={
+                metrics.newCustomers !== null
+                  ? `${metrics.newCustomers} new customers`
+                  : undefined
+              }
+              change={metrics.customerAcquisitionChange ?? undefined}
               icon={Users}
-              status="positive"
+              status={metrics.customerAcquisition !== null ? 'positive' : 'neutral'}
               loading={isLoading}
               onClick={() => navigate('/customers')}
             />
@@ -345,8 +570,8 @@ export default function EnterpriseAnalyticsDashboard() {
             {/* Prescription Renewals */}
             <EnterpriseKpiCard
               label="Prescription Renewals"
-              value={metrics.prescriptionRenewals}
-              subtext="Pending eye tests"
+              value={metrics.prescriptionRenewals !== null ? metrics.prescriptionRenewals : '--'}
+              subtext={metrics.prescriptionRenewals !== null ? 'Pending eye tests' : 'No data available'}
               icon={Eye}
               status="neutral"
               loading={isLoading}
@@ -381,7 +606,7 @@ export default function EnterpriseAnalyticsDashboard() {
               </div>
             </div>
             <LineChart
-              data={generateChartData(metrics.totalRevenue, 14)}
+              data={chartData}
               color="#3b82f6"
               color2="#10b981"
               showLegend
@@ -409,9 +634,9 @@ export default function EnterpriseAnalyticsDashboard() {
       )}
 
       {/* SECTION 3: Multi-Store Performance */}
-      {metrics && (
+      {metrics && stores.length > 0 && (
         <MultiStorePerformanceTable
-          stores={generateMockStores(metrics)}
+          stores={stores}
           onStoreClick={(storeId) => navigate(`/stores/${storeId}/analytics`)}
           loading={isLoading}
         />
@@ -432,7 +657,7 @@ export default function EnterpriseAnalyticsDashboard() {
               onClick={() => navigate('/inventory?tab=low-stock')}
               className="mt-4 w-full px-4 py-2 bg-amber-600 text-white rounded-lg hover:bg-amber-700 transition-colors text-sm font-medium"
             >
-              View Low Stock →
+              View Low Stock
             </button>
           </div>
 
@@ -442,13 +667,26 @@ export default function EnterpriseAnalyticsDashboard() {
               <h3 className="text-lg font-semibold text-red-900">Dead Stock</h3>
               <Package className="w-5 h-5 text-red-600" />
             </div>
-            <p className="text-3xl font-bold text-red-600 mb-2">{formatChartValue(metrics.deadStockValue)}</p>
-            <p className="text-sm text-red-700">{metrics.deadStockItems} items not sold in 90+ days</p>
+            {metrics.deadStockValue !== null ? (
+              <>
+                <p className="text-3xl font-bold text-red-600 mb-2">
+                  {formatChartValue(metrics.deadStockValue)}
+                </p>
+                <p className="text-sm text-red-700">
+                  {metrics.deadStockItems !== null ? `${metrics.deadStockItems} items` : 'Items'} not sold in 90+ days
+                </p>
+              </>
+            ) : (
+              <>
+                <p className="text-3xl font-bold text-red-400 mb-2">N/A</p>
+                <p className="text-sm text-red-600">No data available</p>
+              </>
+            )}
             <button
               onClick={() => navigate('/inventory?tab=dead-stock')}
               className="mt-4 w-full px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors text-sm font-medium"
             >
-              Review Dead Stock →
+              Review Dead Stock
             </button>
           </div>
 
@@ -458,13 +696,22 @@ export default function EnterpriseAnalyticsDashboard() {
               <h3 className="text-lg font-semibold text-green-900">Fast Moving Items</h3>
               <TrendingUp className="w-5 h-5 text-green-600" />
             </div>
-            <p className="text-3xl font-bold text-green-600 mb-2">{metrics.fastMovingItems}</p>
-            <p className="text-sm text-green-700">Top performers this period</p>
+            {metrics.fastMovingItems !== null ? (
+              <>
+                <p className="text-3xl font-bold text-green-600 mb-2">{metrics.fastMovingItems}</p>
+                <p className="text-sm text-green-700">Top performers this period</p>
+              </>
+            ) : (
+              <>
+                <p className="text-3xl font-bold text-green-400 mb-2">N/A</p>
+                <p className="text-sm text-green-600">No data available</p>
+              </>
+            )}
             <button
               onClick={() => navigate('/reports?tab=products')}
               className="mt-4 w-full px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors text-sm font-medium"
             >
-              Analyze Products →
+              Analyze Products
             </button>
           </div>
         </div>
@@ -476,56 +723,87 @@ export default function EnterpriseAnalyticsDashboard() {
           {/* Customer Composition */}
           <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
             <h3 className="text-lg font-semibold text-gray-900 mb-4">Customer Composition</h3>
-            <div className="space-y-4">
-              <div>
-                <div className="flex items-center justify-between mb-2">
-                  <span className="text-gray-700">New Customers</span>
-                  <span className="text-2xl font-bold text-blue-600">{metrics.newCustomers}</span>
+            {metrics.newCustomers !== null && metrics.returningCustomers !== null ? (
+              <div className="space-y-4">
+                <div>
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-gray-700">New Customers</span>
+                    <span className="text-2xl font-bold text-blue-600">{metrics.newCustomers}</span>
+                  </div>
+                  <div className="w-full h-2 bg-gray-200 rounded-full overflow-hidden">
+                    <div
+                      className="h-full bg-blue-500 transition-all"
+                      style={{
+                        width: `${
+                          metrics.newCustomers + metrics.returningCustomers > 0
+                            ? (metrics.newCustomers / (metrics.newCustomers + metrics.returningCustomers)) * 100
+                            : 0
+                        }%`,
+                      }}
+                    />
+                  </div>
                 </div>
-                <div className="w-full h-2 bg-gray-200 rounded-full overflow-hidden">
-                  <div
-                    className="h-full bg-blue-500 transition-all"
-                    style={{ width: `${(metrics.newCustomers / (metrics.newCustomers + metrics.returningCustomers)) * 100}%` }}
-                  />
+                <div>
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-gray-700">Returning Customers</span>
+                    <span className="text-2xl font-bold text-green-600">{metrics.returningCustomers}</span>
+                  </div>
+                  <div className="w-full h-2 bg-gray-200 rounded-full overflow-hidden">
+                    <div
+                      className="h-full bg-green-500 transition-all"
+                      style={{
+                        width: `${
+                          metrics.newCustomers + metrics.returningCustomers > 0
+                            ? (metrics.returningCustomers / (metrics.newCustomers + metrics.returningCustomers)) * 100
+                            : 0
+                        }%`,
+                      }}
+                    />
+                  </div>
                 </div>
+                <p className="text-xs text-gray-600 mt-4">
+                  Retention Rate:{' '}
+                  {metrics.newCustomers + metrics.returningCustomers > 0
+                    ? (
+                        (metrics.returningCustomers /
+                          (metrics.newCustomers + metrics.returningCustomers)) *
+                        100
+                      ).toFixed(1)
+                    : '0.0'}
+                  %
+                </p>
               </div>
-              <div>
-                <div className="flex items-center justify-between mb-2">
-                  <span className="text-gray-700">Returning Customers</span>
-                  <span className="text-2xl font-bold text-green-600">{metrics.returningCustomers}</span>
-                </div>
-                <div className="w-full h-2 bg-gray-200 rounded-full overflow-hidden">
-                  <div
-                    className="h-full bg-green-500 transition-all"
-                    style={{ width: `${(metrics.returningCustomers / (metrics.newCustomers + metrics.returningCustomers)) * 100}%` }}
-                  />
-                </div>
-              </div>
-            </div>
-            <p className="text-xs text-gray-600 mt-4">
-              Retention Rate: {(metrics.returningCustomers / (metrics.newCustomers + metrics.returningCustomers) * 100).toFixed(1)}%
-            </p>
+            ) : (
+              <p className="text-gray-500 text-sm">No customer composition data available for this period.</p>
+            )}
           </div>
 
           {/* Top Customers */}
           <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
             <h3 className="text-lg font-semibold text-gray-900 mb-4">Top 10 Customers by Spend</h3>
-            <div className="space-y-3">
-              {metrics.topCustomers.map((customer, idx) => (
-                <div key={idx} className="flex items-center justify-between p-2 hover:bg-gray-50 rounded-lg transition-colors">
-                  <div className="flex items-center gap-3 flex-1">
-                    <div className="w-8 h-8 rounded-full bg-gradient-to-br from-blue-400 to-purple-500 flex items-center justify-center text-white text-sm font-bold">
-                      {idx + 1}
+            {metrics.topCustomers.length > 0 ? (
+              <div className="space-y-3">
+                {metrics.topCustomers.map((customer, idx) => (
+                  <div
+                    key={idx}
+                    className="flex items-center justify-between p-2 hover:bg-gray-50 rounded-lg transition-colors"
+                  >
+                    <div className="flex items-center gap-3 flex-1">
+                      <div className="w-8 h-8 rounded-full bg-gradient-to-br from-blue-400 to-purple-500 flex items-center justify-center text-white text-sm font-bold">
+                        {idx + 1}
+                      </div>
+                      <div>
+                        <p className="font-medium text-gray-900">{customer.name}</p>
+                        <p className="text-xs text-gray-500">{customer.orders} orders</p>
+                      </div>
                     </div>
-                    <div>
-                      <p className="font-medium text-gray-900">{customer.name}</p>
-                      <p className="text-xs text-gray-500">{customer.orders} orders</p>
-                    </div>
+                    <p className="font-semibold text-gray-900">{formatChartValue(customer.spend)}</p>
                   </div>
-                  <p className="font-semibold text-gray-900">{formatChartValue(customer.spend)}</p>
-                </div>
-              ))}
-            </div>
+                ))}
+              </div>
+            ) : (
+              <p className="text-gray-500 text-sm">No customer data available for this period.</p>
+            )}
           </div>
         </div>
       )}
@@ -563,96 +841,4 @@ export default function EnterpriseAnalyticsDashboard() {
       </div>
     </div>
   );
-}
-
-// ============================================================================
-// Helper Functions
-// ============================================================================
-
-function getTodayDate(): string {
-  const today = new Date();
-  return today.toISOString().split('T')[0];
-}
-
-function generateTrendData(baseValue: number, points = 14): number[] {
-  const data: number[] = [];
-  for (let i = 0; i < points; i++) {
-    const variation = (Math.random() - 0.5) * 0.3 * baseValue;
-    data.push(Math.max(0, baseValue + variation));
-  }
-  return data;
-}
-
-function generateChartData(baseValue: number, points = 14) {
-  const data = [];
-  for (let i = 0; i < points; i++) {
-    const date = new Date();
-    date.setDate(date.getDate() - (points - i - 1));
-    const variation = (Math.random() - 0.5) * 0.2 * baseValue;
-    const yoyVariation = (Math.random() - 0.5) * 0.15 * baseValue;
-
-    data.push({
-      label: date.toLocaleDateString('en-IN', { month: 'short', day: 'numeric' }),
-      value: Math.max(0, baseValue + variation),
-      value2: Math.max(0, baseValue + yoyVariation),
-    });
-  }
-  return data;
-}
-
-function calculateConversion(orders: number): number {
-  return Math.round((orders / 5000) * 100 * 10) / 10;
-}
-
-function generateMockStores(metrics: EnterpriseMetrics) {
-  return [
-    {
-      storeId: 'store-1',
-      storeName: 'Main Store',
-      revenue: metrics.totalRevenue,
-      orders: metrics.totalOrders,
-      averageOrderValue: metrics.averageOrderValue,
-      marginPercent: metrics.grossMarginPercent,
-      stockValue: 5000000,
-      staffCount: 12,
-      revenuePerSqft: 5200,
-      trend: metrics.revenueChange,
-    },
-    {
-      storeId: 'store-2',
-      storeName: 'North Branch',
-      revenue: metrics.totalRevenue * 0.8,
-      orders: Math.floor(metrics.totalOrders * 0.8),
-      averageOrderValue: metrics.averageOrderValue * 0.95,
-      marginPercent: metrics.grossMarginPercent - 2,
-      stockValue: 4000000,
-      staffCount: 10,
-      revenuePerSqft: 4800,
-      trend: 8.5,
-    },
-    {
-      storeId: 'store-3',
-      storeName: 'South Branch',
-      revenue: metrics.totalRevenue * 0.7,
-      orders: Math.floor(metrics.totalOrders * 0.7),
-      averageOrderValue: metrics.averageOrderValue * 0.92,
-      marginPercent: metrics.grossMarginPercent - 3,
-      stockValue: 3500000,
-      staffCount: 8,
-      revenuePerSqft: 4200,
-      trend: -2.3,
-    },
-    {
-      storeId: 'store-4',
-      storeName: 'East Branch',
-      revenue: metrics.totalRevenue * 0.9,
-      orders: Math.floor(metrics.totalOrders * 0.9),
-      averageOrderValue: metrics.averageOrderValue * 1.05,
-      marginPercent: metrics.grossMarginPercent + 1,
-      stockValue: 4500000,
-      staffCount: 11,
-      revenuePerSqft: 5000,
-      trend: 12.1,
-    },
-  ];
 }

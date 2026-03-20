@@ -187,34 +187,9 @@ export function InventoryPage() {
         lowStockThreshold: item.lowStockThreshold || item.minStock || 5,
       })) : []);
 
-      // Generate stock movement audit trail from inventory data
-      const processedItems = Array.isArray(items) ? items : [];
-      const generatedMovements: StockMovement[] = [];
-      const now = new Date();
-      const reasons: Record<StockMovement['type'], string[]> = {
-        IN: ['Purchase Order received', 'GRN processed', 'Vendor delivery', 'Return from customer', 'Opening stock adjustment'],
-        OUT: ['Sold via POS', 'Customer order fulfilled', 'Damaged - written off', 'Expired - disposed', 'Sample/demo'],
-        TRANSFER: ['Transfer to Branch 2', 'Transfer from Main Store', 'Inter-store transfer', 'Warehouse to showroom'],
-        ADJUSTMENT: ['Cycle count adjustment', 'Physical verification', 'System reconciliation', 'Shrinkage correction'],
-      };
-      const users = ['Admin', 'Store Manager', 'Cashier 1', 'Warehouse Staff', 'Catalog Manager'];
-      processedItems.slice(0, 15).forEach((item: StockItem, idx: number) => {
-        const types: StockMovement['type'][] = ['IN', 'OUT', 'TRANSFER', 'ADJUSTMENT'];
-        const type = types[idx % 4];
-        const hoursAgo = idx * 3 + Math.floor(Math.random() * 5);
-        const timestamp = new Date(now.getTime() - hoursAgo * 3600000);
-        generatedMovements.push({
-          id: `mov-${idx}`,
-          type,
-          productName: item.name || item.productName || 'Product',
-          sku: item.sku || `SKU-${idx}`,
-          quantity: type === 'IN' ? Math.floor(Math.random() * 20) + 5 : Math.floor(Math.random() * 5) + 1,
-          reason: reasons[type][idx % reasons[type].length],
-          createdAt: timestamp.toISOString(),
-          createdBy: users[idx % users.length],
-        });
-      });
-      setMovements(generatedMovements.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()));
+      // Stock movements are recorded by the backend when inventory changes occur.
+      // No mock data is generated here - movements will populate as real events are logged.
+      setMovements([]);
     } catch {
       setError('Failed to load inventory. Please try again.');
     } finally {
@@ -799,8 +774,8 @@ export function InventoryPage() {
               ) : filteredMovements.length === 0 ? (
                 <div className="text-center py-12 text-gray-500">
                   <ArrowRightLeft className="w-12 h-12 mx-auto mb-2 opacity-50" />
-                  <p>No stock movements found</p>
-                  <p className="text-sm">Transfers, adjustments, and sales will appear here</p>
+                  <p className="font-medium">No stock movements recorded yet</p>
+                  <p className="text-sm mt-1">Stock movements will appear here as inventory changes are recorded</p>
                 </div>
               ) : (
                 <>

@@ -4,11 +4,13 @@
 // Extracted from POSLayout.tsx — displays order confirmation, receipt/invoice
 // buttons, incentive-qualifying items, and GST invoice modal.
 
-import { useState, useMemo } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import {
-  CheckCircle, Plus, Printer, FileText, X, Sparkles,
+  CheckCircle, Plus, Printer, FileText, X, Sparkles, AlertTriangle,
 } from 'lucide-react';
 import { usePOSStore } from '../../stores/posStore';
+import { storeApi } from '../../services/api';
+import type { Store } from '../../types';
 import { GSTInvoice } from './GSTInvoice';
 
 /** Safe currency format */
@@ -25,6 +27,27 @@ interface StepCompleteProps {
 export function StepComplete({ onPrint, onReset }: StepCompleteProps) {
   const store = usePOSStore();
   const [showGSTInvoice, setShowGSTInvoice] = useState(false);
+
+  // Fetch real store details from the API instead of using a hardcoded map
+  const [fetchedStore, setFetchedStore] = useState<Store | null>(null);
+  const [storeWarning, setStoreWarning] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!store.store_id) return;
+    storeApi.getStore(store.store_id)
+      .then((data: Store) => {
+        setFetchedStore(data);
+        if (!data.gstin) {
+          setStoreWarning('Store GSTIN is not configured. Tax invoice may be invalid.');
+        } else {
+          setStoreWarning(null);
+        }
+      })
+      .catch(() => {
+        setFetchedStore(null);
+        setStoreWarning('Could not load store details. Tax invoice data may be incomplete.');
+      });
+  }, [store.store_id]);
 
   // Build Order-shaped object from POS store for GSTInvoice
   const orderForInvoice = useMemo(() => ({
@@ -64,33 +87,27 @@ export function StepComplete({ onPrint, onReset }: StepCompleteProps) {
     createdAt: new Date().toISOString(),
   }), [store.order_id]);
 
-  // Store details for invoice — maps seeded store IDs to real data
-  const STORE_DETAILS: Record<string, { name: string; gstin: string; address: string; city: string; state: string; stateCode: string; pincode: string }> = {
-    'BV-BOK-01': { name: 'Better Vision Opticals', gstin: '20AABCB1234F1ZP', address: 'City Centre, Sector 4', city: 'Bokaro Steel City', state: 'Jharkhand', stateCode: '20', pincode: '827004' },
-    'BV-BOK-02': { name: 'Better Vision Opticals', gstin: '20AABCB1234F1ZP', address: 'Sector 1 Market', city: 'Bokaro Steel City', state: 'Jharkhand', stateCode: '20', pincode: '827001' },
-    'BV-DHB-01': { name: 'Better Vision Opticals', gstin: '20AABCB5678G1ZQ', address: 'Hirapur Market', city: 'Dhanbad', state: 'Jharkhand', stateCode: '20', pincode: '826001' },
-    'BV-DHB-02': { name: 'Better Vision Opticals', gstin: '20AABCB5678G1ZQ', address: 'Bank More', city: 'Dhanbad', state: 'Jharkhand', stateCode: '20', pincode: '826001' },
-    'WO-DHB-01': { name: 'WizOpt', gstin: '20AABCW9012H1ZR', address: 'Shastri Nagar', city: 'Dhanbad', state: 'Jharkhand', stateCode: '20', pincode: '826001' },
-    'BV-PUN-01': { name: 'Better Vision Opticals', gstin: '27AABCB3456I1ZS', address: 'NIBM Road', city: 'Pune', state: 'Maharashtra', stateCode: '27', pincode: '411048' },
-  };
-  const sd = STORE_DETAILS[store.store_id] || { name: 'Better Vision Opticals', gstin: '', address: '', city: '', state: '', stateCode: '', pincode: '' };
-
-  const storeForInvoice = useMemo(() => ({
-    id: store.store_id,
-    storeCode: store.store_id,
-    storeName: sd.name,
-    brand: sd.name === 'WizOpt' ? 'WIZOPT' as any : 'BETTER_VISION' as any,
-    gstin: sd.gstin,
-    address: sd.address,
-    city: sd.city,
-    state: sd.state,
-    stateCode: sd.stateCode,
-    pincode: sd.pincode,
-    latitude: 0, longitude: 0, geoFenceRadius: 0,
-    isActive: true, isHQ: false,
-    enabledCategories: [],
-    openingTime: '10:00', closingTime: '21:00',
-  }), [store.store_id]);
+  // Build store object for invoice from fetched API data
+  const storeForInvoice = useMemo(() => {
+    if (fetchedStore) return fetchedStore;
+    // Fallback: minimal stub so GSTInvoice can render — warning is shown to user
+    return {
+      id: store.store_id,
+      storeCode: store.store_id,
+      storeName: '',
+      brand: 'BETTER_VISION' as any,
+      gstin: '',
+      address: '',
+      city: '',
+      state: '',
+      stateCode: '',
+      pincode: '',
+      latitude: 0, longitude: 0, geoFenceRadius: 0,
+      isActive: true, isHQ: false,
+      enabledCategories: [],
+      openingTime: '10:00', closingTime: '21:00',
+    };
+  }, [fetchedStore, store.store_id]);
 
   return (
     <div className="max-w-md mx-auto text-center py-8 space-y-6">
@@ -145,6 +162,13 @@ export function StepComplete({ onPrint, onReset }: StepCompleteProps) {
           </div>
         );
       })()}
+
+      {storeWarning && (
+        <div className="flex items-start gap-2 p-3 bg-amber-950 border border-amber-700 rounded-lg text-left text-xs text-amber-300">
+          <AlertTriangle className="w-4 h-4 text-amber-400 flex-shrink-0 mt-0.5" />
+          <span>{storeWarning}</span>
+        </div>
+      )}
 
       <div className="flex gap-3 justify-center flex-wrap">
         <button onClick={onPrint} className="flex items-center gap-2 px-4 py-2.5 border border-gray-600 rounded-lg text-sm font-medium hover:bg-gray-700"><Printer className="w-4 h-4" /> Receipt</button>

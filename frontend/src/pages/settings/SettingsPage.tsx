@@ -60,30 +60,6 @@ interface AuditLogEntry {
   changes?: Record<string, any>;
 }
 
-// Mock audit log data
-const MOCK_AUDIT_LOGS: AuditLogEntry[] = [
-  { id: 'al-001', timestamp: new Date(Date.now() - 5 * 60000).toISOString(), user_id: 'u1', user_name: 'Rajesh Kumar', action: 'LOGIN', details: 'User logged in via web', ip_address: '192.168.1.101', entity_type: 'Session' },
-  { id: 'al-002', timestamp: new Date(Date.now() - 12 * 60000).toISOString(), user_id: 'u2', user_name: 'Priya Sharma', action: 'CREATE', details: 'Created new order #ORD-2025-0847', ip_address: '192.168.1.105', entity_type: 'Order', entity_id: 'ORD-2025-0847' },
-  { id: 'al-003', timestamp: new Date(Date.now() - 25 * 60000).toISOString(), user_id: 'u1', user_name: 'Rajesh Kumar', action: 'UPDATE', details: 'Updated product price for Ray-Ban Aviator Classic', ip_address: '192.168.1.101', entity_type: 'Product', entity_id: 'PRD-00412' },
-  { id: 'al-004', timestamp: new Date(Date.now() - 38 * 60000).toISOString(), user_id: 'u3', user_name: 'Amit Patel', action: 'DELETE', details: 'Deleted draft invoice #INV-2025-0092', ip_address: '192.168.1.110', entity_type: 'Invoice', entity_id: 'INV-2025-0092' },
-  { id: 'al-005', timestamp: new Date(Date.now() - 45 * 60000).toISOString(), user_id: 'u4', user_name: 'Sneha Reddy', action: 'EXPORT', details: 'Exported sales report for Jan 2025', ip_address: '192.168.1.108', entity_type: 'Report' },
-  { id: 'al-006', timestamp: new Date(Date.now() - 60 * 60000).toISOString(), user_id: 'u2', user_name: 'Priya Sharma', action: 'UPDATE', details: 'Updated customer details for Vikram Singh', ip_address: '192.168.1.105', entity_type: 'Customer', entity_id: 'CUS-00234' },
-  { id: 'al-007', timestamp: new Date(Date.now() - 72 * 60000).toISOString(), user_id: 'u5', user_name: 'Deepak Joshi', action: 'LOGOUT', details: 'User logged out', ip_address: '192.168.1.115', entity_type: 'Session' },
-  { id: 'al-008', timestamp: new Date(Date.now() - 90 * 60000).toISOString(), user_id: 'u5', user_name: 'Deepak Joshi', action: 'CREATE', details: 'Created new customer Meera Nair', ip_address: '192.168.1.115', entity_type: 'Customer', entity_id: 'CUS-00290' },
-  { id: 'al-009', timestamp: new Date(Date.now() - 110 * 60000).toISOString(), user_id: 'u3', user_name: 'Amit Patel', action: 'UPDATE', details: 'Updated store settings for Mumbai Central', ip_address: '192.168.1.110', entity_type: 'Store', entity_id: 'STR-003' },
-  { id: 'al-010', timestamp: new Date(Date.now() - 130 * 60000).toISOString(), user_id: 'u1', user_name: 'Rajesh Kumar', action: 'CREATE', details: 'Added new product Titan Analog Watch', ip_address: '192.168.1.101', entity_type: 'Product', entity_id: 'PRD-00560' },
-  { id: 'al-011', timestamp: new Date(Date.now() - 150 * 60000).toISOString(), user_id: 'u4', user_name: 'Sneha Reddy', action: 'EXPORT', details: 'Exported inventory stock report', ip_address: '192.168.1.108', entity_type: 'Report' },
-  { id: 'al-012', timestamp: new Date(Date.now() - 180 * 60000).toISOString(), user_id: 'u2', user_name: 'Priya Sharma', action: 'DELETE', details: 'Removed discontinued lens coating entry', ip_address: '192.168.1.105', entity_type: 'LensCoating', entity_id: 'LC-0019' },
-  { id: 'al-013', timestamp: new Date(Date.now() - 200 * 60000).toISOString(), user_id: 'u6', user_name: 'Rahul Verma', action: 'LOGIN', details: 'User logged in via mobile app', ip_address: '10.0.0.55', entity_type: 'Session' },
-  { id: 'al-014', timestamp: new Date(Date.now() - 230 * 60000).toISOString(), user_id: 'u6', user_name: 'Rahul Verma', action: 'CREATE', details: 'Created new prescription for patient Anita Desai', ip_address: '10.0.0.55', entity_type: 'Prescription', entity_id: 'RX-00891' },
-  { id: 'al-015', timestamp: new Date(Date.now() - 260 * 60000).toISOString(), user_id: 'u3', user_name: 'Amit Patel', action: 'UPDATE', details: 'Updated discount rule for Premium tier', ip_address: '192.168.1.110', entity_type: 'DiscountRule', entity_id: 'DR-007' },
-  { id: 'al-016', timestamp: new Date(Date.now() - 300 * 60000).toISOString(), user_id: 'u1', user_name: 'Rajesh Kumar', action: 'DELETE', details: 'Deleted inactive user account for Suresh Menon', ip_address: '192.168.1.101', entity_type: 'User', entity_id: 'USR-0045' },
-  { id: 'al-017', timestamp: new Date(Date.now() - 350 * 60000).toISOString(), user_id: 'u4', user_name: 'Sneha Reddy', action: 'LOGIN', details: 'User logged in via web', ip_address: '192.168.1.108', entity_type: 'Session' },
-  { id: 'al-018', timestamp: new Date(Date.now() - 400 * 60000).toISOString(), user_id: 'u5', user_name: 'Deepak Joshi', action: 'EXPORT', details: 'Exported customer list as CSV', ip_address: '192.168.1.115', entity_type: 'Report' },
-  { id: 'al-019', timestamp: new Date(Date.now() - 500 * 60000).toISOString(), user_id: 'u2', user_name: 'Priya Sharma', action: 'CREATE', details: 'Created new order #ORD-2025-0846', ip_address: '192.168.1.105', entity_type: 'Order', entity_id: 'ORD-2025-0846' },
-  { id: 'al-020', timestamp: new Date(Date.now() - 600 * 60000).toISOString(), user_id: 'u6', user_name: 'Rahul Verma', action: 'LOGOUT', details: 'User logged out from mobile app', ip_address: '10.0.0.55', entity_type: 'Session' },
-];
-
 const AUDIT_ACTION_STYLES: Record<AuditAction, { bg: string; text: string; label: string }> = {
   LOGIN:  { bg: 'bg-purple-100', text: 'text-purple-700', label: 'Login' },
   LOGOUT: { bg: 'bg-gray-700',   text: 'text-gray-300',   label: 'Logout' },
@@ -191,6 +167,7 @@ export function SettingsPage() {
   const [auditSummary, setAuditSummary] = useState<{
     today: { total_actions: number; logins: number; orders_created: number };
   } | null>(null);
+  const [auditError, setAuditError] = useState<string | null>(null);
   const [auditActionFilter, setAuditActionFilter] = useState<AuditAction | ''>('');
   const [auditSearchQuery, setAuditSearchQuery] = useState('');
   const [auditDateFrom, setAuditDateFrom] = useState('');
@@ -216,6 +193,7 @@ export function SettingsPage() {
 
     setIsLoading(true);
     setError(null);
+    setAuditError(null);
 
     try {
       switch (activeTab) {
@@ -246,25 +224,18 @@ export function SettingsPage() {
           break;
 
         case 'audit-logs':
+          setAuditError(null);
           try {
             const [logsRes, summaryRes] = await Promise.all([
-              settingsApi.getAuditLogs({ limit: 50 }).catch(() => ({ logs: [] })),
+              settingsApi.getAuditLogs({ limit: 50 }),
               settingsApi.getAuditSummary().catch(() => null),
             ]);
-            const apiLogs = logsRes.logs || [];
-            setAuditLogs(apiLogs.length > 0 ? apiLogs : MOCK_AUDIT_LOGS);
-            if (summaryRes) {
-              setAuditSummary(summaryRes);
-            } else {
-              const mockLogins = MOCK_AUDIT_LOGS.filter(l => l.action === 'LOGIN').length;
-              const mockCreates = MOCK_AUDIT_LOGS.filter(l => l.action === 'CREATE').length;
-              setAuditSummary({ today: { total_actions: MOCK_AUDIT_LOGS.length, logins: mockLogins, orders_created: mockCreates } });
-            }
-          } catch {
-            setAuditLogs(MOCK_AUDIT_LOGS);
-            const mockLogins = MOCK_AUDIT_LOGS.filter(l => l.action === 'LOGIN').length;
-            const mockCreates = MOCK_AUDIT_LOGS.filter(l => l.action === 'CREATE').length;
-            setAuditSummary({ today: { total_actions: MOCK_AUDIT_LOGS.length, logins: mockLogins, orders_created: mockCreates } });
+            setAuditLogs(logsRes.logs || []);
+            setAuditSummary(summaryRes || null);
+          } catch (err) {
+            setAuditLogs([]);
+            setAuditSummary(null);
+            setAuditError(err instanceof Error ? err.message : 'Failed to load audit logs');
           }
           break;
 
@@ -386,6 +357,7 @@ export function SettingsPage() {
             <AuditLogSection
               auditLogs={auditLogs}
               auditSummary={auditSummary}
+              auditError={auditError}
               auditActionFilter={auditActionFilter}
               setAuditActionFilter={setAuditActionFilter}
               auditSearchQuery={auditSearchQuery}
@@ -710,6 +682,7 @@ function PrinterSection({
 function AuditLogSection({
   auditLogs,
   auditSummary,
+  auditError,
   auditActionFilter,
   setAuditActionFilter,
   auditSearchQuery,
@@ -722,6 +695,7 @@ function AuditLogSection({
 }: {
   auditLogs: AuditLogEntry[];
   auditSummary: { today: { total_actions: number; logins: number; orders_created: number } } | null;
+  auditError: string | null;
   auditActionFilter: AuditAction | '';
   setAuditActionFilter: (v: AuditAction | '') => void;
   auditSearchQuery: string;
@@ -754,6 +728,17 @@ function AuditLogSection({
 
   return (
     <div className="space-y-4">
+      {/* Error Banner */}
+      {auditError && (
+        <div className="p-3 bg-red-950 border border-red-700 rounded-lg flex items-center gap-2">
+          <AlertCircle className="w-5 h-5 text-red-400 flex-shrink-0" />
+          <span className="text-sm text-red-300">{auditError}</span>
+          <button onClick={onRefresh} className="ml-auto text-sm text-red-400 hover:underline flex-shrink-0">
+            Retry
+          </button>
+        </div>
+      )}
+
       {/* Summary Cards */}
       {auditSummary && (
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
@@ -898,9 +883,15 @@ function AuditLogSection({
                 <tr>
                   <td colSpan={5} className="px-4 py-12 text-center text-gray-400">
                     <History className="w-12 h-12 mx-auto mb-3 opacity-50" />
-                    <p className="font-medium">No audit logs found</p>
-                    {hasActiveFilters && (
-                      <p className="text-sm mt-1">Try adjusting your filters to see more results.</p>
+                    {auditLogs.length === 0 && !hasActiveFilters ? (
+                      <p className="font-medium">No audit logs yet</p>
+                    ) : (
+                      <>
+                        <p className="font-medium">No audit logs found</p>
+                        {hasActiveFilters && (
+                          <p className="text-sm mt-1">Try adjusting your filters to see more results.</p>
+                        )}
+                      </>
                     )}
                   </td>
                 </tr>
