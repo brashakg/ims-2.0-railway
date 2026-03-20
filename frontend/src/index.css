@@ -346,9 +346,103 @@
   color: #111827;
 }
 
-/* Content hover states */
+/* --- Light-mode text fixes: dark-first gray text → readable on white --- */
+:not(.dark) main .text-gray-300,
+:not(.dark) .fixed.inset-0 .text-gray-300 {
+  color: #374151; /* gray-700 */
+}
+
+:not(.dark) main .text-gray-400,
+:not(.dark) .fixed.inset-0 .text-gray-400 {
+  color: #6b7280; /* gray-500 */
+}
+
+:not(.dark) main .text-gray-500,
+:not(.dark) .fixed.inset-0 .text-gray-500 {
+  color: #6b7280; /* gray-500 — no change needed, but ensure consistency */
+}
+
+/* Broader text-white coverage: td, li, label, small inside content */
+:not(.dark) main td.text-white,
+:not(.dark) main li.text-white,
+:not(.dark) main label.text-white,
+:not(.dark) main small.text-white,
+:not(.dark) main a.text-white:not(.btn-primary),
+:not(.dark) .fixed.inset-0 p.text-white,
+:not(.dark) .fixed.inset-0 span.text-white,
+:not(.dark) .fixed.inset-0 div.text-white,
+:not(.dark) .fixed.inset-0 td.text-white,
+:not(.dark) .fixed.inset-0 li.text-white,
+:not(.dark) .fixed.inset-0 label.text-white {
+  color: #111827;
+}
+
+/* --- Light-mode background fixes: dark bgs → light equivalents --- */
+:not(.dark) main .bg-gray-700:not(button):not(.btn-primary):not(.btn-secondary),
+:not(.dark) .fixed.inset-0 .bg-gray-700:not(button) {
+  background-color: #f3f4f6; /* gray-100 */
+}
+
+:not(.dark) main .bg-gray-900:not(aside *),
+:not(.dark) .fixed.inset-0 .bg-gray-900 {
+  background-color: #f9fafb; /* gray-50 */
+}
+
+/* --- Light-mode border fixes --- */
+:not(.dark) main .border-gray-600,
+:not(.dark) .fixed.inset-0 .border-gray-600 {
+  border-color: #d1d5db; /* gray-300 */
+}
+
+:not(.dark) main .border-gray-800,
+:not(.dark) .fixed.inset-0 .border-gray-800 {
+  border-color: #e5e7eb; /* gray-200 */
+}
+
+/* --- Light-mode divider fixes --- */
+:not(.dark) main .divide-gray-600 > :not(:last-child),
+:not(.dark) .fixed.inset-0 .divide-gray-600 > :not(:last-child) {
+  border-color: #d1d5db;
+}
+
+:not(.dark) main .divide-gray-800 > :not(:last-child),
+:not(.dark) .fixed.inset-0 .divide-gray-800 > :not(:last-child) {
+  border-color: #e5e7eb;
+}
+
+/* --- Light-mode hover state fixes --- */
+:not(.dark) main .hover\:bg-gray-700:hover {
+  background-color: #e5e7eb !important; /* gray-200 */
+}
+
+:not(.dark) main .hover\:bg-gray-800:hover {
+  background-color: #f3f4f6 !important; /* gray-100 */
+}
+
 :not(.dark) main .hover\:bg-gray-900:hover {
   background-color: #f3f4f6 !important; /* gray-100 */
+}
+
+:not(.dark) .fixed.inset-0 .hover\:bg-gray-700:hover {
+  background-color: #e5e7eb !important;
+}
+
+:not(.dark) .fixed.inset-0 .hover\:bg-gray-800:hover {
+  background-color: #f3f4f6 !important;
+}
+
+/* --- Light-mode ring/focus fixes --- */
+:not(.dark) main .ring-gray-700 {
+  --tw-ring-color: #d1d5db;
+}
+
+:not(.dark) main .ring-gray-600 {
+  --tw-ring-color: #d1d5db;
+}
+
+/* --- Light-mode placeholder text in content --- */
+:not(.dark) main .placeholder\:text-gray-500::placeholder {
+  color: #9ca3af; /* gray-400 */
 }
 
 /* Brand-specific overrides */
