@@ -114,7 +114,7 @@ export function NotificationSettings() {
         trackingLink: 'https://example.com/track',
       };
 
-      const _message = populateTemplate(selectedTemplate.template, mockVariables);
+      populateTemplate(selectedTemplate.template, mockVariables);
 
       // In production, call API to send test notification
       await new Promise(resolve => setTimeout(resolve, 1000));

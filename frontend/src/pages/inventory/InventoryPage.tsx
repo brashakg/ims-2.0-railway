@@ -136,7 +136,7 @@ export function InventoryPage() {
   const [showCSVImport, setShowCSVImport] = useState(false);
   const [csvFile, setCsvFile] = useState<File | null>(null);
   const [csvPreview, setCsvPreview] = useState<Array<Record<string, string>>>([]);
-  const [, setCsvImporting] = useState(false);
+
 
   // Role-based permissions
   const canTransfer = hasRole(['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER']);

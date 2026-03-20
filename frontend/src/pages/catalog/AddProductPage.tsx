@@ -203,7 +203,7 @@ export function AddProductPage() {
   const [publishPOS, setPublishPOS] = useState(true);
 
   // Images
-  const [images, _setImages] = useState<string[]>([]);
+  const [, _setImages] = useState<string[]>([]);
   // Reserved for future image upload functionality
   void _setImages;
 
@@ -296,34 +296,7 @@ export function AddProductPage() {
 
     setIsSubmitting(true);
     try {
-      const _productData = {
-        category: selectedCategory,
-        attributes,
-        description,
-        hsn_code: hsnCode,
-        gst_rate: parseFloat(gstRate),
-        weight: weight ? parseFloat(weight) : null,
-        pricing: {
-          mrp: parseFloat(mrp),
-          offer_price: offerPrice ? parseFloat(offerPrice) : null,
-          cost_price: costPrice ? parseFloat(costPrice) : null,
-          discount_category: discountCategory,
-        },
-        inventory: {
-          initial_quantity: parseInt(initialQuantity),
-          barcode: barcode || null,
-          reorder_level: parseInt(reorderLevel),
-        },
-        images,
-        shopify: syncToShopify ? {
-          sync_to_shopify: true,
-          shopify_tags: shopifyTags,
-          publish_to_online_store: publishOnlineStore,
-          publish_to_pos: publishPOS,
-        } : null,
-      };
-
-      // API call would go here
+      // TODO: Wire to POST /api/v1/products with form data
 
       // Simulate API call
       await new Promise((resolve) => setTimeout(resolve, 1500));
