@@ -19,9 +19,11 @@ import {
   Percent,
   Activity,
   Warehouse,
+  UserPlus,
 } from 'lucide-react';
 import clsx from 'clsx';
 import { TargetMeter } from '../../components/dashboard/TargetMeter';
+import { WalkinCaptureModal } from '../../components/marketing/WalkinCaptureModal';
 import {
   PendingDeliveriesWidget,
   RemindersWidget,
@@ -274,6 +276,7 @@ export default function DashboardPage() {
   const [targetsError, setTargetsError] = useState(false);
   const [dailyTarget, setDailyTarget] = useState(50000);
   const [monthlyTarget, setMonthlyTarget] = useState(1500000);
+  const [showWalkinModal, setShowWalkinModal] = useState(false);
 
   // Load KPIs and targets when period changes
   useEffect(() => {
@@ -433,6 +436,11 @@ export default function DashboardPage() {
                 <Activity className="w-6 h-6 text-blue-600 mb-2" />
                 <p className="text-sm font-semibold text-gray-900 dark:text-white">My Orders</p>
                 <p className="text-[10px] text-gray-600 dark:text-gray-400">Track pending orders</p>
+              </button>
+              <button onClick={() => setShowWalkinModal(true)} className="bg-emerald-50 border border-emerald-200 rounded-lg p-4 text-left hover:shadow-md transition-all">
+                <UserPlus className="w-6 h-6 text-emerald-600 mb-2" />
+                <p className="text-sm font-semibold text-gray-900 dark:text-white">Walk-in Visitor</p>
+                <p className="text-[10px] text-gray-600 dark:text-gray-400">Register walk-in</p>
               </button>
             </>}
             {isOptometrist && <>
@@ -724,6 +732,9 @@ export default function DashboardPage() {
 
 
       </div>
+
+      {/* Walk-in Capture Modal */}
+      <WalkinCaptureModal isOpen={showWalkinModal} onClose={() => setShowWalkinModal(false)} />
     </div>
   );
 }

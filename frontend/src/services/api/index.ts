@@ -39,3 +39,6 @@ export { expensesApi } from './expenses';
 
 // Settings & Integrations
 export { settingsApi, adminIntegrationApi } from './settings';
+
+// Marketing Automation
+export { marketingApi } from './marketing';
