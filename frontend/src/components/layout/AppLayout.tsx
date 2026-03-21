@@ -211,26 +211,35 @@ export function AppLayout() {
             </div>
 
             {/* Module sidebar items */}
-            {moduleConfig.sidebarItems.map((item) => (
-              <NavLink
-                key={item.id}
-                to={item.path}
-                className={({ isActive }) =>
-                  clsx(
-                    'flex items-center gap-3 px-3 py-2.5 rounded-lg mb-1 transition-colors touch-target',
-                    isActive
-                      ? `${colors.activeBg} ${colors.activeText} font-medium`
-                      : `text-gray-400 ${colors.hoverBg}`
-                  )
-                }
-                onClick={() => setSidebarOpen(false)}
-              >
-                <span className="w-5 h-5 flex items-center justify-center">
-                  <span className="w-1.5 h-1.5 rounded-full bg-current" />
-                </span>
-                <span>{item.label}</span>
-              </NavLink>
-            ))}
+            {moduleConfig.sidebarItems.map((item) => {
+              // Custom active check: for paths with query params, match exactly
+              const hasQuery = item.path.includes('?');
+              const currentFull = location.pathname + location.search;
+              const itemActive = hasQuery
+                ? currentFull === item.path
+                : location.pathname === item.path;
+
+              return (
+                <NavLink
+                  key={item.id}
+                  to={item.path}
+                  className={() =>
+                    clsx(
+                      'flex items-center gap-3 px-3 py-2.5 rounded-lg mb-1 transition-colors touch-target',
+                      itemActive
+                        ? `${colors.activeBg} ${colors.activeText} font-medium`
+                        : `text-gray-400 ${colors.hoverBg}`
+                    )
+                  }
+                  onClick={() => setSidebarOpen(false)}
+                >
+                  <span className="w-5 h-5 flex items-center justify-center">
+                    <span className="w-1.5 h-1.5 rounded-full bg-current" />
+                  </span>
+                  <span>{item.label}</span>
+                </NavLink>
+              );
+            })}
           </nav>
 
           {/* User info */}
