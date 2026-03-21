@@ -7,6 +7,7 @@ import { useState } from 'react';
 import React from 'react';
 import { CheckCircle2, Clock, XCircle, AlertCircle } from 'lucide-react';
 import clsx from 'clsx';
+import { useToast } from '../../context/ToastContext';
 
 export type ApprovalStatus = 'pending' | 'approved' | 'rejected' | 'on_hold';
 
@@ -75,6 +76,7 @@ export function ApprovalWorkflow({
   canApprove,
   loading = false,
 }: ApprovalWorkflowProps) {
+  const toast = useToast();
   const [selectedStep, setSelectedStep] = useState<string | null>(null);
   const [approveComments, setApproveComments] = useState('');
   const [rejectReason, setRejectReason] = useState('');
@@ -99,7 +101,7 @@ export function ApprovalWorkflow({
 
   const handleReject = async (stepId: string) => {
     if (!rejectReason.trim()) {
-      alert('Please provide a rejection reason');
+      toast.warning('Please provide a rejection reason');
       return;
     }
 

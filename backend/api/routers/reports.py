@@ -1335,21 +1335,24 @@ async def get_targets(
     # Default targets
     targets = {
         "store_id": active_store,
-        "daily_target": 50000,  # ₹50,000 daily target
-        "monthly_target": 1500000,  # ₹15,00,000 monthly target
+        "daily_target": 50000,
+        "monthly_target": 1500000,
         "currency": "INR",
         "period": datetime.now().strftime("%Y-%m"),
         "created_at": datetime.now().isoformat(),
     }
-    
-    # TODO: In future, fetch from targets collection in database
-    # For now, return defaults
-    # If targets collection exists, fetch from there:
-    # targets_repo = get_targets_repository()
-    # if targets_repo:
-    #     stored_targets = targets_repo.find_one({"store_id": active_store})
-    #     if stored_targets:
-    #         targets.update(stored_targets)
+
+    # Fetch from targets collection in database if available
+    try:
+        db = get_db()
+        if db:
+            targets_coll = db.get_collection("targets")
+            stored = targets_coll.find_one({"store_id": active_store})
+            if stored:
+                stored.pop("_id", None)
+                targets.update(stored)
+    except Exception:
+        pass  # Fall back to defaults
 
     return targets
 

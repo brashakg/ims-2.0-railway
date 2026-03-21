@@ -6,6 +6,7 @@
 import { useState } from 'react';
 import { Plus, Search, Edit2, Trash2, Copy, Download, QrCode } from 'lucide-react';
 import clsx from 'clsx';
+import { useToast } from '../../context/ToastContext';
 
 export interface Barcode {
   id: string;
@@ -39,6 +40,7 @@ export function BarcodeManagement({
   onDownloadBarcodes,
   loading = false,
 }: BarcodeManagementProps) {
+  const toast = useToast();
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -54,7 +56,7 @@ export function BarcodeManagement({
 
   const handleSave = async () => {
     if (!formData.code || !formData.productId || !formData.format) {
-      alert('Please fill in all required fields');
+      toast.warning('Please fill in all required fields');
       return;
     }
 

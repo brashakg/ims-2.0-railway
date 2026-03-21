@@ -897,7 +897,7 @@ function StepCustomer() {
                   } as any);
                 });
               }}
-              getKey={(cust) => cust.customer_id || cust._id || cust.id || String(Math.random())}
+              getKey={(cust) => cust.customer_id || cust._id || cust.id || cust.phone || cust.name || 'unknown'}
               placeholder="Search by phone number or name..."
               autoFocus
               clearOnSelect

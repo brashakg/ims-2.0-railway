@@ -1,5 +1,8 @@
 @import "tailwindcss";
 
+/* Force class-based dark mode (Tailwind v4 defaults to prefers-color-scheme) */
+@custom-variant dark (&:where(.dark, .dark *));
+
 /* Custom theme colors for Tailwind v4 */
 @theme {
   /* Better Vision Brand Colors (Gold/Brown - from bettervision.in) */
@@ -443,6 +446,81 @@
 /* --- Light-mode placeholder text in content --- */
 :not(.dark) main .placeholder\:text-gray-500::placeholder {
   color: #9ca3af; /* gray-400 */
+}
+
+/* --- Light-mode slate overrides (Finance, Customer360, etc.) --- */
+:not(.dark) main .bg-slate-900,
+:not(.dark) .fixed.inset-0 .bg-slate-900 {
+  background-color: #f9fafb; /* gray-50 */
+}
+
+:not(.dark) main .bg-slate-800,
+:not(.dark) .fixed.inset-0 .bg-slate-800 {
+  background-color: #ffffff;
+}
+
+:not(.dark) main .bg-slate-700,
+:not(.dark) .fixed.inset-0 .bg-slate-700 {
+  background-color: #f3f4f6; /* gray-100 */
+}
+
+:not(.dark) main .border-slate-700,
+:not(.dark) .fixed.inset-0 .border-slate-700 {
+  border-color: #e5e7eb; /* gray-200 */
+}
+
+:not(.dark) main .border-slate-600,
+:not(.dark) .fixed.inset-0 .border-slate-600 {
+  border-color: #d1d5db; /* gray-300 */
+}
+
+:not(.dark) main .text-slate-300,
+:not(.dark) .fixed.inset-0 .text-slate-300 {
+  color: #374151; /* gray-700 */
+}
+
+:not(.dark) main .text-slate-400,
+:not(.dark) .fixed.inset-0 .text-slate-400 {
+  color: #6b7280; /* gray-500 */
+}
+
+:not(.dark) main .text-slate-200,
+:not(.dark) .fixed.inset-0 .text-slate-200 {
+  color: #1f2937; /* gray-800 */
+}
+
+:not(.dark) main .divide-slate-700 > :not(:last-child),
+:not(.dark) .fixed.inset-0 .divide-slate-700 > :not(:last-child) {
+  border-color: #e5e7eb;
+}
+
+:not(.dark) main .hover\:bg-slate-700:hover {
+  background-color: #e5e7eb !important;
+}
+
+:not(.dark) main .hover\:bg-slate-800:hover {
+  background-color: #f3f4f6 !important;
+}
+
+/* Gradient overrides for Finance pages */
+:not(.dark) main .from-slate-900 { --tw-gradient-from: #f9fafb; }
+:not(.dark) main .via-slate-800 { --tw-gradient-via: #ffffff; }
+:not(.dark) main .to-slate-900 { --tw-gradient-to: #f9fafb; }
+:not(.dark) main .from-gray-900 { --tw-gradient-from: #f9fafb; }
+:not(.dark) main .via-gray-800 { --tw-gradient-via: #ffffff; }
+:not(.dark) main .to-gray-900 { --tw-gradient-to: #f9fafb; }
+
+/* Force gradient backgrounds to light on gradient containers */
+:not(.dark) main [class*="bg-gradient"][class*="from-slate-9"],
+:not(.dark) main [class*="bg-gradient"][class*="from-gray-9"] {
+  background: #f9fafb !important;
+}
+
+/* Date input overrides for Finance */
+:not(.dark) main input[type="date"] {
+  background-color: #ffffff;
+  border-color: #d1d5db;
+  color: #111827;
 }
 
 /* Brand-specific overrides */

@@ -34,24 +34,11 @@ interface FamilyPrescriptionsViewProps {
   prescriptions?: FamilyPrescription[];
 }
 
-const SAMPLE_FAMILY: FamilyMember[] = [
-  { id: 'm-001', name: 'Rajesh Kumar', relationship: 'Self', phone: '9876543210', age: 42 },
-  { id: 'm-002', name: 'Anjali Kumar', relationship: 'Wife', phone: '9876543210', age: 40 },
-  { id: 'm-003', name: 'Arjun Kumar', relationship: 'Son', phone: '9876543210', age: 18 },
-  { id: 'm-004', name: 'Priya Kumar', relationship: 'Daughter', phone: '9876543210', age: 15 },
-];
-
-const SAMPLE_PRESCRIPTIONS: FamilyPrescription[] = [
-  { id: 'rx-001', memberId: 'm-001', memberName: 'Rajesh Kumar', relationship: 'Self', date: new Date(Date.now() - 30 * 24 * 60 * 60000).toISOString(), optometristName: 'Dr. Sharma', validUntil: new Date(Date.now() + 700 * 24 * 60 * 60000).toISOString(), status: 'active' },
-  { id: 'rx-002', memberId: 'm-002', memberName: 'Anjali Kumar', relationship: 'Wife', date: new Date(Date.now() - 60 * 24 * 60 * 60000).toISOString(), optometristName: 'Dr. Patel', validUntil: new Date(Date.now() + 670 * 24 * 60 * 60000).toISOString(), status: 'active' },
-  { id: 'rx-003', memberId: 'm-003', memberName: 'Arjun Kumar', relationship: 'Son', date: new Date(Date.now() - 120 * 24 * 60 * 60000).toISOString(), optometristName: 'Dr. Sharma', validUntil: new Date(Date.now() - 5 * 24 * 60 * 60000).toISOString(), status: 'expired' },
-  { id: 'rx-004', memberId: 'm-004', memberName: 'Priya Kumar', relationship: 'Daughter', date: new Date(Date.now() - 200 * 24 * 60 * 60000).toISOString(), optometristName: 'Dr. Kumar', validUntil: new Date(Date.now() + 500 * 24 * 60 * 60000).toISOString(), status: 'active' },
-];
 
 export function FamilyPrescriptionsView({
   customerId,
-  familyMembers: initialFamilyMembers = SAMPLE_FAMILY,
-  prescriptions = SAMPLE_PRESCRIPTIONS,
+  familyMembers: initialFamilyMembers = [],
+  prescriptions = [],
 }: FamilyPrescriptionsViewProps) {
   const [members, setMembers] = useState<FamilyMember[]>(initialFamilyMembers);
   const [selectedMemberId, setSelectedMemberId] = useState<string | null>(null);

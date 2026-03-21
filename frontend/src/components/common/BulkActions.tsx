@@ -6,6 +6,7 @@
 import { useState } from 'react';
 import { Trash2, Download, Edit2, Copy, CheckSquare, Square, X } from 'lucide-react';
 import clsx from 'clsx';
+import { useToast } from '../../context/ToastContext';
 
 export type BulkAction = 'delete' | 'export' | 'edit' | 'duplicate' | 'archive' | 'restore';
 
@@ -74,6 +75,7 @@ export function BulkActionsToolbar({
   actions = defaultActions,
   disabled = false,
 }: BulkActionsProps) {
+  const toast = useToast();
   const [showConfirm, setShowConfirm] = useState<BulkAction | null>(null);
   const [actionLoading, setActionLoading] = useState(false);
 
@@ -99,7 +101,7 @@ export function BulkActionsToolbar({
       await Promise.resolve(onAction(action, selectedIds));
       onDeselectAll?.();
     } catch (error) {
-      alert(`Failed to perform ${action}`);
+      toast.error(`Failed to perform ${action}`);
     } finally {
       setActionLoading(false);
     }

@@ -7,6 +7,7 @@ import { useState } from 'react';
 import { Download, ChevronDown } from 'lucide-react';
 import clsx from 'clsx';
 import { exportToCSV } from '../../utils/exportUtils';
+import { useToast } from '../../context/ToastContext';
 
 export type ExportFormat = 'csv' | 'excel' | 'json';
 
@@ -27,6 +28,7 @@ export function DataExportButton({
   columns,
   disabled = false,
 }: DataExportButtonProps) {
+  const toast = useToast();
   const [showMenu, setShowMenu] = useState(false);
 
   const handleExport = (format: ExportFormat) => {
@@ -35,7 +37,7 @@ export function DataExportButton({
       : data;
 
     if (exportData.length === 0) {
-      alert('No data available to export');
+      toast.warning('No data available to export');
       setShowMenu(false);
       return;
     }

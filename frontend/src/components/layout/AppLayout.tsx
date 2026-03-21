@@ -308,7 +308,7 @@ export function AppLayout() {
             </button>
 
             {/* Role selector */}
-            {user && user.roles.length > 1 && (
+            {user && user.roles?.length > 1 && (
               <div className="relative" ref={roleDropdownRef}>
                 <button
                   className={clsx('flex items-center gap-2 px-3 py-2 text-sm rounded-lg', isDark ? 'bg-gray-700 hover:bg-gray-600 text-gray-200' : 'bg-gray-100 hover:bg-gray-200 text-gray-700')}
@@ -340,7 +340,7 @@ export function AppLayout() {
             )}
 
             {/* Store selector - not available for single-store roles like Optometrist */}
-            {user && (hasRole(['SUPERADMIN', 'ADMIN', 'AREA_MANAGER']) || (user.storeIds.length > 1 && !hasRole(['OPTOMETRIST']))) && (
+            {user && (hasRole(['SUPERADMIN', 'ADMIN', 'AREA_MANAGER']) || ((user.storeIds?.length ?? 0) > 1 && !hasRole(['OPTOMETRIST']))) && (
               <div className="relative" ref={storeDropdownRef}>
                 <button
                   className={clsx('flex items-center gap-2 px-3 py-2 text-sm rounded-lg', isDark ? 'bg-gray-700 hover:bg-gray-600 text-gray-200' : 'bg-gray-100 hover:bg-gray-200 text-gray-700')}

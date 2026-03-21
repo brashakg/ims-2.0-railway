@@ -11,7 +11,10 @@ from typing import Optional, List
 from datetime import datetime, date
 from calendar import monthrange
 import uuid
+import logging
 from .auth import get_current_user
+
+logger = logging.getLogger(__name__)
 from ..dependencies import (
     get_user_repository,
     get_store_repository,
@@ -180,7 +183,7 @@ def _get_staff_sales(staff_id: str, month: int, year: int) -> float:
         result = list(orders_coll.aggregate(pipeline))
         return result[0]["total_sales"] if result else 0
     except Exception as e:
-        print(f"Error calculating staff sales: {e}")
+        logger.warning("Error calculating staff sales: %s", e)
         return 0
 
 

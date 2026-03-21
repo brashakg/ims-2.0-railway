@@ -6,6 +6,7 @@
 import { useState } from 'react';
 import { Plus, Search, Edit2, Trash2, CheckCircle, AlertCircle, FileText, DollarSign } from 'lucide-react';
 import clsx from 'clsx';
+import { useToast } from '../../context/ToastContext';
 
 export interface RMAItem {
   id: string;
@@ -52,6 +53,7 @@ export function ReturnManagement({
   onProcessRefund,
   loading = false,
 }: ReturnManagementProps) {
+  const toast = useToast();
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [showRefundModal, setShowRefundModal] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
@@ -67,7 +69,7 @@ export function ReturnManagement({
 
   const handleSave = async () => {
     if (!formData.rmaNumber || !formData.customerId || !formData.items || formData.items.length === 0) {
-      alert('Please fill in all required fields');
+      toast.warning('Please fill in all required fields');
       return;
     }
 

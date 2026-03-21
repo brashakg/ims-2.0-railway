@@ -6,6 +6,7 @@
 import { useState } from 'react';
 import { Plus, Search, Edit2, Trash2, CheckCircle, Clock, AlertCircle, FileText } from 'lucide-react';
 import clsx from 'clsx';
+import { useToast } from '../../context/ToastContext';
 
 export interface PurchaseOrderItem {
   id: string;
@@ -54,6 +55,7 @@ export function PurchaseOrderManagement({
   onReceiveOrder,
   loading = false,
 }: PurchaseOrderManagementProps) {
+  const toast = useToast();
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -66,7 +68,7 @@ export function PurchaseOrderManagement({
 
   const handleSave = async () => {
     if (!formData.poNumber || !formData.vendorId || !formData.items || formData.items.length === 0) {
-      alert('Please fill in all required fields');
+      toast.warning('Please fill in all required fields');
       return;
     }
 

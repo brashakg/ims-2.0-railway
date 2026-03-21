@@ -6,6 +6,7 @@ import { useState, useRef } from 'react';
 import { Upload, X, AlertTriangle, File, CheckCircle, Loader2 } from 'lucide-react';
 import clsx from 'clsx';
 import api from '../../services/api/client';
+import { useToast } from '../../context/ToastContext';
 
 interface BillFile {
   name: string;
@@ -29,6 +30,7 @@ interface ExpenseBillUploadProps {
 }
 
 export function ExpenseBillUpload({ expenseId, onBillUpload }: ExpenseBillUploadProps) {
+  const toast = useToast();
   const [bill, setBill] = useState<BillFile | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
@@ -38,7 +40,7 @@ export function ExpenseBillUpload({ expenseId, onBillUpload }: ExpenseBillUpload
 
   const handleFileSelect = async (file: File) => {
     if (!file.type.includes('image') && !file.type.includes('pdf')) {
-      alert('Please upload an image or PDF file');
+      toast.warning('Please upload an image or PDF file');
       return;
     }
 

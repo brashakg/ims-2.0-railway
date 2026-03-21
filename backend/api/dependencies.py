@@ -6,6 +6,9 @@ Dependency injection for repositories and services
 
 import os
 import sys
+import logging
+
+logger = logging.getLogger(__name__)
 
 # Add parent directory to path for database imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -45,7 +48,7 @@ try:
 
     DATABASE_AVAILABLE = True
 except ImportError as e:
-    print(f"[WARN] Database import error: {e}")
+    logger.warning("Database import error: %s", e)
     DATABASE_AVAILABLE = False
 
 

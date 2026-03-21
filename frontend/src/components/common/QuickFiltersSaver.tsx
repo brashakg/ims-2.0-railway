@@ -6,6 +6,7 @@
 import { useState, useEffect } from 'react';
 import { Star, X, Plus, Trash2 } from 'lucide-react';
 import clsx from 'clsx';
+import { useToast } from '../../context/ToastContext';
 
 export interface FilterPreset {
   id: string;
@@ -30,6 +31,7 @@ export function QuickFiltersSaver({
   storageKey,
   disabled = false,
 }: QuickFiltersSaverProps) {
+  const toast = useToast();
   const [presets, setPresets] = useState<FilterPreset[]>([]);
   const [showSaveModal, setShowSaveModal] = useState(false);
   const [showPresets, setShowPresets] = useState(false);
@@ -56,12 +58,12 @@ export function QuickFiltersSaver({
 
   const handleSavePreset = () => {
     if (!presetName.trim()) {
-      alert('Please enter a preset name');
+      toast.warning('Please enter a preset name');
       return;
     }
 
     if (presets.length >= MAX_PRESETS && !editingId) {
-      alert(`Maximum ${MAX_PRESETS} presets allowed. Delete one to save a new preset.`);
+      toast.warning(`Maximum ${MAX_PRESETS} presets allowed. Delete one to save a new preset.`);
       return;
     }
 
@@ -70,7 +72,7 @@ export function QuickFiltersSaver({
     );
 
     if (!hasActiveFilters) {
-      alert('No active filters to save');
+      toast.warning('No active filters to save');
       return;
     }
 

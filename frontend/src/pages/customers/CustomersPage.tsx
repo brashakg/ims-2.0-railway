@@ -342,7 +342,7 @@ export function CustomersPage() {
                 )}
                 onSelect={(cust) => { setSelectedCustomer({ ...cust, id: cust.customer_id || cust._id || cust.id } as any); }}
                 onInputChange={(val) => setSearchQuery(val)}
-                getKey={(cust) => cust.customer_id || cust._id || cust.id || String(Math.random())}
+                getKey={(cust) => cust.customer_id || cust._id || cust.id || cust.phone || cust.name || 'unknown'}
                 placeholder="Search by name, phone, or email..."
                 emptyMessage="No customers found"
               />

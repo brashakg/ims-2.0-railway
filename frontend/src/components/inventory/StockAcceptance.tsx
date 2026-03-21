@@ -18,6 +18,7 @@ import {
 import clsx from 'clsx';
 import { vendorsApi } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
+import { useToast } from '../../context/ToastContext';
 
 interface PendingStock {
   id: string;
@@ -46,6 +47,7 @@ const LOCATIONS = [
 
 export function StockAcceptance() {
   const { user } = useAuth();
+  const toast = useToast();
   const [pendingItems, setPendingItems] = useState<PendingStock[]>([]);
   const [selectedItem, setSelectedItem] = useState<PendingStock | null>(null);
   const [countInput, setCountInput] = useState('');
@@ -146,7 +148,7 @@ export function StockAcceptance() {
 
   const handlePrintBarcode = (item: PendingStock) => {
     // In production, this would trigger barcode printing
-    alert(`Barcode printed for ${item.productName}`);
+    toast.success(`Barcode printed for ${item.productName}`);
   };
 
   const handleAccept = async (item: PendingStock) => {
@@ -163,7 +165,7 @@ export function StockAcceptance() {
         )
       );
     } catch (err) {
-      alert('Failed to accept stock. Please try again.');
+      toast.error('Failed to accept stock. Please try again.');
     }
   };
 

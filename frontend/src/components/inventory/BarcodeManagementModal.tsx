@@ -43,38 +43,44 @@ export function BarcodeManagementModal({
   }, [isOpen, currentBarcode]);
 
   const generateRandomBarcode = (format: BarcodeFormat): string => {
+    // Use crypto for secure random generation
+    const randomDigits = (len: number): string => {
+      const arr = new Uint8Array(len);
+      crypto.getRandomValues(arr);
+      return Array.from(arr, b => b % 10).join('');
+    };
+
     switch (format) {
-      case 'EAN13':
-        // Generate 13-digit EAN
-        const ean = Array.from({ length: 12 }, () => Math.floor(Math.random() * 10)).join('');
-        // Calculate check digit
+      case 'EAN13': {
+        const ean = randomDigits(12);
         let sum = 0;
         for (let i = 0; i < 12; i++) {
           sum += parseInt(ean[i]) * (i % 2 === 0 ? 1 : 3);
         }
         const checkDigit = (10 - (sum % 10)) % 10;
         return ean + checkDigit;
+      }
 
-      case 'UPC':
-        // Generate 12-digit UPC
-        const upc = Array.from({ length: 11 }, () => Math.floor(Math.random() * 10)).join('');
-        // Calculate check digit
+      case 'UPC': {
+        const upc = randomDigits(11);
         let upcSum = 0;
         for (let i = 0; i < 11; i++) {
           upcSum += parseInt(upc[i]) * (i % 2 === 0 ? 3 : 1);
         }
         const upcCheck = (10 - (upcSum % 10)) % 10;
         return upc + upcCheck;
+      }
 
-      case 'CODE39':
-        // Generate 8-character alphanumeric CODE39
+      case 'CODE39': {
         const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
-        return Array.from({ length: 8 }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
+        const arr = new Uint8Array(8);
+        crypto.getRandomValues(arr);
+        return Array.from(arr, b => chars[b % chars.length]).join('');
+      }
 
       case 'CODE128':
       default:
-        // Generate 12-digit numeric CODE128
-        return Array.from({ length: 12 }, () => Math.floor(Math.random() * 10)).join('');
+        return randomDigits(12);
     }
   };
 

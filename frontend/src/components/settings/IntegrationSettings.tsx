@@ -2,7 +2,7 @@
 // IMS 2.0 - Integration Settings UI
 // ============================================================================
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { Eye, EyeOff, Zap, Calendar, Copy, Check, Loader2 } from 'lucide-react';
 import clsx from 'clsx';
 import { useToast } from '../../context/ToastContext';
@@ -12,73 +12,62 @@ interface Integration {
   id: string;
   name: string;
   description: string;
-  icon: any;
+  icon: string;
   connected: boolean;
   apiKeyField?: string;
   lastSync?: string;
   testable: boolean;
 }
 
-const INTEGRATIONS: Integration[] = [
-  {
-    id: 'razorpay',
-    name: 'Razorpay',
-    description: 'Payment gateway for credit/debit cards',
-    icon: '💳',
-    connected: true,
-    apiKeyField: 'rzp_live_XXXXXXXXXXXXXX',
-    lastSync: new Date(Date.now() - 2 * 60 * 60000).toISOString(),
-    testable: true,
-  },
-  {
-    id: 'whatsapp',
-    name: 'WhatsApp Business',
-    description: 'Send customer notifications and updates',
-    icon: '💬',
-    connected: false,
-    testable: true,
-  },
-  {
-    id: 'tally',
-    name: 'Tally ERP9',
-    description: 'Synchronize inventory and accounts',
-    icon: '📊',
-    connected: true,
-    lastSync: new Date(Date.now() - 30 * 60000).toISOString(),
-    testable: true,
-  },
-  {
-    id: 'shopify',
-    name: 'Shopify',
-    description: 'Sync products and orders',
-    icon: '🛍️',
-    connected: false,
-    testable: true,
-  },
-  {
-    id: 'shiprocket',
-    name: 'Shiprocket',
-    description: 'Manage shipping and logistics',
-    icon: '📦',
-    connected: false,
-    testable: true,
-  },
-  {
-    id: 'gst-portal',
-    name: 'GST Portal',
-    description: 'File GST returns and compliance',
-    icon: '📋',
-    connected: true,
-    testable: false,
-  },
+// Default integration definitions (metadata only)
+const DEFAULT_INTEGRATIONS: Integration[] = [
+  { id: 'razorpay', name: 'Razorpay', description: 'Payment gateway for credit/debit cards', icon: 'PAY', connected: false, testable: true },
+  { id: 'whatsapp', name: 'WhatsApp Business', description: 'Send customer notifications and updates', icon: 'MSG', connected: false, testable: true },
+  { id: 'tally', name: 'Tally ERP9', description: 'Synchronize inventory and accounts', icon: 'ERP', connected: false, testable: true },
+  { id: 'shopify', name: 'Shopify', description: 'Sync products and orders', icon: 'SHOP', connected: false, testable: true },
+  { id: 'shiprocket', name: 'Shiprocket', description: 'Manage shipping and logistics', icon: 'SHIP', connected: false, testable: true },
+  { id: 'gst-portal', name: 'GST Portal', description: 'File GST returns and compliance', icon: 'GST', connected: false, testable: false },
 ];
 
 export function IntegrationSettings() {
-  const [integrations] = useState<Integration[]>(INTEGRATIONS);
+  const [integrations, setIntegrations] = useState<Integration[]>(DEFAULT_INTEGRATIONS);
+  const [isLoading, setIsLoading] = useState(true);
   const [showApiKey, setShowApiKey] = useState<Record<string, boolean>>({});
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [testingId, setTestingId] = useState<string | null>(null);
   const toast = useToast();
+
+  // Load integration configs from API
+  useEffect(() => {
+    (async () => {
+      try {
+        const response = await settingsApi.getIntegrations();
+        const apiIntegrations = response?.integrations || [];
+        if (apiIntegrations.length > 0) {
+          // Merge API data with defaults for metadata
+          const merged = DEFAULT_INTEGRATIONS.map(def => {
+            const apiData = apiIntegrations.find(
+              (a: Record<string, unknown>) => (a.type || a.id || '').toString().toLowerCase() === def.id
+            );
+            if (apiData) {
+              return {
+                ...def,
+                connected: apiData.enabled ?? apiData.connected ?? def.connected,
+                apiKeyField: apiData.api_key || apiData.apiKeyField || def.apiKeyField,
+                lastSync: apiData.last_sync || apiData.lastSync || def.lastSync,
+              };
+            }
+            return def;
+          });
+          setIntegrations(merged);
+        }
+      } catch {
+        // Fall back to defaults
+      } finally {
+        setIsLoading(false);
+      }
+    })();
+  }, []);
 
   const handleCopyApiKey = (id: string, apiKey: string | undefined) => {
     if (!apiKey) return;

@@ -2,7 +2,7 @@
 // IMS 2.0 - Clinical Abuse Detection
 // ============================================================================
 
-import { AlertTriangle, TrendingUp, Clock, Copy } from 'lucide-react';
+import { AlertTriangle, TrendingUp, Clock, Copy, CheckCircle } from 'lucide-react';
 
 interface AbuseAlert {
   id: string;
@@ -20,37 +20,6 @@ interface AbuseDetectionProps {
   alerts?: AbuseAlert[];
 }
 
-const SAMPLE_ALERTS: AbuseAlert[] = [
-  {
-    id: 'alert-001',
-    type: 'high-redo-rate',
-    severity: 'critical',
-    optometristName: 'Dr. Rajesh Kumar',
-    optometristId: 'opt-001',
-    details: 'Redo rate is 18.5% for the last 30 days (threshold: 15%)',
-    timestamp: new Date(Date.now() - 2 * 60 * 60000).toISOString(),
-    redoRate: 18.5,
-  },
-  {
-    id: 'alert-002',
-    type: 'exact-copy',
-    severity: 'warning',
-    optometristName: 'Dr. Priya Sharma',
-    optometristId: 'opt-002',
-    details: 'Prescription RX-5432 is an exact copy of RX-5401 (created 5 days apart)',
-    timestamp: new Date(Date.now() - 6 * 60 * 60000).toISOString(),
-    prescriptionIds: ['RX-5432', 'RX-5401'],
-  },
-  {
-    id: 'alert-003',
-    type: 'suspicious-speed',
-    severity: 'warning',
-    optometristName: 'Dr. Amit Patel',
-    optometristId: 'opt-003',
-    details: '3 prescriptions created within 25 minutes for different patients',
-    timestamp: new Date(Date.now() - 12 * 60 * 60000).toISOString(),
-  },
-];
 
 const getAlertIcon = (type: AbuseAlert['type']) => {
   switch (type) {
@@ -74,7 +43,7 @@ const getAlertTitle = (type: AbuseAlert['type']) => {
   }
 };
 
-export function AbuseDetection({ alerts = SAMPLE_ALERTS }: AbuseDetectionProps) {
+export function AbuseDetection({ alerts = [] }: AbuseDetectionProps) {
   if (alerts.length === 0) {
     return (
       <div className="p-8 bg-gray-800 rounded-lg border border-gray-700 text-center">
@@ -156,11 +125,3 @@ export function AbuseDetection({ alerts = SAMPLE_ALERTS }: AbuseDetectionProps) 
   );
 }
 
-// Helper component that was missing
-function CheckCircle({ className }: { className: string }) {
-  return (
-    <svg className={className} fill="currentColor" viewBox="0 0 20 20">
-      <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
-    </svg>
-  );
-}

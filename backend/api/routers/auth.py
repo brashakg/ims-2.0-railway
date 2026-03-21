@@ -177,7 +177,7 @@ async def login(request: LoginRequest):
             if db_user:
                 user = db_user
         except Exception as e:
-            print(f"DB user lookup error: {e}")
+            logger.warning("DB user lookup error: %s", e)
     
     # Emergency access via environment variable only (no hardcoded credentials)
     if user is None and os.getenv("EMERGENCY_ADMIN_HASH"):

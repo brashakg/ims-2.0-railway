@@ -62,7 +62,7 @@ export function KeyboardShortcutsModal() {
       key: 'ctrl+shift+s',
       label: 'Ctrl + Shift + S',
       description: 'Save current page',
-      callback: () => alert('Save functionality'),
+      callback: () => {},
       category: 'Editing',
     },
     {

@@ -22,13 +22,6 @@ interface AuditLogViewerProps {
   logs?: AuditLog[];
 }
 
-const SAMPLE_LOGS: AuditLog[] = [
-  { id: 'al-001', timestamp: new Date(Date.now() - 5 * 60000).toISOString(), user_id: 'u1', user_name: 'Rajesh Kumar', action: 'LOGIN', details: 'User logged in via web', ip_address: '192.168.1.101', entity_type: 'Session' },
-  { id: 'al-002', timestamp: new Date(Date.now() - 12 * 60000).toISOString(), user_id: 'u2', user_name: 'Priya Sharma', action: 'CREATE', details: 'Created new order #ORD-2025-0847', ip_address: '192.168.1.105', entity_type: 'Order', entity_id: 'ORD-2025-0847' },
-  { id: 'al-003', timestamp: new Date(Date.now() - 25 * 60000).toISOString(), user_id: 'u1', user_name: 'Rajesh Kumar', action: 'UPDATE', details: 'Updated product price for Ray-Ban Aviator', ip_address: '192.168.1.101', entity_type: 'Product', entity_id: 'PRD-00412' },
-  { id: 'al-004', timestamp: new Date(Date.now() - 38 * 60000).toISOString(), user_id: 'u3', user_name: 'Amit Patel', action: 'DELETE', details: 'Deleted draft invoice #INV-2025-0092', ip_address: '192.168.1.110', entity_type: 'Invoice', entity_id: 'INV-2025-0092' },
-  { id: 'al-005', timestamp: new Date(Date.now() - 45 * 60000).toISOString(), user_id: 'u4', user_name: 'Sneha Reddy', action: 'EXPORT', details: 'Exported sales report for Jan 2025', ip_address: '192.168.1.108', entity_type: 'Report' },
-];
 
 const ACTION_COLORS: Record<string, string> = {
   CREATE: 'bg-green-900 text-green-200',
@@ -39,7 +32,7 @@ const ACTION_COLORS: Record<string, string> = {
   EXPORT: 'bg-orange-900 text-orange-200',
 };
 
-export function AuditLogViewer({ logs = SAMPLE_LOGS }: AuditLogViewerProps) {
+export function AuditLogViewer({ logs = [] }: AuditLogViewerProps) {
   const [filteredLogs, setFilteredLogs] = useState<AuditLog[]>(logs);
   const [searchQuery, setSearchQuery] = useState('');
   const [actionFilter, setActionFilter] = useState<string>('all');
