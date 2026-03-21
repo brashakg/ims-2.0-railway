@@ -220,8 +220,12 @@ export function AppLayout() {
               </span>
             </div>
 
-            {/* Module sidebar items */}
-            {moduleConfig.sidebarItems.map((item) => {
+            {/* Module sidebar items — filtered by role */}
+            {moduleConfig.sidebarItems.filter((item) => {
+              if (!item.roles) return true; // No role restriction = visible to all
+              const userRoles = user?.roles || [user?.activeRole];
+              return item.roles.some(r => userRoles?.includes(r)) || user?.activeRole === 'SUPERADMIN';
+            }).map((item) => {
               // Custom active check: for paths with query params, match exactly
               const hasQuery = item.path.includes('?');
               const currentFull = location.pathname + location.search;

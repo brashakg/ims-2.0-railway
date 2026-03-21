@@ -33,6 +33,7 @@ export interface SidebarItem {
   label: string;
   path: string;
   icon?: LucideIcon;
+  roles?: UserRole[]; // If set, only these roles see this item. If omitted, all roles with module access see it.
 }
 
 export interface ModuleConfig {
@@ -71,10 +72,10 @@ export const MODULE_CONFIGS: ModuleConfig[] = [
     sidebarItems: [
       { id: 'pos-new', label: 'New Sale', path: '/pos' },
       { id: 'pos-orders', label: 'All Orders', path: '/orders' },
-      { id: 'pos-returns', label: 'Returns & Exchanges', path: '/returns' },
+      { id: 'pos-returns', label: 'Returns & Exchanges', path: '/returns', roles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'CASHIER', 'SALES_CASHIER'] },
       { id: 'pos-pending', label: 'Pending Orders', path: '/orders?status=PROCESSING' },
-      { id: 'pos-deliveries', label: 'Ready for Delivery', path: '/orders?status=READY' },
-      { id: 'pos-dayend', label: 'Day-End Report', path: '/reports/day-end' },
+      { id: 'pos-deliveries', label: 'Ready for Delivery', path: '/orders?status=READY', roles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'CASHIER', 'SALES_CASHIER'] },
+      { id: 'pos-dayend', label: 'Day-End Report', path: '/reports/day-end', roles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'CASHIER'] },
     ],
   },
   {
@@ -101,12 +102,12 @@ export const MODULE_CONFIGS: ModuleConfig[] = [
     allowedRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'CATALOG_MANAGER', 'WORKSHOP_STAFF'],
     sidebarItems: [
       { id: 'inv-overview', label: 'Stock Overview', path: '/inventory' },
-      { id: 'inv-catalog', label: 'Add Product', path: '/catalog/add' },
+      { id: 'inv-catalog', label: 'Add Product', path: '/catalog/add', roles: ['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER'] },
       { id: 'inv-lowstock', label: 'Low Stock Alerts', path: '/inventory?tab=low-stock' },
-      { id: 'inv-reorders', label: 'Reorder Dashboard', path: '/inventory?tab=reorders' },
-      { id: 'inv-transfers', label: 'Stock Transfers', path: '/inventory?tab=transfers' },
+      { id: 'inv-reorders', label: 'Reorder Dashboard', path: '/inventory?tab=reorders', roles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER'] },
+      { id: 'inv-transfers', label: 'Stock Transfers', path: '/inventory?tab=transfers', roles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER'] },
       { id: 'inv-movements', label: 'Stock Movements', path: '/inventory?tab=movements' },
-      { id: 'inv-audit', label: 'Stock Audit', path: '/inventory/audit' },
+      { id: 'inv-audit', label: 'Stock Audit', path: '/inventory/audit', roles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER'] },
     ],
   },
   {
@@ -120,12 +121,12 @@ export const MODULE_CONFIGS: ModuleConfig[] = [
     sidebarItems: [
       { id: 'crm-all', label: 'All Customers', path: '/customers' },
       { id: 'crm-search', label: 'Search Customers', path: '/customers?search=true' },
-      { id: 'crm-360', label: 'Customer 360', path: '/customers/360' },
-      { id: 'crm-segmentation', label: 'Segmentation (RFM)', path: '/customers/segmentation' },
-      { id: 'crm-loyalty', label: 'Loyalty Program', path: '/customers/loyalty' },
-      { id: 'crm-campaigns', label: 'Campaign Manager', path: '/customers/campaigns' },
-      { id: 'crm-referrals', label: 'Referral Tracker', path: '/customers/referrals' },
-      { id: 'crm-feedback', label: 'Feedback & NPS', path: '/customers/feedback' },
+      { id: 'crm-360', label: 'Customer 360', path: '/customers/360', roles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER'] },
+      { id: 'crm-segmentation', label: 'Segmentation (RFM)', path: '/customers/segmentation', roles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER'] },
+      { id: 'crm-loyalty', label: 'Loyalty Program', path: '/customers/loyalty', roles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER'] },
+      { id: 'crm-campaigns', label: 'Campaign Manager', path: '/customers/campaigns', roles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER'] },
+      { id: 'crm-referrals', label: 'Referral Tracker', path: '/customers/referrals', roles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER'] },
+      { id: 'crm-feedback', label: 'Feedback & NPS', path: '/customers/feedback', roles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER'] },
       { id: 'crm-recalls', label: 'Recalls & Reminders', path: '/customers?tab=recalls' },
       { id: 'crm-follow-ups', label: 'Follow-ups', path: '/customers/follow-ups' },
     ],
@@ -170,11 +171,11 @@ export const MODULE_CONFIGS: ModuleConfig[] = [
     sidebarItems: [
       { id: 'hr-attendance', label: 'Attendance', path: '/hr' },
       { id: 'hr-leaves', label: 'Leave Management', path: '/hr?tab=leave' },
-      { id: 'hr-payroll', label: 'Payroll & Salary', path: '/hr/payroll' },
-      { id: 'hr-incentives', label: 'Incentive Tracking', path: '/hr/incentives' },
+      { id: 'hr-payroll', label: 'Payroll & Salary', path: '/hr/payroll', roles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'ACCOUNTANT'] },
+      { id: 'hr-incentives', label: 'Incentive Tracking', path: '/hr/incentives', roles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER'] },
       { id: 'hr-tasks', label: 'Tasks Dashboard', path: '/tasks/dashboard' },
       { id: 'hr-checklists', label: 'Daily Checklists', path: '/tasks/checklists' },
-      { id: 'hr-task-mgmt', label: 'Task Management', path: '/tasks' },
+      { id: 'hr-task-mgmt', label: 'Task Management', path: '/tasks', roles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER'] },
     ],
   },
   {
@@ -220,17 +221,19 @@ export const MODULE_CONFIGS: ModuleConfig[] = [
     bgColor: 'bg-gray-100',
     allowedRoles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'AREA_MANAGER', 'CATALOG_MANAGER', 'ACCOUNTANT'],
     sidebarItems: [
-      { id: 'set-setup', label: 'Store & Employee Setup', path: '/setup' },
+      { id: 'set-setup', label: 'Store & Employee Setup', path: '/setup', roles: ['SUPERADMIN', 'ADMIN'] },
       { id: 'set-profile', label: 'My Profile', path: '/settings?tab=profile' },
-      { id: 'set-business', label: 'Business Profile', path: '/settings?tab=business' },
-      { id: 'set-stores', label: 'Store Management', path: '/settings?tab=stores' },
-      { id: 'set-users', label: 'User Management', path: '/settings?tab=users' },
-      { id: 'set-categories', label: 'Categories & Brands', path: '/settings?tab=categories' },
-      { id: 'set-integrations', label: 'Integrations', path: '/settings?tab=integrations' },
-      { id: 'set-approvals', label: 'Approval Workflows', path: '/settings?tab=approvals' },
-      { id: 'set-audit', label: 'Audit Log', path: '/settings?tab=audit-logs' },
-      { id: 'set-system', label: 'System Settings', path: '/settings?tab=system' },
-      { id: 'set-jarvis', label: 'AI Intelligence', path: '/jarvis' },
+      { id: 'set-business', label: 'Business Profile', path: '/settings?tab=business', roles: ['SUPERADMIN', 'ADMIN'] },
+      { id: 'set-stores', label: 'Store Management', path: '/settings?tab=stores', roles: ['SUPERADMIN', 'ADMIN'] },
+      { id: 'set-users', label: 'User Management', path: '/settings?tab=users', roles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER'] },
+      { id: 'set-categories', label: 'Categories & Brands', path: '/settings?tab=categories', roles: ['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER'] },
+      { id: 'set-discounts', label: 'Discount Rules', path: '/settings?tab=discounts', roles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER'] },
+      { id: 'set-tax', label: 'Tax & Invoice', path: '/settings?tab=tax-invoice', roles: ['SUPERADMIN', 'ADMIN', 'ACCOUNTANT'] },
+      { id: 'set-integrations', label: 'Integrations', path: '/settings?tab=integrations', roles: ['SUPERADMIN', 'ADMIN'] },
+      { id: 'set-approvals', label: 'Approval Workflows', path: '/settings?tab=approvals', roles: ['SUPERADMIN', 'ADMIN'] },
+      { id: 'set-audit', label: 'Audit Log', path: '/settings?tab=audit-logs', roles: ['SUPERADMIN', 'ADMIN'] },
+      { id: 'set-system', label: 'System Settings', path: '/settings?tab=system', roles: ['SUPERADMIN', 'ADMIN'] },
+      { id: 'set-jarvis', label: 'AI Intelligence', path: '/jarvis', roles: ['SUPERADMIN', 'ADMIN'] },
     ],
   },
 ];
