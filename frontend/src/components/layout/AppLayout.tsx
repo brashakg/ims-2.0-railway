@@ -7,7 +7,6 @@ import { useState, useEffect, useRef } from 'react';
 import { Outlet, NavLink, useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
 import { useModule, type ModuleId } from '../../context/ModuleContext';
-import { useTheme } from '../../context/ThemeContext';
 import { storeApi } from '../../services/api';
 import {
   LogOut,
@@ -17,8 +16,6 @@ import {
   Home,
   Menu,
   X,
-  Sun,
-  Moon,
 } from 'lucide-react';
 import clsx from 'clsx';
 
@@ -56,7 +53,7 @@ const pathToModule: Record<string, ModuleId> = {
 export function AppLayout() {
   const { user, logout, hasRole, setActiveRole, setActiveStore } = useAuth();
   const { activeModule, setActiveModule, getModuleConfig, goToDashboard } = useModule();
-  const { isDark, toggleDarkMode } = useTheme();
+  // Dark mode removed — app is light-only
   const navigate = useNavigate();
   const location = useLocation();
   const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -159,7 +156,7 @@ export function AppLayout() {
   const colors = getActiveColors();
 
   return (
-    <div className={clsx('min-h-screen', isDark ? 'bg-gray-900' : 'bg-gray-100')} data-brand={brandClass}>
+    <div className={clsx('min-h-screen', 'bg-gray-100')} data-brand={brandClass}>
       {/* Mobile sidebar overlay */}
       {sidebarOpen && moduleConfig && (
         <div
@@ -173,7 +170,7 @@ export function AppLayout() {
         <aside
           className={clsx(
             'fixed top-0 left-0 z-50 h-full w-64 border-r transition-transform duration-300 flex flex-col',
-            isDark ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200',
+            'bg-white border-gray-200',
             sidebarOpen ? 'translate-x-0' : 'tablet:translate-x-0 -translate-x-full'
           )}
         >
@@ -273,7 +270,7 @@ export function AppLayout() {
       {/* Main content - adjust margin based on sidebar presence */}
       <div className={clsx(moduleConfig ? 'tablet:ml-64' : 'w-full')}>
         {/* Top header */}
-        <header className={clsx('h-16 border-b flex items-center justify-between px-4 tablet:px-6', isDark ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200')}>
+        <header className={clsx('h-16 border-b flex items-center justify-between px-4 tablet:px-6', 'bg-white border-gray-200')}>
           {/* Logo and Breadcrumb */}
           <div className="flex items-center gap-4">
             {/* Mobile menu button - only show when module is active */}
@@ -291,7 +288,7 @@ export function AppLayout() {
               <div className="w-8 h-8 bg-bv-gold-500 rounded-lg flex items-center justify-center">
                 <Store className="w-5 h-5 text-white" />
               </div>
-              <span className={clsx('font-bold text-lg', isDark ? 'text-white' : 'text-gray-900')}>IMS 2.0</span>
+              <span className={clsx('font-bold text-lg', 'text-gray-900')}>IMS 2.0</span>
             </div>
 
             {/* Breadcrumb - only show when module is active */}
@@ -324,19 +321,19 @@ export function AppLayout() {
             {user && user.roles?.length > 1 && (
               <div className="relative" ref={roleDropdownRef}>
                 <button
-                  className={clsx('flex items-center gap-2 px-3 py-2 text-sm rounded-lg', isDark ? 'bg-gray-700 hover:bg-gray-600 text-gray-200' : 'bg-gray-100 hover:bg-gray-200 text-gray-700')}
+                  className={clsx('flex items-center gap-2 px-3 py-2 text-sm rounded-lg', 'bg-gray-100 hover:bg-gray-200 text-gray-700')}
                   onClick={() => setRoleDropdownOpen(!roleDropdownOpen)}
                 >
                   <span className="font-medium">{(user.activeRole as string).replaceAll('_', ' ')}</span>
                   <ChevronDown className="w-4 h-4" />
                 </button>
                 {roleDropdownOpen && (
-                  <div className={clsx('absolute top-full right-0 mt-1 w-48 rounded-lg shadow-lg z-50 border', isDark ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200')}>
+                  <div className={clsx('absolute top-full right-0 mt-1 w-48 rounded-lg shadow-lg z-50 border', 'bg-white border-gray-200')}>
                     {user.roles.map((role) => (
                       <button
                         key={role}
                         className={clsx(
-                          `w-full text-left px-4 py-2 text-sm ${isDark ? 'hover:bg-gray-900' : 'hover:bg-gray-100'}`,
+                          `w-full text-left px-4 py-2 text-sm hover:bg-gray-100`,
                           role === user.activeRole && 'bg-bv-gold-50 text-bv-gold-600'
                         )}
                         onClick={() => {
@@ -356,7 +353,7 @@ export function AppLayout() {
             {user && (hasRole(['SUPERADMIN', 'ADMIN', 'AREA_MANAGER']) || ((user.storeIds?.length ?? 0) > 1 && !hasRole(['OPTOMETRIST']))) && (
               <div className="relative" ref={storeDropdownRef}>
                 <button
-                  className={clsx('flex items-center gap-2 px-3 py-2 text-sm rounded-lg', isDark ? 'bg-gray-700 hover:bg-gray-600 text-gray-200' : 'bg-gray-100 hover:bg-gray-200 text-gray-700')}
+                  className={clsx('flex items-center gap-2 px-3 py-2 text-sm rounded-lg', 'bg-gray-100 hover:bg-gray-200 text-gray-700')}
                   onClick={() => setStoreDropdownOpen(!storeDropdownOpen)}
                 >
                   <Store className="w-4 h-4" />
@@ -364,12 +361,12 @@ export function AppLayout() {
                   <ChevronDown className="w-4 h-4" />
                 </button>
                 {storeDropdownOpen && (
-                  <div className={clsx('absolute top-full right-0 mt-1 w-56 rounded-lg shadow-lg z-50 border', isDark ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200')}>
+                  <div className={clsx('absolute top-full right-0 mt-1 w-56 rounded-lg shadow-lg z-50 border', 'bg-white border-gray-200')}>
                     {user.storeIds.map((storeId) => (
                       <button
                         key={storeId}
                         className={clsx(
-                          `w-full text-left px-4 py-2 text-sm ${isDark ? 'hover:bg-gray-900' : 'hover:bg-gray-100'}`,
+                          `w-full text-left px-4 py-2 text-sm hover:bg-gray-100`,
                           storeId === user.activeStoreId && 'bg-bv-gold-50 text-bv-gold-600'
                         )}
                         onClick={() => {
@@ -397,18 +394,18 @@ export function AppLayout() {
                 </span>
               </button>
               {userDropdownOpen && (
-                <div className={clsx('absolute top-full right-0 mt-2 w-48 rounded-lg shadow-lg z-50 border', isDark ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200')}>
-                  <div className={clsx('px-4 py-3 border-b', isDark ? 'border-gray-700' : 'border-gray-200')}>
-                    <div className={clsx('text-sm font-medium', isDark ? 'text-white' : 'text-gray-900')}>{user?.name}</div>
-                    <div className={clsx('text-xs mt-1', isDark ? 'text-gray-400' : 'text-gray-600')}>{user?.email}</div>
-                    <div className={clsx('text-xs mt-1', isDark ? 'text-gray-400' : 'text-gray-600')}>Role: {(user?.activeRole as string)?.replaceAll('_', ' ')}</div>
+                <div className={clsx('absolute top-full right-0 mt-2 w-48 rounded-lg shadow-lg z-50 border', 'bg-white border-gray-200')}>
+                  <div className={clsx('px-4 py-3 border-b', 'border-gray-200')}>
+                    <div className={clsx('text-sm font-medium', 'text-gray-900')}>{user?.name}</div>
+                    <div className={clsx('text-xs mt-1', 'text-gray-600')}>{user?.email}</div>
+                    <div className={clsx('text-xs mt-1', 'text-gray-600')}>Role: {(user?.activeRole as string)?.replaceAll('_', ' ')}</div>
                   </div>
                   <button
                     onClick={() => {
                       navigate('/settings?tab=profile');
                       setUserDropdownOpen(false);
                     }}
-                    className={clsx('w-full text-left px-4 py-2 text-sm transition-colors', isDark ? 'text-gray-400 hover:bg-gray-900' : 'text-gray-600 hover:bg-gray-100')}
+                    className={clsx('w-full text-left px-4 py-2 text-sm transition-colors', 'text-gray-600 hover:bg-gray-100')}
                   >
                     My Profile
                   </button>
@@ -417,7 +414,7 @@ export function AppLayout() {
                       handleLogout();
                       setUserDropdownOpen(false);
                     }}
-                    className={clsx('w-full text-left px-4 py-2 text-sm text-red-600 transition-colors border-t', isDark ? 'hover:bg-gray-900 border-gray-700' : 'hover:bg-red-50 border-gray-200')}
+                    className={clsx('w-full text-left px-4 py-2 text-sm text-red-600 transition-colors border-t', 'hover:bg-red-50 border-gray-200')}
                   >
                     Logout
                   </button>
