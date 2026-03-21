@@ -405,8 +405,8 @@ async def get_tax_settings(current_user: dict = Depends(get_current_user)):
 async def update_tax_settings(
     settings: TaxSettings, current_user: dict = Depends(get_current_user)
 ):
-    """Update tax settings (SUPERADMIN/ADMIN only)"""
-    if not any(role in current_user["roles"] for role in ["SUPERADMIN", "ADMIN"]):
+    """Update tax settings (SUPERADMIN/ADMIN/ACCOUNTANT)"""
+    if not any(role in current_user["roles"] for role in ["SUPERADMIN", "ADMIN", "ACCOUNTANT"]):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
     return {"message": "Tax settings updated", "settings": settings.model_dump()}
 
@@ -430,8 +430,8 @@ async def get_invoice_settings(current_user: dict = Depends(get_current_user)):
 async def update_invoice_settings(
     settings: InvoiceSettings, current_user: dict = Depends(get_current_user)
 ):
-    """Update invoice settings (SUPERADMIN/ADMIN only)"""
-    if not any(role in current_user["roles"] for role in ["SUPERADMIN", "ADMIN"]):
+    """Update invoice settings (SUPERADMIN/ADMIN/ACCOUNTANT)"""
+    if not any(role in current_user["roles"] for role in ["SUPERADMIN", "ADMIN", "ACCOUNTANT"]):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
     return {"message": "Invoice settings updated", "settings": settings.model_dump()}
 
@@ -553,8 +553,8 @@ async def get_discount_rules(current_user: dict = Depends(get_current_user)):
 async def update_discount_rules(
     rules: Dict[str, Dict[str, int]], current_user: dict = Depends(get_current_user)
 ):
-    """Update discount rules (SUPERADMIN/ADMIN only)"""
-    if not any(role in current_user["roles"] for role in ["SUPERADMIN", "ADMIN"]):
+    """Update discount rules (SUPERADMIN/ADMIN/AREA_MANAGER)"""
+    if not any(role in current_user["roles"] for role in ["SUPERADMIN", "ADMIN", "AREA_MANAGER"]):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
     return {"message": "Discount rules updated", "rules": rules}
 
@@ -564,7 +564,7 @@ async def set_discount_rule(
     rule: DiscountSettings, current_user: dict = Depends(get_current_user)
 ):
     """Set individual discount rule"""
-    if not any(role in current_user["roles"] for role in ["SUPERADMIN", "ADMIN"]):
+    if not any(role in current_user["roles"] for role in ["SUPERADMIN", "ADMIN", "AREA_MANAGER"]):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
     return {"message": "Discount rule updated"}
 

@@ -44,7 +44,7 @@ const pathToModule: Record<string, ModuleId> = {
   '/inventory/audit': 'inventory',
   '/reports': 'reports',
   '/finance/expenses': 'finance',
-  '/reports/day-end': 'reports',
+  '/reports/day-end': 'pos',
   '/reports/outstanding': 'reports',
   '/returns': 'pos',
   '/settings': 'settings',
@@ -106,12 +106,22 @@ export function AppLayout() {
     const path = location.pathname;
     const moduleId = pathToModule[path];
 
-    if (moduleId && moduleId !== activeModule) {
-      setActiveModule(moduleId);
-    } else if (path === '/dashboard' && activeModule) {
+    if (path === '/dashboard' && activeModule) {
       goToDashboard();
+    } else if (moduleId && moduleId !== activeModule) {
+      // Don't switch if current module's sidebar already contains this path
+      // (handles shared paths like /orders used by both POS and Reports)
+      if (activeModule) {
+        const currentConfig = getModuleConfig(activeModule);
+        const currentHasPath = currentConfig?.sidebarItems.some(
+          item => item.path === path || item.path.startsWith(path + '?')
+        );
+        if (currentHasPath) return; // Stay in current module
+      }
+      setActiveModule(moduleId);
     }
-  }, [location.pathname, activeModule, setActiveModule, goToDashboard]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [location.pathname]);
 
   // Get active module config
   const moduleConfig = activeModule ? getModuleConfig(activeModule) : null;

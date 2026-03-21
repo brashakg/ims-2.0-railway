@@ -519,7 +519,7 @@ function App() {
                   <Route
                     path="settings"
                     element={
-                      <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'STORE_MANAGER']}>
+                      <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'AREA_MANAGER', 'CATALOG_MANAGER', 'ACCOUNTANT']}>
                         <SettingsPage />
                       </ProtectedRoute>
                     }

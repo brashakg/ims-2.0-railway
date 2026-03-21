@@ -218,7 +218,7 @@ export const MODULE_CONFIGS: ModuleConfig[] = [
     icon: Settings,
     color: 'text-gray-600',
     bgColor: 'bg-gray-100',
-    allowedRoles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER'],
+    allowedRoles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'AREA_MANAGER', 'CATALOG_MANAGER', 'ACCOUNTANT'],
     sidebarItems: [
       { id: 'set-setup', label: 'Store & Employee Setup', path: '/setup' },
       { id: 'set-profile', label: 'My Profile', path: '/settings?tab=profile' },
