@@ -298,7 +298,46 @@ export function GoodsReceiptNote() {
           </div>
 
           {/* Submit Button */}
-          <button className="w-full px-4 py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-semibold flex items-center justify-center gap-2">
+          <button
+            onClick={async () => {
+              if (!poNumber) { toast.error('Please select a Purchase Order'); return; }
+              try {
+                await vendorsApi.createGRN({
+                  po_id: poNumber,
+                  vendor_invoice_no: '',
+                  vendor_invoice_date: new Date().toISOString().split('T')[0],
+                  items: receivedItems.map(item => ({
+                    po_item_id: item.product_id,
+                    product_id: item.product_id,
+                    received_qty: item.received_qty,
+                    accepted_qty: item.inspection_status === 'passed' ? item.received_qty : 0,
+                    rejected_qty: item.inspection_status === 'failed' ? item.received_qty : 0,
+                    rejection_reason: item.inspection_status === 'failed' ? 'Quality inspection failed' : undefined,
+                  })),
+                  notes: qualityNotes || undefined,
+                });
+                toast.success('GRN created successfully');
+                setActiveTab('history');
+                // Reload GRNs
+                const storeId = user?.activeStoreId || '';
+                const response = await vendorsApi.getGRNs({ store_id: storeId });
+                const grnList = Array.isArray(response) ? response : response.data || [];
+                setGrns(grnList.map((grn: any) => ({
+                  id: grn.id || grn._id,
+                  grn_number: grn.grn_number,
+                  po_id: grn.po_id,
+                  po_number: grn.po_number || 'Unknown PO',
+                  received_at: grn.received_at,
+                  items_received: grn.items_received || 0,
+                  quality_status: grn.quality_status || 'passed',
+                  created_by: grn.created_by || 'Unknown',
+                })));
+              } catch (err) {
+                toast.error('Failed to create GRN');
+              }
+            }}
+            className="w-full px-4 py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-semibold flex items-center justify-center gap-2"
+          >
             <FileText className="w-5 h-5" />
             Create GRN
           </button>

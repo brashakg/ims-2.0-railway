@@ -34,5 +34,8 @@ export { hrApi, incentivesApi, tasksApi } from './hr';
 // Clinical / Eye Tests
 export { clinicalApi } from './clinical';
 
+// Expenses
+export { expensesApi } from './expenses';
+
 // Settings & Integrations
 export { settingsApi, adminIntegrationApi } from './settings';

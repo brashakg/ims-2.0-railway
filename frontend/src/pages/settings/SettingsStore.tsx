@@ -484,6 +484,18 @@ export function BrandSection() {
 
 export function DiscountSection() {
   const toast = useToast();
+  const [discounts, setDiscounts] = useState([
+    { role: 'Sales Staff', roleKey: 'SALES_STAFF', mass: 5, premium: 3, luxury: 0 },
+    { role: 'Sales Cashier', roleKey: 'SALES_CASHIER', mass: 10, premium: 5, luxury: 3 },
+    { role: 'Optometrist', roleKey: 'OPTOMETRIST', mass: 5, premium: 3, luxury: 0 },
+    { role: 'Workshop Staff', roleKey: 'WORKSHOP_STAFF', mass: 0, premium: 0, luxury: 0 },
+    { role: 'Store Manager', roleKey: 'STORE_MANAGER', mass: 15, premium: 10, luxury: 5 },
+    { role: 'Accountant', roleKey: 'ACCOUNTANT', mass: 10, premium: 5, luxury: 3 },
+    { role: 'Area Manager', roleKey: 'AREA_MANAGER', mass: 20, premium: 15, luxury: 10 },
+    { role: 'Admin', roleKey: 'ADMIN', mass: 100, premium: 100, luxury: 100 },
+    { role: 'Superadmin', roleKey: 'SUPERADMIN', mass: 100, premium: 100, luxury: 100 },
+  ]);
+  const [isSaving, setIsSaving] = useState(false);
 
   useEffect(() => {
     loadDiscounts();
@@ -491,13 +503,35 @@ export function DiscountSection() {
 
   const loadDiscounts = async () => {
     try {
-      await Promise.all([
-        adminDiscountApi.getRoleDiscountCaps().catch(() => ({})),
-        adminDiscountApi.getTierDiscounts().catch(() => ({})),
+      const [caps] = await Promise.all([
+        adminDiscountApi.getRoleDiscountCaps().catch(() => null),
+        adminDiscountApi.getTierDiscounts().catch(() => null),
       ]);
+      if (caps?.rules) {
+        setDiscounts(prev => prev.map(d => {
+          const cap = caps.rules[d.roleKey];
+          return cap ? { ...d, mass: cap.mass ?? d.mass, premium: cap.premium ?? d.premium, luxury: cap.luxury ?? d.luxury } : d;
+        }));
+      }
     } catch {
       // Discount API not available
     }
+  };
+
+  const handleSaveRules = async () => {
+    setIsSaving(true);
+    try {
+      // Save each role's discount cap
+      await Promise.all(
+        discounts.map(d =>
+          adminDiscountApi.setRoleDiscountCap(d.roleKey, d.mass).catch(() => null)
+        )
+      );
+      toast.success('Discount rules saved');
+    } catch {
+      toast.error('Failed to save');
+    }
+    setIsSaving(false);
   };
 
   return (
@@ -508,11 +542,12 @@ export function DiscountSection() {
           <p className="text-sm text-gray-400">Maximum discount by role and brand tier</p>
         </div>
         <button
-          onClick={() => toast.info('Save changes to update discount rules')}
+          onClick={handleSaveRules}
+          disabled={isSaving}
           className="btn-outline flex items-center gap-2"
         >
           <Edit2 className="w-4 h-4" />
-          Edit Rules
+          {isSaving ? 'Saving...' : 'Save Rules'}
         </button>
       </div>
 
@@ -527,23 +562,17 @@ export function DiscountSection() {
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-200">
-            {[
-              { role: 'Sales Staff', mass: 5, premium: 3, luxury: 0 },
-              { role: 'Sales Cashier', mass: 10, premium: 5, luxury: 3 },
-              { role: 'Optometrist', mass: 5, premium: 3, luxury: 0 },
-              { role: 'Workshop Staff', mass: 0, premium: 0, luxury: 0 },
-              { role: 'Store Manager', mass: 15, premium: 10, luxury: 5 },
-              { role: 'Accountant', mass: 10, premium: 5, luxury: 3 },
-              { role: 'Area Manager', mass: 20, premium: 15, luxury: 10 },
-              { role: 'Admin', mass: 100, premium: 100, luxury: 100 },
-              { role: 'Superadmin', mass: 100, premium: 100, luxury: 100 },
-            ].map(row => (
-              <tr key={row.role}>
+            {discounts.map((row, idx) => (
+              <tr key={row.roleKey}>
                 <td className="px-4 py-3 font-medium">{row.role}</td>
                 <td className="px-4 py-3 text-center">
                   <input
                     type="number"
-                    defaultValue={row.mass}
+                    value={row.mass}
+                    onChange={(e) => {
+                      const val = Math.min(100, Math.max(0, parseInt(e.target.value) || 0));
+                      setDiscounts(prev => prev.map((d, i) => i === idx ? { ...d, mass: val } : d));
+                    }}
                     min="0"
                     max="100"
                     className="w-16 px-2 py-1 text-center border border-gray-700 rounded"
@@ -553,7 +582,11 @@ export function DiscountSection() {
                 <td className="px-4 py-3 text-center">
                   <input
                     type="number"
-                    defaultValue={row.premium}
+                    value={row.premium}
+                    onChange={(e) => {
+                      const val = Math.min(100, Math.max(0, parseInt(e.target.value) || 0));
+                      setDiscounts(prev => prev.map((d, i) => i === idx ? { ...d, premium: val } : d));
+                    }}
                     min="0"
                     max="100"
                     className="w-16 px-2 py-1 text-center border border-gray-700 rounded"
@@ -563,7 +596,11 @@ export function DiscountSection() {
                 <td className="px-4 py-3 text-center">
                   <input
                     type="number"
-                    defaultValue={row.luxury}
+                    value={row.luxury}
+                    onChange={(e) => {
+                      const val = Math.min(100, Math.max(0, parseInt(e.target.value) || 0));
+                      setDiscounts(prev => prev.map((d, i) => i === idx ? { ...d, luxury: val } : d));
+                    }}
                     min="0"
                     max="100"
                     className="w-16 px-2 py-1 text-center border border-gray-700 rounded"

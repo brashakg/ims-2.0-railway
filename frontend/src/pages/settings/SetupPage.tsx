@@ -3,6 +3,7 @@
 // ============================================================================
 import { useState, useEffect } from 'react';
 import { useAuth } from '../../context/AuthContext';
+import { useToast } from '../../context/ToastContext';
 import { adminStoreApi } from '../../services/api';
 import {
   Building, Users, Plus, Edit, MapPin, Phone, Clock,
@@ -81,6 +82,7 @@ const DEFAULT_EMPLOYEE: NewEmployee = {
 
 export default function SetupPage() {
   const { user } = useAuth();
+  const toast = useToast();
   const [activeTab, setActiveTab] = useState<'stores' | 'employees' | 'wizard'>('stores');
   const [stores, setStores] = useState<StoreConfig[]>([]);
 
@@ -189,10 +191,21 @@ export default function SetupPage() {
           {/* Store Form Modal */}
           {showStoreForm && <StoreFormModal
             store={editStore}
-            onSave={(s) => {
-              if (editStore) setStores(prev => prev.map(st => st.id === editStore.id ? { ...st, ...s } : st));
-              else setStores(prev => [...prev, { ...s, id: `STORE-${Date.now()}`, isActive: true }]);
-              setShowStoreForm(false);
+            onSave={async (s) => {
+              try {
+                const apiData = { name: s.name, code: s.code, address: s.address, city: s.city, state: s.state, phone: s.phone, email: s.email, gst: s.gstNumber };
+                if (editStore) {
+                  await adminStoreApi.updateStore(editStore.id!, apiData);
+                  setStores(prev => prev.map(st => st.id === editStore.id ? { ...st, ...s } : st));
+                } else {
+                  const result = await adminStoreApi.createStore(apiData);
+                  setStores(prev => [...prev, { ...s, id: result?.store_id || `STORE-${Date.now()}`, isActive: true }]);
+                }
+                setShowStoreForm(false);
+                toast.success(editStore ? 'Store updated' : 'Store created');
+              } catch (err) {
+                toast.error('Failed to save store');
+              }
             }}
             onClose={() => setShowStoreForm(false)}
           />}

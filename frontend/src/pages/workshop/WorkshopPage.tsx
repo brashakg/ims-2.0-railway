@@ -22,6 +22,7 @@ import { WorkshopJobCardPrint } from '../../components/print/WorkshopJobCardPrin
 import type { JobStatus, JobPriority } from '../../types';
 import { workshopApi, orderApi } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
+import { useToast } from '../../context/ToastContext';
 import clsx from 'clsx';
 
 // Job type
@@ -69,6 +70,7 @@ const PRIORITY_CONFIG: Record<JobPriority, { label: string; class: string; icon:
 
 export function WorkshopPage() {
   const { user } = useAuth();
+  const toast = useToast();
 
   // Data state
   const [jobs, setJobs] = useState<Job[]>([]);
@@ -209,6 +211,17 @@ const loadJobs = async () => {
       // Error handling — silently retry
     } finally {
       setCreateLoading(false);
+    }
+  };
+
+  const handleStatusChange = async (jobId: string, newStatus: string) => {
+    try {
+      await workshopApi.updateJobStatus(jobId, newStatus);
+      toast.success(`Job status updated to ${newStatus}`);
+      setSelectedJob(null);
+      await loadJobs();
+    } catch {
+      toast.error('Failed to update job status');
     }
   };
 
@@ -571,6 +584,28 @@ const loadJobs = async () => {
                       style={{ width: `${(STATUS_CONFIG[selectedJob.status].step / 8) * 100}%` }}
                     />
                   </div>
+                </div>
+
+                {/* Status Transition Buttons */}
+                <div className="flex gap-2 flex-wrap">
+                  {selectedJob.status === 'PENDING' && (
+                    <button onClick={() => handleStatusChange(selectedJob.id, 'PROCESSING')} className="btn-primary text-sm">Start Processing</button>
+                  )}
+                  {selectedJob.status === 'PROCESSING' && (
+                    <button onClick={() => handleStatusChange(selectedJob.id, 'COMPLETED')} className="btn-primary text-sm">Mark Completed</button>
+                  )}
+                  {selectedJob.status === 'COMPLETED' && (
+                    <>
+                      <button onClick={() => handleStatusChange(selectedJob.id, 'READY')} className="btn-success text-sm">QC Passed - Ready</button>
+                      <button onClick={() => handleStatusChange(selectedJob.id, 'QC_FAILED')} className="btn-outline text-sm text-red-600 border-red-600">QC Failed</button>
+                    </>
+                  )}
+                  {selectedJob.status === 'QC_FAILED' && (
+                    <button onClick={() => handleStatusChange(selectedJob.id, 'PROCESSING')} className="btn-primary text-sm">Rework</button>
+                  )}
+                  {selectedJob.status === 'READY' && (
+                    <button onClick={() => handleStatusChange(selectedJob.id, 'DELIVERED')} className="btn-success text-sm">Mark Delivered</button>
+                  )}
                 </div>
 
                 <div className="flex gap-2">

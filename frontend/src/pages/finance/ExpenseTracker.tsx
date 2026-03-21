@@ -20,6 +20,7 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
+import { expensesApi } from '../../services/api/expenses';
 import { ExpenseBillUpload } from '../../components/finance/ExpenseBillUpload';
 import clsx from 'clsx';
 
@@ -95,60 +96,17 @@ export default function ExpenseTracker() {
   const loadExpenses = async () => {
     setIsLoading(true);
     try {
-      // Mock data for now
-      const mockExpenses: Expense[] = [
-        {
-          id: 'EXP001',
-          expense_id: 'EXP-2024-001',
-          category: 'utilities',
-          amount: 5000,
-          description: 'Electricity bill for March',
-          submitted_at: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString(),
-          status: 'pending',
-          submitted_by: user?.name || 'Unknown',
-          receipt_attached: true,
-        },
-        {
-          id: 'EXP002',
-          expense_id: 'EXP-2024-002',
-          category: 'maintenance',
-          amount: 2500,
-          description: 'HVAC system maintenance',
-          submitted_at: new Date(Date.now() - 5 * 24 * 60 * 60 * 1000).toISOString(),
-          status: 'approved',
-          submitted_by: user?.name || 'Unknown',
-          approved_by: 'Manager',
-          approved_at: new Date(Date.now() - 4 * 24 * 60 * 60 * 1000).toISOString(),
-          receipt_attached: true,
-        },
-        {
-          id: 'EXP003',
-          expense_id: 'EXP-2024-003',
-          category: 'supplies',
-          amount: 1200,
-          description: 'Office supplies and stationery',
-          submitted_at: new Date(Date.now() - 10 * 24 * 60 * 60 * 1000).toISOString(),
-          status: 'rejected',
-          submitted_by: user?.name || 'Unknown',
-          rejection_reason: 'Missing receipt',
-          receipt_attached: false,
-        },
-        {
-          id: 'EXP004',
-          expense_id: 'EXP-2024-004',
-          category: 'travel',
-          amount: 3500,
-          description: 'Business travel to regional store',
-          submitted_at: new Date(Date.now() - 1 * 24 * 60 * 60 * 1000).toISOString(),
-          status: 'pending',
-          submitted_by: user?.name || 'Unknown',
-          receipt_attached: true,
-        },
-      ];
-
-      setExpenses(mockExpenses);
+      const response = await expensesApi.getExpenses({
+        store_id: user?.activeStoreId,
+        status: statusFilter !== 'all' ? statusFilter : undefined,
+        from_date: dateFrom || undefined,
+        to_date: dateTo || undefined,
+      });
+      const list = response?.expenses || response || [];
+      setExpenses(Array.isArray(list) ? list : []);
     } catch (error) {
       toast.error('Failed to load expenses');
+      setExpenses([]);
     } finally {
       setIsLoading(false);
     }
@@ -156,22 +114,30 @@ export default function ExpenseTracker() {
 
   const loadSummary = async () => {
     try {
-      const mockSummary: ExpenseSummary = {
-        total_this_month: 12200,
-        pending_count: 2,
-        approved_count: 1,
-        average_daily: 610,
-        by_category: {
-          utilities: 5000,
-          maintenance: 2500,
-          supplies: 1200,
-          travel: 3500,
-          food: 0,
-          marketing: 0,
-          miscellaneous: 0,
-        },
+      const response = await expensesApi.getExpenses({ store_id: user?.activeStoreId });
+      const list = response?.expenses || response || [];
+      const expenseList: Expense[] = Array.isArray(list) ? list : [];
+      const byCategory: Record<ExpenseCategory, number> = {
+        utilities: 0, maintenance: 0, supplies: 0, travel: 0, food: 0, marketing: 0, miscellaneous: 0,
       };
-      setSummary(mockSummary);
+      let total = 0;
+      let pendingCount = 0;
+      let approvedCount = 0;
+      expenseList.forEach(e => {
+        total += e.amount || 0;
+        if (e.status === 'pending') pendingCount++;
+        if (e.status === 'approved') approvedCount++;
+        if (byCategory[e.category as ExpenseCategory] !== undefined) {
+          byCategory[e.category as ExpenseCategory] += e.amount || 0;
+        }
+      });
+      setSummary({
+        total_this_month: total,
+        pending_count: pendingCount,
+        approved_count: approvedCount,
+        average_daily: expenseList.length > 0 ? Math.round(total / 30) : 0,
+        by_category: byCategory,
+      });
     } catch (error) {
       toast.error('Failed to load summary');
     }
@@ -184,6 +150,13 @@ export default function ExpenseTracker() {
     }
 
     try {
+      await expensesApi.createExpense({
+        category: formCategory,
+        amount: parseFloat(formAmount),
+        description: formDescription,
+        expense_date: formDate,
+        store_id: user?.activeStoreId,
+      });
       toast.success('Expense submitted successfully');
       setShowSubmitModal(false);
       setFormAmount('');
@@ -196,8 +169,9 @@ export default function ExpenseTracker() {
     }
   };
 
-  const handleApproveExpense = async (_expenseId: string) => {
+  const handleApproveExpense = async (expenseId: string) => {
     try {
+      await expensesApi.approveExpense(expenseId);
       toast.success('Expense approved');
       await loadExpenses();
       await loadSummary();
@@ -213,6 +187,9 @@ export default function ExpenseTracker() {
     }
 
     try {
+      if (selectedExpense) {
+        await expensesApi.rejectExpense(selectedExpense.id, rejectionReason);
+      }
       toast.success('Expense rejected');
       setShowRejectModal(false);
       setRejectionReason('');
