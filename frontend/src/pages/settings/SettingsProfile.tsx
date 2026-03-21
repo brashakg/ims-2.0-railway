@@ -144,34 +144,7 @@ export function ProfileSection() {
       <div className="card">
         <h2 className="text-lg font-semibold text-white mb-4">Preferences</h2>
         <div className="space-y-4">
-          {/* Theme Selection */}
-          <div className="p-3 bg-gray-900 rounded-lg">
-            <p className="font-medium text-white mb-2">Appearance</p>
-            <p className="text-sm text-gray-400 mb-3">Choose your preferred theme for the interface</p>
-            <div className="flex gap-2">
-              {([
-                { id: 'light' as const, label: 'Light', icon: '(sun)' },
-                { id: 'dark' as const, label: 'Dark', icon: '(moon)' },
-                { id: 'system' as const, label: 'System', icon: '(auto)' },
-              ]).map(opt => (
-                <button
-                  key={opt.id}
-                  onClick={() => setThemeMode(opt.id)}
-                  className={clsx(
-                    'flex items-center gap-2 px-4 py-2.5 rounded-lg text-sm font-medium transition-colors border',
-                    themeMode === opt.id
-                      ? 'bg-bv-gold-600 text-white border-bv-gold-500'
-                      : isDark
-                        ? 'bg-gray-800 text-gray-300 border-gray-700 hover:bg-gray-700'
-                        : 'bg-gray-100 text-gray-700 border-gray-300 hover:bg-gray-200'
-                  )}
-                >
-                  <span>{opt.icon}</span>
-                  {opt.label}
-                </button>
-              ))}
-            </div>
-          </div>
+          {/* Theme — light mode only */}
           <div className="flex items-center justify-between p-3 bg-gray-900 rounded-lg">
             <div>
               <p className="font-medium text-white">Email Notifications</p>
