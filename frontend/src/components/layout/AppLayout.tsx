@@ -295,17 +295,7 @@ export function AppLayout() {
 
           {/* Right side - Theme toggle, Role selector, Store selector, User avatar */}
           <div className="flex items-center gap-3">
-            {/* Theme toggle */}
-            <button
-              onClick={toggleDarkMode}
-              className={clsx(
-                'p-2 rounded-lg transition-colors',
-                isDark ? 'text-yellow-400 hover:bg-gray-700' : 'text-gray-600 hover:bg-gray-100'
-              )}
-              title={isDark ? 'Switch to light mode' : 'Switch to dark mode'}
-            >
-              {isDark ? <Sun className="w-5 h-5" /> : <Moon className="w-5 h-5" />}
-            </button>
+            {/* Theme toggle - hidden (light mode only) */}
 
             {/* Role selector */}
             {user && user.roles?.length > 1 && (

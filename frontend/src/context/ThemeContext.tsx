@@ -17,19 +17,9 @@ export interface ThemeContextType {
 const ThemeContext = createContext<ThemeContextType | undefined>(undefined);
 
 export function ThemeProvider({ children }: { children: React.ReactNode }) {
-  const [mode, setModeState] = useState<ThemeMode>(() => {
-    // Check localStorage first
-    const stored = localStorage.getItem('theme-mode') as ThemeMode | null;
-    if (stored) return stored;
-
-    // Fall back to system preference
-    if (typeof window !== 'undefined' && window.matchMedia) {
-      return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
-    }
-
-    return 'light';
-  });
-
+  // Force light mode — dark mode disabled until Tailwind v4 class-based
+  // dark variant specificity issues are fully resolved
+  const [mode, setModeState] = useState<ThemeMode>('light');
   const [isDark, setIsDark] = useState(false);
 
   // Determine actual dark mode based on mode setting
