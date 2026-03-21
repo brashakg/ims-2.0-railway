@@ -42,3 +42,6 @@ export { settingsApi, adminIntegrationApi } from './settings';
 
 // Marketing Automation
 export { marketingApi } from './marketing';
+
+// Analytics V2
+export { analyticsV2Api } from './analytics';

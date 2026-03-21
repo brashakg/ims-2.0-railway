@@ -129,6 +129,8 @@ export const MODULE_CONFIGS: ModuleConfig[] = [
       { id: 'crm-feedback', label: 'Feedback & NPS', path: '/customers/feedback', roles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER'] },
       { id: 'crm-recalls', label: 'Recalls & Reminders', path: '/customers?tab=recalls' },
       { id: 'crm-follow-ups', label: 'Follow-ups', path: '/customers/follow-ups' },
+      { id: 'crm-loyalty-tiers', label: 'Loyalty Tiers', path: '/customers/loyalty?tab=tiers', roles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER'] },
+      { id: 'crm-cl-subscriptions', label: 'CL Subscriptions', path: '/customers?tab=cl-subscriptions', roles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER'] },
     ],
   },
   {
@@ -176,6 +178,8 @@ export const MODULE_CONFIGS: ModuleConfig[] = [
       { id: 'hr-tasks', label: 'Tasks Dashboard', path: '/tasks/dashboard' },
       { id: 'hr-checklists', label: 'Daily Checklists', path: '/tasks/checklists' },
       { id: 'hr-task-mgmt', label: 'Task Management', path: '/tasks', roles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER'] },
+      { id: 'hr-leaderboard', label: 'Staff Leaderboard', path: '/hr?tab=leaderboard', roles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER'] },
+      { id: 'hr-eye-camps', label: 'Eye Camps', path: '/hr?tab=eye-camps', roles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER'] },
     ],
   },
   {
@@ -195,6 +199,12 @@ export const MODULE_CONFIGS: ModuleConfig[] = [
       { id: 'rpt-gst', label: 'GST Reports', path: '/reports?tab=gst' },
       { id: 'rpt-forecast', label: 'Demand Forecast', path: '/reports?tab=forecast' },
       { id: 'rpt-orders', label: 'Orders Overview', path: '/orders' },
+      { id: 'rpt-discount', label: 'Discount Analysis', path: '/reports?tab=discount-analysis', roles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER'] },
+      { id: 'rpt-deadstock', label: 'Dead Stock', path: '/reports?tab=dead-stock', roles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER'] },
+      { id: 'rpt-demand', label: 'Demand Forecast', path: '/reports?tab=demand', roles: ['SUPERADMIN'] },
+      { id: 'rpt-churn', label: 'Churn Prediction', path: '/reports?tab=churn', roles: ['SUPERADMIN'] },
+      { id: 'rpt-anomaly', label: 'Anomaly Detection', path: '/reports?tab=anomaly', roles: ['SUPERADMIN'] },
+      { id: 'rpt-vendor-margins', label: 'Vendor Margins', path: '/reports?tab=vendor-margins', roles: ['SUPERADMIN'] },
     ],
   },
   {
