@@ -204,7 +204,7 @@ async def get_analytics_root():
 @router.get("/dashboard-summary")
 async def get_dashboard_summary(
     current_user: dict = Depends(get_current_user),
-    period: str = Query("month", regex="^(today|week|month|quarter|year)$"),
+    period: str = Query("month", pattern="^(today|week|month|quarter|year)$"),
 ):
     """
     Get comprehensive dashboard summary with all KPI data
@@ -272,7 +272,7 @@ async def get_dashboard_summary(
 @router.get("/revenue-trends")
 async def get_revenue_trends(
     current_user: dict = Depends(get_current_user),
-    period: str = Query("daily", regex="^(daily|weekly|monthly)$"),
+    period: str = Query("daily", pattern="^(daily|weekly|monthly)$"),
     days: int = Query(30, ge=7, le=365),
 ):
     """
@@ -379,7 +379,7 @@ async def get_revenue_trends(
 @router.get("/store-performance")
 async def get_store_performance(
     current_user: dict = Depends(get_current_user),
-    period: str = Query("month", regex="^(today|week|month|quarter|year)$"),
+    period: str = Query("month", pattern="^(today|week|month|quarter|year)$"),
 ):
     """
     Get performance metrics for all stores (for multi-location admins)
@@ -567,7 +567,7 @@ async def get_inventory_intelligence(
 @router.get("/customer-insights")
 async def get_customer_insights(
     current_user: dict = Depends(get_current_user),
-    period: str = Query("month", regex="^(today|week|month|quarter|year)$"),
+    period: str = Query("month", pattern="^(today|week|month|quarter|year)$"),
 ):
     """
     Get customer insights: composition, top customers, lifetime value
@@ -643,7 +643,7 @@ async def get_customer_insights(
 @router.get("/enterprise-kpis")
 async def get_enterprise_kpis(
     current_user: dict = Depends(get_current_user),
-    period: str = Query("today", regex="^(today|week|month|year)$"),
+    period: str = Query("today", pattern="^(today|week|month|year)$"),
 ):
     """
     Comprehensive enterprise KPI dashboard with SAP/Power BI style metrics

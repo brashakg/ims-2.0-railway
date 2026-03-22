@@ -31,7 +31,7 @@ const DEFAULT_INTEGRATIONS: Integration[] = [
 
 export function IntegrationSettings() {
   const [integrations, setIntegrations] = useState<Integration[]>(DEFAULT_INTEGRATIONS);
-  const [isLoading, setIsLoading] = useState(true);
+  const [, setIsLoading] = useState(true);
   const [showApiKey, setShowApiKey] = useState<Record<string, boolean>>({});
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [testingId, setTestingId] = useState<string | null>(null);

@@ -7,9 +7,7 @@ import {
   User, Building2, Save, Lock,
   ToggleLeft, ToggleRight,
 } from 'lucide-react';
-import clsx from 'clsx';
 import { useAuth } from '../../context/AuthContext';
-import { useTheme } from '../../context/ThemeContext';
 import { useToast } from '../../context/ToastContext';
 import { settingsApi } from '../../services/api';
 
@@ -19,7 +17,6 @@ import { settingsApi } from '../../services/api';
 
 export function ProfileSection() {
   const { user } = useAuth();
-  const { mode: themeMode, setMode: setThemeMode, isDark } = useTheme();
   const toast = useToast();
 
   const [profileData, setProfileData] = useState<{
