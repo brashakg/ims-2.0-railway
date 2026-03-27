@@ -149,21 +149,24 @@ export function Customer360Dashboard() {
           </div>
           {searchResults.length > 0 && (
             <div className="bg-white rounded-lg border border-gray-200 divide-y divide-gray-100">
-              {searchResults.map((c: any) => (
-                <button
-                  key={c._id || c.id}
-                  onClick={() => navigate(`/customers/${c._id || c.id}/360`)}
-                  className="w-full px-4 py-3 flex items-center gap-3 hover:bg-amber-50 transition-colors text-left"
-                >
-                  <div className="w-9 h-9 bg-amber-100 rounded-full flex items-center justify-center">
-                    <User className="w-4 h-4 text-amber-700" />
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm font-medium text-gray-900 truncate">{c.name || `${c.first_name || ''} ${c.last_name || ''}`.trim()}</p>
-                    <p className="text-xs text-gray-500">{c.phone || c.mobile || ''} {c.email ? `· ${c.email}` : ''}</p>
-                  </div>
-                </button>
-              ))}
+              {searchResults.map((c: any) => {
+                const cid = c.customer_id || c._id || c.id;
+                return (
+                  <button
+                    key={cid}
+                    onClick={() => navigate(`/customers/${cid}/360`)}
+                    className="w-full px-4 py-3 flex items-center gap-3 hover:bg-amber-50 transition-colors text-left"
+                  >
+                    <div className="w-9 h-9 bg-amber-100 rounded-full flex items-center justify-center">
+                      <User className="w-4 h-4 text-amber-700" />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-medium text-gray-900 truncate">{c.name || `${c.first_name || ''} ${c.last_name || ''}`.trim()}</p>
+                      <p className="text-xs text-gray-500">{c.mobile || c.phone || ''} {c.email ? ` · ${c.email}` : ''}</p>
+                    </div>
+                  </button>
+                );
+              })}
             </div>
           )}
           {searchResults.length === 0 && searchQuery && !isSearching && (

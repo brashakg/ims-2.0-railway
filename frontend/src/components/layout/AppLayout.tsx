@@ -329,7 +329,7 @@ export function AppLayout() {
                 </button>
                 {roleDropdownOpen && (
                   <div className={clsx('absolute top-full right-0 mt-1 w-48 rounded-lg shadow-lg z-50 border', 'bg-white border-gray-200')}>
-                    {user.roles.map((role) => (
+                    {(user.roles || []).map((role) => (
                       <button
                         key={role}
                         className={clsx(
@@ -362,7 +362,7 @@ export function AppLayout() {
                 </button>
                 {storeDropdownOpen && (
                   <div className={clsx('absolute top-full right-0 mt-1 w-56 rounded-lg shadow-lg z-50 border', 'bg-white border-gray-200')}>
-                    {user.storeIds.map((storeId) => (
+                    {(user.storeIds?.length ? user.storeIds : Object.keys(storeNames)).map((storeId) => (
                       <button
                         key={storeId}
                         className={clsx(
