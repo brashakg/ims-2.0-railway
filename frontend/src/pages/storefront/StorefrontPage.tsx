@@ -221,32 +221,32 @@ export function StorefrontPage() {
   const categories = ['all', ...Array.from(new Set(products.map(p => p.category)))];
 
   return (
-    <div className="min-h-screen bg-gray-900">
+    <div className="min-h-screen bg-gray-50">
       {/* Header */}
-      <header className="bg-gray-800 shadow-sm sticky top-0 z-50">
+      <header className="bg-white shadow-sm sticky top-0 z-50">
         <div className="max-w-7xl mx-auto px-4 py-4">
           <div className="flex items-center justify-between">
             {/* Logo */}
             <div className="flex items-center gap-2">
               <Eye className="w-8 h-8 text-purple-600" />
               <div>
-                <h1 className="text-2xl font-bold text-white">Better Vision Optics</h1>
-                <p className="text-xs text-gray-400">Premium Eyewear & Eyecare</p>
+                <h1 className="text-2xl font-bold text-gray-900">Better Vision Optics</h1>
+                <p className="text-xs text-gray-500">Premium Eyewear & Eyecare</p>
               </div>
             </div>
 
             {/* Actions */}
             <div className="flex items-center gap-4">
-              <button className="relative p-2 hover:bg-gray-700 rounded-lg transition-colors">
-                <Heart className="w-6 h-6 text-gray-400" />
+              <button className="relative p-2 hover:bg-gray-100 rounded-lg transition-colors">
+                <Heart className="w-6 h-6 text-gray-500" />
                 {wishlistItems.size > 0 && (
                   <span className="absolute -top-1 -right-1 w-5 h-5 bg-red-500 text-white text-xs rounded-full flex items-center justify-center">
                     {wishlistItems.size}
                   </span>
                 )}
               </button>
-              <button className="relative p-2 hover:bg-gray-700 rounded-lg transition-colors">
-                <ShoppingCart className="w-6 h-6 text-gray-400" />
+              <button className="relative p-2 hover:bg-gray-100 rounded-lg transition-colors">
+                <ShoppingCart className="w-6 h-6 text-gray-500" />
                 {cartCount > 0 && (
                   <span className="absolute -top-1 -right-1 w-5 h-5 bg-purple-600 text-white text-xs rounded-full flex items-center justify-center">
                     {cartCount}
@@ -282,11 +282,11 @@ export function StorefrontPage() {
 
       {/* Search and Filters */}
       <div className="max-w-7xl mx-auto px-4 py-6">
-        <div className="bg-gray-800 rounded-lg shadow-sm p-4 mb-6">
+        <div className="bg-white rounded-lg shadow-sm p-4 mb-6">
           <div className="flex flex-col tablet:flex-row gap-4">
             {/* Search */}
             <div className="flex-1 relative">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" />
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-500" />
               <input
                 type="text"
                 value={searchQuery}
@@ -330,7 +330,7 @@ export function StorefrontPage() {
             <Loader2 className="w-12 h-12 animate-spin text-purple-600" />
           </div>
         ) : filteredProducts.length === 0 ? (
-          <div className="text-center py-20 text-gray-400">
+          <div className="text-center py-20 text-gray-500">
             <Package className="w-16 h-16 mx-auto mb-4 opacity-50" />
             <p className="text-xl font-medium">No products found</p>
             <p>Try adjusting your search or filters</p>
@@ -340,10 +340,10 @@ export function StorefrontPage() {
             {filteredProducts.map((product) => (
               <div
                 key={product.id}
-                className="bg-gray-800 rounded-lg shadow-sm hover:shadow-md transition-shadow overflow-hidden group"
+                className="bg-white rounded-lg shadow-sm hover:shadow-md transition-shadow overflow-hidden group"
               >
                 {/* Product Image */}
-                <div className="relative aspect-square bg-gray-700">
+                <div className="relative aspect-square bg-gray-100">
                   <img
                     src={product.images[0]}
                     alt={product.name}
@@ -362,20 +362,20 @@ export function StorefrontPage() {
                   {/* Wishlist Button */}
                   <button
                     onClick={() => toggleWishlist(product.id)}
-                    className="absolute top-2 left-2 p-2 bg-gray-800 rounded-full shadow-md hover:bg-gray-900 transition-colors"
+                    className="absolute top-2 left-2 p-2 bg-white rounded-full shadow-md hover:bg-gray-100 transition-colors"
                   >
                     <Heart
                       className={`w-5 h-5 ${
                         wishlistItems.has(product.id)
                           ? 'fill-red-500 text-red-500'
-                          : 'text-gray-400'
+                          : 'text-gray-500'
                       }`}
                     />
                   </button>
                   {/* Stock Badge */}
                   {!product.inStock && (
                     <div className="absolute inset-0 bg-black bg-opacity-50 flex items-center justify-center">
-                      <span className="bg-gray-800 text-white px-4 py-2 rounded-lg font-medium">
+                      <span className="bg-white text-gray-900 px-4 py-2 rounded-lg font-medium">
                         Out of Stock
                       </span>
                     </div>
@@ -384,25 +384,25 @@ export function StorefrontPage() {
 
                 {/* Product Info */}
                 <div className="p-4">
-                  <p className="text-sm text-gray-400 mb-1">{product.brand}</p>
-                  <h3 className="font-medium text-white mb-2 line-clamp-2 min-h-[2.5rem]">
+                  <p className="text-sm text-gray-500 mb-1">{product.brand}</p>
+                  <h3 className="font-medium text-gray-900 mb-2 line-clamp-2 min-h-[2.5rem]">
                     {product.name}
                   </h3>
 
                   {/* Rating */}
                   <div className="flex items-center gap-1 mb-2">
                     <Star className="w-4 h-4 fill-yellow-400 text-yellow-400" />
-                    <span className="text-sm font-medium text-white">{product.rating}</span>
-                    <span className="text-sm text-gray-400">({product.reviewCount})</span>
+                    <span className="text-sm font-medium text-gray-900">{product.rating}</span>
+                    <span className="text-sm text-gray-500">({product.reviewCount})</span>
                   </div>
 
                   {/* Price */}
                   <div className="flex items-baseline gap-2 mb-3">
-                    <span className="text-2xl font-bold text-white">
+                    <span className="text-2xl font-bold text-gray-900">
                       ₹{product.offerPrice.toLocaleString('en-IN')}
                     </span>
                     {product.discount > 0 && (
-                      <span className="text-sm text-gray-400 line-through">
+                      <span className="text-sm text-gray-500 line-through">
                         ₹{product.mrp.toLocaleString('en-IN')}
                       </span>
                     )}
@@ -427,13 +427,13 @@ export function StorefrontPage() {
       </div>
 
       {/* Footer */}
-      <footer className="bg-gray-900 text-white mt-20">
+      <footer className="bg-gray-50 text-gray-900 mt-20">
         <div className="max-w-7xl mx-auto px-4 py-12">
           <div className="grid grid-cols-1 tablet:grid-cols-3 gap-8">
             {/* About */}
             <div>
               <h3 className="text-lg font-bold mb-4">Better Vision Optics</h3>
-              <p className="text-gray-400 text-sm mb-4">
+              <p className="text-gray-500 text-sm mb-4">
                 Your trusted partner for premium eyewear and eyecare solutions. Quality products
                 from top brands at competitive prices.
               </p>
@@ -442,24 +442,24 @@ export function StorefrontPage() {
             {/* Quick Links */}
             <div>
               <h3 className="text-lg font-bold mb-4">Quick Links</h3>
-              <ul className="space-y-2 text-sm text-gray-400">
+              <ul className="space-y-2 text-sm text-gray-500">
                 <li>
-                  <a href="#" className="hover:text-white transition-colors">
+                  <a href="#" className="hover:text-gray-900 transition-colors">
                     About Us
                   </a>
                 </li>
                 <li>
-                  <a href="#" className="hover:text-white transition-colors">
+                  <a href="#" className="hover:text-gray-900 transition-colors">
                     Contact Us
                   </a>
                 </li>
                 <li>
-                  <a href="#" className="hover:text-white transition-colors">
+                  <a href="#" className="hover:text-gray-900 transition-colors">
                     Shipping Policy
                   </a>
                 </li>
                 <li>
-                  <a href="#" className="hover:text-white transition-colors">
+                  <a href="#" className="hover:text-gray-900 transition-colors">
                     Return Policy
                   </a>
                 </li>
@@ -469,7 +469,7 @@ export function StorefrontPage() {
             {/* Contact */}
             <div>
               <h3 className="text-lg font-bold mb-4">Contact Us</h3>
-              <ul className="space-y-3 text-sm text-gray-400">
+              <ul className="space-y-3 text-sm text-gray-500">
                 <li className="flex items-center gap-2">
                   <Phone className="w-4 h-4" />
                   <span>+91 98765 43210</span>
@@ -486,7 +486,7 @@ export function StorefrontPage() {
             </div>
           </div>
 
-          <div className="border-t border-gray-800 mt-8 pt-8 text-center text-sm text-gray-400">
+          <div className="border-t border-gray-200 mt-8 pt-8 text-center text-sm text-gray-500">
             <p>&copy; 2025 Better Vision Optics. All rights reserved.</p>
           </div>
         </div>

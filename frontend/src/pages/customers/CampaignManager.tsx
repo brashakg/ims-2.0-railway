@@ -95,7 +95,7 @@ export function CampaignManager() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-3xl font-bold">Campaign Manager</h1>
-          <p className="text-gray-400">Marketing campaigns for customer engagement</p>
+          <p className="text-gray-500">Marketing campaigns for customer engagement</p>
         </div>
         <button className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-semibold flex items-center gap-2">
           <Plus className="w-5 h-5" />
@@ -104,7 +104,7 @@ export function CampaignManager() {
       </div>
 
       {/* Tabs */}
-      <div className="flex gap-2 border-b border-gray-700">
+      <div className="flex gap-2 border-b border-gray-200">
         {(['campaigns', 'builder'] as const).map((tab) => (
           <button
             key={tab}
@@ -113,7 +113,7 @@ export function CampaignManager() {
               'px-4 py-3 font-medium border-b-2 transition-colors',
               activeTab === tab
                 ? 'border-blue-500 text-blue-400'
-                : 'border-transparent text-gray-400 hover:text-gray-300'
+                : 'border-transparent text-gray-500 hover:text-gray-700'
             )}
           >
             {tab === 'campaigns' ? 'Active Campaigns' : 'Campaign Builder'}
@@ -125,20 +125,20 @@ export function CampaignManager() {
         <div className="space-y-4">
           {/* Summary */}
           <div className="grid grid-cols-4 gap-4">
-            <div className="bg-gray-800 rounded-lg p-4">
-              <p className="text-gray-400 text-sm mb-1">Active</p>
+            <div className="bg-white border border-gray-200 rounded-lg p-4">
+              <p className="text-gray-500 text-sm mb-1">Active</p>
               <p className="text-2xl font-bold text-blue-400">2</p>
             </div>
-            <div className="bg-gray-800 rounded-lg p-4">
-              <p className="text-gray-400 text-sm mb-1">Total Sent</p>
-              <p className="text-2xl font-bold text-white">2,137</p>
+            <div className="bg-white border border-gray-200 rounded-lg p-4">
+              <p className="text-gray-500 text-sm mb-1">Total Sent</p>
+              <p className="text-2xl font-bold text-gray-900">2,137</p>
             </div>
-            <div className="bg-gray-800 rounded-lg p-4">
-              <p className="text-gray-400 text-sm mb-1">Open Rate</p>
+            <div className="bg-white border border-gray-200 rounded-lg p-4">
+              <p className="text-gray-500 text-sm mb-1">Open Rate</p>
               <p className="text-2xl font-bold text-green-400">54%</p>
             </div>
-            <div className="bg-gray-800 rounded-lg p-4">
-              <p className="text-gray-400 text-sm mb-1">Conversion</p>
+            <div className="bg-white border border-gray-200 rounded-lg p-4">
+              <p className="text-gray-500 text-sm mb-1">Conversion</p>
               <p className="text-2xl font-bold text-purple-400">7.2%</p>
             </div>
           </div>
@@ -149,61 +149,61 @@ export function CampaignManager() {
               <div
                 key={campaign.id}
                 onClick={() => setSelectedCampaign(selectedCampaign === campaign.id ? null : campaign.id)}
-                className="bg-gray-800 rounded-lg p-4 border border-gray-700 hover:border-gray-600 cursor-pointer transition-colors"
+                className="bg-white border border-gray-200 rounded-lg p-4 hover:border-gray-300 cursor-pointer transition-colors"
               >
                 <div className="flex items-start justify-between mb-3">
                   <div className="flex items-start gap-3">
-                    <div className="text-gray-400 mt-1">{campaign.icon}</div>
+                    <div className="text-gray-500 mt-1">{campaign.icon}</div>
                     <div>
-                      <h3 className="text-white font-semibold">{campaign.name}</h3>
-                      <p className="text-gray-400 text-sm">
+                      <h3 className="text-gray-900 font-semibold">{campaign.name}</h3>
+                      <p className="text-gray-500 text-sm">
                         Template: {campaign.template}
                       </p>
                     </div>
                   </div>
                   <span className={clsx(
                     'px-3 py-1 rounded-full text-xs font-semibold',
-                    campaign.status === 'active' ? 'bg-green-900 text-green-300' :
-                    campaign.status === 'scheduled' ? 'bg-blue-900 text-blue-300' :
-                    campaign.status === 'completed' ? 'bg-gray-700 text-gray-300' :
-                    'bg-yellow-900 text-yellow-300'
+                    campaign.status === 'active' ? 'bg-green-100 text-green-700' :
+                    campaign.status === 'scheduled' ? 'bg-blue-100 text-blue-700' :
+                    campaign.status === 'completed' ? 'bg-gray-100 text-gray-600' :
+                    'bg-yellow-100 text-yellow-700'
                   )}>
                     {campaign.status.charAt(0).toUpperCase() + campaign.status.slice(1)}
                   </span>
                 </div>
 
-                <div className="grid grid-cols-4 gap-2 mb-3 pb-3 border-b border-gray-700">
+                <div className="grid grid-cols-4 gap-2 mb-3 pb-3 border-b border-gray-200">
                   <div className="text-center">
-                    <p className="text-gray-400 text-xs mb-1">Audience</p>
-                    <p className="text-white font-semibold">{campaign.audience}</p>
+                    <p className="text-gray-500 text-xs mb-1">Audience</p>
+                    <p className="text-gray-900 font-semibold">{campaign.audience}</p>
                   </div>
                   <div className="text-center">
-                    <p className="text-gray-400 text-xs mb-1">Sent</p>
-                    <p className="text-white font-semibold">{campaign.stats.sent}</p>
+                    <p className="text-gray-500 text-xs mb-1">Sent</p>
+                    <p className="text-gray-900 font-semibold">{campaign.stats.sent}</p>
                   </div>
                   <div className="text-center">
-                    <p className="text-gray-400 text-xs mb-1">Open Rate</p>
+                    <p className="text-gray-500 text-xs mb-1">Open Rate</p>
                     <p className="text-blue-400 font-semibold">
                       {campaign.stats.sent > 0 ? ((campaign.stats.opened / campaign.stats.sent) * 100).toFixed(0) : '—'}%
                     </p>
                   </div>
                   <div className="text-center">
-                    <p className="text-gray-400 text-xs mb-1">Converted</p>
+                    <p className="text-gray-500 text-xs mb-1">Converted</p>
                     <p className="text-green-400 font-semibold">{campaign.stats.converted}</p>
                   </div>
                 </div>
 
                 {selectedCampaign === campaign.id && (
-                  <div className="space-y-2 pt-3 border-t border-gray-700 grid grid-cols-3 gap-2">
+                  <div className="space-y-2 pt-3 border-t border-gray-200 grid grid-cols-3 gap-2">
                     <button className="px-3 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded text-sm font-semibold flex items-center justify-center gap-1">
                       <Edit className="w-4 h-4" />
                       Edit
                     </button>
-                    <button className="px-3 py-1 bg-gray-700 hover:bg-gray-600 text-white rounded text-sm font-semibold flex items-center justify-center gap-1">
+                    <button className="px-3 py-1 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded text-sm font-semibold flex items-center justify-center gap-1">
                       <BarChart3 className="w-4 h-4" />
                       Analytics
                     </button>
-                    <button className="px-3 py-1 bg-red-900 hover:bg-red-800 text-red-300 rounded text-sm font-semibold">
+                    <button className="px-3 py-1 bg-red-100 hover:bg-red-200 text-red-700 rounded text-sm font-semibold">
                       Pause
                     </button>
                   </div>
@@ -216,13 +216,13 @@ export function CampaignManager() {
 
       {activeTab === 'builder' && (
         <div className="space-y-6">
-          <div className="bg-gray-800 rounded-lg p-6 border border-gray-700">
-            <h3 className="text-lg font-semibold text-white mb-6">Campaign Builder</h3>
+          <div className="bg-white border border-gray-200 rounded-lg p-6">
+            <h3 className="text-lg font-semibold text-gray-900 mb-6">Campaign Builder</h3>
 
             <div className="space-y-6">
               {/* Campaign Type */}
               <div>
-                <label className="block text-white font-semibold mb-3">Campaign Type</label>
+                <label className="block text-gray-900 font-semibold mb-3">Campaign Type</label>
                 <div className="grid grid-cols-3 gap-3">
                   {[
                     { id: 'rx_renewal', name: 'Rx Renewal', icon: '📋' },
@@ -231,10 +231,10 @@ export function CampaignManager() {
                   ].map((type) => (
                     <button
                       key={type.id}
-                      className="p-4 border-2 border-gray-700 rounded-lg hover:border-blue-500 transition-colors text-center"
+                      className="p-4 border-2 border-gray-200 rounded-lg hover:border-blue-500 transition-colors text-center"
                     >
                       <div className="text-3xl mb-2">{type.icon}</div>
-                      <p className="text-white font-semibold">{type.name}</p>
+                      <p className="text-gray-900 font-semibold">{type.name}</p>
                     </button>
                   ))}
                 </div>
@@ -242,18 +242,18 @@ export function CampaignManager() {
 
               {/* Audience */}
               <div>
-                <label className="block text-white font-semibold mb-2">Target Audience</label>
+                <label className="block text-gray-900 font-semibold mb-2">Target Audience</label>
                 <input
                   type="text"
                   placeholder="Select customer segment..."
-                  className="w-full bg-gray-700 border border-gray-600 rounded px-3 py-2 text-white placeholder-gray-500"
+                  className="w-full bg-white border border-gray-300 rounded px-3 py-2 text-gray-900 placeholder-gray-400"
                 />
-                <p className="text-gray-400 text-xs mt-2">Estimated audience: 1,245 customers</p>
+                <p className="text-gray-500 text-xs mt-2">Estimated audience: 1,245 customers</p>
               </div>
 
               {/* Channels */}
               <div>
-                <label className="block text-white font-semibold mb-3">Channels</label>
+                <label className="block text-gray-900 font-semibold mb-3">Channels</label>
                 <div className="grid grid-cols-4 gap-2">
                   {[
                     { name: 'Email', checked: true },
@@ -263,7 +263,7 @@ export function CampaignManager() {
                   ].map((channel) => (
                     <label key={channel.name} className="flex items-center gap-2 cursor-pointer">
                       <input type="checkbox" defaultChecked={channel.checked} className="rounded" />
-                      <span className="text-gray-300 text-sm">{channel.name}</span>
+                      <span className="text-gray-600 text-sm">{channel.name}</span>
                     </label>
                   ))}
                 </div>
@@ -271,8 +271,8 @@ export function CampaignManager() {
 
               {/* Template */}
               <div>
-                <label className="block text-white font-semibold mb-2">Template</label>
-                <select className="w-full bg-gray-700 border border-gray-600 rounded px-3 py-2 text-white">
+                <label className="block text-gray-900 font-semibold mb-2">Template</label>
+                <select className="w-full bg-white border border-gray-300 rounded px-3 py-2 text-gray-900">
                   <option>Prescription Renewal Reminder</option>
                   <option>Vision Check-up</option>
                   <option>Lens Upgrade Offer</option>
@@ -282,21 +282,21 @@ export function CampaignManager() {
               {/* Schedule */}
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-white font-semibold mb-2">Start Date</label>
-                  <input type="date" className="w-full bg-gray-700 border border-gray-600 rounded px-3 py-2 text-white" />
+                  <label className="block text-gray-900 font-semibold mb-2">Start Date</label>
+                  <input type="date" className="w-full bg-white border border-gray-300 rounded px-3 py-2 text-gray-900" />
                 </div>
                 <div>
-                  <label className="block text-white font-semibold mb-2">End Date</label>
-                  <input type="date" className="w-full bg-gray-700 border border-gray-600 rounded px-3 py-2 text-white" />
+                  <label className="block text-gray-900 font-semibold mb-2">End Date</label>
+                  <input type="date" className="w-full bg-white border border-gray-300 rounded px-3 py-2 text-gray-900" />
                 </div>
               </div>
 
               {/* Actions */}
-              <div className="flex gap-3 pt-4 border-t border-gray-700">
+              <div className="flex gap-3 pt-4 border-t border-gray-200">
                 <button className="px-6 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-semibold">
                   Schedule Campaign
                 </button>
-                <button className="px-6 py-2 bg-gray-700 hover:bg-gray-600 text-white rounded-lg font-semibold">
+                <button className="px-6 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-lg font-semibold">
                   Save as Draft
                 </button>
               </div>

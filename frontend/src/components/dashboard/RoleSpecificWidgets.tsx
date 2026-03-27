@@ -38,17 +38,17 @@ export function PendingDeliveriesWidget() {
   }, []);
 
   return (
-    <div className="bg-gray-800 rounded-lg p-4 border border-gray-700 shadow-sm">
+    <div className="bg-white rounded-lg p-4 border border-gray-200 shadow-sm">
       <div className="flex items-center justify-between mb-2">
         <div className="flex items-center gap-2">
           <Package className="w-4 h-4 text-blue-400" />
-          <p className="text-xs text-gray-400">Pending Deliveries</p>
+          <p className="text-xs text-gray-500">Pending Deliveries</p>
         </div>
       </div>
       {loading ? (
-        <div className="h-8 bg-gray-700 animate-pulse rounded w-16" />
+        <div className="h-8 bg-gray-100 animate-pulse rounded w-16" />
       ) : (
-        <p className="text-2xl font-bold text-white">{count}</p>
+        <p className="text-2xl font-bold text-gray-900">{count}</p>
       )}
     </div>
   );
@@ -77,17 +77,17 @@ export function RemindersWidget() {
   }, []);
 
   return (
-    <div className="bg-gray-800 rounded-lg p-4 border border-gray-700 shadow-sm">
+    <div className="bg-white rounded-lg p-4 border border-gray-200 shadow-sm">
       <div className="flex items-center justify-between mb-2">
         <div className="flex items-center gap-2">
           <Clock className="w-4 h-4 text-orange-400" />
-          <p className="text-xs text-gray-400">Due Today</p>
+          <p className="text-xs text-gray-500">Due Today</p>
         </div>
       </div>
       {loading ? (
-        <div className="h-8 bg-gray-700 animate-pulse rounded w-16" />
+        <div className="h-8 bg-gray-100 animate-pulse rounded w-16" />
       ) : (
-        <p className="text-2xl font-bold text-white">{count}</p>
+        <p className="text-2xl font-bold text-gray-900">{count}</p>
       )}
     </div>
   );
@@ -120,25 +120,25 @@ export function StockCountStatusWidget() {
   }, []);
 
   return (
-    <div className="bg-gray-800 rounded-lg p-4 border border-gray-700 shadow-sm">
-      <p className="text-xs text-gray-400 mb-3">Daily Stock Count</p>
+    <div className="bg-white rounded-lg p-4 border border-gray-200 shadow-sm">
+      <p className="text-xs text-gray-500 mb-3">Daily Stock Count</p>
       {loading ? (
         <div className="space-y-2">
-          <div className="h-6 bg-gray-700 animate-pulse rounded w-24" />
-          <div className="h-2 bg-gray-700 animate-pulse rounded" />
+          <div className="h-6 bg-gray-100 animate-pulse rounded w-24" />
+          <div className="h-2 bg-gray-100 animate-pulse rounded" />
         </div>
       ) : (
         <>
-          <p className="text-lg font-bold text-white mb-2">
+          <p className="text-lg font-bold text-gray-900 mb-2">
             {status.counted}/{status.total}
           </p>
-          <div className="w-full bg-gray-700 rounded-full h-2">
+          <div className="w-full bg-gray-100 rounded-full h-2">
             <div
               className="bg-bv-gold-500 h-2 rounded-full transition-all"
               style={{ width: `${status.percent}%` }}
             />
           </div>
-          <p className="text-xs text-gray-400 mt-1">{status.percent}% Complete</p>
+          <p className="text-xs text-gray-500 mt-1">{status.percent}% Complete</p>
         </>
       )}
     </div>
@@ -168,13 +168,13 @@ export function TaskCompletionWidget() {
   }, []);
 
   return (
-    <div className="bg-gray-800 rounded-lg p-4 border border-gray-700 shadow-sm">
-      <p className="text-xs text-gray-400 mb-3">Task Completion</p>
+    <div className="bg-white rounded-lg p-4 border border-gray-200 shadow-sm">
+      <p className="text-xs text-gray-500 mb-3">Task Completion</p>
       {loading ? (
-        <div className="h-8 bg-gray-700 animate-pulse rounded w-16" />
+        <div className="h-8 bg-gray-100 animate-pulse rounded w-16" />
       ) : (
         <>
-          <p className="text-2xl font-bold text-white">{percent}%</p>
+          <p className="text-2xl font-bold text-gray-900">{percent}%</p>
         </>
       )}
     </div>
@@ -204,17 +204,17 @@ export function EyeTestCountWidget() {
   }, []);
 
   return (
-    <div className="bg-gray-800 rounded-lg p-4 border border-gray-700 shadow-sm">
+    <div className="bg-white rounded-lg p-4 border border-gray-200 shadow-sm">
       <div className="flex items-center justify-between mb-2">
         <div className="flex items-center gap-2">
           <Eye className="w-4 h-4 text-purple-400" />
-          <p className="text-xs text-gray-400">Eye Tests Today</p>
+          <p className="text-xs text-gray-500">Eye Tests Today</p>
         </div>
       </div>
       {loading ? (
-        <div className="h-8 bg-gray-700 animate-pulse rounded w-16" />
+        <div className="h-8 bg-gray-100 animate-pulse rounded w-16" />
       ) : (
-        <p className="text-2xl font-bold text-white">{count}</p>
+        <p className="text-2xl font-bold text-gray-900">{count}</p>
       )}
     </div>
   );
@@ -255,22 +255,22 @@ export function StoreVsTargetWidget() {
   };
 
   return (
-    <div className="bg-gray-800 rounded-lg p-4 border border-gray-700 shadow-sm">
-      <p className="text-xs text-gray-400 mb-3">Store vs Target</p>
+    <div className="bg-white rounded-lg p-4 border border-gray-200 shadow-sm">
+      <p className="text-xs text-gray-500 mb-3">Store vs Target</p>
       {loading ? (
         <div className="space-y-2">
-          <div className="h-6 bg-gray-700 animate-pulse rounded w-32" />
-          <div className="h-2 bg-gray-700 animate-pulse rounded" />
+          <div className="h-6 bg-gray-100 animate-pulse rounded w-32" />
+          <div className="h-2 bg-gray-100 animate-pulse rounded" />
         </div>
       ) : (
         <>
           <div className="mb-3">
-            <p className="text-sm font-semibold text-white">
+            <p className="text-sm font-semibold text-gray-900">
               {formatCurrency(data.actual)}
             </p>
-            <p className="text-xs text-gray-400">Target: {formatCurrency(data.target)}</p>
+            <p className="text-xs text-gray-500">Target: {formatCurrency(data.target)}</p>
           </div>
-          <div className="w-full bg-gray-700 rounded-full h-2">
+          <div className="w-full bg-gray-100 rounded-full h-2">
             <div
               className={clsx(
                 'h-2 rounded-full transition-all',
@@ -279,7 +279,7 @@ export function StoreVsTargetWidget() {
               style={{ width: `${Math.min(data.percent, 100)}%` }}
             />
           </div>
-          <p className="text-xs text-gray-400 mt-1">{data.percent}% of target</p>
+          <p className="text-xs text-gray-500 mt-1">{data.percent}% of target</p>
         </>
       )}
     </div>
@@ -309,12 +309,12 @@ export function StaffAttendanceWidget() {
   }, []);
 
   return (
-    <div className="bg-gray-800 rounded-lg p-4 border border-gray-700 shadow-sm">
-      <p className="text-xs text-gray-400 mb-3">Staff Attendance</p>
+    <div className="bg-white rounded-lg p-4 border border-gray-200 shadow-sm">
+      <p className="text-xs text-gray-500 mb-3">Staff Attendance</p>
       {loading ? (
         <div className="space-y-2">
           {[1, 2, 3].map((i) => (
-            <div key={i} className="h-3 bg-gray-700 animate-pulse rounded" />
+            <div key={i} className="h-3 bg-gray-100 animate-pulse rounded" />
           ))}
         </div>
       ) : (
@@ -322,10 +322,10 @@ export function StaffAttendanceWidget() {
           {data.map((store) => (
             <div key={store.store} className="text-xs">
               <div className="flex justify-between mb-1">
-                <span className="text-gray-300">{store.store}</span>
-                <span className="font-semibold text-white">{store.percent}%</span>
+                <span className="text-gray-600">{store.store}</span>
+                <span className="font-semibold text-gray-900">{store.percent}%</span>
               </div>
-              <div className="w-full bg-gray-700 rounded-full h-1.5">
+              <div className="w-full bg-gray-100 rounded-full h-1.5">
                 <div
                   className={clsx(
                     'h-1.5 rounded-full',
@@ -365,17 +365,17 @@ export function EscalationsWidget() {
   }, []);
 
   return (
-    <div className="bg-gray-800 rounded-lg p-4 border border-gray-700 shadow-sm">
+    <div className="bg-white rounded-lg p-4 border border-gray-200 shadow-sm">
       <div className="flex items-center justify-between mb-2">
         <div className="flex items-center gap-2">
           <AlertCircle className="w-4 h-4 text-red-400" />
-          <p className="text-xs text-gray-400">Escalations</p>
+          <p className="text-xs text-gray-500">Escalations</p>
         </div>
       </div>
       {loading ? (
-        <div className="h-8 bg-gray-700 animate-pulse rounded w-16" />
+        <div className="h-8 bg-gray-100 animate-pulse rounded w-16" />
       ) : (
-        <p className="text-2xl font-bold text-white">{count}</p>
+        <p className="text-2xl font-bold text-gray-900">{count}</p>
       )}
     </div>
   );
@@ -404,17 +404,17 @@ export function HQEscalationsWidget() {
   }, []);
 
   return (
-    <div className="bg-gray-800 rounded-lg p-4 border border-gray-700 shadow-sm">
+    <div className="bg-white rounded-lg p-4 border border-gray-200 shadow-sm">
       <div className="flex items-center justify-between mb-2">
         <div className="flex items-center gap-2">
           <AlertCircle className="w-4 h-4 text-red-500" />
-          <p className="text-xs text-gray-400">HQ Escalations</p>
+          <p className="text-xs text-gray-500">HQ Escalations</p>
         </div>
       </div>
       {loading ? (
-        <div className="h-8 bg-gray-700 animate-pulse rounded w-16" />
+        <div className="h-8 bg-gray-100 animate-pulse rounded w-16" />
       ) : (
-        <p className="text-2xl font-bold text-white">{count}</p>
+        <p className="text-2xl font-bold text-gray-900">{count}</p>
       )}
     </div>
   );
@@ -451,26 +451,26 @@ export function HRSummaryWidget() {
   }, []);
 
   return (
-    <div className="bg-gray-800 rounded-lg p-4 border border-gray-700 shadow-sm">
-      <p className="text-xs text-gray-400 mb-3">HR Summary</p>
+    <div className="bg-white rounded-lg p-4 border border-gray-200 shadow-sm">
+      <p className="text-xs text-gray-500 mb-3">HR Summary</p>
       {loading ? (
         <div className="space-y-2">
-          <div className="h-4 bg-gray-700 animate-pulse rounded w-24" />
-          <div className="h-4 bg-gray-700 animate-pulse rounded w-24" />
-          <div className="h-4 bg-gray-700 animate-pulse rounded w-24" />
+          <div className="h-4 bg-gray-100 animate-pulse rounded w-24" />
+          <div className="h-4 bg-gray-100 animate-pulse rounded w-24" />
+          <div className="h-4 bg-gray-100 animate-pulse rounded w-24" />
         </div>
       ) : (
         <div className="space-y-1 text-sm">
           <div className="flex justify-between">
-            <span className="text-gray-300">Present:</span>
+            <span className="text-gray-600">Present:</span>
             <span className="font-semibold text-green-400">{data.present}</span>
           </div>
           <div className="flex justify-between">
-            <span className="text-gray-300">On Leave:</span>
+            <span className="text-gray-600">On Leave:</span>
             <span className="font-semibold text-orange-400">{data.leave}</span>
           </div>
           <div className="flex justify-between">
-            <span className="text-gray-300">Pending Leaves:</span>
+            <span className="text-gray-600">Pending Leaves:</span>
             <span className="font-semibold text-blue-400">{data.pending}</span>
           </div>
         </div>
@@ -519,30 +519,30 @@ export function SystemHealthWidget() {
   };
 
   return (
-    <div className="bg-gray-800 rounded-lg p-4 border border-gray-700 shadow-sm">
-      <p className="text-xs text-gray-400 mb-3">System Health</p>
+    <div className="bg-white rounded-lg p-4 border border-gray-200 shadow-sm">
+      <p className="text-xs text-gray-500 mb-3">System Health</p>
       {loading ? (
         <div className="space-y-2">
-          <div className="h-4 bg-gray-700 animate-pulse rounded w-20" />
-          <div className="h-4 bg-gray-700 animate-pulse rounded w-20" />
-          <div className="h-4 bg-gray-700 animate-pulse rounded w-24" />
+          <div className="h-4 bg-gray-100 animate-pulse rounded w-20" />
+          <div className="h-4 bg-gray-100 animate-pulse rounded w-20" />
+          <div className="h-4 bg-gray-100 animate-pulse rounded w-24" />
         </div>
       ) : (
         <div className="space-y-1 text-sm">
           <div className="flex items-center justify-between">
-            <span className="text-gray-300">API:</span>
+            <span className="text-gray-600">API:</span>
             <span className={clsx('font-semibold', getStatusColor(health.api))}>
               {health.api}
             </span>
           </div>
           <div className="flex items-center justify-between">
-            <span className="text-gray-300">Database:</span>
+            <span className="text-gray-600">Database:</span>
             <span className={clsx('font-semibold', getStatusColor(health.db))}>
               {health.db}
             </span>
           </div>
           <div className="flex items-center justify-between">
-            <span className="text-gray-300">Last Backup:</span>
+            <span className="text-gray-600">Last Backup:</span>
             <span className="font-semibold text-blue-400">{health.lastBackup}</span>
           </div>
         </div>
@@ -592,30 +592,30 @@ export function FinancialSummaryWidget() {
   };
 
   return (
-    <div className="bg-gray-800 rounded-lg p-4 border border-gray-700 shadow-sm">
-      <p className="text-xs text-gray-400 mb-3">Financial Summary (This Month)</p>
+    <div className="bg-white rounded-lg p-4 border border-gray-200 shadow-sm">
+      <p className="text-xs text-gray-500 mb-3">Financial Summary (This Month)</p>
       {loading ? (
         <div className="space-y-2">
           {[1, 2, 3, 4].map((i) => (
-            <div key={i} className="h-4 bg-gray-700 animate-pulse rounded w-24" />
+            <div key={i} className="h-4 bg-gray-100 animate-pulse rounded w-24" />
           ))}
         </div>
       ) : (
         <div className="space-y-2 text-xs">
           <div className="flex justify-between">
-            <span className="text-gray-300">Revenue:</span>
+            <span className="text-gray-600">Revenue:</span>
             <span className="font-semibold text-green-400">{formatCurrency(data.revenue)}</span>
           </div>
           <div className="flex justify-between">
-            <span className="text-gray-300">Expenses:</span>
+            <span className="text-gray-600">Expenses:</span>
             <span className="font-semibold text-red-400">{formatCurrency(data.expenses)}</span>
           </div>
           <div className="flex justify-between">
-            <span className="text-gray-300">GST Collected:</span>
+            <span className="text-gray-600">GST Collected:</span>
             <span className="font-semibold text-blue-400">{formatCurrency(data.gstCollected)}</span>
           </div>
           <div className="flex justify-between">
-            <span className="text-gray-300">GST Paid:</span>
+            <span className="text-gray-600">GST Paid:</span>
             <span className="font-semibold text-orange-400">{formatCurrency(data.gstPaid)}</span>
           </div>
         </div>
@@ -647,13 +647,13 @@ export function GSTFilingStatusWidget() {
   }, []);
 
   return (
-    <div className="bg-gray-800 rounded-lg p-4 border border-gray-700 shadow-sm">
-      <p className="text-xs text-gray-400 mb-3">GST Filing</p>
+    <div className="bg-white rounded-lg p-4 border border-gray-200 shadow-sm">
+      <p className="text-xs text-gray-500 mb-3">GST Filing</p>
       {loading ? (
-        <div className="h-8 bg-gray-700 animate-pulse rounded w-24" />
+        <div className="h-8 bg-gray-100 animate-pulse rounded w-24" />
       ) : (
         <>
-          <p className="text-lg font-bold text-white">
+          <p className="text-lg font-bold text-gray-900">
             Due in {daysUntilDue} days
           </p>
         </>
@@ -685,17 +685,17 @@ export function PendingReconciliationsWidget() {
   }, []);
 
   return (
-    <div className="bg-gray-800 rounded-lg p-4 border border-gray-700 shadow-sm">
+    <div className="bg-white rounded-lg p-4 border border-gray-200 shadow-sm">
       <div className="flex items-center justify-between mb-2">
         <div className="flex items-center gap-2">
           <FileText className="w-4 h-4 text-yellow-400" />
-          <p className="text-xs text-gray-400">Reconciliations</p>
+          <p className="text-xs text-gray-500">Reconciliations</p>
         </div>
       </div>
       {loading ? (
-        <div className="h-8 bg-gray-700 animate-pulse rounded w-16" />
+        <div className="h-8 bg-gray-100 animate-pulse rounded w-16" />
       ) : (
-        <p className="text-2xl font-bold text-white">{count}</p>
+        <p className="text-2xl font-bold text-gray-900">{count}</p>
       )}
     </div>
   );
@@ -727,17 +727,17 @@ export function PatientQueueWidget() {
   }, []);
 
   return (
-    <div className="bg-gray-800 rounded-lg p-4 border border-gray-700 shadow-sm">
-      <p className="text-xs text-gray-400 mb-3">Patient Queue</p>
+    <div className="bg-white rounded-lg p-4 border border-gray-200 shadow-sm">
+      <p className="text-xs text-gray-500 mb-3">Patient Queue</p>
       {loading ? (
         <div className="space-y-2">
-          <div className="h-6 bg-gray-700 animate-pulse rounded w-20" />
-          <div className="h-4 bg-gray-700 animate-pulse rounded w-24" />
+          <div className="h-6 bg-gray-100 animate-pulse rounded w-20" />
+          <div className="h-4 bg-gray-100 animate-pulse rounded w-24" />
         </div>
       ) : (
         <>
-          <p className="text-2xl font-bold text-white mb-2">{queue.waiting}</p>
-          <p className="text-xs text-gray-400">
+          <p className="text-2xl font-bold text-gray-900 mb-2">{queue.waiting}</p>
+          <p className="text-xs text-gray-500">
             Est. wait: {queue.estimatedWait} min
           </p>
         </>
@@ -769,13 +769,13 @@ export function PrescriptionRedoRateWidget() {
   }, []);
 
   return (
-    <div className="bg-gray-800 rounded-lg p-4 border border-gray-700 shadow-sm">
-      <p className="text-xs text-gray-400 mb-3">Prescription Redo Rate</p>
+    <div className="bg-white rounded-lg p-4 border border-gray-200 shadow-sm">
+      <p className="text-xs text-gray-500 mb-3">Prescription Redo Rate</p>
       {loading ? (
-        <div className="h-8 bg-gray-700 animate-pulse rounded w-16" />
+        <div className="h-8 bg-gray-100 animate-pulse rounded w-16" />
       ) : (
         <>
-          <p className="text-2xl font-bold text-white">{percent}%</p>
+          <p className="text-2xl font-bold text-gray-900">{percent}%</p>
         </>
       )}
     </div>
@@ -813,26 +813,26 @@ export function CatalogSKUCountWidget() {
   }, []);
 
   return (
-    <div className="bg-gray-800 rounded-lg p-4 border border-gray-700 shadow-sm">
-      <p className="text-xs text-gray-400 mb-3">SKU Inventory</p>
+    <div className="bg-white rounded-lg p-4 border border-gray-200 shadow-sm">
+      <p className="text-xs text-gray-500 mb-3">SKU Inventory</p>
       {loading ? (
         <div className="space-y-2">
           {[1, 2, 3].map((i) => (
-            <div key={i} className="h-4 bg-gray-700 animate-pulse rounded w-20" />
+            <div key={i} className="h-4 bg-gray-100 animate-pulse rounded w-20" />
           ))}
         </div>
       ) : (
         <div className="space-y-1 text-sm">
           <div className="flex justify-between">
-            <span className="text-gray-300">Total:</span>
-            <span className="font-semibold text-white">{data.total}</span>
+            <span className="text-gray-600">Total:</span>
+            <span className="font-semibold text-gray-900">{data.total}</span>
           </div>
           <div className="flex justify-between">
-            <span className="text-gray-300">Active:</span>
+            <span className="text-gray-600">Active:</span>
             <span className="font-semibold text-green-400">{data.active}</span>
           </div>
           <div className="flex justify-between">
-            <span className="text-gray-300">Pending:</span>
+            <span className="text-gray-600">Pending:</span>
             <span className="font-semibold text-orange-400">{data.pending}</span>
           </div>
         </div>
@@ -864,17 +864,17 @@ export function PriceChangeRequestsWidget() {
   }, []);
 
   return (
-    <div className="bg-gray-800 rounded-lg p-4 border border-gray-700 shadow-sm">
+    <div className="bg-white rounded-lg p-4 border border-gray-200 shadow-sm">
       <div className="flex items-center justify-between mb-2">
         <div className="flex items-center gap-2">
           <DollarSign className="w-4 h-4 text-green-400" />
-          <p className="text-xs text-gray-400">Price Changes</p>
+          <p className="text-xs text-gray-500">Price Changes</p>
         </div>
       </div>
       {loading ? (
-        <div className="h-8 bg-gray-700 animate-pulse rounded w-16" />
+        <div className="h-8 bg-gray-100 animate-pulse rounded w-16" />
       ) : (
-        <p className="text-2xl font-bold text-white">{count}</p>
+        <p className="text-2xl font-bold text-gray-900">{count}</p>
       )}
     </div>
   );
@@ -903,19 +903,19 @@ export function RecentActivityWidget() {
   }, []);
 
   return (
-    <div className="bg-gray-800 rounded-lg p-4 border border-gray-700 shadow-sm">
-      <p className="text-xs text-gray-400 mb-3">Recent Activity</p>
+    <div className="bg-white rounded-lg p-4 border border-gray-200 shadow-sm">
+      <p className="text-xs text-gray-500 mb-3">Recent Activity</p>
       {loading ? (
         <div className="space-y-2">
           {[1, 2, 3].map((i) => (
-            <div key={i} className="h-3 bg-gray-700 animate-pulse rounded" />
+            <div key={i} className="h-3 bg-gray-100 animate-pulse rounded" />
           ))}
         </div>
       ) : (
         <div className="space-y-2 max-h-32 overflow-y-auto text-xs">
           {activities.map((activity, idx) => (
-            <div key={idx} className="pb-2 border-b border-gray-700 last:border-b-0">
-              <p className="text-gray-300">{activity.action}</p>
+            <div key={idx} className="pb-2 border-b border-gray-200 last:border-b-0">
+              <p className="text-gray-600">{activity.action}</p>
               <p className="text-gray-500 text-[10px]">{activity.product}</p>
               <p className="text-gray-600 text-[10px]">{activity.time}</p>
             </div>

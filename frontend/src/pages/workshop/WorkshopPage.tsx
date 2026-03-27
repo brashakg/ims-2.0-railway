@@ -230,8 +230,8 @@ const loadJobs = async () => {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-white">Workshop</h1>
-          <p className="text-gray-400">Manage lens fitting and job orders</p>
+          <h1 className="text-2xl font-bold text-gray-900">Workshop</h1>
+          <p className="text-gray-500">Manage lens fitting and job orders</p>
         </div>
         <div className="flex items-center gap-2">
           <button onClick={() => setShowCreateJob(true)}
@@ -274,8 +274,8 @@ const loadJobs = async () => {
               <Wrench className="w-5 h-5 text-blue-400" />
             </div>
             <div>
-              <p className="text-sm text-gray-400">Active Jobs</p>
-              <p className="text-2xl font-bold text-white">{activeJobs.length}</p>
+              <p className="text-sm text-gray-500">Active Jobs</p>
+              <p className="text-2xl font-bold text-gray-900">{activeJobs.length}</p>
             </div>
           </div>
         </div>
@@ -285,7 +285,7 @@ const loadJobs = async () => {
               <Zap className="w-5 h-5 text-red-400" />
             </div>
             <div>
-              <p className="text-sm text-gray-400">Urgent</p>
+              <p className="text-sm text-gray-500">Urgent</p>
               <p className="text-2xl font-bold text-red-400">{urgentJobs.length}</p>
             </div>
           </div>
@@ -296,7 +296,7 @@ const loadJobs = async () => {
               <CheckCircle className="w-5 h-5 text-green-400" />
             </div>
             <div>
-              <p className="text-sm text-gray-400">Ready for Pickup</p>
+              <p className="text-sm text-gray-500">Ready for Pickup</p>
               <p className="text-2xl font-bold text-green-400">{readyJobs.length}</p>
             </div>
           </div>
@@ -307,7 +307,7 @@ const loadJobs = async () => {
               <AlertTriangle className="w-5 h-5 text-orange-400" />
             </div>
             <div>
-              <p className="text-sm text-gray-400">Overdue</p>
+              <p className="text-sm text-gray-500">Overdue</p>
               <p className="text-2xl font-bold text-orange-400">{overdueJobs.length}</p>
             </div>
           </div>
@@ -384,7 +384,7 @@ const loadJobs = async () => {
                   {/* Job Info */}
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-3 mb-2">
-                      <span className="font-bold text-white">{job.jobNumber}</span>
+                      <span className="font-bold text-gray-900">{job.jobNumber}</span>
                       <span className={clsx('px-2 py-0.5 rounded-full text-xs font-medium', statusConfig.class)}>
                         {statusConfig.label}
                       </span>
@@ -453,7 +453,7 @@ const loadJobs = async () => {
                 </div>
 
                 {/* Progress Bar */}
-                <div className="mt-4 pt-4 border-t border-gray-700">
+                <div className="mt-4 pt-4 border-t border-gray-200">
                   <div className="flex items-center justify-between text-xs mb-2">
                     <span className="text-gray-400">Progress</span>
                     <span className="text-gray-400">{statusConfig.label}</span>
@@ -477,15 +477,15 @@ const loadJobs = async () => {
       {/* Job Detail Modal */}
       {selectedJob && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-gray-800 rounded-xl shadow-xl max-w-lg w-full max-h-[90vh] overflow-y-auto">
+          <div className="bg-white rounded-xl shadow-xl max-w-lg w-full max-h-[90vh] overflow-y-auto">
             <div className="p-6">
               <div className="flex items-center justify-between mb-6">
-                <h2 className="text-xl font-bold text-white">
+                <h2 className="text-xl font-bold text-gray-900">
                   Job {selectedJob.jobNumber}
                 </h2>
                 <button
                   onClick={() => setSelectedJob(null)}
-                  className="p-2 hover:bg-gray-700 rounded-lg text-gray-400"
+                  className="p-2 hover:bg-gray-100 rounded-lg text-gray-400"
                 >
                   ×
                 </button>
@@ -506,9 +506,9 @@ const loadJobs = async () => {
                 </div>
 
                 {/* Customer */}
-                <div className="bg-gray-900 rounded-lg p-4 space-y-2">
-                  <h3 className="text-sm font-medium text-gray-400">Customer</h3>
-                  <p className="font-medium text-white flex items-center gap-2">
+                <div className="bg-gray-50 border border-gray-200 rounded-lg p-4 space-y-2">
+                  <h3 className="text-sm font-medium text-gray-500">Customer</h3>
+                  <p className="font-medium text-gray-900 flex items-center gap-2">
                     <User className="w-4 h-4" /> {selectedJob.customerName}
                   </p>
                   <p className="text-sm text-gray-400 flex items-center gap-2">
@@ -539,7 +539,7 @@ const loadJobs = async () => {
                 </div>
 
                 {/* Dates */}
-                <div className="grid grid-cols-2 gap-4 bg-gray-900 rounded-lg p-4">
+                <div className="grid grid-cols-2 gap-4 bg-gray-50 border border-gray-200 rounded-lg p-4">
                   <div>
                     <p className="text-sm text-gray-400">Created</p>
                     <p className="font-medium">{formatDate(selectedJob.createdAt)}</p>
@@ -658,10 +658,10 @@ const loadJobs = async () => {
       {/* CREATE JOB MODAL */}
       {showCreateJob && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-gray-800 rounded-xl shadow-2xl w-full max-w-lg max-h-[85vh] overflow-y-auto">
-            <div className="p-5 border-b border-gray-700 flex items-center justify-between">
-              <h3 className="font-semibold text-white">Create Workshop Job from Order</h3>
-              <button onClick={() => { setShowCreateJob(false); setCreateSelectedOrder(null); setCreateOrders([]); }} className="p-1 hover:bg-gray-700 rounded text-gray-400 hover:text-gray-200">
+          <div className="bg-white rounded-xl shadow-2xl w-full max-w-lg max-h-[85vh] overflow-y-auto">
+            <div className="p-5 border-b border-gray-200 flex items-center justify-between">
+              <h3 className="font-semibold text-gray-900">Create Workshop Job from Order</h3>
+              <button onClick={() => { setShowCreateJob(false); setCreateSelectedOrder(null); setCreateOrders([]); }} className="p-1 hover:bg-gray-100 rounded text-gray-400 hover:text-gray-700">
                 ×
               </button>
             </div>
@@ -674,7 +674,7 @@ const loadJobs = async () => {
                       <input value={createOrderSearch} onChange={e => setCreateOrderSearch(e.target.value)}
                         onKeyDown={e => e.key === 'Enter' && searchOrdersForJob()}
                         placeholder="Search order number or customer..."
-                        className="w-full pl-9 pr-4 py-2.5 border border-gray-600 bg-gray-700 text-white rounded-lg text-sm placeholder-gray-400" />
+                        className="w-full pl-9 pr-4 py-2.5 border border-gray-300 bg-white text-gray-900 rounded-lg text-sm placeholder-gray-500" />
                     </div>
                     <button onClick={searchOrdersForJob} className="px-4 py-2 bg-bv-gold-500 text-white rounded-lg text-sm font-semibold hover:bg-bv-gold-600">Search</button>
                   </div>
@@ -682,7 +682,7 @@ const loadJobs = async () => {
                     <div className="space-y-1.5 max-h-60 overflow-y-auto">
                       {createOrders.map((o: any) => (
                         <button key={o.id} onClick={() => setCreateSelectedOrder(o)}
-                          className="w-full flex items-center justify-between p-3 rounded-lg border border-gray-600 hover:border-bv-gold-400 hover:bg-gray-700 text-left text-white transition-colors">
+                          className="w-full flex items-center justify-between p-3 rounded-lg border border-gray-300 hover:border-bv-gold-400 hover:bg-gray-100 text-left text-gray-900 transition-colors">
                           <div>
                             <p className="text-sm font-medium">{o.orderNumber}</p>
                             <p className="text-xs text-gray-400">{o.customerName} · {(o.items || []).length} items</p>
@@ -695,7 +695,7 @@ const loadJobs = async () => {
                 </>
               ) : (
                 <>
-                  <div className="bg-gray-900 rounded-lg p-3">
+                  <div className="bg-gray-50 border border-gray-200 rounded-lg p-3">
                     <div className="flex items-center justify-between">
                       <div>
                         <p className="font-medium text-sm">{createSelectedOrder.orderNumber}</p>
@@ -706,7 +706,7 @@ const loadJobs = async () => {
                     <div className="mt-2 space-y-1">
                       {(createSelectedOrder.items || []).map((item: any, i: number) => (
                         <div key={i} className="flex items-center justify-between text-xs">
-                          <span className="text-white">{item.productName || item.product_name || item.name}</span>
+                          <span className="text-gray-900">{item.productName || item.product_name || item.name}</span>
                           <span className="text-gray-400 text-xs">{item.category}</span>
                         </div>
                       ))}
@@ -723,7 +723,7 @@ const loadJobs = async () => {
                               ? p === 'URGENT' ? 'border-red-500 bg-red-900 text-red-300'
                                 : p === 'EXPRESS' ? 'border-amber-500 bg-amber-900 text-amber-300'
                                   : 'border-bv-gold-500 bg-bv-gold-900 text-bv-gold-300'
-                              : 'border-gray-600 text-gray-300 bg-gray-700')}>
+                              : 'border-gray-300 text-gray-600 bg-white')}>
                           {p}
                         </button>
                       ))}
@@ -734,29 +734,29 @@ const loadJobs = async () => {
                     <label className="text-xs text-gray-400 block mb-1">Expected Delivery Date</label>
                     <input type="date" value={createExpectedDate} onChange={e => setCreateExpectedDate(e.target.value)}
                       min={new Date().toISOString().split('T')[0]}
-                      className="w-full px-3 py-2 border border-gray-600 bg-gray-700 text-white rounded-lg text-sm" />
+                      className="w-full px-3 py-2 border border-gray-300 bg-white text-gray-900 rounded-lg text-sm" />
                   </div>
 
                   <div>
                     <label className="text-xs text-gray-400 block mb-1">Fitting Instructions</label>
                     <textarea value={createFitting} onChange={e => setCreateFitting(e.target.value)}
                       placeholder="PD, segment height, tilt, wrap angle, frame adjustments..."
-                      className="w-full px-3 py-2 border border-gray-600 bg-gray-700 text-white rounded-lg text-sm h-16 resize-none placeholder-gray-500" />
+                      className="w-full px-3 py-2 border border-gray-300 bg-white text-gray-900 rounded-lg text-sm h-16 resize-none placeholder-gray-500" />
                   </div>
 
                   <div>
                     <label className="text-xs text-gray-400 block mb-1">Special Notes for Workshop</label>
                     <textarea value={createNotes} onChange={e => setCreateNotes(e.target.value)}
                       placeholder="Tint, drill mount, special coating, customer preferences..."
-                      className="w-full px-3 py-2 border border-gray-600 bg-gray-700 text-white rounded-lg text-sm h-16 resize-none placeholder-gray-500" />
+                      className="w-full px-3 py-2 border border-gray-300 bg-white text-gray-900 rounded-lg text-sm h-16 resize-none placeholder-gray-500" />
                   </div>
                 </>
               )}
             </div>
             {createSelectedOrder && (
-              <div className="p-5 border-t border-gray-700 flex gap-2">
+              <div className="p-5 border-t border-gray-200 flex gap-2">
                 <button onClick={() => { setShowCreateJob(false); setCreateSelectedOrder(null); }}
-                  className="flex-1 px-4 py-2.5 border border-gray-600 text-gray-300 rounded-lg text-sm hover:bg-gray-700">Cancel</button>
+                  className="flex-1 px-4 py-2.5 border border-gray-300 text-gray-600 rounded-lg text-sm hover:bg-gray-100">Cancel</button>
                 <button onClick={handleCreateJob} disabled={createLoading}
                   className="flex-1 px-4 py-2.5 bg-bv-gold-500 text-white rounded-lg text-sm font-semibold hover:bg-bv-gold-600 disabled:opacity-50">
                   {createLoading ? 'Creating...' : 'Create Job'}

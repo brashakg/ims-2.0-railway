@@ -162,8 +162,8 @@ export function HRPage() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-white">HR Management</h1>
-          <p className="text-gray-400">Attendance tracking and leave management</p>
+          <h1 className="text-2xl font-bold text-gray-900">HR Management</h1>
+          <p className="text-gray-500">Attendance tracking and leave management</p>
         </div>
         <div className="flex items-center gap-2">
           <button
@@ -271,7 +271,7 @@ export function HRPage() {
               <CheckCircle className="w-5 h-5 text-green-600" />
             </div>
             <div>
-              <p className="text-sm text-gray-400">Present Today</p>
+              <p className="text-sm text-gray-500">Present Today</p>
               <p className="text-2xl font-bold text-green-600">{presentCount}</p>
             </div>
           </div>
@@ -282,7 +282,7 @@ export function HRPage() {
               <XCircle className="w-5 h-5 text-red-600" />
             </div>
             <div>
-              <p className="text-sm text-gray-400">Absent</p>
+              <p className="text-sm text-gray-500">Absent</p>
               <p className="text-2xl font-bold text-red-600">{absentCount}</p>
             </div>
           </div>
@@ -293,7 +293,7 @@ export function HRPage() {
               <Calendar className="w-5 h-5 text-blue-600" />
             </div>
             <div>
-              <p className="text-sm text-gray-400">On Leave</p>
+              <p className="text-sm text-gray-500">On Leave</p>
               <p className="text-2xl font-bold text-blue-600">{onLeaveCount}</p>
             </div>
           </div>
@@ -304,7 +304,7 @@ export function HRPage() {
               <FileText className="w-5 h-5 text-yellow-600" />
             </div>
             <div>
-              <p className="text-sm text-gray-400">Pending Leaves</p>
+              <p className="text-sm text-gray-500">Pending Leaves</p>
               <p className="text-2xl font-bold text-yellow-600">{pendingLeaves}</p>
             </div>
           </div>
@@ -312,14 +312,14 @@ export function HRPage() {
       </div>
 
       {/* Tabs */}
-      <div className="flex border-b border-gray-700">
+      <div className="flex border-b border-gray-200">
         <button
           onClick={() => setActiveTab('attendance')}
           className={clsx(
             'flex items-center gap-2 px-4 py-3 text-sm font-medium border-b-2 transition-colors',
             activeTab === 'attendance'
               ? 'border-bv-red-600 text-bv-red-600'
-              : 'border-transparent text-gray-400 hover:text-gray-300'
+              : 'border-transparent text-gray-500 hover:text-gray-700'
           )}
         >
           <Clock className="w-4 h-4" />
@@ -331,7 +331,7 @@ export function HRPage() {
             'flex items-center gap-2 px-4 py-3 text-sm font-medium border-b-2 transition-colors',
             activeTab === 'leave'
               ? 'border-bv-red-600 text-bv-red-600'
-              : 'border-transparent text-gray-400 hover:text-gray-300'
+              : 'border-transparent text-gray-500 hover:text-gray-700'
           )}
         >
           <Calendar className="w-4 h-4" />
@@ -348,7 +348,7 @@ export function HRPage() {
             'flex items-center gap-2 px-4 py-3 text-sm font-medium border-b-2 transition-colors',
             activeTab === 'monthly_grid'
               ? 'border-bv-red-600 text-bv-red-600'
-              : 'border-transparent text-gray-400 hover:text-gray-300'
+              : 'border-transparent text-gray-500 hover:text-gray-700'
           )}
         >
           <Calendar className="w-4 h-4" />
@@ -360,7 +360,7 @@ export function HRPage() {
             'flex items-center gap-2 px-4 py-3 text-sm font-medium border-b-2 transition-colors',
             activeTab === 'self_service'
               ? 'border-bv-red-600 text-bv-red-600'
-              : 'border-transparent text-gray-400 hover:text-gray-300'
+              : 'border-transparent text-gray-500 hover:text-gray-700'
           )}
         >
           <User className="w-4 h-4" />
@@ -376,37 +376,37 @@ export function HRPage() {
               <Loader2 className="w-8 h-8 animate-spin text-bv-red-600" />
             </div>
           ) : attendance.length === 0 ? (
-            <div className="text-center py-12 text-gray-400">
+            <div className="text-center py-12 text-gray-500">
               <Clock className="w-12 h-12 mx-auto mb-2 opacity-50" />
               <p>No attendance records for today</p>
             </div>
           ) : (
             <div className="overflow-x-auto">
               <table className="w-full">
-                <thead className="bg-gray-900 border-b border-gray-700">
+                <thead className="bg-gray-50 border-b border-gray-200">
                   <tr>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">Employee</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">Role</th>
-                    <th className="px-4 py-3 text-center text-xs font-medium text-gray-400 uppercase">Check In</th>
-                    <th className="px-4 py-3 text-center text-xs font-medium text-gray-400 uppercase">Check Out</th>
-                    <th className="px-4 py-3 text-center text-xs font-medium text-gray-400 uppercase">Status</th>
-                    <th className="px-4 py-3 text-center text-xs font-medium text-gray-400 uppercase">Geo</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Employee</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Role</th>
+                    <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Check In</th>
+                    <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Check Out</th>
+                    <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Status</th>
+                    <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Geo</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-200">
                   {attendance.map(record => {
-                    const statusConfig = ATTENDANCE_STATUS_CONFIG[record.status] || { label: record.status, class: 'bg-gray-700 text-gray-400' };
+                    const statusConfig = ATTENDANCE_STATUS_CONFIG[record.status] || { label: record.status, class: 'bg-gray-100 text-gray-500' };
                     return (
-                      <tr key={record.id} className="hover:bg-gray-900">
+                      <tr key={record.id} className="hover:bg-gray-50">
                         <td className="px-4 py-3">
                           <div className="flex items-center gap-3">
-                            <div className="w-8 h-8 bg-gray-700 rounded-full flex items-center justify-center">
-                              <User className="w-4 h-4 text-gray-400" />
+                            <div className="w-8 h-8 bg-gray-100 rounded-full flex items-center justify-center">
+                              <User className="w-4 h-4 text-gray-500" />
                             </div>
-                            <span className="font-medium text-white">{record.userName}</span>
+                            <span className="font-medium text-gray-900">{record.userName}</span>
                           </div>
                         </td>
-                        <td className="px-4 py-3 text-sm text-gray-400">{record.role}</td>
+                        <td className="px-4 py-3 text-sm text-gray-500">{record.role}</td>
                         <td className="px-4 py-3 text-center">
                           {record.checkInTime ? (
                             <div>
@@ -418,25 +418,25 @@ export function HRPage() {
                               )}
                             </div>
                           ) : (
-                            <span className="text-gray-400">-</span>
+                            <span className="text-gray-500">-</span>
                           )}
                         </td>
                         <td className="px-4 py-3 text-center">
-                          {record.checkOutTime || <span className="text-gray-400">-</span>}
+                          {record.checkOutTime || <span className="text-gray-500">-</span>}
                         </td>
                         <td className="px-4 py-3 text-center">
                           <span className={clsx('px-2 py-1 rounded-full text-xs font-medium', statusConfig.class)}>
                             {statusConfig.label}
                           </span>
                           {record.leaveType && (
-                            <span className="block text-xs text-gray-400 mt-1">{record.leaveType}</span>
+                            <span className="block text-xs text-gray-500 mt-1">{record.leaveType}</span>
                           )}
                         </td>
                         <td className="px-4 py-3 text-center">
                           {record.geoVerified ? (
                             <MapPin className="w-4 h-4 text-green-500 mx-auto" />
                           ) : record.status === 'LEAVE' ? (
-                            <span className="text-gray-400">-</span>
+                            <span className="text-gray-500">-</span>
                           ) : (
                             <AlertTriangle className="w-4 h-4 text-yellow-500 mx-auto" />
                           )}
@@ -459,35 +459,35 @@ export function HRPage() {
               <Loader2 className="w-8 h-8 animate-spin text-bv-red-600" />
             </div>
           ) : leaveRequests.length === 0 ? (
-            <div className="card text-center py-12 text-gray-400">
+            <div className="card text-center py-12 text-gray-500">
               <Calendar className="w-12 h-12 mx-auto mb-2 opacity-50" />
               <p>No leave requests</p>
             </div>
           ) : (
             leaveRequests.map(leave => {
-              const statusConfig = LEAVE_STATUS_CONFIG[leave.status] || { label: leave.status, class: 'bg-gray-700 text-gray-400' };
+              const statusConfig = LEAVE_STATUS_CONFIG[leave.status] || { label: leave.status, class: 'bg-gray-100 text-gray-500' };
               const isActionLoading = actionLoading === leave.id;
               return (
                 <div key={leave.id} className="card">
                   <div className="flex items-start justify-between gap-4">
                     <div className="flex items-start gap-4">
-                      <div className="w-10 h-10 bg-gray-700 rounded-full flex items-center justify-center">
-                        <User className="w-5 h-5 text-gray-400" />
+                      <div className="w-10 h-10 bg-gray-100 rounded-full flex items-center justify-center">
+                        <User className="w-5 h-5 text-gray-500" />
                       </div>
                       <div>
                         <div className="flex items-center gap-2 mb-1">
-                          <span className="font-medium text-white">{leave.userName}</span>
+                          <span className="font-medium text-gray-900">{leave.userName}</span>
                           <span className={statusConfig.class}>{statusConfig.label}</span>
                         </div>
-                        <p className="text-sm text-gray-400">{leave.role}</p>
+                        <p className="text-sm text-gray-500">{leave.role}</p>
                         <div className="mt-2 text-sm">
                           <p className="font-medium">{leave.leaveType}</p>
-                          <p className="text-gray-400">
+                          <p className="text-gray-500">
                             {formatDate(leave.startDate)}
                             {leave.startDate !== leave.endDate && ` - ${formatDate(leave.endDate)}`}
                             <span className="ml-2">({leave.days} day{leave.days > 1 ? 's' : ''})</span>
                           </p>
-                          <p className="text-gray-400 mt-1">Reason: {leave.reason}</p>
+                          <p className="text-gray-500 mt-1">Reason: {leave.reason}</p>
                         </div>
                       </div>
                     </div>
@@ -511,7 +511,7 @@ export function HRPage() {
                       </div>
                     )}
                     {leave.status === 'APPROVED' && leave.approvedBy && (
-                      <p className="text-xs text-gray-400">
+                      <p className="text-xs text-gray-500">
                         Approved by {leave.approvedBy}
                       </p>
                     )}

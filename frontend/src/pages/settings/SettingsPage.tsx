@@ -62,7 +62,7 @@ interface AuditLogEntry {
 
 const AUDIT_ACTION_STYLES: Record<AuditAction, { bg: string; text: string; label: string }> = {
   LOGIN:  { bg: 'bg-purple-100', text: 'text-purple-700', label: 'Login' },
-  LOGOUT: { bg: 'bg-gray-700',   text: 'text-gray-300',   label: 'Logout' },
+  LOGOUT: { bg: 'bg-gray-100',   text: 'text-gray-600',   label: 'Logout' },
   CREATE: { bg: 'bg-green-100',  text: 'text-green-700',  label: 'Create' },
   UPDATE: { bg: 'bg-blue-100',   text: 'text-blue-700',   label: 'Update' },
   DELETE: { bg: 'bg-red-100',    text: 'text-red-700',    label: 'Delete' },
@@ -266,8 +266,8 @@ export function SettingsPage() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-white">Settings</h1>
-          <p className="text-gray-400">System configuration and master data management</p>
+          <h1 className="text-2xl font-bold text-gray-900">Settings</h1>
+          <p className="text-gray-500">System configuration and master data management</p>
         </div>
         {user?.activeRole === 'SUPERADMIN' && (
           <span className="badge-warning">Superadmin Mode</span>
@@ -297,13 +297,13 @@ export function SettingsPage() {
                   'w-full flex items-center gap-3 px-3 py-3 rounded-lg text-left transition-colors',
                   activeTab === section.id
                     ? 'bg-bv-red-50 text-bv-red-600'
-                    : 'text-gray-400 hover:bg-gray-900'
+                    : 'text-gray-500 hover:bg-gray-100'
                 )}
               >
                 <section.icon className="w-5 h-5" />
                 <div className="flex-1 min-w-0">
                   <p className="font-medium text-sm">{section.label}</p>
-                  <p className="text-xs text-gray-400 truncate">{section.description}</p>
+                  <p className="text-xs text-gray-500 truncate">{section.description}</p>
                 </div>
               </button>
             ))}
@@ -399,22 +399,22 @@ function TaxInvoiceSection({
   return (
     <div className="space-y-4">
       <div className="card">
-        <h2 className="text-lg font-semibold text-white mb-4">Tax Settings</h2>
+        <h2 className="text-lg font-semibold text-gray-900 mb-4">Tax Settings</h2>
         <div className="space-y-4">
-          <div className="flex items-center justify-between p-3 bg-gray-900 rounded-lg">
+          <div className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
             <div>
-              <p className="font-medium text-white">GST Enabled</p>
-              <p className="text-sm text-gray-400">Apply GST to all transactions</p>
+              <p className="font-medium text-gray-900">GST Enabled</p>
+              <p className="text-sm text-gray-500">Apply GST to all transactions</p>
             </div>
             {taxSettings?.gst_enabled ? (
               <ToggleRight className="w-8 h-8 text-green-600 cursor-pointer" onClick={() => setTaxSettings((prev: any) => prev ? { ...prev, gst_enabled: false } : null)} />
             ) : (
-              <ToggleLeft className="w-8 h-8 text-gray-400 cursor-pointer" onClick={() => setTaxSettings((prev: any) => prev ? { ...prev, gst_enabled: true } : null)} />
+              <ToggleLeft className="w-8 h-8 text-gray-500 cursor-pointer" onClick={() => setTaxSettings((prev: any) => prev ? { ...prev, gst_enabled: true } : null)} />
             )}
           </div>
           <div className="grid grid-cols-2 gap-4">
             <div>
-              <label className="block text-sm font-medium text-gray-300 mb-1">Company GSTIN</label>
+              <label className="block text-sm font-medium text-gray-600 mb-1">Company GSTIN</label>
               <input
                 type="text"
                 value={taxSettings?.company_gstin || ''}
@@ -424,7 +424,7 @@ function TaxInvoiceSection({
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-gray-300 mb-1">Default GST Rate (%)</label>
+              <label className="block text-sm font-medium text-gray-600 mb-1">Default GST Rate (%)</label>
               <input
                 type="number"
                 value={taxSettings?.default_gst_rate || 18}
@@ -433,29 +433,29 @@ function TaxInvoiceSection({
               />
             </div>
           </div>
-          <div className="flex items-center justify-between p-3 bg-gray-900 rounded-lg">
+          <div className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
             <div>
-              <p className="font-medium text-white">E-Invoice Enabled</p>
-              <p className="text-sm text-gray-400">Generate IRN for B2B transactions</p>
+              <p className="font-medium text-gray-900">E-Invoice Enabled</p>
+              <p className="text-sm text-gray-500">Generate IRN for B2B transactions</p>
             </div>
-            <ToggleLeft className="w-8 h-8 text-gray-400 cursor-pointer" />
+            <ToggleLeft className="w-8 h-8 text-gray-500 cursor-pointer" />
           </div>
-          <div className="flex items-center justify-between p-3 bg-gray-900 rounded-lg">
+          <div className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
             <div>
-              <p className="font-medium text-white">E-Way Bill Auto-Generate</p>
-              <p className="text-sm text-gray-400">For invoices above threshold</p>
+              <p className="font-medium text-gray-900">E-Way Bill Auto-Generate</p>
+              <p className="text-sm text-gray-500">For invoices above threshold</p>
             </div>
-            <ToggleLeft className="w-8 h-8 text-gray-400 cursor-pointer" />
+            <ToggleLeft className="w-8 h-8 text-gray-500 cursor-pointer" />
           </div>
         </div>
       </div>
 
       <div className="card">
-        <h2 className="text-lg font-semibold text-white mb-4">Invoice Settings</h2>
+        <h2 className="text-lg font-semibold text-gray-900 mb-4">Invoice Settings</h2>
         <div className="space-y-4">
           <div className="grid grid-cols-3 gap-4">
             <div>
-              <label className="block text-sm font-medium text-gray-300 mb-1">Invoice Prefix</label>
+              <label className="block text-sm font-medium text-gray-600 mb-1">Invoice Prefix</label>
               <input
                 type="text"
                 value={invoiceSettings?.invoice_prefix || 'INV'}
@@ -464,16 +464,16 @@ function TaxInvoiceSection({
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-gray-300 mb-1">Current Number</label>
+              <label className="block text-sm font-medium text-gray-600 mb-1">Current Number</label>
               <input
                 type="number"
                 value={invoiceSettings?.current_invoice_number || 1}
                 readOnly
-                className="input-field bg-gray-700"
+                className="input-field bg-gray-100"
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-gray-300 mb-1">Financial Year</label>
+              <label className="block text-sm font-medium text-gray-600 mb-1">Financial Year</label>
               <input
                 type="text"
                 value={invoiceSettings?.financial_year || '2024-25'}
@@ -483,7 +483,7 @@ function TaxInvoiceSection({
             </div>
           </div>
           <div>
-            <label className="block text-sm font-medium text-gray-300 mb-1">Default Terms & Conditions</label>
+            <label className="block text-sm font-medium text-gray-600 mb-1">Default Terms & Conditions</label>
             <textarea
               value={invoiceSettings?.default_terms || ''}
               onChange={e => setInvoiceSettings((prev: any) => prev ? { ...prev, default_terms: e.target.value } : null)}
@@ -493,7 +493,7 @@ function TaxInvoiceSection({
           </div>
           <div className="grid grid-cols-2 gap-4">
             <div>
-              <label className="block text-sm font-medium text-gray-300 mb-1">Default Warranty (days)</label>
+              <label className="block text-sm font-medium text-gray-600 mb-1">Default Warranty (days)</label>
               <input
                 type="number"
                 value={invoiceSettings?.default_warranty_days || 365}
@@ -553,11 +553,11 @@ function PrinterSection({
   return (
     <div className="space-y-4">
       <div className="card">
-        <h2 className="text-lg font-semibold text-white mb-4">Printer Configuration</h2>
+        <h2 className="text-lg font-semibold text-gray-900 mb-4">Printer Configuration</h2>
         <div className="space-y-4">
           <div className="grid grid-cols-2 gap-4">
             <div>
-              <label className="block text-sm font-medium text-gray-300 mb-1">Receipt Printer</label>
+              <label className="block text-sm font-medium text-gray-600 mb-1">Receipt Printer</label>
               <select
                 value={printerSettings?.receipt_printer_name || ''}
                 onChange={e => setPrinterSettings((prev: any) => prev ? { ...prev, receipt_printer_name: e.target.value } : null)}
@@ -570,7 +570,7 @@ function PrinterSection({
               </select>
             </div>
             <div>
-              <label className="block text-sm font-medium text-gray-300 mb-1">Receipt Width (mm)</label>
+              <label className="block text-sm font-medium text-gray-600 mb-1">Receipt Width (mm)</label>
               <select
                 value={printerSettings?.receipt_printer_width || 80}
                 onChange={e => setPrinterSettings((prev: any) => prev ? { ...prev, receipt_printer_width: parseInt(e.target.value) } : null)}
@@ -581,7 +581,7 @@ function PrinterSection({
               </select>
             </div>
             <div>
-              <label className="block text-sm font-medium text-gray-300 mb-1">Label Printer</label>
+              <label className="block text-sm font-medium text-gray-600 mb-1">Label Printer</label>
               <select
                 value={printerSettings?.label_printer_name || ''}
                 onChange={e => setPrinterSettings((prev: any) => prev ? { ...prev, label_printer_name: e.target.value } : null)}
@@ -594,7 +594,7 @@ function PrinterSection({
               </select>
             </div>
             <div>
-              <label className="block text-sm font-medium text-gray-300 mb-1">Label Size</label>
+              <label className="block text-sm font-medium text-gray-600 mb-1">Label Size</label>
               <select
                 value={printerSettings?.label_size || '50x25'}
                 onChange={e => setPrinterSettings((prev: any) => prev ? { ...prev, label_size: e.target.value } : null)}
@@ -608,7 +608,7 @@ function PrinterSection({
           </div>
 
           <div className="space-y-2">
-            <label className="flex items-center gap-2 cursor-pointer p-2 hover:bg-gray-900 rounded">
+            <label className="flex items-center gap-2 cursor-pointer p-2 hover:bg-gray-100 rounded">
               <input
                 type="checkbox"
                 checked={printerSettings?.auto_print_receipt}
@@ -617,7 +617,7 @@ function PrinterSection({
               />
               <span className="text-sm">Auto-print receipt after payment</span>
             </label>
-            <label className="flex items-center gap-2 cursor-pointer p-2 hover:bg-gray-900 rounded">
+            <label className="flex items-center gap-2 cursor-pointer p-2 hover:bg-gray-100 rounded">
               <input
                 type="checkbox"
                 checked={printerSettings?.auto_print_job_card}
@@ -646,18 +646,18 @@ function PrinterSection({
       </div>
 
       <div className="card">
-        <h2 className="text-lg font-semibold text-white mb-4">Available Printers</h2>
+        <h2 className="text-lg font-semibold text-gray-900 mb-4">Available Printers</h2>
         <div className="space-y-2">
           {availablePrinters.length === 0 ? (
-            <p className="text-gray-400 text-center py-4">No printers detected on network</p>
+            <p className="text-gray-500 text-center py-4">No printers detected on network</p>
           ) : (
             availablePrinters.map(printer => (
-              <div key={printer.name} className="flex items-center justify-between p-3 bg-gray-900 rounded-lg">
+              <div key={printer.name} className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
                 <div className="flex items-center gap-3">
-                  <Printer className="w-5 h-5 text-gray-400" />
+                  <Printer className="w-5 h-5 text-gray-500" />
                   <div>
-                    <p className="font-medium text-white">{printer.name}</p>
-                    <p className="text-xs text-gray-400">{printer.type}</p>
+                    <p className="font-medium text-gray-900">{printer.name}</p>
+                    <p className="text-xs text-gray-500">{printer.type}</p>
                   </div>
                 </div>
                 <span className={clsx(
@@ -730,10 +730,10 @@ function AuditLogSection({
     <div className="space-y-4">
       {/* Error Banner */}
       {auditError && (
-        <div className="p-3 bg-red-950 border border-red-700 rounded-lg flex items-center gap-2">
-          <AlertCircle className="w-5 h-5 text-red-400 flex-shrink-0" />
-          <span className="text-sm text-red-300">{auditError}</span>
-          <button onClick={onRefresh} className="ml-auto text-sm text-red-400 hover:underline flex-shrink-0">
+        <div className="p-3 bg-red-50 border border-red-200 rounded-lg flex items-center gap-2">
+          <AlertCircle className="w-5 h-5 text-red-500 flex-shrink-0" />
+          <span className="text-sm text-red-700">{auditError}</span>
+          <button onClick={onRefresh} className="ml-auto text-sm text-red-600 hover:underline flex-shrink-0">
             Retry
           </button>
         </div>
@@ -744,29 +744,29 @@ function AuditLogSection({
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
           <div className="card p-4">
             <div className="flex items-center gap-2 mb-1">
-              <Shield className="w-4 h-4 text-gray-400" />
-              <p className="text-sm text-gray-400">Total Actions</p>
+              <Shield className="w-4 h-4 text-gray-500" />
+              <p className="text-sm text-gray-500">Total Actions</p>
             </div>
-            <p className="text-2xl font-bold text-white">{auditSummary.today.total_actions}</p>
+            <p className="text-2xl font-bold text-gray-900">{auditSummary.today.total_actions}</p>
           </div>
           <div className="card p-4">
             <div className="flex items-center gap-2 mb-1">
               <LogOut className="w-4 h-4 text-green-400" />
-              <p className="text-sm text-gray-400">Logins</p>
+              <p className="text-sm text-gray-500">Logins</p>
             </div>
             <p className="text-2xl font-bold text-green-600">{auditSummary.today.logins}</p>
           </div>
           <div className="card p-4">
             <div className="flex items-center gap-2 mb-1">
               <Plus className="w-4 h-4 text-blue-400" />
-              <p className="text-sm text-gray-400">Orders Created</p>
+              <p className="text-sm text-gray-500">Orders Created</p>
             </div>
             <p className="text-2xl font-bold text-blue-600">{auditSummary.today.orders_created}</p>
           </div>
           <div className="card p-4">
             <div className="flex items-center gap-2 mb-1">
               <AlertCircle className="w-4 h-4 text-green-400" />
-              <p className="text-sm text-gray-400">System Health</p>
+              <p className="text-sm text-gray-500">System Health</p>
             </div>
             <p className="text-2xl font-bold text-green-600">Good</p>
           </div>
@@ -776,9 +776,9 @@ function AuditLogSection({
       <div className="card">
         <div className="flex items-center justify-between mb-4">
           <div className="flex items-center gap-2">
-            <History className="w-5 h-5 text-gray-400" />
-            <h2 className="text-lg font-semibold text-white">Activity Log</h2>
-            <span className="text-sm text-gray-400 ml-1">
+            <History className="w-5 h-5 text-gray-500" />
+            <h2 className="text-lg font-semibold text-gray-900">Activity Log</h2>
+            <span className="text-sm text-gray-500 ml-1">
               ({filteredLogs.length}{hasActiveFilters ? ` of ${auditLogs.length}` : ''} entries)
             </span>
           </div>
@@ -789,16 +789,16 @@ function AuditLogSection({
         </div>
 
         {/* Filters Row */}
-        <div className="flex flex-wrap items-end gap-3 mb-4 p-3 bg-gray-900 rounded-lg border border-gray-700">
-          <div className="flex items-center gap-1 text-sm font-medium text-gray-400">
+        <div className="flex flex-wrap items-end gap-3 mb-4 p-3 bg-gray-50 rounded-lg border border-gray-200">
+          <div className="flex items-center gap-1 text-sm font-medium text-gray-500">
             <Filter className="w-4 h-4" />
             Filters
           </div>
 
           <div className="flex-1 min-w-[180px]">
-            <label className="block text-xs text-gray-400 mb-1">Search User</label>
+            <label className="block text-xs text-gray-500 mb-1">Search User</label>
             <div className="relative">
-              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-500" />
               <input
                 type="text"
                 placeholder="Search by user name..."
@@ -810,7 +810,7 @@ function AuditLogSection({
           </div>
 
           <div className="min-w-[150px]">
-            <label className="block text-xs text-gray-400 mb-1">Action Type</label>
+            <label className="block text-xs text-gray-500 mb-1">Action Type</label>
             <select
               value={auditActionFilter}
               onChange={e => setAuditActionFilter(e.target.value as AuditAction | '')}
@@ -827,7 +827,7 @@ function AuditLogSection({
           </div>
 
           <div className="min-w-[150px]">
-            <label className="block text-xs text-gray-400 mb-1">
+            <label className="block text-xs text-gray-500 mb-1">
               <span className="flex items-center gap-1"><Calendar className="w-3 h-3" /> From</span>
             </label>
             <input
@@ -839,7 +839,7 @@ function AuditLogSection({
           </div>
 
           <div className="min-w-[150px]">
-            <label className="block text-xs text-gray-400 mb-1">
+            <label className="block text-xs text-gray-500 mb-1">
               <span className="flex items-center gap-1"><Calendar className="w-3 h-3" /> To</span>
             </label>
             <input
@@ -867,21 +867,21 @@ function AuditLogSection({
         </div>
 
         {/* Table */}
-        <div className="overflow-x-auto rounded-lg border border-gray-700">
+        <div className="overflow-x-auto rounded-lg border border-gray-200">
           <table className="w-full">
-            <thead className="bg-gray-900 border-b border-gray-700">
+            <thead className="bg-gray-50 border-b border-gray-200">
               <tr>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">Timestamp</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">User</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">Action</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">Details</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">IP Address</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Timestamp</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">User</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Action</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Details</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">IP Address</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-200">
               {filteredLogs.length === 0 ? (
                 <tr>
-                  <td colSpan={5} className="px-4 py-12 text-center text-gray-400">
+                  <td colSpan={5} className="px-4 py-12 text-center text-gray-500">
                     <History className="w-12 h-12 mx-auto mb-3 opacity-50" />
                     {auditLogs.length === 0 && !hasActiveFilters ? (
                       <p className="font-medium">No audit logs yet</p>
@@ -902,13 +902,13 @@ function AuditLogSection({
                   const rowBg = AUDIT_ACTION_ROW_STYLES[actionKey] || '';
 
                   return (
-                    <tr key={log.id} className={clsx('hover:bg-gray-900 transition-colors', rowBg)}>
-                      <td className="px-4 py-3 text-sm text-gray-400 whitespace-nowrap">
+                    <tr key={log.id} className={clsx('hover:bg-gray-100 transition-colors', rowBg)}>
+                      <td className="px-4 py-3 text-sm text-gray-500 whitespace-nowrap">
                         <div>{new Date(log.timestamp).toLocaleDateString()}</div>
-                        <div className="text-xs text-gray-400">{new Date(log.timestamp).toLocaleTimeString()}</div>
+                        <div className="text-xs text-gray-500">{new Date(log.timestamp).toLocaleTimeString()}</div>
                       </td>
                       <td className="px-4 py-3 whitespace-nowrap">
-                        <p className="text-sm font-medium text-white">{log.user_name}</p>
+                        <p className="text-sm font-medium text-gray-900">{log.user_name}</p>
                       </td>
                       <td className="px-4 py-3 whitespace-nowrap">
                         <span className={clsx(
@@ -923,17 +923,17 @@ function AuditLogSection({
                           'text-sm',
                           actionKey === 'DELETE' ? 'text-red-700' :
                           actionKey === 'CREATE' ? 'text-green-700' :
-                          'text-gray-300'
+                          'text-gray-600'
                         )}>
                           {log.details}
                         </p>
                         {log.entity_type && (
-                          <p className="text-xs text-gray-400 mt-0.5">
+                          <p className="text-xs text-gray-500 mt-0.5">
                             {log.entity_type}{log.entity_id ? ` / ${log.entity_id}` : ''}
                           </p>
                         )}
                       </td>
-                      <td className="px-4 py-3 text-sm text-gray-400 font-mono whitespace-nowrap">
+                      <td className="px-4 py-3 text-sm text-gray-500 font-mono whitespace-nowrap">
                         {log.ip_address || '-'}
                       </td>
                     </tr>
@@ -945,7 +945,7 @@ function AuditLogSection({
         </div>
 
         {filteredLogs.length > 0 && (
-          <p className="text-xs text-gray-400 mt-3 text-right">
+          <p className="text-xs text-gray-500 mt-3 text-right">
             Showing {filteredLogs.length} log {filteredLogs.length === 1 ? 'entry' : 'entries'}
             {hasActiveFilters ? ' (filtered)' : ''}
           </p>
@@ -965,29 +965,29 @@ function SystemSection({ systemStatus }: { systemStatus: { database: string; api
   return (
     <div className="space-y-4">
       <div className="card">
-        <h2 className="text-lg font-semibold text-white mb-4">System Status</h2>
+        <h2 className="text-lg font-semibold text-gray-900 mb-4">System Status</h2>
         <div className="grid grid-cols-3 gap-4">
           <div className={clsx('p-4 rounded-lg', systemStatus?.database === 'connected' ? 'bg-green-50' : 'bg-yellow-50')}>
-            <p className="text-sm text-gray-400">Database</p>
+            <p className="text-sm text-gray-500">Database</p>
             <p className={clsx('font-medium', systemStatus?.database === 'connected' ? 'text-green-600' : 'text-yellow-600')}>
               {systemStatus?.database || 'Checking...'}
             </p>
           </div>
           <div className={clsx('p-4 rounded-lg', systemStatus?.api === 'healthy' ? 'bg-green-50' : 'bg-yellow-50')}>
-            <p className="text-sm text-gray-400">API Status</p>
+            <p className="text-sm text-gray-500">API Status</p>
             <p className={clsx('font-medium', systemStatus?.api === 'healthy' ? 'text-green-600' : 'text-yellow-600')}>
               {systemStatus?.api || 'Checking...'}
             </p>
           </div>
           <div className="p-4 bg-blue-50 rounded-lg">
-            <p className="text-sm text-gray-400">Version</p>
+            <p className="text-sm text-gray-500">Version</p>
             <p className="font-medium text-blue-600">{systemStatus?.version || '2.0.0'}</p>
           </div>
         </div>
       </div>
 
       <div className="card">
-        <h2 className="text-lg font-semibold text-white mb-4">Data Management</h2>
+        <h2 className="text-lg font-semibold text-gray-900 mb-4">Data Management</h2>
         <div className="space-y-3">
           <button
             onClick={() => {
@@ -1010,16 +1010,16 @@ function SystemSection({ systemStatus }: { systemStatus: { database: string; api
               };
               input.click();
             }}
-            className="w-full p-4 bg-gray-900 rounded-lg text-left hover:bg-gray-700 transition-colors flex items-center justify-between"
+            className="w-full p-4 bg-gray-50 rounded-lg text-left hover:bg-gray-200 transition-colors flex items-center justify-between"
           >
             <div className="flex items-center gap-3">
-              <Upload className="w-5 h-5 text-gray-400" />
+              <Upload className="w-5 h-5 text-gray-500" />
               <div>
-                <p className="font-medium text-white">Import Data</p>
-                <p className="text-sm text-gray-400">Import products, customers from CSV/Excel</p>
+                <p className="font-medium text-gray-900">Import Data</p>
+                <p className="text-sm text-gray-500">Import products, customers from CSV/Excel</p>
               </div>
             </div>
-            <ChevronRight className="w-5 h-5 text-gray-400" />
+            <ChevronRight className="w-5 h-5 text-gray-500" />
           </button>
           <button
             onClick={async () => {
@@ -1039,16 +1039,16 @@ function SystemSection({ systemStatus }: { systemStatus: { database: string; api
                 }
               }
             }}
-            className="w-full p-4 bg-gray-900 rounded-lg text-left hover:bg-gray-700 transition-colors flex items-center justify-between"
+            className="w-full p-4 bg-gray-50 rounded-lg text-left hover:bg-gray-200 transition-colors flex items-center justify-between"
           >
             <div className="flex items-center gap-3">
-              <Download className="w-5 h-5 text-gray-400" />
+              <Download className="w-5 h-5 text-gray-500" />
               <div>
-                <p className="font-medium text-white">Export Data</p>
-                <p className="text-sm text-gray-400">Export reports and data to Excel</p>
+                <p className="font-medium text-gray-900">Export Data</p>
+                <p className="text-sm text-gray-500">Export reports and data to Excel</p>
               </div>
             </div>
-            <ChevronRight className="w-5 h-5 text-gray-400" />
+            <ChevronRight className="w-5 h-5 text-gray-500" />
           </button>
           <button
             onClick={async () => {
@@ -1061,22 +1061,22 @@ function SystemSection({ systemStatus }: { systemStatus: { database: string; api
                 }
               }
             }}
-            className="w-full p-4 bg-gray-900 rounded-lg text-left hover:bg-gray-700 transition-colors flex items-center justify-between"
+            className="w-full p-4 bg-gray-50 rounded-lg text-left hover:bg-gray-200 transition-colors flex items-center justify-between"
           >
             <div className="flex items-center gap-3">
-              <Database className="w-5 h-5 text-gray-400" />
+              <Database className="w-5 h-5 text-gray-500" />
               <div>
-                <p className="font-medium text-white">Backup Database</p>
-                <p className="text-sm text-gray-400">Create full system backup</p>
+                <p className="font-medium text-gray-900">Backup Database</p>
+                <p className="text-sm text-gray-500">Create full system backup</p>
               </div>
             </div>
-            <ChevronRight className="w-5 h-5 text-gray-400" />
+            <ChevronRight className="w-5 h-5 text-gray-500" />
           </button>
         </div>
       </div>
 
       <div className="card mt-6">
-        <h2 className="text-lg font-semibold text-white mb-4">Admin Controls -- Store & Role Configuration</h2>
+        <h2 className="text-lg font-semibold text-gray-900 mb-4">Admin Controls -- Store & Role Configuration</h2>
         <AdminControlPanel />
       </div>
     </div>

@@ -43,7 +43,7 @@ interface Outcome {
 }
 
 const FOLLOW_UP_TYPES = [
-  { id: 'all', label: 'All', color: 'bg-gray-700', icon: '📋' },
+  { id: 'all', label: 'All', color: 'bg-gray-200', icon: '📋' },
   { id: 'eye_test_reminder', label: 'Eye Test', color: 'bg-purple-700', icon: '👁️' },
   { id: 'frame_replacement', label: 'Frame Replacement', color: 'bg-blue-700', icon: '👓' },
   { id: 'order_delivery', label: 'Order Delivery', color: 'bg-green-700', icon: '📦' },
@@ -51,11 +51,11 @@ const FOLLOW_UP_TYPES = [
 ];
 
 const OUTCOMES: Outcome[] = [
-  { value: 'called_interested', label: 'Called - Interested', color: 'bg-green-900 text-green-200' },
-  { value: 'called_not_interested', label: 'Called - Not Interested', color: 'bg-gray-900 text-gray-300' },
-  { value: 'no_answer', label: 'No Answer', color: 'bg-orange-900 text-orange-200' },
-  { value: 'rescheduled', label: 'Rescheduled', color: 'bg-yellow-900 text-yellow-200' },
-  { value: 'completed', label: 'Completed', color: 'bg-blue-900 text-blue-200' },
+  { value: 'called_interested', label: 'Called - Interested', color: 'bg-green-100 text-green-700' },
+  { value: 'called_not_interested', label: 'Called - Not Interested', color: 'bg-gray-100 text-gray-600' },
+  { value: 'no_answer', label: 'No Answer', color: 'bg-orange-100 text-orange-700' },
+  { value: 'rescheduled', label: 'Rescheduled', color: 'bg-yellow-100 text-yellow-700' },
+  { value: 'completed', label: 'Completed', color: 'bg-blue-100 text-blue-700' },
 ];
 
 export function FollowUpDashboard() {
@@ -181,9 +181,9 @@ export function FollowUpDashboard() {
       case 'completed':
         return 'text-green-400';
       case 'skipped':
-        return 'text-gray-400';
+        return 'text-gray-500';
       default:
-        return 'text-gray-300';
+        return 'text-gray-600';
     }
   };
 
@@ -211,8 +211,8 @@ export function FollowUpDashboard() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-3xl font-bold text-white">Follow-up Management</h1>
-          <p className="text-gray-400 mt-1">Track and manage customer follow-ups</p>
+          <h1 className="text-3xl font-bold text-gray-900">Follow-up Management</h1>
+          <p className="text-gray-500 mt-1">Track and manage customer follow-ups</p>
         </div>
         <button
           onClick={handleAutoGenerate}
@@ -225,51 +225,51 @@ export function FollowUpDashboard() {
 
       {/* Summary Cards */}
       <div className="grid grid-cols-5 gap-4">
-        <div className="bg-gradient-to-br from-red-900/30 to-red-900/10 border border-red-700 rounded-lg p-4">
+        <div className="bg-red-50 border border-red-200 rounded-lg p-4">
           <div className="flex items-center justify-between">
             <div>
               <p className="text-red-300 text-sm font-medium">Due Today</p>
-              <p className="text-2xl font-bold text-white mt-1">{summary.due_today}</p>
+              <p className="text-2xl font-bold text-gray-900 mt-1">{summary.due_today}</p>
             </div>
             <AlertCircle className="w-8 h-8 text-red-500" />
           </div>
         </div>
 
-        <div className="bg-gradient-to-br from-yellow-900/30 to-yellow-900/10 border border-yellow-700 rounded-lg p-4">
+        <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4">
           <div className="flex items-center justify-between">
             <div>
               <p className="text-yellow-300 text-sm font-medium">This Week</p>
-              <p className="text-2xl font-bold text-white mt-1">{summary.this_week}</p>
+              <p className="text-2xl font-bold text-gray-900 mt-1">{summary.this_week}</p>
             </div>
             <Calendar className="w-8 h-8 text-yellow-500" />
           </div>
         </div>
 
-        <div className="bg-gradient-to-br from-orange-900/30 to-orange-900/10 border border-orange-700 rounded-lg p-4">
+        <div className="bg-orange-50 border border-orange-200 rounded-lg p-4">
           <div className="flex items-center justify-between">
             <div>
               <p className="text-orange-300 text-sm font-medium">Overdue</p>
-              <p className="text-2xl font-bold text-white mt-1">{summary.overdue}</p>
+              <p className="text-2xl font-bold text-gray-900 mt-1">{summary.overdue}</p>
             </div>
             <Clock className="w-8 h-8 text-orange-500" />
           </div>
         </div>
 
-        <div className="bg-gradient-to-br from-green-900/30 to-green-900/10 border border-green-700 rounded-lg p-4">
+        <div className="bg-green-50 border border-green-200 rounded-lg p-4">
           <div className="flex items-center justify-between">
             <div>
               <p className="text-green-300 text-sm font-medium">Completed</p>
-              <p className="text-2xl font-bold text-white mt-1">{summary.completed_this_month}</p>
+              <p className="text-2xl font-bold text-gray-900 mt-1">{summary.completed_this_month}</p>
             </div>
             <CheckCircle2 className="w-8 h-8 text-green-500" />
           </div>
         </div>
 
-        <div className="bg-gradient-to-br from-blue-900/30 to-blue-900/10 border border-blue-700 rounded-lg p-4">
+        <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
           <div className="flex items-center justify-between">
             <div>
               <p className="text-blue-300 text-sm font-medium">Pending</p>
-              <p className="text-2xl font-bold text-white mt-1">{summary.pending_total}</p>
+              <p className="text-2xl font-bold text-gray-900 mt-1">{summary.pending_total}</p>
             </div>
             <Phone className="w-8 h-8 text-blue-500" />
           </div>
@@ -283,10 +283,10 @@ export function FollowUpDashboard() {
             key={type.id}
             onClick={() => setActiveType(type.id)}
             className={clsx(
-              'whitespace-nowrap px-4 py-2 rounded-lg text-white font-medium transition',
+              'whitespace-nowrap px-4 py-2 rounded-lg font-medium transition',
               activeType === type.id
-                ? `${type.color} ring-2 ring-offset-2 ring-offset-gray-800`
-                : 'bg-gray-700 hover:bg-gray-600'
+                ? `${type.color} text-white ring-2 ring-offset-2 ring-offset-white`
+                : 'bg-gray-100 hover:bg-gray-200 text-gray-700'
             )}
           >
             <span className="mr-2">{type.icon}</span>
@@ -296,38 +296,38 @@ export function FollowUpDashboard() {
       </div>
 
       {/* Follow-ups List */}
-      <div className="bg-gray-800 border border-gray-700 rounded-lg overflow-hidden">
+      <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
         {loading ? (
-          <div className="p-8 text-center text-gray-400">Loading follow-ups...</div>
+          <div className="p-8 text-center text-gray-500">Loading follow-ups...</div>
         ) : filteredFollowUps.length === 0 ? (
-          <div className="p-8 text-center text-gray-400">No follow-ups found</div>
+          <div className="p-8 text-center text-gray-500">No follow-ups found</div>
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full">
-              <thead className="bg-gray-700/50 border-b border-gray-700">
+              <thead className="bg-gray-50 border-b border-gray-200">
                 <tr>
-                  <th className="px-4 py-3 text-left text-sm font-semibold text-gray-300">Customer</th>
-                  <th className="px-4 py-3 text-left text-sm font-semibold text-gray-300">Type</th>
-                  <th className="px-4 py-3 text-left text-sm font-semibold text-gray-300">Phone</th>
-                  <th className="px-4 py-3 text-left text-sm font-semibold text-gray-300">Due Date</th>
-                  <th className="px-4 py-3 text-left text-sm font-semibold text-gray-300">Status</th>
-                  <th className="px-4 py-3 text-left text-sm font-semibold text-gray-300">Actions</th>
+                  <th className="px-4 py-3 text-left text-sm font-semibold text-gray-600">Customer</th>
+                  <th className="px-4 py-3 text-left text-sm font-semibold text-gray-600">Type</th>
+                  <th className="px-4 py-3 text-left text-sm font-semibold text-gray-600">Phone</th>
+                  <th className="px-4 py-3 text-left text-sm font-semibold text-gray-600">Due Date</th>
+                  <th className="px-4 py-3 text-left text-sm font-semibold text-gray-600">Status</th>
+                  <th className="px-4 py-3 text-left text-sm font-semibold text-gray-600">Actions</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-700">
                 {filteredFollowUps.map((fu) => (
-                  <tr key={fu.follow_up_id} className="hover:bg-gray-700/50 transition">
-                    <td className="px-4 py-3 text-white font-medium">{fu.customer_name}</td>
+                  <tr key={fu.follow_up_id} className="hover:bg-gray-50 transition">
+                    <td className="px-4 py-3 text-gray-900 font-medium">{fu.customer_name}</td>
                     <td className="px-4 py-3">
                       <span className="flex items-center gap-2">
                         <span>{typeIcon(fu.type)}</span>
-                        <span className="text-gray-300 capitalize text-sm">
+                        <span className="text-gray-600 capitalize text-sm">
                           {fu.type.replace(/_/g, ' ')}
                         </span>
                       </span>
                     </td>
-                    <td className="px-4 py-3 text-gray-300">{fu.customer_phone}</td>
-                    <td className="px-4 py-3 text-gray-300">
+                    <td className="px-4 py-3 text-gray-600">{fu.customer_phone}</td>
+                    <td className="px-4 py-3 text-gray-600">
                       <div className="flex items-center gap-1">
                         <span>{formatDate(fu.scheduled_date)}</span>
                         {isOverdue(fu.scheduled_date) && fu.status === 'pending' && (
@@ -353,7 +353,7 @@ export function FollowUpDashboard() {
                                 [fu.follow_up_id]: e.target.value,
                               }))
                             }
-                            className="bg-gray-700 border border-gray-600 text-white text-sm rounded px-2 py-1"
+                            className="bg-white border border-gray-300 text-gray-900 text-sm rounded px-2 py-1"
                           >
                             <option value="">Select outcome...</option>
                             {OUTCOMES.map((outcome) => (
@@ -365,13 +365,13 @@ export function FollowUpDashboard() {
                           <button
                             onClick={() => handleComplete(fu.follow_up_id)}
                             disabled={!selectedOutcome[fu.follow_up_id] || completing === fu.follow_up_id}
-                            className="bg-green-700 hover:bg-green-600 disabled:bg-gray-700 text-white px-3 py-1 rounded text-sm transition"
+                            className="bg-green-600 hover:bg-green-700 disabled:bg-gray-200 disabled:text-gray-400 text-white px-3 py-1 rounded text-sm transition"
                           >
                             {completing === fu.follow_up_id ? 'Saving...' : 'Complete'}
                           </button>
                         </div>
                       ) : (
-                        <span className={`text-xs px-2 py-1 rounded ${OUTCOMES.find((o) => o.value === fu.outcome)?.color || 'bg-gray-700'}`}>
+                        <span className={`text-xs px-2 py-1 rounded ${OUTCOMES.find((o) => o.value === fu.outcome)?.color || 'bg-gray-100'}`}>
                           {OUTCOMES.find((o) => o.value === fu.outcome)?.label || 'N/A'}
                         </span>
                       )}

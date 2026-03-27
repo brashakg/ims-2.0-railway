@@ -234,8 +234,8 @@ export function PayrollDashboard() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-3xl font-bold text-white">Payroll Management</h1>
-          <p className="text-gray-400">Indian optical retail chain salary structure</p>
+          <h1 className="text-3xl font-bold text-gray-900">Payroll Management</h1>
+          <p className="text-gray-500">Indian optical retail chain salary structure</p>
         </div>
       </div>
 
@@ -248,14 +248,14 @@ export function PayrollDashboard() {
       )}
 
       {/* Tabs */}
-      <div className="flex gap-2 border-b border-gray-700">
+      <div className="flex gap-2 border-b border-gray-200">
         <button
           onClick={() => setActiveTab('sheet')}
           className={clsx(
             'px-4 py-2 font-medium transition-colors',
             activeTab === 'sheet'
               ? 'text-blue-400 border-b-2 border-blue-400'
-              : 'text-gray-400 hover:text-gray-300'
+              : 'text-gray-500 hover:text-gray-700'
           )}
         >
           <DollarSign className="inline w-4 h-4 mr-2" />
@@ -267,7 +267,7 @@ export function PayrollDashboard() {
             'px-4 py-2 font-medium transition-colors',
             activeTab === 'advances'
               ? 'text-blue-400 border-b-2 border-blue-400'
-              : 'text-gray-400 hover:text-gray-300'
+              : 'text-gray-500 hover:text-gray-700'
           )}
         >
           <TrendingDown className="inline w-4 h-4 mr-2" />
@@ -279,7 +279,7 @@ export function PayrollDashboard() {
             'px-4 py-2 font-medium transition-colors',
             activeTab === 'payslips'
               ? 'text-blue-400 border-b-2 border-blue-400'
-              : 'text-gray-400 hover:text-gray-300'
+              : 'text-gray-500 hover:text-gray-700'
           )}
         >
           <FileText className="inline w-4 h-4 mr-2" />
@@ -291,14 +291,14 @@ export function PayrollDashboard() {
       {activeTab === 'sheet' && (
         <div className="space-y-4">
           {/* Controls */}
-          <div className="flex items-center justify-between bg-gray-800/50 p-4 rounded-lg">
+          <div className="flex items-center justify-between bg-white border border-gray-200 p-4 rounded-lg">
             <div className="flex items-center gap-4">
               <div className="flex items-center gap-2">
-                <Calendar className="w-4 h-4 text-gray-400" />
+                <Calendar className="w-4 h-4 text-gray-500" />
                 <select
                   value={selectedMonth}
                   onChange={(e) => setSelectedMonth(Number(e.target.value))}
-                  className="bg-gray-700 text-white px-3 py-1 rounded text-sm"
+                  className="bg-white border border-gray-300 text-gray-900 px-3 py-1 rounded text-sm"
                 >
                   {MONTHS.map((m, i) => (
                     <option key={i} value={i + 1}>
@@ -309,7 +309,7 @@ export function PayrollDashboard() {
                 <select
                   value={selectedYear}
                   onChange={(e) => setSelectedYear(Number(e.target.value))}
-                  className="bg-gray-700 text-white px-3 py-1 rounded text-sm"
+                  className="bg-white border border-gray-300 text-gray-900 px-3 py-1 rounded text-sm"
                 >
                   {[currentYear - 1, currentYear, currentYear + 1].map((year) => (
                     <option key={year} value={year}>
@@ -334,26 +334,26 @@ export function PayrollDashboard() {
               <Loader2 className="w-8 h-8 text-blue-400 animate-spin" />
             </div>
           ) : salarySheet.length === 0 ? (
-            <div className="text-center py-8 text-gray-400">
+            <div className="text-center py-8 text-gray-500">
               No salary data for {MONTHS[selectedMonth - 1]} {selectedYear}
             </div>
           ) : (
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
                 <thead>
-                  <tr className="border-b border-gray-700">
-                    <th className="text-left px-4 py-2 text-gray-400 font-medium">Employee</th>
-                    <th className="text-right px-4 py-2 text-gray-400 font-medium">Basic</th>
-                    <th className="text-right px-4 py-2 text-gray-400 font-medium">HRA</th>
-                    <th className="text-right px-4 py-2 text-gray-400 font-medium">Allow.</th>
-                    <th className="text-right px-4 py-2 text-gray-400 font-medium">Gross</th>
-                    <th className="text-right px-4 py-2 text-gray-400 font-medium">PF</th>
-                    <th className="text-right px-4 py-2 text-gray-400 font-medium">ESI</th>
-                    <th className="text-right px-4 py-2 text-gray-400 font-medium">PT</th>
-                    <th className="text-right px-4 py-2 text-gray-400 font-medium">TDS</th>
-                    <th className="text-right px-4 py-2 text-gray-400 font-medium">LWP</th>
-                    <th className="text-right px-4 py-2 text-gray-400 font-medium">Advance</th>
-                    <th className="text-right px-4 py-2 text-gray-400 font-medium">Net Pay</th>
+                  <tr className="border-b border-gray-200">
+                    <th className="text-left px-4 py-2 text-gray-500 font-medium">Employee</th>
+                    <th className="text-right px-4 py-2 text-gray-500 font-medium">Basic</th>
+                    <th className="text-right px-4 py-2 text-gray-500 font-medium">HRA</th>
+                    <th className="text-right px-4 py-2 text-gray-500 font-medium">Allow.</th>
+                    <th className="text-right px-4 py-2 text-gray-500 font-medium">Gross</th>
+                    <th className="text-right px-4 py-2 text-gray-500 font-medium">PF</th>
+                    <th className="text-right px-4 py-2 text-gray-500 font-medium">ESI</th>
+                    <th className="text-right px-4 py-2 text-gray-500 font-medium">PT</th>
+                    <th className="text-right px-4 py-2 text-gray-500 font-medium">TDS</th>
+                    <th className="text-right px-4 py-2 text-gray-500 font-medium">LWP</th>
+                    <th className="text-right px-4 py-2 text-gray-500 font-medium">Advance</th>
+                    <th className="text-right px-4 py-2 text-gray-500 font-medium">Net Pay</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -363,23 +363,23 @@ export function PayrollDashboard() {
                     return (
                       <tr
                         key={salary.salary_record_id}
-                        className="border-b border-gray-700 hover:bg-gray-800/50 transition"
+                        className="border-b border-gray-200 hover:bg-gray-50 transition"
                       >
-                        <td className="px-4 py-2 text-white font-medium">
+                        <td className="px-4 py-2 text-gray-900 font-medium">
                           {salary.employee_name}
                         </td>
-                        <td className="text-right px-4 py-2 text-gray-300">₹{b.basic.toLocaleString()}</td>
-                        <td className="text-right px-4 py-2 text-gray-300">₹{b.hra.toLocaleString()}</td>
-                        <td className="text-right px-4 py-2 text-gray-300">₹{allowances.toLocaleString()}</td>
+                        <td className="text-right px-4 py-2 text-gray-600">₹{b.basic.toLocaleString()}</td>
+                        <td className="text-right px-4 py-2 text-gray-600">₹{b.hra.toLocaleString()}</td>
+                        <td className="text-right px-4 py-2 text-gray-600">₹{allowances.toLocaleString()}</td>
                         <td className="text-right px-4 py-2 text-green-400 font-medium">
                           ₹{b.gross_salary.toLocaleString()}
                         </td>
-                        <td className="text-right px-4 py-2 text-gray-300">₹{b.pf_employee.toLocaleString()}</td>
-                        <td className="text-right px-4 py-2 text-gray-300">₹{b.esi.toLocaleString()}</td>
-                        <td className="text-right px-4 py-2 text-gray-300">₹{b.professional_tax.toLocaleString()}</td>
-                        <td className="text-right px-4 py-2 text-gray-300">₹{b.tds.toLocaleString()}</td>
-                        <td className="text-right px-4 py-2 text-gray-300">₹{b.lwp_deduction.toLocaleString()}</td>
-                        <td className="text-right px-4 py-2 text-gray-300">₹{b.advance_deduction.toLocaleString()}</td>
+                        <td className="text-right px-4 py-2 text-gray-600">₹{b.pf_employee.toLocaleString()}</td>
+                        <td className="text-right px-4 py-2 text-gray-600">₹{b.esi.toLocaleString()}</td>
+                        <td className="text-right px-4 py-2 text-gray-600">₹{b.professional_tax.toLocaleString()}</td>
+                        <td className="text-right px-4 py-2 text-gray-600">₹{b.tds.toLocaleString()}</td>
+                        <td className="text-right px-4 py-2 text-gray-600">₹{b.lwp_deduction.toLocaleString()}</td>
+                        <td className="text-right px-4 py-2 text-gray-600">₹{b.advance_deduction.toLocaleString()}</td>
                         <td className="text-right px-4 py-2 text-yellow-400 font-bold">
                           ₹{b.net_pay.toLocaleString()}
                         </td>
@@ -397,7 +397,7 @@ export function PayrollDashboard() {
       {activeTab === 'advances' && (
         <div className="space-y-4">
           {/* Employee selector */}
-          <div className="bg-gray-800/50 p-4 rounded-lg">
+          <div className="bg-white border border-gray-200 p-4 rounded-lg">
             <div className="flex items-center gap-4">
               <select
                 value={selectedEmployee}
@@ -407,7 +407,7 @@ export function PayrollDashboard() {
                     loadAdvances(e.target.value);
                   }
                 }}
-                className="bg-gray-700 text-white px-4 py-2 rounded flex-1"
+                className="bg-white border border-gray-300 text-gray-900 px-4 py-2 rounded flex-1"
               >
                 <option value="">Select employee...</option>
                 {salarySheet.map((salary) => (
@@ -430,19 +430,19 @@ export function PayrollDashboard() {
 
           {/* Advance form */}
           {showAdvanceForm && selectedEmployee && (
-            <div className="bg-gray-800/50 p-4 rounded-lg space-y-3">
+            <div className="bg-white border border-gray-200 p-4 rounded-lg space-y-3">
               <input
                 type="number"
                 placeholder="Advance amount (₹)"
                 value={advanceForm.amount}
                 onChange={(e) => setAdvanceForm({ ...advanceForm, amount: e.target.value })}
-                className="w-full bg-gray-700 text-white px-3 py-2 rounded text-sm"
+                className="w-full bg-white border border-gray-300 text-gray-900 px-3 py-2 rounded text-sm"
               />
               <textarea
                 placeholder="Reason (optional)"
                 value={advanceForm.reason}
                 onChange={(e) => setAdvanceForm({ ...advanceForm, reason: e.target.value })}
-                className="w-full bg-gray-700 text-white px-3 py-2 rounded text-sm h-20"
+                className="w-full bg-white border border-gray-300 text-gray-900 px-3 py-2 rounded text-sm h-20"
               />
               <div className="flex gap-2">
                 <button
@@ -468,17 +468,17 @@ export function PayrollDashboard() {
                 <Loader2 className="w-8 h-8 text-blue-400 animate-spin" />
               </div>
             ) : advances.length === 0 ? (
-              <div className="text-center py-8 text-gray-400">No advances recorded</div>
+              <div className="text-center py-8 text-gray-500">No advances recorded</div>
             ) : (
               <div className="space-y-3">
                 {advances.map((adv) => (
                   <div
                     key={adv.advance_id}
-                    className="bg-gray-800/50 p-4 rounded-lg flex items-center justify-between"
+                    className="bg-white border border-gray-200 p-4 rounded-lg flex items-center justify-between"
                   >
                     <div>
-                      <p className="text-white font-medium">₹{adv.amount.toLocaleString()}</p>
-                      <p className="text-gray-400 text-sm">{adv.date_requested}</p>
+                      <p className="text-gray-900 font-medium">₹{adv.amount.toLocaleString()}</p>
+                      <p className="text-gray-500 text-sm">{adv.date_requested}</p>
                     </div>
                     <div className="flex items-center gap-2">
                       {adv.status === 'pending' && (
@@ -497,7 +497,7 @@ export function PayrollDashboard() {
                         </span>
                       )}
                       {adv.status === 'deducted' && (
-                        <span className="flex items-center gap-1 text-gray-400 text-sm">
+                        <span className="flex items-center gap-1 text-gray-500 text-sm">$
                           <X className="w-4 h-4" /> Deducted
                         </span>
                       )}
@@ -514,7 +514,7 @@ export function PayrollDashboard() {
       {activeTab === 'payslips' && (
         <div className="space-y-4">
           {/* Controls */}
-          <div className="bg-gray-800/50 p-4 rounded-lg">
+          <div className="bg-white border border-gray-200 p-4 rounded-lg">
             <div className="flex items-center gap-4">
               <select
                 value={selectedEmployee}
@@ -524,7 +524,7 @@ export function PayrollDashboard() {
                     loadPayslip(e.target.value);
                   }
                 }}
-                className="bg-gray-700 text-white px-4 py-2 rounded flex-1"
+                className="bg-white border border-gray-300 text-gray-900 px-4 py-2 rounded flex-1"
               >
                 <option value="">Select employee...</option>
                 {salarySheet.map((salary) => (
@@ -537,7 +537,7 @@ export function PayrollDashboard() {
                 <select
                   value={selectedMonth}
                   onChange={(e) => setSelectedMonth(Number(e.target.value))}
-                  className="bg-gray-700 text-white px-3 py-2 rounded"
+                  className="bg-white border border-gray-300 text-gray-900 px-3 py-2 rounded"
                 >
                   {MONTHS.map((m, i) => (
                     <option key={i} value={i + 1}>
@@ -548,7 +548,7 @@ export function PayrollDashboard() {
                 <select
                   value={selectedYear}
                   onChange={(e) => setSelectedYear(Number(e.target.value))}
-                  className="bg-gray-700 text-white px-3 py-2 rounded"
+                  className="bg-white border border-gray-300 text-gray-900 px-3 py-2 rounded"
                 >
                   {[currentYear - 1, currentYear, currentYear + 1].map((year) => (
                     <option key={year} value={year}>
@@ -567,10 +567,10 @@ export function PayrollDashboard() {
                 <Loader2 className="w-8 h-8 text-blue-400 animate-spin" />
               </div>
             ) : payslip ? (
-              <div className="bg-gray-800/50 p-8 rounded-lg space-y-4">
-                <div className="text-center pb-4 border-b border-gray-700">
-                  <h2 className="text-2xl font-bold text-white">{payslip.employee_name}</h2>
-                  <p className="text-gray-400 text-sm">{payslip.designation}</p>
+              <div className="bg-white border border-gray-200 p-8 rounded-lg space-y-4">
+                <div className="text-center pb-4 border-b border-gray-200">
+                  <h2 className="text-2xl font-bold text-gray-900">{payslip.employee_name}</h2>
+                  <p className="text-gray-500 text-sm">{payslip.designation}</p>
                   <p className="text-gray-500 text-xs">
                     {MONTHS[payslip.month - 1]} {payslip.year}
                   </p>
@@ -578,26 +578,26 @@ export function PayrollDashboard() {
 
                 <div className="grid grid-cols-2 gap-8">
                   <div>
-                    <h3 className="text-gray-400 font-medium mb-3 text-sm">EARNINGS</h3>
+                    <h3 className="text-gray-500 font-medium mb-3 text-sm">EARNINGS</h3>
                     <div className="space-y-2 text-sm">
                       <div className="flex justify-between">
-                        <span className="text-gray-300">Basic Salary</span>
-                        <span className="text-white">₹{payslip.breakdown.basic.toLocaleString()}</span>
+                        <span className="text-gray-600">Basic Salary</span>
+                        <span className="text-gray-900">₹{payslip.breakdown.basic.toLocaleString()}</span>
                       </div>
                       <div className="flex justify-between">
-                        <span className="text-gray-300">HRA</span>
-                        <span className="text-white">₹{payslip.breakdown.hra.toLocaleString()}</span>
+                        <span className="text-gray-600">HRA</span>
+                        <span className="text-gray-900">₹{payslip.breakdown.hra.toLocaleString()}</span>
                       </div>
                       <div className="flex justify-between">
-                        <span className="text-gray-300">Conveyance</span>
-                        <span className="text-white">₹{payslip.breakdown.conveyance.toLocaleString()}</span>
+                        <span className="text-gray-600">Conveyance</span>
+                        <span className="text-gray-900">₹{payslip.breakdown.conveyance.toLocaleString()}</span>
                       </div>
                       <div className="flex justify-between">
-                        <span className="text-gray-300">Medical</span>
-                        <span className="text-white">₹{payslip.breakdown.medical.toLocaleString()}</span>
+                        <span className="text-gray-600">Medical</span>
+                        <span className="text-gray-900">₹{payslip.breakdown.medical.toLocaleString()}</span>
                       </div>
-                      <div className="flex justify-between border-t border-gray-700 pt-2 mt-2">
-                        <span className="text-gray-300 font-medium">Gross Salary</span>
+                      <div className="flex justify-between border-t border-gray-200 pt-2 mt-2">
+                        <span className="text-gray-600 font-medium">Gross Salary</span>
                         <span className="text-green-400 font-bold">
                           ₹{payslip.breakdown.gross_salary.toLocaleString()}
                         </span>
@@ -606,34 +606,34 @@ export function PayrollDashboard() {
                   </div>
 
                   <div>
-                    <h3 className="text-gray-400 font-medium mb-3 text-sm">DEDUCTIONS</h3>
+                    <h3 className="text-gray-500 font-medium mb-3 text-sm">DEDUCTIONS</h3>
                     <div className="space-y-2 text-sm">
                       <div className="flex justify-between">
-                        <span className="text-gray-300">PF (Employee)</span>
-                        <span className="text-white">₹{payslip.breakdown.pf_employee.toLocaleString()}</span>
+                        <span className="text-gray-600">PF (Employee)</span>
+                        <span className="text-gray-900">₹{payslip.breakdown.pf_employee.toLocaleString()}</span>
                       </div>
                       <div className="flex justify-between">
-                        <span className="text-gray-300">ESI</span>
-                        <span className="text-white">₹{payslip.breakdown.esi.toLocaleString()}</span>
+                        <span className="text-gray-600">ESI</span>
+                        <span className="text-gray-900">₹{payslip.breakdown.esi.toLocaleString()}</span>
                       </div>
                       <div className="flex justify-between">
-                        <span className="text-gray-300">Professional Tax</span>
-                        <span className="text-white">₹{payslip.breakdown.professional_tax.toLocaleString()}</span>
+                        <span className="text-gray-600">Professional Tax</span>
+                        <span className="text-gray-900">₹{payslip.breakdown.professional_tax.toLocaleString()}</span>
                       </div>
                       <div className="flex justify-between">
-                        <span className="text-gray-300">TDS</span>
-                        <span className="text-white">₹{payslip.breakdown.tds.toLocaleString()}</span>
+                        <span className="text-gray-600">TDS</span>
+                        <span className="text-gray-900">₹{payslip.breakdown.tds.toLocaleString()}</span>
                       </div>
                       <div className="flex justify-between">
-                        <span className="text-gray-300">LWP Deduction</span>
-                        <span className="text-white">₹{payslip.breakdown.lwp_deduction.toLocaleString()}</span>
+                        <span className="text-gray-600">LWP Deduction</span>
+                        <span className="text-gray-900">₹{payslip.breakdown.lwp_deduction.toLocaleString()}</span>
                       </div>
                       <div className="flex justify-between">
-                        <span className="text-gray-300">Advance Deduction</span>
-                        <span className="text-white">₹{payslip.breakdown.advance_deduction.toLocaleString()}</span>
+                        <span className="text-gray-600">Advance Deduction</span>
+                        <span className="text-gray-900">₹{payslip.breakdown.advance_deduction.toLocaleString()}</span>
                       </div>
-                      <div className="flex justify-between border-t border-gray-700 pt-2 mt-2">
-                        <span className="text-gray-300 font-medium">Net Pay</span>
+                      <div className="flex justify-between border-t border-gray-200 pt-2 mt-2">
+                        <span className="text-gray-600 font-medium">Net Pay</span>
                         <span className="text-yellow-400 font-bold">
                           ₹{payslip.breakdown.net_pay.toLocaleString()}
                         </span>
@@ -643,7 +643,7 @@ export function PayrollDashboard() {
                 </div>
               </div>
             ) : (
-              <div className="text-center py-8 text-gray-400">
+              <div className="text-center py-8 text-gray-500">
                 No payslip found for selected month
               </div>
             )

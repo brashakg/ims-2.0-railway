@@ -101,7 +101,7 @@ export function AuditLogViewer({ logs = [] }: AuditLogViewerProps) {
       {/* Filters */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
         <div>
-          <label className="block text-sm font-medium text-gray-300 mb-2">Search</label>
+          <label className="block text-sm font-medium text-gray-600 mb-2">Search</label>
           <div className="relative">
             <Search className="absolute left-3 top-3 w-4 h-4 text-gray-500" />
             <input
@@ -109,17 +109,17 @@ export function AuditLogViewer({ logs = [] }: AuditLogViewerProps) {
               placeholder="User, action, entity..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              className="w-full pl-10 pr-4 py-2 bg-gray-700 border border-gray-600 rounded text-white placeholder-gray-400 focus:border-blue-500 outline-none"
+              className="w-full pl-10 pr-4 py-2 bg-white border border-gray-300 rounded text-gray-900 placeholder-gray-500 focus:border-blue-500 outline-none"
             />
           </div>
         </div>
 
         <div>
-          <label className="block text-sm font-medium text-gray-300 mb-2">Action</label>
+          <label className="block text-sm font-medium text-gray-600 mb-2">Action</label>
           <select
             value={actionFilter}
             onChange={(e) => setActionFilter(e.target.value)}
-            className="w-full px-4 py-2 bg-gray-700 border border-gray-600 rounded text-white focus:border-blue-500 outline-none"
+            className="w-full px-4 py-2 bg-white border border-gray-300 rounded text-gray-900 focus:border-blue-500 outline-none"
           >
             <option value="all">All Actions</option>
             {uniqueActions.map(action => (
@@ -129,11 +129,11 @@ export function AuditLogViewer({ logs = [] }: AuditLogViewerProps) {
         </div>
 
         <div>
-          <label className="block text-sm font-medium text-gray-300 mb-2">User</label>
+          <label className="block text-sm font-medium text-gray-600 mb-2">User</label>
           <select
             value={userFilter}
             onChange={(e) => setUserFilter(e.target.value)}
-            className="w-full px-4 py-2 bg-gray-700 border border-gray-600 rounded text-white focus:border-blue-500 outline-none"
+            className="w-full px-4 py-2 bg-white border border-gray-300 rounded text-gray-900 focus:border-blue-500 outline-none"
           >
             <option value="all">All Users</option>
             {uniqueUsers.map(user => (
@@ -143,22 +143,22 @@ export function AuditLogViewer({ logs = [] }: AuditLogViewerProps) {
         </div>
 
         <div>
-          <label className="block text-sm font-medium text-gray-300 mb-2">From Date</label>
+          <label className="block text-sm font-medium text-gray-600 mb-2">From Date</label>
           <input
             type="date"
             value={dateFrom}
             onChange={(e) => setDateFrom(e.target.value)}
-            className="w-full px-4 py-2 bg-gray-700 border border-gray-600 rounded text-white focus:border-blue-500 outline-none"
+            className="w-full px-4 py-2 bg-white border border-gray-300 rounded text-gray-900 focus:border-blue-500 outline-none"
           />
         </div>
 
         <div>
-          <label className="block text-sm font-medium text-gray-300 mb-2">To Date</label>
+          <label className="block text-sm font-medium text-gray-600 mb-2">To Date</label>
           <input
             type="date"
             value={dateTo}
             onChange={(e) => setDateTo(e.target.value)}
-            className="w-full px-4 py-2 bg-gray-700 border border-gray-600 rounded text-white focus:border-blue-500 outline-none"
+            className="w-full px-4 py-2 bg-white border border-gray-300 rounded text-gray-900 focus:border-blue-500 outline-none"
           />
         </div>
       </div>
@@ -172,13 +172,13 @@ export function AuditLogViewer({ logs = [] }: AuditLogViewerProps) {
       <div className="overflow-x-auto">
         <table className="w-full">
           <thead>
-            <tr className="border-b border-gray-700">
-              <th className="px-4 py-3 text-left text-sm font-semibold text-gray-300">Timestamp</th>
-              <th className="px-4 py-3 text-left text-sm font-semibold text-gray-300">User</th>
-              <th className="px-4 py-3 text-left text-sm font-semibold text-gray-300">Action</th>
-              <th className="px-4 py-3 text-left text-sm font-semibold text-gray-300">Entity</th>
-              <th className="px-4 py-3 text-left text-sm font-semibold text-gray-300">Details</th>
-              <th className="px-4 py-3 text-left text-sm font-semibold text-gray-300">IP Address</th>
+            <tr className="border-b border-gray-200">
+              <th className="px-4 py-3 text-left text-sm font-semibold text-gray-600">Timestamp</th>
+              <th className="px-4 py-3 text-left text-sm font-semibold text-gray-600">User</th>
+              <th className="px-4 py-3 text-left text-sm font-semibold text-gray-600">Action</th>
+              <th className="px-4 py-3 text-left text-sm font-semibold text-gray-600">Entity</th>
+              <th className="px-4 py-3 text-left text-sm font-semibold text-gray-600">Details</th>
+              <th className="px-4 py-3 text-left text-sm font-semibold text-gray-600">IP Address</th>
             </tr>
           </thead>
           <tbody>
@@ -196,15 +196,15 @@ export function AuditLogViewer({ logs = [] }: AuditLogViewerProps) {
               </tr>
             ) : (
               filteredLogs.map(log => (
-                <tr key={log.id} className="border-b border-gray-700 hover:bg-gray-800 transition">
-                  <td className="px-4 py-3 text-sm text-gray-300">{formatDate(log.timestamp)}</td>
-                  <td className="px-4 py-3 text-sm text-gray-300">{log.user_name}</td>
+                <tr key={log.id} className="border-b border-gray-200 hover:bg-gray-50 transition">
+                  <td className="px-4 py-3 text-sm text-gray-600">{formatDate(log.timestamp)}</td>
+                  <td className="px-4 py-3 text-sm text-gray-600">{log.user_name}</td>
                   <td className="px-4 py-3 text-sm">
-                    <span className={clsx('px-3 py-1 rounded-full text-xs font-medium', ACTION_COLORS[log.action] || 'bg-gray-700 text-gray-300')}>
+                    <span className={clsx('px-3 py-1 rounded-full text-xs font-medium', ACTION_COLORS[log.action] || 'bg-gray-200 text-gray-600')}>
                       {log.action}
                     </span>
                   </td>
-                  <td className="px-4 py-3 text-sm text-gray-300">
+                  <td className="px-4 py-3 text-sm text-gray-600">
                     {log.entity_type}
                     {log.entity_id && ` (#${log.entity_id})`}
                   </td>

@@ -238,7 +238,7 @@ export default function ExpenseTracker() {
   }
 
   return (
-    <div className="min-h-screen bg-gray-900 p-6">
+    <div className="min-h-screen bg-gray-50 p-6">
       {/* Header */}
       <div className="mb-8">
         <div className="flex items-center justify-between mb-6">
@@ -247,8 +247,8 @@ export default function ExpenseTracker() {
               <DollarSign className="w-6 h-6 text-white" />
             </div>
             <div>
-              <h1 className="text-3xl font-bold text-white">Expense Tracking</h1>
-              <p className="text-gray-400">Manage and approve store expenses</p>
+              <h1 className="text-3xl font-bold text-gray-900">Expense Tracking</h1>
+              <p className="text-gray-500">Manage and approve store expenses</p>
             </div>
           </div>
           <button
@@ -263,20 +263,20 @@ export default function ExpenseTracker() {
         {/* Summary Cards */}
         {summary && (
           <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-            <div className="bg-gray-800 border border-gray-700 rounded-lg p-6">
-              <p className="text-gray-400 text-sm mb-1">Total (This Month)</p>
-              <p className="text-3xl font-bold text-white">₹{summary.total_this_month.toLocaleString()}</p>
+            <div className="bg-white border border-gray-200 rounded-lg p-6">
+              <p className="text-gray-500 text-sm mb-1">Total (This Month)</p>
+              <p className="text-3xl font-bold text-gray-900">₹{summary.total_this_month.toLocaleString()}</p>
             </div>
-            <div className="bg-gray-800 border border-gray-700 rounded-lg p-6">
-              <p className="text-gray-400 text-sm mb-1">Pending Approval</p>
+            <div className="bg-white border border-gray-200 rounded-lg p-6">
+              <p className="text-gray-500 text-sm mb-1">Pending Approval</p>
               <p className="text-3xl font-bold text-yellow-400">{summary.pending_count}</p>
             </div>
-            <div className="bg-gray-800 border border-gray-700 rounded-lg p-6">
-              <p className="text-gray-400 text-sm mb-1">Approved</p>
+            <div className="bg-white border border-gray-200 rounded-lg p-6">
+              <p className="text-gray-500 text-sm mb-1">Approved</p>
               <p className="text-3xl font-bold text-green-400">{summary.approved_count}</p>
             </div>
-            <div className="bg-gray-800 border border-gray-700 rounded-lg p-6">
-              <p className="text-gray-400 text-sm mb-1">Average Daily</p>
+            <div className="bg-white border border-gray-200 rounded-lg p-6">
+              <p className="text-gray-500 text-sm mb-1">Average Daily</p>
               <p className="text-3xl font-bold text-blue-400">₹{summary.average_daily.toLocaleString()}</p>
             </div>
           </div>
@@ -284,7 +284,7 @@ export default function ExpenseTracker() {
       </div>
 
       {/* Tabs */}
-      <div className="flex gap-4 mb-6 border-b border-gray-700">
+      <div className="flex gap-4 mb-6 border-b border-gray-200">
         {(['my-expenses', 'pending-approval', 'summary'] as const).map((tab) => (
           <button
             key={tab}
@@ -293,7 +293,7 @@ export default function ExpenseTracker() {
               'px-4 py-3 font-medium transition-colors border-b-2',
               activeTab === tab
                 ? 'text-blue-400 border-blue-400'
-                : 'text-gray-400 border-transparent hover:text-gray-300'
+                : 'text-gray-500 border-transparent hover:text-gray-700'
             )}
           >
             {tab === 'my-expenses' && 'My Expenses'}
@@ -305,12 +305,12 @@ export default function ExpenseTracker() {
 
       {/* Content */}
       {activeTab === 'my-expenses' && (
-        <div className="bg-gray-800 rounded-lg border border-gray-700">
+        <div className="bg-white rounded-lg border border-gray-200">
           {/* Filters */}
-          <div className="p-6 border-b border-gray-700">
+          <div className="p-6 border-b border-gray-200">
             <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
               <div>
-                <label className="block text-sm font-medium text-gray-300 mb-2">Search</label>
+                <label className="block text-sm font-medium text-gray-600 mb-2">Search</label>
                 <div className="relative">
                   <Search className="absolute left-3 top-3 w-5 h-5 text-gray-500" />
                   <input
@@ -318,16 +318,16 @@ export default function ExpenseTracker() {
                     placeholder="Search expenses..."
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
-                    className="w-full pl-10 pr-4 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-blue-500"
+                    className="w-full pl-10 pr-4 py-2 bg-white border border-gray-200 rounded-lg text-gray-900 placeholder-gray-500 focus:outline-none focus:border-blue-500"
                   />
                 </div>
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-300 mb-2">Status</label>
+                <label className="block text-sm font-medium text-gray-600 mb-2">Status</label>
                 <select
                   value={statusFilter}
                   onChange={(e) => setStatusFilter(e.target.value as any)}
-                  className="w-full px-4 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white focus:outline-none focus:border-blue-500"
+                  className="w-full px-4 py-2 bg-white border border-gray-200 rounded-lg text-gray-900 focus:outline-none focus:border-blue-500"
                 >
                   <option value="all">All Status</option>
                   <option value="pending">Pending</option>
@@ -336,11 +336,11 @@ export default function ExpenseTracker() {
                 </select>
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-300 mb-2">Category</label>
+                <label className="block text-sm font-medium text-gray-600 mb-2">Category</label>
                 <select
                   value={categoryFilter}
                   onChange={(e) => setCategoryFilter(e.target.value as any)}
-                  className="w-full px-4 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white focus:outline-none focus:border-blue-500"
+                  className="w-full px-4 py-2 bg-white border border-gray-200 rounded-lg text-gray-900 focus:outline-none focus:border-blue-500"
                 >
                   <option value="all">All Categories</option>
                   {CATEGORIES.map((cat) => (
@@ -351,21 +351,21 @@ export default function ExpenseTracker() {
                 </select>
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-300 mb-2">From</label>
+                <label className="block text-sm font-medium text-gray-600 mb-2">From</label>
                 <input
                   type="date"
                   value={dateFrom}
                   onChange={(e) => setDateFrom(e.target.value)}
-                  className="w-full px-4 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white focus:outline-none focus:border-blue-500"
+                  className="w-full px-4 py-2 bg-white border border-gray-200 rounded-lg text-gray-900 focus:outline-none focus:border-blue-500"
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-300 mb-2">To</label>
+                <label className="block text-sm font-medium text-gray-600 mb-2">To</label>
                 <input
                   type="date"
                   value={dateTo}
                   onChange={(e) => setDateTo(e.target.value)}
-                  className="w-full px-4 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white focus:outline-none focus:border-blue-500"
+                  className="w-full px-4 py-2 bg-white border border-gray-200 rounded-lg text-gray-900 focus:outline-none focus:border-blue-500"
                 />
               </div>
             </div>
@@ -375,20 +375,20 @@ export default function ExpenseTracker() {
           <div className="overflow-x-auto">
             <table className="w-full">
               <thead>
-                <tr className="border-b border-gray-700">
-                  <th className="px-6 py-3 text-left text-sm font-semibold text-gray-300">ID</th>
-                  <th className="px-6 py-3 text-left text-sm font-semibold text-gray-300">Category</th>
-                  <th className="px-6 py-3 text-left text-sm font-semibold text-gray-300">Amount</th>
-                  <th className="px-6 py-3 text-left text-sm font-semibold text-gray-300">Description</th>
-                  <th className="px-6 py-3 text-left text-sm font-semibold text-gray-300">Status</th>
-                  <th className="px-6 py-3 text-left text-sm font-semibold text-gray-300">Date</th>
-                  <th className="px-6 py-3 text-left text-sm font-semibold text-gray-300">Actions</th>
+                <tr className="border-b border-gray-200">
+                  <th className="px-6 py-3 text-left text-sm font-semibold text-gray-600">ID</th>
+                  <th className="px-6 py-3 text-left text-sm font-semibold text-gray-600">Category</th>
+                  <th className="px-6 py-3 text-left text-sm font-semibold text-gray-600">Amount</th>
+                  <th className="px-6 py-3 text-left text-sm font-semibold text-gray-600">Description</th>
+                  <th className="px-6 py-3 text-left text-sm font-semibold text-gray-600">Status</th>
+                  <th className="px-6 py-3 text-left text-sm font-semibold text-gray-600">Date</th>
+                  <th className="px-6 py-3 text-left text-sm font-semibold text-gray-600">Actions</th>
                 </tr>
               </thead>
               <tbody>
                 {filteredExpenses.map((expense) => (
-                  <tr key={expense.id} className="border-b border-gray-700 hover:bg-gray-700/50 transition-colors">
-                    <td className="px-6 py-4 text-sm text-gray-300">{expense.expense_id}</td>
+                  <tr key={expense.id} className="border-b border-gray-200 hover:bg-gray-50 transition-colors">
+                    <td className="px-6 py-4 text-sm text-gray-600">{expense.expense_id}</td>
                     <td className="px-6 py-4 text-sm">
                       {CATEGORIES.find((c) => c.value === expense.category) && (
                         <span
@@ -401,15 +401,15 @@ export default function ExpenseTracker() {
                         </span>
                       )}
                     </td>
-                    <td className="px-6 py-4 text-sm font-semibold text-white">₹{expense.amount.toLocaleString()}</td>
-                    <td className="px-6 py-4 text-sm text-gray-300 max-w-xs truncate">{expense.description}</td>
+                    <td className="px-6 py-4 text-sm font-semibold text-gray-900">₹{expense.amount.toLocaleString()}</td>
+                    <td className="px-6 py-4 text-sm text-gray-600 max-w-xs truncate">{expense.description}</td>
                     <td className="px-6 py-4 text-sm">
                       <span className={clsx('inline-flex items-center gap-2 px-2 py-1 rounded-full text-xs font-medium', getStatusBadge(expense.status))}>
                         {getStatusIcon(expense.status)}
                         {expense.status.charAt(0).toUpperCase() + expense.status.slice(1)}
                       </span>
                     </td>
-                    <td className="px-6 py-4 text-sm text-gray-400">
+                    <td className="px-6 py-4 text-sm text-gray-500">
                       {new Date(expense.submitted_at).toLocaleDateString()}
                     </td>
                     <td className="px-6 py-4 text-sm">
@@ -429,21 +429,21 @@ export default function ExpenseTracker() {
 
           {filteredExpenses.length === 0 && (
             <div className="p-12 text-center">
-              <p className="text-gray-400">No expenses found</p>
+              <p className="text-gray-500">No expenses found</p>
             </div>
           )}
         </div>
       )}
 
       {activeTab === 'pending-approval' && (
-        <div className="bg-gray-800 rounded-lg border border-gray-700 p-6">
+        <div className="bg-white rounded-lg border border-gray-200 p-6">
           <div className="space-y-4">
             {expenses.filter((e) => e.status === 'pending').map((expense) => (
-              <div key={expense.id} className="bg-gray-700 rounded-lg p-4 border border-gray-600">
+              <div key={expense.id} className="bg-gray-50 rounded-lg p-4 border border-gray-200">
                 <div className="flex justify-between items-start mb-4">
                   <div>
-                    <p className="font-semibold text-white">{expense.description}</p>
-                    <p className="text-sm text-gray-400">{expense.expense_id}</p>
+                    <p className="font-semibold text-gray-900">{expense.description}</p>
+                    <p className="text-sm text-gray-500">{expense.expense_id}</p>
                   </div>
                   <span className="text-2xl font-bold text-blue-400">₹{expense.amount.toLocaleString()}</span>
                 </div>
@@ -469,7 +469,7 @@ export default function ExpenseTracker() {
               </div>
             ))}
             {expenses.filter((e) => e.status === 'pending').length === 0 && (
-              <p className="text-gray-400 text-center py-8">No pending expenses for approval</p>
+              <p className="text-gray-500 text-center py-8">No pending expenses for approval</p>
             )}
           </div>
         </div>
@@ -478,8 +478,8 @@ export default function ExpenseTracker() {
       {activeTab === 'summary' && summary && (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
           {/* Category breakdown chart */}
-          <div className="bg-gray-800 rounded-lg border border-gray-700 p-6">
-            <h3 className="text-lg font-semibold text-white mb-6 flex items-center gap-2">
+          <div className="bg-white rounded-lg border border-gray-200 p-6">
+            <h3 className="text-lg font-semibold text-gray-900 mb-6 flex items-center gap-2">
               <BarChart3 className="w-5 h-5" />
               Spending by Category
             </h3>
@@ -490,10 +490,10 @@ export default function ExpenseTracker() {
                 return (
                   <div key={cat.value}>
                     <div className="flex justify-between items-center mb-2">
-                      <span className="text-sm font-medium text-gray-300">{cat.label}</span>
-                      <span className="text-sm font-semibold text-white">₹{amount.toLocaleString()}</span>
+                      <span className="text-sm font-medium text-gray-600">{cat.label}</span>
+                      <span className="text-sm font-semibold text-gray-900">₹{amount.toLocaleString()}</span>
                     </div>
-                    <div className="w-full bg-gray-700 rounded-full h-2">
+                    <div className="w-full bg-gray-200 rounded-full h-2">
                       <div
                         className="bg-blue-500 h-2 rounded-full transition-all"
                         style={{ width: `${percentage}%` }}
@@ -506,26 +506,26 @@ export default function ExpenseTracker() {
           </div>
 
           {/* Summary stats */}
-          <div className="bg-gray-800 rounded-lg border border-gray-700 p-6">
-            <h3 className="text-lg font-semibold text-white mb-6 flex items-center gap-2">
+          <div className="bg-white rounded-lg border border-gray-200 p-6">
+            <h3 className="text-lg font-semibold text-gray-900 mb-6 flex items-center gap-2">
               <TrendingUp className="w-5 h-5" />
               Summary Statistics
             </h3>
             <div className="space-y-4">
-              <div className="flex justify-between items-center pb-4 border-b border-gray-700">
-                <span className="text-gray-400">Total Expenses</span>
-                <span className="text-2xl font-bold text-white">₹{summary.total_this_month.toLocaleString()}</span>
+              <div className="flex justify-between items-center pb-4 border-b border-gray-200">
+                <span className="text-gray-500">Total Expenses</span>
+                <span className="text-2xl font-bold text-gray-900">₹{summary.total_this_month.toLocaleString()}</span>
               </div>
-              <div className="flex justify-between items-center pb-4 border-b border-gray-700">
-                <span className="text-gray-400">Pending Approval</span>
+              <div className="flex justify-between items-center pb-4 border-b border-gray-200">
+                <span className="text-gray-500">Pending Approval</span>
                 <span className="text-2xl font-bold text-yellow-400">{summary.pending_count}</span>
               </div>
-              <div className="flex justify-between items-center pb-4 border-b border-gray-700">
-                <span className="text-gray-400">Approved</span>
+              <div className="flex justify-between items-center pb-4 border-b border-gray-200">
+                <span className="text-gray-500">Approved</span>
                 <span className="text-2xl font-bold text-green-400">{summary.approved_count}</span>
               </div>
               <div className="flex justify-between items-center">
-                <span className="text-gray-400">Daily Average</span>
+                <span className="text-gray-500">Daily Average</span>
                 <span className="text-2xl font-bold text-blue-400">₹{summary.average_daily.toLocaleString()}</span>
               </div>
             </div>
@@ -536,23 +536,23 @@ export default function ExpenseTracker() {
       {/* Submit Expense Modal */}
       {showSubmitModal && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-gray-800 rounded-lg border border-gray-700 max-w-md w-full">
-            <div className="border-b border-gray-700 px-6 py-4 flex items-center justify-between">
-              <h2 className="text-lg font-semibold text-white">Submit Expense</h2>
+          <div className="bg-white rounded-lg border border-gray-200 max-w-md w-full">
+            <div className="border-b border-gray-200 px-6 py-4 flex items-center justify-between">
+              <h2 className="text-lg font-semibold text-gray-900">Submit Expense</h2>
               <button
                 onClick={() => setShowSubmitModal(false)}
-                className="text-gray-400 hover:text-white transition-colors"
+                className="text-gray-500 hover:text-gray-700 transition-colors"
               >
                 <XIcon className="w-5 h-5" />
               </button>
             </div>
             <div className="p-6 space-y-4">
               <div>
-                <label className="block text-sm font-medium text-gray-300 mb-2">Category</label>
+                <label className="block text-sm font-medium text-gray-600 mb-2">Category</label>
                 <select
                   value={formCategory}
                   onChange={(e) => setFormCategory(e.target.value as ExpenseCategory)}
-                  className="w-full px-4 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white focus:outline-none focus:border-blue-500"
+                  className="w-full px-4 py-2 bg-white border border-gray-200 rounded-lg text-gray-900 focus:outline-none focus:border-blue-500"
                 >
                   {CATEGORIES.map((cat) => (
                     <option key={cat.value} value={cat.value}>
@@ -562,36 +562,36 @@ export default function ExpenseTracker() {
                 </select>
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-300 mb-2">Amount (₹)</label>
+                <label className="block text-sm font-medium text-gray-600 mb-2">Amount (₹)</label>
                 <input
                   type="number"
                   value={formAmount}
                   onChange={(e) => setFormAmount(e.target.value)}
                   placeholder="0.00"
-                  className="w-full px-4 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-blue-500"
+                  className="w-full px-4 py-2 bg-white border border-gray-200 rounded-lg text-gray-900 placeholder-gray-500 focus:outline-none focus:border-blue-500"
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-300 mb-2">Description</label>
+                <label className="block text-sm font-medium text-gray-600 mb-2">Description</label>
                 <textarea
                   value={formDescription}
                   onChange={(e) => setFormDescription(e.target.value)}
                   placeholder="Enter expense details..."
                   rows={3}
-                  className="w-full px-4 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-blue-500"
+                  className="w-full px-4 py-2 bg-white border border-gray-200 rounded-lg text-gray-900 placeholder-gray-500 focus:outline-none focus:border-blue-500"
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-300 mb-2">Date</label>
+                <label className="block text-sm font-medium text-gray-600 mb-2">Date</label>
                 <input
                   type="date"
                   value={formDate}
                   onChange={(e) => setFormDate(e.target.value)}
-                  className="w-full px-4 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white focus:outline-none focus:border-blue-500"
+                  className="w-full px-4 py-2 bg-white border border-gray-200 rounded-lg text-gray-900 focus:outline-none focus:border-blue-500"
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-300 mb-2">Attach Bill / Receipt</label>
+                <label className="block text-sm font-medium text-gray-600 mb-2">Attach Bill / Receipt</label>
                 <ExpenseBillUpload
                   onBillUpload={(_file, _hash) => {
                     toast.success('Bill attached successfully');
@@ -599,10 +599,10 @@ export default function ExpenseTracker() {
                 />
               </div>
             </div>
-            <div className="border-t border-gray-700 px-6 py-4 flex gap-3 justify-end">
+            <div className="border-t border-gray-200 px-6 py-4 flex gap-3 justify-end">
               <button
                 onClick={() => setShowSubmitModal(false)}
-                className="px-4 py-2 rounded-lg text-gray-300 hover:bg-gray-700 transition-colors"
+                className="px-4 py-2 rounded-lg text-gray-600 hover:bg-gray-100 transition-colors"
               >
                 Cancel
               </button>
@@ -620,41 +620,41 @@ export default function ExpenseTracker() {
       {/* Reject Expense Modal */}
       {showRejectModal && selectedExpense && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-gray-800 rounded-lg border border-gray-700 max-w-md w-full">
-            <div className="border-b border-gray-700 px-6 py-4 flex items-center justify-between">
-              <h2 className="text-lg font-semibold text-white">Reject Expense</h2>
+          <div className="bg-white rounded-lg border border-gray-200 max-w-md w-full">
+            <div className="border-b border-gray-200 px-6 py-4 flex items-center justify-between">
+              <h2 className="text-lg font-semibold text-gray-900">Reject Expense</h2>
               <button
                 onClick={() => {
                   setShowRejectModal(false);
                   setRejectionReason('');
                 }}
-                className="text-gray-400 hover:text-white transition-colors"
+                className="text-gray-500 hover:text-gray-700 transition-colors"
               >
                 <XIcon className="w-5 h-5" />
               </button>
             </div>
             <div className="p-6 space-y-4">
-              <p className="text-gray-300">
+              <p className="text-gray-600">
                 <strong>Expense:</strong> {selectedExpense.description}
               </p>
               <div>
-                <label className="block text-sm font-medium text-gray-300 mb-2">Reason for Rejection</label>
+                <label className="block text-sm font-medium text-gray-600 mb-2">Reason for Rejection</label>
                 <textarea
                   value={rejectionReason}
                   onChange={(e) => setRejectionReason(e.target.value)}
                   placeholder="Explain why this expense is being rejected..."
                   rows={3}
-                  className="w-full px-4 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-blue-500"
+                  className="w-full px-4 py-2 bg-white border border-gray-200 rounded-lg text-gray-900 placeholder-gray-500 focus:outline-none focus:border-blue-500"
                 />
               </div>
             </div>
-            <div className="border-t border-gray-700 px-6 py-4 flex gap-3 justify-end">
+            <div className="border-t border-gray-200 px-6 py-4 flex gap-3 justify-end">
               <button
                 onClick={() => {
                   setShowRejectModal(false);
                   setRejectionReason('');
                 }}
-                className="px-4 py-2 rounded-lg text-gray-300 hover:bg-gray-700 transition-colors"
+                className="px-4 py-2 rounded-lg text-gray-600 hover:bg-gray-100 transition-colors"
               >
                 Cancel
               </button>

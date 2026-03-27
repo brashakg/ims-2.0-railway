@@ -165,7 +165,7 @@ export function UserManagementSection() {
   };
 
   if (isLoading) {
-    return <div className="flex items-center justify-center h-48"><div className="text-gray-400">Loading...</div></div>;
+    return <div className="flex items-center justify-center h-48"><div className="text-gray-500">Loading...</div></div>;
   }
 
   return (
@@ -173,9 +173,9 @@ export function UserManagementSection() {
       <div className="card">
         <div className="flex items-center justify-between mb-6">
           <div>
-            <h2 className="text-lg font-semibold text-white">User Management</h2>
+            <h2 className="text-lg font-semibold text-gray-900">User Management</h2>
             {user?.activeRole === 'STORE_MANAGER' && (
-              <p className="text-xs text-gray-400 mt-1">Showing users from your managed stores</p>
+              <p className="text-xs text-gray-500 mt-1">Showing users from your managed stores</p>
             )}
           </div>
           <button
@@ -187,7 +187,7 @@ export function UserManagementSection() {
           </button>
         </div>
 
-        <p className="text-sm text-gray-400 mb-4">
+        <p className="text-sm text-gray-500 mb-4">
           {user?.activeRole === 'STORE_MANAGER'
             ? 'Create and manage store staff. You can assign: Optometrist, Sales Cashier, Sales Staff, Workshop Staff roles.'
             : 'Create users and assign roles. Users can have multiple roles and access to multiple stores.'}
@@ -195,14 +195,14 @@ export function UserManagementSection() {
 
         <div className="overflow-x-auto">
           <table className="w-full">
-            <thead className="bg-gray-900 border-b border-gray-700">
+            <thead className="bg-gray-50 border-b border-gray-200">
               <tr>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">User</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">Roles</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">Stores</th>
-                <th className="px-4 py-3 text-center text-xs font-medium text-gray-400 uppercase">Discount Cap</th>
-                <th className="px-4 py-3 text-center text-xs font-medium text-gray-400 uppercase">Status</th>
-                <th className="px-4 py-3 text-center text-xs font-medium text-gray-400 uppercase">Actions</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">User</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Roles</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Stores</th>
+                <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Discount Cap</th>
+                <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Status</th>
+                <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-200">
@@ -220,10 +220,10 @@ export function UserManagementSection() {
                   const canDelete = canManageUser(u) && u.id !== user?.id;
 
                   return (
-                    <tr key={u.id} className="hover:bg-gray-900">
+                    <tr key={u.id} className="hover:bg-gray-50">
                       <td className="px-4 py-3">
-                        <p className="font-medium text-white">{u.fullName}</p>
-                        <p className="text-xs text-gray-400">{u.email}</p>
+                        <p className="font-medium text-gray-900">{u.fullName}</p>
+                        <p className="text-xs text-gray-500">{u.email}</p>
                       </td>
                       <td className="px-4 py-3">
                         <div className="flex flex-wrap gap-1">
@@ -234,7 +234,7 @@ export function UserManagementSection() {
                               role === 'ADMIN' ? 'bg-red-100 text-red-700' :
                               role === 'AREA_MANAGER' ? 'bg-orange-100 text-orange-700' :
                               role === 'STORE_MANAGER' ? 'bg-blue-100 text-blue-700' :
-                              'bg-gray-700 text-gray-300'
+                              'bg-gray-100 text-gray-600'
                             )}>
                               {role.replace('_', ' ')}
                             </span>
@@ -253,7 +253,7 @@ export function UserManagementSection() {
                               );
                             })}
                             {u.accessibleStores.length > 3 && (
-                              <span className="text-xs text-gray-400">+{u.accessibleStores.length - 3} more</span>
+                              <span className="text-xs text-gray-500">+{u.accessibleStores.length - 3} more</span>
                             )}
                           </div>
                         ) : (
@@ -312,13 +312,13 @@ export function UserManagementSection() {
         </div>
 
         {/* Available Roles Reference */}
-        <div className="mt-6 pt-6 border-t border-gray-700">
-          <h3 className="text-sm font-medium text-gray-300 mb-3">
+        <div className="mt-6 pt-6 border-t border-gray-200">
+          <h3 className="text-sm font-medium text-gray-600 mb-3">
             {user?.activeRole === 'STORE_MANAGER' ? 'Assignable Roles' : 'Available Roles'}
           </h3>
           <div className="flex flex-wrap gap-2">
             {(ASSIGNABLE_ROLES[user?.activeRole || ''] || []).map(role => (
-              <span key={role} className="text-xs bg-gray-700 px-3 py-1 rounded">
+              <span key={role} className="text-xs bg-gray-100 px-3 py-1 rounded">
                 {role.replace('_', ' ')}
               </span>
             ))}
@@ -384,12 +384,12 @@ function UserModal({
 
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-      <div className="bg-gray-800 rounded-xl w-full max-w-xl max-h-[90vh] overflow-hidden flex flex-col">
-        <div className="flex items-center justify-between p-4 border-b border-gray-700">
-          <h2 className="text-lg font-semibold text-white">
+      <div className="bg-white border border-gray-200 rounded-xl w-full max-w-xl max-h-[90vh] overflow-hidden flex flex-col">
+        <div className="flex items-center justify-between p-4 border-b border-gray-200">
+          <h2 className="text-lg font-semibold text-gray-900">
             {user ? 'Edit User' : 'Add New User'}
           </h2>
-          <button onClick={onClose} className="p-2 hover:bg-gray-700 rounded-lg">
+          <button onClick={onClose} className="p-2 hover:bg-gray-100 rounded-lg">
             <X className="w-5 h-5 text-gray-400" />
           </button>
         </div>
@@ -397,66 +397,66 @@ function UserModal({
         <div className="flex-1 overflow-y-auto p-4 space-y-4">
           <div className="grid grid-cols-2 gap-4">
             <div>
-              <label className="block text-sm font-medium text-gray-300 mb-1">Username *</label>
+              <label className="block text-sm font-medium text-gray-600 mb-1">Username *</label>
               <input
                 type="text"
                 value={formData.username || ''}
                 onChange={e => setFormData(prev => ({ ...prev, username: e.target.value }))}
-                className="w-full px-3 py-2 border border-gray-700 rounded-lg focus:border-bv-red-500 focus:outline-none"
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-bv-red-500 focus:outline-none"
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-gray-300 mb-1">Full Name *</label>
+              <label className="block text-sm font-medium text-gray-600 mb-1">Full Name *</label>
               <input
                 type="text"
                 value={formData.fullName || ''}
                 onChange={e => setFormData(prev => ({ ...prev, fullName: e.target.value }))}
-                className="w-full px-3 py-2 border border-gray-700 rounded-lg focus:border-bv-red-500 focus:outline-none"
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-bv-red-500 focus:outline-none"
               />
             </div>
           </div>
 
           <div className="grid grid-cols-2 gap-4">
             <div>
-              <label className="block text-sm font-medium text-gray-300 mb-1">Email *</label>
+              <label className="block text-sm font-medium text-gray-600 mb-1">Email *</label>
               <input
                 type="email"
                 value={formData.email || ''}
                 onChange={e => setFormData(prev => ({ ...prev, email: e.target.value }))}
-                className="w-full px-3 py-2 border border-gray-700 rounded-lg focus:border-bv-red-500 focus:outline-none"
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-bv-red-500 focus:outline-none"
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-gray-300 mb-1">Phone</label>
+              <label className="block text-sm font-medium text-gray-600 mb-1">Phone</label>
               <input
                 type="tel"
                 value={formData.phone || ''}
                 onChange={e => setFormData(prev => ({ ...prev, phone: e.target.value }))}
-                className="w-full px-3 py-2 border border-gray-700 rounded-lg focus:border-bv-red-500 focus:outline-none"
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-bv-red-500 focus:outline-none"
               />
             </div>
           </div>
 
           {!user && (
             <div>
-              <label className="block text-sm font-medium text-gray-300 mb-1">Password *</label>
+              <label className="block text-sm font-medium text-gray-600 mb-1">Password *</label>
               <input
                 type="password"
                 value={password}
                 onChange={e => setPassword(e.target.value)}
-                className="w-full px-3 py-2 border border-gray-700 rounded-lg focus:border-bv-red-500 focus:outline-none"
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-bv-red-500 focus:outline-none"
               />
             </div>
           )}
 
           <div>
-            <label className="block text-sm font-medium text-gray-300 mb-2">Roles *</label>
+            <label className="block text-sm font-medium text-gray-600 mb-2">Roles *</label>
             {allowedRoles.length === 0 ? (
-              <p className="text-sm text-gray-400">You don't have permission to assign roles.</p>
+              <p className="text-sm text-gray-500">You don't have permission to assign roles.</p>
             ) : (
               <div className="grid grid-cols-2 gap-2">
                 {allowedRoles.map(role => (
-                  <label key={role} className="flex items-center gap-2 p-2 bg-gray-900 rounded cursor-pointer hover:bg-gray-700">
+                  <label key={role} className="flex items-center gap-2 p-2 bg-gray-50 border border-gray-200 rounded cursor-pointer hover:bg-gray-100">
                     <input
                       type="checkbox"
                       checked={formData.roles?.includes(role) || false}
@@ -476,18 +476,18 @@ function UserModal({
               </div>
             )}
             {currentUserRole === 'STORE_MANAGER' && (
-              <p className="text-xs text-gray-400 mt-2">As Store Manager, you can only assign store-level roles.</p>
+              <p className="text-xs text-gray-500 mt-2">As Store Manager, you can only assign store-level roles.</p>
             )}
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-gray-300 mb-2">Accessible Stores</label>
+            <label className="block text-sm font-medium text-gray-600 mb-2">Accessible Stores</label>
             {allowedStores.length === 0 ? (
-              <p className="text-sm text-gray-400">No stores available.</p>
+              <p className="text-sm text-gray-500">No stores available.</p>
             ) : (
               <div className="grid grid-cols-2 gap-2">
                 {allowedStores.map(store => (
-                  <label key={store.id} className="flex items-center gap-2 p-2 bg-gray-900 rounded cursor-pointer hover:bg-gray-700">
+                  <label key={store.id} className="flex items-center gap-2 p-2 bg-gray-50 border border-gray-200 rounded cursor-pointer hover:bg-gray-100">
                     <input
                       type="checkbox"
                       checked={formData.accessibleStores?.includes(store.id) || false}
@@ -507,28 +507,28 @@ function UserModal({
               </div>
             )}
             {currentUserRole === 'STORE_MANAGER' && (
-              <p className="text-xs text-gray-400 mt-2">You can only assign users to your managed stores.</p>
+              <p className="text-xs text-gray-500 mt-2">You can only assign users to your managed stores.</p>
             )}
           </div>
 
           <div className="grid grid-cols-2 gap-4">
             <div>
-              <label className="block text-sm font-medium text-gray-300 mb-1">Discount Cap (%)</label>
+              <label className="block text-sm font-medium text-gray-600 mb-1">Discount Cap (%)</label>
               <input
                 type="number"
                 value={formData.discountCap || 10}
                 onChange={e => setFormData(prev => ({ ...prev, discountCap: parseInt(e.target.value) }))}
                 min="0"
                 max="100"
-                className="w-full px-3 py-2 border border-gray-700 rounded-lg focus:border-bv-red-500 focus:outline-none"
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-bv-red-500 focus:outline-none"
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-gray-300 mb-1">Status</label>
+              <label className="block text-sm font-medium text-gray-600 mb-1">Status</label>
               <select
                 value={formData.isActive ? 'active' : 'inactive'}
                 onChange={e => setFormData(prev => ({ ...prev, isActive: e.target.value === 'active' }))}
-                className="w-full px-3 py-2 bg-gray-900 border border-gray-700 text-white rounded-lg focus:border-bv-red-500 focus:outline-none"
+                className="w-full px-3 py-2 bg-white border border-gray-300 text-gray-900 rounded-lg focus:border-bv-red-500 focus:outline-none"
               >
                 <option value="active">Active</option>
                 <option value="inactive">Inactive (Suspended)</option>
@@ -538,7 +538,7 @@ function UserModal({
 
           {/* User-wise Module Access */}
           <div>
-            <label className="block text-sm font-medium text-gray-300 mb-2">Module Access</label>
+            <label className="block text-sm font-medium text-gray-600 mb-2">Module Access</label>
             <p className="text-xs text-gray-500 mb-2">Control which modules this user can access (overrides role defaults)</p>
             <div className="grid grid-cols-3 gap-2">
               {['POS', 'Clinical', 'Workshop', 'Inventory', 'Reports', 'HR', 'Finance', 'CRM', 'Tasks'].map(mod => {
@@ -546,7 +546,7 @@ function UserModal({
                 const userModules = (formData as any).moduleAccess || {};
                 const isEnabled = userModules[moduleKey] !== false;
                 return (
-                  <label key={mod} className={clsx('flex items-center gap-2 p-2 rounded cursor-pointer', isEnabled ? 'bg-green-900/30' : 'bg-gray-900')}>
+                  <label key={mod} className={clsx('flex items-center gap-2 p-2 rounded cursor-pointer', isEnabled ? 'bg-green-50 border border-green-200' : 'bg-gray-50 border border-gray-200')}>
                     <input
                       type="checkbox"
                       checked={isEnabled}
@@ -554,9 +554,9 @@ function UserModal({
                         const current = (formData as any).moduleAccess || {};
                         setFormData(prev => ({ ...prev, moduleAccess: { ...current, [moduleKey]: e.target.checked } } as any));
                       }}
-                      className="rounded border-gray-600"
+                      className="rounded border-gray-300"
                     />
-                    <span className="text-sm text-gray-300">{mod}</span>
+                    <span className="text-sm text-gray-600">{mod}</span>
                   </label>
                 );
               })}
@@ -565,7 +565,7 @@ function UserModal({
 
           {/* User-wise Permissions */}
           <div>
-            <label className="block text-sm font-medium text-gray-300 mb-2">Individual Permissions</label>
+            <label className="block text-sm font-medium text-gray-600 mb-2">Individual Permissions</label>
             <div className="grid grid-cols-2 gap-2">
               {[
                 { key: 'can_void_orders', label: 'Void/Cancel Orders' },
@@ -578,7 +578,7 @@ function UserModal({
                 const userPerms = (formData as any).permissions || {};
                 const isGranted = userPerms[perm.key] !== false;
                 return (
-                  <label key={perm.key} className="flex items-center gap-2 p-2 bg-gray-900 rounded cursor-pointer hover:bg-gray-700">
+                  <label key={perm.key} className="flex items-center gap-2 p-2 bg-gray-50 border border-gray-200 rounded cursor-pointer hover:bg-gray-100">
                     <input
                       type="checkbox"
                       checked={isGranted}
@@ -586,9 +586,9 @@ function UserModal({
                         const current = (formData as any).permissions || {};
                         setFormData(prev => ({ ...prev, permissions: { ...current, [perm.key]: e.target.checked } } as any));
                       }}
-                      className="rounded border-gray-600"
+                      className="rounded border-gray-300"
                     />
-                    <span className="text-sm text-gray-300">{perm.label}</span>
+                    <span className="text-sm text-gray-600">{perm.label}</span>
                   </label>
                 );
               })}
@@ -596,7 +596,7 @@ function UserModal({
           </div>
         </div>
 
-        <div className="p-4 border-t border-gray-700 flex justify-end gap-3">
+        <div className="p-4 border-t border-gray-200 flex justify-end gap-3">
           <button onClick={onClose} className="btn-outline">
             Cancel
           </button>

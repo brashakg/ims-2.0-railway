@@ -54,7 +54,7 @@ export function Pagination({ currentPage, totalItems, pageSize, onPageChange }: 
   };
 
   return (
-    <div className="flex flex-col sm:flex-row items-center justify-between gap-3 pt-4 border-t border-gray-700">
+    <div className="flex flex-col sm:flex-row items-center justify-between gap-3 pt-4 border-t border-gray-200">
       <p className="text-sm text-gray-400">
         Showing {startItem}-{endItem} of {totalItems} items
       </p>
@@ -68,7 +68,7 @@ export function Pagination({ currentPage, totalItems, pageSize, onPageChange }: 
             'p-2 rounded-lg transition-colors',
             currentPage === 1
               ? 'text-gray-600 cursor-not-allowed'
-              : 'text-gray-300 hover:bg-gray-700 hover:text-white'
+              : 'text-gray-600 hover:bg-gray-100 hover:text-gray-900'
           )}
           aria-label="Previous page"
         >
@@ -89,7 +89,7 @@ export function Pagination({ currentPage, totalItems, pageSize, onPageChange }: 
                 'min-w-[36px] h-9 rounded-lg text-sm font-medium transition-colors',
                 currentPage === page
                   ? 'bg-bv-red-600 text-white'
-                  : 'text-gray-300 hover:bg-gray-700 hover:text-white'
+                  : 'text-gray-600 hover:bg-gray-100 hover:text-gray-900'
               )}
             >
               {page}
@@ -105,7 +105,7 @@ export function Pagination({ currentPage, totalItems, pageSize, onPageChange }: 
             'p-2 rounded-lg transition-colors',
             currentPage === totalPages
               ? 'text-gray-600 cursor-not-allowed'
-              : 'text-gray-300 hover:bg-gray-700 hover:text-white'
+              : 'text-gray-600 hover:bg-gray-100 hover:text-gray-900'
           )}
           aria-label="Next page"
         >

@@ -99,35 +99,35 @@ export function CustomerFeedback() {
       {/* Header */}
       <div>
         <h1 className="text-3xl font-bold">Customer Feedback</h1>
-        <p className="text-gray-400">NPS scores, sentiment analysis, complaints & store comparison</p>
+        <p className="text-gray-500">NPS scores, sentiment analysis, complaints & store comparison</p>
       </div>
 
       {/* Summary Stats */}
       <div className="grid grid-cols-4 gap-4">
-        <div className="bg-gray-800 rounded-lg p-4">
-          <p className="text-gray-400 text-sm mb-1">NPS Score</p>
+        <div className="bg-white border border-gray-200 rounded-lg p-4">
+          <p className="text-gray-500 text-sm mb-1">NPS Score</p>
           <p className="text-2xl font-bold text-blue-400">{npsScore.toFixed(0)}</p>
-          <p className="text-xs text-gray-400">Excellent</p>
+          <p className="text-xs text-gray-500">Excellent</p>
         </div>
-        <div className="bg-gray-800 rounded-lg p-4">
-          <p className="text-gray-400 text-sm mb-1">Avg Rating</p>
+        <div className="bg-white border border-gray-200 rounded-lg p-4">
+          <p className="text-gray-500 text-sm mb-1">Avg Rating</p>
           <p className="text-2xl font-bold text-green-400">{avgNPS}/10</p>
-          <p className="text-xs text-gray-400">{npsScores.length} responses</p>
+          <p className="text-xs text-gray-500">{npsScores.length} responses</p>
         </div>
-        <div className="bg-gray-800 rounded-lg p-4">
-          <p className="text-gray-400 text-sm mb-1">Positive Sentiment</p>
+        <div className="bg-white border border-gray-200 rounded-lg p-4">
+          <p className="text-gray-500 text-sm mb-1">Positive Sentiment</p>
           <p className="text-2xl font-bold text-green-400">{sentiments.positive}</p>
-          <p className="text-xs text-gray-400">{((sentiments.positive / FEEDBACK_DATA.length) * 100).toFixed(0)}% of feedback</p>
+          <p className="text-xs text-gray-500">{((sentiments.positive / FEEDBACK_DATA.length) * 100).toFixed(0)}% of feedback</p>
         </div>
-        <div className="bg-gray-800 rounded-lg p-4">
-          <p className="text-gray-400 text-sm mb-1">Open Complaints</p>
+        <div className="bg-white border border-gray-200 rounded-lg p-4">
+          <p className="text-gray-500 text-sm mb-1">Open Complaints</p>
           <p className="text-2xl font-bold text-orange-400">{complaints.filter(c => c.status === 'open').length}</p>
-          <p className="text-xs text-gray-400">Need attention</p>
+          <p className="text-xs text-gray-500">Need attention</p>
         </div>
       </div>
 
       {/* Tabs */}
-      <div className="flex gap-2 border-b border-gray-700">
+      <div className="flex gap-2 border-b border-gray-200">
         {(['nps', 'sentiment', 'complaints', 'comparison'] as const).map((tab) => (
           <button
             key={tab}
@@ -136,7 +136,7 @@ export function CustomerFeedback() {
               'px-4 py-3 font-medium border-b-2 transition-colors',
               activeTab === tab
                 ? 'border-blue-500 text-blue-400'
-                : 'border-transparent text-gray-400 hover:text-gray-300'
+                : 'border-transparent text-gray-500 hover:text-gray-700'
             )}
           >
             {tab === 'nps' ? 'NPS' : tab === 'sentiment' ? 'Sentiment' : tab === 'complaints' ? 'Complaints' : 'Comparison'}
@@ -147,8 +147,8 @@ export function CustomerFeedback() {
       {activeTab === 'nps' && (
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
           {/* NPS Distribution */}
-          <div className="bg-gray-800 rounded-lg p-6 border border-gray-700">
-            <h3 className="text-lg font-semibold text-white mb-4">Score Distribution</h3>
+          <div className="bg-white border border-gray-200 rounded-lg p-6 border border-gray-200">
+            <h3 className="text-lg font-semibold text-gray-900 mb-4">Score Distribution</h3>
             <div className="space-y-3">
               {[10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0].map((score) => {
                 const count = npsScores.filter(f => (f.score || 0) === score).length;
@@ -162,9 +162,9 @@ export function CustomerFeedback() {
                       )}>
                         {score}
                       </span>
-                      <span className="text-gray-400 text-xs">{count} responses</span>
+                      <span className="text-gray-500 text-xs">{count} responses</span>
                     </div>
-                    <div className="w-full bg-gray-700 rounded-full h-2 overflow-hidden">
+                    <div className="w-full bg-gray-100 rounded-full h-2 overflow-hidden">
                       <div
                         className={clsx(
                           'h-full',
@@ -180,31 +180,31 @@ export function CustomerFeedback() {
           </div>
 
           {/* NPS Categories */}
-          <div className="bg-gray-800 rounded-lg p-6 border border-gray-700">
-            <h3 className="text-lg font-semibold text-white mb-4">Respondent Segments</h3>
+          <div className="bg-white border border-gray-200 rounded-lg p-6 border border-gray-200">
+            <h3 className="text-lg font-semibold text-gray-900 mb-4">Respondent Segments</h3>
             <div className="space-y-4">
-              <div className="p-4 bg-green-900/30 border border-green-700 rounded-lg">
+              <div className="p-4 bg-green-50 border border-green-200 rounded-lg">
                 <div className="flex items-center justify-between mb-2">
                   <span className="text-green-400 font-semibold">Promoters (9-10)</span>
                   <span className="text-2xl font-bold text-green-400">{promoters}</span>
                 </div>
-                <p className="text-gray-400 text-xs">Loyal customers who will recommend</p>
+                <p className="text-gray-500 text-xs">Loyal customers who will recommend</p>
               </div>
-              <div className="p-4 bg-blue-900/30 border border-blue-700 rounded-lg">
+              <div className="p-4 bg-blue-50 border border-blue-200 rounded-lg">
                 <div className="flex items-center justify-between mb-2">
                   <span className="text-blue-400 font-semibold">Passives (7-8)</span>
                   <span className="text-2xl font-bold text-blue-400">
                     {npsScores.filter(f => (f.score || 0) >= 7 && (f.score || 0) <= 8).length}
                   </span>
                 </div>
-                <p className="text-gray-400 text-xs">Satisfied but vulnerable to competition</p>
+                <p className="text-gray-500 text-xs">Satisfied but vulnerable to competition</p>
               </div>
-              <div className="p-4 bg-orange-900/30 border border-orange-700 rounded-lg">
+              <div className="p-4 bg-orange-50 border border-orange-200 rounded-lg">
                 <div className="flex items-center justify-between mb-2">
                   <span className="text-orange-400 font-semibold">Detractors (0-6)</span>
                   <span className="text-2xl font-bold text-orange-400">{detractors}</span>
                 </div>
-                <p className="text-gray-400 text-xs">Unhappy customers who may switch</p>
+                <p className="text-gray-500 text-xs">Unhappy customers who may switch</p>
               </div>
             </div>
           </div>
@@ -214,29 +214,29 @@ export function CustomerFeedback() {
       {activeTab === 'sentiment' && (
         <div className="space-y-4">
           {/* Sentiment Pie-like display */}
-          <div className="bg-gray-800 rounded-lg p-6 border border-gray-700">
-            <h3 className="text-lg font-semibold text-white mb-4">Overall Sentiment</h3>
+          <div className="bg-white border border-gray-200 rounded-lg p-6 border border-gray-200">
+            <h3 className="text-lg font-semibold text-gray-900 mb-4">Overall Sentiment</h3>
             <div className="grid grid-cols-3 gap-4">
-              <div className="text-center p-4 bg-green-900/30 border border-green-700 rounded-lg">
+              <div className="text-center p-4 bg-green-50 border border-green-200 rounded-lg">
                 <Heart className="w-8 h-8 text-green-400 mx-auto mb-2" />
                 <p className="text-2xl font-bold text-green-400">{sentiments.positive}</p>
-                <p className="text-gray-400 text-sm">Positive</p>
+                <p className="text-gray-500 text-sm">Positive</p>
                 <p className="text-green-400 text-xs font-semibold">
                   {((sentiments.positive / FEEDBACK_DATA.length) * 100).toFixed(0)}%
                 </p>
               </div>
-              <div className="text-center p-4 bg-blue-900/30 border border-blue-700 rounded-lg">
+              <div className="text-center p-4 bg-blue-50 border border-blue-200 rounded-lg">
                 <MessageSquare className="w-8 h-8 text-blue-400 mx-auto mb-2" />
                 <p className="text-2xl font-bold text-blue-400">{sentiments.neutral}</p>
-                <p className="text-gray-400 text-sm">Neutral</p>
+                <p className="text-gray-500 text-sm">Neutral</p>
                 <p className="text-blue-400 text-xs font-semibold">
                   {((sentiments.neutral / FEEDBACK_DATA.length) * 100).toFixed(0)}%
                 </p>
               </div>
-              <div className="text-center p-4 bg-orange-900/30 border border-orange-700 rounded-lg">
+              <div className="text-center p-4 bg-orange-50 border border-orange-200 rounded-lg">
                 <AlertCircle className="w-8 h-8 text-orange-400 mx-auto mb-2" />
                 <p className="text-2xl font-bold text-orange-400">{sentiments.negative}</p>
-                <p className="text-gray-400 text-sm">Negative</p>
+                <p className="text-gray-500 text-sm">Negative</p>
                 <p className="text-orange-400 text-xs font-semibold">
                   {((sentiments.negative / FEEDBACK_DATA.length) * 100).toFixed(0)}%
                 </p>
@@ -245,26 +245,26 @@ export function CustomerFeedback() {
           </div>
 
           {/* Recent Feedback */}
-          <div className="bg-gray-800 rounded-lg p-6 border border-gray-700">
-            <h3 className="text-lg font-semibold text-white mb-4">Recent Feedback</h3>
+          <div className="bg-white border border-gray-200 rounded-lg p-6 border border-gray-200">
+            <h3 className="text-lg font-semibold text-gray-900 mb-4">Recent Feedback</h3>
             <div className="space-y-3">
               {FEEDBACK_DATA.slice(0, 5).map((feedback) => (
-                <div key={feedback.id} className="p-3 bg-gray-700 rounded-lg">
+                <div key={feedback.id} className="p-3 bg-gray-100 rounded-lg">
                   <div className="flex items-start justify-between mb-2">
                     <div>
-                      <p className="text-white font-semibold text-sm">{feedback.customer}</p>
-                      <p className="text-gray-400 text-xs">{new Date(feedback.date).toLocaleDateString()}</p>
+                      <p className="text-gray-900 font-semibold text-sm">{feedback.customer}</p>
+                      <p className="text-gray-500 text-xs">{new Date(feedback.date).toLocaleDateString()}</p>
                     </div>
                     <span className={clsx(
                       'px-2 py-1 rounded text-xs font-semibold',
-                      feedback.sentiment === 'positive' ? 'bg-green-900 text-green-300' :
-                      feedback.sentiment === 'neutral' ? 'bg-blue-900 text-blue-300' :
-                      'bg-orange-900 text-orange-300'
+                      feedback.sentiment === 'positive' ? 'bg-green-100 text-green-700' :
+                      feedback.sentiment === 'neutral' ? 'bg-blue-100 text-blue-700' :
+                      'bg-orange-100 text-orange-700'
                     )}>
                       {feedback.sentiment}
                     </span>
                   </div>
-                  <p className="text-gray-300 text-sm">{feedback.message}</p>
+                  <p className="text-gray-600 text-sm">{feedback.message}</p>
                 </div>
               ))}
             </div>
@@ -275,11 +275,11 @@ export function CustomerFeedback() {
       {activeTab === 'complaints' && (
         <div className="space-y-4">
           <div className="flex items-center gap-3">
-            <Filter className="w-5 h-5 text-gray-400" />
+            <Filter className="w-5 h-5 text-gray-500" />
             <select
               value={filterStore}
               onChange={(e) => setFilterStore(e.target.value)}
-              className="bg-gray-800 border border-gray-700 rounded px-3 py-2 text-white text-sm"
+              className="bg-white border border-gray-300 rounded px-3 py-2 text-gray-900 text-sm"
             >
               {STORES.map((store) => (
                 <option key={store} value={store}>
@@ -290,22 +290,22 @@ export function CustomerFeedback() {
           </div>
           <div className="space-y-3">
             {complaints.map((complaint) => (
-              <div key={complaint.id} className="bg-gray-800 rounded-lg p-4 border border-gray-700">
+              <div key={complaint.id} className="bg-white border border-gray-200 rounded-lg p-4 border border-gray-200">
                 <div className="flex items-start justify-between mb-2">
                   <div>
-                    <p className="text-white font-semibold">{complaint.customer}</p>
-                    <p className="text-gray-400 text-xs">{complaint.store} • {new Date(complaint.date).toLocaleDateString()}</p>
+                    <p className="text-gray-900 font-semibold">{complaint.customer}</p>
+                    <p className="text-gray-500 text-xs">{complaint.store} • {new Date(complaint.date).toLocaleDateString()}</p>
                   </div>
                   <span className={clsx(
                     'px-3 py-1 rounded-full text-xs font-semibold',
-                    complaint.status === 'open' ? 'bg-red-900 text-red-300' :
-                    complaint.status === 'acknowledged' ? 'bg-yellow-900 text-yellow-300' :
-                    'bg-green-900 text-green-300'
+                    complaint.status === 'open' ? 'bg-red-100 text-red-700' :
+                    complaint.status === 'acknowledged' ? 'bg-yellow-100 text-yellow-700' :
+                    'bg-green-100 text-green-700'
                   )}>
                     {complaint.status}
                   </span>
                 </div>
-                <p className="text-gray-300 text-sm">{complaint.message}</p>
+                <p className="text-gray-600 text-sm">{complaint.message}</p>
               </div>
             ))}
           </div>
@@ -313,20 +313,20 @@ export function CustomerFeedback() {
       )}
 
       {activeTab === 'comparison' && (
-        <div className="bg-gray-800 rounded-lg p-6 border border-gray-700">
-          <h3 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+        <div className="bg-white border border-gray-200 rounded-lg p-6 border border-gray-200">
+          <h3 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
             <Store className="w-5 h-5" />
             Store Performance Comparison
           </h3>
           <div className="overflow-x-auto">
             <table className="w-full">
               <thead>
-                <tr className="border-b border-gray-700">
-                  <th className="text-left py-3 px-4 text-gray-400 font-semibold text-sm">Store</th>
-                  <th className="text-right py-3 px-4 text-gray-400 font-semibold text-sm">Avg NPS</th>
-                  <th className="text-right py-3 px-4 text-gray-400 font-semibold text-sm">Positive %</th>
-                  <th className="text-right py-3 px-4 text-gray-400 font-semibold text-sm">Complaints</th>
-                  <th className="text-right py-3 px-4 text-gray-400 font-semibold text-sm">Response Rate</th>
+                <tr className="border-b border-gray-200">
+                  <th className="text-left py-3 px-4 text-gray-500 font-semibold text-sm">Store</th>
+                  <th className="text-right py-3 px-4 text-gray-500 font-semibold text-sm">Avg NPS</th>
+                  <th className="text-right py-3 px-4 text-gray-500 font-semibold text-sm">Positive %</th>
+                  <th className="text-right py-3 px-4 text-gray-500 font-semibold text-sm">Complaints</th>
+                  <th className="text-right py-3 px-4 text-gray-500 font-semibold text-sm">Response Rate</th>
                 </tr>
               </thead>
               <tbody>
@@ -335,8 +335,8 @@ export function CustomerFeedback() {
                   { name: 'Downtown', nps: 62, positive: 58, complaints: 5, response: 80 },
                   { name: 'Mall Location', nps: 68, positive: 65, complaints: 1, response: 100 },
                 ].map((store) => (
-                  <tr key={store.name} className="border-b border-gray-700 hover:bg-gray-700/50">
-                    <td className="py-3 px-4 text-white text-sm">{store.name}</td>
+                  <tr key={store.name} className="border-b border-gray-200 hover:bg-gray-100/50">
+                    <td className="py-3 px-4 text-gray-900 text-sm">{store.name}</td>
                     <td className="py-3 px-4 text-right font-semibold">
                       <span className="text-blue-400">{store.nps}</span>
                     </td>
@@ -352,7 +352,7 @@ export function CustomerFeedback() {
                       </span>
                     </td>
                     <td className="py-3 px-4 text-right">
-                      <span className="text-gray-300">{store.response}%</span>
+                      <span className="text-gray-600">{store.response}%</span>
                     </td>
                   </tr>
                 ))}

@@ -221,12 +221,12 @@ export function TasksDashboard() {
   // Unused: const escalatedTasks = tasks.filter(t => t.status === 'escalated');
 
   return (
-    <div className="min-h-screen bg-gray-900 p-6">
+    <div className="min-h-screen bg-gray-50 p-6">
       <div className="max-w-7xl mx-auto">
         {/* Header */}
         <div className="mb-8">
-          <h1 className="text-3xl font-bold text-white mb-2">Tasks & Daily Checklists</h1>
-          <p className="text-gray-400">Manage your tasks, checklists, and team assignments</p>
+          <h1 className="text-3xl font-bold text-gray-900 mb-2">Tasks & Daily Checklists</h1>
+          <p className="text-gray-500">Manage your tasks, checklists, and team assignments</p>
         </div>
 
         {/* Alert: Overdue/Escalated */}
@@ -244,40 +244,40 @@ export function TasksDashboard() {
 
         {/* Summary Cards */}
         <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
-          <div className="bg-gray-800 rounded-lg p-4 border border-gray-700">
+          <div className="bg-white rounded-lg p-4 border border-gray-200">
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-gray-400 text-sm">Total Tasks</p>
-                <p className="text-2xl font-bold text-white">{summary.total}</p>
+                <p className="text-gray-500 text-sm">Total Tasks</p>
+                <p className="text-2xl font-bold text-gray-900">{summary.total}</p>
               </div>
               <ListChecks className="w-8 h-8 text-blue-400" />
             </div>
           </div>
 
-          <div className="bg-gray-800 rounded-lg p-4 border border-gray-700">
+          <div className="bg-white rounded-lg p-4 border border-gray-200">
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-gray-400 text-sm">Open/In Progress</p>
+                <p className="text-gray-500 text-sm">Open/In Progress</p>
                 <p className="text-2xl font-bold text-yellow-400">{summary.open}</p>
               </div>
               <Clock className="w-8 h-8 text-yellow-400" />
             </div>
           </div>
 
-          <div className="bg-gray-800 rounded-lg p-4 border border-gray-700">
+          <div className="bg-white rounded-lg p-4 border border-gray-200">
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-gray-400 text-sm">Overdue</p>
+                <p className="text-gray-500 text-sm">Overdue</p>
                 <p className="text-2xl font-bold text-red-400">{summary.overdue}</p>
               </div>
               <AlertCircle className="w-8 h-8 text-red-400" />
             </div>
           </div>
 
-          <div className="bg-gray-800 rounded-lg p-4 border border-gray-700">
+          <div className="bg-white rounded-lg p-4 border border-gray-200">
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-gray-400 text-sm">Completed</p>
+                <p className="text-gray-500 text-sm">Completed</p>
                 <p className="text-2xl font-bold text-green-400">{summary.completed}</p>
               </div>
               <CheckCircle className="w-8 h-8 text-green-400" />
@@ -286,14 +286,14 @@ export function TasksDashboard() {
         </div>
 
         {/* Tabs */}
-        <div className="flex gap-4 mb-6 border-b border-gray-700">
+        <div className="flex gap-4 mb-6 border-b border-gray-200">
           <button
             onClick={() => setActiveTab('my-tasks')}
             className={clsx(
               'px-4 py-3 font-medium border-b-2 transition-colors',
               activeTab === 'my-tasks'
                 ? 'border-blue-500 text-blue-400'
-                : 'border-transparent text-gray-400 hover:text-gray-300'
+                : 'border-transparent text-gray-500 hover:text-gray-700'
             )}
           >
             My Tasks ({myTasks.length})
@@ -305,7 +305,7 @@ export function TasksDashboard() {
               'px-4 py-3 font-medium border-b-2 transition-colors',
               activeTab === 'checklists'
                 ? 'border-blue-500 text-blue-400'
-                : 'border-transparent text-gray-400 hover:text-gray-300'
+                : 'border-transparent text-gray-500 hover:text-gray-700'
             )}
           >
             Daily Checklists
@@ -318,7 +318,7 @@ export function TasksDashboard() {
                 'px-4 py-3 font-medium border-b-2 transition-colors',
                 activeTab === 'team-tasks'
                   ? 'border-blue-500 text-blue-400'
-                  : 'border-transparent text-gray-400 hover:text-gray-300'
+                  : 'border-transparent text-gray-500 hover:text-gray-700'
               )}
             >
               Team Tasks
@@ -345,15 +345,15 @@ export function TasksDashboard() {
             {/* My Tasks List */}
             <div className="space-y-4">
               {myTasks.length === 0 ? (
-                <div className="text-center py-12 bg-gray-800 rounded-lg border border-gray-700">
+                <div className="text-center py-12 bg-white rounded-lg border border-gray-200">
                   <CheckCircle className="w-12 h-12 text-gray-600 mx-auto mb-3" />
-                  <p className="text-gray-400">No tasks assigned to you</p>
+                  <p className="text-gray-500">No tasks assigned to you</p>
                 </div>
               ) : (
                 myTasks.map(task => (
                   <div
                     key={task.task_id}
-                    className="bg-gray-800 rounded-lg border border-gray-700 p-4 hover:border-gray-600 transition-colors"
+                    className="bg-white rounded-lg border border-gray-200 p-4 hover:border-gray-300 transition-colors"
                     style={{
                       borderLeft: `4px solid ${PRIORITY_COLORS[task.priority]?.border || '#2563EB'}`
                     }}
@@ -361,7 +361,7 @@ export function TasksDashboard() {
                     <div className="flex items-start justify-between gap-4">
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-3 mb-2">
-                          <h3 className="text-lg font-semibold text-white truncate">{task.title}</h3>
+                          <h3 className="text-lg font-semibold text-gray-900 truncate">{task.title}</h3>
                           <span className={clsx(
                             'text-xs font-bold px-2 py-1 rounded',
                             PRIORITY_COLORS[task.priority]?.bg,
@@ -369,14 +369,14 @@ export function TasksDashboard() {
                           )}>
                             {task.priority}
                           </span>
-                          <span className="text-xs px-2 py-1 rounded bg-gray-700 text-gray-300">
+                          <span className="text-xs px-2 py-1 rounded bg-gray-100 text-gray-600">
                             {task.status}
                           </span>
                         </div>
                         {task.description && (
-                          <p className="text-sm text-gray-400 mb-3">{task.description}</p>
+                          <p className="text-sm text-gray-500 mb-3">{task.description}</p>
                         )}
-                        <div className="flex items-center gap-4 text-sm text-gray-400">
+                        <div className="flex items-center gap-4 text-sm text-gray-500">
                           <span>Due: {new Date(task.due_date).toLocaleDateString()}</span>
                           <span>Type: {task.type}</span>
                         </div>
@@ -408,7 +408,7 @@ export function TasksDashboard() {
             </div>
           </div>
         ) : activeTab === 'checklists' ? (
-          <div className="bg-gray-800 rounded-lg border border-gray-700 p-6">
+          <div className="bg-white rounded-lg border border-gray-200 p-6">
             {/* Checklist Type Selector */}
             <div className="mb-6 flex gap-3">
               {(['opening', 'closing', 'stock_count'] as ChecklistType[]).map(type => (
@@ -419,7 +419,7 @@ export function TasksDashboard() {
                     'px-4 py-2 rounded-lg font-medium transition-colors',
                     checklistType === type
                       ? 'bg-blue-600 text-white'
-                      : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+                      : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
                   )}
                 >
                   {type === 'opening' && 'Opening'}
@@ -432,10 +432,10 @@ export function TasksDashboard() {
             {/* Progress Bar */}
             <div className="mb-6">
               <div className="flex items-center justify-between mb-2">
-                <p className="text-gray-300 font-medium">Progress</p>
-                <p className="text-sm text-gray-400">{completedChecklistItems} of {checklistItems.length} completed</p>
+                <p className="text-gray-600 font-medium">Progress</p>
+                <p className="text-sm text-gray-500">{completedChecklistItems} of {checklistItems.length} completed</p>
               </div>
-              <div className="w-full bg-gray-700 rounded-full h-2">
+              <div className="w-full bg-gray-200 rounded-full h-2">
                 <div
                   className="bg-green-500 h-2 rounded-full transition-all duration-300"
                   style={{ width: `${checklistProgress}%` }}
@@ -446,16 +446,16 @@ export function TasksDashboard() {
             {/* Checklist Items */}
             <div className="space-y-3">
               {checklistItems.map((item, index) => (
-                <label key={index} className="flex items-start gap-3 p-3 rounded-lg hover:bg-gray-700 transition-colors cursor-pointer">
+                <label key={index} className="flex items-start gap-3 p-3 rounded-lg hover:bg-gray-100 transition-colors cursor-pointer">
                   <input
                     type="checkbox"
                     checked={item.completed}
                     onChange={() => handleChecklistItemToggle(index)}
-                    className="mt-1 w-5 h-5 rounded border-gray-600 text-green-500 cursor-pointer"
+                    className="mt-1 w-5 h-5 rounded border-gray-200 text-green-500 cursor-pointer"
                   />
                   <span className={clsx(
                     'text-sm flex-1',
-                    item.completed ? 'line-through text-gray-500' : 'text-gray-300'
+                    item.completed ? 'line-through text-gray-400' : 'text-gray-600'
                   )}>
                     {item.text}
                   </span>
@@ -468,7 +468,7 @@ export function TasksDashboard() {
           <div>
             {/* Filter bar */}
             <div className="flex items-center gap-3 mb-6">
-              <span className="text-gray-400 text-sm">Filter:</span>
+              <span className="text-gray-500 text-sm">Filter:</span>
               {(['all', 'open', 'completed', 'escalated'] as const).map(f => (
                 <button
                   key={f}
@@ -477,7 +477,7 @@ export function TasksDashboard() {
                     'px-3 py-1.5 rounded-lg text-sm font-medium transition-colors capitalize',
                     teamFilter === f
                       ? 'bg-blue-600 text-white'
-                      : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+                      : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
                   )}
                 >
                   {f}
@@ -486,7 +486,7 @@ export function TasksDashboard() {
               <button
                 onClick={loadTeamTasks}
                 disabled={isLoadingTeam}
-                className="ml-auto px-3 py-1.5 bg-gray-700 hover:bg-gray-600 text-gray-300 rounded-lg text-sm transition-colors flex items-center gap-1.5"
+                className="ml-auto px-3 py-1.5 bg-gray-100 hover:bg-gray-200 text-gray-600 rounded-lg text-sm transition-colors flex items-center gap-1.5"
               >
                 {isLoadingTeam ? (
                   <Loader2 className="w-4 h-4 animate-spin" />
@@ -501,9 +501,9 @@ export function TasksDashboard() {
                 <Loader2 className="w-8 h-8 text-blue-400 animate-spin" />
               </div>
             ) : teamTasks.length === 0 ? (
-              <div className="text-center py-12 bg-gray-800 rounded-lg border border-gray-700">
+              <div className="text-center py-12 bg-white rounded-lg border border-gray-200">
                 <Users className="w-12 h-12 text-gray-600 mx-auto mb-3" />
-                <p className="text-gray-300 font-medium">No team tasks found</p>
+                <p className="text-gray-600 font-medium">No team tasks found</p>
                 <p className="text-gray-500 text-sm mt-1">
                   {teamFilter === 'all' ? 'No tasks have been created for this store yet.' : `No ${teamFilter} tasks.`}
                 </p>
@@ -515,13 +515,13 @@ export function TasksDashboard() {
                   return (
                     <div
                       key={task.task_id}
-                      className="bg-gray-800 rounded-lg border border-gray-700 p-4"
+                      className="bg-white rounded-lg border border-gray-200 p-4"
                       style={{ borderLeft: `4px solid ${PRIORITY_COLORS[task.priority]?.border || '#2563EB'}` }}
                     >
                       <div className="flex items-start justify-between gap-4">
                         <div className="flex-1 min-w-0">
                           <div className="flex items-center gap-2 mb-1 flex-wrap">
-                            <h3 className="text-base font-semibold text-white truncate">{task.title}</h3>
+                            <h3 className="text-base font-semibold text-gray-900 truncate">{task.title}</h3>
                             <span className={clsx(
                               'text-xs font-bold px-2 py-0.5 rounded',
                               PRIORITY_COLORS[task.priority]?.bg,
@@ -533,7 +533,7 @@ export function TasksDashboard() {
                               'text-xs px-2 py-0.5 rounded',
                               task.status === 'completed' ? 'bg-green-800 text-green-200' :
                               task.status === 'escalated' ? 'bg-red-800 text-red-200' :
-                              'bg-gray-700 text-gray-300'
+                              'bg-gray-100 text-gray-600'
                             )}>
                               {task.status}
                             </span>
@@ -542,11 +542,11 @@ export function TasksDashboard() {
                             )}
                           </div>
                           {task.description && (
-                            <p className="text-sm text-gray-400 mb-2">{task.description}</p>
+                            <p className="text-sm text-gray-500 mb-2">{task.description}</p>
                           )}
                           <div className="flex items-center gap-4 text-xs text-gray-500">
-                            <span>Assigned to: <span className="text-gray-300">{task.assigned_to}</span></span>
-                            <span>Due: <span className={isOverdue ? 'text-orange-400' : 'text-gray-300'}>{new Date(task.due_date).toLocaleDateString()}</span></span>
+                            <span>Assigned to: <span className="text-gray-600">{task.assigned_to}</span></span>
+                            <span>Due: <span className={isOverdue ? 'text-orange-400' : 'text-gray-600'}>{new Date(task.due_date).toLocaleDateString()}</span></span>
                             <span>Type: {task.type}</span>
                           </div>
                         </div>
@@ -571,12 +571,12 @@ export function TasksDashboard() {
       {/* Create Task Modal */}
       {showCreateModal && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-gray-800 rounded-lg border border-gray-700 w-full max-w-md p-6 max-h-screen overflow-y-auto">
+          <div className="bg-white rounded-lg border border-gray-200 w-full max-w-md p-6 max-h-screen overflow-y-auto">
             <div className="flex items-center justify-between mb-6">
-              <h2 className="text-xl font-bold text-white">Create Task</h2>
+              <h2 className="text-xl font-bold text-gray-900">Create Task</h2>
               <button
                 onClick={() => setShowCreateModal(false)}
-                className="text-gray-400 hover:text-gray-300"
+                className="text-gray-500 hover:text-gray-700"
               >
                 <X className="w-5 h-5" />
               </button>
@@ -585,34 +585,34 @@ export function TasksDashboard() {
             <div className="space-y-4">
               {/* Title */}
               <div>
-                <label className="block text-sm font-medium text-gray-300 mb-1">Task Title *</label>
+                <label className="block text-sm font-medium text-gray-600 mb-1">Task Title *</label>
                 <input
                   type="text"
                   value={newTask.title}
                   onChange={e => setNewTask({...newTask, title: e.target.value})}
                   placeholder="Enter task title"
-                  className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white placeholder-gray-500 focus:border-blue-500 focus:outline-none"
+                  className="w-full px-3 py-2 bg-white border border-gray-200 rounded-lg text-gray-900 placeholder-gray-500 focus:border-blue-500 focus:outline-none"
                 />
               </div>
 
               {/* Description */}
               <div>
-                <label className="block text-sm font-medium text-gray-300 mb-1">Description</label>
+                <label className="block text-sm font-medium text-gray-600 mb-1">Description</label>
                 <textarea
                   value={newTask.description}
                   onChange={e => setNewTask({...newTask, description: e.target.value})}
                   placeholder="Enter task description"
-                  className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white placeholder-gray-500 focus:border-blue-500 focus:outline-none h-24 resize-none"
+                  className="w-full px-3 py-2 bg-white border border-gray-200 rounded-lg text-gray-900 placeholder-gray-500 focus:border-blue-500 focus:outline-none h-24 resize-none"
                 />
               </div>
 
               {/* Priority */}
               <div>
-                <label className="block text-sm font-medium text-gray-300 mb-1">Priority</label>
+                <label className="block text-sm font-medium text-gray-600 mb-1">Priority</label>
                 <select
                   value={newTask.priority}
                   onChange={e => setNewTask({...newTask, priority: e.target.value})}
-                  className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white focus:border-blue-500 focus:outline-none"
+                  className="w-full px-3 py-2 bg-white border border-gray-200 rounded-lg text-gray-900 focus:border-blue-500 focus:outline-none"
                 >
                   <option value="P0">P0 - Critical (Dark Red)</option>
                   <option value="P1">P1 - High (Red)</option>
@@ -624,22 +624,22 @@ export function TasksDashboard() {
 
               {/* Due Date */}
               <div>
-                <label className="block text-sm font-medium text-gray-300 mb-1">Due Date</label>
+                <label className="block text-sm font-medium text-gray-600 mb-1">Due Date</label>
                 <input
                   type="date"
                   value={newTask.due_date}
                   onChange={e => setNewTask({...newTask, due_date: e.target.value})}
-                  className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white focus:border-blue-500 focus:outline-none"
+                  className="w-full px-3 py-2 bg-white border border-gray-200 rounded-lg text-gray-900 focus:border-blue-500 focus:outline-none"
                 />
               </div>
 
               {/* Type */}
               <div>
-                <label className="block text-sm font-medium text-gray-300 mb-1">Type</label>
+                <label className="block text-sm font-medium text-gray-600 mb-1">Type</label>
                 <select
                   value={newTask.type}
                   onChange={e => setNewTask({...newTask, type: e.target.value})}
-                  className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white focus:border-blue-500 focus:outline-none"
+                  className="w-full px-3 py-2 bg-white border border-gray-200 rounded-lg text-gray-900 focus:border-blue-500 focus:outline-none"
                 >
                   <option value="manual">Manual Task</option>
                   <option value="sop">SOP Template</option>
@@ -657,7 +657,7 @@ export function TasksDashboard() {
                 </button>
                 <button
                   onClick={() => setShowCreateModal(false)}
-                  className="flex-1 px-4 py-2 bg-gray-700 hover:bg-gray-600 text-gray-300 rounded-lg font-medium transition-colors"
+                  className="flex-1 px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-600 rounded-lg font-medium transition-colors"
                 >
                   Cancel
                 </button>

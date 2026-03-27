@@ -103,9 +103,9 @@ export function FamilyPrescriptionsView({
   return (
     <div className="space-y-6">
       {/* Family Members Tabs */}
-      <div className="bg-gray-800 rounded-lg border border-gray-700 p-4">
+      <div className="bg-white rounded-lg border border-gray-200 p-4">
         <div className="flex items-center justify-between mb-4">
-          <h3 className="flex items-center gap-2 text-white font-semibold">
+          <h3 className="flex items-center gap-2 text-gray-900 font-semibold">
             <Users className="w-5 h-5" />
             Family Members
           </h3>
@@ -128,7 +128,7 @@ export function FamilyPrescriptionsView({
                 'px-4 py-2 rounded-lg font-medium transition text-sm',
                 selectedMemberId === member.id
                   ? 'bg-blue-600 text-white'
-                  : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+                  : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
               )}
             >
               <div className="text-left">
@@ -141,18 +141,18 @@ export function FamilyPrescriptionsView({
 
         {/* Add Member Form */}
         {showAddMember && (
-          <div className="mt-4 p-4 bg-gray-700 rounded space-y-3">
+          <div className="mt-4 p-4 bg-gray-50 border border-gray-200 rounded space-y-3">
             <input
               type="text"
               placeholder="Member Name"
               value={newMemberName}
               onChange={(e) => setNewMemberName(e.target.value)}
-              className="w-full px-3 py-2 bg-gray-600 border border-gray-500 rounded text-white placeholder-gray-400 outline-none focus:border-blue-500"
+              className="w-full px-3 py-2 bg-white border border-gray-300 rounded text-gray-900 placeholder-gray-500 outline-none focus:border-blue-500"
             />
             <select
               value={newMemberRelationship}
               onChange={(e) => setNewMemberRelationship(e.target.value)}
-              className="w-full px-3 py-2 bg-gray-600 border border-gray-500 rounded text-white outline-none focus:border-blue-500"
+              className="w-full px-3 py-2 bg-white border border-gray-300 rounded text-gray-900 outline-none focus:border-blue-500"
             >
               <option value="">Select Relationship</option>
               <option value="Spouse">Spouse</option>
@@ -175,7 +175,7 @@ export function FamilyPrescriptionsView({
               </button>
               <button
                 onClick={() => { setShowAddMember(false); setAddError(null); }}
-                className="flex-1 px-3 py-2 bg-gray-600 text-white rounded hover:bg-gray-700 transition"
+                className="flex-1 px-3 py-2 bg-gray-200 text-gray-700 rounded hover:bg-gray-300 transition"
               >
                 Cancel
               </button>
@@ -185,14 +185,14 @@ export function FamilyPrescriptionsView({
       </div>
 
       {/* Prescriptions for Selected Member or All */}
-      <div className="bg-gray-800 rounded-lg border border-gray-700 p-4">
-        <h3 className="flex items-center gap-2 text-white font-semibold mb-4">
+      <div className="bg-white rounded-lg border border-gray-200 p-4">
+        <h3 className="flex items-center gap-2 text-gray-900 font-semibold mb-4">
           <Eye className="w-5 h-5" />
           Prescriptions
         </h3>
 
         {memberPrescriptions.length === 0 ? (
-          <div className="text-center py-8 text-gray-400">
+          <div className="text-center py-8 text-gray-500">
             <p>No prescriptions found</p>
           </div>
         ) : (
@@ -208,29 +208,29 @@ export function FamilyPrescriptionsView({
                       ? 'bg-red-900 bg-opacity-20 border-red-600'
                       : daysLeft < 30
                       ? 'bg-yellow-900 bg-opacity-20 border-yellow-600'
-                      : 'bg-gray-700 border-gray-600'
+                      : 'bg-gray-50 border-gray-200'
                   )}
                 >
                   <div className="flex items-start justify-between">
                     <div className="flex-1">
                       <div className="flex items-center gap-2 mb-2">
-                        <h4 className="font-semibold text-white">{rx.memberName}</h4>
-                        <span className="text-xs text-gray-400">({rx.relationship})</span>
+                        <h4 className="font-semibold text-gray-900">{rx.memberName}</h4>
+                        <span className="text-xs text-gray-500">({rx.relationship})</span>
                         {rx.status === 'expired' && (
-                          <span className="text-xs px-2 py-1 rounded bg-red-900 text-red-200">
+                          <span className="text-xs px-2 py-1 rounded bg-red-100 text-red-700">
                             EXPIRED
                           </span>
                         )}
                         {rx.status === 'active' && daysLeft < 30 && (
-                          <span className="text-xs px-2 py-1 rounded bg-yellow-900 text-yellow-200">
+                          <span className="text-xs px-2 py-1 rounded bg-yellow-100 text-yellow-700">
                             EXPIRING SOON
                           </span>
                         )}
                       </div>
-                      <p className="text-sm text-gray-400 mb-2">
+                      <p className="text-sm text-gray-500 mb-2">
                         <strong>Rx ID:</strong> {rx.id} | <strong>Optometrist:</strong> {rx.optometristName}
                       </p>
-                      <div className="flex items-center gap-4 text-xs text-gray-400">
+                      <div className="flex items-center gap-4 text-xs text-gray-500">
                         <div className="flex items-center gap-1">
                           <Calendar className="w-3 h-3" />
                           <span>Created: {formatDate(rx.date)}</span>

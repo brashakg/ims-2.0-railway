@@ -51,15 +51,15 @@ export function ProfileSection() {
   return (
     <div className="space-y-4">
       <div className="card">
-        <h2 className="text-lg font-semibold text-white mb-4">My Profile</h2>
+        <h2 className="text-lg font-semibold text-gray-900 mb-4">My Profile</h2>
         <div className="space-y-4">
-          <div className="flex items-center gap-4 p-4 bg-gray-900 rounded-lg">
+          <div className="flex items-center gap-4 p-4 bg-gray-50 rounded-lg">
             <div className="w-16 h-16 rounded-full bg-bv-gold-100 flex items-center justify-center">
               <User className="w-8 h-8 text-bv-gold-600" />
             </div>
             <div>
-              <h3 className="font-semibold text-white">{user?.name || 'User'}</h3>
-              <p className="text-sm text-gray-400">@{user?.email?.split('@')[0]}</p>
+              <h3 className="font-semibold text-gray-900">{user?.name || 'User'}</h3>
+              <p className="text-sm text-gray-500">@{user?.email?.split('@')[0]}</p>
               <div className="flex gap-2 mt-1">
                 {user?.roles?.map(role => (
                   <span key={role} className="text-xs bg-bv-gold-100 text-bv-gold-700 px-2 py-0.5 rounded">
@@ -72,7 +72,7 @@ export function ProfileSection() {
 
           <div className="grid grid-cols-2 gap-4">
             <div>
-              <label className="block text-sm font-medium text-gray-300 mb-1">Full Name</label>
+              <label className="block text-sm font-medium text-gray-600 mb-1">Full Name</label>
               <input
                 type="text"
                 value={profileData?.full_name || user?.name || ''}
@@ -81,7 +81,7 @@ export function ProfileSection() {
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-gray-300 mb-1">Email</label>
+              <label className="block text-sm font-medium text-gray-600 mb-1">Email</label>
               <input
                 type="email"
                 value={profileData?.email || ''}
@@ -90,7 +90,7 @@ export function ProfileSection() {
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-gray-300 mb-1">Phone</label>
+              <label className="block text-sm font-medium text-gray-600 mb-1">Phone</label>
               <input
                 type="tel"
                 value={profileData?.phone || ''}
@@ -126,7 +126,7 @@ export function ProfileSection() {
 
           {showChangePassword && (
             <div className="p-4 bg-yellow-50 rounded-lg border border-yellow-200">
-              <h4 className="font-medium text-white mb-3">Change Password</h4>
+              <h4 className="font-medium text-gray-900 mb-3">Change Password</h4>
               <div className="space-y-3">
                 <input type="password" placeholder="Current Password" className="input-field" />
                 <input type="password" placeholder="New Password (min 8 chars)" className="input-field" />
@@ -139,22 +139,22 @@ export function ProfileSection() {
       </div>
 
       <div className="card">
-        <h2 className="text-lg font-semibold text-white mb-4">Preferences</h2>
+        <h2 className="text-lg font-semibold text-gray-900 mb-4">Preferences</h2>
         <div className="space-y-4">
           {/* Theme — light mode only */}
-          <div className="flex items-center justify-between p-3 bg-gray-900 rounded-lg">
+          <div className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
             <div>
-              <p className="font-medium text-white">Email Notifications</p>
-              <p className="text-sm text-gray-400">Receive email alerts for important updates</p>
+              <p className="font-medium text-gray-900">Email Notifications</p>
+              <p className="text-sm text-gray-500">Receive email alerts for important updates</p>
             </div>
             <ToggleRight className="w-8 h-8 text-green-600 cursor-pointer" />
           </div>
-          <div className="flex items-center justify-between p-3 bg-gray-900 rounded-lg">
+          <div className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
             <div>
-              <p className="font-medium text-white">SMS Notifications</p>
-              <p className="text-sm text-gray-400">Receive SMS for urgent alerts</p>
+              <p className="font-medium text-gray-900">SMS Notifications</p>
+              <p className="text-sm text-gray-500">Receive SMS for urgent alerts</p>
             </div>
-            <ToggleLeft className="w-8 h-8 text-gray-400 cursor-pointer" />
+            <ToggleLeft className="w-8 h-8 text-gray-500 cursor-pointer" />
           </div>
         </div>
       </div>
@@ -200,21 +200,21 @@ export function BusinessSection() {
   return (
     <div className="space-y-4">
       <div className="card">
-        <h2 className="text-lg font-semibold text-white mb-4">Company Profile</h2>
+        <h2 className="text-lg font-semibold text-gray-900 mb-4">Company Profile</h2>
         <div className="space-y-4">
-          <div className="flex items-center gap-4 p-4 bg-gray-900 rounded-lg">
-            <div className="w-20 h-20 rounded-lg bg-gray-800 border-2 border-dashed border-gray-300 flex items-center justify-center cursor-pointer hover:border-bv-gold-500">
-              <Building2 className="w-8 h-8 text-gray-400" />
+          <div className="flex items-center gap-4 p-4 bg-gray-50 rounded-lg">
+            <div className="w-20 h-20 rounded-lg bg-white border-2 border-dashed border-gray-300 flex items-center justify-center cursor-pointer hover:border-bv-gold-500">
+              <Building2 className="w-8 h-8 text-gray-500" />
             </div>
             <div>
-              <p className="text-sm text-gray-400">Company Logo</p>
+              <p className="text-sm text-gray-500">Company Logo</p>
               <button className="text-sm text-bv-gold-600 hover:underline">Upload new logo</button>
             </div>
           </div>
 
           <div className="grid grid-cols-2 gap-4">
             <div>
-              <label className="block text-sm font-medium text-gray-300 mb-1">Company Name</label>
+              <label className="block text-sm font-medium text-gray-600 mb-1">Company Name</label>
               <input
                 type="text"
                 value={businessSettings?.company_name || ''}
@@ -223,7 +223,7 @@ export function BusinessSection() {
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-gray-300 mb-1">Short Name</label>
+              <label className="block text-sm font-medium text-gray-600 mb-1">Short Name</label>
               <input
                 type="text"
                 value={businessSettings?.company_short_name || ''}
@@ -232,7 +232,7 @@ export function BusinessSection() {
               />
             </div>
             <div className="col-span-2">
-              <label className="block text-sm font-medium text-gray-300 mb-1">Tagline</label>
+              <label className="block text-sm font-medium text-gray-600 mb-1">Tagline</label>
               <input
                 type="text"
                 value={businessSettings?.tagline || ''}
@@ -241,7 +241,7 @@ export function BusinessSection() {
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-gray-300 mb-1">Support Email</label>
+              <label className="block text-sm font-medium text-gray-600 mb-1">Support Email</label>
               <input
                 type="email"
                 value={businessSettings?.support_email || ''}
@@ -250,7 +250,7 @@ export function BusinessSection() {
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-gray-300 mb-1">Support Phone</label>
+              <label className="block text-sm font-medium text-gray-600 mb-1">Support Phone</label>
               <input
                 type="tel"
                 value={businessSettings?.support_phone || ''}
@@ -259,7 +259,7 @@ export function BusinessSection() {
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-gray-300 mb-1">Website</label>
+              <label className="block text-sm font-medium text-gray-600 mb-1">Website</label>
               <input
                 type="url"
                 value={businessSettings?.website || ''}
@@ -268,7 +268,7 @@ export function BusinessSection() {
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-gray-300 mb-1">Primary Color</label>
+              <label className="block text-sm font-medium text-gray-600 mb-1">Primary Color</label>
               <div className="flex gap-2">
                 <input
                   type="color"
@@ -285,7 +285,7 @@ export function BusinessSection() {
               </div>
             </div>
             <div className="col-span-2">
-              <label className="block text-sm font-medium text-gray-300 mb-1">Address</label>
+              <label className="block text-sm font-medium text-gray-600 mb-1">Address</label>
               <textarea
                 value={businessSettings?.address || ''}
                 onChange={e => setBusinessSettings(prev => prev ? { ...prev, address: e.target.value } : null)}

@@ -120,9 +120,9 @@ export default function ReturnsPage() {
         ]).map(t => (
           <button key={t.id} onClick={() => setReturnType(t.id)}
             className={clsx('flex-1 p-3 rounded-xl border-2 text-left transition-all',
-              returnType === t.id ? 'border-bv-gold-500 bg-bv-gold-50' : 'border-gray-700 hover:border-gray-300')}>
+              returnType === t.id ? 'border-bv-gold-500 bg-bv-gold-50' : 'border-gray-200 hover:border-gray-300')}>
             <div className="flex items-center gap-2">
-              <t.icon className={clsx('w-5 h-5', returnType === t.id ? 'text-bv-gold-600' : 'text-gray-400')} />
+              <t.icon className={clsx('w-5 h-5', returnType === t.id ? 'text-bv-gold-600' : 'text-gray-500')} />
               <span className={clsx('text-sm font-medium', returnType === t.id ? 'text-bv-gold-700' : 'text-gray-700')}>{t.label}</span>
             </div>
             <p className="text-xs text-gray-500 mt-1 ml-7">{t.desc}</p>
@@ -139,11 +139,11 @@ export default function ReturnsPage() {
 
       {/* Step 1: Search Order */}
       {step === 'search' && (
-        <div className="bg-gray-800 border border-gray-700 rounded-xl p-5">
-          <h3 className="font-semibold text-white mb-3">Find Original Order</h3>
+        <div className="bg-white border border-gray-200 rounded-xl p-5">
+          <h3 className="font-semibold text-gray-900 mb-3">Find Original Order</h3>
           <div className="flex gap-2">
             <div className="relative flex-1">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" />
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-500" />
               <input value={searchQuery} onChange={e => setSearchQuery(e.target.value)}
                 onKeyDown={e => e.key === 'Enter' && searchOrders()}
                 placeholder="Order number, customer name, or phone..."
@@ -159,15 +159,15 @@ export default function ReturnsPage() {
             <div className="mt-4 space-y-2">
               {orders.map(order => (
                 <button key={order.id} onClick={() => selectOrder(order)}
-                  className="w-full flex items-center justify-between p-3 rounded-lg border border-gray-700 hover:border-bv-gold-300 hover:bg-bv-gold-50 text-left transition-all">
+                  className="w-full flex items-center justify-between p-3 rounded-lg border border-gray-200 hover:border-bv-gold-300 hover:bg-bv-gold-50 text-left transition-all">
                   <div>
-                    <p className="font-medium text-sm text-white">{order.orderNumber}</p>
+                    <p className="font-medium text-sm text-gray-900">{order.orderNumber}</p>
                     <p className="text-xs text-gray-500">{order.customerName} · {new Date(order.createdAt).toLocaleDateString('en-IN')}</p>
-                    <p className="text-xs text-gray-400">{(order.items || []).length} items</p>
+                    <p className="text-xs text-gray-500">{(order.items || []).length} items</p>
                   </div>
                   <div className="text-right">
                     <p className="font-bold text-sm">{fc(order.grandTotal || 0)}</p>
-                    <ChevronRight className="w-4 h-4 text-gray-400 ml-auto mt-1" />
+                    <ChevronRight className="w-4 h-4 text-gray-500 ml-auto mt-1" />
                   </div>
                 </button>
               ))}
@@ -178,10 +178,10 @@ export default function ReturnsPage() {
 
       {/* Step 2: Select Items */}
       {step === 'select' && selectedOrder && (
-        <div className="bg-gray-800 border border-gray-700 rounded-xl p-5">
+        <div className="bg-white border border-gray-200 rounded-xl p-5">
           <div className="flex items-center justify-between mb-4">
             <div>
-              <h3 className="font-semibold text-white">Select Items for {returnType === 'EXCHANGE' ? 'Exchange' : 'Return'}</h3>
+              <h3 className="font-semibold text-gray-900">Select Items for {returnType === 'EXCHANGE' ? 'Exchange' : 'Return'}</h3>
               <p className="text-xs text-gray-500">Order {selectedOrder.orderNumber} · {selectedOrder.customerName}</p>
             </div>
             <button onClick={() => { setStep('search'); setSelectedOrder(null); }} className="text-sm text-gray-500 hover:text-gray-700">Change order</button>
@@ -190,7 +190,7 @@ export default function ReturnsPage() {
           <div className="space-y-3">
             {returnItems.map((item, i) => (
               <div key={i} className={clsx('border rounded-lg p-4 transition-all',
-                item.returnQty > 0 ? 'border-bv-gold-300 bg-bv-gold-50' : 'border-gray-700')}>
+                item.returnQty > 0 ? 'border-bv-gold-300 bg-bv-gold-50' : 'border-gray-200')}>
                 <div className="flex items-start justify-between gap-4">
                   <div className="flex-1">
                     <p className="font-medium text-sm">{item.productName}</p>
@@ -208,7 +208,7 @@ export default function ReturnsPage() {
                 </div>
 
                 {item.returnQty > 0 && (
-                  <div className="mt-3 pt-3 border-t border-gray-700 grid grid-cols-1 tablet:grid-cols-3 gap-3">
+                  <div className="mt-3 pt-3 border-t border-gray-200 grid grid-cols-1 tablet:grid-cols-3 gap-3">
                     <div>
                       <label className="text-xs text-gray-500 block mb-1">Reason *</label>
                       <select value={item.reason} onChange={e => updateReturnItem(i, { reason: e.target.value as ReturnReason })}
@@ -237,7 +237,7 @@ export default function ReturnsPage() {
           </div>
 
           {activeReturns.length > 0 && (
-            <div className="mt-4 pt-4 border-t border-gray-700">
+            <div className="mt-4 pt-4 border-t border-gray-200">
               <div className="flex items-center justify-between mb-3">
                 <span className="text-sm text-gray-700">
                   {returnType === 'CREDIT_NOTE' ? 'Credit Amount' : 'Refund Amount'}: <span className="font-bold text-lg">{fc(totalRefund)}</span>
@@ -261,9 +261,9 @@ export default function ReturnsPage() {
 
       {/* Step 3: Complete */}
       {step === 'complete' && (
-        <div className="bg-gray-800 border border-gray-700 rounded-xl p-8 text-center">
+        <div className="bg-white border border-gray-200 rounded-xl p-8 text-center">
           <CheckCircle className="w-16 h-16 text-green-500 mx-auto mb-4" />
-          <h3 className="text-xl font-bold text-white">
+          <h3 className="text-xl font-bold text-gray-900">
             {returnType === 'EXCHANGE' ? 'Exchange Processed' : returnType === 'CREDIT_NOTE' ? 'Credit Note Issued' : 'Return Processed'}
           </h3>
           <p className="text-gray-500 mt-2">Reference: {resultId}</p>

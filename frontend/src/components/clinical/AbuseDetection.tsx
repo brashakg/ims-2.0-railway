@@ -46,8 +46,8 @@ const getAlertTitle = (type: AbuseAlert['type']) => {
 export function AbuseDetection({ alerts = [] }: AbuseDetectionProps) {
   if (alerts.length === 0) {
     return (
-      <div className="p-8 bg-gray-800 rounded-lg border border-gray-700 text-center">
-        <div className="text-gray-400">
+      <div className="p-8 bg-white rounded-lg border border-gray-200 text-center">
+        <div className="text-gray-500">
           <CheckCircle className="w-12 h-12 mx-auto mb-4" />
           <p className="text-lg font-semibold mb-2">No Issues Detected</p>
           <p className="text-sm">All optometrists are performing within acceptable parameters</p>
@@ -87,7 +87,7 @@ export function AbuseDetection({ alerts = [] }: AbuseDetectionProps) {
 
               <div className="flex-1">
                 <div className="flex items-center justify-between mb-2">
-                  <h3 className="font-semibold text-white">{getAlertTitle(alert.type)}</h3>
+                  <h3 className="font-semibold text-gray-900">{getAlertTitle(alert.type)}</h3>
                   <span className={`text-xs font-medium px-2 py-1 rounded ${
                     alert.severity === 'critical'
                       ? 'bg-red-900 text-red-200'
@@ -97,21 +97,21 @@ export function AbuseDetection({ alerts = [] }: AbuseDetectionProps) {
                   </span>
                 </div>
 
-                <p className="text-gray-300 text-sm mb-2">{alert.details}</p>
+                <p className="text-gray-600 text-sm mb-2">{alert.details}</p>
 
-                <div className="flex items-center justify-between text-xs text-gray-400">
+                <div className="flex items-center justify-between text-xs text-gray-500">
                   <div className="space-y-1">
-                    <p>Optometrist: <strong className="text-gray-300">{alert.optometristName}</strong></p>
+                    <p>Optometrist: <strong className="text-gray-600">{alert.optometristName}</strong></p>
                     {alert.redoRate && (
-                      <p>Redo Rate: <strong className="text-gray-300">{alert.redoRate.toFixed(1)}%</strong></p>
+                      <p>Redo Rate: <strong className="text-gray-600">{alert.redoRate.toFixed(1)}%</strong></p>
                     )}
                     {alert.prescriptionIds && (
-                      <p>Prescriptions: <strong className="text-gray-300">{alert.prescriptionIds.join(', ')}</strong></p>
+                      <p>Prescriptions: <strong className="text-gray-600">{alert.prescriptionIds.join(', ')}</strong></p>
                     )}
                   </div>
                   <div className="text-right">
                     <p className="text-gray-500">{new Date(alert.timestamp).toLocaleString('en-IN')}</p>
-                    <button className="mt-2 px-3 py-1 text-xs bg-gray-700 hover:bg-gray-600 text-gray-300 rounded transition">
+                    <button className="mt-2 px-3 py-1 text-xs bg-gray-100 hover:bg-gray-200 text-gray-600 rounded transition">
                       Review
                     </button>
                   </div>

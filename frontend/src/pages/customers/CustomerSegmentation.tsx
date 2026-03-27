@@ -28,7 +28,7 @@ const SEGMENTS: Segment[] = [
     id: 'champions',
     name: 'Champions',
     color: 'text-green-400',
-    bgColor: 'bg-green-900/30 border-green-700',
+    bgColor: 'bg-green-50 border-green-200',
     customerCount: 145,
     avgLifetimeValue: 85000,
     avgOrderValue: 8500,
@@ -44,7 +44,7 @@ const SEGMENTS: Segment[] = [
     id: 'loyal',
     name: 'Loyal Customers',
     color: 'text-blue-400',
-    bgColor: 'bg-blue-900/30 border-blue-700',
+    bgColor: 'bg-blue-50 border-blue-200',
     customerCount: 312,
     avgLifetimeValue: 42000,
     avgOrderValue: 4200,
@@ -60,7 +60,7 @@ const SEGMENTS: Segment[] = [
     id: 'big_spenders',
     name: 'Big Spenders',
     color: 'text-yellow-400',
-    bgColor: 'bg-yellow-900/30 border-yellow-700',
+    bgColor: 'bg-yellow-50 border-yellow-200',
     customerCount: 89,
     avgLifetimeValue: 125000,
     avgOrderValue: 12500,
@@ -76,7 +76,7 @@ const SEGMENTS: Segment[] = [
     id: 'at_risk',
     name: 'At Risk',
     color: 'text-orange-400',
-    bgColor: 'bg-orange-900/30 border-orange-700',
+    bgColor: 'bg-orange-50 border-orange-200',
     customerCount: 234,
     avgLifetimeValue: 18000,
     avgOrderValue: 1800,
@@ -92,7 +92,7 @@ const SEGMENTS: Segment[] = [
     id: 'lost',
     name: 'Lost Customers',
     color: 'text-red-400',
-    bgColor: 'bg-red-900/30 border-red-700',
+    bgColor: 'bg-red-50 border-red-200',
     customerCount: 156,
     avgLifetimeValue: 5200,
     avgOrderValue: 520,
@@ -118,32 +118,32 @@ export function CustomerSegmentation() {
       {/* Header */}
       <div className="space-y-2">
         <h1 className="text-3xl font-bold">Customer Segmentation</h1>
-        <p className="text-gray-400">RFM Analysis: Identify customer segments and target campaigns</p>
+        <p className="text-gray-500">RFM Analysis: Identify customer segments and target campaigns</p>
       </div>
 
       {/* Summary Stats */}
       <div className="grid grid-cols-3 gap-4">
-        <div className="bg-gray-800 rounded-lg p-4">
-          <p className="text-gray-400 text-sm mb-1">Total Customers</p>
-          <p className="text-2xl font-bold text-white">{totalCustomers}</p>
+        <div className="bg-white border border-gray-200 rounded-lg p-4">
+          <p className="text-gray-500 text-sm mb-1">Total Customers</p>
+          <p className="text-2xl font-bold text-gray-900">{totalCustomers}</p>
         </div>
-        <div className="bg-gray-800 rounded-lg p-4">
-          <p className="text-gray-400 text-sm mb-1">Total Value</p>
+        <div className="bg-white border border-gray-200 rounded-lg p-4">
+          <p className="text-gray-500 text-sm mb-1">Total Value</p>
           <p className="text-2xl font-bold text-green-400">₹{(totalValue / 100000).toFixed(1)}L</p>
         </div>
-        <div className="bg-gray-800 rounded-lg p-4">
-          <p className="text-gray-400 text-sm mb-1">Avg Customer LTV</p>
+        <div className="bg-white border border-gray-200 rounded-lg p-4">
+          <p className="text-gray-500 text-sm mb-1">Avg Customer LTV</p>
           <p className="text-2xl font-bold text-blue-400">₹{(totalValue / totalCustomers).toLocaleString('en-IN', { maximumFractionDigits: 0 })}</p>
         </div>
       </div>
 
       {/* Filters */}
       <div className="flex items-center gap-3">
-        <Filter className="w-5 h-5 text-gray-400" />
+        <Filter className="w-5 h-5 text-gray-500" />
         <select
           value={filterStore}
           onChange={(e) => setFilterStore(e.target.value)}
-          className="bg-gray-800 border border-gray-700 rounded px-3 py-2 text-white text-sm"
+          className="bg-white border border-gray-300 rounded px-3 py-2 text-gray-900 text-sm"
         >
           <option value="all">All Stores</option>
           <option value="main">Main Store</option>
@@ -161,32 +161,32 @@ export function CustomerSegmentation() {
             className={clsx(
               'rounded-lg p-6 border transition-all cursor-pointer',
               selectedSegment === segment.id
-                ? `${segment.bgColor} ring-2 ring-offset-2 ring-offset-gray-900`
-                : 'bg-gray-800 border-gray-700 hover:border-gray-600'
+                ? `${segment.bgColor} ring-2 ring-offset-2 ring-offset-white`
+                : 'bg-white border border-gray-200 border-gray-200 hover:border-gray-300'
             )}
           >
             {/* Header */}
             <div className="flex items-start justify-between mb-4">
               <div>
                 <h3 className={clsx('text-xl font-bold mb-1', segment.color)}>{segment.name}</h3>
-                <p className="text-gray-400 text-sm">{segment.description}</p>
+                <p className="text-gray-500 text-sm">{segment.description}</p>
               </div>
               <Users className={clsx('w-6 h-6', segment.color)} />
             </div>
 
             {/* Main Metrics */}
-            <div className="grid grid-cols-2 gap-4 mb-4 pb-4 border-b border-gray-700">
+            <div className="grid grid-cols-2 gap-4 mb-4 pb-4 border-b border-gray-200">
               <div>
-                <p className="text-gray-400 text-xs mb-1">Customers</p>
-                <p className="text-2xl font-bold text-white">{segment.customerCount}</p>
+                <p className="text-gray-500 text-xs mb-1">Customers</p>
+                <p className="text-2xl font-bold text-gray-900">{segment.customerCount}</p>
                 <p className={clsx('text-xs', segment.color)}>
                   {((segment.customerCount / totalCustomers) * 100).toFixed(1)}% of total
                 </p>
               </div>
               <div>
-                <p className="text-gray-400 text-xs mb-1">Avg LTV</p>
+                <p className="text-gray-500 text-xs mb-1">Avg LTV</p>
                 <p className="text-2xl font-bold text-green-400">₹{(segment.avgLifetimeValue / 1000).toFixed(0)}K</p>
-                <p className="text-xs text-gray-400">per customer</p>
+                <p className="text-xs text-gray-500">per customer</p>
               </div>
             </div>
 
@@ -194,15 +194,15 @@ export function CustomerSegmentation() {
             <div className="space-y-2 mb-4">
               {segment.metrics.map((metric, idx) => (
                 <div key={idx} className="flex items-center justify-between">
-                  <span className="text-gray-400 text-sm">{metric.label}</span>
-                  <span className="text-white font-semibold">{metric.value}</span>
+                  <span className="text-gray-500 text-sm">{metric.label}</span>
+                  <span className="text-gray-900 font-semibold">{metric.value}</span>
                 </div>
               ))}
             </div>
 
             {/* Actions */}
             {selectedSegment === segment.id && (
-              <div className="space-y-2 pt-4 border-t border-gray-700">
+              <div className="space-y-2 pt-4 border-t border-gray-200">
                 <button className={clsx(
                   'w-full py-2 rounded text-sm font-semibold flex items-center justify-center gap-2 transition-colors',
                   segment.id === 'champions' ? 'bg-green-600 hover:bg-green-700 text-white' :
@@ -214,7 +214,7 @@ export function CustomerSegmentation() {
                   <Target className="w-4 h-4" />
                   {segment.actionLabel}
                 </button>
-                <button className="w-full py-2 rounded bg-gray-700 hover:bg-gray-600 text-white text-sm font-semibold flex items-center justify-center gap-2">
+                <button className="w-full py-2 rounded bg-gray-100 hover:bg-gray-200 text-gray-700 text-sm font-semibold flex items-center justify-center gap-2">
                   <Mail className="w-4 h-4" />
                   View Customers
                 </button>
@@ -225,20 +225,20 @@ export function CustomerSegmentation() {
       </div>
 
       {/* Segment Distribution Chart */}
-      <div className="bg-gray-800 rounded-lg p-6">
-        <h3 className="text-lg font-semibold text-white mb-4">Customer Distribution</h3>
+      <div className="bg-white border border-gray-200 rounded-lg p-6">
+        <h3 className="text-lg font-semibold text-gray-900 mb-4">Customer Distribution</h3>
         <div className="space-y-3">
           {SEGMENTS.map((segment) => {
             const percentage = (segment.customerCount / totalCustomers) * 100;
             return (
               <div key={segment.id}>
                 <div className="flex items-center justify-between mb-1">
-                  <span className="text-sm text-gray-400">{segment.name}</span>
+                  <span className="text-sm text-gray-500">{segment.name}</span>
                   <span className={clsx('text-sm font-semibold', segment.color)}>
                     {segment.customerCount} ({percentage.toFixed(1)}%)
                   </span>
                 </div>
-                <div className="w-full bg-gray-700 rounded-full h-2 overflow-hidden">
+                <div className="w-full bg-gray-100 rounded-full h-2 overflow-hidden">
                   <div
                     className={clsx('h-full',
                       segment.id === 'champions' ? 'bg-green-500' :

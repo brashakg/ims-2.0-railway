@@ -129,7 +129,7 @@ export function PurchaseOrderDashboard() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-3xl font-bold">Purchase Orders</h1>
-          <p className="text-gray-400">Manage purchase orders and vendor supplies</p>
+          <p className="text-gray-500">Manage purchase orders and vendor supplies</p>
         </div>
         <button className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-semibold flex items-center gap-2">
           <Plus className="w-5 h-5" />
@@ -139,26 +139,26 @@ export function PurchaseOrderDashboard() {
 
       {/* Summary Stats */}
       <div className="grid grid-cols-4 gap-4">
-        <div className="bg-gray-800 rounded-lg p-4">
-          <p className="text-gray-400 text-sm mb-1">Total POs</p>
-          <p className="text-2xl font-bold text-white">{purchaseOrders.length}</p>
+        <div className="bg-white border border-gray-200 rounded-lg p-4">
+          <p className="text-gray-500 text-sm mb-1">Total POs</p>
+          <p className="text-2xl font-bold text-gray-900">{purchaseOrders.length}</p>
         </div>
-        <div className="bg-gray-800 rounded-lg p-4">
-          <p className="text-gray-400 text-sm mb-1">Pending POs</p>
+        <div className="bg-white border border-gray-200 rounded-lg p-4">
+          <p className="text-gray-500 text-sm mb-1">Pending POs</p>
           <p className="text-2xl font-bold text-yellow-400">{pendingPOs.length}</p>
         </div>
-        <div className="bg-gray-800 rounded-lg p-4">
-          <p className="text-gray-400 text-sm mb-1">Total Value</p>
+        <div className="bg-white border border-gray-200 rounded-lg p-4">
+          <p className="text-gray-500 text-sm mb-1">Total Value</p>
           <p className="text-2xl font-bold text-green-400">₹{(totalValue / 100000).toFixed(1)}L</p>
         </div>
-        <div className="bg-gray-800 rounded-lg p-4">
-          <p className="text-gray-400 text-sm mb-1">Pending Value</p>
+        <div className="bg-white border border-gray-200 rounded-lg p-4">
+          <p className="text-gray-500 text-sm mb-1">Pending Value</p>
           <p className="text-2xl font-bold text-blue-400">₹{(pendingValue / 100000).toFixed(1)}L</p>
         </div>
       </div>
 
       {/* Tabs */}
-      <div className="flex gap-2 border-b border-gray-700">
+      <div className="flex gap-2 border-b border-gray-300">
         {(['all', 'pending', 'received', 'closed'] as const).map((tab) => (
           <button
             key={tab}
@@ -167,7 +167,7 @@ export function PurchaseOrderDashboard() {
               'px-4 py-3 font-medium border-b-2 transition-colors',
               activeTab === tab
                 ? 'border-blue-500 text-blue-400'
-                : 'border-transparent text-gray-400 hover:text-gray-300'
+                : 'border-transparent text-gray-400 hover:text-gray-700'
             )}
           >
             {tab === 'all' ? 'All' : tab === 'pending' ? 'Pending' : tab === 'received' ? 'Received' : 'Closed'}
@@ -184,13 +184,13 @@ export function PurchaseOrderDashboard() {
             placeholder="Search by PO number or vendor..."
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
-            className="w-full pl-10 pr-4 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-blue-500"
+            className="w-full pl-10 pr-4 py-2 bg-white border border-gray-300 rounded-lg text-gray-900 placeholder-gray-500 focus:outline-none focus:border-blue-500"
           />
         </div>
         <select
           value={filterStatus}
           onChange={(e) => startTransition(() => setFilterStatus(e.target.value))}
-          className="px-4 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white text-sm"
+          className="px-4 py-2 bg-white border border-gray-300 rounded-lg text-gray-900 text-sm"
         >
           <option value="all">All Status</option>
           <option value="draft">Draft</option>
@@ -206,37 +206,37 @@ export function PurchaseOrderDashboard() {
       <div className="space-y-3">
         {filteredPOs.map((po) => (
           <div key={po.id}>
-            <div className="bg-gray-800 rounded-lg p-4 border border-gray-700 hover:border-gray-600 transition-colors">
+            <div className="bg-white border border-gray-200 rounded-lg p-4 hover:border-gray-300 transition-colors">
             <div className="flex items-start justify-between mb-3">
               <div className="flex-1">
-                <p className="text-white font-semibold">{po.po_number}</p>
-                <p className="text-gray-400 text-sm">{po.vendor_name}</p>
+                <p className="text-gray-900 font-semibold">{po.po_number}</p>
+                <p className="text-gray-500 text-sm">{po.vendor_name}</p>
               </div>
               <span className={clsx('px-3 py-1 rounded-full text-xs font-semibold', getStatusColor(po.status))}>
                 {getStatusLabel(po.status)}
               </span>
             </div>
 
-            <div className="grid grid-cols-5 gap-4 mb-3 pb-3 border-b border-gray-700">
+            <div className="grid grid-cols-5 gap-4 mb-3 pb-3 border-b border-gray-300">
               <div>
-                <p className="text-gray-400 text-xs mb-1">Items</p>
-                <p className="text-white font-semibold">{po.items.length}</p>
+                <p className="text-gray-500 text-xs mb-1">Items</p>
+                <p className="text-gray-900 font-semibold">{po.items.length}</p>
               </div>
               <div>
-                <p className="text-gray-400 text-xs mb-1">Quantity</p>
-                <p className="text-white font-semibold">{po.items.reduce((sum, i) => sum + i.quantity, 0)}</p>
+                <p className="text-gray-500 text-xs mb-1">Quantity</p>
+                <p className="text-gray-900 font-semibold">{po.items.reduce((sum, i) => sum + i.quantity, 0)}</p>
               </div>
               <div>
-                <p className="text-gray-400 text-xs mb-1">Amount</p>
+                <p className="text-gray-500 text-xs mb-1">Amount</p>
                 <p className="text-green-400 font-semibold">₹{po.net_amount.toLocaleString('en-IN')}</p>
               </div>
               <div>
-                <p className="text-gray-400 text-xs mb-1">Expected Delivery</p>
-                <p className="text-white font-semibold">{new Date(po.expected_delivery).toLocaleDateString()}</p>
+                <p className="text-gray-500 text-xs mb-1">Expected Delivery</p>
+                <p className="text-gray-900 font-semibold">{new Date(po.expected_delivery).toLocaleDateString()}</p>
               </div>
               <div className="text-right">
-                <p className="text-gray-400 text-xs mb-1">Created</p>
-                <p className="text-white font-semibold">{new Date(po.created_at).toLocaleDateString()}</p>
+                <p className="text-gray-500 text-xs mb-1">Created</p>
+                <p className="text-gray-900 font-semibold">{new Date(po.created_at).toLocaleDateString()}</p>
               </div>
             </div>
 
@@ -246,7 +246,7 @@ export function PurchaseOrderDashboard() {
                   <button className="px-3 py-1 bg-blue-600 hover:bg-blue-700 text-white text-sm rounded font-semibold flex items-center gap-1">
                     <Check className="w-4 h-4" /> Approve
                   </button>
-                  <button className="px-3 py-1 bg-gray-700 hover:bg-gray-600 text-white text-sm rounded font-semibold flex items-center gap-1">
+                  <button className="px-3 py-1 bg-gray-100 hover:bg-gray-200 text-gray-700 text-sm rounded font-semibold flex items-center gap-1 border border-gray-300">
                     <Edit2 className="w-4 h-4" /> Edit
                   </button>
                 </>
@@ -263,32 +263,32 @@ export function PurchaseOrderDashboard() {
               )}
               <button
                 onClick={() => startTransition(() => setExpandedPO(expandedPO === po.id ? null : po.id))}
-                className="px-3 py-1 bg-gray-700 hover:bg-gray-600 text-white text-sm rounded font-semibold"
+                className="px-3 py-1 bg-gray-100 hover:bg-gray-200 text-gray-700 text-sm rounded font-semibold border border-gray-300"
               >
                 {expandedPO === po.id ? 'Hide Details' : 'View Details'}
               </button>
             </div>
 
             {expandedPO === po.id && (
-              <div className="bg-gray-750 rounded-b-lg p-4 border border-t-0 border-gray-700">
-                <h4 className="text-white font-semibold mb-3">Line Items</h4>
+              <div className="bg-gray-50 rounded-b-lg p-4 border border-t-0 border-gray-200">
+                <h4 className="text-gray-900 font-semibold mb-3">Line Items</h4>
                 {po.items && po.items.length > 0 ? (
                   <div className="overflow-x-auto">
                     <table className="w-full text-sm">
                       <thead>
-                        <tr className="border-b border-gray-600">
-                          <th className="text-left px-3 py-2 text-gray-400">Product</th>
-                          <th className="text-right px-3 py-2 text-gray-400">Qty</th>
-                          <th className="text-right px-3 py-2 text-gray-400">Unit Price</th>
-                          <th className="text-right px-3 py-2 text-gray-400">Total</th>
+                        <tr className="border-b border-gray-300">
+                          <th className="text-left px-3 py-2 text-gray-500">Product</th>
+                          <th className="text-right px-3 py-2 text-gray-500">Qty</th>
+                          <th className="text-right px-3 py-2 text-gray-500">Unit Price</th>
+                          <th className="text-right px-3 py-2 text-gray-500">Total</th>
                         </tr>
                       </thead>
                       <tbody>
                         {po.items.map((item, idx) => (
-                          <tr key={idx} className="border-b border-gray-700 hover:bg-gray-700/50">
-                            <td className="px-3 py-2 text-white">{item.product_name}</td>
-                            <td className="text-right px-3 py-2 text-white">{item.quantity}</td>
-                            <td className="text-right px-3 py-2 text-white">₹{item.unit_price.toLocaleString('en-IN')}</td>
+                          <tr key={idx} className="border-b border-gray-200 hover:bg-gray-100">
+                            <td className="px-3 py-2 text-gray-900">{item.product_name}</td>
+                            <td className="text-right px-3 py-2 text-gray-900">{item.quantity}</td>
+                            <td className="text-right px-3 py-2 text-gray-900">₹{item.unit_price.toLocaleString('en-IN')}</td>
                             <td className="text-right px-3 py-2 text-green-400 font-semibold">₹{item.total_price.toLocaleString('en-IN')}</td>
                           </tr>
                         ))}
@@ -296,7 +296,7 @@ export function PurchaseOrderDashboard() {
                     </table>
                   </div>
                 ) : (
-                  <p className="text-gray-400 text-sm">No line items</p>
+                  <p className="text-gray-500 text-sm">No line items</p>
                 )}
               </div>
             )}

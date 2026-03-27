@@ -179,56 +179,56 @@ export function PrescriptionCard({ prescription }: PrescriptionCardProps) {
       </div>
 
       {/* Preview in UI */}
-      <div className={`p-6 rounded-lg border-2 ${expired ? 'bg-red-900 border-red-600' : 'bg-gray-800 border-gray-700'}`}>
+      <div className={`p-6 rounded-lg border-2 ${expired ? 'bg-red-50 border-red-300' : 'bg-white border-gray-200'}`}>
         {expired && (
-          <div className="mb-4 p-3 bg-red-800 border border-red-600 rounded text-red-200 text-sm">
+          <div className="mb-4 p-3 bg-red-100 border border-red-300 rounded text-red-700 text-sm">
             ⚠️ This prescription has expired on {formatDate(prescription.validUntil)}
           </div>
         )}
 
         <div className="grid grid-cols-2 gap-6">
           <div>
-            <h3 className="text-white font-semibold mb-2">{prescription.patientName}</h3>
-            <p className="text-gray-400 text-sm">Age: {prescription.patientAge || 'N/A'}</p>
-            <p className="text-gray-400 text-sm">Optometrist: {prescription.optometristName}</p>
+            <h3 className="text-gray-900 font-semibold mb-2">{prescription.patientName}</h3>
+            <p className="text-gray-500 text-sm">Age: {prescription.patientAge || 'N/A'}</p>
+            <p className="text-gray-500 text-sm">Optometrist: {prescription.optometristName}</p>
           </div>
           <div>
-            <p className="text-gray-400 text-sm">Date: {formatDate(prescription.date)}</p>
-            <p className="text-gray-400 text-sm">Valid Until: {formatDate(prescription.validUntil)}</p>
-            <p className="text-gray-400 text-sm">PD: {prescription.pd}mm</p>
+            <p className="text-gray-500 text-sm">Date: {formatDate(prescription.date)}</p>
+            <p className="text-gray-500 text-sm">Valid Until: {formatDate(prescription.validUntil)}</p>
+            <p className="text-gray-500 text-sm">PD: {prescription.pd}mm</p>
           </div>
         </div>
 
         <table className="w-full mt-4 text-sm">
           <thead>
-            <tr className="border-b border-gray-600">
-              <th className="text-left text-gray-300 py-2">Eye</th>
-              <th className="text-center text-gray-300 py-2">SPH</th>
-              <th className="text-center text-gray-300 py-2">CYL</th>
-              <th className="text-center text-gray-300 py-2">AXIS</th>
-              <th className="text-center text-gray-300 py-2">ADD</th>
+            <tr className="border-b border-gray-200">
+              <th className="text-left text-gray-600 py-2">Eye</th>
+              <th className="text-center text-gray-600 py-2">SPH</th>
+              <th className="text-center text-gray-600 py-2">CYL</th>
+              <th className="text-center text-gray-600 py-2">AXIS</th>
+              <th className="text-center text-gray-600 py-2">ADD</th>
             </tr>
           </thead>
           <tbody>
-            <tr className="border-b border-gray-700">
-              <td className="text-white py-2">Right (OD)</td>
-              <td className="text-center text-gray-300">{prescription.rightEye.sphere.toFixed(2)}</td>
-              <td className="text-center text-gray-300">{prescription.rightEye.cylinder.toFixed(2)}</td>
-              <td className="text-center text-gray-300">{prescription.rightEye.axis}</td>
-              <td className="text-center text-gray-300">{prescription.rightEye.add.toFixed(2)}</td>
+            <tr className="border-b border-gray-200">
+              <td className="text-gray-900 py-2">Right (OD)</td>
+              <td className="text-center text-gray-600">{prescription.rightEye.sphere.toFixed(2)}</td>
+              <td className="text-center text-gray-600">{prescription.rightEye.cylinder.toFixed(2)}</td>
+              <td className="text-center text-gray-600">{prescription.rightEye.axis}</td>
+              <td className="text-center text-gray-600">{prescription.rightEye.add.toFixed(2)}</td>
             </tr>
             <tr>
-              <td className="text-white py-2">Left (OS)</td>
-              <td className="text-center text-gray-300">{prescription.leftEye.sphere.toFixed(2)}</td>
-              <td className="text-center text-gray-300">{prescription.leftEye.cylinder.toFixed(2)}</td>
-              <td className="text-center text-gray-300">{prescription.leftEye.axis}</td>
-              <td className="text-center text-gray-300">{prescription.leftEye.add.toFixed(2)}</td>
+              <td className="text-gray-900 py-2">Left (OS)</td>
+              <td className="text-center text-gray-600">{prescription.leftEye.sphere.toFixed(2)}</td>
+              <td className="text-center text-gray-600">{prescription.leftEye.cylinder.toFixed(2)}</td>
+              <td className="text-center text-gray-600">{prescription.leftEye.axis}</td>
+              <td className="text-center text-gray-600">{prescription.leftEye.add.toFixed(2)}</td>
             </tr>
           </tbody>
         </table>
 
         {prescription.notes && (
-          <p className="mt-4 text-gray-400 text-sm">Notes: {prescription.notes}</p>
+          <p className="mt-4 text-gray-500 text-sm">Notes: {prescription.notes}</p>
         )}
       </div>
     </div>

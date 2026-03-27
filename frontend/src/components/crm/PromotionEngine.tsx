@@ -489,7 +489,7 @@ export function PromotionEngine() {
 
         {filtered.length === 0 && (
           <div className="text-center py-16 bg-white rounded-lg border border-gray-200">
-            <Gift className="w-12 h-12 text-gray-300 mx-auto mb-3" />
+            <Gift className="w-12 h-12 text-gray-400 mx-auto mb-3" />
             <p className="text-gray-500">No campaigns found</p>
           </div>
         )}

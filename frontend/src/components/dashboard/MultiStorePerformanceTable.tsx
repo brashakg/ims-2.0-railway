@@ -77,7 +77,7 @@ export function MultiStorePerformanceTable({ stores, onStoreClick, loading }: Mu
   };
 
   const SortIcon = ({ isActive, direction }: { isActive: boolean; direction: SortDirection }) => {
-    if (!isActive) return <span className="text-gray-300">⬍</span>;
+    if (!isActive) return <span className="text-gray-400">⬍</span>;
     return direction === 'asc' ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />;
   };
 

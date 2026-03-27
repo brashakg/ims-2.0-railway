@@ -44,15 +44,15 @@ export function LensMasterSection() {
   return (
     <div className="space-y-4">
       <div className="card">
-        <h2 className="text-lg font-semibold text-white mb-4">Lens Master</h2>
-        <p className="text-sm text-gray-400 mb-6">
+        <h2 className="text-lg font-semibold text-gray-900 mb-4">Lens Master</h2>
+        <p className="text-sm text-gray-500 mb-6">
           Configure lens brands, indices, coatings, and add-ons for the lens selection workflow in POS.
         </p>
 
         {/* Lens Brands */}
         <div className="mb-6">
           <div className="flex items-center justify-between mb-3">
-            <h3 className="text-sm font-medium text-gray-300">Lens Brands</h3>
+            <h3 className="text-sm font-medium text-gray-600">Lens Brands</h3>
             <button
               onClick={async () => {
                 const name = prompt('Enter lens brand name:');
@@ -74,17 +74,17 @@ export function LensMasterSection() {
           </div>
           <div className="grid grid-cols-4 gap-2">
             {lensBrands.length === 0 ? (
-              <div className="col-span-4 text-center py-4 text-gray-400">
+              <div className="col-span-4 text-center py-4 text-gray-500">$
                 No lens brands configured. Click "Add Brand" to add one.
               </div>
             ) : (
               lensBrands.map(brand => (
-                <div key={brand.id} className="p-3 bg-gray-900 rounded-lg flex items-center justify-between">
+                <div key={brand.id} className="p-3 bg-gray-50 border border-gray-200 rounded-lg flex items-center justify-between">
                   <span className="text-sm">{brand.name}</span>
                   <div className="flex items-center gap-1">
-                    <Edit2 className="w-3 h-3 text-gray-400 cursor-pointer hover:text-bv-red-600" />
+                    <Edit2 className="w-3 h-3 text-gray-500 cursor-pointer hover:text-bv-red-600" />
                     <Trash2
-                      className="w-3 h-3 text-gray-400 cursor-pointer hover:text-red-600"
+                      className="w-3 h-3 text-gray-500 cursor-pointer hover:text-red-600"
                       onClick={async () => {
                         if (window.confirm(`Delete lens brand "${brand.name}"?`)) {
                           try {
@@ -107,7 +107,7 @@ export function LensMasterSection() {
         {/* Lens Indices */}
         <div className="mb-6">
           <div className="flex items-center justify-between mb-3">
-            <h3 className="text-sm font-medium text-gray-300">Lens Indices</h3>
+            <h3 className="text-sm font-medium text-gray-600">Lens Indices</h3>
             <button
               onClick={async () => {
                 const value = prompt('Enter index value (e.g., 1.56):');
@@ -130,18 +130,18 @@ export function LensMasterSection() {
           </div>
           <div className="grid grid-cols-4 gap-2">
             {lensIndices.length === 0 ? (
-              <div className="col-span-4 text-center py-4 text-gray-400">
+              <div className="col-span-4 text-center py-4 text-gray-500">$
                 No lens indices configured. Click "Add Index" to add one.
               </div>
             ) : (
               lensIndices.map(idx => (
-                <div key={idx.id} className="p-3 bg-gray-900 rounded-lg flex items-center justify-between">
+                <div key={idx.id} className="p-3 bg-gray-50 border border-gray-200 rounded-lg flex items-center justify-between">
                   <div>
                     <span className="text-sm font-medium">{idx.value}</span>
-                    <span className="text-xs text-gray-400 ml-2">{idx.name}</span>
+                    <span className="text-xs text-gray-500 ml-2">{idx.name}</span>
                   </div>
                   <Trash2
-                    className="w-3 h-3 text-gray-400 cursor-pointer hover:text-red-600"
+                    className="w-3 h-3 text-gray-500 cursor-pointer hover:text-red-600"
                     onClick={async () => {
                       if (window.confirm(`Delete lens index "${idx.value}"?`)) {
                         try {
@@ -163,7 +163,7 @@ export function LensMasterSection() {
         {/* Coatings */}
         <div className="mb-6">
           <div className="flex items-center justify-between mb-3">
-            <h3 className="text-sm font-medium text-gray-300">Coatings</h3>
+            <h3 className="text-sm font-medium text-gray-600">Coatings</h3>
             <button
               onClick={async () => {
                 const name = prompt('Enter coating name:');
@@ -190,20 +190,20 @@ export function LensMasterSection() {
           </div>
           <div className="grid grid-cols-3 gap-2">
             {lensCoatings.length === 0 ? (
-              <div className="col-span-3 text-center py-4 text-gray-400">
+              <div className="col-span-3 text-center py-4 text-gray-500">$
                 No coatings configured. Click "Add Coating" to add one.
               </div>
             ) : (
               lensCoatings.map(coating => (
-                <div key={coating.id} className="p-3 bg-gray-900 rounded-lg flex items-center justify-between">
+                <div key={coating.id} className="p-3 bg-gray-50 border border-gray-200 rounded-lg flex items-center justify-between">
                   <div>
                     <span className="text-sm">{coating.name}</span>
-                    <span className="text-xs text-gray-400 ml-2">Rs.{Number(coating.price).toFixed(2)}</span>
+                    <span className="text-xs text-gray-500 ml-2">Rs.{Number(coating.price).toFixed(2)}</span>
                   </div>
                   <div className="flex items-center gap-1">
-                    <Edit2 className="w-3 h-3 text-gray-400 cursor-pointer hover:text-bv-red-600" />
+                    <Edit2 className="w-3 h-3 text-gray-500 cursor-pointer hover:text-bv-red-600" />
                     <Trash2
-                      className="w-3 h-3 text-gray-400 cursor-pointer hover:text-red-600"
+                      className="w-3 h-3 text-gray-500 cursor-pointer hover:text-red-600"
                       onClick={async () => {
                         if (window.confirm(`Delete coating "${coating.name}"?`)) {
                           try {
@@ -226,7 +226,7 @@ export function LensMasterSection() {
         {/* Add-ons */}
         <div>
           <div className="flex items-center justify-between mb-3">
-            <h3 className="text-sm font-medium text-gray-300">Add-ons</h3>
+            <h3 className="text-sm font-medium text-gray-600">Add-ons</h3>
             <button
               onClick={async () => {
                 const name = prompt('Enter add-on name:');
@@ -254,20 +254,20 @@ export function LensMasterSection() {
           </div>
           <div className="grid grid-cols-3 gap-2">
             {lensAddons.length === 0 ? (
-              <div className="col-span-3 text-center py-4 text-gray-400">
+              <div className="col-span-3 text-center py-4 text-gray-500">$
                 No add-ons configured. Click "Add Add-on" to add one.
               </div>
             ) : (
               lensAddons.map(addon => (
-                <div key={addon.id} className="p-3 bg-gray-900 rounded-lg flex items-center justify-between">
+                <div key={addon.id} className="p-3 bg-gray-50 border border-gray-200 rounded-lg flex items-center justify-between">
                   <div>
                     <span className="text-sm">{addon.name}</span>
-                    <span className="text-xs text-gray-400 ml-2">Rs.{Number(addon.price).toFixed(2)}</span>
+                    <span className="text-xs text-gray-500 ml-2">Rs.{Number(addon.price).toFixed(2)}</span>
                   </div>
                   <div className="flex items-center gap-1">
-                    <Edit2 className="w-3 h-3 text-gray-400 cursor-pointer hover:text-bv-red-600" />
+                    <Edit2 className="w-3 h-3 text-gray-500 cursor-pointer hover:text-bv-red-600" />
                     <Trash2
-                      className="w-3 h-3 text-gray-400 cursor-pointer hover:text-red-600"
+                      className="w-3 h-3 text-gray-500 cursor-pointer hover:text-red-600"
                       onClick={async () => {
                         if (window.confirm(`Delete add-on "${addon.name}"?`)) {
                           try {

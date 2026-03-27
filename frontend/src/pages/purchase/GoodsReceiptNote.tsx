@@ -112,30 +112,30 @@ export function GoodsReceiptNote() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-3xl font-bold">Goods Receipt Notes</h1>
-          <p className="text-gray-400">Record item receipt with quality inspection</p>
+          <p className="text-gray-500">Record item receipt with quality inspection</p>
         </div>
       </div>
 
       {/* Summary Stats */}
       <div className="grid grid-cols-4 gap-4">
-        <div className="bg-gray-800 rounded-lg p-4">
-          <p className="text-gray-400 text-sm mb-1">Total GRNs</p>
-          <p className="text-2xl font-bold text-white">{grns.length}</p>
+        <div className="bg-white border border-gray-200 rounded-lg p-4">
+          <p className="text-gray-500 text-sm mb-1">Total GRNs</p>
+          <p className="text-2xl font-bold text-gray-900">{grns.length}</p>
         </div>
-        <div className="bg-gray-800 rounded-lg p-4">
-          <p className="text-gray-400 text-sm mb-1">Quality Passed</p>
+        <div className="bg-white border border-gray-200 rounded-lg p-4">
+          <p className="text-gray-500 text-sm mb-1">Quality Passed</p>
           <p className="text-2xl font-bold text-green-400">
             {grns.filter(g => g.quality_status === 'passed').length}
           </p>
         </div>
-        <div className="bg-gray-800 rounded-lg p-4">
-          <p className="text-gray-400 text-sm mb-1">Conditional Receipts</p>
+        <div className="bg-white border border-gray-200 rounded-lg p-4">
+          <p className="text-gray-500 text-sm mb-1">Conditional Receipts</p>
           <p className="text-2xl font-bold text-yellow-400">
             {grns.filter(g => g.quality_status === 'conditional').length}
           </p>
         </div>
-        <div className="bg-gray-800 rounded-lg p-4">
-          <p className="text-gray-400 text-sm mb-1">Failed Quality</p>
+        <div className="bg-white border border-gray-200 rounded-lg p-4">
+          <p className="text-gray-500 text-sm mb-1">Failed Quality</p>
           <p className="text-2xl font-bold text-red-400">
             {grns.filter(g => g.quality_status === 'failed').length}
           </p>
@@ -143,7 +143,7 @@ export function GoodsReceiptNote() {
       </div>
 
       {/* Tabs */}
-      <div className="flex gap-2 border-b border-gray-700">
+      <div className="flex gap-2 border-b border-gray-300">
         {(['create', 'history', 'discrepancies'] as const).map((tab) => (
           <button
             key={tab}
@@ -152,7 +152,7 @@ export function GoodsReceiptNote() {
               'px-4 py-3 font-medium border-b-2 transition-colors',
               activeTab === tab
                 ? 'border-blue-500 text-blue-400'
-                : 'border-transparent text-gray-400 hover:text-gray-300'
+                : 'border-transparent text-gray-400 hover:text-gray-700'
             )}
           >
             {tab === 'create' ? 'Create GRN' : tab === 'history' ? 'History' : 'Discrepancies'}
@@ -164,12 +164,12 @@ export function GoodsReceiptNote() {
       {activeTab === 'create' && (
         <div className="space-y-6">
           {/* PO Selection */}
-          <div className="bg-gray-800 rounded-lg p-6 border border-gray-700">
-            <h3 className="text-lg font-semibold text-white mb-4">Select Purchase Order</h3>
+          <div className="bg-white border border-gray-200 rounded-lg p-6">
+            <h3 className="text-lg font-semibold text-gray-900 mb-4">Select Purchase Order</h3>
             <select
               value={poNumber}
               onChange={(e) => setPoNumber(e.target.value)}
-              className="w-full px-4 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white"
+              className="w-full px-4 py-2 bg-white border border-gray-300 rounded-lg text-gray-900"
             >
               <option value="PO-2024-001">PO-2024-001 - Optical Frames Ltd</option>
               <option value="PO-2024-002">PO-2024-002 - Lens Manufacturers Inc</option>
@@ -177,19 +177,19 @@ export function GoodsReceiptNote() {
           </div>
 
           {/* Items Reception */}
-          <div className="bg-gray-800 rounded-lg p-6 border border-gray-700">
-            <h3 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+          <div className="bg-white border border-gray-200 rounded-lg p-6">
+            <h3 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
               <Package className="w-5 h-5" />
               Items Received
             </h3>
 
             <div className="space-y-4">
               {receivedItems.map((item, idx) => (
-                <div key={idx} className="bg-gray-700 rounded-lg p-4">
+                <div key={idx} className="bg-gray-50 border border-gray-200 rounded-lg p-4">
                   <div className="flex items-start justify-between mb-3">
                     <div>
-                      <p className="text-white font-semibold">{item.product_name}</p>
-                      <p className="text-gray-400 text-sm">Product ID: {item.product_id}</p>
+                      <p className="text-gray-900 font-semibold">{item.product_name}</p>
+                      <p className="text-gray-500 text-sm">Product ID: {item.product_id}</p>
                     </div>
                     <span className={clsx(
                       'px-2 py-1 rounded text-xs font-semibold',
@@ -203,11 +203,11 @@ export function GoodsReceiptNote() {
 
                   <div className="grid grid-cols-3 gap-4">
                     <div>
-                      <p className="text-gray-400 text-xs mb-2">PO Quantity</p>
-                      <p className="text-white font-semibold">{item.po_qty}</p>
+                      <p className="text-gray-500 text-xs mb-2">PO Quantity</p>
+                      <p className="text-gray-900 font-semibold">{item.po_qty}</p>
                     </div>
                     <div>
-                      <p className="text-gray-400 text-xs mb-2">Received Quantity</p>
+                      <p className="text-gray-500 text-xs mb-2">Received Quantity</p>
                       <input
                         type="number"
                         value={item.received_qty}
@@ -218,11 +218,11 @@ export function GoodsReceiptNote() {
                             setReceivedItems(newItems);
                           });
                         }}
-                        className="w-full px-2 py-1 bg-gray-600 border border-gray-500 rounded text-white text-sm"
+                        className="w-full px-2 py-1 bg-white border border-gray-300 rounded text-gray-900 text-sm"
                       />
                     </div>
                     <div>
-                      <p className="text-gray-400 text-xs mb-2">Variance</p>
+                      <p className="text-gray-500 text-xs mb-2">Variance</p>
                       <p className={clsx(
                         'text-sm font-semibold',
                         item.received_qty === item.po_qty ? 'text-green-400' : 'text-orange-400'
@@ -237,8 +237,8 @@ export function GoodsReceiptNote() {
           </div>
 
           {/* Quality Inspection */}
-          <div className="bg-gray-800 rounded-lg p-6 border border-gray-700">
-            <h3 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+          <div className="bg-white border border-gray-200 rounded-lg p-6">
+            <h3 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
               <Check className="w-5 h-5" />
               Quality Inspection Checklist
             </h3>
@@ -252,29 +252,29 @@ export function GoodsReceiptNote() {
                     onChange={() => toggleInspectionCheck(item)}
                     className="w-4 h-4 rounded border-gray-500"
                   />
-                  <span className="text-gray-300 text-sm">{item}</span>
+                  <span className="text-gray-600 text-sm">{item}</span>
                 </label>
               ))}
             </div>
 
             <div className="mb-4">
-              <label className="block text-gray-400 text-sm mb-2">Quality Notes</label>
+              <label className="block text-gray-500 text-sm mb-2">Quality Notes</label>
               <textarea
                 value={qualityNotes}
                 onChange={(e) => startTransition(() => setQualityNotes(e.target.value))}
                 placeholder="Add any observations during inspection..."
-                className="w-full px-4 py-2 bg-gray-700 border border-gray-600 rounded text-white placeholder-gray-500 resize-none"
+                className="w-full px-4 py-2 bg-white border border-gray-300 rounded text-gray-900 placeholder-gray-500 resize-none"
                 rows={3}
               />
             </div>
 
             <div className="mb-4">
-              <label className="block text-gray-400 text-sm mb-2">Discrepancies Found</label>
+              <label className="block text-gray-500 text-sm mb-2">Discrepancies Found</label>
               <textarea
                 value={discrepancies}
                 onChange={(e) => startTransition(() => setDiscrepancies(e.target.value))}
                 placeholder="List any damaged items, missing items, or other discrepancies..."
-                className="w-full px-4 py-2 bg-gray-700 border border-gray-600 rounded text-white placeholder-gray-500 resize-none"
+                className="w-full px-4 py-2 bg-white border border-gray-300 rounded text-gray-900 placeholder-gray-500 resize-none"
                 rows={3}
               />
             </div>
@@ -347,33 +347,33 @@ export function GoodsReceiptNote() {
       {activeTab === 'history' && (
         <div className="space-y-4">
           {grns.map((grn) => (
-            <div key={grn.id} className="bg-gray-800 rounded-lg p-4 border border-gray-700 hover:border-gray-600 transition-colors">
+            <div key={grn.id} className="bg-white border border-gray-200 rounded-lg p-4 hover:border-gray-300 transition-colors">
               <div className="flex items-start justify-between mb-3">
                 <div>
-                  <p className="text-white font-semibold">{grn.grn_number}</p>
-                  <p className="text-gray-400 text-sm">Against {grn.po_number}</p>
+                  <p className="text-gray-900 font-semibold">{grn.grn_number}</p>
+                  <p className="text-gray-500 text-sm">Against {grn.po_number}</p>
                 </div>
                 <span className={clsx('px-3 py-1 rounded-full text-xs font-semibold', getQualityStatusColor(grn.quality_status))}>
                   {grn.quality_status === 'passed' ? 'Passed' : grn.quality_status === 'failed' ? 'Failed' : 'Conditional'}
                 </span>
               </div>
 
-              <div className="grid grid-cols-4 gap-4 mb-3 pb-3 border-b border-gray-700">
+              <div className="grid grid-cols-4 gap-4 mb-3 pb-3 border-b border-gray-300">
                 <div>
-                  <p className="text-gray-400 text-xs mb-1">Items Received</p>
-                  <p className="text-white font-semibold">{grn.items_received}</p>
+                  <p className="text-gray-500 text-xs mb-1">Items Received</p>
+                  <p className="text-gray-900 font-semibold">{grn.items_received}</p>
                 </div>
                 <div>
-                  <p className="text-gray-400 text-xs mb-1">Received Date</p>
-                  <p className="text-white font-semibold">{new Date(grn.received_at).toLocaleDateString()}</p>
+                  <p className="text-gray-500 text-xs mb-1">Received Date</p>
+                  <p className="text-gray-900 font-semibold">{new Date(grn.received_at).toLocaleDateString()}</p>
                 </div>
                 <div>
-                  <p className="text-gray-400 text-xs mb-1">Received Time</p>
-                  <p className="text-white font-semibold">{new Date(grn.received_at).toLocaleTimeString()}</p>
+                  <p className="text-gray-500 text-xs mb-1">Received Time</p>
+                  <p className="text-gray-900 font-semibold">{new Date(grn.received_at).toLocaleTimeString()}</p>
                 </div>
                 <div>
-                  <p className="text-gray-400 text-xs mb-1">Created By</p>
-                  <p className="text-white font-semibold">{grn.created_by}</p>
+                  <p className="text-gray-500 text-xs mb-1">Created By</p>
+                  <p className="text-gray-900 font-semibold">{grn.created_by}</p>
                 </div>
               </div>
 
@@ -402,7 +402,7 @@ export function GoodsReceiptNote() {
               <div className="flex items-start justify-between mb-2">
                 <div>
                   <p className="text-orange-300 font-semibold">GRN-2024-002 - Frame Model A</p>
-                  <p className="text-gray-400 text-sm">Against PO-2024-001</p>
+                  <p className="text-gray-500 text-sm">Against PO-2024-001</p>
                 </div>
                 <span className="px-2 py-1 bg-orange-900 text-orange-300 rounded text-xs font-semibold">
                   Quantity Variance
@@ -415,7 +415,7 @@ export function GoodsReceiptNote() {
               <div className="flex items-start justify-between mb-2">
                 <div>
                   <p className="text-red-300 font-semibold">GRN-2024-003 - Lens Coating</p>
-                  <p className="text-gray-400 text-sm">Against PO-2024-002</p>
+                  <p className="text-gray-500 text-sm">Against PO-2024-002</p>
                 </div>
                 <span className="px-2 py-1 bg-red-900 text-red-300 rounded text-xs font-semibold">
                   Quality Failure

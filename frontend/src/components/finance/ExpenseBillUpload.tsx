@@ -128,7 +128,7 @@ export function ExpenseBillUpload({ expenseId, onBillUpload }: ExpenseBillUpload
             'border-2 border-dashed rounded-lg p-8 text-center cursor-pointer transition',
             isDragging
               ? 'border-blue-500 bg-blue-900 bg-opacity-20'
-              : 'border-gray-600 bg-gray-800 hover:border-gray-500'
+              : 'border-gray-300 bg-white hover:border-gray-400'
           )}
         >
           <input
@@ -140,12 +140,12 @@ export function ExpenseBillUpload({ expenseId, onBillUpload }: ExpenseBillUpload
           />
           
           <div className="flex flex-col items-center gap-3">
-            <Upload className="w-8 h-8 text-gray-400" />
+            <Upload className="w-8 h-8 text-gray-500" />
             <div>
-              <p className="text-white font-medium mb-1">
+              <p className="text-gray-900 font-medium mb-1">
                 {isUploading ? 'Uploading and checking for duplicates...' : 'Drag & drop your bill here'}
               </p>
-              <p className="text-sm text-gray-400">
+              <p className="text-sm text-gray-500">
                 {isUploading ? '' : 'or click to browse (Image or PDF)'}
               </p>
             </div>
@@ -174,8 +174,8 @@ export function ExpenseBillUpload({ expenseId, onBillUpload }: ExpenseBillUpload
                 bill.status === 'duplicate' ? 'text-yellow-400' : 'text-green-400'
               )} />
               <div>
-                <p className="font-medium text-white">{bill.name}</p>
-                <p className="text-sm text-gray-400">{formatFileSize(bill.size)}</p>
+                <p className="font-medium text-gray-900">{bill.name}</p>
+                <p className="text-sm text-gray-500">{formatFileSize(bill.size)}</p>
               </div>
             </div>
             <button
@@ -183,7 +183,7 @@ export function ExpenseBillUpload({ expenseId, onBillUpload }: ExpenseBillUpload
                 setBill(null);
                 setDuplicate(null);
               }}
-              className="p-1 text-gray-400 hover:text-red-400 transition"
+              className="p-1 text-gray-500 hover:text-red-500 transition"
             >
               <X className="w-5 h-5" />
             </button>
@@ -216,20 +216,20 @@ export function ExpenseBillUpload({ expenseId, onBillUpload }: ExpenseBillUpload
               <p className="text-sm text-yellow-100 mb-3">
                 This bill appears to be a duplicate of an existing expense. Please review before proceeding.
               </p>
-              <div className="p-3 bg-gray-800 rounded text-sm space-y-1">
-                <p className="text-gray-300">
+              <div className="p-3 bg-gray-50 border border-gray-200 rounded text-sm space-y-1">
+                <p className="text-gray-600">
                   <strong>Existing Expense:</strong> {duplicate.expenseId}
                 </p>
-                <p className="text-gray-300">
+                <p className="text-gray-600">
                   <strong>Amount:</strong> ₹{duplicate.amount.toLocaleString()}
                 </p>
-                <p className="text-gray-300">
+                <p className="text-gray-600">
                   <strong>Date:</strong> {duplicate.date}
                 </p>
-                <p className="text-gray-300">
+                <p className="text-gray-600">
                   <strong>Description:</strong> {duplicate.description}
                 </p>
-                <p className="text-gray-300">
+                <p className="text-gray-600">
                   <strong>Match Confidence:</strong> {duplicate.similarity}%
                 </p>
               </div>

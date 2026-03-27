@@ -310,7 +310,7 @@ export function Customer360Dashboard() {
       <div className="flex items-center justify-center h-96">
         <div className="text-center space-y-4">
           <AlertCircle className="w-12 h-12 text-red-500 mx-auto" />
-          <p className="text-gray-400">{error || 'Customer not found'}</p>
+          <p className="text-gray-500">{error || 'Customer not found'}</p>
           <button
             onClick={() => navigate('/customers')}
             className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg"
@@ -328,7 +328,7 @@ export function Customer360Dashboard() {
       <div className="flex items-center gap-4 mb-6">
         <button
           onClick={() => navigate('/customers')}
-          className="p-2 hover:bg-gray-800 rounded-lg transition-colors"
+          className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
         >
           <ArrowLeft className="w-5 h-5" />
         </button>
@@ -339,7 +339,7 @@ export function Customer360Dashboard() {
       <CustomerHeaderCard customer={customer} stats={stats} loyaltyData={loyaltyData} />
 
       {/* Tab Navigation */}
-      <div className="flex gap-2 border-b border-gray-700 overflow-x-auto">
+      <div className="flex gap-2 border-b border-gray-200 overflow-x-auto">
         {(['overview', 'prescriptions', 'orders', 'interactions', 'loyalty', 'preferences'] as const).map((tab) => (
           <button
             key={tab}
@@ -348,7 +348,7 @@ export function Customer360Dashboard() {
               'px-4 py-3 font-medium whitespace-nowrap border-b-2 transition-colors',
               activeTab === tab
                 ? 'border-blue-500 text-blue-400'
-                : 'border-transparent text-gray-400 hover:text-gray-300'
+                : 'border-transparent text-gray-400 hover:text-gray-700'
             )}
           >
             {tab.charAt(0).toUpperCase() + tab.slice(1)}
@@ -357,7 +357,7 @@ export function Customer360Dashboard() {
       </div>
 
       {/* Tab Content */}
-      <div className="bg-gray-800 rounded-lg p-6">
+      <div className="bg-white border border-gray-200 rounded-lg p-6">
         {activeTab === 'overview' && stats && <OverviewTab stats={stats} />}
         {activeTab === 'prescriptions' && <PrescriptionsTab prescriptions={prescriptions} />}
         {activeTab === 'orders' && <OrdersTab orders={orders} />}
@@ -392,7 +392,7 @@ function CustomerHeaderCard({ customer, stats, loyaltyData }: CustomerHeaderCard
   };
 
   return (
-    <div className="bg-gradient-to-r from-gray-800 to-gray-700 rounded-lg p-6 space-y-4">
+    <div className="bg-white border border-gray-200 rounded-lg p-6 space-y-4">
       <div className="flex items-start justify-between">
         <div className="flex items-start gap-4">
           {/* Avatar */}
@@ -402,8 +402,8 @@ function CustomerHeaderCard({ customer, stats, loyaltyData }: CustomerHeaderCard
 
           {/* Customer Info */}
           <div className="space-y-2">
-            <h2 className="text-2xl font-bold text-white">{customer.name}</h2>
-            <div className="flex items-center gap-4 text-gray-400">
+            <h2 className="text-2xl font-bold text-gray-900">{customer.name}</h2>
+            <div className="flex items-center gap-4 text-gray-500">
               <div className="flex items-center gap-1">
                 <Phone className="w-4 h-4" />
                 <span>{customer.phone}</span>
@@ -414,7 +414,7 @@ function CustomerHeaderCard({ customer, stats, loyaltyData }: CustomerHeaderCard
               </div>
             </div>
             {customer.address && (
-              <div className="flex items-center gap-1 text-gray-400">
+              <div className="flex items-center gap-1 text-gray-500">
                 <MapPin className="w-4 h-4" />
                 <span>{customer.address}</span>
               </div>
@@ -433,26 +433,26 @@ function CustomerHeaderCard({ customer, stats, loyaltyData }: CustomerHeaderCard
 
       {/* Key Metrics */}
       {stats && (
-        <div className="grid grid-cols-5 gap-4 pt-4 border-t border-gray-700">
+        <div className="grid grid-cols-5 gap-4 pt-4 border-t border-gray-200">
           <div className="text-center">
-            <p className="text-gray-400 text-sm">Customer Since</p>
-            <p className="text-white font-semibold">{new Date(stats.customerSinceDate).toLocaleDateString()}</p>
+            <p className="text-gray-500 text-sm">Customer Since</p>
+            <p className="text-gray-900 font-semibold">{new Date(stats.customerSinceDate).toLocaleDateString()}</p>
           </div>
           <div className="text-center">
-            <p className="text-gray-400 text-sm">Lifetime Value</p>
-            <p className="text-green-400 font-semibold">₹{stats.totalLifetimeValue.toLocaleString('en-IN')}</p>
+            <p className="text-gray-500 text-sm">Lifetime Value</p>
+            <p className="text-green-600 font-semibold">₹{stats.totalLifetimeValue.toLocaleString('en-IN')}</p>
           </div>
           <div className="text-center">
-            <p className="text-gray-400 text-sm">Visit Frequency</p>
-            <p className="text-white font-semibold">{stats.visitFrequency}/month</p>
+            <p className="text-gray-500 text-sm">Visit Frequency</p>
+            <p className="text-gray-900 font-semibold">{stats.visitFrequency}/month</p>
           </div>
           <div className="text-center">
-            <p className="text-gray-400 text-sm">Avg Order Value</p>
-            <p className="text-white font-semibold">₹{stats.averageOrderValue.toLocaleString('en-IN', { maximumFractionDigits: 0 })}</p>
+            <p className="text-gray-500 text-sm">Avg Order Value</p>
+            <p className="text-gray-900 font-semibold">₹{stats.averageOrderValue.toLocaleString('en-IN', { maximumFractionDigits: 0 })}</p>
           </div>
           <div className="text-center">
-            <p className="text-gray-400 text-sm">Last Order</p>
-            <p className="text-white font-semibold">
+            <p className="text-gray-500 text-sm">Last Order</p>
+            <p className="text-gray-900 font-semibold">
               {stats.lastOrderDate ? new Date(stats.lastOrderDate).toLocaleDateString() : 'N/A'}
             </p>
           </div>
@@ -487,9 +487,9 @@ function OverviewTab({ stats }: OverviewTabProps) {
       {/* Right Column */}
       <div className="space-y-4">
         {/* Last Order */}
-        <div className="bg-gray-700 rounded-lg p-4">
-          <h3 className="text-lg font-semibold text-white mb-3">Recent Activity</h3>
-          <p className="text-gray-400 text-sm">
+        <div className="bg-gray-50 rounded-lg p-4">
+          <h3 className="text-lg font-semibold text-gray-900 mb-3">Recent Activity</h3>
+          <p className="text-gray-500 text-sm">
             {stats.lastOrderDate
               ? `Last purchase on ${new Date(stats.lastOrderDate).toLocaleDateString()} for ₹${stats.lastOrderAmount?.toLocaleString('en-IN')}`
               : 'No purchase history'}
@@ -497,10 +497,10 @@ function OverviewTab({ stats }: OverviewTabProps) {
         </div>
 
         {/* Member Duration */}
-        <div className="bg-gray-700 rounded-lg p-4">
-          <h3 className="text-lg font-semibold text-white mb-3">Quick Stats</h3>
-          <p className="text-gray-400 text-sm">
-            <strong className="text-white">Member Duration:</strong>{' '}
+        <div className="bg-gray-50 rounded-lg p-4">
+          <h3 className="text-lg font-semibold text-gray-900 mb-3">Quick Stats</h3>
+          <p className="text-gray-500 text-sm">
+            <strong className="text-gray-900">Member Duration:</strong>{' '}
             {Math.floor(monthsAsSinceDate(stats.customerSinceDate) / 12)} years{' '}
             {(monthsAsSinceDate(stats.customerSinceDate) % 12)} months
           </p>
@@ -524,12 +524,12 @@ interface MetricRowProps {
 
 function MetricRow({ label, value, icon }: MetricRowProps) {
   return (
-    <div className="flex items-center justify-between bg-gray-700 rounded-lg p-3">
+    <div className="flex items-center justify-between bg-gray-50 rounded-lg p-3">
       <div className="flex items-center gap-3">
-        <div className="text-gray-400">{icon}</div>
-        <span className="text-gray-300">{label}</span>
+        <div className="text-gray-500">{icon}</div>
+        <span className="text-gray-600">{label}</span>
       </div>
-      <span className="text-white font-semibold">{value}</span>
+      <span className="text-gray-900 font-semibold">{value}</span>
     </div>
   );
 }
@@ -541,7 +541,7 @@ interface PrescriptionsTabProps {
 function PrescriptionsTab({ prescriptions }: PrescriptionsTabProps) {
   if (prescriptions.length === 0) {
     return (
-      <div className="text-center py-12 text-gray-400">
+      <div className="text-center py-12 text-gray-500">
         <Eye className="w-12 h-12 mx-auto mb-3 opacity-40" />
         <p>No prescriptions recorded.</p>
       </div>
@@ -551,15 +551,15 @@ function PrescriptionsTab({ prescriptions }: PrescriptionsTabProps) {
   return (
     <div className="space-y-4">
       {prescriptions.map((rx) => (
-        <div key={rx.id} className="bg-gray-700 rounded-lg p-4 space-y-2">
+        <div key={rx.id} className="bg-gray-50 rounded-lg p-4 space-y-2">
           <div className="flex items-start justify-between">
             <div className="space-y-2">
               <div className="flex items-center gap-2">
                 <Eye className="w-5 h-5 text-blue-400" />
-                <span className="font-semibold text-white">Prescription #{rx.id?.slice(-6) || 'N/A'}</span>
+                <span className="font-semibold text-gray-900">Prescription #{rx.id?.slice(-6) || 'N/A'}</span>
               </div>
-              <p className="text-gray-400 text-sm">Date: {new Date(rx.testDate).toLocaleDateString()}</p>
-              {rx.doctorName && <p className="text-gray-400 text-sm">Doctor: {rx.doctorName}</p>}
+              <p className="text-gray-500 text-sm">Date: {new Date(rx.testDate).toLocaleDateString()}</p>
+              {rx.doctorName && <p className="text-gray-500 text-sm">Doctor: {rx.doctorName}</p>}
             </div>
 
             {/* Renewal Status Badge */}
@@ -585,21 +585,21 @@ function PrescriptionsTab({ prescriptions }: PrescriptionsTabProps) {
           {/* Prescription Details */}
           <div className="grid grid-cols-2 gap-4 text-sm">
             <div>
-              <p className="text-gray-400">Right Eye (OD)</p>
-              <p className="text-white">
+              <p className="text-gray-500">Right Eye (OD)</p>
+              <p className="text-gray-900">
                 SPH: {rx.rightEyeSph || '-'} | CYL: {rx.rightEyeCyl || '-'} | AXIS: {rx.rightEyeAxis || '-'}
               </p>
             </div>
             <div>
-              <p className="text-gray-400">Left Eye (OS)</p>
-              <p className="text-white">
+              <p className="text-gray-500">Left Eye (OS)</p>
+              <p className="text-gray-900">
                 SPH: {rx.leftEyeSph || '-'} | CYL: {rx.leftEyeCyl || '-'} | AXIS: {rx.leftEyeAxis || '-'}
               </p>
             </div>
           </div>
 
           {rx.daysUntilRenewal !== undefined && rx.renewalStatus !== 'current' && (
-            <p className="text-xs text-gray-400 pt-2 border-t border-gray-600">
+            <p className="text-xs text-gray-500 pt-2 border-t border-gray-200">
               {rx.renewalStatus === 'upcoming' ? `Renews in ${rx.daysUntilRenewal} days` : `Expired ${Math.abs(rx.daysUntilRenewal)} days ago`}
             </p>
           )}
@@ -615,24 +615,24 @@ interface OrdersTabProps {
 
 function OrdersTab({ orders }: OrdersTabProps) {
   if (orders.length === 0) {
-    return <p className="text-gray-400">No orders found</p>;
+    return <p className="text-gray-500">No orders found</p>;
   }
 
   return (
     <div className="space-y-4">
       {orders.map((order) => (
-        <div key={order.id} className="bg-gray-700 rounded-lg p-4">
+        <div key={order.id} className="bg-gray-50 rounded-lg p-4">
           <div className="flex items-start justify-between mb-2">
             <div>
-              <p className="font-semibold text-white">Order #{order.order_number || order.id?.slice(-6)}</p>
-              <p className="text-gray-400 text-sm">{new Date(order.order_date || '').toLocaleDateString()}</p>
+              <p className="font-semibold text-gray-900">Order #{order.order_number || order.id?.slice(-6)}</p>
+              <p className="text-gray-500 text-sm">{new Date(order.order_date || '').toLocaleDateString()}</p>
             </div>
             <div className="text-right">
-              <p className="text-green-400 font-semibold">₹{(order.total_amount || 0).toLocaleString('en-IN')}</p>
-              <p className="text-gray-400 text-xs capitalize">{order.status || 'Completed'}</p>
+              <p className="text-green-600 font-semibold">₹{(order.total_amount || 0).toLocaleString('en-IN')}</p>
+              <p className="text-gray-500 text-xs capitalize">{order.status || 'Completed'}</p>
             </div>
           </div>
-          <p className="text-gray-400 text-sm">{order.items?.length || 0} items</p>
+          <p className="text-gray-500 text-sm">{order.items?.length || 0} items</p>
         </div>
       ))}
     </div>
@@ -663,7 +663,7 @@ function InteractionsTab({ interactions }: InteractionsTabProps) {
 
   if (interactions.length === 0) {
     return (
-      <div className="text-center py-12 text-gray-400">
+      <div className="text-center py-12 text-gray-500">
         <MessageCircleIcon className="w-12 h-12 mx-auto mb-3 opacity-40" />
         <p>No interactions recorded.</p>
       </div>
@@ -673,18 +673,18 @@ function InteractionsTab({ interactions }: InteractionsTabProps) {
   return (
     <div className="space-y-4">
       {interactions.map((interaction) => (
-        <div key={interaction.id} className="bg-gray-700 rounded-lg p-4">
+        <div key={interaction.id} className="bg-gray-50 rounded-lg p-4">
           <div className="flex items-start gap-3">
-            <div className="text-gray-400 mt-1">{getInteractionIcon(interaction.type)}</div>
+            <div className="text-gray-500 mt-1">{getInteractionIcon(interaction.type)}</div>
             <div className="flex-1">
               <div className="flex items-start justify-between">
                 <div>
-                  <p className="font-semibold text-white capitalize">{interaction.type.replace('_', ' ')}</p>
-                  <p className="text-gray-400 text-sm">{interaction.notes}</p>
+                  <p className="font-semibold text-gray-900 capitalize">{interaction.type.replace('_', ' ')}</p>
+                  <p className="text-gray-500 text-sm">{interaction.notes}</p>
                 </div>
                 <div className="text-right">
-                  <p className="text-gray-400 text-xs">{new Date(interaction.date).toLocaleDateString()}</p>
-                  {interaction.duration && <p className="text-gray-400 text-xs">{interaction.duration} min</p>}
+                  <p className="text-gray-500 text-xs">{new Date(interaction.date).toLocaleDateString()}</p>
+                  {interaction.duration && <p className="text-gray-500 text-xs">{interaction.duration} min</p>}
                 </div>
               </div>
               <p className="text-gray-500 text-xs mt-2">Initiated by: {interaction.initiatedBy}</p>
@@ -718,48 +718,48 @@ function LoyaltyTab({ loyaltyData }: LoyaltyTabProps) {
   return (
     <div className="space-y-6">
       {/* Current Tier */}
-      <div className="bg-gray-700 rounded-lg p-6 space-y-4">
+      <div className="bg-gray-50 rounded-lg p-6 space-y-4">
         <div className="flex items-center justify-between">
-          <h3 className="text-lg font-semibold text-white">Current Tier</h3>
+          <h3 className="text-lg font-semibold text-gray-900">Current Tier</h3>
           <Award className="w-6 h-6 text-yellow-400" />
         </div>
         <p className="text-4xl font-bold text-yellow-400">{loyaltyData.tier}</p>
-        <p className="text-gray-400">Member since {new Date(loyaltyData.memberSince).toLocaleDateString()}</p>
+        <p className="text-gray-500">Member since {new Date(loyaltyData.memberSince).toLocaleDateString()}</p>
       </div>
 
       {/* Points Progress */}
-      <div className="bg-gray-700 rounded-lg p-6 space-y-4">
-        <h3 className="text-lg font-semibold text-white">Points Progress</h3>
+      <div className="bg-gray-50 rounded-lg p-6 space-y-4">
+        <h3 className="text-lg font-semibold text-gray-900">Points Progress</h3>
         <div className="space-y-2">
           <div className="flex items-center justify-between">
-            <span className="text-gray-400">Current Points</span>
-            <span className="text-white font-semibold">{loyaltyData.points}</span>
+            <span className="text-gray-500">Current Points</span>
+            <span className="text-gray-900 font-semibold">{loyaltyData.points}</span>
           </div>
-          <div className="w-full bg-gray-800 rounded-full h-3 overflow-hidden">
+          <div className="w-full bg-gray-200 rounded-full h-3 overflow-hidden">
             <div className="bg-gradient-to-r from-blue-500 to-purple-500 h-full" style={{ width: `${Math.min(progress, 100)}%` }} />
           </div>
           <div className="flex items-center justify-between text-xs">
-            <span className="text-gray-400">
+            <span className="text-gray-500">
               {getTierThreshold(loyaltyData.tier).toLocaleString('en-IN')}
             </span>
-            <span className="text-gray-400">
+            <span className="text-gray-500">
               {nextTierThreshold.toLocaleString('en-IN', { maximumFractionDigits: 0 })}
             </span>
           </div>
         </div>
-        <p className="text-gray-400 text-sm pt-2 border-t border-gray-600">
+        <p className="text-gray-500 text-sm pt-2 border-t border-gray-200">
           {loyaltyData.pointsToNextTier} points needed to reach next tier
         </p>
       </div>
 
       {/* Loyalty Stats */}
       <div className="grid grid-cols-2 gap-4">
-        <div className="bg-gray-700 rounded-lg p-4">
-          <p className="text-gray-400 text-sm mb-2">Redeemed Points</p>
-          <p className="text-2xl font-bold text-white">{loyaltyData.redeemedPoints}</p>
+        <div className="bg-gray-50 rounded-lg p-4">
+          <p className="text-gray-500 text-sm mb-2">Redeemed Points</p>
+          <p className="text-2xl font-bold text-gray-900">{loyaltyData.redeemedPoints}</p>
         </div>
-        <div className="bg-gray-700 rounded-lg p-4">
-          <p className="text-gray-400 text-sm mb-2">Total Earned</p>
+        <div className="bg-gray-50 rounded-lg p-4">
+          <p className="text-gray-500 text-sm mb-2">Total Earned</p>
           <p className="text-2xl font-bold text-green-400">{loyaltyData.totalPointsEarned}</p>
         </div>
       </div>
@@ -770,8 +770,8 @@ function LoyaltyTab({ loyaltyData }: LoyaltyTabProps) {
 function PreferencesTab() {
   return (
     <div className="space-y-4">
-      <div className="bg-gray-700 rounded-lg p-4">
-        <h3 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+      <div className="bg-gray-50 rounded-lg p-4">
+        <h3 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
           <Settings className="w-5 h-5" />
           Customer Preferences
         </h3>
@@ -785,8 +785,8 @@ function PreferencesTab() {
         </div>
       </div>
 
-      <div className="bg-gray-700 rounded-lg p-4">
-        <h3 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+      <div className="bg-gray-50 rounded-lg p-4">
+        <h3 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
           <Gift className="w-5 h-5" />
           Product Interests
         </h3>
@@ -810,8 +810,8 @@ interface PreferenceRowProps {
 function PreferenceRow({ label, status }: PreferenceRowProps) {
   return (
     <div className="flex items-center justify-between">
-      <span className="text-gray-300">{label}</span>
-      <div className={clsx('w-10 h-6 rounded-full flex items-center px-1 cursor-pointer', status ? 'bg-green-600' : 'bg-gray-600')}>
+      <span className="text-gray-600">{label}</span>
+      <div className={clsx('w-10 h-6 rounded-full flex items-center px-1 cursor-pointer', status ? 'bg-green-600' : 'bg-gray-300')}>
         <div className={clsx('w-4 h-4 rounded-full bg-white transition-transform', status ? 'translate-x-4' : '')} />
       </div>
     </div>

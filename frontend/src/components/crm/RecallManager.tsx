@@ -382,7 +382,7 @@ export function RecallManager() {
         </div>
       ) : filtered.length === 0 ? (
         <div className="text-center py-16 bg-white rounded-lg border border-gray-200">
-          <Bell className="w-12 h-12 text-gray-300 mx-auto mb-3" />
+          <Bell className="w-12 h-12 text-gray-400 mx-auto mb-3" />
           <p className="text-gray-500">No recalls found</p>
           <p className="text-sm text-gray-400 mt-1">All customers are up to date!</p>
         </div>

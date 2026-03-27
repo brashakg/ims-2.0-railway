@@ -202,8 +202,8 @@ export function VendorReturns() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-3xl font-bold text-white">Vendor Returns</h1>
-          <p className="text-gray-400">Manage defective products and debit notes</p>
+          <h1 className="text-3xl font-bold text-gray-900">Vendor Returns</h1>
+          <p className="text-gray-500">Manage defective products and debit notes</p>
         </div>
         <button
           onClick={() => setShowModal(true)}
@@ -216,34 +216,34 @@ export function VendorReturns() {
 
       {/* Summary Stats */}
       <div className="grid grid-cols-4 gap-4">
-        <div className="bg-gray-800 rounded-lg p-4 border border-gray-700">
+        <div className="bg-white border border-gray-200 rounded-lg p-4">
           <div className="flex items-center justify-between mb-2">
-            <p className="text-gray-400 text-sm">Total Returns</p>
+            <p className="text-gray-500 text-sm">Total Returns</p>
             <Package className="w-5 h-5 text-gray-500" />
           </div>
-          <p className="text-2xl font-bold text-white">{returns.length}</p>
+          <p className="text-2xl font-bold text-gray-900">{returns.length}</p>
         </div>
-        <div className="bg-gray-800 rounded-lg p-4 border border-gray-700">
+        <div className="bg-white border border-gray-200 rounded-lg p-4">
           <div className="flex items-center justify-between mb-2">
-            <p className="text-gray-400 text-sm">Pending Credits</p>
+            <p className="text-gray-500 text-sm">Pending Credits</p>
             <Clock className="w-5 h-5 text-yellow-500" />
           </div>
           <p className="text-2xl font-bold text-yellow-400">
             {returns.filter(r => r.status === 'received_by_vendor' || r.status === 'approved').length}
           </p>
         </div>
-        <div className="bg-gray-800 rounded-lg p-4 border border-gray-700">
+        <div className="bg-white border border-gray-200 rounded-lg p-4">
           <div className="flex items-center justify-between mb-2">
-            <p className="text-gray-400 text-sm">Credit Value</p>
+            <p className="text-gray-500 text-sm">Credit Value</p>
             <DollarSign className="w-5 h-5 text-green-500" />
           </div>
           <p className="text-2xl font-bold text-green-400">
             ₹{returns.reduce((sum, r) => sum + (r.credit_note_amount || 0), 0).toLocaleString()}
           </p>
         </div>
-        <div className="bg-gray-800 rounded-lg p-4 border border-gray-700">
+        <div className="bg-white border border-gray-200 rounded-lg p-4">
           <div className="flex items-center justify-between mb-2">
-            <p className="text-gray-400 text-sm">This Month</p>
+            <p className="text-gray-500 text-sm">This Month</p>
             <Calendar className="w-5 h-5 text-blue-500" />
           </div>
           <p className="text-2xl font-bold text-blue-400">
@@ -253,7 +253,7 @@ export function VendorReturns() {
       </div>
 
       {/* Tabs */}
-      <div className="flex gap-2 border-b border-gray-700">
+      <div className="flex gap-2 border-b border-gray-300">
         {(['active', 'history'] as const).map((tab) => (
           <button
             key={tab}
@@ -262,7 +262,7 @@ export function VendorReturns() {
               'px-4 py-3 font-medium border-b-2 transition-colors',
               activeTab === tab
                 ? 'border-blue-500 text-blue-400'
-                : 'border-transparent text-gray-400 hover:text-gray-300'
+                : 'border-transparent text-gray-400 hover:text-gray-700'
             )}
           >
             {tab === 'active' ? 'Active Returns' : 'History'}
@@ -282,7 +282,7 @@ export function VendorReturns() {
           displayReturns.map((ret) => (
             <div
               key={ret.return_id}
-              className="bg-gray-800 rounded-lg border border-gray-700 overflow-hidden hover:border-gray-600 transition"
+              className="bg-white border border-gray-200 rounded-lg overflow-hidden hover:border-gray-300 transition"
             >
               {/* Header */}
               <button
@@ -292,7 +292,7 @@ export function VendorReturns() {
                 <div className="flex items-center gap-4 flex-1">
                   <div className="flex-1">
                     <div className="flex items-center gap-3 mb-1">
-                      <h3 className="text-lg font-semibold text-white">{ret.vendor_name}</h3>
+                      <h3 className="text-lg font-semibold text-gray-900">{ret.vendor_name}</h3>
                       <span className={clsx(
                         'px-2 py-1 rounded text-xs font-semibold',
                         STATUS_COLORS[ret.status]
@@ -306,11 +306,11 @@ export function VendorReturns() {
                         {ret.return_type === 'credit_note' ? 'Credit Note' : 'Replacement'}
                       </span>
                     </div>
-                    <p className="text-gray-400 text-sm">Return ID: {ret.return_id}</p>
+                    <p className="text-gray-500 text-sm">Return ID: {ret.return_id}</p>
                   </div>
                   <div className="text-right">
-                    <p className="text-lg font-bold text-white">₹{ret.total_value.toLocaleString()}</p>
-                    <p className="text-gray-400 text-sm">{ret.items.length} item(s)</p>
+                    <p className="text-lg font-bold text-gray-900">₹{ret.total_value.toLocaleString()}</p>
+                    <p className="text-gray-500 text-sm">{ret.items.length} item(s)</p>
                   </div>
                 </div>
                 <ChevronDown
@@ -323,19 +323,19 @@ export function VendorReturns() {
 
               {/* Expanded Details */}
               {expandedReturn === ret.return_id && (
-                <div className="border-t border-gray-700 px-6 py-4 bg-gray-750 space-y-4">
+                <div className="border-t border-gray-200 px-6 py-4 bg-gray-50 space-y-4">
                   {/* Items */}
                   <div>
-                    <h4 className="font-semibold text-white mb-2">Items</h4>
+                    <h4 className="font-semibold text-gray-900 mb-2">Items</h4>
                     <div className="space-y-2">
                       {ret.items.map((item, idx) => (
                         <div key={idx} className="flex justify-between items-center text-sm">
                           <div>
-                            <p className="text-gray-300">{item.product_name}</p>
+                            <p className="text-gray-600">{item.product_name}</p>
                             <p className="text-gray-500 text-xs">Qty: {item.quantity} @ ₹{item.unit_price}</p>
                           </div>
                           <div className="text-right">
-                            <p className="text-gray-300 font-medium">₹{item.quantity * item.unit_price}</p>
+                            <p className="text-gray-600 font-medium">₹{item.quantity * item.unit_price}</p>
                             <p className="text-gray-500 text-xs">{RETURN_REASONS.find(r => r.value === item.reason)?.label}</p>
                           </div>
                         </div>
@@ -347,13 +347,13 @@ export function VendorReturns() {
                   <div className="grid grid-cols-2 gap-4">
                     {ret.notes && (
                       <div>
-                        <p className="text-gray-400 text-sm mb-1">Notes</p>
-                        <p className="text-gray-300 text-sm">{ret.notes}</p>
+                        <p className="text-gray-500 text-sm mb-1">Notes</p>
+                        <p className="text-gray-600 text-sm">{ret.notes}</p>
                       </div>
                     )}
                     {ret.credit_note_number && (
                       <div>
-                        <p className="text-gray-400 text-sm mb-1">Credit Note</p>
+                        <p className="text-gray-500 text-sm mb-1">Credit Note</p>
                         <p className="text-green-400 font-semibold">{ret.credit_note_number}</p>
                       </div>
                     )}
@@ -361,7 +361,7 @@ export function VendorReturns() {
 
                   {/* Action Buttons */}
                   {activeTab === 'active' && (
-                    <div className="flex gap-2 pt-4 border-t border-gray-600">
+                    <div className="flex gap-2 pt-4 border-t border-gray-300">
                       {ret.status === 'created' && (
                         <button
                           onClick={() => handleUpdateStatus(ret.return_id, 'approved')}
@@ -414,13 +414,13 @@ export function VendorReturns() {
       {/* Create Return Modal */}
       {showModal && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-gray-800 rounded-lg w-full max-w-2xl max-h-[90vh] overflow-y-auto border border-gray-700 shadow-2xl">
+          <div className="bg-white rounded-lg w-full max-w-2xl max-h-[90vh] overflow-y-auto border border-gray-200 shadow-2xl">
             {/* Modal Header */}
-            <div className="flex items-center justify-between px-6 py-4 border-b border-gray-700">
-              <h2 className="text-xl font-bold text-white">Create Vendor Return</h2>
+            <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200">
+              <h2 className="text-xl font-bold text-gray-900">Create Vendor Return</h2>
               <button
                 onClick={() => setShowModal(false)}
-                className="text-gray-400 hover:text-gray-300 transition"
+                className="text-gray-400 hover:text-gray-700 transition"
               >
                 <XIcon className="w-6 h-6" />
               </button>
@@ -430,11 +430,11 @@ export function VendorReturns() {
             <div className="p-6 space-y-4">
               {/* Vendor Selection */}
               <div>
-                <label className="block text-sm font-medium text-white mb-2">Vendor *</label>
+                <label className="block text-sm font-medium text-gray-900 mb-2">Vendor *</label>
                 <select
                   value={selectedVendor}
                   onChange={(e) => setSelectedVendor(e.target.value)}
-                  className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white hover:bg-gray-650 focus:border-blue-500 outline-none transition"
+                  className="w-full px-3 py-2 bg-white border border-gray-300 rounded-lg text-gray-900 hover:bg-gray-100 focus:border-blue-500 outline-none transition"
                 >
                   <option value="">Select Vendor...</option>
                   {vendors.map((v) => (
@@ -447,7 +447,7 @@ export function VendorReturns() {
 
               {/* Return Type */}
               <div>
-                <label className="block text-sm font-medium text-white mb-2">Return Type *</label>
+                <label className="block text-sm font-medium text-gray-900 mb-2">Return Type *</label>
                 <div className="flex gap-4">
                   <label className="flex items-center gap-2 cursor-pointer">
                     <input
@@ -457,7 +457,7 @@ export function VendorReturns() {
                       onChange={(e) => setReturnType(e.target.value as 'credit_note')}
                       className="w-4 h-4"
                     />
-                    <span className="text-white">Credit Note</span>
+                    <span className="text-gray-900">Credit Note</span>
                   </label>
                   <label className="flex items-center gap-2 cursor-pointer">
                     <input
@@ -467,7 +467,7 @@ export function VendorReturns() {
                       onChange={(e) => setReturnType(e.target.value as 'replacement')}
                       className="w-4 h-4"
                     />
-                    <span className="text-white">Replacement</span>
+                    <span className="text-gray-900">Replacement</span>
                   </label>
                 </div>
               </div>
@@ -475,7 +475,7 @@ export function VendorReturns() {
               {/* Items */}
               <div>
                 <div className="flex items-center justify-between mb-2">
-                  <label className="block text-sm font-medium text-white">Items *</label>
+                  <label className="block text-sm font-medium text-gray-900">Items *</label>
                   <button
                     onClick={handleAddItem}
                     className="text-blue-400 hover:text-blue-300 text-sm font-medium"
@@ -485,46 +485,46 @@ export function VendorReturns() {
                 </div>
                 <div className="space-y-3">
                   {items.map((item, idx) => (
-                    <div key={idx} className="bg-gray-700 rounded-lg p-4 space-y-3">
+                    <div key={idx} className="bg-gray-50 border border-gray-200 rounded-lg p-4 space-y-3">
                       <div className="grid grid-cols-2 gap-3">
                         <div>
-                          <label className="block text-xs text-gray-400 mb-1">Product Name</label>
+                          <label className="block text-xs text-gray-500 mb-1">Product Name</label>
                           <input
                             type="text"
                             value={item.product_name}
                             onChange={(e) => handleItemChange(idx, 'product_name', e.target.value)}
                             placeholder="Enter product name"
-                            className="w-full px-3 py-2 bg-gray-600 border border-gray-500 rounded text-white text-sm placeholder-gray-400 outline-none focus:border-blue-500"
+                            className="w-full px-3 py-2 bg-white border border-gray-300 rounded text-gray-900 text-sm placeholder-gray-500 outline-none focus:border-blue-500"
                           />
                         </div>
                         <div>
-                          <label className="block text-xs text-gray-400 mb-1">Quantity</label>
+                          <label className="block text-xs text-gray-500 mb-1">Quantity</label>
                           <input
                             type="number"
                             min="1"
                             value={item.quantity}
                             onChange={(e) => handleItemChange(idx, 'quantity', parseInt(e.target.value) || 0)}
-                            className="w-full px-3 py-2 bg-gray-600 border border-gray-500 rounded text-white text-sm outline-none focus:border-blue-500"
+                            className="w-full px-3 py-2 bg-white border border-gray-300 rounded text-gray-900 text-sm outline-none focus:border-blue-500"
                           />
                         </div>
                       </div>
                       <div className="grid grid-cols-2 gap-3">
                         <div>
-                          <label className="block text-xs text-gray-400 mb-1">Unit Price</label>
+                          <label className="block text-xs text-gray-500 mb-1">Unit Price</label>
                           <input
                             type="number"
                             min="0"
                             value={item.unit_price}
                             onChange={(e) => handleItemChange(idx, 'unit_price', parseFloat(e.target.value) || 0)}
-                            className="w-full px-3 py-2 bg-gray-600 border border-gray-500 rounded text-white text-sm outline-none focus:border-blue-500"
+                            className="w-full px-3 py-2 bg-white border border-gray-300 rounded text-gray-900 text-sm outline-none focus:border-blue-500"
                           />
                         </div>
                         <div>
-                          <label className="block text-xs text-gray-400 mb-1">Reason</label>
+                          <label className="block text-xs text-gray-500 mb-1">Reason</label>
                           <select
                             value={item.reason}
                             onChange={(e) => handleItemChange(idx, 'reason', e.target.value)}
-                            className="w-full px-3 py-2 bg-gray-600 border border-gray-500 rounded text-white text-sm outline-none focus:border-blue-500"
+                            className="w-full px-3 py-2 bg-white border border-gray-300 rounded text-gray-900 text-sm outline-none focus:border-blue-500"
                           >
                             {RETURN_REASONS.map((r) => (
                               <option key={r.value} value={r.value}>
@@ -549,30 +549,30 @@ export function VendorReturns() {
 
               {/* Notes */}
               <div>
-                <label className="block text-sm font-medium text-white mb-2">Notes</label>
+                <label className="block text-sm font-medium text-gray-900 mb-2">Notes</label>
                 <textarea
                   value={notes}
                   onChange={(e) => setNotes(e.target.value)}
                   placeholder="Add any additional notes..."
                   rows={3}
-                  className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white text-sm placeholder-gray-400 outline-none focus:border-blue-500 resize-none"
+                  className="w-full px-3 py-2 bg-white border border-gray-300 rounded-lg text-gray-900 text-sm placeholder-gray-500 outline-none focus:border-blue-500 resize-none"
                 />
               </div>
 
               {/* Total */}
-              <div className="bg-gray-700 rounded-lg p-4">
+              <div className="bg-gray-50 border border-gray-200 rounded-lg p-4">
                 <div className="flex justify-between items-center">
-                  <p className="text-gray-300 font-medium">Total Return Value</p>
-                  <p className="text-2xl font-bold text-white">₹{totalValue.toLocaleString()}</p>
+                  <p className="text-gray-600 font-medium">Total Return Value</p>
+                  <p className="text-2xl font-bold text-gray-900">₹{totalValue.toLocaleString()}</p>
                 </div>
               </div>
             </div>
 
             {/* Modal Footer */}
-            <div className="flex gap-3 px-6 py-4 border-t border-gray-700 bg-gray-750">
+            <div className="flex gap-3 px-6 py-4 border-t border-gray-200 bg-gray-50">
               <button
                 onClick={() => setShowModal(false)}
-                className="flex-1 px-4 py-2 bg-gray-700 hover:bg-gray-600 text-white rounded-lg font-medium transition"
+                className="flex-1 px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-lg font-medium transition border border-gray-300"
               >
                 Cancel
               </button>

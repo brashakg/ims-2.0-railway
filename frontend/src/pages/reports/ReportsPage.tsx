@@ -361,8 +361,8 @@ export function ReportsPage() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-white">Reports</h1>
-          <p className="text-gray-400">Analytics and business reports</p>
+          <h1 className="text-2xl font-bold text-gray-900">Reports</h1>
+          <p className="text-gray-500">Analytics and business reports</p>
         </div>
         <div className="flex gap-2">
           <select
@@ -411,11 +411,11 @@ export function ReportsPage() {
               <IndianRupee className="w-5 h-5 text-green-600" />
             </div>
             <div>
-              <p className="text-sm text-gray-400">Total Sales</p>
+              <p className="text-sm text-gray-500">Total Sales</p>
               {isLoading ? (
                 <div className="h-7 w-20 bg-gray-200 animate-pulse rounded mt-1" />
               ) : (
-                <p className="text-xl font-bold text-white">{formatCurrency(salesSummary.totalSales)}</p>
+                <p className="text-xl font-bold text-gray-900">{formatCurrency(salesSummary.totalSales)}</p>
               )}
             </div>
           </div>
@@ -426,11 +426,11 @@ export function ReportsPage() {
               <ShoppingCart className="w-5 h-5 text-blue-600" />
             </div>
             <div>
-              <p className="text-sm text-gray-400">Orders</p>
+              <p className="text-sm text-gray-500">Orders</p>
               {isLoading ? (
                 <div className="h-7 w-12 bg-gray-200 animate-pulse rounded mt-1" />
               ) : (
-                <p className="text-xl font-bold text-white">{salesSummary.orderCount}</p>
+                <p className="text-xl font-bold text-gray-900">{salesSummary.orderCount}</p>
               )}
             </div>
           </div>
@@ -441,11 +441,11 @@ export function ReportsPage() {
               <TrendingUp className="w-5 h-5 text-purple-600" />
             </div>
             <div>
-              <p className="text-sm text-gray-400">Avg Order Value</p>
+              <p className="text-sm text-gray-500">Avg Order Value</p>
               {isLoading ? (
                 <div className="h-7 w-16 bg-gray-200 animate-pulse rounded mt-1" />
               ) : (
-                <p className="text-xl font-bold text-white">{formatCurrency(salesSummary.averageOrderValue)}</p>
+                <p className="text-xl font-bold text-gray-900">{formatCurrency(salesSummary.averageOrderValue)}</p>
               )}
             </div>
           </div>
@@ -456,11 +456,11 @@ export function ReportsPage() {
               <FileText className="w-5 h-5 text-orange-600" />
             </div>
             <div>
-              <p className="text-sm text-gray-400">GST Collected</p>
+              <p className="text-sm text-gray-500">GST Collected</p>
               {isLoading ? (
                 <div className="h-7 w-16 bg-gray-200 animate-pulse rounded mt-1" />
               ) : (
-                <p className="text-xl font-bold text-white">{formatCurrency(salesSummary.gstCollected)}</p>
+                <p className="text-xl font-bold text-gray-900">{formatCurrency(salesSummary.gstCollected)}</p>
               )}
             </div>
           </div>
@@ -468,7 +468,7 @@ export function ReportsPage() {
       </div>
 
       {/* Tabs */}
-      <div className="flex border-b border-gray-700 overflow-x-auto">
+      <div className="flex border-b border-gray-200 overflow-x-auto">
         {[
           { id: 'sales' as ReportType, label: 'Sales', icon: BarChart3 },
           { id: 'inventory' as ReportType, label: 'Inventory', icon: Package },
@@ -483,7 +483,7 @@ export function ReportsPage() {
               'flex items-center gap-2 px-4 py-3 text-sm font-medium border-b-2 transition-colors whitespace-nowrap',
               activeTab === tab.id
                 ? 'border-bv-red-600 text-bv-red-600'
-                : 'border-transparent text-gray-400 hover:text-gray-300'
+                : 'border-transparent text-gray-500 hover:text-gray-700'
             )}
           >
             <tab.icon className="w-4 h-4" />
@@ -498,7 +498,7 @@ export function ReportsPage() {
           {/* Sales Trend */}
           <div className="card">
             <div className="flex items-center justify-between mb-4">
-              <h3 className="font-semibold text-white">Sales Trend</h3>
+              <h3 className="font-semibold text-gray-900">Sales Trend</h3>
               {canExport && (
                 <button
                   onClick={handleExportSalesTrend}
@@ -514,7 +514,7 @@ export function ReportsPage() {
                 <Loader2 className="w-8 h-8 animate-spin text-bv-red-600" />
               </div>
             ) : dailyTrend.length === 0 ? (
-              <div className="h-48 flex items-center justify-center text-gray-400">
+              <div className="h-48 flex items-center justify-center text-gray-500">
                 <p>No sales data available for this period</p>
               </div>
             ) : (
@@ -529,7 +529,7 @@ export function ReportsPage() {
                         style={{ height: `${height}%` }}
                         title={formatCurrency(day.sales)}
                       />
-                      <span className="text-xs text-gray-400">{day.date}</span>
+                      <span className="text-xs text-gray-500">{day.date}</span>
                     </div>
                   );
                 })}
@@ -540,7 +540,7 @@ export function ReportsPage() {
           {/* Category Breakdown */}
           <div className="card">
             <div className="flex items-center justify-between mb-4">
-              <h3 className="font-semibold text-white">Category Breakdown</h3>
+              <h3 className="font-semibold text-gray-900">Category Breakdown</h3>
               {canExport && categoryBreakdown.length > 0 && (
                 <button
                   onClick={handleExportCategoryBreakdown}
@@ -564,7 +564,7 @@ export function ReportsPage() {
                 ))}
               </div>
             ) : categoryBreakdown.length === 0 ? (
-              <div className="py-8 text-center text-gray-400">
+              <div className="py-8 text-center text-gray-500">
                 <p>No category data available</p>
               </div>
             ) : (
@@ -572,7 +572,7 @@ export function ReportsPage() {
                 {categoryBreakdown.map((cat, index) => (
                   <div key={index}>
                     <div className="flex items-center justify-between text-sm mb-1">
-                      <span className="text-gray-400">{cat.category}</span>
+                      <span className="text-gray-500">{cat.category}</span>
                       <span className="font-medium">{formatCurrency(cat.sales)}</span>
                     </div>
                     <div className="h-2 bg-gray-200 rounded-full overflow-hidden">
@@ -593,7 +593,7 @@ export function ReportsPage() {
       {/* Sales Comparison Card */}
       <div className="card">
         <div className="flex items-center justify-between mb-4">
-          <h3 className="font-semibold text-white">Sales Comparison</h3>
+          <h3 className="font-semibold text-gray-900">Sales Comparison</h3>
         </div>
         {isLoading ? (
           <div className="h-32 flex items-center justify-center">
@@ -602,12 +602,12 @@ export function ReportsPage() {
         ) : (
           <div className="space-y-4">
             <div className="grid grid-cols-2 gap-4">
-              <div className="bg-gray-700 rounded p-3">
-                <p className="text-xs text-gray-400">Current Period</p>
-                <p className="text-lg font-bold text-white mt-1">₹{(salesSummary.totalSales / 100000).toFixed(2)}L</p>
+              <div className="bg-white rounded p-3">
+                <p className="text-xs text-gray-500">Current Period</p>
+                <p className="text-lg font-bold text-gray-900 mt-1">₹{(salesSummary.totalSales / 100000).toFixed(2)}L</p>
               </div>
-              <div className="bg-gray-700 rounded p-3">
-                <p className="text-xs text-gray-400">Trend</p>
+              <div className="bg-white rounded p-3">
+                <p className="text-xs text-gray-500">Trend</p>
                 <p className="text-lg font-bold text-green-400 mt-1">+12.5%</p>
               </div>
             </div>
@@ -618,25 +618,25 @@ export function ReportsPage() {
       {/* Staff Performance Card */}
       <div className="card">
         <div className="flex items-center justify-between mb-4">
-          <h3 className="font-semibold text-white">Top Performers</h3>
+          <h3 className="font-semibold text-gray-900">Top Performers</h3>
         </div>
         {isLoading ? (
           <div className="h-32 flex items-center justify-center">
             <Loader2 className="w-6 h-6 animate-spin text-bv-red-600" />
           </div>
         ) : staffRanking.length === 0 ? (
-          <div className="py-8 text-center text-gray-400">
+          <div className="py-8 text-center text-gray-500">
             <p>No staff data available</p>
           </div>
         ) : (
           <div className="space-y-2">
             {staffRanking.slice(0, 3).map((staff: any, idx: number) => (
-              <div key={idx} className="flex items-center justify-between py-2 border-b border-gray-700 last:border-b-0">
+              <div key={idx} className="flex items-center justify-between py-2 border-b border-gray-200 last:border-b-0">
                 <div className="flex items-center gap-2">
                   <div className="w-6 h-6 rounded-full bg-bv-red-600 text-white text-xs flex items-center justify-center">{idx + 1}</div>
-                  <span className="text-sm text-gray-300">{staff.staff_name}</span>
+                  <span className="text-sm text-gray-600">{staff.staff_name}</span>
                 </div>
-                <span className="text-sm font-medium text-white">₹{(staff.total_sales / 1000).toFixed(0)}K</span>
+                <span className="text-sm font-medium text-gray-900">₹{(staff.total_sales / 1000).toFixed(0)}K</span>
               </div>
             ))}
           </div>
@@ -644,7 +644,7 @@ export function ReportsPage() {
       </div>
       {/* Report Cards */}
       <div>
-        <h3 className="font-semibold text-white mb-3">Available Reports</h3>
+        <h3 className="font-semibold text-gray-900 mb-3">Available Reports</h3>
         <div className="grid grid-cols-1 tablet:grid-cols-2 laptop:grid-cols-3 gap-4">
           {filteredReports.map(report => (
             <div key={report.id} className="card hover:border-bv-red-300 transition-colors">
@@ -653,8 +653,8 @@ export function ReportsPage() {
                   <report.icon className="w-5 h-5 text-bv-red-600" />
                 </div>
                 <div className="flex-1 min-w-0">
-                  <h4 className="font-medium text-white">{report.title}</h4>
-                  <p className="text-sm text-gray-400 mt-1">{report.description}</p>
+                  <h4 className="font-medium text-gray-900">{report.title}</h4>
+                  <p className="text-sm text-gray-500 mt-1">{report.description}</p>
                   <div className="flex items-center gap-2 mt-3">
                     {report.id === 'gst-report' ? (
                       <button
@@ -676,7 +676,7 @@ export function ReportsPage() {
                     {canExport && (
                       <button
                         onClick={() => handleExportReport(report.id)}
-                        className="text-sm text-gray-400 hover:text-gray-300 flex items-center gap-1"
+                        className="text-sm text-gray-500 hover:text-gray-700 flex items-center gap-1"
                       >
                         <Download className="w-4 h-4" />
                         Export CSV
@@ -684,7 +684,7 @@ export function ReportsPage() {
                     )}
                     <button
                       onClick={() => handlePrintReport(report.title)}
-                      className="text-sm text-gray-400 hover:text-gray-300 flex items-center gap-1"
+                      className="text-sm text-gray-500 hover:text-gray-700 flex items-center gap-1"
                     >
                       <Printer className="w-4 h-4" />
                       Print
@@ -703,7 +703,7 @@ export function ReportsPage() {
           {/* Stock Count Card */}
           <div className="card">
             <div className="flex items-center justify-between mb-4">
-              <h3 className="font-semibold text-white">Stock Summary</h3>
+              <h3 className="font-semibold text-gray-900">Stock Summary</h3>
             </div>
             {isLoading ? (
               <div className="h-32 flex items-center justify-center">
@@ -714,20 +714,20 @@ export function ReportsPage() {
                 {stockCount ? (
                   <>
                     <div className="flex items-center justify-between">
-                      <span className="text-gray-400">Total Items:</span>
-                      <span className="font-medium text-white">{stockCount.summary?.total_items || 0}</span>
+                      <span className="text-gray-500">Total Items:</span>
+                      <span className="font-medium text-gray-900">{stockCount.summary?.total_items || 0}</span>
                     </div>
                     <div className="flex items-center justify-between">
-                      <span className="text-gray-400">Total Quantity:</span>
-                      <span className="font-medium text-white">{stockCount.summary?.total_quantity || 0} units</span>
+                      <span className="text-gray-500">Total Quantity:</span>
+                      <span className="font-medium text-gray-900">{stockCount.summary?.total_quantity || 0} units</span>
                     </div>
                     <div className="flex items-center justify-between">
-                      <span className="text-gray-400">Total Value:</span>
-                      <span className="font-medium text-white">₹{((stockCount.summary?.total_value || 0) / 100000).toFixed(2)}L</span>
+                      <span className="text-gray-500">Total Value:</span>
+                      <span className="font-medium text-gray-900">₹{((stockCount.summary?.total_value || 0) / 100000).toFixed(2)}L</span>
                     </div>
                   </>
                 ) : (
-                  <p className="text-gray-400">No data available</p>
+                  <p className="text-gray-500">No data available</p>
                 )}
               </div>
             )}
@@ -736,24 +736,24 @@ export function ReportsPage() {
           {/* Brand Sell-through Card */}
           <div className="card">
             <div className="flex items-center justify-between mb-4">
-              <h3 className="font-semibold text-white">Brand Performance</h3>
+              <h3 className="font-semibold text-gray-900">Brand Performance</h3>
             </div>
             {isLoading ? (
               <div className="h-32 flex items-center justify-center">
                 <Loader2 className="w-6 h-6 animate-spin text-bv-red-600" />
               </div>
             ) : brandSellthrough.length === 0 ? (
-              <div className="py-8 text-center text-gray-400">
+              <div className="py-8 text-center text-gray-500">
                 <p>No brand data available</p>
               </div>
             ) : (
               <div className="space-y-2">
                 {brandSellthrough.slice(0, 5).map((brand: any, idx: number) => (
-                  <div key={idx} className="flex items-center justify-between py-2 border-b border-gray-700 last:border-b-0">
-                    <span className="text-sm text-gray-300 truncate">{brand.brand}</span>
+                  <div key={idx} className="flex items-center justify-between py-2 border-b border-gray-200 last:border-b-0">
+                    <span className="text-sm text-gray-600 truncate">{brand.brand}</span>
                     <div className="text-right">
-                      <p className="text-sm font-medium text-white">{brand.quantity_sold} units</p>
-                      <p className="text-xs text-gray-400">{brand.sellthrough_percent || 0}% sell-through</p>
+                      <p className="text-sm font-medium text-gray-900">{brand.quantity_sold} units</p>
+                      <p className="text-xs text-gray-500">{brand.sellthrough_percent || 0}% sell-through</p>
                     </div>
                   </div>
                 ))}
@@ -767,7 +767,7 @@ export function ReportsPage() {
       {activeTab === 'customers' && (
         <div className="card">
           <div className="flex items-center justify-between mb-4">
-            <h3 className="font-semibold text-white">Customer Acquisition & Retention</h3>
+            <h3 className="font-semibold text-gray-900">Customer Acquisition & Retention</h3>
           </div>
           {isLoading ? (
             <div className="h-40 flex items-center justify-center">
@@ -775,25 +775,25 @@ export function ReportsPage() {
             </div>
           ) : customerAcquisition ? (
             <div className="grid grid-cols-2 tablet:grid-cols-4 gap-3">
-              <div className="bg-gray-700 rounded p-3">
-                <p className="text-xs text-gray-400">New Customers</p>
+              <div className="bg-white rounded p-3">
+                <p className="text-xs text-gray-500">New Customers</p>
                 <p className="text-xl font-bold text-green-400 mt-1">{customerAcquisition.new_customers}</p>
               </div>
-              <div className="bg-gray-700 rounded p-3">
-                <p className="text-xs text-gray-400">Returning</p>
+              <div className="bg-white rounded p-3">
+                <p className="text-xs text-gray-500">Returning</p>
                 <p className="text-xl font-bold text-blue-400 mt-1">{customerAcquisition.returning_customers}</p>
               </div>
-              <div className="bg-gray-700 rounded p-3">
-                <p className="text-xs text-gray-400">Retention Rate</p>
+              <div className="bg-white rounded p-3">
+                <p className="text-xs text-gray-500">Retention Rate</p>
                 <p className="text-xl font-bold text-purple-400 mt-1">{customerAcquisition.retention_percent}%</p>
               </div>
-              <div className="bg-gray-700 rounded p-3">
-                <p className="text-xs text-gray-400">Total Customers</p>
+              <div className="bg-white rounded p-3">
+                <p className="text-xs text-gray-500">Total Customers</p>
                 <p className="text-xl font-bold text-orange-400 mt-1">{customerAcquisition.total_customers}</p>
               </div>
             </div>
           ) : (
-            <p className="text-gray-400">No data available</p>
+            <p className="text-gray-500">No data available</p>
           )}
         </div>
       )}
@@ -806,8 +806,8 @@ export function ReportsPage() {
               <FileText className="w-5 h-5 text-yellow-600" />
             </div>
             <div>
-              <h4 className="font-medium text-white">GST Filing Data Ready</h4>
-              <p className="text-sm text-gray-400 mt-1">
+              <h4 className="font-medium text-gray-900">GST Filing Data Ready</h4>
+              <p className="text-sm text-gray-500 mt-1">
                 GST data for the period has been compiled. Download the reports for GSTR-1 and GSTR-3B filing.
               </p>
               <div className="flex gap-3 mt-3">
@@ -833,7 +833,7 @@ export function ReportsPage() {
       {activeTab === 'gst' && (
         <div className="card mt-4">
           <div className="flex items-center justify-between mb-4">
-            <h3 className="font-semibold text-white">Discount Analysis</h3>
+            <h3 className="font-semibold text-gray-900">Discount Analysis</h3>
           </div>
           {isLoading ? (
             <div className="h-32 flex items-center justify-center">
@@ -842,27 +842,27 @@ export function ReportsPage() {
           ) : discountAnalysis ? (
             <div className="space-y-4">
               <div className="grid grid-cols-2 gap-4">
-                <div className="bg-gray-700 rounded p-3">
-                  <p className="text-xs text-gray-400">Total Discount</p>
-                  <p className="text-lg font-bold text-white">₹{((discountAnalysis.summary?.total_discount || 0) / 1000).toFixed(1)}K</p>
+                <div className="bg-white rounded p-3">
+                  <p className="text-xs text-gray-500">Total Discount</p>
+                  <p className="text-lg font-bold text-gray-900">₹{((discountAnalysis.summary?.total_discount || 0) / 1000).toFixed(1)}K</p>
                 </div>
-                <div className="bg-gray-700 rounded p-3">
-                  <p className="text-xs text-gray-400">Discount %</p>
+                <div className="bg-white rounded p-3">
+                  <p className="text-xs text-gray-500">Discount %</p>
                   <p className="text-lg font-bold text-orange-400">{discountAnalysis.summary?.discount_percent || 0}%</p>
                 </div>
               </div>
               <div className="space-y-2">
-                <p className="text-sm font-medium text-gray-400">By Category:</p>
+                <p className="text-sm font-medium text-gray-500">By Category:</p>
                 {discountAnalysis.by_category?.slice(0, 3).map((cat: any, idx: number) => (
                   <div key={idx} className="flex items-center justify-between text-sm">
-                    <span className="text-gray-300">{cat.category}</span>
+                    <span className="text-gray-600">{cat.category}</span>
                     <span className="text-bv-red-400">₹{(cat.total_discount / 1000).toFixed(1)}K</span>
                   </div>
                 ))}
               </div>
             </div>
           ) : (
-            <p className="text-gray-400">No data available</p>
+            <p className="text-gray-500">No data available</p>
           )}
         </div>
       )}
@@ -871,7 +871,7 @@ export function ReportsPage() {
       {activeTab === 'forecast' && (
         <div className="card mb-4">
           <div className="flex items-center justify-between mb-4">
-            <h3 className="font-semibold text-white">Expense vs Revenue</h3>
+            <h3 className="font-semibold text-gray-900">Expense vs Revenue</h3>
           </div>
           {isLoading ? (
             <div className="h-40 flex items-center justify-center">
@@ -880,26 +880,26 @@ export function ReportsPage() {
           ) : expenseVsRevenue ? (
             <div className="space-y-4">
               <div className="grid grid-cols-2 tablet:grid-cols-4 gap-3">
-                <div className="bg-gray-700 rounded p-3">
-                  <p className="text-xs text-gray-400">Revenue</p>
+                <div className="bg-white rounded p-3">
+                  <p className="text-xs text-gray-500">Revenue</p>
                   <p className="text-lg font-bold text-green-400">₹{((expenseVsRevenue.revenue || 0) / 100000).toFixed(2)}L</p>
                 </div>
-                <div className="bg-gray-700 rounded p-3">
-                  <p className="text-xs text-gray-400">Cost</p>
+                <div className="bg-white rounded p-3">
+                  <p className="text-xs text-gray-500">Cost</p>
                   <p className="text-lg font-bold text-red-400">₹{((expenseVsRevenue.cost || 0) / 100000).toFixed(2)}L</p>
                 </div>
-                <div className="bg-gray-700 rounded p-3">
-                  <p className="text-xs text-gray-400">Profit</p>
+                <div className="bg-white rounded p-3">
+                  <p className="text-xs text-gray-500">Profit</p>
                   <p className="text-lg font-bold text-blue-400">₹{((expenseVsRevenue.profit || 0) / 100000).toFixed(2)}L</p>
                 </div>
-                <div className="bg-gray-700 rounded p-3">
-                  <p className="text-xs text-gray-400">Margin</p>
+                <div className="bg-white rounded p-3">
+                  <p className="text-xs text-gray-500">Margin</p>
                   <p className="text-lg font-bold text-purple-400">{expenseVsRevenue.margin_percent || 0}%</p>
                 </div>
               </div>
             </div>
           ) : (
-            <p className="text-gray-400">No data available</p>
+            <p className="text-gray-500">No data available</p>
           )}
         </div>
       )}
@@ -912,14 +912,14 @@ export function ReportsPage() {
       {/* GSTR-1 Modal */}
       {showGSTR1 && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-gray-800 rounded-xl shadow-xl w-full max-w-7xl max-h-[90vh] overflow-y-auto">
-            <div className="sticky top-0 bg-gray-800 border-b border-gray-700 px-6 py-4 flex items-center justify-between">
-              <h2 className="text-xl font-bold text-white">GSTR-1 Report</h2>
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-7xl max-h-[90vh] overflow-y-auto">
+            <div className="sticky top-0 bg-white border-b border-gray-200 px-6 py-4 flex items-center justify-between">
+              <h2 className="text-xl font-bold text-gray-900">GSTR-1 Report</h2>
               <button
                 onClick={() => setShowGSTR1(false)}
-                className="p-2 hover:bg-gray-700 rounded-lg"
+                className="p-2 hover:bg-gray-100 rounded-lg"
               >
-                <X className="w-5 h-5 text-gray-400" />
+                <X className="w-5 h-5 text-gray-500" />
               </button>
             </div>
             <div className="p-6">
@@ -932,14 +932,14 @@ export function ReportsPage() {
       {/* GSTR-3B Modal */}
       {showGSTR3B && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-gray-800 rounded-xl shadow-xl w-full max-w-7xl max-h-[90vh] overflow-y-auto">
-            <div className="sticky top-0 bg-gray-800 border-b border-gray-700 px-6 py-4 flex items-center justify-between">
-              <h2 className="text-xl font-bold text-white">GSTR-3B Report</h2>
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-7xl max-h-[90vh] overflow-y-auto">
+            <div className="sticky top-0 bg-white border-b border-gray-200 px-6 py-4 flex items-center justify-between">
+              <h2 className="text-xl font-bold text-gray-900">GSTR-3B Report</h2>
               <button
                 onClick={() => setShowGSTR3B(false)}
-                className="p-2 hover:bg-gray-700 rounded-lg"
+                className="p-2 hover:bg-gray-100 rounded-lg"
               >
-                <X className="w-5 h-5 text-gray-400" />
+                <X className="w-5 h-5 text-gray-500" />
               </button>
             </div>
             <div className="p-6">

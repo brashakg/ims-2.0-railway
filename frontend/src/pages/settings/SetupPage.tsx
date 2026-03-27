@@ -128,15 +128,15 @@ export default function SetupPage() {
   return (
     <div className="max-w-5xl mx-auto p-4 tablet:p-6 space-y-6">
       <div className="flex items-center justify-between">
-        <h1 className="text-xl font-bold text-white">System Setup</h1>
-        <div className="flex bg-gray-800 rounded-lg p-1">
-          <button onClick={() => setActiveTab('stores')} className={clsx('px-4 py-2 rounded-md text-sm font-medium transition-colors', activeTab === 'stores' ? 'bg-gray-700 shadow text-white' : 'text-gray-400')}>
+        <h1 className="text-xl font-bold text-gray-900">System Setup</h1>
+        <div className="flex bg-gray-100 rounded-lg p-1">
+          <button onClick={() => setActiveTab('stores')} className={clsx('px-4 py-2 rounded-md text-sm font-medium transition-colors', activeTab === 'stores' ? 'bg-white shadow text-gray-900' : 'text-gray-500')}>
             <Building className="w-4 h-4 inline mr-1.5" />Stores
           </button>
-          <button onClick={() => setActiveTab('employees')} className={clsx('px-4 py-2 rounded-md text-sm font-medium transition-colors', activeTab === 'employees' ? 'bg-gray-700 shadow text-white' : 'text-gray-400')}>
+          <button onClick={() => setActiveTab('employees')} className={clsx('px-4 py-2 rounded-md text-sm font-medium transition-colors', activeTab === 'employees' ? 'bg-white shadow text-gray-900' : 'text-gray-500')}>
             <Users className="w-4 h-4 inline mr-1.5" />Employees
           </button>
-          <button onClick={() => setActiveTab('wizard')} className={clsx('px-4 py-2 rounded-md text-sm font-medium transition-colors', activeTab === 'wizard' ? 'bg-gray-700 shadow text-white' : 'text-gray-400')}>
+          <button onClick={() => setActiveTab('wizard')} className={clsx('px-4 py-2 rounded-md text-sm font-medium transition-colors', activeTab === 'wizard' ? 'bg-white shadow text-gray-900' : 'text-gray-500')}>
             <Wand2 className="w-4 h-4 inline mr-1.5" />Setup Wizard
           </button>
         </div>
@@ -249,12 +249,12 @@ export default function SetupPage() {
       {/* ================================================================ */}
       {activeTab === 'wizard' && (
         <div className="space-y-4">
-          <div className="bg-gray-800 border border-gray-700 rounded-xl p-6">
+          <div className="bg-white border border-gray-200 rounded-xl p-6">
             <div className="flex items-center gap-3 mb-4">
               <Wand2 className="w-6 h-6 text-bv-gold-500" />
               <div>
-                <h2 className="text-lg font-semibold text-white">New Store Setup Wizard</h2>
-                <p className="text-sm text-gray-400">Step-by-step guided setup for opening a new store location</p>
+                <h2 className="text-lg font-semibold text-gray-900">New Store Setup Wizard</h2>
+                <p className="text-sm text-gray-500">Step-by-step guided setup for opening a new store location</p>
               </div>
             </div>
             <StoreSetupWizard />
