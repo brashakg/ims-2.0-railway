@@ -166,6 +166,18 @@ function App() {
                     }
                   />
 
+                  {/* POS: Footfall Tracking */}
+                  <Route
+                    path="pos/footfall"
+                    element={
+                      <ProtectedRoute
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'CASHIER', 'SALES_CASHIER', 'SALES_STAFF', 'OPTOMETRIST']}
+                      >
+                        <div className="p-6"><h1 className="text-2xl font-bold text-gray-900">Footfall Tracking</h1><p className="text-gray-500 mt-2">Coming soon</p></div>
+                      </ProtectedRoute>
+                    }
+                  />
+
                   {/* Customers */}
                   <Route
                     path="customers"

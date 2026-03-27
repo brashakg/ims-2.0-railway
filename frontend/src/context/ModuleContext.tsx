@@ -76,6 +76,7 @@ export const MODULE_CONFIGS: ModuleConfig[] = [
       { id: 'pos-pending', label: 'Pending Orders', path: '/orders?status=PROCESSING' },
       { id: 'pos-deliveries', label: 'Ready for Delivery', path: '/orders?status=READY', roles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'CASHIER', 'SALES_CASHIER'] },
       { id: 'pos-dayend', label: 'Day-End Report', path: '/reports/day-end', roles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'CASHIER'] },
+      { id: 'pos-footfall', label: 'Footfall Tracking', path: '/pos/footfall' },
     ],
   },
   {
