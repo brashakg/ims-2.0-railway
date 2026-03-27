@@ -381,8 +381,8 @@ export default function DashboardPage() {
           <h2 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">
             Quick Access
           </h2>
-          <div className="grid grid-cols-2 tablet:grid-cols-3 laptop:grid-cols-6 gap-3">
-            {availableModules.slice(0, 6).map((module) => (
+          <div className="grid grid-cols-2 tablet:grid-cols-3 laptop:grid-cols-4 desktop:grid-cols-6 gap-3">
+            {availableModules.map((module) => (
               <ModuleCard
                 key={module.id}
                 moduleId={module.id}
