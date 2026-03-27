@@ -18,6 +18,7 @@ import {
   Settings,
   Loader2,
   AlertCircle,
+  Search,
   Calendar,
   TrendingUp,
   Gift,
@@ -97,14 +98,81 @@ export function Customer360Dashboard() {
   const [activeTab, setActiveTab] = useState<Customer360Tab>('overview');
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchResults, setSearchResults] = useState<Customer[]>([]);
+  const [isSearching, setIsSearching] = useState(false);
 
   useEffect(() => {
-    if (!customerId) {
-      navigate('/customers');
-      return;
-    }
+    if (!customerId) return;
     loadCustomerData();
   }, [customerId]);
+
+  const handleSearch = async () => {
+    if (!searchQuery.trim()) return;
+    setIsSearching(true);
+    try {
+      const res = await customerApi.getCustomers({ search: searchQuery.trim(), limit: 10 });
+      setSearchResults(res.customers || res.data || res || []);
+    } catch {
+      toast.error('Failed to search customers');
+    } finally {
+      setIsSearching(false);
+    }
+  };
+
+  // Show search UI when no customerId
+  if (!customerId) {
+    return (
+      <div className="min-h-screen bg-gray-50 p-6">
+        <div className="max-w-2xl mx-auto">
+          <h1 className="text-2xl font-bold text-gray-900 mb-2">Customer 360 View</h1>
+          <p className="text-gray-600 mb-6">Search for a customer to view their complete profile</p>
+          <div className="flex gap-2 mb-6">
+            <div className="relative flex-1">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+              <input
+                type="text"
+                placeholder="Search by name, phone, or email..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
+                className="w-full pl-10 pr-4 py-2.5 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-amber-500 focus:border-amber-500"
+              />
+            </div>
+            <button
+              onClick={handleSearch}
+              disabled={isSearching}
+              className="px-4 py-2.5 bg-amber-600 text-white rounded-lg text-sm font-medium hover:bg-amber-700 disabled:opacity-50"
+            >
+              {isSearching ? 'Searching...' : 'Search'}
+            </button>
+          </div>
+          {searchResults.length > 0 && (
+            <div className="bg-white rounded-lg border border-gray-200 divide-y divide-gray-100">
+              {searchResults.map((c: any) => (
+                <button
+                  key={c._id || c.id}
+                  onClick={() => navigate(`/customers/${c._id || c.id}/360`)}
+                  className="w-full px-4 py-3 flex items-center gap-3 hover:bg-amber-50 transition-colors text-left"
+                >
+                  <div className="w-9 h-9 bg-amber-100 rounded-full flex items-center justify-center">
+                    <User className="w-4 h-4 text-amber-700" />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-medium text-gray-900 truncate">{c.name || `${c.first_name || ''} ${c.last_name || ''}`.trim()}</p>
+                    <p className="text-xs text-gray-500">{c.phone || c.mobile || ''} {c.email ? `· ${c.email}` : ''}</p>
+                  </div>
+                </button>
+              ))}
+            </div>
+          )}
+          {searchResults.length === 0 && searchQuery && !isSearching && (
+            <p className="text-center text-gray-500 text-sm mt-8">No customers found. Try a different search term.</p>
+          )}
+        </div>
+      </div>
+    );
+  }
 
   const loadCustomerData = async () => {
     setIsLoading(true);

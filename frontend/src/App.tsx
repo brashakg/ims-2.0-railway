@@ -178,7 +178,18 @@ function App() {
                     }
                   />
 
-                  {/* CRM: Customer 360 */}
+                  {/* CRM: Customer 360 - search/picker */}
+                  <Route
+                    path="customers/360"
+                    element={
+                      <ProtectedRoute
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'OPTOMETRIST', 'CASHIER', 'SALES_CASHIER', 'SALES_STAFF']}
+                      >
+                        <Customer360Dashboard />
+                      </ProtectedRoute>
+                    }
+                  />
+                  {/* CRM: Customer 360 - with customer */}
                   <Route
                     path="customers/:customerId/360"
                     element={
