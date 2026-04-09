@@ -26,7 +26,7 @@ import {
   ChevronLeft,
   ChevronRight,
   ScrollText,
-  Upload,
+  HardDriveDownload,
   Percent,
 } from "lucide-react";
 
@@ -51,7 +51,7 @@ export default function Sidebar() {
     { href: "/dashboard/collections", label: "Collections", icon: <FolderOpen className="w-5 h-5 flex-shrink-0" /> },
     { href: "/dashboard/stock-transfers", label: "Stock Transfers", icon: <ArrowLeftRight className="w-5 h-5 flex-shrink-0" /> },
     { href: "/dashboard/stock-tally", label: "Stock Tally", icon: <ClipboardCheck className="w-5 h-5 flex-shrink-0" /> },
-    { href: "/dashboard/stock-import", label: "Stock Import", icon: <Upload className="w-5 h-5 flex-shrink-0" /> },
+    { href: "/dashboard/stock-import", label: "Backup & Restore", icon: <HardDriveDownload className="w-5 h-5 flex-shrink-0" /> },
   ];
 
   const insightLinks: NavItem[] = [
