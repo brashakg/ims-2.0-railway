@@ -172,7 +172,7 @@ export async function POST() {
     let cursor: string | null = null;
     let allOrders: ShopifyOrder[] = [];
     let pageCount = 0;
-    const maxPages = 10;
+    const maxPages = 100; // Fetch up to ~5000 orders (50 per page)
 
     do {
       const result: { success: boolean; data?: OrdersResponse; error?: string } =

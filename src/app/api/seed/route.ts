@@ -222,12 +222,9 @@ export async function GET(request: NextRequest) {
       },
     });
 
-    // Create locations
-    for (const location of SEED_DATA.locations) {
-      await prisma.location.create({
-        data: location,
-      });
-    }
+    // Locations should be synced from Shopify via the locations API endpoint
+    // instead of seeding with mock data. Call POST /api/locations with
+    // { action: 'sync_from_shopify' } to populate locations from your Shopify store.
 
     // Create attribute types and options
     for (const [attrName, options] of Object.entries(SEED_DATA.attributes)) {

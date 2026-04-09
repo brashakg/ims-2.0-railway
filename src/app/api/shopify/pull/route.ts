@@ -5,6 +5,7 @@ import { logActivity } from "@/lib/activityLog";
 import {
   fetchAllProducts,
   fetchProductByShopifyId,
+  fetchShopifyLocations,
   type ShopifyProductNode,
 } from "@/lib/shopify";
 
@@ -633,6 +634,28 @@ export async function POST(request: NextRequest) {
       }
     }
 
+    // Also sync real Shopify locations
+    let locationsSynced = 0;
+    try {
+      const locResult = await fetchShopifyLocations();
+      if (locResult.success && locResult.locations) {
+        for (const loc of locResult.locations) {
+          const code = loc.name
+            .toUpperCase()
+            .replace(/[^A-Z0-9]/g, "")
+            .substring(0, 10) || loc.id.split("/").pop()!;
+          await prisma.location.upsert({
+            where: { shopifyLocationId: loc.id },
+            update: { name: loc.name, address: loc.address?.formatted?.join(", ") || null, isActive: loc.isActive ?? true },
+            create: { name: loc.name, code, address: loc.address?.formatted?.join(", ") || null, shopifyLocationId: loc.id, isActive: loc.isActive ?? true },
+          });
+          locationsSynced++;
+        }
+      }
+    } catch (e) {
+      console.error("Location sync during pull failed:", e);
+    }
+
     // Log activity
     logActivity({
       userId: (auth.session?.user as any)?.id,
@@ -640,7 +663,7 @@ export async function POST(request: NextRequest) {
       userEmail: auth.session?.user?.email,
       action: "PULL",
       entity: "SHOPIFY",
-      details: `Shopify pull: ${pulledCount} new, ${updatedCount} updated, ${errorCount} errors`,
+      details: `Shopify pull: ${pulledCount} new, ${updatedCount} updated, ${errorCount} errors, ${locationsSynced} locations synced`,
     });
 
     return NextResponse.json({
