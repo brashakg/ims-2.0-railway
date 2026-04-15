@@ -5,7 +5,7 @@ Prescription management endpoints
 """
 
 from fastapi import APIRouter, HTTPException, Depends, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from typing import Optional
 from datetime import date, datetime, timedelta
 import uuid
@@ -14,6 +14,40 @@ from .auth import get_current_user
 from ..dependencies import get_prescription_repository, get_customer_repository
 
 router = APIRouter()
+
+
+# ============================================================================
+# Prescription Value Validation Ranges (ISO 8980 / standard ophthalmic)
+# ============================================================================
+# SPH (Sphere): -30.00 to +30.00 diopters (0.25 step typical, but accepting any)
+# CYL (Cylinder): -10.00 to +10.00 diopters
+# AXIS: 1 to 180 degrees
+# ADD (Addition): +0.25 to +4.00 diopters
+# PD (Pupillary Distance): 20 to 80 mm
+
+_RX_LIMITS = {
+    "sph": (-30.0, 30.0),
+    "cyl": (-10.0, 10.0),
+    "add": (0.0, 4.0),
+    "pd": (20.0, 80.0),
+}
+
+
+def _validate_rx_value(value: Optional[str], field_name: str) -> Optional[str]:
+    """Validate that an Rx string value falls within acceptable clinical range."""
+    if value is None or value.strip() == "" or value.strip() == "0":
+        return value
+    try:
+        num = float(value)
+    except (ValueError, TypeError):
+        raise ValueError(f"{field_name} must be a valid number, got '{value}'")
+    lo, hi = _RX_LIMITS.get(field_name, (-999, 999))
+    if num < lo or num > hi:
+        raise ValueError(
+            f"{field_name} value {num} is outside the valid range ({lo} to {hi}). "
+            f"Please double-check the prescription."
+        )
+    return value
 
 
 # ============================================================================
@@ -30,6 +64,26 @@ class EyeData(BaseModel):
     prism: Optional[str] = None
     base: Optional[str] = None
     acuity: Optional[str] = None
+
+    @field_validator("sph")
+    @classmethod
+    def validate_sph(cls, v: Optional[str]) -> Optional[str]:
+        return _validate_rx_value(v, "sph")
+
+    @field_validator("cyl")
+    @classmethod
+    def validate_cyl(cls, v: Optional[str]) -> Optional[str]:
+        return _validate_rx_value(v, "cyl")
+
+    @field_validator("add")
+    @classmethod
+    def validate_add(cls, v: Optional[str]) -> Optional[str]:
+        return _validate_rx_value(v, "add")
+
+    @field_validator("pd")
+    @classmethod
+    def validate_pd(cls, v: Optional[str]) -> Optional[str]:
+        return _validate_rx_value(v, "pd")
 
 
 class PrescriptionCreate(BaseModel):
@@ -178,8 +232,17 @@ async def create_prescription(
     repo = get_prescription_repository()
     customer_repo = get_customer_repository()
 
-    # Validate optometrist requirement
+    # Role-based access: only qualified roles may create prescriptions
     user_roles = current_user.get("roles", [])
+    CLINICAL_ROLES = {"SUPERADMIN", "ADMIN", "STORE_MANAGER", "OPTOMETRIST"}
+    is_clinical = bool(set(user_roles) & CLINICAL_ROLES)
+    if not is_clinical:
+        raise HTTPException(
+            status_code=403,
+            detail="Only optometrists and managers can create prescriptions. "
+                   "Your role does not have clinical access."
+        )
+
     is_admin = any(r in user_roles for r in ["SUPERADMIN", "ADMIN", "STORE_MANAGER"])
     if rx.source == "TESTED_AT_STORE" and not rx.optometrist_id and not is_admin:
         raise HTTPException(

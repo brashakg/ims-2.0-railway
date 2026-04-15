@@ -182,6 +182,23 @@ async def create_invoice(
         payment_method = invoice_data.get("payment_method", "cash")
         store_id = current_user.get("active_store_id")
 
+        # GST compliance: block invoice if store GSTIN is missing
+        if store_id:
+            db = _get_db()
+            if db is not None:
+                try:
+                    store_doc = db["stores"].find_one({"store_id": store_id})
+                    if store_doc and not store_doc.get("gstin"):
+                        raise HTTPException(
+                            status_code=400,
+                            detail="Cannot generate invoice: store GSTIN is not configured. "
+                                   "Update store settings with a valid GSTIN first."
+                        )
+                except HTTPException:
+                    raise
+                except Exception:
+                    pass
+
         # Convert items to CartItemData
         cart_items = [
             CartItemData(
@@ -268,7 +285,7 @@ async def create_invoice(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error creating invoice: {str(e)}")
+        raise HTTPException(status_code=500, detail="Error creating invoice. Please try again.")
 
 
 @router.post("/apply-discount")
@@ -382,7 +399,7 @@ async def apply_discount(
 
     except Exception as e:
         raise HTTPException(
-            status_code=500, detail=f"Error applying discount: {str(e)}"
+            status_code=500, detail="Error applying discount. Please try again."
         )
 
 
@@ -489,7 +506,7 @@ async def get_gst_summary(
 
     except Exception as e:
         raise HTTPException(
-            status_code=500, detail=f"Error fetching GST summary: {str(e)}"
+            status_code=500, detail="Error fetching GST summary. Please try again."
         )
 
 
@@ -535,7 +552,7 @@ async def get_held_bills(
 
     except Exception as e:
         raise HTTPException(
-            status_code=500, detail=f"Error fetching held bills: {str(e)}"
+            status_code=500, detail="Error fetching held bills. Please try again."
         )
 
 
@@ -590,7 +607,7 @@ async def hold_bill(
         }
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error holding bill: {str(e)}")
+        raise HTTPException(status_code=500, detail="Error holding bill. Please try again.")
 
 
 @router.post("/recall-held-bill")
@@ -640,7 +657,7 @@ async def recall_held_bill(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error recalling bill: {str(e)}")
+        raise HTTPException(status_code=500, detail="Error recalling bill. Please try again.")
 
 
 @router.post("/process-payment")
@@ -715,5 +732,5 @@ async def process_payment(
         raise
     except Exception as e:
         raise HTTPException(
-            status_code=500, detail=f"Error processing payment: {str(e)}"
+            status_code=500, detail="Error processing payment. Please try again."
         )

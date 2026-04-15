@@ -8,6 +8,7 @@ from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
+from collections import defaultdict
 import time
 import logging
 import os
@@ -16,6 +17,22 @@ import sys
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# ── Sentry APM — error tracking & performance monitoring ────────────────
+_sentry_dsn = os.getenv("SENTRY_DSN")
+if _sentry_dsn:
+    try:
+        import sentry_sdk
+        sentry_sdk.init(
+            dsn=_sentry_dsn,
+            environment=os.getenv("NODE_ENV", "development"),
+            traces_sample_rate=float(os.getenv("SENTRY_TRACES_RATE", "0.2")),
+            profiles_sample_rate=float(os.getenv("SENTRY_PROFILES_RATE", "0.1")),
+            send_default_pii=False,  # don't send user IPs/emails to Sentry
+        )
+        logger.info("[APM] Sentry initialized")
+    except Exception as e:
+        logger.warning(f"[APM] Sentry init failed: {e}")
 
 # Add parent directory to path for database imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -62,6 +79,7 @@ from .routers import (
     incentives_router,
     marketing_router,
     analytics_v2_router,
+    agents_router,
 )
 
 
@@ -70,6 +88,23 @@ from .routers import (
 async def lifespan(app: FastAPI):
     # Startup
     logger.info("[START] Starting IMS 2.0 API Server...")
+
+    # ── Environment validation ──────────────────────────────────────────
+    _jwt_key = os.getenv("JWT_SECRET_KEY", "")
+    if not _jwt_key or _jwt_key in ("CHANGE_THIS_TO_A_RANDOM_SECRET_KEY_IN_PRODUCTION", "dev-secret-key-change-in-production"):
+        logger.warning(
+            "[SECURITY] JWT_SECRET_KEY is missing or using a default placeholder! "
+            "Set a strong random secret via environment variable for production."
+        )
+    _mongo_url = os.getenv("MONGODB_URL") or os.getenv("MONGO_URL") or os.getenv("MONGO_HOST")
+    if not _mongo_url:
+        logger.warning("[CONFIG] No MongoDB connection configured (MONGODB_URL / MONGO_URL / MONGO_HOST). Running in stub mode.")
+    _missing_recommended = [
+        v for v in ("CORS_ORIGINS", "RATE_LIMIT_PER_MINUTE")
+        if not os.getenv(v)
+    ]
+    if _missing_recommended:
+        logger.info(f"[CONFIG] Optional env vars not set (using defaults): {', '.join(_missing_recommended)}")
 
     # Initialize database connection
     if DATABASE_AVAILABLE:
@@ -81,15 +116,63 @@ async def lifespan(app: FastAPI):
 
         if init_db(config):
             logger.info("[OK] Database connection established")
+            # Create performance indexes (idempotent — safe to call every startup)
+            try:
+                get_db().ensure_indexes()
+            except Exception as e:
+                logger.warning(f"[WARN] Index creation skipped: {e}")
         else:
             logger.warning("[WARN] Database not connected - running in mock mode")
     else:
         logger.info("[INFO] Running without database (stub mode)")
 
+    # Initialize Agent System (JARVIS Agents)
+    _scheduler = None
+    try:
+        from agents.config import AgentConfigManager
+        from agents.registry import initialize_registry, AGENT_REGISTRY
+        from agents.scheduler import AgentScheduler
+
+        if DATABASE_AVAILABLE:
+            from database.connection import get_seeded_db
+            db = get_seeded_db()
+        else:
+            db = None
+
+        # Seed default agent configs into MongoDB
+        config_mgr = AgentConfigManager(db=db)
+        config_mgr.seed_configs()
+        logger.info("[AGENTS] Agent configs seeded")
+
+        # Initialize agent registry (creates CORTEX + SENTINEL instances)
+        initialize_registry(db=db)
+        logger.info(f"[AGENTS] Registry initialized — {len(AGENT_REGISTRY)} agents")
+
+        # Start the background scheduler
+        _scheduler = AgentScheduler(db=db)
+        await _scheduler.start(AGENT_REGISTRY)
+        logger.info("[AGENTS] Scheduler started")
+
+        # Store scheduler globally so the toggle endpoint can pause/resume
+        import agents as _agents_pkg
+        _agents_pkg._scheduler_instance = _scheduler
+
+    except Exception as e:
+        logger.warning(f"[AGENTS] Agent system init failed (non-fatal): {e}")
+
     yield
 
     # Shutdown
     logger.info("🛑 Shutting down IMS 2.0 API Server...")
+
+    # Shutdown Agent Scheduler
+    if _scheduler:
+        try:
+            await _scheduler.shutdown()
+            logger.info("[AGENTS] Scheduler shutdown")
+        except Exception as e:
+            logger.warning(f"[AGENTS] Scheduler shutdown error: {e}")
+
     if DATABASE_AVAILABLE:
         close_db()
         logger.info("🔌 Database connection closed")
@@ -178,9 +261,79 @@ app.add_middleware(
     allow_origins=CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
-    allow_headers=["*"],  # Allow all headers including Authorization
-    expose_headers=["*"],  # Expose all response headers
+    allow_headers=[
+        "Authorization",
+        "Content-Type",
+        "Accept",
+        "Origin",
+        "X-Requested-With",
+        "Cache-Control",
+    ],
+    expose_headers=[
+        "X-Process-Time",
+        "Content-Disposition",
+    ],
 )
+
+
+# ============================================================================
+# GLOBAL RATE LIMITER — Per-IP sliding window
+# ============================================================================
+# 120 requests per minute per IP for all endpoints (generous for POS use)
+_GLOBAL_RATE_LIMIT = int(os.getenv("RATE_LIMIT_PER_MINUTE", "120"))
+_GLOBAL_RATE_WINDOW = 60  # seconds
+_request_log: dict = defaultdict(list)
+
+
+@app.middleware("http")
+async def global_rate_limiter(request: Request, call_next):
+    """Per-IP rate limiting for all API endpoints."""
+    # Skip health checks and static files
+    if request.url.path in ("/health", "/docs", "/openapi.json", "/redoc"):
+        return await call_next(request)
+
+    client_ip = (
+        request.headers.get("x-forwarded-for", "").split(",")[0].strip()
+        or (request.client.host if request.client else "unknown")
+    )
+    now = time.time()
+    cutoff = now - _GLOBAL_RATE_WINDOW
+
+    # Clean old entries and count
+    _request_log[client_ip] = [t for t in _request_log[client_ip] if t > cutoff]
+    if len(_request_log[client_ip]) >= _GLOBAL_RATE_LIMIT:
+        return JSONResponse(
+            status_code=429,
+            content={"detail": f"Rate limit exceeded. Max {_GLOBAL_RATE_LIMIT} requests per minute."},
+        )
+    _request_log[client_ip].append(now)
+    return await call_next(request)
+
+
+# ============================================================================
+# SECURITY HEADERS
+# ============================================================================
+
+
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    """Add security headers to every response."""
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-XSS-Protection"] = "1; mode=block"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=(self)"
+    response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    # CSP: allow self + Vercel preview domains for the frontend
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; "
+        "script-src 'self' 'unsafe-inline'; "
+        "style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data: https:; "
+        "connect-src 'self' https://*.vercel.app https://*.up.railway.app"
+    )
+    return response
 
 
 # Custom CORS handler for dynamic origin validation (additional safety layer)
@@ -242,9 +395,9 @@ async def http_exception_handler(request: Request, exc: HTTPException):
 # Global exception handler for unexpected errors
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
-    logger.error(f"Unhandled exception: {exc}")
+    logger.error(f"Unhandled exception on {request.method} {request.url.path}: {exc}", exc_info=True)
     response = JSONResponse(
-        status_code=500, content={"detail": "Internal server error", "error": str(exc)}
+        status_code=500, content={"detail": "Internal server error"}
     )
 
     # Add CORS headers to error responses
@@ -369,6 +522,7 @@ app.include_router(follow_ups_router, prefix="/api/v1/follow-ups", tags=["Follow
 app.include_router(payroll_router, prefix="/api/v1/payroll", tags=["Payroll"])
 app.include_router(marketing_router, prefix="/api/v1/marketing", tags=["Marketing"])
 app.include_router(analytics_v2_router, prefix="/api/v1/analytics-v2", tags=["Analytics V2"])
+app.include_router(agents_router, prefix="/api/v1/jarvis", tags=["Agents"])
 
 
 if __name__ == "__main__":

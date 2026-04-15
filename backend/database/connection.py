@@ -159,6 +159,65 @@ class DatabaseConnection:
             self._connected = False
             return False
     
+    def ensure_indexes(self):
+        """Create MongoDB indexes for query performance.
+        Safe to call multiple times — MongoDB skips existing indexes.
+        """
+        if not self._connected or not self._db:
+            return
+        try:
+            # Orders — most queried collection
+            orders = self._db["orders"]
+            orders.create_index("order_id", unique=True, background=True)
+            orders.create_index("store_id", background=True)
+            orders.create_index("customer_id", background=True)
+            orders.create_index([("store_id", 1), ("status", 1)], background=True)
+            orders.create_index([("store_id", 1), ("created_at", -1)], background=True)
+            orders.create_index("order_number", unique=True, sparse=True, background=True)
+            orders.create_index([("store_id", 1), ("balance_due", 1)], background=True)
+
+            # Customers
+            customers = self._db["customers"]
+            customers.create_index("customer_id", unique=True, background=True)
+            customers.create_index("mobile", unique=True, sparse=True, background=True)
+            customers.create_index("email", sparse=True, background=True)
+            customers.create_index([("store_ids", 1)], background=True)
+            customers.create_index("name", background=True)
+
+            # Products / Stock
+            products = self._db["products"]
+            products.create_index("product_id", unique=True, background=True)
+            products.create_index("sku", unique=True, sparse=True, background=True)
+            products.create_index("barcode", sparse=True, background=True)
+            products.create_index([("store_id", 1), ("category", 1)], background=True)
+
+            # Users
+            users = self._db["users"]
+            users.create_index("user_id", unique=True, background=True)
+            users.create_index("username", unique=True, background=True)
+            users.create_index("email", unique=True, sparse=True, background=True)
+
+            # Workshop jobs
+            jobs = self._db["workshop_jobs"]
+            jobs.create_index("job_id", unique=True, background=True)
+            jobs.create_index("job_number", unique=True, background=True)
+            jobs.create_index([("store_id", 1), ("status", 1)], background=True)
+
+            # Prescriptions
+            rx = self._db["prescriptions"]
+            rx.create_index("prescription_id", unique=True, background=True)
+            rx.create_index("customer_id", background=True)
+            rx.create_index([("store_id", 1), ("created_at", -1)], background=True)
+
+            # Stores
+            stores = self._db["stores"]
+            stores.create_index("store_id", unique=True, background=True)
+            stores.create_index("store_code", unique=True, background=True)
+
+            print("[OK] MongoDB indexes ensured")
+        except Exception as e:
+            print(f"[WARN] Index creation error (non-fatal): {e}")
+
     def disconnect(self):
         """Close database connection"""
         if self._client:

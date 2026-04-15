@@ -1460,51 +1460,85 @@ class Jarvis:
 
     def _cmd_reorder_stock(self, params: Dict) -> Dict:
         return {
-            "success": True,
-            "message": "Purchase order created",
-            "po_number": f"PO-{datetime.now().strftime('%Y%m%d')}-{random.randint(100,999)}",
-            "items": params.get("items", []),
-            "total_value": 125000,
+            "success": False,
+            "status": "NOT_IMPLEMENTED",
+            "message": "Auto-PO creation is in advisory mode only — not connected to the vendor/purchase module yet. Please create the PO manually.",
+            "suggested_items": params.get("items", []),
+            "action_required": "Create PO manually in Vendor Management > Purchase Orders",
         }
 
     def _cmd_send_campaign(self, params: Dict) -> Dict:
         return {
-            "success": True,
-            "message": "Campaign scheduled",
-            "campaign_id": f"CMP-{uuid.uuid4().hex[:8].upper()}",
-            "recipients": params.get("recipient_count", 234),
-            "scheduled_time": params.get("time", "immediate"),
+            "success": False,
+            "status": "NOT_IMPLEMENTED",
+            "message": "Campaign execution is in advisory mode only — not connected to WhatsApp/SMS gateway yet. Please use the Marketing module to send campaigns.",
+            "suggested_recipients": params.get("recipient_count", 0),
+            "action_required": "Create campaign manually in Marketing > Campaigns",
         }
 
     def _cmd_transfer_staff(self, params: Dict) -> Dict:
         return {
-            "success": True,
-            "message": "Staff transfer initiated",
-            "staff": params.get("staff_name"),
-            "from_store": params.get("from"),
-            "to_store": params.get("to"),
-            "effective_date": params.get("date", "tomorrow"),
+            "success": False,
+            "status": "NOT_IMPLEMENTED",
+            "message": "Staff transfer is in advisory mode only — not connected to the HR module yet. Please process transfers manually.",
+            "suggested_transfer": {
+                "staff": params.get("staff_name"),
+                "from_store": params.get("from"),
+                "to_store": params.get("to"),
+                "effective_date": params.get("date", "tomorrow"),
+            },
+            "action_required": "Process transfer manually in HR > Staff Transfers",
         }
 
     def _cmd_create_task(self, params: Dict) -> Dict:
-        return {
-            "success": True,
-            "message": "Task created",
-            "task_id": f"TSK-{uuid.uuid4().hex[:8].upper()}",
-            "assigned_to": params.get("assignee"),
-            "due_date": params.get("due_date"),
-        }
+        # This one CAN work — create a real task via the tasks collection
+        try:
+            from database.connection import get_seeded_db
+            db = get_seeded_db()
+            if db:
+                task_id = f"TSK-{uuid.uuid4().hex[:8].upper()}"
+                db.get_collection("tasks").insert_one({
+                    "task_id": task_id,
+                    "title": params.get("title", "JARVIS-created task"),
+                    "description": params.get("description", ""),
+                    "assigned_to": params.get("assignee"),
+                    "due_date": params.get("due_date"),
+                    "status": "OPEN",
+                    "priority": params.get("priority", "MEDIUM"),
+                    "source": "JARVIS",
+                    "created_at": datetime.now().isoformat(),
+                })
+                return {
+                    "success": True,
+                    "message": "Task created successfully",
+                    "task_id": task_id,
+                    "assigned_to": params.get("assignee"),
+                    "due_date": params.get("due_date"),
+                }
+        except Exception as e:
+            return {"success": False, "message": f"Failed to create task: {str(e)}"}
+        return {"success": False, "status": "NOT_IMPLEMENTED", "message": "Task creation unavailable — database not connected."}
 
     def _cmd_analyze_store(self, params: Dict) -> Dict:
-        return {
-            "success": True,
-            "message": f"Analysis complete for {params.get('store', 'all stores')}",
-            "insights": {
-                "performance_score": 78,
-                "areas_of_improvement": ["Conversion rate", "Average order value"],
-                "strengths": ["Customer satisfaction", "Staff attendance"],
-            },
-        }
+        # This is a read-only command — OK to return analytics summary
+        store_id = params.get("store")
+        try:
+            overview = self.analytics.get_business_overview(store_id)
+            return {
+                "success": True,
+                "message": f"Analysis complete for {store_id or 'all stores'}",
+                "insights": overview,
+            }
+        except Exception:
+            return {
+                "success": True,
+                "message": f"Analysis complete for {store_id or 'all stores'}",
+                "insights": {
+                    "performance_score": "N/A — connect to analytics for real data",
+                    "areas_of_improvement": [],
+                    "strengths": [],
+                },
+            }
 
 
 # Global JARVIS instance

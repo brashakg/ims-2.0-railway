@@ -16,8 +16,29 @@ from pydantic import BaseModel, Field
 from typing import List, Optional
 from datetime import datetime, date, timedelta
 import uuid
+import time
+import logging
+from collections import defaultdict
+
+logger = logging.getLogger(__name__)
 
 from .auth import get_current_user
+
+# Simple per-user notification rate limiter: max 20 sends per 10 minutes
+_notification_rate: dict = defaultdict(list)
+_NOTIFICATION_LIMIT = 20
+_NOTIFICATION_WINDOW = 600  # 10 minutes
+
+
+def _check_notification_rate(user_id: str) -> Optional[str]:
+    """Returns error message if rate-limited, None if OK."""
+    now = time.time()
+    cutoff = now - _NOTIFICATION_WINDOW
+    _notification_rate[user_id] = [t for t in _notification_rate[user_id] if t > cutoff]
+    if len(_notification_rate[user_id]) >= _NOTIFICATION_LIMIT:
+        return f"Rate limit exceeded: max {_NOTIFICATION_LIMIT} notifications per {_NOTIFICATION_WINDOW // 60} minutes."
+    _notification_rate[user_id].append(now)
+    return None
 from ..dependencies import get_db as _dep_get_db
 from ..services.notification_service import send_notification, populate_template
 
@@ -76,6 +97,11 @@ async def send_marketing_notification(
     current_user: dict = Depends(get_current_user),
 ):
     """Send a notification to a customer via WhatsApp/SMS"""
+    # Rate limit to prevent notification spam
+    rate_err = _check_notification_rate(current_user.get("user_id", "unknown"))
+    if rate_err:
+        raise HTTPException(status_code=429, detail=rate_err)
+
     active_store = store_id or current_user.get("active_store_id", "")
     result = await send_notification(
         store_id=active_store,

@@ -9,9 +9,23 @@ from pydantic import BaseModel, Field
 from typing import Optional
 from datetime import date, datetime
 import uuid
+import logging
+
+logger = logging.getLogger(__name__)
 
 from .auth import get_current_user
 from ..dependencies import get_workshop_repository, get_order_repository
+
+# Valid workshop job state transitions
+VALID_JOB_TRANSITIONS = {
+    "PENDING": {"IN_PROGRESS", "CANCELLED"},
+    "IN_PROGRESS": {"COMPLETED", "CANCELLED"},
+    "COMPLETED": {"READY", "QC_FAILED"},  # QC pass → READY, QC fail → QC_FAILED
+    "QC_FAILED": {"IN_PROGRESS", "CANCELLED"},  # rework sends back to IN_PROGRESS
+    "READY": {"DELIVERED"},
+    "DELIVERED": set(),
+    "CANCELLED": set(),
+}
 
 router = APIRouter()
 
@@ -42,9 +56,20 @@ class WorkshopJobUpdate(BaseModel):
 # ============================================================================
 
 
-def generate_job_number() -> str:
-    """Generate unique workshop job number"""
-    return f"WS-{datetime.now().strftime('%y%m%d')}-{str(uuid.uuid4())[:6].upper()}"
+def generate_job_number(repo=None) -> str:
+    """Generate unique workshop job number with collision retry."""
+    for _ in range(5):
+        candidate = f"WS-{datetime.now().strftime('%y%m%d')}-{uuid.uuid4().hex[:8].upper()}"
+        if repo is not None:
+            try:
+                existing = repo.collection.find_one({"job_number": candidate})
+                if existing:
+                    continue  # collision — retry
+            except Exception:
+                pass
+        return candidate
+    # Fallback: use full UUID to guarantee uniqueness
+    return f"WS-{datetime.now().strftime('%y%m%d')}-{uuid.uuid4().hex[:12].upper()}"
 
 
 def job_to_frontend(job: dict) -> dict:
@@ -218,7 +243,7 @@ async def create_job(
                 raise HTTPException(status_code=404, detail="Order not found")
 
         job_data = {
-            "job_number": generate_job_number(),
+            "job_number": generate_job_number(repo),
             "order_id": job.order_id,
             "store_id": current_user.get("active_store_id"),
             "frame_details": job.frame_details,
@@ -297,13 +322,22 @@ async def update_job_status(
     notes: Optional[str] = Query(None),
     current_user: dict = Depends(get_current_user),
 ):
-    """Update job status (generic endpoint)"""
+    """Update job status (generic endpoint) with state machine validation."""
     repo = get_workshop_repository()
 
     if repo is not None:
         job = repo.find_by_id(job_id)
         if job is None:
             raise HTTPException(status_code=404, detail="Workshop job not found")
+
+        current_status = job.get("status", "PENDING")
+        allowed = VALID_JOB_TRANSITIONS.get(current_status, set())
+        if status not in allowed:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Cannot transition from {current_status} to {status}. "
+                       f"Allowed: {', '.join(sorted(allowed)) if allowed else 'none (terminal state)'}."
+            )
 
         if repo.update_status(job_id, status, current_user.get("user_id"), notes):
             return {
@@ -339,6 +373,20 @@ async def assign_job(
             raise HTTPException(
                 status_code=400, detail="Job cannot be assigned in current state"
             )
+
+        # Validate technician exists and has WORKSHOP_STAFF role
+        from ..dependencies import get_user_repository
+        user_repo = get_user_repository()
+        if user_repo:
+            tech_user = user_repo.find_by_id(technician_id)
+            if tech_user is None:
+                raise HTTPException(status_code=404, detail=f"Technician {technician_id} not found")
+            tech_roles = tech_user.get("roles", [])
+            if not any(r in tech_roles for r in ["WORKSHOP_STAFF", "STORE_MANAGER", "ADMIN", "SUPERADMIN"]):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"User {tech_user.get('full_name', technician_id)} is not a workshop technician"
+                )
 
         if repo.assign_technician(job_id, technician_id):
             return {
@@ -432,3 +480,39 @@ async def qc_job(
         raise HTTPException(status_code=500, detail="Failed to record QC")
 
     return {"message": "QC recorded", "status": "READY" if passed else "QC_FAILED"}
+
+
+@router.post("/jobs/{job_id}/rework")
+async def rework_job(
+    job_id: str,
+    notes: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Send QC-failed job back for rework (QC_FAILED → IN_PROGRESS)."""
+    repo = get_workshop_repository()
+
+    if repo is not None:
+        job = repo.find_by_id(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="Workshop job not found")
+
+        if job.get("status") != "QC_FAILED":
+            raise HTTPException(
+                status_code=400,
+                detail="Only QC_FAILED jobs can be sent for rework"
+            )
+
+        rework_count = job.get("rework_count", 0) + 1
+        repo.update(job_id, {"rework_count": rework_count})
+
+        if repo.update_status(job_id, "IN_PROGRESS", current_user.get("user_id"), notes or f"Rework #{rework_count}"):
+            return {
+                "job_id": job_id,
+                "status": "IN_PROGRESS",
+                "rework_count": rework_count,
+                "message": f"Job sent for rework (attempt #{rework_count})",
+            }
+
+        raise HTTPException(status_code=500, detail="Failed to send job for rework")
+
+    return {"message": "Job sent for rework"}

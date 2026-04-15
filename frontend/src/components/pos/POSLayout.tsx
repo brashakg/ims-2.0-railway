@@ -5,7 +5,7 @@
 // Uses posStore (Zustand) for all state with localStorage persistence
 // Sub-components extracted to: POSCart, POSPayment, POSReceipt, POSInvoice
 
-import { useState, useEffect, useMemo, startTransition } from 'react';
+import { useState, useEffect, useMemo, useCallback, startTransition } from 'react';
 import {
   ShoppingCart, User, Eye, Package, CreditCard, CheckCircle,
   ChevronRight, ChevronLeft, Plus, X,
@@ -102,6 +102,25 @@ export function POSLayout() {
   const { user } = useAuth();
   const store = usePOSStore();
 
+  // HIGH #6: Block POS access when no store is selected
+  const activeStoreId = user?.activeStoreId || user?.storeIds?.[0] || '';
+  if (!activeStoreId || activeStoreId === 'No store') {
+    return (
+      <div className="min-h-screen min-h-[100dvh] bg-gray-900 flex items-center justify-center p-4">
+        <div className="bg-gray-800 border border-amber-700 rounded-2xl p-8 max-w-md text-center">
+          <AlertTriangle className="w-12 h-12 text-amber-500 mx-auto mb-4" />
+          <h2 className="text-xl font-bold text-white mb-2">No Store Selected</h2>
+          <p className="text-sm text-gray-400 mb-4">
+            POS requires an active store to process transactions. Please select a store from the header dropdown before accessing Point of Sale.
+          </p>
+          <p className="text-xs text-gray-500">
+            Orders created without a store context cannot be tracked, invoiced, or reported accurately.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
   const [showPrescriptionModal, setShowPrescriptionModal] = useState(false);
   const [showNewPrescription, setShowNewPrescription] = useState(false);
   const [showLensModal, setShowLensModal] = useState(false);
@@ -113,10 +132,13 @@ export function POSLayout() {
   const [showNewConfirm, setShowNewConfirm] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
-  // Held bills from localStorage
-  const getHeldBills = (): Array<{ id: string; customer: string; items: number; total: number; heldAt: string; state: any }> => {
-    try { return JSON.parse(localStorage.getItem('ims-held-bills') || '[]'); } catch { return []; }
-  };
+  // Held bills from localStorage — cached to avoid repeated JSON.parse in render
+  const [heldBillsCache, setHeldBillsCache] = useState<Array<{ id: string; customer: string; items: number; total: number; heldAt: string; state: any }>>([]);
+  const refreshHeldBills = useCallback(() => {
+    try { setHeldBillsCache(JSON.parse(localStorage.getItem('ims-held-bills') || '[]')); } catch { setHeldBillsCache([]); }
+  }, []);
+  useEffect(() => { refreshHeldBills(); }, [refreshHeldBills]);
+  const getHeldBills = useCallback(() => heldBillsCache, [heldBillsCache]);
 
   const holdCurrentBill = () => {
     const bills = getHeldBills();
@@ -138,6 +160,7 @@ export function POSLayout() {
       },
     });
     localStorage.setItem('ims-held-bills', JSON.stringify(bills));
+    refreshHeldBills();
     store.resetTransaction();
     setHoldConfirm(false);
   };
@@ -160,6 +183,7 @@ export function POSLayout() {
       store.addPayment(p);
     }
     localStorage.setItem('ims-held-bills', JSON.stringify(bills.filter(b => b.id !== billId)));
+    refreshHeldBills();
     setShowRecallPanel(false);
     if ((s.cart || []).length > 0) store.setStep('review');
   };
@@ -167,6 +191,7 @@ export function POSLayout() {
   const deleteHeldBill = (billId: string) => {
     const bills = getHeldBills().filter(b => b.id !== billId);
     localStorage.setItem('ims-held-bills', JSON.stringify(bills));
+    refreshHeldBills();
   };
 
   // Safe reset: clear zustand + all local state
@@ -212,14 +237,14 @@ export function POSLayout() {
     const handle = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement)?.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
-      if (e.key === 'F2') { e.preventDefault(); store.setStep('products'); }
-      if (e.key === 'F9' && (store.cart || []).length > 0) { e.preventDefault(); store.setStep('payment'); }
-      if (e.key === 'Escape' && store.current_step !== 'customer') { e.preventDefault(); store.prevStep(); }
+      if (e.key === 'F2') { e.preventDefault(); startTransition(() => store.setStep('products')); }
+      if (e.key === 'F9' && (store.cart || []).length > 0) { e.preventDefault(); startTransition(() => store.setStep('payment')); }
+      if (e.key === 'Escape' && store.current_step !== 'customer') { e.preventDefault(); startTransition(() => store.prevStep()); }
       if (e.key === 'F4' && (store.cart || []).length > 0) { e.preventDefault(); setHoldConfirm(true); }
       if (e.key === 'Enter' && e.ctrlKey && store.current_step === 'payment') { e.preventDefault(); handleCreateOrder(); }
       if (e.key === 'Enter' && !e.ctrlKey && store.current_step !== 'complete' && store.current_step !== 'payment') {
         e.preventDefault();
-        if (canProceed) store.nextStep();
+        if (canProceed) startTransition(() => store.nextStep());
       }
     };
     window.addEventListener('keydown', handle);
@@ -374,7 +399,7 @@ export function POSLayout() {
             return (
               <div key={step.id} className="flex items-center">
                 {idx > 0 && <ChevronRight className="w-4 h-4 text-gray-300 mx-1 flex-shrink-0" />}
-                <button onClick={() => { if (isComplete) store.setStep(step.id); }}
+                <button onClick={() => { if (isComplete) startTransition(() => store.setStep(step.id)); }}
                   className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium whitespace-nowrap transition-colors ${
                     isActive ? 'bg-bv-gold-500 text-white' : isComplete ? 'bg-bv-gold-900/30 text-bv-gold-400 cursor-pointer hover:bg-bv-gold-900/50' : 'text-gray-400'
                   }`}>
@@ -426,7 +451,7 @@ export function POSLayout() {
       <footer className="bg-gray-800 border-t border-gray-700 px-3 tablet:px-4 py-2.5 flex items-center justify-between pb-[env(safe-area-inset-bottom,0)]">
         <div className="flex items-center gap-2 tablet:gap-3">
           {currentStepIndex > 0 && store.current_step !== 'complete' && (
-            <button onClick={() => store.prevStep()} className="flex items-center gap-1.5 px-3 tablet:px-4 py-2.5 text-sm border border-gray-600 rounded-lg hover:bg-gray-700 touch-manipulation min-h-[44px]">
+            <button onClick={() => startTransition(() => store.prevStep())} className="flex items-center gap-1.5 px-3 tablet:px-4 py-2.5 text-sm border border-gray-600 rounded-lg hover:bg-gray-700 touch-manipulation min-h-[44px]">
               <ChevronLeft className="w-4 h-4" /> Back
             </button>
           )}
@@ -437,7 +462,7 @@ export function POSLayout() {
           )}
         </div>
         {store.current_step !== 'complete' && (
-          <button onClick={() => { setErrorMsg(null); store.current_step === 'payment' ? handleCreateOrder() : store.nextStep(); }}
+          <button onClick={() => { setErrorMsg(null); store.current_step === 'payment' ? handleCreateOrder() : startTransition(() => store.nextStep()); }}
             disabled={!canProceed || store.is_processing}
             className={`flex items-center gap-1.5 px-5 tablet:px-6 py-2.5 tablet:py-3 rounded-lg text-sm font-semibold transition-colors touch-manipulation min-h-[44px] ${
               !canProceed || store.is_processing ? 'bg-gray-700 text-gray-400 cursor-not-allowed' : 'bg-bv-gold-500 text-white hover:bg-bv-gold-600'
@@ -859,7 +884,7 @@ function StepCustomer() {
                 {store.patient && <p className="text-xs text-bv-gold-600 mt-0.5">Patient: {store.patient.name}</p>}
               </div>
             </div>
-            <button onClick={() => store.setCustomer(null)} className="text-sm text-gray-500 hover:text-gray-300 px-3 py-1 border border-gray-700 rounded-lg">Change</button>
+            <button onClick={() => startTransition(() => store.setCustomer(null))} className="text-sm text-gray-500 hover:text-gray-300 px-3 py-1 border border-gray-700 rounded-lg">Change</button>
           </div>
           {!isWalkin && <CustomerCardWithLoyalty />}
           {!isWalkin && <RxAvailableBadge customerId={store.customer.id} customerName={store.customer.name} />}

@@ -28,6 +28,7 @@ export function CartSidebar() {
               <div className="flex items-center gap-1">
                 <button onClick={() => store.updateQuantity(item.id, item.quantity - 1)} className="w-6 h-6 rounded bg-gray-800 border text-xs hover:bg-gray-700">-</button>
                 <input type="number" min="1" max="99" value={item.quantity}
+                  aria-label={`Quantity for ${item.name}`}
                   onChange={(e) => { const v = parseInt(e.target.value) || 1; store.updateQuantity(item.id, Math.max(1, Math.min(99, v))); }}
                   onFocus={(e) => e.target.select()}
                   className="w-10 text-center text-xs font-medium border border-gray-700 rounded px-1 py-0.5 [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none" />

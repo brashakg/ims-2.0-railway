@@ -18,6 +18,7 @@ export type SettingsTab =
   | 'audit-logs'
   | 'approvals'
   | 'feature-toggles'
+  | 'agents'
   | 'system';
 
 export interface StoreData {

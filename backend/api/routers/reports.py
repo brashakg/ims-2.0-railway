@@ -529,10 +529,39 @@ async def outstanding_report(
 
     outstanding_data = []
     total = 0
+    now = datetime.now()
+    aging_buckets = {"0_30": 0.0, "31_60": 0.0, "61_90": 0.0, "90_plus": 0.0}
+
     for order in orders:
         balance = order.get("balance_due", 0)
         if balance > 0:
             total += balance
+
+            # Calculate aging bucket from order creation date
+            created_str = order.get("created_at", "")
+            days_old = 0
+            try:
+                if isinstance(created_str, str) and created_str:
+                    created_dt = datetime.fromisoformat(created_str.replace("Z", "+00:00").replace("+00:00", ""))
+                    days_old = (now - created_dt).days
+                elif isinstance(created_str, datetime):
+                    days_old = (now - created_str).days
+            except (ValueError, TypeError):
+                days_old = 0
+
+            if days_old <= 30:
+                bucket = "0-30 days"
+                aging_buckets["0_30"] += balance
+            elif days_old <= 60:
+                bucket = "31-60 days"
+                aging_buckets["31_60"] += balance
+            elif days_old <= 90:
+                bucket = "61-90 days"
+                aging_buckets["61_90"] += balance
+            else:
+                bucket = "90+ days"
+                aging_buckets["90_plus"] += balance
+
             outstanding_data.append(
                 {
                     "order_id": order.get("order_id"),
@@ -543,10 +572,30 @@ async def outstanding_report(
                     "paid_amount": order.get("paid_amount", 0),
                     "balance_due": balance,
                     "created_at": order.get("created_at"),
+                    "days_outstanding": days_old,
+                    "aging_bucket": bucket,
                 }
             )
 
-    return {"data": outstanding_data, "total_outstanding": total}
+    # Sort by age (oldest first)
+    outstanding_data.sort(key=lambda x: x.get("days_outstanding", 0), reverse=True)
+
+    return {
+        "data": outstanding_data,
+        "total_outstanding": total,
+        "aging_summary": {
+            "0-30 days": round(aging_buckets["0_30"], 2),
+            "31-60 days": round(aging_buckets["31_60"], 2),
+            "61-90 days": round(aging_buckets["61_90"], 2),
+            "90+ days": round(aging_buckets["90_plus"], 2),
+        },
+        "count_by_aging": {
+            "0-30 days": sum(1 for d in outstanding_data if d["aging_bucket"] == "0-30 days"),
+            "31-60 days": sum(1 for d in outstanding_data if d["aging_bucket"] == "31-60 days"),
+            "61-90 days": sum(1 for d in outstanding_data if d["aging_bucket"] == "61-90 days"),
+            "90+ days": sum(1 for d in outstanding_data if d["aging_bucket"] == "90+ days"),
+        },
+    }
 
 
 @router.get("/finance/gst")

@@ -10,6 +10,10 @@ from pydantic import BaseModel, Field
 from typing import List, Optional, Literal
 from datetime import datetime, date, timedelta
 import uuid
+import logging
+
+logger = logging.getLogger(__name__)
+
 from .auth import get_current_user
 from ..dependencies import get_customer_repository
 
@@ -188,7 +192,8 @@ async def get_customer_360(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("CRM operation failed: %s", e)
+        raise HTTPException(status_code=500, detail="An internal error occurred. Please try again.")
 
 
 @router.get("/customers/{customer_id}/lifecycle", response_model=LifecyclePhase)
@@ -217,7 +222,8 @@ async def get_customer_lifecycle_phase(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("CRM operation failed: %s", e)
+        raise HTTPException(status_code=500, detail="An internal error occurred. Please try again.")
 
 
 @router.get("/customers/segment/rfm", response_model=List[CustomerSegmentResponse])
@@ -239,7 +245,8 @@ async def get_rfm_segmentation(
         segments = _perform_rfm_segmentation(all_customers)
         return segments
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("CRM operation failed: %s", e)
+        raise HTTPException(status_code=500, detail="An internal error occurred. Please try again.")
 
 
 @router.get(
@@ -268,7 +275,8 @@ async def get_customer_interactions(
             interactions = [i for i in interactions if i["type"] == interaction_type]
         return interactions
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("CRM operation failed: %s", e)
+        raise HTTPException(status_code=500, detail="An internal error occurred. Please try again.")
 
 
 @router.post("/customers/{customer_id}/interactions", response_model=InteractionRecord)
@@ -294,7 +302,8 @@ async def create_customer_interaction(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("CRM operation failed: %s", e)
+        raise HTTPException(status_code=500, detail="An internal error occurred. Please try again.")
 
 
 @router.get(
@@ -310,7 +319,8 @@ async def get_customer_prescriptions(
         prescriptions = db.query_customer_prescriptions(customer_id)
         return [_add_prescription_status(rx) for rx in prescriptions]
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("CRM operation failed: %s", e)
+        raise HTTPException(status_code=500, detail="An internal error occurred. Please try again.")
 
 
 @router.get("/customers/churn-risk/list", response_model=List[dict])
@@ -328,11 +338,23 @@ async def get_churn_risk_customers(
     - low: Minor engagement decline
     """
     try:
-        all_customers = db.query_all_customers()
+        store_id = current_user.get("active_store_id")
+        # Filter customers by store to prevent cross-store data leakage
+        if store_id and hasattr(db, 'query_customers_by_store'):
+            all_customers = db.query_customers_by_store(store_id)
+        else:
+            all_customers = db.query_all_customers()
+            # Fallback: filter in-memory if store_id is available
+            if store_id:
+                all_customers = [
+                    c for c in all_customers
+                    if store_id in (c.get("store_ids", []) + [c.get("primary_store_id", "")])
+                ]
         at_risk = _identify_churn_risk_customers(all_customers, risk_level)
         return at_risk[:limit]
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("Churn risk query failed: %s", e)
+        raise HTTPException(status_code=500, detail="Failed to retrieve churn risk data")
 
 
 @router.post(
@@ -367,7 +389,8 @@ async def add_loyalty_points(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("CRM operation failed: %s", e)
+        raise HTTPException(status_code=500, detail="An internal error occurred. Please try again.")
 
 
 # ============================================================================

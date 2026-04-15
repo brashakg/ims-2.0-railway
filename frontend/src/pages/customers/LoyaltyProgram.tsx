@@ -26,7 +26,7 @@ const LOYALTY_TIERS: LoyaltyTier[] = [
     minValue: 0,
     maxValue: 10000,
     color: 'text-amber-400',
-    bgColor: 'bg-amber-900/30 border-amber-700',
+    bgColor: 'bg-amber-50 border-amber-200',
     badge: '🥉',
     benefits: ['1x points per purchase', 'Monthly newsletter', 'Email promotions'],
     pointsMultiplier: 1,
@@ -38,7 +38,7 @@ const LOYALTY_TIERS: LoyaltyTier[] = [
     minValue: 10000,
     maxValue: 25000,
     color: 'text-slate-300',
-    bgColor: 'bg-slate-700/30 border-slate-600',
+    bgColor: 'bg-slate-50 border-slate-200',
     badge: '🥈',
     benefits: ['1.25x points', 'Birthday offer', 'Priority support', 'Free shipping'],
     pointsMultiplier: 1.25,
@@ -50,7 +50,7 @@ const LOYALTY_TIERS: LoyaltyTier[] = [
     minValue: 25000,
     maxValue: 50000,
     color: 'text-yellow-400',
-    bgColor: 'bg-yellow-900/30 border-yellow-700',
+    bgColor: 'bg-yellow-50 border-yellow-200',
     badge: '🥇',
     benefits: ['1.5x points', 'Exclusive sales', '10% loyalty discount', 'VIP support'],
     pointsMultiplier: 1.5,
@@ -62,7 +62,7 @@ const LOYALTY_TIERS: LoyaltyTier[] = [
     minValue: 50000,
     maxValue: 100000,
     color: 'text-blue-400',
-    bgColor: 'bg-blue-900/30 border-blue-700',
+    bgColor: 'bg-blue-50 border-blue-200',
     badge: '💎',
     benefits: ['2x points', '15% loyalty discount', 'Personal account manager', 'Event invites'],
     pointsMultiplier: 2,
@@ -74,7 +74,7 @@ const LOYALTY_TIERS: LoyaltyTier[] = [
     minValue: 100000,
     maxValue: Infinity,
     color: 'text-purple-400',
-    bgColor: 'bg-purple-900/30 border-purple-700',
+    bgColor: 'bg-purple-50 border-purple-200',
     badge: '👑',
     benefits: ['3x points', '20% loyalty discount', 'Concierge service', 'Exclusive products'],
     pointsMultiplier: 3,
@@ -282,7 +282,7 @@ export function LoyaltyProgram() {
                 <div className="flex items-center gap-3">
                   <span className={clsx(
                     'px-2 py-1 rounded text-xs font-semibold',
-                    promo.status === 'Active' ? 'bg-green-900 text-green-300' : 'bg-blue-900 text-blue-300'
+                    promo.status === 'Active' ? 'bg-green-100 text-green-700' : 'bg-blue-100 text-blue-700'
                   )}>
                     {promo.status}
                   </span>

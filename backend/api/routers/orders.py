@@ -11,12 +11,24 @@ from datetime import datetime, date, timedelta
 from enum import Enum
 import uuid
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 from .auth import get_current_user
 from ..dependencies import (
     get_order_repository,
     get_customer_repository,
     get_stock_repository,
 )
+
+# Discount cap by product discount_category (mirrors billing.py caps)
+CATEGORY_DISCOUNT_CAPS = {
+    "LUXURY": 2.0,
+    "PREMIUM": 5.0,
+    "MASS": 10.0,
+    "NON_DISCOUNTABLE": 0.0,
+}
 
 router = APIRouter()
 
@@ -159,6 +171,23 @@ class OrderStatus(str, Enum):
     CANCELLED = "CANCELLED"
 
 
+# Valid state transitions — only these moves are allowed
+VALID_TRANSITIONS = {
+    "DRAFT":      {"CONFIRMED", "CANCELLED"},
+    "CONFIRMED":  {"PROCESSING", "READY", "CANCELLED"},   # READY for quick-sale (no workshop)
+    "PROCESSING": {"READY", "CANCELLED"},
+    "READY":      {"DELIVERED", "CANCELLED"},
+    "DELIVERED":  set(),       # Terminal
+    "CANCELLED":  set(),       # Terminal
+}
+
+
+def validate_status_transition(current: str, target: str) -> bool:
+    """Check if an order status transition is valid."""
+    allowed = VALID_TRANSITIONS.get(current, set())
+    return target in allowed
+
+
 class PaymentMethod(str, Enum):
     CASH = "CASH"
     UPI = "UPI"
@@ -189,6 +218,9 @@ class PaymentCreate(BaseModel):
     method: PaymentMethod
     amount: float = Field(..., gt=0)
     reference: Optional[str] = None
+    # EMI-specific fields (only required when method=EMI)
+    emi_months: Optional[int] = Field(None, ge=3, le=24)
+    emi_provider: Optional[str] = None  # e.g., "BAJAJ", "HDFC", "ICICI"
 
 
 class OrderCreate(BaseModel):
@@ -241,10 +273,14 @@ async def list_orders(
             orders = repo.find_many(filter_dict, skip=skip, limit=limit)
 
         # Convert to frontend format (camelCase)
+        from ..utils.pagination import paginate
         orders_formatted = [order_to_frontend(o) for o in orders]
-        return {"orders": orders_formatted, "total": len(orders_formatted)}
+        page = (skip // limit) + 1 if limit > 0 else 1
+        result = paginate(orders_formatted, page=page, page_size=limit)
+        result["orders"] = result["data"]  # backward compat
+        return result
 
-    return {"orders": [], "total": 0}
+    return {"orders": [], "total": 0, "data": [], "pagination": {"total": 0, "page": 1, "page_size": limit, "total_pages": 0}}
 
 
 # NOTE: Specific routes MUST come before /{order_id} to avoid being matched as order_id
@@ -386,6 +422,25 @@ async def create_order(
     if not order.items:
         raise HTTPException(status_code=400, detail="Order must have at least one item")
 
+    MAX_CART_ITEMS = 15
+    if len(order.items) > MAX_CART_ITEMS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cart exceeds maximum of {MAX_CART_ITEMS} items. Split into multiple orders."
+        )
+
+    # Validate product_ids exist
+    stock_repo = get_stock_repository()
+    if stock_repo is not None:
+        for item in order.items:
+            if item.product_id and not item.product_id.startswith("custom-"):
+                product = stock_repo.find_by_id(item.product_id)
+                if product is None:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Product not found: {item.product_id} ({item.product_name or 'unknown'})"
+                    )
+
     # Validate: offer_price cannot exceed MRP
     for item in order.items:
         offer_price = getattr(item, "offer_price", 0) or 0
@@ -412,8 +467,36 @@ async def create_order(
         items_data = []
         subtotal = 0.0
 
+        # Retrieve user discount cap for enforcement
+        user_discount_cap = current_user.get("discount_cap", 10.0)
+        user_roles = current_user.get("roles", [])
+        is_admin = any(r in user_roles for r in ["SUPERADMIN", "ADMIN", "STORE_MANAGER"])
+
         for item in order.items:
             item_total = item.unit_price * item.quantity
+
+            # Enforce discount cap (admins bypass)
+            effective_cap = user_discount_cap
+            if not is_admin and item.discount_percent > 0:
+                # Look up category cap for this product
+                try:
+                    stock_repo = get_stock_repository()
+                    if stock_repo is not None:
+                        product = stock_repo.find_by_id(item.product_id)
+                        if product:
+                            cat = product.get("discount_category", "MASS")
+                            category_cap = CATEGORY_DISCOUNT_CAPS.get(cat, 10.0)
+                            effective_cap = min(user_discount_cap, category_cap)
+                except Exception:
+                    pass  # fall back to user cap only
+
+                if item.discount_percent > effective_cap:
+                    raise HTTPException(
+                        status_code=403,
+                        detail=f"Discount {item.discount_percent}% on {item.product_name or item.product_id} "
+                               f"exceeds your limit of {effective_cap}%. Contact a manager for approval."
+                    )
+
             discount_amount = item_total * (item.discount_percent / 100)
             item_subtotal = item_total - discount_amount
 
@@ -743,9 +826,9 @@ async def confirm_order(order_id: str, current_user: dict = Depends(get_current_
         if order is None:
             raise HTTPException(status_code=404, detail="Order not found")
 
-        if order.get("status") != "DRAFT":
+        if not validate_status_transition(order.get("status", ""), "CONFIRMED"):
             raise HTTPException(
-                status_code=400, detail="Only DRAFT orders can be confirmed"
+                status_code=400, detail=f"Cannot confirm order — current status is {order.get('status')}"
             )
 
         if not order.get("items"):
@@ -791,6 +874,42 @@ async def add_payment(
                 detail=f"Payment amount exceeds balance due (₹{balance_due})",
             )
 
+        # EMI validation and interest calculation
+        emi_details = None
+        if payment.method == PaymentMethod.EMI:
+            if not payment.emi_months:
+                raise HTTPException(status_code=400, detail="EMI tenure (emi_months) is required for EMI payments")
+            # Fetch configurable EMI rate from store settings (default 12% annual)
+            emi_annual_rate = 12.0  # fallback
+            try:
+                from ..dependencies import get_seeded_db
+                db = get_seeded_db()
+                if db:
+                    store_settings = db.get_collection("settings").find_one({
+                        "store_id": current_user.get("active_store_id"),
+                        "key": "emi_config"
+                    })
+                    if store_settings and store_settings.get("value", {}).get("annual_rate"):
+                        emi_annual_rate = float(store_settings["value"]["annual_rate"])
+            except Exception:
+                pass  # use default
+
+            monthly_rate = emi_annual_rate / 12 / 100
+            months = payment.emi_months
+            if monthly_rate > 0:
+                emi_amount = payment.amount * monthly_rate * (1 + monthly_rate) ** months / ((1 + monthly_rate) ** months - 1)
+            else:
+                emi_amount = payment.amount / months
+
+            emi_details = {
+                "tenure_months": months,
+                "annual_rate": emi_annual_rate,
+                "monthly_emi": round(emi_amount, 2),
+                "total_payable": round(emi_amount * months, 2),
+                "interest_amount": round(emi_amount * months - payment.amount, 2),
+                "provider": payment.emi_provider or "STORE",
+            }
+
         payment_data = {
             "payment_id": str(uuid.uuid4()),
             "method": payment.method.value,
@@ -799,12 +918,24 @@ async def add_payment(
             "received_by": current_user.get("user_id"),
             "received_at": datetime.now().isoformat(),
         }
+        if emi_details:
+            payment_data["emi_details"] = emi_details
 
         if repo.add_payment(order_id, payment_data):
+            # Auto-confirm DRAFT orders when first payment is received
+            # This fixes the "stuck in DRAFT+PARTIAL" lifecycle issue
+            refreshed = repo.find_by_id(order_id)
+            auto_confirmed = False
+            if refreshed and refreshed.get("status") == "DRAFT":
+                repo.update_status(order_id, "CONFIRMED", current_user.get("user_id"))
+                auto_confirmed = True
+
             return {
                 "payment_id": payment_data["payment_id"],
-                "message": "Payment recorded",
+                "message": "Payment recorded" + (" — order auto-confirmed" if auto_confirmed else ""),
                 "amount": payment.amount,
+                "order_status": "CONFIRMED" if auto_confirmed else refreshed.get("status") if refreshed else "DRAFT",
+                "payment_status": refreshed.get("payment_status") if refreshed else "PARTIAL",
             }
 
         raise HTTPException(status_code=500, detail="Failed to add payment")
@@ -822,10 +953,10 @@ async def mark_ready(order_id: str, current_user: dict = Depends(get_current_use
         if order is None:
             raise HTTPException(status_code=404, detail="Order not found")
 
-        if order.get("status") not in ["CONFIRMED", "PROCESSING"]:
+        if not validate_status_transition(order.get("status", ""), "READY"):
             raise HTTPException(
                 status_code=400,
-                detail="Order must be CONFIRMED or PROCESSING to mark as ready",
+                detail=f"Cannot mark as ready — current status is {order.get('status')}. Valid transitions: {', '.join(VALID_TRANSITIONS.get(order.get('status', ''), set()))}",
             )
 
         if repo.update_status(order_id, "READY", current_user.get("user_id")):
@@ -850,9 +981,9 @@ async def deliver_order(order_id: str, current_user: dict = Depends(get_current_
         if order is None:
             raise HTTPException(status_code=404, detail="Order not found")
 
-        if order.get("status") != "READY":
+        if not validate_status_transition(order.get("status", ""), "DELIVERED"):
             raise HTTPException(
-                status_code=400, detail="Order must be READY for delivery"
+                status_code=400, detail=f"Cannot deliver — current status is {order.get('status')}. Must be READY."
             )
 
         # Check payment status (allow partial for B2B customers)
@@ -931,6 +1062,25 @@ async def get_invoice(order_id: str, current_user: dict = Depends(get_current_us
             raise HTTPException(
                 status_code=400, detail="Cannot generate invoice for DRAFT orders"
             )
+
+        # GST compliance: store must have GSTIN configured before generating invoice
+        store_id = order.get("store_id") or current_user.get("active_store_id")
+        if store_id:
+            try:
+                from ..dependencies import get_store_repository
+                store_repo = get_store_repository()
+                if store_repo:
+                    store = store_repo.find_by_id(store_id)
+                    if store and not store.get("gstin"):
+                        raise HTTPException(
+                            status_code=400,
+                            detail="Cannot generate invoice: store GSTIN is not configured. "
+                                   "Update store settings with a valid GSTIN first."
+                        )
+            except HTTPException:
+                raise
+            except Exception:
+                pass  # don't block invoice if store lookup fails
 
         # Return existing invoice or generate new one
         invoice_number = order.get("invoice_number")

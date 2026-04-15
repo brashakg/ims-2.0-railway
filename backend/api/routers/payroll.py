@@ -320,7 +320,8 @@ async def create_salary_config(
         
         return {"status": "success", "config_id": config_doc["config_id"]}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("Payroll operation failed: %s", e)
+        raise HTTPException(status_code=500, detail="Payroll operation failed. Please try again.")
 
 
 @router.get("/config/{employee_id}")
@@ -337,7 +338,8 @@ async def get_salary_config(
         config = _get_salary_config(db, employee_id)
         return {"config": config or {}}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("Payroll operation failed: %s", e)
+        raise HTTPException(status_code=500, detail="Payroll operation failed. Please try again.")
 
 
 # ============================================================================
@@ -397,7 +399,8 @@ async def get_salary_sheet(
             "total": len(salary_data)
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("Payroll operation failed: %s", e)
+        raise HTTPException(status_code=500, detail="Payroll operation failed. Please try again.")
 
 
 @router.get("/salary/{employee_id}")
@@ -433,7 +436,8 @@ async def get_employee_salary(
             "salary": record or {}
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("Payroll operation failed: %s", e)
+        raise HTTPException(status_code=500, detail="Payroll operation failed. Please try again.")
 
 
 # ============================================================================
@@ -508,7 +512,8 @@ async def calculate_salary(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("Payroll operation failed: %s", e)
+        raise HTTPException(status_code=500, detail="Payroll operation failed. Please try again.")
 
 
 # ============================================================================
@@ -555,7 +560,8 @@ async def record_salary_advance(
             "message": "Salary advance recorded"
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("Payroll operation failed: %s", e)
+        raise HTTPException(status_code=500, detail="Payroll operation failed. Please try again.")
 
 
 @router.get("/advances/{employee_id}")
@@ -584,7 +590,8 @@ async def get_salary_advances(
             "total": len(advances) if advances else 0
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("Payroll operation failed: %s", e)
+        raise HTTPException(status_code=500, detail="Payroll operation failed. Please try again.")
 
 
 @router.post("/advances/{advance_id}/settle", status_code=200)
@@ -626,7 +633,8 @@ async def settle_salary_advance(
             "message": "Advance settled and will be deducted from salary"
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("Payroll operation failed: %s", e)
+        raise HTTPException(status_code=500, detail="Payroll operation failed. Please try again.")
 
 
 # ============================================================================
@@ -688,7 +696,8 @@ async def get_payslip(
         
         return {"payslip": payslip}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("Payroll operation failed: %s", e)
+        raise HTTPException(status_code=500, detail="Payroll operation failed. Please try again.")
 
 
 @router.get("/payslip/{employee_id}")
@@ -710,7 +719,8 @@ async def get_latest_payslip(
         
         return {"payslip": payslips[0] if payslips else None}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("Payroll operation failed: %s", e)
+        raise HTTPException(status_code=500, detail="Payroll operation failed. Please try again.")
 
 
 # ============================================================================
@@ -744,7 +754,8 @@ async def get_incentive_summary(
             logger.error(f"Error fetching incentive: {str(e)}", exc_info=True)
             return {"incentive": None, "message": "Incentive data not found"}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("Payroll operation failed: %s", e)
+        raise HTTPException(status_code=500, detail="Payroll operation failed. Please try again.")
 
 
 # ============================================================================

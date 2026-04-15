@@ -208,7 +208,7 @@ export function AuditLogViewer({ logs = [] }: AuditLogViewerProps) {
                     {log.entity_type}
                     {log.entity_id && ` (#${log.entity_id})`}
                   </td>
-                  <td className="px-4 py-3 text-sm text-gray-400">{log.details}</td>
+                  <td className="px-4 py-3 text-sm text-gray-500">{log.details}</td>
                   <td className="px-4 py-3 text-sm text-gray-500">{log.ip_address || '-'}</td>
                 </tr>
               ))

@@ -5,11 +5,23 @@ Customer and patient management endpoints
 """
 
 from fastapi import APIRouter, HTTPException, Depends, Query, Path, Body
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from typing import List, Optional
 from datetime import date
 import uuid
+import re
 from .auth import get_current_user
+
+
+def _sanitize_text(value: str) -> str:
+    """Strip HTML tags and dangerous characters from user input."""
+    if not value:
+        return value
+    # Remove HTML tags
+    clean = re.sub(r'<[^>]+>', '', value)
+    # Remove control characters except newline/tab
+    clean = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', clean)
+    return clean.strip()
 from ..dependencies import get_customer_repository, validate_store_access
 
 router = APIRouter()
@@ -41,6 +53,11 @@ class CustomerCreate(BaseModel):
     gstin: Optional[str] = None
     billing_address: Optional[dict] = None
     patients: List[PatientCreate] = []
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def sanitize_name(cls, v):
+        return _sanitize_text(v) if isinstance(v, str) else v
 
 
 class CustomerUpdate(BaseModel):
@@ -89,8 +106,13 @@ async def list_customers(
         else:
             customers = repo.find_many(filter_dict, skip=skip, limit=limit)
 
+        from ..utils.pagination import paginate
         total = repo.count(filter_dict) if not search else len(customers)
-        return {"customers": customers, "total": total}
+        page = (skip // limit) + 1 if limit > 0 else 1
+        result = paginate(customers, page=page, page_size=limit, total=total)
+        # Keep backward compat: also include "customers" key
+        result["customers"] = result["data"]
+        return result
 
     # No database available - return empty
     return {"customers": [], "total": 0}

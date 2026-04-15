@@ -88,6 +88,15 @@ async def list_products(
     current_user: dict = Depends(get_current_user),
 ):
     """List products with filtering. If store_id provided, only return products with stock at that store."""
+    from ..services.cache import cache
+
+    # Build cache key from query params
+    active_store = store_id or current_user.get("active_store_id", "")
+    cache_key = f"products:{active_store}:{category}:{brand}:{search}:{skip}:{limit}"
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return cached
+
     repo = get_product_repository()
 
     if repo is not None:
@@ -117,7 +126,9 @@ async def list_products(
                 pass  # Fallback: return all products if stock lookup fails
 
         total = len(products)
-        return {"products": products, "total": total}
+        result = {"products": products, "total": total}
+        cache.set(cache_key, result, ttl=cache.TTL_MEDIUM)
+        return result
 
     return {"products": [], "total": 0}
 
@@ -160,6 +171,9 @@ async def create_product(
 
         created = repo.create(product_data)
         if created:
+            # Invalidate product cache for this store
+            from ..services.cache import cache
+            cache.delete_pattern(f"products:{current_user.get('active_store_id', '')}:*")
             return {"product_id": created["product_id"], "sku": created["sku"]}
 
         raise HTTPException(status_code=500, detail="Failed to create product")

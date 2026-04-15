@@ -86,7 +86,8 @@ export function StepPayment() {
     const downPayment = parseFloat(emiDownPayment) || 0;
     if (downPayment < 0 || downPayment >= balance) return;
     const principal = balance - downPayment;
-    const annualRate = 0.12; // 12% annual
+    // EMI rate fetched from store settings; falls back to 12% annual
+    const annualRate = (store as any).emiAnnualRate ?? 0.12;
     const monthlyRate = annualRate / 12;
     const monthlyEMI = calculateEMI(principal, monthlyRate, emiTenure);
     const processingFee = (principal * 0.02);

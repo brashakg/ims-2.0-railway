@@ -267,10 +267,22 @@ async def get_incentive_dashboard(
     # Kicker bonus
     kicker_bonus = kicker_count * 200 if kicker_count >= 3 else 0
     
-    # Google review bonus (mock - ₹25/₹50 per review)
-    # In production, query from reviews collection
+    # Google review bonus: ₹50 per verified review
     google_reviews = 0
     google_review_bonus = 0
+    if db:
+        try:
+            reviews_coll = db.get_collection("google_reviews")
+            start_date = datetime(year, month, 1)
+            end_date = datetime(year + 1, 1, 1) if month == 12 else datetime(year, month + 1, 1)
+            google_reviews = reviews_coll.count_documents({
+                "staff_id": staff_id,
+                "review_date": {"$gte": start_date.isoformat(), "$lt": end_date.isoformat()},
+                "verified": True,
+            })
+            google_review_bonus = google_reviews * 50  # ₹50 per verified review
+        except Exception as e:
+            logger.warning("Error fetching Google reviews: %s", e)
     
     # Total incentive
     total_incentive = base_incentive + kicker_bonus + google_review_bonus

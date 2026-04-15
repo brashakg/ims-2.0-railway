@@ -494,17 +494,44 @@ async def get_inventory_intelligence(
         inventory = stock_repo.find_many({"store_id": store_id}) if stock_repo is not None else []
 
         # Categorize items
+        # Low stock: quantity at or below reorder point
         low_stock = [
             i for i in inventory
             if _safe_int(i.get("quantity")) <= _safe_int(i.get("reorder_point"))
+            and _safe_int(i.get("quantity")) > 0
         ]
-        dead_stock = [
-            i for i in inventory
-            if _safe_int(i.get("quantity")) > _safe_int(i.get("reorder_point")) * 2
-        ]
+
+        # Dead stock: items with zero recent sales (last_sold_at > 90 days ago or never)
+        # OR items with quantity but zero sales velocity
+        from datetime import datetime, timedelta
+        ninety_days_ago = datetime.utcnow() - timedelta(days=90)
+        dead_stock = []
+        for i in inventory:
+            qty = _safe_int(i.get("quantity"))
+            if qty <= 0:
+                continue  # No stock = nothing to worry about
+            last_sold = i.get("last_sold_at") or i.get("last_sale_date")
+            sales_velocity = _safe_float(i.get("sales_velocity", 0))
+            # Dead if: no last_sold date, or last_sold > 90 days, or zero velocity with stock
+            if last_sold is None:
+                dead_stock.append(i)
+            elif isinstance(last_sold, str):
+                try:
+                    last_sold_dt = datetime.fromisoformat(last_sold.replace("Z", "+00:00"))
+                    if last_sold_dt < ninety_days_ago:
+                        dead_stock.append(i)
+                except (ValueError, TypeError):
+                    if sales_velocity == 0 and qty > 0:
+                        dead_stock.append(i)
+            elif sales_velocity == 0 and qty > 0:
+                dead_stock.append(i)
+
+        # Fast-moving: items selling faster than reorder point restocks them
+        # High velocity = sales_velocity > 0, or quantity dropping fast relative to reorder point
         fast_moving = [
             i for i in inventory
-            if _safe_int(i.get("quantity")) < _safe_int(i.get("reorder_point")) / 2
+            if _safe_float(i.get("sales_velocity", 0)) > 0
+            and _safe_int(i.get("quantity")) <= _safe_int(i.get("reorder_point")) * 1.5
         ]
 
         return {

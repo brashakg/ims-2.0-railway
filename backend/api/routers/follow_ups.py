@@ -375,7 +375,9 @@ async def auto_generate_follow_ups(
                             })
                             generated_count += 1
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error generating follow-ups: {str(e)}")
+        import logging as _log
+        _log.getLogger(__name__).error("Follow-up generation failed: %s", e)
+        raise HTTPException(status_code=500, detail="Error generating follow-ups. Please try again.")
     
     return {
         "status": "success",

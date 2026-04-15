@@ -17,7 +17,7 @@ import {
   RefreshCw, ToggleLeft, ToggleRight, Upload, Download,
   Link, Boxes, CircleDot,
   User, Building2, Receipt, Bell, History, Printer, Save,
-  Search, Calendar, Filter, X, Shield, LogOut,
+  Search, Calendar, Filter, X, Shield, LogOut, Bot,
 } from 'lucide-react';
 import clsx from 'clsx';
 import { useAuth } from '../../context/AuthContext';
@@ -33,6 +33,7 @@ import { FeatureToggles } from '../../components/settings/FeatureToggles';
 import { IntegrationSettings } from '../../components/settings/IntegrationSettings';
 import { NotificationSettings } from '../../components/settings/NotificationSettings';
 import { AdminControlPanel } from '../../components/settings/AdminControlPanel';
+import { AgentControlPanel } from '../../components/settings/AgentControlPanel';
 
 // Sub-components
 import { ProfileSection, BusinessSection } from './SettingsProfile';
@@ -96,6 +97,7 @@ const SETTINGS_SECTIONS = [
   { id: 'integrations' as SettingsTab, label: 'Integrations', icon: Link, description: 'Payment, Tally, Shopify', role: ['SUPERADMIN', 'ADMIN'] },
   { id: 'printers' as SettingsTab, label: 'Printers', icon: Printer, description: 'Receipt and label printers', role: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER'] },
   { id: 'approvals' as SettingsTab, label: 'Approval Workflows', icon: Shield, description: 'Configure approval rules and thresholds', role: ['SUPERADMIN', 'ADMIN'] },
+  { id: 'agents' as SettingsTab, label: 'AI Agents', icon: Bot, description: 'JARVIS agent control panel', role: ['SUPERADMIN'] },
   { id: 'feature-toggles' as SettingsTab, label: 'Feature Toggles', icon: ToggleLeft, description: 'Enable/disable system features per store', role: ['SUPERADMIN'] },
   { id: 'audit-logs' as SettingsTab, label: 'Audit Logs', icon: History, description: 'Activity history and logs', role: ['SUPERADMIN', 'ADMIN'] },
   { id: 'system' as SettingsTab, label: 'System', icon: Database, description: 'Backup, sync, maintenance', role: ['SUPERADMIN', 'ADMIN'] },
@@ -115,7 +117,7 @@ export function SettingsPage() {
   useEffect(() => {
     const tabParam = searchParams.get('tab');
     if (tabParam && tabParam !== activeTab) {
-      const validTabs: SettingsTab[] = ['profile', 'business', 'stores', 'users', 'categories', 'brands', 'lens-master', 'discounts', 'tax-invoice', 'notifications', 'integrations', 'printers', 'approvals', 'feature-toggles', 'audit-logs', 'system'];
+      const validTabs: SettingsTab[] = ['profile', 'business', 'stores', 'users', 'categories', 'brands', 'lens-master', 'discounts', 'tax-invoice', 'notifications', 'integrations', 'printers', 'approvals', 'agents', 'feature-toggles', 'audit-logs', 'system'];
       if (validTabs.includes(tabParam as SettingsTab)) {
         setActiveTab(tabParam as SettingsTab);
       }
@@ -333,6 +335,7 @@ export function SettingsPage() {
           {activeTab === 'integrations' && <div><IntegrationSettings /></div>}
           {activeTab === 'notifications' && <div><NotificationSettings /></div>}
           {activeTab === 'approvals' && <div><ApprovalWorkflows /></div>}
+          {activeTab === 'agents' && <div><AgentControlPanel /></div>}
           {activeTab === 'feature-toggles' && <div><FeatureToggles storeId={user?.activeStoreId || ''} /></div>}
 
           {/* ---- Inline tabs ---- */}

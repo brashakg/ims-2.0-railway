@@ -50,29 +50,29 @@ jobs:
 
       - name: Lint with Black
         run: black --check api/
-        continue-on-error: true
+        continue-on-error: true  # formatting is advisory
 
-      - name: Lint with Pylint
+      - name: Lint with Pylint (errors only)
         run: pylint api/ --disable=all --enable=E,F
-        continue-on-error: true
 
       - name: Type check with mypy
         run: mypy api/
-        continue-on-error: true
+        continue-on-error: true  # gradual adoption
 
       - name: Run unit tests
-        run: pytest tests/ -m unit --cov=api --cov-report=xml --cov-report=term
+        run: pytest tests/ --cov=api --cov-report=xml --cov-report=term -x
         env:
           MONGODB_URL: mongodb://localhost:27017/ims_test
+          JWT_SECRET_KEY: ci-test-secret-key
           ENVIRONMENT: test
-        continue-on-error: true
 
       - name: Run integration tests
         run: pytest tests/ -m integration --cov=api --cov-append --cov-report=xml
         env:
           MONGODB_URL: mongodb://localhost:27017/ims_test
+          JWT_SECRET_KEY: ci-test-secret-key
           ENVIRONMENT: test
-        continue-on-error: true
+        continue-on-error: true  # integration tests may need DB
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v4
@@ -102,16 +102,15 @@ jobs:
           pip install -r requirements-dev.txt
 
       - name: Security audit with Bandit
-        run: bandit -r api/ -f json -o bandit-report.json
-        continue-on-error: true
+        run: bandit -r api/ -f json -o bandit-report.json -ll
+        # -ll = only HIGH and CRITICAL severity; blocks merge on real vulnerabilities
 
       - name: Dependency check with Safety
         run: safety check --json > safety-report.json
-        continue-on-error: true
 
       - name: SBOM generation
         run: pip install cyclonedx-bom && cyclonedx-py -o sbom.xml
-        continue-on-error: true
+        continue-on-error: true  # SBOM is informational
 
   build:
     runs-on: ubuntu-latest

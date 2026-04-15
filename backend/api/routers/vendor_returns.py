@@ -122,7 +122,7 @@ async def list_vendor_returns(
         return {"returns": returns, "total": total}
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+        raise HTTPException(status_code=500, detail="A database error occurred. Please try again or contact support.")
 
 
 @router.post("/", status_code=201)
@@ -184,7 +184,7 @@ async def create_vendor_return(
         }
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to create return: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to create return. Please try again.")
 
 
 @router.get("/{return_id}")
@@ -212,7 +212,7 @@ async def get_vendor_return(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+        raise HTTPException(status_code=500, detail="A database error occurred. Please try again or contact support.")
 
 
 @router.patch("/{return_id}/status")
@@ -298,4 +298,4 @@ async def update_return_status(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+        raise HTTPException(status_code=500, detail="A database error occurred. Please try again or contact support.")

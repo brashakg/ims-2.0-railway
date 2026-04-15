@@ -10,7 +10,8 @@
     "type-check": "tsc --noEmit",
     "test:unit": "echo 'No unit tests configured yet'",
     "test:integration": "echo 'No integration tests configured yet'",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "prepare": "cd .. && if command -v pre-commit > /dev/null 2>&1; then pre-commit install; fi"
   },
   "dependencies": {
     "@tanstack/react-query": "^5.90.19",

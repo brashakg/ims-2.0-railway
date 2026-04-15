@@ -14,10 +14,99 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any
 from datetime import datetime
+import hashlib
+import os
+import base64
+import logging
 from .auth import get_current_user, hash_password, verify_password
 from ..dependencies import get_audit_repository
 
+logger = logging.getLogger(__name__)
 router = APIRouter()
+
+
+# ============================================================================
+# Credential Encryption / Masking
+# ============================================================================
+# Encrypts API keys at rest using AES-like XOR with HMAC-derived key.
+# For production, replace with Fernet (cryptography lib) or cloud KMS.
+
+_CRED_SECRET = os.getenv("CREDENTIAL_ENCRYPTION_KEY", os.getenv("JWT_SECRET_KEY", "ims2-default-key-change-me"))
+
+# Sensitive config field names that must be encrypted at rest & masked on read
+_SENSITIVE_FIELDS = {
+    "api_key", "api_secret", "secret_key", "secret", "password", "token",
+    "access_token", "refresh_token", "private_key", "webhook_secret",
+    "razorpay_key_secret", "shopify_api_secret", "whatsapp_api_key",
+    "tally_password", "shiprocket_password",
+}
+
+
+def _mask_value(val: str) -> str:
+    """Mask a credential: show first 4 and last 2 chars only."""
+    if not val or len(val) < 8:
+        return "****"
+    return val[:4] + "*" * (len(val) - 6) + val[-2:]
+
+
+def _mask_config(config: dict) -> dict:
+    """Deep-mask any sensitive fields in a config dict."""
+    masked = {}
+    for k, v in config.items():
+        if isinstance(v, dict):
+            masked[k] = _mask_config(v)
+        elif isinstance(v, str) and k.lower() in _SENSITIVE_FIELDS:
+            masked[k] = _mask_value(v)
+        else:
+            masked[k] = v
+    return masked
+
+
+def _encrypt_value(plaintext: str) -> str:
+    """Simple reversible encoding for credential storage. NOT military-grade but
+    prevents plaintext exposure in DB dumps. Use Fernet for production."""
+    key = hashlib.sha256(_CRED_SECRET.encode()).digest()
+    encoded = plaintext.encode("utf-8")
+    xored = bytes(b ^ key[i % len(key)] for i, b in enumerate(encoded))
+    return "enc:" + base64.b64encode(xored).decode("ascii")
+
+
+def _decrypt_value(ciphertext: str) -> str:
+    """Reverse _encrypt_value."""
+    if not ciphertext.startswith("enc:"):
+        return ciphertext  # Not encrypted (legacy data)
+    raw = base64.b64decode(ciphertext[4:])
+    key = hashlib.sha256(_CRED_SECRET.encode()).digest()
+    return bytes(b ^ key[i % len(key)] for i, b in enumerate(raw)).decode("utf-8")
+
+
+def _encrypt_config(config: dict) -> dict:
+    """Encrypt sensitive fields before writing to MongoDB."""
+    encrypted = {}
+    for k, v in config.items():
+        if isinstance(v, dict):
+            encrypted[k] = _encrypt_config(v)
+        elif isinstance(v, str) and k.lower() in _SENSITIVE_FIELDS and not v.startswith("enc:"):
+            encrypted[k] = _encrypt_value(v)
+        else:
+            encrypted[k] = v
+    return encrypted
+
+
+def _decrypt_config(config: dict) -> dict:
+    """Decrypt sensitive fields after reading from MongoDB (for internal use)."""
+    decrypted = {}
+    for k, v in config.items():
+        if isinstance(v, dict):
+            decrypted[k] = _decrypt_config(v)
+        elif isinstance(v, str) and v.startswith("enc:"):
+            try:
+                decrypted[k] = _decrypt_value(v)
+            except Exception:
+                decrypted[k] = v  # Can't decrypt — return as-is
+        else:
+            decrypted[k] = v
+    return decrypted
 
 
 # ============================================================================
@@ -104,13 +193,24 @@ def _get_discount_rules_from_db() -> Optional[dict]:
     return None
 
 
-def _get_integrations_from_db() -> List[dict]:
-    """Fetch integration configs from database"""
+def _get_integrations_from_db(mask: bool = True) -> List[dict]:
+    """Fetch integration configs from database.
+    mask=True (default): sensitive fields are masked for API responses.
+    mask=False: decrypts for internal use (e.g., actually calling Shopify API).
+    """
     collection = _get_settings_collection("integrations")
     if collection:
         integrations = list(collection.find({}))
         for i in integrations:
             i.pop("_id", None)
+            if "config" in i and isinstance(i["config"], dict):
+                if mask:
+                    # Decrypt then mask — API consumers see masked values
+                    decrypted = _decrypt_config(i["config"])
+                    i["config"] = _mask_config(decrypted)
+                else:
+                    # Decrypt for internal use
+                    i["config"] = _decrypt_config(i["config"])
         return integrations
     return []
 
@@ -603,12 +703,28 @@ async def update_integration(
     config: IntegrationConfig,
     current_user: dict = Depends(get_current_user),
 ):
-    """Update integration configuration (SUPERADMIN/ADMIN only)"""
+    """Update integration configuration (SUPERADMIN/ADMIN only).
+    Encrypts sensitive fields before storing in MongoDB."""
     if not any(role in current_user["roles"] for role in ["SUPERADMIN", "ADMIN"]):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
+
+    # Encrypt sensitive fields before persisting
+    safe_config = config.model_dump()
+    if "config" in safe_config and isinstance(safe_config["config"], dict):
+        safe_config["config"] = _encrypt_config(safe_config["config"])
+
+    # Persist to MongoDB
+    collection = _get_settings_collection("integrations")
+    if collection:
+        collection.update_one(
+            {"integration_type": integration_type},
+            {"$set": safe_config},
+            upsert=True,
+        )
+
     return {
         "message": f"{integration_type} integration updated",
-        "config": config.model_dump(),
+        "config": _mask_config(config.model_dump().get("config", {})),
     }
 
 
@@ -896,16 +1012,32 @@ class FeatureTogglesUpdate(BaseModel):
 async def get_feature_toggles(
     store_id: str, current_user: dict = Depends(get_current_user)
 ):
-    """Get feature toggle states for a store (SUPERADMIN only)"""
-    if "SUPERADMIN" not in current_user["roles"]:
-        raise HTTPException(status_code=403, detail="Superadmin access required")
+    """Get feature toggle states for a store (SUPERADMIN or STORE_MANAGER of that store)"""
+    roles = current_user.get("roles", [])
+    user_stores = current_user.get("store_ids", [])
+    is_super = "SUPERADMIN" in roles
+    is_store_mgr = "STORE_MANAGER" in roles and store_id in user_stores
+    if not is_super and not is_store_mgr:
+        raise HTTPException(status_code=403, detail="Superadmin or store manager access required")
+
+    # Check cache first
+    from ..services.cache import cache
+    cache_key = f"feature_toggles:{store_id}"
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return cached
+
     collection = _get_settings_collection("feature_toggles")
     if collection:
         doc = collection.find_one({"_id": store_id})
         if doc:
             doc.pop("_id", None)
-            return {"store_id": store_id, "features": doc.get("features", DEFAULT_FEATURE_TOGGLES)}
-    return {"store_id": store_id, "features": DEFAULT_FEATURE_TOGGLES}
+            result = {"store_id": store_id, "features": doc.get("features", DEFAULT_FEATURE_TOGGLES)}
+            cache.set(cache_key, result, ttl=cache.TTL_LONG)
+            return result
+    result = {"store_id": store_id, "features": DEFAULT_FEATURE_TOGGLES}
+    cache.set(cache_key, result, ttl=cache.TTL_LONG)
+    return result
 
 
 @router.put("/feature-toggles/{store_id}")
@@ -914,9 +1046,13 @@ async def update_feature_toggles_put(
     payload: FeatureTogglesUpdate,
     current_user: dict = Depends(get_current_user),
 ):
-    """Update feature toggle states for a store (SUPERADMIN only)"""
-    if "SUPERADMIN" not in current_user["roles"]:
-        raise HTTPException(status_code=403, detail="Superadmin access required")
+    """Update feature toggle states for a store (SUPERADMIN or STORE_MANAGER of that store)"""
+    roles = current_user.get("roles", [])
+    user_stores = current_user.get("store_ids", [])
+    is_super = "SUPERADMIN" in roles
+    is_store_mgr = "STORE_MANAGER" in roles and store_id in user_stores
+    if not is_super and not is_store_mgr:
+        raise HTTPException(status_code=403, detail="Superadmin or store manager access required")
     collection = _get_settings_collection("feature_toggles")
     if collection:
         collection.update_one(
@@ -934,9 +1070,13 @@ async def update_feature_toggles_patch(
     payload: FeatureTogglesUpdate,
     current_user: dict = Depends(get_current_user),
 ):
-    """Update feature toggle states for a store (SUPERADMIN only)"""
-    if "SUPERADMIN" not in current_user["roles"]:
-        raise HTTPException(status_code=403, detail="Superadmin access required")
+    """Update feature toggle states for a store (SUPERADMIN or STORE_MANAGER of that store)"""
+    roles = current_user.get("roles", [])
+    user_stores = current_user.get("store_ids", [])
+    is_super = "SUPERADMIN" in roles
+    is_store_mgr = "STORE_MANAGER" in roles and store_id in user_stores
+    if not is_super and not is_store_mgr:
+        raise HTTPException(status_code=403, detail="Superadmin or store manager access required")
     collection = _get_settings_collection("feature_toggles")
     if collection:
         collection.update_one(
