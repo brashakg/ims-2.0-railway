@@ -17,18 +17,24 @@ router = APIRouter()
 
 
 # ============================================================================
-# Prescription Value Validation Ranges (ISO 8980 / standard ophthalmic)
+# Prescription Value Validation Ranges — per IMS 2.0 business rules
+# (see CLAUDE.md and docs/reference/IMS2_Complete_App_Summary.docx §6.3).
 # ============================================================================
-# SPH (Sphere): -30.00 to +30.00 diopters (0.25 step typical, but accepting any)
-# CYL (Cylinder): -10.00 to +10.00 diopters
-# AXIS: 1 to 180 degrees
-# ADD (Addition): +0.25 to +4.00 diopters
-# PD (Pupillary Distance): 20 to 80 mm
+# SPH (Sphere):  -20.00 to +20.00 diopters, 0.25 steps
+# CYL (Cylinder): -6.00 to +6.00 diopters, 0.25 steps
+# AXIS:           1 to 180 degrees (whole number) — enforced via Field(ge/le)
+# ADD (Addition): +0.75 to +3.50 diopters, 0.25 steps
+# PD (Pupillary Distance): 20 to 80 mm (wider than clinical ADD/CYL range
+#                                       because PD is a measurement, not Rx)
+#
+# These are the ONLY source of truth. Endpoint-level inline checks call the
+# same validator — don't duplicate ranges elsewhere. If you need to relax a
+# limit, update this dict AND the spec docs; don't add a second check.
 
 _RX_LIMITS = {
-    "sph": (-30.0, 30.0),
-    "cyl": (-10.0, 10.0),
-    "add": (0.0, 4.0),
+    "sph": (-20.0, 20.0),
+    "cyl": (-6.0, 6.0),
+    "add": (0.75, 3.50),
     "pd": (20.0, 80.0),
 }
 

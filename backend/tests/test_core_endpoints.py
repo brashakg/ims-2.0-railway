@@ -119,15 +119,21 @@ class TestPrescriptionEndpoints:
         assert resp.status_code == 401
 
     def test_create_rx_blocked_for_sales_staff(self, client, staff_headers):
-        """SALES_STAFF should not be able to create prescriptions."""
+        """SALES_STAFF should not be able to create prescriptions.
+
+        EyeData fields (sph/cyl/add) are strings, not floats — Rx values
+        carry sign prefixes like '-2.00' that need to round-trip exactly
+        through the DB. Pydantic v2 doesn't coerce float → str, so passing
+        numeric JSON would 422 before the role gate ever runs.
+        """
         resp = client.post(
             "/api/v1/prescriptions",
             json={
                 "customer_id": "cust-1",
                 "patient_id": "pat-1",
                 "source": "TESTED_AT_STORE",
-                "right_eye": {"sph": -2.0, "cyl": -0.5},
-                "left_eye": {"sph": -1.5, "cyl": -0.75},
+                "right_eye": {"sph": "-2.00", "cyl": "-0.50", "axis": 90},
+                "left_eye": {"sph": "-1.50", "cyl": "-0.75", "axis": 85},
             },
             headers=staff_headers,
         )

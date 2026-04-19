@@ -13,7 +13,31 @@ from .auth import get_current_user
 import uuid
 import os
 
-router = APIRouter()
+async def _require_admin_role(
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    """Router-level dependency: gate every admin endpoint to SUPERADMIN/ADMIN.
+
+    Integration endpoints expose identifiers (shop URLs, vendor emails,
+    webhook IDs) that shouldn't be visible to store staff even when API-key
+    fields are masked. Test and sync endpoints trigger real (or simulated)
+    third-party calls, which is strictly an admin concern. Before this gate
+    was added, any authenticated user could hit /api/v1/admin/integrations/*
+    and see whether a store has Shopify configured, which vendor we ship
+    through, etc. Now only SUPERADMIN/ADMIN get a response.
+
+    Applied at the APIRouter level (see below) so it cannot be bypassed by
+    forgetting to add `Depends(...)` on a new handler.
+    """
+    roles = current_user.get("roles", []) if current_user else []
+    if not any(r in ("SUPERADMIN", "ADMIN") for r in roles):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+    return current_user
+
+
+# Gate the entire admin router — 24+ endpoints, all integration-related,
+# none of which should be exposed to store-level roles.
+router = APIRouter(dependencies=[Depends(_require_admin_role)])
 
 
 # ============================================================================
