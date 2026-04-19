@@ -263,61 +263,67 @@ export function SettingsPage() {
   // Render
   // ============================================================================
 
+  const activeSection = visibleSections.find(s => s.id === activeTab) ?? visibleSections[0];
+
   return (
-    <div className="space-y-4">
-      {/* Header */}
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold text-gray-900">Settings</h1>
-          <p className="text-gray-500">System configuration and master data management</p>
-        </div>
+    <div className="setup-grid">
+      {/* Left nav — 240px */}
+      <nav className="s-nav">
+        <span className="eyebrow">Configuration · {visibleSections.length} sections</span>
+        {visibleSections.map(section => {
+          const IconCmp = section.icon;
+          return (
+            <button
+              key={section.id}
+              type="button"
+              onClick={() => setActiveTab(section.id)}
+              className={'s-nav-item' + (activeTab === section.id ? ' on' : '')}
+              title={section.description}
+            >
+              <IconCmp className="s-nav-icon" />
+              <span className="s-nav-label">{section.label}</span>
+            </button>
+          );
+        })}
         {user?.activeRole === 'SUPERADMIN' && (
-          <span className="badge-warning">Superadmin Mode</span>
+          <>
+            <div className="divider" />
+            <span className="eyebrow">Superadmin</span>
+            <div style={{ padding: '0 10px', fontSize: 11, color: 'var(--ink-4)' }}>
+              Elevated mode — all changes audit-logged.
+            </div>
+          </>
         )}
-      </div>
+      </nav>
 
-      {/* Error Banner */}
-      {error && (
-        <div className="p-3 bg-red-50 border border-red-200 rounded-lg flex items-center gap-2">
-          <AlertCircle className="w-5 h-5 text-red-500" />
-          <span className="text-sm text-red-700">{error}</span>
-          <button onClick={loadInlineTabData} className="ml-auto text-sm text-red-600 hover:underline">
-            Retry
-          </button>
+      {/* Content */}
+      <div className="s-content">
+        <div className="s-head">
+          <span className="eyebrow" style={{ display: 'block', marginBottom: 6 }}>
+            {activeSection?.description ?? ''}
+          </span>
+          <h1>{activeSection?.label ?? 'Store Setup'}</h1>
+          <p className="sub">
+            System configuration and master data management. Some settings are <strong>locked at HQ level</strong> — changes require superadmin approval and are recorded in audit.
+          </p>
         </div>
-      )}
 
-      <div className="flex gap-6">
-        {/* Sidebar */}
-        <div className="w-64 flex-shrink-0">
-          <div className="card p-2">
-            {visibleSections.map(section => (
-              <button
-                key={section.id}
-                onClick={() => setActiveTab(section.id)}
-                className={clsx(
-                  'w-full flex items-center gap-3 px-3 py-3 rounded-lg text-left transition-colors',
-                  activeTab === section.id
-                    ? 'bg-bv-red-50 text-bv-red-600'
-                    : 'text-gray-500 hover:bg-gray-100'
-                )}
-              >
-                <section.icon className="w-5 h-5" />
-                <div className="flex-1 min-w-0">
-                  <p className="font-medium text-sm">{section.label}</p>
-                  <p className="text-xs text-gray-500 truncate">{section.description}</p>
-                </div>
-              </button>
-            ))}
+        {/* Error Banner */}
+        {error && (
+          <div className="s-section" style={{ padding: 12, borderColor: 'var(--err-50)', background: 'var(--err-50)', display: 'flex', alignItems: 'center', gap: 8 }}>
+            <AlertCircle className="w-5 h-5" style={{ color: 'var(--err)' }} />
+            <span className="t" style={{ color: 'var(--err)' }}>{error}</span>
+            <button onClick={loadInlineTabData} className="btn sm" style={{ marginLeft: 'auto' }}>
+              Retry
+            </button>
           </div>
-        </div>
+        )}
 
-        {/* Content */}
-        <div className="flex-1 min-w-0">
+        <div className="s-section-body">
           {/* Inline loading spinner for inline tabs only */}
           {isLoading && ['tax-invoice', 'printers', 'audit-logs', 'system'].includes(activeTab) && (
             <div className="flex items-center justify-center h-48">
-              <RefreshCw className="w-8 h-8 text-bv-red-600 animate-spin" />
+              <RefreshCw className="w-8 h-8 animate-spin" style={{ color: 'var(--bv)' }} />
             </div>
           )}
 
