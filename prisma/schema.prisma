@@ -26,7 +26,7 @@ model Location {
   code              String   @unique
   address           String?
   isActive          Boolean  @default(true)
-  shopifyLocationId String?  // Shopify location GID for inventory sync
+  shopifyLocationId String?  @unique // Shopify location GID for inventory sync
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
   users             User[]
