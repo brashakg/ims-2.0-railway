@@ -346,85 +346,54 @@ export function TaskManagementPage() {
     sop.category.toLowerCase().includes(searchQuery.toLowerCase())
   );
 
+  const myOpen = myTasks.filter(t => t.status !== 'COMPLETED').length;
+
   return (
-    <div className="space-y-6">
-      {/* Header */}
-      <div className="flex items-center justify-between">
+    <div className="inv-body">
+      {/* Editorial header */}
+      <div className="inv-head">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900 flex items-center gap-2">
-            <CheckSquare className="w-7 h-7 text-green-600" />
-            Task & SOP Management
-          </h1>
-          <p className="text-gray-500 mt-1">Coordinate 40 employees with tasks, checklists, and SOPs</p>
+          <div className="eyebrow" style={{ marginBottom: 6 }}>Tasks &amp; SOPs</div>
+          <h1>The shift, by priority.</h1>
+          <div className="hint">P0–P4 priorities with countdown timers and auto-escalation tied to SOPs. 40-person ops coordination.</div>
         </div>
-        <button
-          onClick={() => setShowCreateTask(true)}
-          className="btn-primary flex items-center gap-2"
-        >
-          <Plus className="w-4 h-4" />
-          {activeTab === 'sop' ? 'Create SOP' : 'Create Task'}
-        </button>
+        <div className="row" style={{ gap: 8 }}>
+          <button
+            onClick={() => setShowCreateTask(true)}
+            className="btn sm primary"
+          >
+            <Plus className="w-4 h-4" /> {activeTab === 'sop' ? 'New SOP' : 'New task'}
+          </button>
+        </div>
       </div>
 
-      {/* Tabs */}
-      <div className="border-b border-gray-200">
-        <nav className="flex gap-8">
-          <button
-            onClick={() => setActiveTab('my-tasks')}
-            className={`pb-3 px-1 border-b-2 font-medium text-sm transition-colors ${
-              activeTab === 'my-tasks'
-                ? 'border-green-600 text-green-600'
-                : 'border-transparent text-gray-500 hover:text-gray-700'
-            }`}
-          >
-            <div className="flex items-center gap-2">
-              <User className="w-4 h-4" />
-              My Tasks
-              <span className="px-2 py-0.5 bg-green-100 text-green-700 rounded-full text-xs font-medium">
-                {myTasks.filter(t => t.status !== 'COMPLETED').length}
-              </span>
-            </div>
-          </button>
-          <button
-            onClick={() => setActiveTab('team-tasks')}
-            className={`pb-3 px-1 border-b-2 font-medium text-sm transition-colors ${
-              activeTab === 'team-tasks'
-                ? 'border-green-600 text-green-600'
-                : 'border-transparent text-gray-500 hover:text-gray-700'
-            }`}
-          >
-            <div className="flex items-center gap-2">
-              <Users className="w-4 h-4" />
-              All Team Tasks
-            </div>
-          </button>
-          <button
-            onClick={() => setActiveTab('sop')}
-            className={`pb-3 px-1 border-b-2 font-medium text-sm transition-colors ${
-              activeTab === 'sop'
-                ? 'border-green-600 text-green-600'
-                : 'border-transparent text-gray-500 hover:text-gray-700'
-            }`}
-          >
-            <div className="flex items-center gap-2">
-              <ListChecks className="w-4 h-4" />
-              SOPs & Procedures
-            </div>
-          </button>
-          <button
-            onClick={() => setActiveTab('analytics')}
-            className={`pb-3 px-1 border-b-2 font-medium text-sm transition-colors ${
-              activeTab === 'analytics'
-                ? 'border-green-600 text-green-600'
-                : 'border-transparent text-gray-500 hover:text-gray-700'
-            }`}
-          >
-            <div className="flex items-center gap-2">
-              <TrendingUp className="w-4 h-4" />
-              Team Performance
-            </div>
-          </button>
-        </nav>
+      {/* Tabs — shared underline style */}
+      <div className="inv-tabs">
+        <button
+          onClick={() => setActiveTab('my-tasks')}
+          className={activeTab === 'my-tasks' ? 'on' : ''}
+        >
+          <User className="w-4 h-4" />
+          Mine <span className="count">· {myOpen}</span>
+        </button>
+        <button
+          onClick={() => setActiveTab('team-tasks')}
+          className={activeTab === 'team-tasks' ? 'on' : ''}
+        >
+          <Users className="w-4 h-4" /> Team
+        </button>
+        <button
+          onClick={() => setActiveTab('sop')}
+          className={activeTab === 'sop' ? 'on' : ''}
+        >
+          <ListChecks className="w-4 h-4" /> SOPs
+        </button>
+        <button
+          onClick={() => setActiveTab('analytics')}
+          className={activeTab === 'analytics' ? 'on' : ''}
+        >
+          <TrendingUp className="w-4 h-4" /> Performance
+        </button>
       </div>
 
       {/* Search & Filters */}
@@ -469,16 +438,12 @@ export function TaskManagementPage() {
         </div>
       )}
 
-      {/* Error Banner */}
+      {/* Error banner */}
       {error && (
-        <div className="card bg-red-50 border-red-200">
-          <div className="flex items-center gap-3 text-red-600">
-            <AlertTriangle className="w-5 h-5" />
-            <p>{error}</p>
-            <button onClick={loadData} className="ml-auto text-sm underline">
-              Retry
-            </button>
-          </div>
+        <div className="s-section" style={{ padding: 12, borderColor: 'var(--err-50)', background: 'var(--err-50)', display: 'flex', alignItems: 'center', gap: 8, marginTop: 14 }}>
+          <AlertTriangle className="w-5 h-5" style={{ color: 'var(--err)' }} />
+          <span style={{ color: 'var(--err)' }}>{error}</span>
+          <button onClick={loadData} className="btn sm" style={{ marginLeft: 'auto' }}>Retry</button>
         </div>
       )}
 
