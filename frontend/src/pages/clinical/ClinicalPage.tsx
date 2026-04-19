@@ -291,126 +291,85 @@ export function ClinicalPage() {
   };
 
   return (
-    <div className="space-y-4">
-      {/* Header */}
-      <div className="flex items-center justify-between">
+    <div className="inv-body">
+      {/* Editorial header */}
+      <div className="inv-head">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">Eye Tests</h1>
-          <p className="text-gray-500">Manage patient queue and eye examinations</p>
+          <div className="eyebrow" style={{ marginBottom: 6 }}>Clinical</div>
+          <h1>The queue, by token.</h1>
+          <div className="hint">Optometrist queue · refraction form · A5 Rx card handoff to POS.</div>
         </div>
-        <div className="flex gap-2">
+        <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
           <button
             onClick={loadData}
             disabled={isLoading}
-            className="btn-outline flex items-center gap-2"
+            className="btn sm"
           >
-            {isLoading ? (
-              <Loader2 className="w-4 h-4 animate-spin" />
-            ) : (
-              <RefreshCw className="w-4 h-4" />
-            )}
+            {isLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
             Refresh
           </button>
           {canAddPatient && (
             <button
               onClick={() => setShowAddCustomerModal(true)}
-              className="btn-primary flex items-center gap-2"
+              className="btn sm primary"
             >
-              <Plus className="w-4 h-4" />
-              New Patient/Customer
+              <Plus className="w-4 h-4" /> New patient
             </button>
           )}
         </div>
       </div>
 
-      {/* Error State */}
+      {/* Error banner */}
       {error && (
-        <div className="card bg-red-50 border-red-200">
-          <div className="flex items-center gap-3 text-red-600">
-            <AlertTriangle className="w-5 h-5" />
-            <p>{error}</p>
-            <button onClick={loadData} className="ml-auto text-sm underline">
-              Retry
-            </button>
-          </div>
+        <div className="s-section" style={{ padding: 12, borderColor: 'var(--err-50)', background: 'var(--err-50)', display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14 }}>
+          <AlertTriangle className="w-5 h-5" style={{ color: 'var(--err)' }} />
+          <span style={{ color: 'var(--err)' }}>{error}</span>
+          <button onClick={loadData} className="btn sm" style={{ marginLeft: 'auto' }}>Retry</button>
         </div>
       )}
 
-      {/* Stats Cards */}
-      <div className="grid grid-cols-3 gap-4">
-        <div className="card">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 bg-yellow-100 rounded-lg flex items-center justify-center">
-              <Clock className="w-5 h-5 text-yellow-600" />
-            </div>
-            <div>
-              <p className="text-sm text-gray-500">Waiting</p>
-              <p className="text-2xl font-bold text-yellow-600">{waitingCount}</p>
-            </div>
-          </div>
+      {/* 3-card stat strip */}
+      <div className="stat-strip" style={{ gridTemplateColumns: 'repeat(3, 1fr)' }}>
+        <div>
+          <div className="l">Waiting</div>
+          <div className="v" style={{ color: waitingCount > 0 ? 'var(--warn)' : 'var(--ink)' }}>{waitingCount}</div>
+          <div className="d">in queue</div>
         </div>
-        <div className="card">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 bg-blue-100 rounded-lg flex items-center justify-center">
-              <Eye className="w-5 h-5 text-blue-600" />
-            </div>
-            <div>
-              <p className="text-sm text-gray-500">In Progress</p>
-              <p className="text-2xl font-bold text-blue-600">{inProgressCount}</p>
-            </div>
-          </div>
+        <div>
+          <div className="l">In exam</div>
+          <div className="v" style={{ color: inProgressCount > 0 ? 'var(--info)' : 'var(--ink)' }}>{inProgressCount}</div>
+          <div className="d">currently active</div>
         </div>
-        <div className="card">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 bg-green-100 rounded-lg flex items-center justify-center">
-              <CheckCircle className="w-5 h-5 text-green-600" />
-            </div>
-            <div>
-              <p className="text-sm text-gray-500">Completed Today</p>
-              <p className="text-2xl font-bold text-green-600">{completedCount}</p>
-            </div>
-          </div>
+        <div>
+          <div className="l">Completed today</div>
+          <div className="v" style={{ color: 'var(--ok)' }}>{completedCount}</div>
+          <div className="d good">{completedCount === 1 ? 'eye test' : 'eye tests'}</div>
         </div>
       </div>
 
-      {/* Tabs */}
-      <div className="flex border-b border-gray-200">
+      {/* Tabs — underline style (shared .inv-tabs) */}
+      <div className="inv-tabs">
         <button
           onClick={() => setActiveTab('queue')}
-          className={clsx(
-            'flex items-center gap-2 px-4 py-3 text-sm font-medium border-b-2 transition-colors',
-            activeTab === 'queue'
-              ? 'border-bv-red-600 text-bv-red-600'
-              : 'border-transparent text-gray-500 hover:text-gray-700'
-          )}
+          className={activeTab === 'queue' ? 'on' : ''}
         >
           <Clock className="w-4 h-4" />
-          Queue ({waitingCount + inProgressCount})
+          Queue <span className="count">· {waitingCount + inProgressCount}</span>
         </button>
         <button
           onClick={() => setActiveTab('completed')}
-          className={clsx(
-            'flex items-center gap-2 px-4 py-3 text-sm font-medium border-b-2 transition-colors',
-            activeTab === 'completed'
-              ? 'border-bv-red-600 text-bv-red-600'
-              : 'border-transparent text-gray-500 hover:text-gray-700'
-          )}
+          className={activeTab === 'completed' ? 'on' : ''}
         >
           <CheckCircle className="w-4 h-4" />
-          Completed Today ({completedCount})
+          Completed today <span className="count">· {completedCount}</span>
         </button>
         {canViewAbuseAlerts && (
           <button
             onClick={() => setActiveTab('abuse-alerts')}
-            className={clsx(
-              'flex items-center gap-2 px-4 py-3 text-sm font-medium border-b-2 transition-colors',
-              activeTab === 'abuse-alerts'
-                ? 'border-bv-red-600 text-bv-red-600'
-                : 'border-transparent text-gray-500 hover:text-gray-700'
-            )}
+            className={activeTab === 'abuse-alerts' ? 'on' : ''}
           >
             <AlertTriangle className="w-4 h-4" />
-            Abuse Alerts
+            Abuse alerts
           </button>
         )}
       </div>
