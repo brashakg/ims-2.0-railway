@@ -736,6 +736,112 @@
 .tgl.on { background: var(--ok); }
 .tgl.on::after { transform: translateX(18px); }
 
+/* ============================================================================
+   Inventory — hero + stat strip + tab underline + filter row.
+   Ported from docs/design/inventory.html
+   ============================================================================ */
+.inv-body {
+  padding: 24px 28px;
+  overflow-y: auto;
+  min-height: calc(100vh - 52px);
+  background: var(--bg);
+}
+
+.inv-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+  margin-bottom: 20px;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.inv-head h1, .inv-head h2 {
+  margin: 0 0 4px;
+  font-family: var(--font-display) !important;
+  font-size: 32px !important;
+  font-weight: 400;
+  letter-spacing: -0.01em;
+  color: var(--ink) !important;
+}
+
+/* 5-col stat strip */
+.stat-strip {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 0;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  margin-bottom: 18px;
+}
+.stat-strip > div {
+  padding: 14px 18px;
+  border-right: 1px solid var(--line);
+}
+.stat-strip > div:last-child { border-right: 0; }
+.stat-strip .l {
+  font: 500 10.5px/1 var(--font-mono);
+  color: var(--ink-4);
+  text-transform: uppercase;
+  letter-spacing: .08em;
+  margin-bottom: 8px;
+}
+.stat-strip .v {
+  font-family: var(--font-sans);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  font-size: 26px;
+  line-height: 1;
+  letter-spacing: -.02em;
+  color: var(--ink);
+}
+.stat-strip .d {
+  font-size: 11.5px;
+  color: var(--ink-4);
+  margin-top: 4px;
+}
+.stat-strip .d.bad  { color: var(--err); }
+.stat-strip .d.good { color: var(--ok); }
+.stat-strip .d.warn { color: var(--warn); }
+
+/* Tab bar — underline style matching setup/inventory prototypes */
+.inv-tabs {
+  display: flex;
+  gap: 2px;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 18px;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+.inv-tabs button {
+  height: 36px;
+  padding: 0 14px;
+  border: 0;
+  background: transparent;
+  font: 500 12.5px/1 var(--font-sans);
+  color: var(--ink-4);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+  transition: color .12s, border-color .12s;
+}
+.inv-tabs button.on {
+  color: var(--ink);
+  border-bottom-color: var(--ink);
+}
+.inv-tabs button:hover:not(.on) { color: var(--ink-2); }
+.inv-tabs .count {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--ink-4);
+  margin-left: 4px;
+}
+.inv-tabs button.on .count { color: var(--ink-3); }
+
 /* Print only */
 @media print {
   .no-print { display: none !important; }

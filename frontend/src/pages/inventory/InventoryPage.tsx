@@ -13,7 +13,6 @@ import {
   Plus,
   Download,
   BarChart3,
-  Tag,
   Boxes,
   TrendingDown,
   Eye,
@@ -285,165 +284,120 @@ export function InventoryPage() {
     setShowBarcodeModal(true);
   };
 
+  const tabList: Array<{ id: ViewTab; label: string; icon: typeof AlertTriangle; count?: number }> = [
+    { id: 'alerts',         label: 'Alerts',          icon: AlertTriangle },
+    { id: 'catalog',        label: 'Catalog',         icon: Package, count: totalSKUs },
+    { id: 'low-stock',      label: 'Low stock',       icon: AlertTriangle, count: lowStockCount },
+    { id: 'reorders',       label: 'Reorders',        icon: ShoppingCart },
+    { id: 'serial-numbers', label: 'Serial numbers',  icon: Hash },
+    { id: 'aging',          label: 'Stock aging',     icon: Clock },
+    { id: 'transfers',      label: 'Transfers',       icon: ArrowRightLeft },
+    { id: 'movements',      label: 'Movements',       icon: Eye },
+    { id: 'non-moving',     label: 'Non-moving',      icon: TrendingDown },
+    { id: 'stock-count',    label: 'Stock count',     icon: Barcode },
+    { id: 'contact-lens',   label: 'CL expiry',       icon: Eye },
+    { id: 'power-grid',     label: 'Lens power grid', icon: BarChart3 },
+    { id: 'sell-through',   label: 'Sell-through',    icon: TrendingDown },
+    { id: 'overstock',      label: 'Overstock',       icon: Boxes },
+  ];
+
   return (
-    <div className="space-y-4">
-      {/* Header */}
-      <div className="flex items-center justify-between">
+    <div className="inv-body">
+      {/* Editorial header */}
+      <div className="inv-head">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">Inventory</h1>
-          <p className="text-gray-500">Manage products and stock levels</p>
+          <div className="eyebrow" style={{ marginBottom: 6 }}>Inventory</div>
+          <h1>What's on the floor.</h1>
+          <div className="hint">Live stock by SKU across {CATEGORIES.length} categories · cycle count · transfers · non-moving flags.</div>
         </div>
-        <div className="flex gap-2">
+        <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
           <button
             onClick={loadInventory}
             disabled={isLoading}
-            className="btn-outline flex items-center gap-2"
+            className="btn sm"
           >
-            {isLoading ? (
-              <Loader2 className="w-4 h-4 animate-spin" />
-            ) : (
-              <RefreshCw className="w-4 h-4" />
-            )}
+            {isLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
             Refresh
           </button>
           {canExport && (
-            <button
-              onClick={() => toast.info('Export feature coming soon')}
-              className="btn-outline flex items-center gap-2"
-            >
-              <Download className="w-4 h-4" />
-              Export
+            <button onClick={() => toast.info('Export feature coming soon')} className="btn sm">
+              <Download className="w-4 h-4" /> Export
             </button>
           )}
           {canTransfer && (
-            <button
-              onClick={() => setShowTransferModal(true)}
-              className="btn-outline flex items-center gap-2"
-            >
-              <ArrowRightLeft className="w-4 h-4" />
-              New Transfer
+            <button onClick={() => setShowTransferModal(true)} className="btn sm">
+              <ArrowRightLeft className="w-4 h-4" /> New transfer
             </button>
           )}
           {canAddProduct && (
             <>
-              <button
-                onClick={() => setShowCSVImport(true)}
-                className="btn-outline flex items-center gap-2"
-              >
-                <Upload className="w-4 h-4" />
-                CSV Import
+              <button onClick={() => setShowCSVImport(true)} className="btn sm">
+                <Upload className="w-4 h-4" /> CSV import
               </button>
-              <button
-                onClick={() => navigate('/settings?tab=products')}
-                className="btn-primary flex items-center gap-2"
-              >
-                <Plus className="w-4 h-4" />
-                Add Product
+              <button onClick={() => navigate('/settings?tab=products')} className="btn sm primary">
+                <Plus className="w-4 h-4" /> Add product
               </button>
             </>
           )}
         </div>
       </div>
 
-      {/* Error State */}
+      {/* Error banner */}
       {error && (
-        <div className="card bg-red-50 border-red-200">
-          <div className="flex items-center gap-3 text-red-600">
-            <AlertTriangle className="w-5 h-5" />
-            <p>{error}</p>
-            <button onClick={loadInventory} className="ml-auto text-sm underline">
-              Retry
-            </button>
-          </div>
+        <div className="s-section" style={{ padding: 12, borderColor: 'var(--err-50)', background: 'var(--err-50)', display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14 }}>
+          <AlertTriangle className="w-5 h-5" style={{ color: 'var(--err)' }} />
+          <span style={{ color: 'var(--err)' }}>{error}</span>
+          <button onClick={loadInventory} className="btn sm" style={{ marginLeft: 'auto' }}>Retry</button>
         </div>
       )}
 
-      {/* Stats Cards */}
-      <div className="grid grid-cols-2 tablet:grid-cols-4 gap-4">
-        <div className="card">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 bg-blue-100 rounded-lg flex items-center justify-center">
-              <Boxes className="w-5 h-5 text-blue-600" />
-            </div>
-            <div>
-              <p className="text-sm text-gray-500">Total SKUs</p>
-              <p className="text-xl font-bold text-gray-900">{totalSKUs}</p>
-            </div>
+      {/* 5-cell stat strip */}
+      <div className="stat-strip">
+        <div>
+          <div className="l">Total SKUs</div>
+          <div className="v">{totalSKUs.toLocaleString('en-IN')}</div>
+          <div className="d">across {CATEGORIES.length} categories</div>
+        </div>
+        <div>
+          <div className="l">Stock value</div>
+          <div className="v">₹ {(totalValue / 100000).toFixed(1)}L</div>
+          <div className="d">total landed inventory</div>
+        </div>
+        <div>
+          <div className="l">Low stock</div>
+          <div className="v" style={{ color: lowStockCount > 0 ? 'var(--err)' : 'var(--ink)' }}>{lowStockCount}</div>
+          <div className={'d ' + (lowStockCount > 0 ? 'bad' : 'good')}>
+            {lowStockCount > 0 ? 'needs reorder' : 'all above reorder pt'}
           </div>
         </div>
-        <div className="card">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 bg-green-100 rounded-lg flex items-center justify-center">
-              <BarChart3 className="w-5 h-5 text-green-600" />
-            </div>
-            <div>
-              <p className="text-sm text-gray-500">Stock Value</p>
-              <p className="text-xl font-bold text-gray-900">₹{(totalValue / 100000).toFixed(1)}L</p>
-            </div>
-          </div>
+        <div>
+          <div className="l">Categories</div>
+          <div className="v">{CATEGORIES.length}</div>
+          <div className="d">incl. lenses, frames, CL</div>
         </div>
-        <div className="card">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 bg-yellow-100 rounded-lg flex items-center justify-center">
-              <TrendingDown className="w-5 h-5 text-yellow-600" />
-            </div>
-            <div>
-              <p className="text-sm text-gray-500">Low Stock</p>
-              <p className="text-xl font-bold text-yellow-600">{lowStockCount}</p>
-            </div>
-          </div>
-        </div>
-        <div className="card">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 bg-purple-100 rounded-lg flex items-center justify-center">
-              <Tag className="w-5 h-5 text-purple-600" />
-            </div>
-            <div>
-              <p className="text-sm text-gray-500">Categories</p>
-              <p className="text-xl font-bold text-gray-900">{CATEGORIES.length}</p>
-            </div>
-          </div>
+        <div>
+          <div className="l">View</div>
+          <div className="v" style={{ fontSize: 22 }}>{tabList.find(t => t.id === activeTab)?.label ?? '—'}</div>
+          <div className="d">active tab</div>
         </div>
       </div>
 
-      {/* Tabs */}
-      <div className="flex border-b border-gray-200">
-        {[
-          { id: 'alerts' as ViewTab, label: 'Inventory Alerts', icon: AlertTriangle },
-          { id: 'catalog' as ViewTab, label: 'Catalog', icon: Package },
-          { id: 'low-stock' as ViewTab, label: `Low Stock (${lowStockCount})`, icon: AlertTriangle },
-          { id: 'reorders' as ViewTab, label: 'Reorders', icon: ShoppingCart },
-          { id: 'serial-numbers' as ViewTab, label: 'Serial Numbers', icon: Hash },
-          { id: 'aging' as ViewTab, label: 'Stock Aging', icon: Clock },
-          { id: 'transfers' as ViewTab, label: 'Transfers', icon: ArrowRightLeft },
-          { id: 'movements' as ViewTab, label: 'Movements', icon: Eye },
-
-          { id: 'non-moving' as ViewTab, label: 'Non-Moving Stock', icon: TrendingDown },
-
-          { id: 'stock-count' as ViewTab, label: 'Stock Count Scan', icon: Barcode },
-
-          { id: 'contact-lens' as ViewTab, label: 'Contact Lens Expiry', icon: Eye },
-
-          { id: 'power-grid' as ViewTab, label: 'Lens Power Grid', icon: BarChart3 },
-
-          { id: 'sell-through' as ViewTab, label: 'Sell-Through Analysis', icon: TrendingDown },
-
-          { id: 'overstock' as ViewTab, label: 'Overstock Analysis', icon: Boxes },
-        ].map(tab => (
-          <button
-            key={tab.id}
-            onClick={() => setActiveTab(tab.id)}
-            className={clsx(
-              'flex items-center gap-2 px-4 py-3 text-sm font-medium border-b-2 transition-colors',
-              activeTab === tab.id
-                ? 'border-bv-red-600 text-bv-red-600'
-                : 'border-transparent text-gray-500 hover:text-gray-700'
-            )}
-          >
-            <tab.icon className="w-4 h-4" />
-            {tab.label}
-          </button>
-        ))}
+      {/* Tabs — underline style, mono count */}
+      <div className="inv-tabs">
+        {tabList.map(tab => {
+          const TabIcon = tab.icon;
+          return (
+            <button
+              key={tab.id}
+              onClick={() => setActiveTab(tab.id)}
+              className={activeTab === tab.id ? 'on' : ''}
+            >
+              <TabIcon className="w-4 h-4" />
+              {tab.label}
+              {typeof tab.count === 'number' && <span className="count">· {tab.count}</span>}
+            </button>
+          );
+        })}
       </div>
 
       {/* Search and Filters */}
