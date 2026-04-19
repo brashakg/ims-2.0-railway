@@ -15,30 +15,41 @@ export async function GET(request: NextRequest) {
     const search = searchParams.get("search");
 
     const skip = (page - 1) * limit;
-    const where: Record<string, unknown> = {};
+    const andClauses: Record<string, unknown>[] = [];
 
-    if (status && status !== "All") where.orderStatus = status;
+    if (status && status !== "All") andClauses.push({ orderStatus: status });
 
     if (segment === "unfulfilled") {
-      where.fulfillmentStatus = { not: "fulfilled" };
-      where.orderStatus = { not: "CANCELLED" };
+      andClauses.push({ fulfillmentStatus: { not: "fulfilled" } });
+      andClauses.push({ orderStatus: { not: "CANCELLED" } });
     } else if (segment === "unpaid") {
-      where.financialStatus = { in: ["pending", "authorized", null] };
-      where.orderStatus = { not: "CANCELLED" };
+      // Prisma's `in` doesn't accept null — split into OR.
+      andClauses.push({
+        OR: [
+          { financialStatus: { in: ["pending", "authorized"] } },
+          { financialStatus: null },
+        ],
+      });
+      andClauses.push({ orderStatus: { not: "CANCELLED" } });
     } else if (segment === "open") {
-      where.orderStatus = "OPEN";
+      andClauses.push({ orderStatus: "OPEN" });
     } else if (segment === "closed") {
-      where.orderStatus = "CLOSED";
+      andClauses.push({ orderStatus: "CLOSED" });
     } else if (segment === "cancelled") {
-      where.orderStatus = "CANCELLED";
+      andClauses.push({ orderStatus: "CANCELLED" });
     }
     if (search) {
-      where.OR = [
-        { name: { contains: search, mode: "insensitive" } },
-        { email: { contains: search, mode: "insensitive" } },
-        { orderNumber: { contains: search, mode: "insensitive" } },
-      ];
+      andClauses.push({
+        OR: [
+          { name: { contains: search, mode: "insensitive" } },
+          { email: { contains: search, mode: "insensitive" } },
+          { orderNumber: { contains: search, mode: "insensitive" } },
+        ],
+      });
     }
+
+    const where: Record<string, unknown> =
+      andClauses.length > 0 ? { AND: andClauses } : {};
 
     const [orders, total] = await Promise.all([
       prisma.order.findMany({
