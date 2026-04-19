@@ -15,9 +15,78 @@ import logging
 logger = logging.getLogger(__name__)
 
 from .auth import get_current_user
-from ..dependencies import get_customer_repository
+from ..dependencies import (
+    get_customer_repository,
+    get_order_repository,
+    get_prescription_repository,
+)
 
 router = APIRouter()
+
+
+# ============================================================================
+# DATA ACCESS ADAPTER
+# ============================================================================
+# This router was originally written against a unified `db` query object that
+# never existed. The adapter below provides the legacy query API expected by
+# the endpoints below, delegating to the real repositories where possible.
+# Missing data returns empty lists rather than 500s, which lets the frontend
+# render the Customer 360 / CRM screens even when collections are empty.
+
+
+class _CRMDataAdapter:
+    """Adapter exposing the query API the CRM endpoints were written against."""
+
+    def query_customer(self, customer_id: str):
+        repo = get_customer_repository()
+        return repo.find_by_id(customer_id) if repo else None
+
+    def query_all_customers(self):
+        repo = get_customer_repository()
+        return repo.find_many({}) if repo else []
+
+    def query_customers_by_store(self, store_id: str):
+        repo = get_customer_repository()
+        if not repo:
+            return []
+        return repo.find_many({"primary_store_id": store_id})
+
+    def query_customer_orders(self, customer_id: str):
+        repo = get_order_repository()
+        return repo.find_by_customer(customer_id) if repo else []
+
+    def query_customer_prescriptions(self, customer_id: str):
+        repo = get_prescription_repository()
+        if repo and hasattr(repo, "find_by_customer"):
+            return repo.find_by_customer(customer_id)
+        # Fallback: prescriptions embedded in customer document
+        customer = self.query_customer(customer_id)
+        return customer.get("prescriptions", []) if customer else []
+
+    def query_customer_interactions(self, customer_id: str, limit: int = 100):
+        # Interactions are stored as an array on the customer document.
+        customer = self.query_customer(customer_id)
+        if not customer:
+            return []
+        interactions = customer.get("interactions", []) or []
+        return interactions[:limit]
+
+    def create_customer_interaction(self, interaction_data: dict) -> bool:
+        repo = get_customer_repository()
+        if not repo:
+            return False
+        try:
+            repo.collection.update_one(
+                {"customer_id": interaction_data["customer_id"]},
+                {"$push": {"interactions": interaction_data}},
+            )
+            return True
+        except Exception as exc:  # pylint: disable=broad-except
+            logger.warning("Failed to persist customer interaction: %s", exc)
+            return False
+
+
+db = _CRMDataAdapter()
 
 
 # ============================================================================

@@ -103,7 +103,7 @@ jobs:
 
       - name: Security audit with Bandit
         run: bandit -r api/ -f json -o bandit-report.json -ll
-        # -ll = only HIGH and CRITICAL severity; blocks merge on real vulnerabilities
+        # -ll = MEDIUM severity and above; blocks merge on real vulnerabilities
 
       - name: Dependency check with Safety
         run: safety check --json > safety-report.json

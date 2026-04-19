@@ -128,7 +128,7 @@ async def list_vendors(
 
     if search:
         # Search in name, trade name, or mobile
-        vendors = vendor_repo.search(search)
+        vendors = vendor_repo.search_vendors(search)
     else:
         vendors = vendor_repo.find_many(filter_dict, skip=skip, limit=limit)
 
@@ -491,14 +491,18 @@ async def accept_grn(grn_id: str, current_user: dict = Depends(get_current_user)
     # Add stock for accepted items
     if stock_repo is not None:
         for item in grn.get("items", []):
-            if item.get("accepted_qty", 0) > 0:
-                stock_repo.add_stock(
-                    store_id=grn.get("store_id"),
-                    product_id=item.get("product_id"),
-                    quantity=item.get("accepted_qty"),
-                    source_type="GRN",
-                    source_id=grn_id,
-                )
+            accepted_qty = item.get("accepted_qty", 0) or 0
+            if accepted_qty > 0:
+                # Create individual stock units for each accepted quantity
+                for _ in range(int(accepted_qty)):
+                    stock_repo.create({
+                        "store_id": grn.get("store_id"),
+                        "product_id": item.get("product_id"),
+                        "quantity": 1,
+                        "status": "AVAILABLE",
+                        "source_type": "GRN",
+                        "source_id": grn_id,
+                    })
 
     # Update GRN status
     grn_repo.update(

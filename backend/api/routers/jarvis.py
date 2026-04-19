@@ -382,6 +382,7 @@ class JarvisAnalyticsEngine:
         inventory_health_score = 0
         turnover_ratio = 0
         dead_stock_value = 0
+        total_value = 0
 
         # Get alerts from database
         if alerts_col:
@@ -1523,7 +1524,9 @@ class Jarvis:
         # This is a read-only command — OK to return analytics summary
         store_id = params.get("store")
         try:
-            overview = self.analytics.get_business_overview(store_id)
+            # get_business_overview is a @staticmethod with no args; store_id is kept
+            # in the response message below for context.
+            overview = self.analytics.get_business_overview()
             return {
                 "success": True,
                 "message": f"Analysis complete for {store_id or 'all stores'}",
@@ -1756,7 +1759,7 @@ async def subagent_analyze(
 async def list_agents(current_user: dict = Depends(require_superadmin)):
     """List all registered subagents"""
     try:
-        from ...core.subagents import AGENT_REGISTRY
+        from core.subagents import AGENT_REGISTRY  # pylint: disable=import-outside-toplevel
         return {
             "agents": [
                 {
@@ -1776,7 +1779,7 @@ async def list_agents(current_user: dict = Depends(require_superadmin)):
 async def run_all(current_user: dict = Depends(require_superadmin)):
     """Run all subagents and return combined intelligence report"""
     try:
-        from ...core.subagents import run_all_agents
+        from core.subagents import run_all_agents  # pylint: disable=import-outside-toplevel
         db = get_db_collection("__db__")  # Get the database reference
         if db is None:
             return {"error": "Database not available"}
@@ -1795,7 +1798,7 @@ async def run_all(current_user: dict = Depends(require_superadmin)):
 async def run_single_agent(agent_id: str, current_user: dict = Depends(require_superadmin)):
     """Run a specific subagent"""
     try:
-        from ...core.subagents import run_agent
+        from core.subagents import run_agent  # pylint: disable=import-outside-toplevel
         db = get_db_collection("__db__")
         if db is None:
             return {"error": "Database not available"}

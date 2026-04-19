@@ -528,4 +528,5 @@ app.include_router(agents_router, prefix="/api/v1/jarvis", tags=["Agents"])
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    # Bind 0.0.0.0 is intentional for container/Railway deployment.
+    uvicorn.run(app, host="0.0.0.0", port=8000)  # nosec B104
