@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { requireAuth } from "@/lib/apiAuth";
 import { makeGraphQLRequest } from "@/lib/shopify";
+import { recomputeCustomerAggregates } from "@/lib/customerAggregates";
 
 interface ShopifyOrder {
   id: string;
@@ -198,6 +199,7 @@ export async function POST() {
 
     let created = 0;
     let updated = 0;
+    const touchedCustomerIds = new Set<string>();
 
     for (const shopifyOrder of allOrders) {
       const shopifyGid = shopifyOrder.id;
@@ -206,49 +208,35 @@ export async function POST() {
       if (shopifyOrder.customer) {
         const c = shopifyOrder.customer;
         const addr = c.addresses?.[0];
+        // NOTE: ordersCount/totalSpent are intentionally omitted —
+        // they are recomputed from the Order table after this loop.
+        const customerFields = {
+          email: c.email || undefined,
+          phone: c.phone || undefined,
+          firstName: c.firstName || undefined,
+          lastName: c.lastName || undefined,
+          address1: addr?.address1 || undefined,
+          address2: addr?.address2 || undefined,
+          city: addr?.city || undefined,
+          state: addr?.province || undefined,
+          zip: addr?.zip || undefined,
+          country: addr?.country || undefined,
+          tags: c.tags?.join(", ") || undefined,
+          note: c.note || undefined,
+          acceptsMarketing: c.acceptsMarketing || false,
+          taxExempt: c.taxExempt || false,
+          verified: c.verifiedEmail || false,
+        };
         const customer = await prisma.customer.upsert({
           where: { shopifyCustomerId: c.id },
-          update: {
-            email: c.email || undefined,
-            phone: c.phone || undefined,
-            firstName: c.firstName || undefined,
-            lastName: c.lastName || undefined,
-            ordersCount: parseInt(c.ordersCount) || 0,
-            totalSpent: parseFloat(c.totalSpentV2?.amount) || 0,
-            address1: addr?.address1 || undefined,
-            address2: addr?.address2 || undefined,
-            city: addr?.city || undefined,
-            state: addr?.province || undefined,
-            zip: addr?.zip || undefined,
-            country: addr?.country || undefined,
-            tags: c.tags?.join(", ") || undefined,
-            note: c.note || undefined,
-            acceptsMarketing: c.acceptsMarketing || false,
-            taxExempt: c.taxExempt || false,
-            verified: c.verifiedEmail || false,
-          },
+          update: customerFields,
           create: {
             shopifyCustomerId: c.id,
-            email: c.email || undefined,
-            phone: c.phone || undefined,
-            firstName: c.firstName || undefined,
-            lastName: c.lastName || undefined,
-            ordersCount: parseInt(c.ordersCount) || 0,
-            totalSpent: parseFloat(c.totalSpentV2?.amount) || 0,
-            address1: addr?.address1 || undefined,
-            address2: addr?.address2 || undefined,
-            city: addr?.city || undefined,
-            state: addr?.province || undefined,
-            zip: addr?.zip || undefined,
-            country: addr?.country || undefined,
-            tags: c.tags?.join(", ") || undefined,
-            note: c.note || undefined,
-            acceptsMarketing: c.acceptsMarketing || false,
-            taxExempt: c.taxExempt || false,
-            verified: c.verifiedEmail || false,
+            ...customerFields,
           },
         });
         customerId = customer.id;
+        touchedCustomerIds.add(customer.id);
       }
 
       const orderStatus = shopifyOrder.cancelledAt
@@ -332,10 +320,15 @@ export async function POST() {
       }
     }
 
+    // Recompute ordersCount/totalSpent for every customer touched in this sync.
+    const recomputed = await recomputeCustomerAggregates(
+      Array.from(touchedCustomerIds)
+    );
+
     return NextResponse.json({
       success: true,
-      message: `Synced ${allOrders.length} orders (${created} new, ${updated} updated)`,
-      data: { total: allOrders.length, created, updated },
+      message: `Synced ${allOrders.length} orders (${created} new, ${updated} updated); recomputed totals for ${recomputed} customer(s)`,
+      data: { total: allOrders.length, created, updated, recomputed },
     });
   } catch (error) {
     return NextResponse.json(

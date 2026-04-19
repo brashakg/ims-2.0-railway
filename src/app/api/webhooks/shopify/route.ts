@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import crypto from "crypto";
 import { logActivity } from "@/lib/activityLog";
+import { recomputeCustomerAggregates } from "@/lib/customerAggregates";
 
 // Shopify sends webhooks as POST requests with HMAC verification
 // The HMAC is in the X-Shopify-Hmac-Sha256 header
@@ -306,40 +307,28 @@ async function handleOrderCreateUpdate(payload: any) {
     const c = payload.customer;
     const shopifyCustomerId = `gid://shopify/Customer/${c.id}`;
     const addr = c.default_address || {};
+    // NOTE: ordersCount/totalSpent are recomputed from the Order table
+    // at the end of this handler — do not sync them from the Shopify payload.
+    const customerFields = {
+      email: c.email || null,
+      phone: c.phone || null,
+      firstName: c.first_name || null,
+      lastName: c.last_name || null,
+      acceptsMarketing: c.accepts_marketing || false,
+      tags: c.tags || null,
+      note: c.note || null,
+      address1: addr.address1 || null,
+      city: addr.city || null,
+      state: addr.province || null,
+      zip: addr.zip || null,
+      country: addr.country || null,
+    };
     const customer = await prisma.customer.upsert({
       where: { shopifyCustomerId },
-      update: {
-        email: c.email || null,
-        phone: c.phone || null,
-        firstName: c.first_name || null,
-        lastName: c.last_name || null,
-        ordersCount: c.orders_count || 0,
-        totalSpent: parseFloat(c.total_spent || "0"),
-        acceptsMarketing: c.accepts_marketing || false,
-        tags: c.tags || null,
-        note: c.note || null,
-        address1: addr.address1 || null,
-        city: addr.city || null,
-        state: addr.province || null,
-        zip: addr.zip || null,
-        country: addr.country || null,
-      },
+      update: customerFields,
       create: {
         shopifyCustomerId,
-        email: c.email || null,
-        phone: c.phone || null,
-        firstName: c.first_name || null,
-        lastName: c.last_name || null,
-        ordersCount: c.orders_count || 0,
-        totalSpent: parseFloat(c.total_spent || "0"),
-        acceptsMarketing: c.accepts_marketing || false,
-        tags: c.tags || null,
-        note: c.note || null,
-        address1: addr.address1 || null,
-        city: addr.city || null,
-        state: addr.province || null,
-        zip: addr.zip || null,
-        country: addr.country || null,
+        ...customerFields,
       },
     });
     customerId = customer.id;
@@ -410,11 +399,20 @@ async function handleOrderCreateUpdate(payload: any) {
       });
     }
   }
+
+  // Refresh aggregate totals for this customer now that the order is committed.
+  if (customerId) {
+    await recomputeCustomerAggregates([customerId]);
+  }
 }
 
 // Handle order cancellation
 async function handleOrderCancel(payload: any) {
   const shopifyOrderId = `gid://shopify/Order/${payload.id}`;
+  const cancelled = await prisma.order.findUnique({
+    where: { shopifyOrderId },
+    select: { customerId: true },
+  });
   await prisma.order.updateMany({
     where: { shopifyOrderId },
     data: {
@@ -423,6 +421,9 @@ async function handleOrderCancel(payload: any) {
       cancelledAt: payload.cancelled_at ? new Date(payload.cancelled_at) : new Date(),
     },
   });
+  if (cancelled?.customerId) {
+    await recomputeCustomerAggregates([cancelled.customerId]);
+  }
 }
 
 // Handle customer create/update
@@ -430,46 +431,33 @@ async function handleCustomerCreateUpdate(payload: any) {
   const shopifyCustomerId = `gid://shopify/Customer/${payload.id}`;
   const addr = payload.default_address || {};
 
-  await prisma.customer.upsert({
+  // NOTE: ordersCount/totalSpent are derived from our Order table via
+  // recomputeCustomerAggregates — never take them from the customer payload.
+  const customerFields = {
+    email: payload.email || null,
+    phone: payload.phone || null,
+    firstName: payload.first_name || null,
+    lastName: payload.last_name || null,
+    acceptsMarketing: payload.accepts_marketing || false,
+    verified: payload.verified_email || false,
+    tags: payload.tags || null,
+    note: payload.note || null,
+    address1: addr.address1 || null,
+    address2: addr.address2 || null,
+    city: addr.city || null,
+    state: addr.province || null,
+    zip: addr.zip || null,
+    country: addr.country || null,
+  };
+  const customer = await prisma.customer.upsert({
     where: { shopifyCustomerId },
-    update: {
-      email: payload.email || null,
-      phone: payload.phone || null,
-      firstName: payload.first_name || null,
-      lastName: payload.last_name || null,
-      ordersCount: payload.orders_count || 0,
-      totalSpent: parseFloat(payload.total_spent || "0"),
-      acceptsMarketing: payload.accepts_marketing || false,
-      verified: payload.verified_email || false,
-      tags: payload.tags || null,
-      note: payload.note || null,
-      address1: addr.address1 || null,
-      address2: addr.address2 || null,
-      city: addr.city || null,
-      state: addr.province || null,
-      zip: addr.zip || null,
-      country: addr.country || null,
-    },
+    update: customerFields,
     create: {
       shopifyCustomerId,
-      email: payload.email || null,
-      phone: payload.phone || null,
-      firstName: payload.first_name || null,
-      lastName: payload.last_name || null,
-      ordersCount: payload.orders_count || 0,
-      totalSpent: parseFloat(payload.total_spent || "0"),
-      acceptsMarketing: payload.accepts_marketing || false,
-      verified: payload.verified_email || false,
-      tags: payload.tags || null,
-      note: payload.note || null,
-      address1: addr.address1 || null,
-      address2: addr.address2 || null,
-      city: addr.city || null,
-      state: addr.province || null,
-      zip: addr.zip || null,
-      country: addr.country || null,
+      ...customerFields,
     },
   });
+  await recomputeCustomerAggregates([customer.id]);
 }
 
 // Handle customer delete

@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { requireAuth } from "@/lib/apiAuth";
 import { makeGraphQLRequest } from "@/lib/shopify";
+import { recomputeCustomerAggregates } from "@/lib/customerAggregates";
 
 interface ShopifyCustomer {
   id: string;
@@ -108,13 +109,14 @@ export async function POST() {
     for (const c of allCustomers) {
       const addr = c.addresses?.[0];
 
+      // NOTE: ordersCount and totalSpent are intentionally NOT synced here.
+      // They are derived from our Order table via recomputeCustomerAggregates
+      // after this loop — Shopify's numbers can be stale vs. our order sync.
       const customerData = {
         email: c.email || undefined,
         phone: c.phone || undefined,
         firstName: c.firstName || undefined,
         lastName: c.lastName || undefined,
-        ordersCount: parseInt(c.ordersCount) || 0,
-        totalSpent: parseFloat(c.totalSpentV2?.amount || "0"),
         address1: addr?.address1 || undefined,
         address2: addr?.address2 || undefined,
         city: addr?.city || undefined,
@@ -149,10 +151,14 @@ export async function POST() {
       }
     }
 
+    // Recompute ordersCount/totalSpent from the Order table for every customer.
+    // Cheap (single UPDATE) and keeps these fields consistent with orders sync.
+    const recomputed = await recomputeCustomerAggregates();
+
     return NextResponse.json({
       success: true,
-      message: `Synced ${allCustomers.length} customers (${created} new, ${updated} updated)`,
-      data: { total: allCustomers.length, created, updated },
+      message: `Synced ${allCustomers.length} customers (${created} new, ${updated} updated); recomputed totals for ${recomputed}`,
+      data: { total: allCustomers.length, created, updated, recomputed },
     });
   } catch (error) {
     return NextResponse.json(
