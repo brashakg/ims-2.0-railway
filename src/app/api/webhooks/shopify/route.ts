@@ -289,12 +289,65 @@ async function handleProductDelete(payload: any) {
   }
 }
 
-// Handle inventory level update
-async function handleInventoryUpdate(payload: any) {
-  // payload has inventory_item_id, location_id, available
-  // We'd need to map inventory_item_id back to a variant
-  // For now, log the event
-  console.log("Inventory update:", payload);
+// Handle inventory level update.
+// Payload (REST webhook shape): { inventory_item_id, location_id, available, ... }
+// - inventory_item_id is a numeric id; our ProductVariant.shopifyInventoryItemId
+//   stores the GID form "gid://shopify/InventoryItem/<id>".
+// - location_id is numeric; Location.shopifyLocationId stores the GID form.
+// We upsert VariantLocation if both sides of the mapping resolve; otherwise
+// we log a descriptive reason and return without erroring (so the webhook
+// record shows the miss, not a 500).
+async function handleInventoryUpdate(payload: any): Promise<string | null> {
+  const rawItemId = payload?.inventory_item_id;
+  const rawLocationId = payload?.location_id;
+  const available = payload?.available;
+
+  if (rawItemId === undefined || rawItemId === null) {
+    return "missing inventory_item_id in payload";
+  }
+  if (rawLocationId === undefined || rawLocationId === null) {
+    return "missing location_id in payload";
+  }
+
+  const itemGid = `gid://shopify/InventoryItem/${rawItemId}`;
+  const locationGid = `gid://shopify/Location/${rawLocationId}`;
+
+  const variant = await prisma.productVariant.findFirst({
+    where: { shopifyInventoryItemId: itemGid },
+    select: { id: true },
+  });
+  if (!variant) {
+    return `variant not found for inventory_item_id ${rawItemId}`;
+  }
+
+  const location = await prisma.location.findUnique({
+    where: { shopifyLocationId: locationGid },
+    select: { id: true },
+  });
+  if (!location) {
+    return `location not synced yet for location_id ${rawLocationId}`;
+  }
+
+  // Shopify can send `available: null` when a location tracks the item but
+  // has no stock recorded; treat it as 0 so the row exists.
+  const qty = typeof available === "number" ? available : 0;
+
+  await prisma.variantLocation.upsert({
+    where: {
+      variantId_locationId: {
+        variantId: variant.id,
+        locationId: location.id,
+      },
+    },
+    update: { quantity: qty },
+    create: {
+      variantId: variant.id,
+      locationId: location.id,
+      quantity: qty,
+    },
+  });
+
+  return null;
 }
 
 // Handle order create/update
@@ -538,6 +591,7 @@ async function processWebhookInBackground(
   shopifyDomain: string,
   eventId: string
 ) {
+  let skipReason: string | null = null;
   try {
     switch (topic) {
       case "products/create":
@@ -548,7 +602,7 @@ async function processWebhookInBackground(
         await handleProductDelete(payload);
         break;
       case "inventory_levels/update":
-        await handleInventoryUpdate(payload);
+        skipReason = await handleInventoryUpdate(payload);
         break;
       case "orders/create":
       case "orders/updated":
@@ -586,7 +640,12 @@ async function processWebhookInBackground(
 
     await prisma.webhookEvent.update({
       where: { id: eventId },
-      data: { status: "PROCESSED", message: `Handled ${topic} for ${shopifyDomain}` },
+      data: {
+        status: "PROCESSED",
+        message: skipReason
+          ? `Handled ${topic} for ${shopifyDomain} (skipped: ${skipReason})`
+          : `Handled ${topic} for ${shopifyDomain}`,
+      },
     });
 
     logActivity({
