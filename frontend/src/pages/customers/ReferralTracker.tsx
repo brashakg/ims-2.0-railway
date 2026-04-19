@@ -226,7 +226,7 @@ export function ReferralTracker() {
               <div key={referrer.id} className="flex items-center gap-4 p-4 bg-gray-700 rounded-lg hover:bg-gray-600 transition-colors">
                 <div className={clsx(
                   'w-10 h-10 rounded-full flex items-center justify-center font-bold text-white',
-                  idx === 0 ? 'bg-yellow-600' : idx === 1 ? 'bg-gray-500' : idx === 2 ? 'bg-orange-600' : 'bg-gray-700 border border-gray-600'
+                  idx === 0 ? 'bg-yellow-600' : idx === 1 ? 'bg-gray-500' : idx === 2 ? 'bg-orange-600' : 'bg-gray-700 border border-gray-200'
                 )}>
                   {idx === 0 ? '🥇' : idx === 1 ? '🥈' : idx === 2 ? '🥉' : idx + 1}
                 </div>
