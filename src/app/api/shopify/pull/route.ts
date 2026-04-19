@@ -232,7 +232,53 @@ function parseTagsToFields(tags: string[]): {
 }
 
 // Helper: upsert a single Shopify product into local DB
-async function upsertProduct(sp: ShopifyProductNode) {
+// Sync real Shopify locations into the local Location table and return
+// a map of shopifyLocationId → local Location.id that upsertProduct can
+// use to write per-location VariantLocation rows in a single pass.
+async function syncShopifyLocationsToMap(): Promise<{
+  locationMap: Map<string, string>;
+  synced: number;
+}> {
+  const map = new Map<string, string>();
+  let synced = 0;
+  try {
+    const locResult = await fetchShopifyLocations();
+    if (locResult.success && locResult.locations) {
+      for (const loc of locResult.locations) {
+        const code =
+          loc.name
+            .toUpperCase()
+            .replace(/[^A-Z0-9]/g, "")
+            .substring(0, 10) || loc.id.split("/").pop()!;
+        const local = await prisma.location.upsert({
+          where: { shopifyLocationId: loc.id },
+          update: {
+            name: loc.name,
+            address: loc.address?.formatted?.join(", ") || null,
+            isActive: loc.isActive ?? true,
+          },
+          create: {
+            name: loc.name,
+            code,
+            address: loc.address?.formatted?.join(", ") || null,
+            shopifyLocationId: loc.id,
+            isActive: loc.isActive ?? true,
+          },
+        });
+        map.set(loc.id, local.id);
+        synced++;
+      }
+    }
+  } catch (e) {
+    console.error("Location sync during pull failed:", e);
+  }
+  return { locationMap: map, synced };
+}
+
+async function upsertProduct(
+  sp: ShopifyProductNode,
+  locationMap: Map<string, string> = new Map()
+) {
   const existing = await prisma.product.findFirst({
     where: { shopifyProductId: sp.id },
     include: { variants: true, images: true },
@@ -539,29 +585,64 @@ async function upsertProduct(sp: ShopifyProductNode) {
     },
   });
 
-  // Upsert variant-level inventory (inventoryQuantity)
+  // Upsert variant-level inventory (inventoryQuantity — aggregated across
+  // all Shopify locations, kept on the synthetic SHOPIFY location for
+  // backwards compatibility with existing reports).
   const updatedVariants = await prisma.productVariant.findMany({
     where: { productId },
   });
+
+  const perLocationEnabled =
+    (process.env.PULL_PER_LOCATION_INVENTORY ?? "true").toLowerCase() !==
+    "false";
 
   for (const ve of sp.variants.edges) {
     const sv = ve.node;
     const localVariant = updatedVariants.find(
       (v) => v.shopifyVariantId === sv.id
     );
-    if (localVariant) {
+    if (!localVariant) continue;
+
+    // Aggregate (SHOPIFY synthetic location)
+    await prisma.variantLocation.upsert({
+      where: {
+        variantId_locationId: {
+          variantId: localVariant.id,
+          locationId: defaultLocation.id,
+        },
+      },
+      update: { quantity: sv.inventoryQuantity || 0 },
+      create: {
+        variantId: localVariant.id,
+        locationId: defaultLocation.id,
+        quantity: sv.inventoryQuantity || 0,
+      },
+    });
+
+    // Per-location (real Shopify locations)
+    if (!perLocationEnabled) continue;
+    const levels = sv.inventoryItem?.inventoryLevels?.edges || [];
+    for (const le of levels) {
+      const shopifyLocId = le.node.location.id;
+      const localLocId = locationMap.get(shopifyLocId);
+      if (!localLocId) {
+        // Location hasn't been synced yet — skip; next pull will catch it.
+        continue;
+      }
+      const available = le.node.quantities.find((q) => q.name === "available");
+      const qty = available?.quantity ?? 0;
       await prisma.variantLocation.upsert({
         where: {
           variantId_locationId: {
             variantId: localVariant.id,
-            locationId: defaultLocation.id,
+            locationId: localLocId,
           },
         },
-        update: { quantity: sv.inventoryQuantity || 0 },
+        update: { quantity: qty },
         create: {
           variantId: localVariant.id,
-          locationId: defaultLocation.id,
-          quantity: sv.inventoryQuantity || 0,
+          locationId: localLocId,
+          quantity: qty,
         },
       });
     }
@@ -584,6 +665,11 @@ export async function POST(request: NextRequest) {
     let errorCount = 0;
     const errors: string[] = [];
 
+    // Sync real Shopify locations BEFORE products so per-location
+    // VariantLocation rows can be populated in a single pass.
+    const { locationMap, synced: locationsSynced } =
+      await syncShopifyLocationsToMap();
+
     if (singleProductId) {
       // Pull a single product by Shopify GID
       const result = await fetchProductByShopifyId(singleProductId);
@@ -598,7 +684,7 @@ export async function POST(request: NextRequest) {
         const existing = await prisma.product.findFirst({
           where: { shopifyProductId: singleProductId },
         });
-        await upsertProduct(result.product);
+        await upsertProduct(result.product, locationMap);
         if (existing) updatedCount++;
         else pulledCount++;
       } catch (e) {
@@ -622,7 +708,7 @@ export async function POST(request: NextRequest) {
           const existing = await prisma.product.findFirst({
             where: { shopifyProductId: sp.id },
           });
-          await upsertProduct(sp);
+          await upsertProduct(sp, locationMap);
           if (existing) updatedCount++;
           else pulledCount++;
         } catch (e) {
@@ -632,28 +718,6 @@ export async function POST(request: NextRequest) {
           );
         }
       }
-    }
-
-    // Also sync real Shopify locations
-    let locationsSynced = 0;
-    try {
-      const locResult = await fetchShopifyLocations();
-      if (locResult.success && locResult.locations) {
-        for (const loc of locResult.locations) {
-          const code = loc.name
-            .toUpperCase()
-            .replace(/[^A-Z0-9]/g, "")
-            .substring(0, 10) || loc.id.split("/").pop()!;
-          await prisma.location.upsert({
-            where: { shopifyLocationId: loc.id },
-            update: { name: loc.name, address: loc.address?.formatted?.join(", ") || null, isActive: loc.isActive ?? true },
-            create: { name: loc.name, code, address: loc.address?.formatted?.join(", ") || null, shopifyLocationId: loc.id, isActive: loc.isActive ?? true },
-          });
-          locationsSynced++;
-        }
-      }
-    } catch (e) {
-      console.error("Location sync during pull failed:", e);
     }
 
     // Log activity

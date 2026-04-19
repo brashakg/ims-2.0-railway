@@ -794,7 +794,17 @@ export interface ShopifyProductNode {
         barcode: string | null;
         inventoryQuantity: number;
         selectedOptions: Array<{ name: string; value: string }>;
-        inventoryItem: { id: string };
+        inventoryItem: {
+          id: string;
+          inventoryLevels?: {
+            edges: Array<{
+              node: {
+                location: { id: string };
+                quantities: Array<{ name: string; quantity: number }>;
+              };
+            }>;
+          };
+        };
       };
     }>;
   };
@@ -845,7 +855,17 @@ export async function fetchAllProducts(): Promise<{
                   barcode
                   inventoryQuantity
                   selectedOptions { name value }
-                  inventoryItem { id }
+                  inventoryItem {
+                    id
+                    inventoryLevels(first: 10) {
+                      edges {
+                        node {
+                          location { id }
+                          quantities(names: ["available"]) { name quantity }
+                        }
+                      }
+                    }
+                  }
                 }
               }
             }
@@ -925,7 +945,17 @@ export async function fetchProductByShopifyId(shopifyGid: string): Promise<{
               barcode
               inventoryQuantity
               selectedOptions { name value }
-              inventoryItem { id }
+              inventoryItem {
+                id
+                inventoryLevels(first: 10) {
+                  edges {
+                    node {
+                      location { id }
+                      quantities(names: ["available"]) { name quantity }
+                    }
+                  }
+                }
+              }
             }
           }
         }
