@@ -15,7 +15,9 @@ types-python-dateutil==2.9.0.20240316
 
 # Security
 bandit==1.7.6
-safety==3.0.1
-# safety 3.0.1 is incompatible with modern click/typer internals; the CI step
-# is marked continue-on-error so we don't chase its dep hell. Bandit still blocks.
+# safety 3.0.1 pinned pydantic <2, which downgraded our pydantic 2.9 install
+# at test time and broke `from pydantic import field_validator` in routers,
+# which in turn killed every `pytest` run in CI (ConftestImportFailure).
+# safety >=3.2 runs on pydantic 2; bumping here fixes backend CI permanently.
+safety>=3.2.11,<4
 
