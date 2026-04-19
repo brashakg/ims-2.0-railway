@@ -920,6 +920,220 @@
 .kpi .r .dlt.dn { background: var(--err-50); color: var(--err); }
 .kpi .r .vs { color: var(--ink-4); }
 
+/* ============================================================================
+   POS — 2-col grid (220px vertical stepper + work surface), sticky footer.
+   Ported from docs/design/pos.html. Scoped with .pos- prefix to avoid
+   bleeding into the step components' existing markup.
+   ============================================================================ */
+.pos-body {
+  display: grid;
+  grid-template-columns: 220px 1fr;
+  height: calc(100vh - 52px);
+  min-height: 0;
+  background: var(--bg);
+}
+@media (max-width: 768px) {
+  .pos-body { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
+}
+
+/* Second grid cell — may contain work surface + optional cart column */
+.pos-main {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* Stepper rail (left column) */
+.steps-rail {
+  background: var(--surface);
+  border-right: 1px solid var(--line);
+  padding: 20px 16px 16px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.steps-rail .eyebrow { margin-bottom: 14px; display: block; }
+@media (max-width: 768px) {
+  /* On mobile, stepper collapses to a compact horizontal scroller at top */
+  .steps-rail {
+    flex-direction: row;
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding: 10px 12px;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+    gap: 8px;
+    min-height: 0;
+    height: auto;
+  }
+  .steps-rail .eyebrow, .steps-rail .rail-actions, .steps-rail .held-list { display: none; }
+}
+
+.step {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  padding: 12px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+  position: relative;
+  transition: background .12s, color .12s;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  width: 100%;
+  color: var(--ink);
+  flex-shrink: 0;
+}
+.step:hover { background: var(--bg-sunk); }
+.step:disabled { cursor: default; opacity: .6; }
+.step:disabled:hover { background: transparent; }
+.step.active { background: var(--ink); color: #fff; }
+.step.active .step-num {
+  background: #fff;
+  color: var(--ink);
+  border-color: #fff;
+}
+.step.active .step-title { color: #fff; }
+.step.active .step-sub { color: rgba(255, 255, 255, 0.65); }
+.step.done .step-num {
+  background: var(--ok);
+  color: #fff;
+  border-color: var(--ok);
+}
+
+.step-num {
+  width: 22px; height: 22px;
+  border-radius: 50%;
+  border: 1.5px solid var(--line-strong);
+  display: grid; place-items: center;
+  font: 600 11px/1 var(--font-mono);
+  color: var(--ink-3);
+  background: var(--surface);
+  flex-shrink: 0;
+}
+.step-title {
+  font: 600 13px/1.2 var(--font-sans);
+  color: var(--ink);
+}
+.step-sub {
+  font-size: 11px;
+  color: var(--ink-4);
+  margin-top: 3px;
+  line-height: 1.3;
+}
+/* Connecting line between steps */
+.step + .step::before {
+  content: '';
+  position: absolute;
+  left: 21px;
+  top: -2px;
+  width: 1.5px;
+  height: 14px;
+  background: var(--line-strong);
+}
+.step.done + .step::before,
+.step.active + .step::before { background: var(--ok); }
+
+/* Held-bill list below the stepper */
+.held-list {
+  margin-top: 20px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+  display: flex; flex-direction: column;
+}
+.held-list-title {
+  font: 500 10.5px/1 var(--font-mono);
+  color: var(--ink-4);
+  text-transform: uppercase;
+  letter-spacing: .1em;
+  margin-bottom: 8px;
+  display: flex; justify-content: space-between; align-items: center;
+}
+.held-item {
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px dashed var(--line-strong);
+  margin-bottom: 6px;
+  cursor: pointer;
+  background: var(--surface-2);
+  font-size: 11.5px;
+  transition: border-color .12s;
+}
+.held-item:hover { border-color: var(--ink); }
+.held-item .row1 { display: flex; justify-content: space-between; font: 500 12px/1 var(--font-sans); color: var(--ink); margin-bottom: 3px; }
+.held-item .row2 { display: flex; justify-content: space-between; font-size: 10.5px; color: var(--ink-4); }
+.held-item .row1 .code { font-family: var(--font-mono); font-size: 10px; }
+
+/* Rail actions strip (Hold / Recall / New + kbd hints) */
+.rail-actions {
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+  display: flex; flex-direction: column; gap: 8px;
+}
+.rail-actions .btn { width: 100%; }
+.rail-actions .kbd-row {
+  display: flex; flex-wrap: wrap; gap: 6px 10px;
+  font-size: 10px; color: var(--ink-4); font-family: var(--font-mono);
+  margin-top: 6px;
+}
+.rail-actions .kbd-row span { display: inline-flex; align-items: center; gap: 3px; }
+
+/* Work surface (center column) */
+.pos-work {
+  overflow-y: auto;
+  padding: 20px 28px 120px;
+  background: var(--bg);
+  min-height: 0;
+  display: flex; flex-direction: column;
+}
+.pos-work .work-head { margin-bottom: 20px; }
+.pos-work .work-head h2 {
+  margin: 0 0 4px;
+  font-family: var(--font-display) !important;
+  font-size: 32px !important;
+  font-weight: 400;
+  letter-spacing: -0.01em;
+  color: var(--ink) !important;
+}
+.pos-work .work-head .sub { color: var(--ink-4); font-size: 13px; margin: 0; }
+
+/* Sticky bottom action bar */
+.pos-footer {
+  position: sticky;
+  bottom: 0;
+  left: 0; right: 0;
+  background: var(--surface);
+  border-top: 1px solid var(--line);
+  padding: 12px 28px calc(12px + env(safe-area-inset-bottom, 0));
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 16px;
+  z-index: 10;
+  margin-top: auto;
+}
+.pos-footer .left { display: flex; align-items: center; gap: 12px; }
+.pos-footer .cart-hint { font-size: 12.5px; color: var(--ink-4); }
+.pos-footer .cart-hint strong { color: var(--ink); font-weight: 600; }
+
+/* Cart column (right) — inline inside .pos-work when visible */
+.pos-cart-col {
+  width: 320px;
+  flex-shrink: 0;
+  border-left: 1px solid var(--line);
+  background: var(--surface);
+  overflow-y: auto;
+  min-height: 0;
+}
+@media (max-width: 1024px) {
+  .pos-cart-col { width: 280px; }
+}
+@media (max-width: 768px) {
+  .pos-cart-col { display: none; }
+}
+
 /* Print only */
 @media print {
   .no-print { display: none !important; }

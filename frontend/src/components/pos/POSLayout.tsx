@@ -345,29 +345,106 @@ export function POSLayout() {
     }
   }
 
+  // Editorial title + subtitle for each wizard step — rendered in the work
+  // surface header so step components themselves don't need to know about it.
+  const STEP_HEADERS: Record<POSStep, { title: string; sub: string }> = {
+    customer: { title: "Who's buying?", sub: 'Search an existing customer or create a walk-in. Phone lookup picks up family members automatically.' },
+    prescription: { title: 'Capture Rx', sub: "Pull the customer's active prescription or enter a new one. Optometrist role required for tested-at-store Rx." },
+    products: { title: 'Add to cart', sub: 'Barcode scan, SKU lookup, or browse. Lens orders auto-attach to the selected Rx.' },
+    review: { title: 'Review & discount', sub: 'Check line items, apply category / brand / role-capped discount. GST auto-calculated.' },
+    payment: { title: 'Tender', sub: 'Single or split tender across Cash / UPI / Card / EMI / Advance. Round-off at 50p if enabled.' },
+    complete: { title: 'Done.', sub: 'Order placed. Receipt printed. Workshop job card auto-created for Rx orders.' },
+  };
+  const header = STEP_HEADERS[store.current_step];
+  const showCartCol =
+    (['products', 'review', 'prescription'] as POSStep[]).includes(store.current_step) &&
+    (store.cart || []).length > 0;
+
   return (
-    <div className="min-h-screen min-h-[100dvh] bg-gray-900 flex flex-col">
-      {/* HEADER */}
-      <header className="bg-gray-800 border-b border-gray-700 px-3 tablet:px-4 py-2.5 flex items-center justify-between gap-2">
-        <div className="flex items-center gap-2 min-w-0">
-          <div className="w-8 h-8 tablet:w-9 tablet:h-9 bg-bv-gold-500 rounded-lg flex items-center justify-center flex-shrink-0">
-            <ShoppingCart className="w-4 h-4 tablet:w-5 tablet:h-5 text-white" />
-          </div>
-          <div className="min-w-0">
-            <h1 className="text-base tablet:text-lg font-bold text-white truncate">Point of Sale</h1>
-            <p className="text-[10px] tablet:text-xs text-gray-500 truncate">{'\u00B7'} {store.store_id || 'No store'}</p>
-          </div>
-        </div>
-        <div className="flex items-center gap-1.5 tablet:gap-2 flex-shrink-0">
-          <button onClick={() => setHoldConfirm(true)} disabled={(store.cart || []).length === 0}
-            className="flex items-center gap-1 px-2.5 py-2 tablet:px-3 text-xs tablet:text-sm bg-amber-900/30 text-amber-700 border border-amber-700 rounded-lg hover:bg-amber-100 disabled:opacity-40 touch-manipulation">
-            <Pause className="w-4 h-4" /> <span className="hidden tablet:inline">Hold</span>
+    <div className="pos-body">
+      {/* ── Left rail: vertical stepper + actions + held bills ── */}
+      <aside className="steps-rail">
+        <span className="eyebrow">Checkout</span>
+
+        {visibleSteps.map((step) => {
+          const stepIdx = activeSteps.indexOf(step.id);
+          const isActive = step.id === store.current_step;
+          const isComplete = stepIdx < currentStepIndex;
+          const Icon = step.icon;
+          return (
+            <button
+              key={step.id}
+              type="button"
+              className={'step' + (isActive ? ' active' : '') + (isComplete ? ' done' : '')}
+              onClick={() => {
+                if (isComplete) startTransition(() => store.setStep(step.id));
+              }}
+              disabled={!isComplete && !isActive}
+              title={step.label}
+            >
+              <div className="step-num">
+                {isComplete ? '' : <Icon className="w-3 h-3" />}
+              </div>
+              <div style={{ minWidth: 0, flex: 1 }}>
+                <div className="step-title">{step.label}</div>
+                <div className="step-sub">
+                  {step.id === 'customer' && (store.customer?.name ?? 'Pick customer')}
+                  {step.id === 'prescription' && (store.prescription ? 'Rx attached' : 'Optional')}
+                  {step.id === 'products' && `${(store.cart || []).length} items`}
+                  {step.id === 'review' && 'Discount & GST'}
+                  {step.id === 'payment' && 'Split tender OK'}
+                  {step.id === 'complete' && 'Print receipt'}
+                </div>
+              </div>
+            </button>
+          );
+        })}
+
+        {/* Rail actions — Hold / Recall / New + kbd hints */}
+        <div className="rail-actions">
+          <button
+            type="button"
+            onClick={() => setHoldConfirm(true)}
+            disabled={(store.cart || []).length === 0}
+            className="btn sm"
+            title="Hold current bill (F4)"
+          >
+            <Pause className="w-4 h-4" /> Hold bill
           </button>
-          <button className="flex items-center gap-1 px-2.5 py-2 tablet:px-3 text-xs tablet:text-sm bg-gray-700 text-gray-300 rounded-lg hover:bg-gray-600 relative touch-manipulation" onClick={() => setShowRecallPanel(true)}>
-            <Play className="w-4 h-4" /> <span className="hidden tablet:inline">Recall</span>
-            {getHeldBills().length > 0 && <span className="absolute -top-1 -right-1 w-4 h-4 bg-amber-500 text-white text-[10px] rounded-full flex items-center justify-center">{getHeldBills().length}</span>}
+          <button
+            type="button"
+            onClick={() => setShowRecallPanel(true)}
+            className="btn sm"
+            style={{ position: 'relative' }}
+            title="Recall held bill"
+          >
+            <Play className="w-4 h-4" /> Recall
+            {getHeldBills().length > 0 && (
+              <span
+                style={{
+                  position: 'absolute',
+                  top: -6,
+                  right: -6,
+                  minWidth: 18,
+                  height: 18,
+                  padding: '0 5px',
+                  borderRadius: 9,
+                  background: 'var(--bv)',
+                  color: '#fff',
+                  fontFamily: 'var(--font-mono)',
+                  fontSize: 10,
+                  fontWeight: 600,
+                  display: 'grid',
+                  placeItems: 'center',
+                }}
+              >
+                {getHeldBills().length}
+              </span>
+            )}
           </button>
-          <button onClick={() => {
+          <button
+            type="button"
+            onClick={() => {
               if ((store.cart || []).length > 0) {
                 setHoldConfirm(false);
                 setShowNewConfirm(true);
@@ -375,106 +452,187 @@ export function POSLayout() {
                 handleFullReset();
               }
             }}
-            className="flex items-center gap-1 px-2.5 py-2 tablet:px-3 text-xs tablet:text-sm bg-gray-700 text-gray-300 rounded-lg hover:bg-gray-600 touch-manipulation">
-            <RotateCcw className="w-4 h-4" /> <span className="hidden tablet:inline">New</span>
+            className="btn sm"
+            title="Start a new transaction"
+          >
+            <RotateCcw className="w-4 h-4" /> New sale
           </button>
-          <div className="hidden laptop:flex items-center gap-2 text-xs text-gray-400 ml-2 border-l border-gray-700 pl-3">
-            <kbd className="px-1.5 py-0.5 bg-gray-700 border rounded text-[10px]">F2</kbd> Search
-            <kbd className="px-1.5 py-0.5 bg-gray-700 border rounded text-[10px]">F4</kbd> Hold
-            <kbd className="px-1.5 py-0.5 bg-gray-700 border rounded text-[10px]">F9</kbd> Pay
-            <kbd className="px-1.5 py-0.5 bg-gray-700 border rounded text-[10px]">ESC</kbd> Back
-            <kbd className="px-1.5 py-0.5 bg-gray-700 border rounded text-[10px]">{'\u23CE'}</kbd> Next
+          <div className="kbd-row">
+            <span><kbd className="kbd">F2</kbd>Search</span>
+            <span><kbd className="kbd">F4</kbd>Hold</span>
+            <span><kbd className="kbd">F9</kbd>Pay</span>
+            <span><kbd className="kbd">Esc</kbd>Back</span>
+            <span><kbd className="kbd">{'\u23CE'}</kbd>Next</span>
           </div>
         </div>
-      </header>
 
-      {/* STEP INDICATOR */}
-      <div className="bg-gray-800 border-b border-gray-700 px-4 py-2">
-        <div className="flex items-center gap-1 overflow-x-auto">
-          {visibleSteps.map((step, idx) => {
-            const stepIdx = activeSteps.indexOf(step.id);
-            const isActive = step.id === store.current_step;
-            const isComplete = stepIdx < currentStepIndex;
-            const Icon = step.icon;
-            return (
-              <div key={step.id} className="flex items-center">
-                {idx > 0 && <ChevronRight className="w-4 h-4 text-gray-300 mx-1 flex-shrink-0" />}
-                <button onClick={() => { if (isComplete) startTransition(() => store.setStep(step.id)); }}
-                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium whitespace-nowrap transition-colors ${
-                    isActive ? 'bg-bv-gold-500 text-white' : isComplete ? 'bg-bv-gold-900/30 text-bv-gold-400 cursor-pointer hover:bg-bv-gold-900/50' : 'text-gray-400'
-                  }`}>
-                  <Icon className="w-4 h-4" /> {step.label} {isComplete && <CheckCircle className="w-3.5 h-3.5" />}
-                </button>
+        {/* Held bills preview */}
+        {getHeldBills().length > 0 && (
+          <div className="held-list">
+            <div className="held-list-title">
+              <span>Held · {getHeldBills().length}</span>
+              <button
+                type="button"
+                className="mute"
+                style={{ background: 'transparent', border: 0, fontSize: 11, cursor: 'pointer', fontFamily: 'var(--font-mono)' }}
+                onClick={() => setShowRecallPanel(true)}
+              >
+                see all
+              </button>
+            </div>
+            {getHeldBills().slice(0, 3).map((bill) => (
+              <div
+                key={bill.id}
+                className="held-item"
+                onClick={() => recallBill(bill.id)}
+                title="Click to recall"
+              >
+                <div className="row1">
+                  <span>{bill.customer}</span>
+                  <span className="code">{bill.items} · ₹{Math.round(bill.total).toLocaleString('en-IN')}</span>
+                </div>
+                <div className="row2">
+                  <span>held</span>
+                  <span>{new Date(bill.heldAt).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}</span>
+                </div>
               </div>
-            );
-          })}
-        </div>
-      </div>
-
-      {/* MAIN CONTENT */}
-      <div className="flex-1 flex overflow-hidden relative">
-        <div className="flex-1 overflow-y-auto p-3 tablet:p-5 laptop:p-6 pb-20 tablet:pb-6">
-          {store.current_step === 'customer' && <StepCustomer />}
-          {store.current_step === 'prescription' && <StepPrescription onShowModal={() => setShowPrescriptionModal(true)} onShowNew={() => setShowNewPrescription(true)} />}
-          {store.current_step === 'products' && <StepProducts onOpenLensModal={() => setShowLensModal(true)} />}
-          {store.current_step === 'review' && <StepReview onOpenDiscount={(item) => setDiscountItem(item)} />}
-          {store.current_step === 'payment' && <StepPayment />}
-          {store.current_step === 'complete' && <StepComplete onPrint={() => setShowReceipt(true)} onReset={handleFullReset} />}
-        </div>
-
-        {(['products', 'review', 'prescription'] as POSStep[]).includes(store.current_step) && (store.cart || []).length > 0 && (
-          <div className="hidden tablet:flex w-72 laptop:w-80 xl:w-96 border-l border-gray-700 bg-gray-800 flex-col">
-            <CartSidebar />
+            ))}
           </div>
         )}
+      </aside>
 
-        {/* Mobile/small tablet: floating cart badge */}
-        {(['products', 'review', 'prescription'] as POSStep[]).includes(store.current_step) && (store.cart || []).length > 0 && (
-          <div className="tablet:hidden fixed bottom-20 right-4 z-30">
-            <button onClick={() => store.setStep('review')}
-              className="w-14 h-14 bg-bv-gold-500 text-white rounded-full shadow-lg flex items-center justify-center relative touch-manipulation">
-              <ShoppingCart className="w-6 h-6" />
-              <span className="absolute -top-1 -right-1 w-6 h-6 bg-red-500 text-white text-xs font-bold rounded-full flex items-center justify-center">{(store.cart || []).length}</span>
-            </button>
+      {/* ── Right cell: work surface (+ optional cart col) + sticky footer ── */}
+      <div className="pos-main">
+        <div className="pos-work">
+          {/* Editorial header */}
+          <div className="work-head">
+            <div className="eyebrow" style={{ marginBottom: 6 }}>
+              Step {currentStepIndex + 1} / {visibleSteps.length} · {visibleSteps.find((s) => s.id === store.current_step)?.label}
+            </div>
+            <h2>{header.title}</h2>
+            <p className="sub">{header.sub}</p>
           </div>
-        )}
-      </div>
 
-      {/* FOOTER NAV */}
-      {errorMsg && (
-        <div className="bg-red-900/30 border-t border-red-200 px-4 py-2.5 flex items-center gap-2 text-sm text-red-700">
-          <AlertTriangle className="w-4 h-4 flex-shrink-0" />
-          <span className="flex-1">{errorMsg}</span>
-          <button onClick={() => setErrorMsg(null)} className="text-red-400 hover:text-red-600 ml-2"><X className="w-4 h-4" /></button>
-        </div>
-      )}
-      <footer className="bg-gray-800 border-t border-gray-700 px-3 tablet:px-4 py-2.5 flex items-center justify-between pb-[env(safe-area-inset-bottom,0)]">
-        <div className="flex items-center gap-2 tablet:gap-3">
-          {currentStepIndex > 0 && store.current_step !== 'complete' && (
-            <button onClick={() => startTransition(() => store.prevStep())} className="flex items-center gap-1.5 px-3 tablet:px-4 py-2.5 text-sm border border-gray-600 rounded-lg hover:bg-gray-700 touch-manipulation min-h-[44px]">
-              <ChevronLeft className="w-4 h-4" /> Back
-            </button>
-          )}
-          {(store.cart || []).length > 0 && (
-            <div className="text-xs tablet:text-sm text-gray-500">
-              <span className="font-semibold text-white">{(store.cart || []).length}</span> {(store.cart || []).length === 1 ? 'item' : 'items'} {'\u00B7'} <span className="font-semibold text-white ml-1">{'\u20B9'}{Math.round(store.getGrandTotal()).toLocaleString('en-IN')}</span>
+          {/* Error banner */}
+          {errorMsg && (
+            <div
+              className="s-section"
+              style={{
+                padding: 12,
+                borderColor: 'var(--err-50)',
+                background: 'var(--err-50)',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 8,
+                marginBottom: 14,
+              }}
+            >
+              <AlertTriangle className="w-5 h-5" style={{ color: 'var(--err)' }} />
+              <span style={{ color: 'var(--err)', flex: 1 }}>{errorMsg}</span>
+              <button onClick={() => setErrorMsg(null)} className="btn sm ghost">
+                <X className="w-4 h-4" />
+              </button>
             </div>
           )}
-        </div>
-        {store.current_step !== 'complete' && (
-          <button onClick={() => { setErrorMsg(null); store.current_step === 'payment' ? handleCreateOrder() : startTransition(() => store.nextStep()); }}
-            disabled={!canProceed || store.is_processing}
-            className={`flex items-center gap-1.5 px-5 tablet:px-6 py-2.5 tablet:py-3 rounded-lg text-sm font-semibold transition-colors touch-manipulation min-h-[44px] ${
-              !canProceed || store.is_processing ? 'bg-gray-700 text-gray-400 cursor-not-allowed' : 'bg-bv-gold-500 text-white hover:bg-bv-gold-600'
-            }`}>
-            {store.is_processing ? (
-              <><span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" /> Processing...</>
-            ) : (
-              <>{store.current_step === 'payment' ? 'Complete Order' : 'Continue'} <ChevronRight className="w-4 h-4" /></>
+
+          {/* Step content (unchanged components) */}
+          <div style={{ flex: 1, minHeight: 0 }}>
+            {store.current_step === 'customer' && <StepCustomer />}
+            {store.current_step === 'prescription' && (
+              <StepPrescription
+                onShowModal={() => setShowPrescriptionModal(true)}
+                onShowNew={() => setShowNewPrescription(true)}
+              />
             )}
-          </button>
+            {store.current_step === 'products' && <StepProducts onOpenLensModal={() => setShowLensModal(true)} />}
+            {store.current_step === 'review' && <StepReview onOpenDiscount={(item) => setDiscountItem(item)} />}
+            {store.current_step === 'payment' && <StepPayment />}
+            {store.current_step === 'complete' && (
+              <StepComplete onPrint={() => setShowReceipt(true)} onReset={handleFullReset} />
+            )}
+          </div>
+
+          {/* Sticky footer: Back + cart hint + Continue/Complete */}
+          <div className="pos-footer">
+            <div className="left">
+              {currentStepIndex > 0 && store.current_step !== 'complete' && (
+                <button
+                  type="button"
+                  onClick={() => startTransition(() => store.prevStep())}
+                  className="btn sm"
+                >
+                  <ChevronLeft className="w-4 h-4" /> Back
+                </button>
+              )}
+              {(store.cart || []).length > 0 && (
+                <span className="cart-hint">
+                  <strong>{(store.cart || []).length}</strong>{' '}
+                  {(store.cart || []).length === 1 ? 'item' : 'items'} · <strong>₹{Math.round(store.getGrandTotal()).toLocaleString('en-IN')}</strong>
+                </span>
+              )}
+            </div>
+            {store.current_step !== 'complete' && (
+              <button
+                type="button"
+                onClick={() => {
+                  setErrorMsg(null);
+                  store.current_step === 'payment'
+                    ? handleCreateOrder()
+                    : startTransition(() => store.nextStep());
+                }}
+                disabled={!canProceed || store.is_processing}
+                className={'btn sm ' + (store.current_step === 'payment' ? 'accent' : 'primary')}
+              >
+                {store.is_processing ? (
+                  <>
+                    <span
+                      className="w-4 h-4 animate-spin"
+                      style={{
+                        border: '2px solid rgba(255,255,255,.3)',
+                        borderTopColor: '#fff',
+                        borderRadius: '50%',
+                      }}
+                    />
+                    Processing…
+                  </>
+                ) : (
+                  <>
+                    {store.current_step === 'payment' ? 'Complete order' : 'Continue'}
+                    <ChevronRight className="w-4 h-4" />
+                  </>
+                )}
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* Right cart column — only during cart-relevant steps */}
+        {showCartCol && (
+          <aside className="pos-cart-col">
+            <CartSidebar />
+          </aside>
         )}
-      </footer>
+      </div>
+
+      {/* Mobile floating cart FAB — unchanged behavior */}
+      {showCartCol && (
+        <div className="tablet:hidden fixed bottom-20 right-4 z-30">
+          <button
+            onClick={() => store.setStep('review')}
+            className="w-14 h-14 rounded-full shadow-lg flex items-center justify-center relative touch-manipulation"
+            style={{ background: 'var(--bv)', color: '#fff' }}
+            aria-label={`Review cart (${(store.cart || []).length} items)`}
+          >
+            <ShoppingCart className="w-6 h-6" />
+            <span
+              className="absolute -top-1 -right-1 w-6 h-6 text-white text-xs font-bold rounded-full flex items-center justify-center"
+              style={{ background: 'var(--ink)' }}
+            >
+              {(store.cart || []).length}
+            </span>
+          </button>
+        </div>
+      )}
 
       {/* MODALS */}
       {showPrescriptionModal && store.customer && (
