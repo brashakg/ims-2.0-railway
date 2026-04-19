@@ -57,7 +57,9 @@ export default {
         'info': '#3B82F6',
       },
       fontFamily: {
-        sans: ['Nunito', 'Inter', 'system-ui', 'sans-serif'],
+        sans: ['Inter', 'ui-sans-serif', 'system-ui', '-apple-system', 'Segoe UI', 'Roboto', 'sans-serif'],
+        display: ['"Instrument Serif"', 'Times New Roman', 'serif'],
+        mono: ['"JetBrains Mono"', 'ui-monospace', 'Menlo', 'monospace'],
         optician: ['"Optician Sans"', 'monospace'],
       },
       screens: {

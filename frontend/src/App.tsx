@@ -9,6 +9,7 @@ import { AuthProvider } from './context/AuthContext';
 import { ToastProvider } from './context/ToastContext';
 import { ModuleProvider } from './context/ModuleContext';
 import { ThemeProvider } from './context/ThemeContext';
+import { AppearanceProvider } from './context/AppearanceContext';
 import { AppLayout } from './components/layout/AppLayout';
 import { ProtectedRoute } from './components/layout/ProtectedRoute';
 import { ErrorBoundary } from './components/layout/ErrorBoundary';
@@ -111,6 +112,7 @@ function App() {
   return (
     <ErrorBoundary>
       <ThemeProvider>
+      <AppearanceProvider>
       <QueryClientProvider client={queryClient}>
         <AuthProvider>
           <ModuleProvider>
@@ -619,6 +621,7 @@ function App() {
         </ModuleProvider>
       </AuthProvider>
     </QueryClientProvider>
+    </AppearanceProvider>
     </ThemeProvider>
     </ErrorBoundary>
   );

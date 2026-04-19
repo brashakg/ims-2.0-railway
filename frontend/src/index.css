@@ -3,9 +3,136 @@
 /* Dark mode disabled — override dark: variant to never match */
 @variant dark (&:where(.force-dark-mode-disabled));
 
+/* ============================================================================
+   IMS 2.0 Design Tokens — ported from design_handoff_ims_2_0/shell/tokens.css
+   Operational, light-modern. BV red as rare accent. Typography: Inter (UI),
+   Instrument Serif (display), JetBrains Mono (codes).
+   ============================================================================ */
+:root {
+  /* Surfaces */
+  --bg:            #fafaf9;
+  --bg-sunk:       #f4f4f2;
+  --surface:       #ffffff;
+  --surface-2:     #fbfbfa;
+  --line:          #ececea;
+  --line-strong:   #d8d8d5;
+  --line-soft:     #f1f1ef;
+
+  /* Ink */
+  --ink:           #141413;
+  --ink-2:         #2a2a28;
+  --ink-3:         #55554f;
+  --ink-4:         #8a8a82;
+  --ink-5:         #b6b6ae;
+
+  /* Better Vision brand */
+  --bv:            #CD201A;
+  --bv-600:        #B81A15;
+  --bv-50:         #fbe8e6;
+  --bv-soft:       #f8eeed;
+
+  /* WizOpt accent */
+  --wz:            #0e8c8c;
+  --wz-50:         #e6f4f4;
+
+  /* Semantic */
+  --ok:            #0d7b4c;
+  --ok-50:         #e5f3ed;
+  --warn:          #b46a00;
+  --warn-50:       #fbf1df;
+  --err:           #b42318;
+  --err-50:        #fbeae7;
+  --info:          #1e5eb3;
+  --info-50:       #e5eef9;
+
+  /* Priority (P0-P4) */
+  --p0: #8b0000; --p0-bg: #f8e8e6;
+  --p1: #b42318; --p1-bg: #fbeae7;
+  --p2: #b46a00; --p2-bg: #fbf1df;
+  --p3: #1e5eb3; --p3-bg: #e5eef9;
+  --p4: #55554f; --p4-bg: #f1f1ef;
+
+  /* Radii */
+  --r-xs: 4px; --r-sm: 6px; --r-md: 8px; --r-lg: 12px; --r-xl: 16px; --r-2xl: 20px;
+
+  /* Shadows — subtle, prefer hairlines over drop shadows */
+  --sh-xs: 0 1px 0 rgba(17,17,17,.03);
+  --sh-sm: 0 1px 2px rgba(17,17,17,.04), 0 0 0 .5px rgba(17,17,17,.04);
+  --sh-md: 0 4px 12px rgba(17,17,17,.06), 0 0 0 .5px rgba(17,17,17,.04);
+  --sh-lg: 0 12px 32px rgba(17,17,17,.09), 0 0 0 .5px rgba(17,17,17,.05);
+  --sh-pop:0 20px 48px rgba(17,17,17,.14), 0 0 0 .5px rgba(17,17,17,.06);
+
+  /* Type */
+  --font-sans:    'Inter', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --font-display: 'Instrument Serif', 'Times New Roman', serif;
+  --font-figure:  'Inter', ui-sans-serif, system-ui, sans-serif;
+  --font-mono:    'JetBrains Mono', ui-monospace, Menlo, monospace;
+
+  /* Density */
+  --cell: 34px; --row: 44px; --btn: 36px; --btn-lg: 44px;
+}
+
+[data-density="compact"] {
+  --cell: 28px; --row: 36px; --btn: 32px; --btn-lg: 38px;
+}
+
+[data-brand="wizopt"] {
+  --bv:      var(--wz);
+  --bv-600:  #0b7777;
+  --bv-50:   var(--wz-50);
+  --bv-soft: #edf6f6;
+}
+
 /* Custom theme colors for Tailwind v4 */
 @theme {
-  /* Better Vision Brand Colors (Gold/Brown - from bettervision.in) */
+  /* Design token colors (primary system) */
+  --color-ink:           #141413;
+  --color-ink-2:         #2a2a28;
+  --color-ink-3:         #55554f;
+  --color-ink-4:         #8a8a82;
+  --color-ink-5:         #b6b6ae;
+  --color-surface:       #ffffff;
+  --color-surface-2:     #fbfbfa;
+  --color-bg:            #fafaf9;
+  --color-bg-sunk:       #f4f4f2;
+  --color-line:          #ececea;
+  --color-line-strong:   #d8d8d5;
+  --color-line-soft:     #f1f1ef;
+
+  --color-bv:            #CD201A;
+  --color-bv-600:        #B81A15;
+  --color-bv-50:         #fbe8e6;
+  --color-bv-soft:       #f8eeed;
+  --color-wz:            #0e8c8c;
+  --color-wz-50:         #e6f4f4;
+
+  --color-ok:            #0d7b4c;
+  --color-ok-50:         #e5f3ed;
+  --color-warn:          #b46a00;
+  --color-warn-50:       #fbf1df;
+  --color-err:           #b42318;
+  --color-err-50:        #fbeae7;
+  --color-info:          #1e5eb3;
+  --color-info-50:       #e5eef9;
+
+  --color-p0:            #8b0000;
+  --color-p0-bg:         #f8e8e6;
+  --color-p1:            #b42318;
+  --color-p1-bg:         #fbeae7;
+  --color-p2:            #b46a00;
+  --color-p2-bg:         #fbf1df;
+  --color-p3:            #1e5eb3;
+  --color-p3-bg:         #e5eef9;
+  --color-p4:            #55554f;
+  --color-p4-bg:         #f1f1ef;
+
+  /* Font families */
+  --font-sans:    'Inter', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --font-display: 'Instrument Serif', 'Times New Roman', serif;
+  --font-mono:    'JetBrains Mono', ui-monospace, Menlo, monospace;
+
+  /* ——— Legacy color palette (kept for backwards compat with existing pages) ——— */
+  /* Better Vision Brand Colors (gold alias kept; new canonical is --color-bv) */
   --color-bv-gold-50: #fdfaf7;
   --color-bv-gold-100: #f9f0e6;
   --color-bv-gold-200: #f2dcc8;
@@ -18,7 +145,7 @@
   --color-bv-gold-900: #533724;
   --color-bv-gold-950: #2d1d14;
 
-  /* Legacy alias (bv-red now points to gold) */
+  /* Legacy alias (bv-red kept pointing at gold for backwards compat) */
   --color-bv-red-50: #fdfaf7;
   --color-bv-red-100: #f9f0e6;
   --color-bv-red-200: #f2dcc8;
@@ -31,7 +158,7 @@
   --color-bv-red-900: #533724;
   --color-bv-red-950: #2d1d14;
 
-  /* WizOpt Brand Colors (Teal) */
+  /* WizOpt Brand Colors (legacy full scale) */
   --color-wz-teal-50: #f0fdfa;
   --color-wz-teal-100: #ccfbf1;
   --color-wz-teal-200: #99f6e4;
@@ -50,19 +177,352 @@
   --breakpoint-desktop: 1280px;
 }
 
-/* Base styles */
+/* ============================================================================
+   Base styles — ported from shell/tokens.css + shell/shell.css
+   ============================================================================ */
 @layer base {
-  html {
-    @apply font-sans antialiased;
-  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
 
   body {
-    @apply bg-gray-50 text-gray-900 min-h-screen;
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+    font-family: var(--font-sans);
+    font-size: 13.5px;
+    line-height: 1.45;
+    color: var(--ink);
+    background: var(--bg);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    font-feature-settings: "ss01", "cv11";
+    min-height: 100vh;
   }
 
-  /* Better focus states for accessibility */
-  *:focus-visible {
+  :focus-visible {
+    outline: 2px solid var(--bv);
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-thumb {
+    background: #d8d8d5; border-radius: 10px;
+    border: 2px solid transparent; background-clip: padding-box;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: #b6b6ae; background-clip: padding-box; border: 2px solid transparent;
+  }
+}
+
+/* ============================================================================
+   Typography utilities (.figure, .mono, .display, .eyebrow)
+   ============================================================================ */
+.num, .tnum { font-variant-numeric: tabular-nums; font-feature-settings: "tnum"; }
+.mono { font-family: var(--font-mono); font-size: 12px; }
+.display { font-family: var(--font-display); font-weight: 400; letter-spacing: -0.01em; }
+
+/* Canonical big operational number: Inter 600, tabular, tight tracking.
+   Never use Instrument Serif for numbers — serif reads editorial, this reads operational. */
+.figure {
+  font-family: var(--font-sans);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum", "ss01";
+  letter-spacing: -0.02em;
+}
+
+.eyebrow {
+  font: 500 10.5px/1 var(--font-mono);
+  color: var(--ink-4);
+  text-transform: uppercase;
+  letter-spacing: .12em;
+}
+
+/* ============================================================================
+   Shell shared components — buttons, chips, pills, inputs, cards, tables
+   (ported verbatim from design_handoff_ims_2_0/shell/shell.css)
+   ============================================================================ */
+
+/* Keyboard shortcut badge */
+.kbd {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 18px; height: 18px; padding: 0 5px;
+  border: 1px solid var(--line-strong); border-bottom-width: 2px;
+  border-radius: 4px; background: var(--surface);
+  font-family: var(--font-mono); font-size: 10px; color: var(--ink-3);
+}
+
+/* Buttons — do not use .btn-primary naming (collides with legacy); use .btn + modifier */
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  height: var(--btn); padding: 0 12px;
+  border: 1px solid var(--line-strong); border-radius: 8px;
+  background: var(--surface); color: var(--ink);
+  font: 500 12.5px/1 var(--font-sans); cursor: pointer;
+  transition: background .12s, border-color .12s, transform .06s;
+}
+.btn:hover { background: var(--bg-sunk); }
+.btn:active { transform: translateY(0.5px); }
+.btn.primary { background: var(--ink); color: #fff; border-color: var(--ink); }
+.btn.primary:hover { background: #2a2a28; }
+.btn.accent { background: var(--bv); color: #fff; border-color: var(--bv); }
+.btn.accent:hover { background: var(--bv-600); }
+.btn.ghost { background: transparent; border-color: transparent; color: var(--ink-2); }
+.btn.ghost:hover { background: var(--bg-sunk); }
+.btn.danger { color: var(--err); border-color: var(--err-50); background: var(--err-50); }
+.btn.lg { height: var(--btn-lg); padding: 0 16px; font-size: 13.5px; }
+.btn.sm { height: 28px; padding: 0 8px; font-size: 12px; border-radius: 6px; }
+.btn.block { width: 100%; }
+.btn.icon { width: var(--btn); padding: 0; }
+.btn:disabled { opacity: .5; cursor: not-allowed; }
+
+/* Chips / status badges */
+.chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  height: 22px; padding: 0 8px; border-radius: 6px;
+  font: 500 11px/1 var(--font-sans);
+  background: var(--bg-sunk); color: var(--ink-2);
+  border: 1px solid var(--line);
+}
+.chip.ok    { background: var(--ok-50); color: var(--ok); border-color: transparent; }
+.chip.warn  { background: var(--warn-50); color: var(--warn); border-color: transparent; }
+.chip.err   { background: var(--err-50); color: var(--err); border-color: transparent; }
+.chip.info  { background: var(--info-50); color: var(--info); border-color: transparent; }
+.chip.accent{ background: var(--bv-50); color: var(--bv); border-color: transparent; }
+.chip .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; opacity: .85; }
+
+/* Priority pills for Tasks & SOPs (P0–P4) */
+.pill-P0 { background: var(--p0-bg); color: var(--p0); }
+.pill-P1 { background: var(--p1-bg); color: var(--p1); }
+.pill-P2 { background: var(--p2-bg); color: var(--p2); }
+.pill-P3 { background: var(--p3-bg); color: var(--p3); }
+.pill-P4 { background: var(--p4-bg); color: var(--p4); }
+.pill-P0, .pill-P1, .pill-P2, .pill-P3, .pill-P4 {
+  display: inline-flex; align-items: center; gap: 4px;
+  height: 20px; padding: 0 6px; border-radius: 4px;
+  font: 700 10px/1 var(--font-mono); letter-spacing: .04em;
+}
+
+/* Inputs */
+.input {
+  height: 36px; padding: 0 10px;
+  border: 1px solid var(--line-strong); border-radius: 8px;
+  background: var(--surface); color: var(--ink);
+  font-size: 13px; width: 100%;
+  transition: border-color .12s, box-shadow .12s;
+}
+.input:focus {
+  outline: none; border-color: var(--ink);
+  box-shadow: 0 0 0 3px rgba(20,20,19,.08);
+}
+.input::placeholder { color: var(--ink-4); }
+.input.lg { height: 44px; font-size: 14px; }
+.label {
+  display: block; font: 500 11px/1.3 var(--font-sans);
+  color: var(--ink-3); margin-bottom: 6px;
+  text-transform: uppercase; letter-spacing: .05em;
+}
+
+/* Cards — new design uses .card-new to avoid clash with legacy .card */
+.card-new {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+}
+.card-head {
+  height: 44px; padding: 0 14px;
+  display: flex; align-items: center; gap: 8px;
+  border-bottom: 1px solid var(--line);
+}
+.card-head h3 {
+  margin: 0; font: 600 12.5px/1 var(--font-sans);
+  color: var(--ink-2); letter-spacing: .01em;
+}
+.card-head .meta { margin-left: auto; color: var(--ink-4); font-size: 11.5px; }
+.card-body { padding: 14px; }
+
+/* Table — new design uses .tbl to avoid clash with legacy .table */
+.tbl { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.tbl thead th {
+  text-align: left; font: 500 10.5px/1 var(--font-mono);
+  color: var(--ink-4); text-transform: uppercase; letter-spacing: .08em;
+  padding: 10px 12px; border-bottom: 1px solid var(--line);
+  background: var(--surface-2);
+}
+.tbl tbody td {
+  padding: 10px 12px; border-bottom: 1px solid var(--line-soft);
+  vertical-align: middle;
+}
+.tbl tbody tr:hover { background: var(--bg-sunk); }
+.tbl .right { text-align: right; }
+
+/* Image placeholder (diagonal stripe pattern) */
+.ph {
+  background: repeating-linear-gradient(45deg, #f4f4f2 0 6px, #ececea 6px 12px);
+  color: var(--ink-4);
+  display: grid; place-items: center;
+  font: 500 10.5px/1.2 var(--font-mono);
+  text-transform: uppercase; letter-spacing: .06em;
+  border-radius: var(--r-sm);
+}
+
+/* Divider */
+.divider { height: 1px; background: var(--line); margin: 12px 0; }
+
+/* Layout helpers */
+.hint { color: var(--ink-4); font-size: 11.5px; }
+.mute { color: var(--ink-4); }
+.strong { color: var(--ink); font-weight: 600; }
+
+/* Modal scrim + dialog */
+.scrim {
+  position: fixed; inset: 0; background: rgba(17,17,17,.28);
+  display: grid; place-items: center; z-index: 100;
+  backdrop-filter: blur(2px);
+}
+.dialog {
+  background: var(--surface); border-radius: var(--r-xl);
+  box-shadow: var(--sh-pop); border: 1px solid var(--line);
+  max-width: calc(100vw - 32px); max-height: calc(100vh - 32px);
+  overflow: hidden;
+}
+
+/* Segmented control */
+.seg { display: flex; gap: 4px; background: var(--bg-sunk); padding: 3px; border-radius: 8px; }
+.seg button {
+  flex: 1; height: 28px; border: 0; background: transparent;
+  font: 500 11.5px/1 var(--font-sans); color: var(--ink-3);
+  border-radius: 6px; cursor: pointer; text-transform: capitalize;
+}
+.seg button.on { background: var(--surface); color: var(--ink); box-shadow: var(--sh-xs); }
+
+/* ============================================================================
+   Shell chrome — 64px Rail + 52px Topbar (ported from shell/shell.css)
+   ============================================================================ */
+.app-shell {
+  display: grid;
+  grid-template-columns: 64px 1fr;
+  height: 100vh;
+  background: var(--bg);
+}
+
+/* Left rail */
+.rail {
+  background: #141413;
+  color: #e9e9e4;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  padding: 12px 0;
+  position: relative;
+  z-index: 20;
+  overflow: visible;
+}
+.rail .brand {
+  width: 40px; height: 40px; margin: 0 auto 16px;
+  border-radius: 10px;
+  display: grid; place-items: center;
+  background: var(--bv);
+  color: #fff;
+  font-family: var(--font-display); font-size: 20px;
+}
+.rail .rail-group { display: contents; }
+.rail .rail-item {
+  position: relative;
+  width: 48px; height: 44px; margin: 2px auto;
+  border-radius: 10px;
+  display: grid; place-items: center;
+  color: #9a9a92;
+  cursor: pointer;
+  transition: background .12s, color .12s;
+  text-decoration: none;
+}
+.rail .rail-item:hover { background: #222220; color: #fff; }
+.rail .rail-item.active { background: #2e2e2b; color: #fff; }
+.rail .rail-item.active::before {
+  content: ''; position: absolute; left: -8px; top: 10px; bottom: 10px; width: 3px;
+  background: var(--bv); border-radius: 0 2px 2px 0;
+}
+.rail .rail-item svg { width: 20px; height: 20px; stroke-width: 1.6; }
+.rail .rail-label {
+  position: absolute; left: calc(100% + 10px); top: 50%; transform: translateY(-50%);
+  background: #141413; color: #fff; padding: 4px 8px; border-radius: 6px;
+  font-size: 11.5px; white-space: nowrap; opacity: 0; pointer-events: none;
+  transition: opacity .15s; z-index: 30;
+  box-shadow: var(--sh-md);
+}
+.rail .rail-item:hover .rail-label { opacity: 1; }
+.rail .rail-sep { height: 1px; background: #2a2a28; margin: 8px 14px; }
+.rail .rail-spacer { flex: 1; }
+.rail .rail-avatar {
+  width: 36px; height: 36px; margin: 4px auto; border-radius: 50%;
+  background: #2e2e2b; color: #fff;
+  display: grid; place-items: center;
+  font-size: 12px; font-weight: 600; cursor: pointer;
+}
+
+/* Main column */
+.app-main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.app-main > .page-body { flex: 1; min-height: 0; overflow: auto; }
+
+/* Top bar */
+.topbar {
+  height: 52px;
+  display: flex; align-items: center; gap: 12px;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+}
+.crumbs { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--ink-3); }
+.crumbs .sep { color: var(--ink-5); display: inline-flex; }
+.crumbs .cur { color: var(--ink); font-weight: 500; }
+.topbar .spacer { flex: 1; }
+
+.store-pill {
+  display: inline-flex; align-items: center; gap: 6px;
+  height: 30px; padding: 0 10px 0 8px;
+  border: 1px solid var(--line-strong); border-radius: 8px;
+  background: var(--surface); font-size: 12.5px; color: var(--ink-2);
+  cursor: pointer;
+}
+.store-pill .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--ok); }
+.store-pill .code {
+  font-family: var(--font-mono); font-size: 11px; color: var(--ink-3);
+}
+
+.role-pill {
+  display: inline-flex; align-items: center; gap: 6px;
+  height: 30px; padding: 0 10px;
+  border-radius: 8px;
+  background: var(--bg-sunk); font-size: 12px; color: var(--ink-2);
+}
+.role-pill .k {
+  font-family: var(--font-mono); font-size: 10px; color: var(--ink-4);
+  text-transform: uppercase; letter-spacing: .08em;
+}
+
+.cmdk {
+  display: inline-flex; align-items: center; gap: 8px;
+  height: 32px; padding: 0 10px 0 12px; width: 280px;
+  border: 1px solid var(--line-strong); border-radius: 8px;
+  background: var(--bg); color: var(--ink-4); font-size: 12.5px;
+  cursor: pointer;
+}
+.cmdk .kbd { margin-left: auto; }
+
+/* Print only */
+@media print {
+  .no-print { display: none !important; }
+  .rail, .topbar { display: none !important; }
+  .app-shell { display: block; }
+}
+
+/* ============================================================================
+   LEGACY base (kept for backwards compat with existing pages)
+   ============================================================================ */
+@layer base {
+  html { @apply antialiased; }
+
+  /* Legacy focus override — overridden by :focus-visible above for new components */
+  .legacy-focus *:focus-visible {
     @apply outline-none ring-2 ring-bv-gold-500 ring-offset-2;
   }
 }

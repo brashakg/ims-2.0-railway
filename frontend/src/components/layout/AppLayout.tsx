@@ -1,435 +1,90 @@
 // ============================================================================
-// IMS 2.0 - Main Application Layout
+// IMS 2.0 — Main Application Layout
+// Uses the new design-handoff Shell (64px rail + 52px topbar).
+// Pages render inside <Outlet /> within the Shell's page-body.
 // ============================================================================
-// Module-aware layout with conditional sidebar
 
-import { useState, useEffect, useRef } from 'react';
-import { Outlet, NavLink, useNavigate, useLocation } from 'react-router-dom';
-import { useAuth } from '../../context/AuthContext';
-import { useModule, type ModuleId } from '../../context/ModuleContext';
-import { storeApi } from '../../services/api';
-import {
-  LogOut,
-  ChevronDown,
-  ChevronLeft,
-  Store,
-  Home,
-  Menu,
-  X,
-} from 'lucide-react';
-import clsx from 'clsx';
+import { Outlet, useLocation } from 'react-router-dom';
+import { useMemo } from 'react';
+import { Shell, type Crumb } from '../shell';
+import { useAppearance } from '../../context/AppearanceContext';
 
-// Map URL paths to module IDs
-const pathToModule: Record<string, ModuleId> = {
-  '/pos': 'pos',
-  '/customers': 'customers',
-  '/inventory': 'inventory',
-  '/orders': 'pos',
-  '/clinical': 'clinic',
-  '/clinical/test': 'clinic',
-  '/clinical/history': 'clinic',
-  '/clinical/contact-lens': 'clinic',
-  '/prescriptions': 'clinic',
-  '/workshop': 'workshop',
-  '/tasks': 'hr',
-  '/hr': 'hr',
-  '/purchase': 'vendors',
-  '/purchase/orders': 'vendors',
-  '/purchase/vendors': 'vendors',
-  '/purchase/grn': 'vendors',
-  '/inventory/replenishment': 'inventory',
-  '/inventory/audit': 'inventory',
-  '/reports': 'reports',
-  '/finance/expenses': 'finance',
-  '/reports/day-end': 'pos',
-  '/reports/outstanding': 'reports',
-  '/returns': 'pos',
-  '/settings': 'settings',
-  '/setup': 'settings',
-  '/jarvis': 'settings',
-  '/catalog/add': 'inventory',
+// Keep labels consistent with the Rail labels so the crumb matches the active item.
+const SEGMENT_LABELS: Record<string, string> = {
+  dashboard: 'Hub',
+  pos: 'POS',
+  customers: 'Customers',
+  360: 'Customer 360',
+  segmentation: 'Segmentation',
+  loyalty: 'Loyalty',
+  campaigns: 'Campaigns',
+  referrals: 'Referrals',
+  feedback: 'Feedback',
+  'follow-ups': 'Follow-ups',
+  orders: 'Orders',
+  returns: 'Returns',
+  clinical: 'Clinical',
+  test: 'New Eye Test',
+  history: 'Test History',
+  'contact-lens': 'Contact Lens Fitting',
+  prescriptions: 'Prescriptions',
+  inventory: 'Inventory',
+  replenishment: 'Replenishment',
+  audit: 'Stock Audit',
+  purchase: 'Purchase',
+  vendors: 'Vendors',
+  grn: 'GRN',
+  workshop: 'Workshop',
+  catalog: 'Catalog',
+  add: 'Add Product',
+  tasks: 'Tasks & SOPs',
+  checklists: 'Checklists',
+  hr: 'HR',
+  payroll: 'Payroll',
+  incentives: 'Incentives',
+  reports: 'Reports',
+  'day-end': 'Day-End',
+  outstanding: 'Outstanding',
+  finance: 'Finance',
+  expenses: 'Expenses',
+  storefront: 'Storefront',
+  settings: 'Store Setup',
+  setup: 'Store Setup',
+  jarvis: 'Jarvis',
+  executive: 'Executive',
+  analytics: 'Analytics',
+  footfall: 'Footfall',
 };
 
+function pathToCrumbs(pathname: string): Crumb[] {
+  const parts = pathname.split('/').filter(Boolean);
+  if (parts.length === 0) return [{ label: 'Hub' }];
+  const crumbs: Crumb[] = [];
+  let acc = '';
+  parts.forEach((p, i) => {
+    acc += '/' + p;
+    const label = SEGMENT_LABELS[p] ?? p.replaceAll('-', ' ');
+    const capitalized = label.charAt(0).toUpperCase() + label.slice(1);
+    crumbs.push({
+      label: capitalized,
+      to: i < parts.length - 1 ? acc : undefined,
+    });
+  });
+  return crumbs;
+}
+
 export function AppLayout() {
-  const { user, logout, hasRole, setActiveRole, setActiveStore } = useAuth();
-  const { activeModule, setActiveModule, getModuleConfig, goToDashboard } = useModule();
-  // Dark mode removed — app is light-only
-  const navigate = useNavigate();
   const location = useLocation();
-  const [sidebarOpen, setSidebarOpen] = useState(false);
-  const [roleDropdownOpen, setRoleDropdownOpen] = useState(false);
-  const [storeDropdownOpen, setStoreDropdownOpen] = useState(false);
-  const [userDropdownOpen, setUserDropdownOpen] = useState(false);
-  const roleDropdownRef = useRef<HTMLDivElement>(null);
-  const storeDropdownRef = useRef<HTMLDivElement>(null);
-  const userDropdownRef = useRef<HTMLDivElement>(null);
+  const { brand } = useAppearance();
 
-  // Load store names for display
-  const [storeNames, setStoreNames] = useState<Record<string, string>>({});
-  useEffect(() => {
-    storeApi.getStores().then((stores: any) => {
-      const storesArr = stores?.stores || stores || [];
-      if (Array.isArray(storesArr)) {
-        const nameMap: Record<string, string> = {};
-        storesArr.forEach((s: any) => {
-          const id = s.store_id || s.id || s._id;
-          const name = s.store_name || s.storeName || s.name;
-          if (id && name) nameMap[id] = name;
-        });
-        setStoreNames(nameMap);
-      }
-    }).catch(() => {});
-  }, []);
-
-  // Close dropdowns on outside click
-  useEffect(() => {
-    const handleClickOutside = (event: MouseEvent) => {
-      if (roleDropdownRef.current && !roleDropdownRef.current.contains(event.target as Node)) {
-        setRoleDropdownOpen(false);
-      }
-      if (storeDropdownRef.current && !storeDropdownRef.current.contains(event.target as Node)) {
-        setStoreDropdownOpen(false);
-      }
-      if (userDropdownRef.current && !userDropdownRef.current.contains(event.target as Node)) {
-        setUserDropdownOpen(false);
-      }
-    };
-    document.addEventListener('mousedown', handleClickOutside);
-    return () => document.removeEventListener('mousedown', handleClickOutside);
-  }, []);
-
-  // Auto-detect module from URL path on mount and route changes
-  useEffect(() => {
-    const path = location.pathname;
-    const moduleId = pathToModule[path];
-
-    if (path === '/dashboard' && activeModule) {
-      goToDashboard();
-    } else if (moduleId && moduleId !== activeModule) {
-      // Don't switch if current module's sidebar already contains this path
-      // (handles shared paths like /orders used by both POS and Reports)
-      if (activeModule) {
-        const currentConfig = getModuleConfig(activeModule);
-        const currentHasPath = currentConfig?.sidebarItems.some(
-          item => item.path === path || item.path.startsWith(path + '?')
-        );
-        if (currentHasPath) return; // Stay in current module
-      }
-      setActiveModule(moduleId);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [location.pathname]);
-
-  // Get active module config
-  const moduleConfig = activeModule ? getModuleConfig(activeModule) : null;
-
-  const handleLogout = async () => {
-    await logout();
-    navigate('/login');
-  };
-
-  const handleBackToDashboard = () => {
-    goToDashboard();
-    navigate('/dashboard');
-    setSidebarOpen(false);
-  };
-
-  // Get brand class for theming
-  const brandClass = user?.activeStoreId?.includes('WZ') ? 'wizopt' : 'bettervision';
-
-  // Determine active colors based on module
-  const getActiveColors = () => {
-    if (moduleConfig) {
-      return {
-        activeBg: moduleConfig.bgColor,
-        activeText: moduleConfig.color,
-        hoverBg: 'hover:bg-gray-700',
-      };
-    }
-    return {
-      activeBg: 'bg-bv-gold-50',
-      activeText: 'text-bv-gold-600',
-      hoverBg: 'hover:bg-gray-700',
-    };
-  };
-
-  const colors = getActiveColors();
+  const crumbs = useMemo(() => pathToCrumbs(location.pathname), [location.pathname]);
 
   return (
-    <div className={clsx('min-h-screen', 'bg-gray-100')} data-brand={brandClass}>
-      {/* Mobile sidebar overlay */}
-      {sidebarOpen && moduleConfig && (
-        <div
-          className="fixed inset-0 bg-black/50 z-40 tablet:hidden"
-          onClick={() => setSidebarOpen(false)}
-        />
-      )}
-
-      {/* Sidebar - only show when module is active */}
-      {moduleConfig && (
-        <aside
-          className={clsx(
-            'fixed top-0 left-0 z-50 h-full w-64 border-r transition-transform duration-300 flex flex-col',
-            'bg-white border-gray-200',
-            sidebarOpen ? 'translate-x-0' : 'tablet:translate-x-0 -translate-x-full'
-          )}
-        >
-          {/* Module Header */}
-          <div className="h-16 flex items-center justify-between px-4 border-b border-gray-700">
-            <div className="flex items-center gap-2 flex-1">
-              <button
-                onClick={handleBackToDashboard}
-                className="p-1.5 rounded-lg hover:bg-gray-700 transition-colors"
-                title="Back to Dashboard"
-              >
-                <ChevronLeft className="w-5 h-5 text-gray-400" />
-              </button>
-              <div className={clsx('w-8 h-8 rounded-lg flex items-center justify-center', moduleConfig.bgColor)}>
-                <moduleConfig.icon className={clsx('w-5 h-5', moduleConfig.color)} />
-              </div>
-              <div className="flex-1 min-w-0">
-                <span className="font-bold text-white text-sm truncate block">{moduleConfig.title}</span>
-              </div>
-            </div>
-            <button
-              className="tablet:hidden p-2 text-gray-400 hover:text-gray-300"
-              onClick={() => setSidebarOpen(false)}
-            >
-              <X className="w-5 h-5" />
-            </button>
-          </div>
-
-          {/* Navigation */}
-          <nav className="flex-1 overflow-y-auto py-4 px-2">
-            {/* Back to Dashboard link */}
-            <button
-              onClick={handleBackToDashboard}
-              className="flex items-center gap-3 px-3 py-2.5 rounded-lg mb-2 w-full text-gray-400 hover:bg-gray-700 transition-colors"
-            >
-              <Home className="w-5 h-5" />
-              <span>Dashboard</span>
-            </button>
-
-            {/* Module section header */}
-            <div className="px-3 py-2 mb-1">
-              <span className="text-xs font-semibold text-gray-400 uppercase tracking-wider">
-                {moduleConfig.title}
-              </span>
-            </div>
-
-            {/* Module sidebar items — filtered by role */}
-            {moduleConfig.sidebarItems.filter((item) => {
-              if (!item.roles) return true; // No role restriction = visible to all
-              const userRoles = user?.roles || [user?.activeRole];
-              return item.roles.some(r => userRoles?.includes(r)) || user?.activeRole === 'SUPERADMIN';
-            }).map((item) => {
-              // Custom active check: for paths with query params, match exactly
-              const hasQuery = item.path.includes('?');
-              const currentFull = location.pathname + location.search;
-              const itemActive = hasQuery
-                ? currentFull === item.path
-                : location.pathname === item.path;
-
-              return (
-                <NavLink
-                  key={item.id}
-                  to={item.path}
-                  className={() =>
-                    clsx(
-                      'flex items-center gap-3 px-3 py-2.5 rounded-lg mb-1 transition-colors touch-target',
-                      itemActive
-                        ? `${colors.activeBg} ${colors.activeText} font-medium`
-                        : `text-gray-400 ${colors.hoverBg}`
-                    )
-                  }
-                  onClick={() => setSidebarOpen(false)}
-                >
-                  <span className="w-5 h-5 flex items-center justify-center">
-                    <span className="w-1.5 h-1.5 rounded-full bg-current" />
-                  </span>
-                  <span>{item.label}</span>
-                </NavLink>
-              );
-            })}
-          </nav>
-
-          {/* User info */}
-          <div className="border-t border-gray-700 p-4">
-            <div className="text-sm text-gray-400 mb-2">{user?.name}</div>
-            <button
-              onClick={handleLogout}
-              className="flex items-center gap-2 text-gray-400 hover:text-bv-red-600 transition-colors"
-            >
-              <LogOut className="w-4 h-4" />
-              <span className="text-sm">Logout</span>
-            </button>
-          </div>
-        </aside>
-      )}
-
-      {/* Main content - adjust margin based on sidebar presence */}
-      <div className={clsx(moduleConfig ? 'tablet:ml-64' : 'w-full')}>
-        {/* Top header */}
-        <header className={clsx('h-16 border-b flex items-center justify-between px-4 tablet:px-6', 'bg-white border-gray-200')}>
-          {/* Logo and Breadcrumb */}
-          <div className="flex items-center gap-4">
-            {/* Mobile menu button - only show when module is active */}
-            {moduleConfig && (
-              <button
-                className="tablet:hidden p-2 text-gray-400 hover:text-white"
-                onClick={() => setSidebarOpen(true)}
-              >
-                <Menu className="w-6 h-6" />
-              </button>
-            )}
-
-            {/* Logo */}
-            <div className="flex items-center gap-2 cursor-pointer" onClick={handleBackToDashboard}>
-              <div className="w-8 h-8 bg-bv-gold-500 rounded-lg flex items-center justify-center">
-                <Store className="w-5 h-5 text-white" />
-              </div>
-              <span className={clsx('font-bold text-lg', 'text-gray-900')}>IMS 2.0</span>
-            </div>
-
-            {/* Breadcrumb - only show when module is active */}
-            {moduleConfig && (
-              <div className="hidden tablet:flex items-center gap-2 text-sm">
-                <ChevronDown className="w-4 h-4 text-gray-400 rotate-[-90deg]" />
-                <button
-                  onClick={handleBackToDashboard}
-                  className="text-gray-400 hover:text-gray-300 transition-colors flex items-center gap-1"
-                >
-                  <Home className="w-4 h-4" />
-                  Dashboard
-                </button>
-                <ChevronDown className="w-4 h-4 text-gray-400 rotate-[-90deg]" />
-                <div className="flex items-center gap-2">
-                  <div className={clsx('w-6 h-6 rounded-lg flex items-center justify-center', moduleConfig.bgColor)}>
-                    <moduleConfig.icon className={clsx('w-4 h-4', moduleConfig.color)} />
-                  </div>
-                  <span className={clsx('font-medium', moduleConfig.color)}>{moduleConfig.title}</span>
-                </div>
-              </div>
-            )}
-          </div>
-
-          {/* Right side - Theme toggle, Role selector, Store selector, User avatar */}
-          <div className="flex items-center gap-3">
-            {/* Theme toggle - hidden (light mode only) */}
-
-            {/* Role selector */}
-            {user && user.roles?.length > 1 && (
-              <div className="relative" ref={roleDropdownRef}>
-                <button
-                  className={clsx('flex items-center gap-2 px-3 py-2 text-sm rounded-lg', 'bg-gray-100 hover:bg-gray-200 text-gray-700')}
-                  onClick={() => setRoleDropdownOpen(!roleDropdownOpen)}
-                >
-                  <span className="font-medium">{(user.activeRole as string).replaceAll('_', ' ')}</span>
-                  <ChevronDown className="w-4 h-4" />
-                </button>
-                {roleDropdownOpen && (
-                  <div className={clsx('absolute top-full right-0 mt-1 w-48 rounded-lg shadow-lg z-50 border', 'bg-white border-gray-200')}>
-                    {(user.roles || []).map((role) => (
-                      <button
-                        key={role}
-                        className={clsx(
-                          `w-full text-left px-4 py-2 text-sm hover:bg-gray-100`,
-                          role === user.activeRole && 'bg-bv-gold-50 text-bv-gold-600'
-                        )}
-                        onClick={() => {
-                          setActiveRole(role);
-                          setRoleDropdownOpen(false);
-                        }}
-                      >
-                        {(role as string).replaceAll('_', ' ')}
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* Store selector - not available for single-store roles like Optometrist */}
-            {user && (hasRole(['SUPERADMIN', 'ADMIN', 'AREA_MANAGER']) || ((user.storeIds?.length ?? 0) > 1 && !hasRole(['OPTOMETRIST']))) && (
-              <div className="relative" ref={storeDropdownRef}>
-                <button
-                  className={clsx('flex items-center gap-2 px-3 py-2 text-sm rounded-lg', 'bg-gray-100 hover:bg-gray-200 text-gray-700')}
-                  onClick={() => setStoreDropdownOpen(!storeDropdownOpen)}
-                >
-                  <Store className="w-4 h-4" />
-                  <span className="font-medium hidden tablet:inline">{storeNames[user.activeStoreId] || user.activeStoreId || 'Select Store'}</span>
-                  <ChevronDown className="w-4 h-4" />
-                </button>
-                {storeDropdownOpen && (
-                  <div className={clsx('absolute top-full right-0 mt-1 w-56 rounded-lg shadow-lg z-50 border', 'bg-white border-gray-200')}>
-                    {(user.storeIds?.length ? user.storeIds : Object.keys(storeNames)).map((storeId) => (
-                      <button
-                        key={storeId}
-                        className={clsx(
-                          `w-full text-left px-4 py-2 text-sm hover:bg-gray-100`,
-                          storeId === user.activeStoreId && 'bg-bv-gold-50 text-bv-gold-600'
-                        )}
-                        onClick={() => {
-                          setActiveStore(storeId);
-                          setStoreDropdownOpen(false);
-                        }}
-                      >
-                        {storeNames[storeId] || storeId}
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* User avatar and dropdown */}
-            <div className="relative" ref={userDropdownRef}>
-              <button
-                onClick={() => setUserDropdownOpen(!userDropdownOpen)}
-                className="w-8 h-8 bg-bv-gold-100 rounded-full flex items-center justify-center hover:bg-bv-gold-200 transition-colors"
-                title="User menu"
-              >
-                <span className="text-sm font-medium text-bv-gold-600">
-                  {user?.name?.charAt(0).toUpperCase()}
-                </span>
-              </button>
-              {userDropdownOpen && (
-                <div className={clsx('absolute top-full right-0 mt-2 w-48 rounded-lg shadow-lg z-50 border', 'bg-white border-gray-200')}>
-                  <div className={clsx('px-4 py-3 border-b', 'border-gray-200')}>
-                    <div className={clsx('text-sm font-medium', 'text-gray-900')}>{user?.name}</div>
-                    <div className={clsx('text-xs mt-1', 'text-gray-600')}>{user?.email}</div>
-                    <div className={clsx('text-xs mt-1', 'text-gray-600')}>Role: {(user?.activeRole as string)?.replaceAll('_', ' ')}</div>
-                  </div>
-                  <button
-                    onClick={() => {
-                      navigate('/settings?tab=profile');
-                      setUserDropdownOpen(false);
-                    }}
-                    className={clsx('w-full text-left px-4 py-2 text-sm transition-colors', 'text-gray-600 hover:bg-gray-100')}
-                  >
-                    My Profile
-                  </button>
-                  <button
-                    onClick={() => {
-                      handleLogout();
-                      setUserDropdownOpen(false);
-                    }}
-                    className={clsx('w-full text-left px-4 py-2 text-sm text-red-600 transition-colors border-t', 'hover:bg-red-50 border-gray-200')}
-                  >
-                    Logout
-                  </button>
-                </div>
-              )}
-            </div>
-          </div>
-        </header>
-
-        {/* Page content */}
-        <main className="p-4 tablet:p-6">
-          <Outlet />
-        </main>
-      </div>
-    </div>
+    <Shell crumbs={crumbs} brand={brand}>
+      <main style={{ padding: '0' }}>
+        <Outlet />
+      </main>
+    </Shell>
   );
 }
 
