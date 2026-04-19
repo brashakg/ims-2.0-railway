@@ -11,12 +11,27 @@ export async function GET(request: NextRequest) {
     const page = parseInt(searchParams.get("page") || "1");
     const limit = parseInt(searchParams.get("limit") || "20");
     const status = searchParams.get("status");
+    const segment = searchParams.get("segment") || "all";
     const search = searchParams.get("search");
 
     const skip = (page - 1) * limit;
     const where: Record<string, unknown> = {};
 
     if (status && status !== "All") where.orderStatus = status;
+
+    if (segment === "unfulfilled") {
+      where.fulfillmentStatus = { not: "fulfilled" };
+      where.orderStatus = { not: "CANCELLED" };
+    } else if (segment === "unpaid") {
+      where.financialStatus = { in: ["pending", "authorized", null] };
+      where.orderStatus = { not: "CANCELLED" };
+    } else if (segment === "open") {
+      where.orderStatus = "OPEN";
+    } else if (segment === "closed") {
+      where.orderStatus = "CLOSED";
+    } else if (segment === "cancelled") {
+      where.orderStatus = "CANCELLED";
+    }
     if (search) {
       where.OR = [
         { name: { contains: search, mode: "insensitive" } },

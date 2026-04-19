@@ -1,7 +1,19 @@
 'use client';
 
 import { useState, useEffect } from 'react';
+import Link from 'next/link';
 import { ChevronDown, ChevronUp, Loader2, RefreshCw, Search } from 'lucide-react';
+
+type Segment = 'all' | 'unfulfilled' | 'unpaid' | 'open' | 'closed' | 'cancelled';
+
+const SEGMENTS: Array<{ key: Segment; label: string }> = [
+  { key: 'all', label: 'All' },
+  { key: 'unfulfilled', label: 'Unfulfilled' },
+  { key: 'unpaid', label: 'Unpaid' },
+  { key: 'open', label: 'Open' },
+  { key: 'closed', label: 'Closed' },
+  { key: 'cancelled', label: 'Cancelled' },
+];
 
 interface Order {
   id: string;
@@ -38,7 +50,7 @@ export default function OrdersPage() {
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
   const [search, setSearch] = useState('');
-  const [statusFilter, setStatusFilter] = useState<'All' | 'OPEN' | 'CLOSED' | 'CANCELLED'>('All');
+  const [segment, setSegment] = useState<Segment>('all');
   const [page, setPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
   const [expandedOrders, setExpandedOrders] = useState<ExpandedOrder>({});
@@ -71,8 +83,8 @@ export default function OrdersPage() {
         const params = new URLSearchParams({
           page: page.toString(),
           limit: ITEMS_PER_PAGE.toString(),
+          segment,
           ...(search && { search }),
-          ...(statusFilter !== 'All' && { status: statusFilter }),
         });
         const res = await fetch(`/api/orders?${params}`);
         if (!res.ok) throw new Error('Failed to fetch orders');
@@ -87,7 +99,7 @@ export default function OrdersPage() {
       }
     };
     fetchOrders();
-  }, [page, search, statusFilter]);
+  }, [page, search, segment]);
 
   const handleSyncOrders = async () => {
     setSyncing(true);
@@ -108,8 +120,8 @@ export default function OrdersPage() {
       const params = new URLSearchParams({
         page: page.toString(),
         limit: ITEMS_PER_PAGE.toString(),
+        segment,
         ...(search && { search }),
-        ...(statusFilter !== 'All' && { status: statusFilter }),
       });
       const ordersRes = await fetch(`/api/orders?${params}`);
       const ordersData = await ordersRes.json();
@@ -202,33 +214,37 @@ export default function OrdersPage() {
             </button>
           </div>
 
-          <div className="flex flex-col sm:flex-row gap-4">
-            <div className="flex-1 relative">
-              <Search className="absolute left-3 top-2.5 w-4 h-4 text-gray-400" />
-              <input
-                type="text"
-                placeholder="Search by order number or customer..."
-                value={search}
-                onChange={(e) => {
-                  setSearch(e.target.value);
+          <div className="flex items-center gap-2 flex-wrap border-b border-gray-200 -mx-6 px-6 pb-3 mb-4">
+            {SEGMENTS.map((s) => (
+              <button
+                key={s.key}
+                onClick={() => {
+                  setSegment(s.key);
                   setPage(1);
                 }}
-                className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-              />
-            </div>
-            <select
-              value={statusFilter}
+                className={`px-3 py-1.5 text-sm rounded-lg border transition-colors ${
+                  segment === s.key
+                    ? 'bg-blue-600 text-white border-blue-600'
+                    : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-50'
+                }`}
+              >
+                {s.label}
+              </button>
+            ))}
+          </div>
+
+          <div className="flex-1 relative">
+            <Search className="absolute left-3 top-2.5 w-4 h-4 text-gray-400" />
+            <input
+              type="text"
+              placeholder="Search by order number or customer..."
+              value={search}
               onChange={(e) => {
-                setStatusFilter(e.target.value as any);
+                setSearch(e.target.value);
                 setPage(1);
               }}
-              className="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-            >
-              <option value="All">All Orders</option>
-              <option value="OPEN">Open</option>
-              <option value="CLOSED">Closed</option>
-              <option value="CANCELLED">Cancelled</option>
-            </select>
+              className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+            />
           </div>
         </div>
 
@@ -261,8 +277,15 @@ export default function OrdersPage() {
                   <tbody className="divide-y divide-gray-200">
                     {orders.map((order) => (
                       <tbody key={order.id}>
-                        <tr className="hover:bg-gray-50 cursor-pointer" onClick={() => toggleOrderExpand(order.id)}>
-                          <td className="px-6 py-4 text-sm font-medium text-blue-600">#{order.orderNumber}</td>
+                        <tr className="hover:bg-gray-50">
+                          <td className="px-6 py-4 text-sm font-medium">
+                            <Link
+                              href={`/dashboard/orders/${order.id}`}
+                              className="text-blue-600 hover:underline"
+                            >
+                              #{order.orderNumber}
+                            </Link>
+                          </td>
                           <td className="px-6 py-4 text-sm text-gray-900">{order.customerName}</td>
                           <td className="px-6 py-4 text-sm text-gray-600">{(order.lineItems || []).length} items</td>
                           <td className="px-6 py-4 text-sm font-medium text-gray-900">₹{(order.totalPrice || 0).toFixed(2)}</td>
@@ -278,11 +301,17 @@ export default function OrdersPage() {
                           </td>
                           <td className="px-6 py-4 text-sm text-gray-600">{order.createdAt ? new Date(order.createdAt).toLocaleDateString() : '—'}</td>
                           <td className="px-6 py-4">
-                            {expandedOrders[order.id] ? (
-                              <ChevronUp className="w-4 h-4 text-gray-400" />
-                            ) : (
-                              <ChevronDown className="w-4 h-4 text-gray-400" />
-                            )}
+                            <button
+                              onClick={() => toggleOrderExpand(order.id)}
+                              aria-label={expandedOrders[order.id] ? 'Collapse line items' : 'Expand line items'}
+                              className="p-1 rounded hover:bg-gray-200"
+                            >
+                              {expandedOrders[order.id] ? (
+                                <ChevronUp className="w-4 h-4 text-gray-400" />
+                              ) : (
+                                <ChevronDown className="w-4 h-4 text-gray-400" />
+                              )}
+                            </button>
                           </td>
                         </tr>
                         {expandedOrders[order.id] && (
