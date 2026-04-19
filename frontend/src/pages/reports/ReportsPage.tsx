@@ -9,10 +9,8 @@ import {
   BarChart3,
   TrendingUp,
   Download,
-  IndianRupee,
   Package,
   Users,
-  ShoppingCart,
   FileText,
   Eye,
   Printer,
@@ -27,7 +25,6 @@ import { useToast } from '../../context/ToastContext';
 import { GSTR1Report } from '../../components/reports/GSTR1Report';
 import { GSTR3BReport } from '../../components/reports/GSTR3BReport';
 import { DemandForecast } from '../../components/reports/DemandForecast';
-import clsx from 'clsx';
 import { exportToCSV, SALES_REPORT_COLUMNS, INVENTORY_REPORT_COLUMNS, CUSTOMER_REPORT_COLUMNS, GST_REPORT_COLUMNS } from '../../utils/exportUtils';
 
 type ReportType = 'sales' | 'inventory' | 'customers' | 'gst' | 'forecast';
@@ -356,140 +353,98 @@ export function ReportsPage() {
     return `₹${amount.toLocaleString('en-IN')}`;
   };
 
+  const reportTabs = [
+    { id: 'sales' as ReportType,     label: 'Sales',     icon: BarChart3 },
+    { id: 'inventory' as ReportType, label: 'Inventory', icon: Package },
+    { id: 'customers' as ReportType, label: 'Customers', icon: Users },
+    { id: 'gst' as ReportType,       label: 'GST',       icon: FileText },
+    { id: 'forecast' as ReportType,  label: 'Forecast',  icon: TrendingUp },
+  ];
+
   return (
-    <div className="space-y-4">
-      {/* Header */}
-      <div className="flex items-center justify-between">
+    <div className="r-body">
+      {/* Editorial header */}
+      <div className="r-head">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">Reports</h1>
-          <p className="text-gray-500">Analytics and business reports</p>
+          <div className="eyebrow" style={{ marginBottom: 6 }}>Reports</div>
+          <h1>The day, in numbers.</h1>
+          <div className="hint">Day-end close, MoM & YoY trends, sell-through by category, aging cohorts, GST filing prep.</div>
         </div>
-        <div className="flex gap-2">
+        <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
           <select
             value={dateRange}
             onChange={e => setDateRange(e.target.value as DateRange)}
-            className="input-field w-auto"
+            className="input"
+            style={{ maxWidth: 160 }}
           >
             <option value="today">Today</option>
-            <option value="week">This Week</option>
-            <option value="month">This Month</option>
-            <option value="quarter">This Quarter</option>
+            <option value="week">This week</option>
+            <option value="month">This month</option>
+            <option value="quarter">This quarter</option>
           </select>
           <button
             onClick={loadReportData}
             disabled={isLoading}
-            className="btn-outline flex items-center gap-2"
+            className="btn sm"
           >
-            {isLoading ? (
-              <Loader2 className="w-4 h-4 animate-spin" />
-            ) : (
-              <RefreshCw className="w-4 h-4" />
-            )}
+            {isLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
             Refresh
           </button>
         </div>
       </div>
 
-      {/* Error State */}
+      {/* Error banner */}
       {error && (
-        <div className="card bg-red-50 border-red-200">
-          <div className="flex items-center gap-3 text-red-600">
-            <AlertTriangle className="w-5 h-5" />
-            <p>{error}</p>
-            <button onClick={loadReportData} className="ml-auto text-sm underline">
-              Retry
-            </button>
-          </div>
+        <div className="s-section" style={{ padding: 12, borderColor: 'var(--err-50)', background: 'var(--err-50)', display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14 }}>
+          <AlertTriangle className="w-5 h-5" style={{ color: 'var(--err)' }} />
+          <span style={{ color: 'var(--err)' }}>{error}</span>
+          <button onClick={loadReportData} className="btn sm" style={{ marginLeft: 'auto' }}>Retry</button>
         </div>
       )}
 
-      {/* Summary Cards */}
-      <div className="grid grid-cols-2 tablet:grid-cols-4 gap-4">
-        <div className="card">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 bg-green-100 rounded-lg flex items-center justify-center">
-              <IndianRupee className="w-5 h-5 text-green-600" />
-            </div>
-            <div>
-              <p className="text-sm text-gray-500">Total Sales</p>
-              {isLoading ? (
-                <div className="h-7 w-20 bg-gray-200 animate-pulse rounded mt-1" />
-              ) : (
-                <p className="text-xl font-bold text-gray-900">{formatCurrency(salesSummary.totalSales)}</p>
-              )}
-            </div>
+      {/* 4-col KPI grid */}
+      <div className="kpi-grid">
+        <div className="kpi">
+          <div className="l">Total sales</div>
+          <div className="v">
+            {isLoading ? <span className="mute">—</span> : formatCurrency(salesSummary.totalSales)}
           </div>
         </div>
-        <div className="card">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 bg-blue-100 rounded-lg flex items-center justify-center">
-              <ShoppingCart className="w-5 h-5 text-blue-600" />
-            </div>
-            <div>
-              <p className="text-sm text-gray-500">Orders</p>
-              {isLoading ? (
-                <div className="h-7 w-12 bg-gray-200 animate-pulse rounded mt-1" />
-              ) : (
-                <p className="text-xl font-bold text-gray-900">{salesSummary.orderCount}</p>
-              )}
-            </div>
+        <div className="kpi">
+          <div className="l">Orders</div>
+          <div className="v">
+            {isLoading ? <span className="mute">—</span> : salesSummary.orderCount}
           </div>
         </div>
-        <div className="card">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 bg-purple-100 rounded-lg flex items-center justify-center">
-              <TrendingUp className="w-5 h-5 text-purple-600" />
-            </div>
-            <div>
-              <p className="text-sm text-gray-500">Avg Order Value</p>
-              {isLoading ? (
-                <div className="h-7 w-16 bg-gray-200 animate-pulse rounded mt-1" />
-              ) : (
-                <p className="text-xl font-bold text-gray-900">{formatCurrency(salesSummary.averageOrderValue)}</p>
-              )}
-            </div>
+        <div className="kpi">
+          <div className="l">Avg order value</div>
+          <div className="v">
+            {isLoading ? <span className="mute">—</span> : formatCurrency(salesSummary.averageOrderValue)}
           </div>
         </div>
-        <div className="card">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 bg-orange-100 rounded-lg flex items-center justify-center">
-              <FileText className="w-5 h-5 text-orange-600" />
-            </div>
-            <div>
-              <p className="text-sm text-gray-500">GST Collected</p>
-              {isLoading ? (
-                <div className="h-7 w-16 bg-gray-200 animate-pulse rounded mt-1" />
-              ) : (
-                <p className="text-xl font-bold text-gray-900">{formatCurrency(salesSummary.gstCollected)}</p>
-              )}
-            </div>
+        <div className="kpi">
+          <div className="l">GST collected</div>
+          <div className="v">
+            {isLoading ? <span className="mute">—</span> : formatCurrency(salesSummary.gstCollected)}
           </div>
         </div>
       </div>
 
-      {/* Tabs */}
-      <div className="flex border-b border-gray-200 overflow-x-auto">
-        {[
-          { id: 'sales' as ReportType, label: 'Sales', icon: BarChart3 },
-          { id: 'inventory' as ReportType, label: 'Inventory', icon: Package },
-          { id: 'customers' as ReportType, label: 'Customers', icon: Users },
-          { id: 'gst' as ReportType, label: 'GST', icon: FileText },
-          { id: 'forecast' as ReportType, label: 'Forecast', icon: TrendingUp },
-        ].map(tab => (
-          <button
-            key={tab.id}
-            onClick={() => setActiveTab(tab.id)}
-            className={clsx(
-              'flex items-center gap-2 px-4 py-3 text-sm font-medium border-b-2 transition-colors whitespace-nowrap',
-              activeTab === tab.id
-                ? 'border-bv-red-600 text-bv-red-600'
-                : 'border-transparent text-gray-500 hover:text-gray-700'
-            )}
-          >
-            <tab.icon className="w-4 h-4" />
-            {tab.label}
-          </button>
-        ))}
+      {/* Tabs — underline style, reuses .inv-tabs from Inventory */}
+      <div className="inv-tabs">
+        {reportTabs.map(tab => {
+          const TabIcon = tab.icon;
+          return (
+            <button
+              key={tab.id}
+              onClick={() => setActiveTab(tab.id)}
+              className={activeTab === tab.id ? 'on' : ''}
+            >
+              <TabIcon className="w-4 h-4" />
+              {tab.label}
+            </button>
+          );
+        })}
       </div>
 
       {/* Report Content */}
