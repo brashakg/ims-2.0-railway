@@ -377,37 +377,18 @@ async function upsertProduct(
     productData.warranty = parsedTags.warranty;
   }
 
-  // Add additional parsed fields (these don't have metafield equivalents)
-  if (parsedTags.frameColor) {
-    productData.frameColor = parsedTags.frameColor;
-  }
-  if (parsedTags.templeColor) {
-    productData.templeColor = parsedTags.templeColor;
-  }
+  // Product-level fields (material/type/lens/UV etc. are shared across variants).
   if (parsedTags.templeMaterial) {
     productData.templeMaterial = parsedTags.templeMaterial;
   }
   if (parsedTags.frameType) {
     productData.frameType = parsedTags.frameType;
   }
-  if (parsedTags.frameSize) {
-    productData.frameSize = parsedTags.frameSize;
-  }
-  if (parsedTags.bridge) {
-    productData.bridge = parsedTags.bridge;
-  }
-  if (parsedTags.templeLength) {
-    productData.templeLength = parsedTags.templeLength;
-  }
-  if (parsedTags.weight) {
-    productData.weight = parsedTags.weight;
-  }
-  if (parsedTags.lensColour) {
-    productData.lensColour = parsedTags.lensColour;
-  }
-  if (parsedTags.tint) {
-    productData.tint = parsedTags.tint;
-  }
+  // NOTE: legacy variant-level fields (frameColor, templeColor, frameSize,
+  // bridge, templeLength, weight, lensColour, tint) are no longer written
+  // to Product. They live on ProductVariant now. The columns still exist
+  // on Product for backward compat with existing data; we just stopped
+  // writing to them so new pulls don't reintroduce duplication.
   if (parsedTags.polarization) {
     productData.polarization = parsedTags.polarization;
   }
