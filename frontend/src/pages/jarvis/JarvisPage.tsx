@@ -15,9 +15,7 @@ import {
   ShoppingCart,
   Clock,
   Zap,
-  Activity,
   Target,
-  Brain,
   Sparkles,
   RefreshCw,
   ChevronRight,
@@ -26,7 +24,6 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import api from '../../services/api/client';
-import clsx from 'clsx';
 
 // Types
 interface Message {
@@ -372,113 +369,220 @@ Is there a specific aspect you'd like me to dive deeper into? I can provide deta
     { label: 'Recommendations', query: 'What do you recommend?' },
   ];
 
+  // 8 Jarvis superhero agents — from docs/reference/IMS2_Agent_Architecture.html.
+  // Current state: CORTEX + SENTINEL implemented (backend/agents/implementations),
+  // the other 6 are Phase 3 work. Shown here as "pending" so the control surface
+  // reflects the roadmap honestly.
+  const AGENTS = [
+    { id: 'JARVIS',     hero: 'J.A.R.V.I.S. (Marvel)',    role: 'Foundation · NLP & conversation core',             schedule: 'Always-on',               status: 'live',    acts24h: 0 },
+    { id: 'CORTEX',     hero: 'Professor X (Marvel)',     role: 'Orchestrator · command router',                    schedule: 'Event-driven',            status: 'live',    acts24h: 12 },
+    { id: 'SENTINEL',   hero: 'The Sentinels (Marvel)',   role: 'System health & monitoring',                       schedule: 'Every 60s',               status: 'live',    acts24h: 94 },
+    { id: 'PIXEL',      hero: 'Batman (DC)',              role: 'UI/UX quality · deploy audit · a11y',              schedule: 'Daily 2 AM + on deploy',  status: 'pending', acts24h: 0 },
+    { id: 'MEGAPHONE',  hero: 'Black Canary (DC)',        role: 'Marketing · Rx expiry / birthday / follow-up',     schedule: '30 min + daily 9 AM',     status: 'pending', acts24h: 0 },
+    { id: 'ORACLE',     hero: 'Oracle / Barbara Gordon',  role: 'AI analysis · anomaly scan + EOD sweep',           schedule: 'Hourly + 10 PM',          status: 'pending', acts24h: 0 },
+    { id: 'TASKMASTER', hero: 'Taskmaster (Marvel)',      role: 'Real execution · SLA, SOP, auto-reorder',          schedule: 'Every 5 min',             status: 'pending', acts24h: 0 },
+    { id: 'NEXUS',      hero: 'Cyborg (DC)',              role: 'Integration sync · Shopify / Razorpay / Shiprocket', schedule: 'Hourly + webhook',        status: 'pending', acts24h: 0 },
+  ];
+  const liveAgents = AGENTS.filter(a => a.status === 'live').length;
+  const totalActs24h = AGENTS.reduce((sum, a) => sum + a.acts24h, 0);
+
   return (
-    <div className="h-[calc(100vh-120px)] flex flex-col">
-      {/* JARVIS Header */}
-      <div className="bg-gradient-to-r from-gray-900 to-gray-800 text-white p-4 rounded-t-xl">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="w-12 h-12 rounded-full bg-gradient-to-br from-blue-400 to-cyan-500 flex items-center justify-center">
-              <Brain className="w-6 h-6" />
+    <div style={{ padding: '24px 28px 60px', background: 'var(--bg)', minHeight: 'calc(100vh - 52px)', overflowY: 'auto' }}>
+      {/* ── Hero: ink background, editorial title, pulse stats ── */}
+      <section
+        style={{
+          background: 'var(--ink)',
+          color: '#fff',
+          borderRadius: 'var(--r-xl)',
+          padding: '32px 32px 28px',
+          marginBottom: 20,
+          display: 'grid',
+          gridTemplateColumns: '1fr auto',
+          gap: 32,
+          alignItems: 'end',
+          position: 'relative',
+          overflow: 'hidden',
+          backgroundImage:
+            'radial-gradient(400px 180px at 85% 0%, rgba(205,32,26,.22), transparent 60%), radial-gradient(600px 300px at 30% 110%, rgba(255,255,255,.04), transparent 60%)',
+        }}
+      >
+        <div>
+          <div className="eyebrow" style={{ color: '#9a9a92', marginBottom: 12 }}>
+            Jarvis · Always-on automation · Superadmin only
+          </div>
+          <h1 style={{ margin: '0 0 10px', fontFamily: 'var(--font-display)', fontSize: 44, lineHeight: 1.02, letterSpacing: '-0.02em', maxWidth: 600, color: '#fff', fontWeight: 400 }}>
+            Eight agents. One shift.<br />
+            Quietly keeping things in line.
+          </h1>
+          <p style={{ margin: 0, color: '#b6b6ae', maxWidth: 520, fontSize: 13.5, lineHeight: 1.55 }}>
+            Jarvis watches the feeds every store ignores — stock, pricing, Rx alignment, task SLAs — and takes the smallest action it can, then asks for approval when the stakes matter.
+          </p>
+          <div style={{ display: 'flex', gap: 18, fontFamily: 'var(--font-mono)', fontSize: 11, color: '#8a8a82', marginTop: 16, textTransform: 'uppercase', letterSpacing: '.08em' }}>
+            <div style={{ paddingRight: 18, borderRight: '1px solid #2e2e2b' }}>
+              <div className="figure" style={{ fontSize: 26, color: '#fff', textTransform: 'none', letterSpacing: '-.02em' }}>{liveAgents}/8</div>
+              agents live
+            </div>
+            <div style={{ paddingRight: 18, borderRight: '1px solid #2e2e2b' }}>
+              <div className="figure" style={{ fontSize: 26, color: '#fff', textTransform: 'none', letterSpacing: '-.02em' }}>{totalActs24h}</div>
+              actions · 24h
             </div>
             <div>
-              <h1 className="text-xl font-bold flex items-center gap-2">
-                JARVIS
-                <Sparkles className="w-4 h-4 text-yellow-400" />
-              </h1>
-              <p className="text-sm text-gray-400">Powered by Claude AI • Business Intelligence System</p>
+              <div className="figure" style={{ fontSize: 26, color: '#fff', textTransform: 'none', letterSpacing: '-.02em' }}>0</div>
+              awaiting approval
             </div>
-          </div>
-          <div className="flex items-center gap-4">
-            <div className="flex items-center gap-2 text-sm bg-gray-800/50 px-3 py-1 rounded-full">
-              <Activity className="w-4 h-4 text-green-400 animate-pulse" />
-              <span className="text-green-400">Online</span>
-              <span className="text-gray-500">•</span>
-              <span className="text-cyan-400 text-xs">Claude</span>
-            </div>
-            <button
-              onClick={() => {
-                loadInsights();
-                loadRecommendations();
-              }}
-              className="p-2 hover:bg-gray-700 rounded-lg transition-colors"
-            >
-              <RefreshCw className="w-5 h-5" />
-            </button>
           </div>
         </div>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button
+            className="btn sm"
+            style={{ background: '#2a2a28', color: '#fff', borderColor: '#3a3a36' }}
+            onClick={() => {
+              loadInsights();
+              loadRecommendations();
+            }}
+          >
+            <RefreshCw className="w-3.5 h-3.5" /> Refresh
+          </button>
+          <button className="btn sm accent">
+            <Sparkles className="w-3.5 h-3.5" /> Deploy agent
+          </button>
+        </div>
+      </section>
+
+      {/* ── Agent grid (2 cols) ── */}
+      <div className="eyebrow" style={{ marginBottom: 10 }}>Agents</div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(380px, 1fr))', gap: 14, marginBottom: 24 }}>
+        {AGENTS.map((a) => (
+          <div
+            key={a.id}
+            style={{
+              background: 'var(--surface)',
+              border: '1px solid var(--line)',
+              borderRadius: 'var(--r-lg)',
+              padding: 18,
+              display: 'grid',
+              gridTemplateColumns: '48px 1fr auto',
+              gap: 14,
+              alignItems: 'flex-start',
+              position: 'relative',
+              overflow: 'hidden',
+              opacity: a.status === 'pending' ? 0.7 : 1,
+            }}
+          >
+            <div
+              style={{
+                width: 48,
+                height: 48,
+                borderRadius: 10,
+                background: a.status === 'live' ? 'var(--ink)' : 'var(--bg-sunk)',
+                color: a.status === 'live' ? '#fff' : 'var(--ink-4)',
+                display: 'grid',
+                placeItems: 'center',
+                fontFamily: 'var(--font-mono)',
+                fontSize: 12,
+                fontWeight: 600,
+                letterSpacing: '.04em',
+              }}
+            >
+              {a.id.slice(0, 3)}
+            </div>
+            <div>
+              <h3 style={{ margin: '0 0 3px', font: '600 14px/1.2 var(--font-sans)', color: 'var(--ink)' }}>{a.id}</h3>
+              <div style={{ fontSize: 11, color: 'var(--ink-4)', marginBottom: 4, fontStyle: 'italic' }}>{a.hero}</div>
+              <div style={{ fontSize: 12.5, color: 'var(--ink-3)', lineHeight: 1.5, marginBottom: 10 }}>{a.role}</div>
+              <div style={{ display: 'flex', gap: 14, fontSize: 11, color: 'var(--ink-4)', fontFamily: 'var(--font-mono)' }}>
+                <span>Cadence · <strong style={{ color: 'var(--ink)', fontFamily: 'var(--font-sans)', fontWeight: 600, fontSize: 12 }}>{a.schedule}</strong></span>
+                <span>24h · <strong style={{ color: 'var(--ink)', fontFamily: 'var(--font-sans)', fontWeight: 600, fontSize: 12 }}>{a.acts24h} acts</strong></span>
+              </div>
+            </div>
+            <span className={'chip ' + (a.status === 'live' ? 'ok' : 'warn')}>
+              {a.status === 'live' ? 'running' : 'pending · Phase 3'}
+            </span>
+          </div>
+        ))}
       </div>
 
-      {/* Main Content */}
-      <div className="flex-1 flex overflow-hidden bg-gray-50">
-        {/* Chat Panel */}
-        <div className="flex-1 flex flex-col">
+      {/* ── Jarvis conversation (preserves original chat logic) ── */}
+      <div className="eyebrow" style={{ marginBottom: 10 }}>Ask intelligence</div>
+      <div
+        style={{
+          display: 'grid',
+          gridTemplateColumns: '1fr 320px',
+          gap: 14,
+          background: 'var(--surface)',
+          border: '1px solid var(--line)',
+          borderRadius: 'var(--r-lg)',
+          overflow: 'hidden',
+          minHeight: 480,
+        }}
+      >
+        {/* Chat pane */}
+        <div style={{ display: 'flex', flexDirection: 'column', minHeight: 0 }}>
           {/* Messages */}
-          <div className="flex-1 overflow-y-auto p-4 space-y-4">
+          <div style={{ flex: 1, overflowY: 'auto', padding: 16, display: 'flex', flexDirection: 'column', gap: 12 }}>
             {messages.map((message) => (
               <div
                 key={message.id}
-                className={clsx(
-                  'flex',
-                  message.type === 'user' ? 'justify-end' : 'justify-start'
-                )}
+                style={{
+                  display: 'flex',
+                  justifyContent: message.type === 'user' ? 'flex-end' : 'flex-start',
+                }}
               >
                 <div
-                  className={clsx(
-                    'max-w-[80%] rounded-2xl px-4 py-3',
-                    message.type === 'user'
-                      ? 'bg-bv-gold-500 text-white'
-                      : 'bg-white shadow-md'
-                  )}
+                  style={{
+                    maxWidth: '80%',
+                    borderRadius: 14,
+                    padding: '10px 14px',
+                    background: message.type === 'user' ? 'var(--ink)' : 'var(--bg-sunk)',
+                    color: message.type === 'user' ? '#fff' : 'var(--ink)',
+                    border: message.type === 'user' ? '1px solid var(--ink)' : '1px solid var(--line)',
+                  }}
                 >
                   {message.type === 'jarvis' && (
-                    <div className="flex items-center gap-2 mb-2">
-                      <Bot className="w-4 h-4 text-blue-500" />
-                      <span className="text-xs font-medium text-blue-500">JARVIS</span>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
+                      <Bot className="w-3.5 h-3.5" style={{ color: 'var(--bv)' }} />
+                      <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--bv)', textTransform: 'uppercase', letterSpacing: '.08em' }}>
+                        JARVIS
+                      </span>
                       {(message.data as { ai_powered?: boolean })?.ai_powered && (
-                        <span className="text-xs px-1.5 py-0.5 bg-gradient-to-r from-cyan-500 to-blue-500 text-white rounded-full">
+                        <span className="chip accent" style={{ height: 18, fontSize: 9.5 }}>
                           Claude AI
                         </span>
                       )}
                     </div>
                   )}
                   <div
-                    className={clsx(
-                      'text-sm whitespace-pre-wrap',
-                      message.type === 'jarvis' && 'prose prose-sm max-w-none'
-                    )}
+                    style={{
+                      fontSize: 13,
+                      lineHeight: 1.5,
+                      whiteSpace: 'pre-wrap',
+                    }}
                     dangerouslySetInnerHTML={{
                       __html: message.content
                         .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
-                        .replace(/\n/g, '<br />')
+                        .replace(/\n/g, '<br />'),
                     }}
                   />
-                  <div
-                    className={clsx(
-                      'text-xs mt-2',
-                      message.type === 'user' ? 'text-white/70' : 'text-gray-400'
-                    )}
-                  >
-                    {message.timestamp.toLocaleTimeString([], {
-                      hour: '2-digit',
-                      minute: '2-digit',
-                    })}
+                  <div style={{ fontSize: 10.5, marginTop: 6, color: message.type === 'user' ? 'rgba(255,255,255,.55)' : 'var(--ink-4)', fontFamily: 'var(--font-mono)' }}>
+                    {message.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                   </div>
                 </div>
               </div>
             ))}
 
             {isLoading && (
-              <div className="flex justify-start">
-                <div className="bg-white shadow-md rounded-2xl px-4 py-3">
-                  <div className="flex items-center gap-2">
-                    <Bot className="w-4 h-4 text-blue-500" />
-                    <span className="text-xs font-medium text-blue-500">JARVIS</span>
+              <div style={{ display: 'flex', justifyContent: 'flex-start' }}>
+                <div style={{ background: 'var(--bg-sunk)', borderRadius: 14, padding: '10px 14px', border: '1px solid var(--line)' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+                    <Bot className="w-3.5 h-3.5" style={{ color: 'var(--bv)' }} />
+                    <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--bv)', textTransform: 'uppercase', letterSpacing: '.08em' }}>
+                      JARVIS
+                    </span>
                   </div>
-                  <div className="flex items-center gap-1 mt-2">
-                    <div className="w-2 h-2 bg-blue-500 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
-                    <div className="w-2 h-2 bg-blue-500 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
-                    <div className="w-2 h-2 bg-blue-500 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+                  <div style={{ display: 'flex', gap: 4, paddingTop: 4 }}>
+                    <div style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--ink-4)', animation: 'bounce 1s infinite', animationDelay: '0ms' }} />
+                    <div style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--ink-4)', animation: 'bounce 1s infinite', animationDelay: '150ms' }} />
+                    <div style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--ink-4)', animation: 'bounce 1s infinite', animationDelay: '300ms' }} />
                   </div>
                 </div>
               </div>
@@ -487,14 +591,16 @@ Is there a specific aspect you'd like me to dive deeper into? I can provide deta
             <div ref={messagesEndRef} />
           </div>
 
-          {/* Quick Queries */}
-          <div className="px-4 py-2 border-t bg-white">
-            <div className="flex flex-wrap gap-2">
+          {/* Quick queries chip row */}
+          <div style={{ padding: '10px 14px', borderTop: '1px solid var(--line)', background: 'var(--surface-2)' }}>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
               {quickQueries.map((q) => (
                 <button
                   key={q.label}
+                  type="button"
                   onClick={() => handleQuickQuery(q.query)}
-                  className="px-3 py-1.5 text-xs font-medium bg-gray-100 hover:bg-gray-200 rounded-full transition-colors"
+                  className="btn sm ghost"
+                  style={{ fontSize: 11 }}
                 >
                   {q.label}
                 </button>
@@ -502,130 +608,134 @@ Is there a specific aspect you'd like me to dive deeper into? I can provide deta
             </div>
           </div>
 
-          {/* Input */}
-          <div className="p-4 bg-white border-t">
-            <div className="flex items-center gap-2">
+          {/* Input bar */}
+          <div style={{ padding: 14, borderTop: '1px solid var(--line)', background: 'var(--surface)' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
               <button
+                type="button"
                 onClick={() => setIsListening(!isListening)}
-                className={clsx(
-                  'p-3 rounded-full transition-colors',
-                  isListening
-                    ? 'bg-red-500 text-white'
-                    : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
-                )}
+                className="btn icon ghost"
+                style={{
+                  background: isListening ? 'var(--err)' : 'var(--bg-sunk)',
+                  color: isListening ? '#fff' : 'var(--ink-3)',
+                  borderColor: isListening ? 'var(--err)' : 'var(--line-strong)',
+                }}
+                aria-label={isListening ? 'Stop listening' : 'Start voice input'}
               >
-                {isListening ? <MicOff className="w-5 h-5" /> : <Mic className="w-5 h-5" />}
+                {isListening ? <MicOff className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
               </button>
               <input
                 type="text"
                 value={inputValue}
                 onChange={(e) => setInputValue(e.target.value)}
                 onKeyDown={(e) => e.key === 'Enter' && handleSend()}
-                placeholder="Ask JARVIS anything..."
-                className="flex-1 px-4 py-3 bg-gray-100 rounded-full focus:outline-none focus:ring-2 focus:ring-blue-500"
+                placeholder="Ask JARVIS anything…"
+                className="input"
+                style={{ flex: 1 }}
               />
               <button
+                type="button"
                 onClick={handleSend}
                 disabled={!inputValue.trim() || isLoading}
-                className="p-3 bg-blue-500 text-white rounded-full hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                className="btn sm primary"
               >
-                <Send className="w-5 h-5" />
+                <Send className="w-4 h-4" /> Send
               </button>
             </div>
           </div>
         </div>
 
-        {/* Insights Panel */}
-        <div className="w-80 border-l bg-white overflow-y-auto hidden laptop:block">
-          <div className="p-4 space-y-4">
-            <h2 className="font-semibold text-gray-900 flex items-center gap-2">
-              <Zap className="w-4 h-4 text-yellow-500" />
-              Live Insights
-            </h2>
+        {/* Right rail — live insights */}
+        <aside
+          style={{
+            borderLeft: '1px solid var(--line)',
+            background: 'var(--surface-2)',
+            padding: 16,
+            overflowY: 'auto',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 14,
+          }}
+        >
+          <div className="eyebrow" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <Zap className="w-3 h-3" /> Live insights
+          </div>
 
-            {insights && (
-              <>
-                {/* Revenue Card */}
-                <div className="bg-gradient-to-br from-green-50 to-emerald-50 rounded-xl p-4">
-                  <div className="flex items-center justify-between mb-2">
-                    <span className="text-sm text-gray-600">Today's Revenue</span>
-                    {insights.revenue_growth >= 0 ? (
-                      <ArrowUpRight className="w-4 h-4 text-green-600" />
-                    ) : (
-                      <ArrowDownRight className="w-4 h-4 text-red-600" />
-                    )}
-                  </div>
-                  <p className="text-2xl font-bold text-gray-900">
-                    {formatCurrency(insights.revenue_today)}
-                  </p>
-                  <p
-                    className={clsx(
-                      'text-sm',
-                      insights.revenue_growth >= 0 ? 'text-green-600' : 'text-red-600'
-                    )}
-                  >
-                    {insights.revenue_growth >= 0 ? '+' : ''}
-                    {insights.revenue_growth}% vs yesterday
-                  </p>
+          {insights && (
+            <>
+              <div style={{ background: 'var(--surface)', border: '1px solid var(--line)', borderRadius: 'var(--r-lg)', padding: 14 }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+                  <span style={{ fontSize: 11, color: 'var(--ink-4)', fontFamily: 'var(--font-mono)', textTransform: 'uppercase', letterSpacing: '.08em' }}>Today's revenue</span>
+                  {insights.revenue_growth >= 0 ? (
+                    <ArrowUpRight className="w-4 h-4" style={{ color: 'var(--ok)' }} />
+                  ) : (
+                    <ArrowDownRight className="w-4 h-4" style={{ color: 'var(--err)' }} />
+                  )}
                 </div>
-
-                {/* Stats Grid */}
-                <div className="grid grid-cols-2 gap-3">
-                  <div className="bg-blue-50 rounded-lg p-3">
-                    <ShoppingCart className="w-4 h-4 text-blue-600 mb-1" />
-                    <p className="text-lg font-bold">{insights.orders_today}</p>
-                    <p className="text-xs text-gray-600">Orders Today</p>
-                  </div>
-                  <div className="bg-orange-50 rounded-lg p-3">
-                    <Clock className="w-4 h-4 text-orange-600 mb-1" />
-                    <p className="text-lg font-bold">{insights.pending_orders}</p>
-                    <p className="text-xs text-gray-600">Pending</p>
-                  </div>
-                  <div className="bg-red-50 rounded-lg p-3">
-                    <Package className="w-4 h-4 text-red-600 mb-1" />
-                    <p className="text-lg font-bold">{insights.low_stock_count}</p>
-                    <p className="text-xs text-gray-600">Low Stock</p>
-                  </div>
-                  <div className="bg-purple-50 rounded-lg p-3">
-                    <Users className="w-4 h-4 text-purple-600 mb-1" />
-                    <p className="text-lg font-bold">{insights.staff_present}</p>
-                    <p className="text-xs text-gray-600">Staff Present</p>
-                  </div>
+                <div className="figure" style={{ fontSize: 26, color: 'var(--ink)' }}>
+                  {formatCurrency(insights.revenue_today)}
                 </div>
-              </>
-            )}
-
-            {/* Recommendations */}
-            <div className="pt-4 border-t">
-              <h3 className="font-semibold text-gray-900 flex items-center gap-2 mb-3">
-                <Target className="w-4 h-4 text-bv-gold-500" />
-                Recommendations
-              </h3>
-              <div className="space-y-3">
-                {recommendations.map((rec, index) => (
-                  <div
-                    key={index}
-                    className={clsx(
-                      'p-3 rounded-lg border-l-4',
-                      rec.priority === 'high'
-                        ? 'bg-red-50 border-red-500'
-                        : rec.priority === 'medium'
-                        ? 'bg-yellow-50 border-yellow-500'
-                        : 'bg-green-50 border-green-500'
-                    )}
-                  >
-                    <p className="text-sm font-medium text-gray-900">{rec.title}</p>
-                    <p className="text-xs text-gray-600 mt-1">{rec.description}</p>
-                    <button className="text-xs text-blue-600 font-medium mt-2 flex items-center gap-1">
-                      Take Action
-                      <ChevronRight className="w-3 h-3" />
-                    </button>
-                  </div>
-                ))}
+                <div style={{ fontSize: 12, color: insights.revenue_growth >= 0 ? 'var(--ok)' : 'var(--err)', marginTop: 3, fontFamily: 'var(--font-mono)' }}>
+                  {insights.revenue_growth >= 0 ? '+' : ''}{insights.revenue_growth}% vs yesterday
+                </div>
               </div>
+
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 8 }}>
+                <div style={{ background: 'var(--surface)', border: '1px solid var(--line)', borderRadius: 8, padding: 10 }}>
+                  <ShoppingCart className="w-3.5 h-3.5" style={{ color: 'var(--info)', marginBottom: 4 }} />
+                  <div className="figure" style={{ fontSize: 18 }}>{insights.orders_today}</div>
+                  <div style={{ fontSize: 10.5, color: 'var(--ink-4)', fontFamily: 'var(--font-mono)', textTransform: 'uppercase', letterSpacing: '.06em' }}>Orders</div>
+                </div>
+                <div style={{ background: 'var(--surface)', border: '1px solid var(--line)', borderRadius: 8, padding: 10 }}>
+                  <Clock className="w-3.5 h-3.5" style={{ color: 'var(--warn)', marginBottom: 4 }} />
+                  <div className="figure" style={{ fontSize: 18 }}>{insights.pending_orders}</div>
+                  <div style={{ fontSize: 10.5, color: 'var(--ink-4)', fontFamily: 'var(--font-mono)', textTransform: 'uppercase', letterSpacing: '.06em' }}>Pending</div>
+                </div>
+                <div style={{ background: 'var(--surface)', border: '1px solid var(--line)', borderRadius: 8, padding: 10 }}>
+                  <Package className="w-3.5 h-3.5" style={{ color: 'var(--err)', marginBottom: 4 }} />
+                  <div className="figure" style={{ fontSize: 18 }}>{insights.low_stock_count}</div>
+                  <div style={{ fontSize: 10.5, color: 'var(--ink-4)', fontFamily: 'var(--font-mono)', textTransform: 'uppercase', letterSpacing: '.06em' }}>Low stock</div>
+                </div>
+                <div style={{ background: 'var(--surface)', border: '1px solid var(--line)', borderRadius: 8, padding: 10 }}>
+                  <Users className="w-3.5 h-3.5" style={{ color: 'var(--info)', marginBottom: 4 }} />
+                  <div className="figure" style={{ fontSize: 18 }}>{insights.staff_present}</div>
+                  <div style={{ fontSize: 10.5, color: 'var(--ink-4)', fontFamily: 'var(--font-mono)', textTransform: 'uppercase', letterSpacing: '.06em' }}>Staff</div>
+                </div>
+              </div>
+            </>
+          )}
+
+          {/* Recommendations */}
+          <div style={{ paddingTop: 12, borderTop: '1px solid var(--line)' }}>
+            <div className="eyebrow" style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10 }}>
+              <Target className="w-3 h-3" /> Recommendations
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {recommendations.map((rec, index) => (
+                <div
+                  key={index}
+                  style={{
+                    padding: 10,
+                    borderRadius: 8,
+                    background: 'var(--surface)',
+                    borderLeft: `3px solid ${rec.priority === 'high' ? 'var(--err)' : rec.priority === 'medium' ? 'var(--warn)' : 'var(--ok)'}`,
+                    border: '1px solid var(--line)',
+                  }}
+                >
+                  <div style={{ fontSize: 12.5, fontWeight: 500, color: 'var(--ink)' }}>{rec.title}</div>
+                  <div style={{ fontSize: 11, color: 'var(--ink-4)', marginTop: 2, lineHeight: 1.45 }}>{rec.description}</div>
+                  <button type="button" className="btn sm ghost" style={{ marginTop: 6, fontSize: 11, padding: '0 6px', height: 22 }}>
+                    Take action <ChevronRight className="w-3 h-3" />
+                  </button>
+                </div>
+              ))}
             </div>
           </div>
-        </div>
+
+          <div style={{ marginTop: 'auto', paddingTop: 10, fontSize: 10, color: 'var(--ink-4)', lineHeight: 1.5, fontFamily: 'var(--font-mono)' }}>
+            Activity signal. For agent toggles, see docs/reference/IMS2_Agent_Architecture.html.
+          </div>
+        </aside>
       </div>
     </div>
   );
