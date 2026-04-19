@@ -1,7 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import { Loader, CheckCircle, AlertCircle, AlertTriangle } from 'lucide-react';
+import { Loader, CheckCircle, AlertCircle, AlertTriangle, Sparkles, X } from 'lucide-react';
 
 interface HealthMetric {
   field: string;
@@ -22,10 +22,41 @@ interface AuditData {
   }[];
 }
 
+interface SeoSample {
+  productId: string;
+  title?: string;
+  status: 'SUCCESS' | 'FAILED' | 'SKIPPED';
+  message?: string;
+  generated?: { seoTitle: string; seoDescription: string };
+  pushed?: boolean;
+}
+
+interface SeoBatchState {
+  running: boolean;
+  mode: 'idle' | 'dryrun' | 'batch';
+  samples: SeoSample[];
+  progress: { generated: number; failed: number; skipped: number; pushed: number };
+  startTotal: number;
+  remaining: number;
+  tokens: { in: number; out: number; cacheRead: number };
+  error: string | null;
+}
+
 export default function StoreHealthPage() {
   const [auditData, setAuditData] = useState<AuditData | null>(null);
   const [loading, setLoading] = useState(false);
   const [auditStarted, setAuditStarted] = useState(false);
+
+  const [seoState, setSeoState] = useState<SeoBatchState>({
+    running: false,
+    mode: 'idle',
+    samples: [],
+    progress: { generated: 0, failed: 0, skipped: 0, pushed: 0 },
+    startTotal: 0,
+    remaining: 0,
+    tokens: { in: 0, out: 0, cacheRead: 0 },
+    error: null,
+  });
 
   const runAudit = async () => {
     try {
@@ -65,6 +96,136 @@ export default function StoreHealthPage() {
     if (percentage >= 90) return 'Excellent';
     if (percentage >= 70) return 'Good';
     return 'Needs Work';
+  };
+
+  // Preview AI-generated SEO for the first 3 products needing it.
+  const previewSeo = async () => {
+    setSeoState((s) => ({
+      ...s,
+      running: true,
+      mode: 'dryrun',
+      samples: [],
+      error: null,
+    }));
+    try {
+      const res = await fetch('/api/store-health/generate-seo', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ limit: 3, dryRun: true, mode: 'missing_either' }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        throw new Error(data.error || 'Preview failed');
+      }
+      setSeoState((s) => ({
+        ...s,
+        running: false,
+        samples: data.results || [],
+        remaining: data.remaining ?? 0,
+        tokens: {
+          in: data.summary?.tokens?.in || 0,
+          out: data.summary?.tokens?.out || 0,
+          cacheRead: data.summary?.tokens?.cacheRead || 0,
+        },
+      }));
+    } catch (e) {
+      setSeoState((s) => ({
+        ...s,
+        running: false,
+        error: e instanceof Error ? e.message : 'Preview failed',
+      }));
+    }
+  };
+
+  // Chunked real run: repeatedly pulls 25 at a time until remaining === 0
+  // or until the user cancels by navigating away.
+  const runSeoBatch = async () => {
+    if (!confirm('Generate SEO for all products missing titles or descriptions? This calls the Anthropic API for each product and may take several minutes.')) return;
+    setSeoState((s) => ({
+      ...s,
+      running: true,
+      mode: 'batch',
+      samples: [],
+      progress: { generated: 0, failed: 0, skipped: 0, pushed: 0 },
+      tokens: { in: 0, out: 0, cacheRead: 0 },
+      error: null,
+      startTotal: 0,
+    }));
+
+    let totalIn = 0,
+      totalOut = 0,
+      totalCache = 0;
+    let tg = 0, tf = 0, ts = 0, tp = 0;
+    let loops = 0;
+    let startTotal = 0;
+    let remaining = 1;
+
+    while (remaining > 0 && loops < 200) {
+      try {
+        const res = await fetch('/api/store-health/generate-seo', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            limit: 25,
+            dryRun: false,
+            pushToShopify: true,
+            mode: 'missing_either',
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok || !data.success) {
+          setSeoState((s) => ({
+            ...s,
+            running: false,
+            error: data.error || 'Batch call failed',
+          }));
+          return;
+        }
+        tg += data.summary?.generated || 0;
+        tf += data.summary?.failed || 0;
+        ts += data.summary?.skipped || 0;
+        tp += data.summary?.pushed || 0;
+        totalIn += data.summary?.tokens?.in || 0;
+        totalOut += data.summary?.tokens?.out || 0;
+        totalCache += data.summary?.tokens?.cacheRead || 0;
+        remaining = data.remaining ?? 0;
+        if (loops === 0) {
+          startTotal = tg + tf + ts + remaining;
+        }
+        setSeoState((s) => ({
+          ...s,
+          startTotal,
+          remaining,
+          progress: { generated: tg, failed: tf, skipped: ts, pushed: tp },
+          tokens: { in: totalIn, out: totalOut, cacheRead: totalCache },
+          samples: (data.results || []).slice(0, 5),
+        }));
+        if ((data.summary?.generated || 0) + (data.summary?.skipped || 0) + (data.summary?.failed || 0) === 0) {
+          // nothing left to do
+          break;
+        }
+      } catch (e) {
+        setSeoState((s) => ({
+          ...s,
+          running: false,
+          error: e instanceof Error ? e.message : 'Batch failed',
+        }));
+        return;
+      }
+      loops++;
+    }
+
+    setSeoState((s) => ({
+      ...s,
+      running: false,
+      mode: 'idle',
+    }));
+    // Auto-refresh the audit panel so numbers reflect the new state
+    runAudit();
+  };
+
+  const cancelSeo = () => {
+    setSeoState((s) => ({ ...s, running: false, mode: 'idle' }));
   };
 
   return (
@@ -180,6 +341,156 @@ export default function StoreHealthPage() {
                   );
                 })}
               </div>
+            </div>
+
+            {/* AI SEO Generator */}
+            <div className="bg-white rounded-lg shadow-md p-6 border-2 border-purple-100">
+              <div className="flex items-start justify-between gap-4 flex-wrap mb-4">
+                <div>
+                  <h2 className="text-xl font-semibold text-gray-900 flex items-center gap-2">
+                    <Sparkles className="w-5 h-5 text-purple-600" />
+                    AI SEO Generator
+                  </h2>
+                  <p className="text-sm text-gray-600 mt-1">
+                    Fill missing SEO titles and meta descriptions using Claude (Haiku 4.5). Gaps only — existing values are never overwritten.
+                  </p>
+                </div>
+                <div className="flex gap-2">
+                  <button
+                    onClick={previewSeo}
+                    disabled={seoState.running}
+                    className="px-3 py-2 text-sm border border-purple-300 text-purple-700 bg-white rounded-lg hover:bg-purple-50 disabled:opacity-50 flex items-center gap-2"
+                  >
+                    {seoState.running && seoState.mode === 'dryrun' ? (
+                      <Loader className="w-4 h-4 animate-spin" />
+                    ) : (
+                      <Sparkles className="w-4 h-4" />
+                    )}
+                    Preview 3 samples
+                  </button>
+                  <button
+                    onClick={runSeoBatch}
+                    disabled={seoState.running}
+                    className="px-3 py-2 text-sm rounded-lg bg-purple-600 text-white hover:bg-purple-700 disabled:opacity-50 flex items-center gap-2"
+                  >
+                    {seoState.running && seoState.mode === 'batch' ? (
+                      <Loader className="w-4 h-4 animate-spin" />
+                    ) : (
+                      <Sparkles className="w-4 h-4" />
+                    )}
+                    Run full batch
+                  </button>
+                  {seoState.running && (
+                    <button
+                      onClick={cancelSeo}
+                      className="px-2 py-2 text-sm rounded-lg border border-slate-300 text-slate-600 bg-white hover:bg-slate-50"
+                      title="Stop the batch (server-side chunk in flight will finish)"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {seoState.error && (
+                <div className="mb-3 p-3 bg-red-50 border border-red-200 rounded text-sm text-red-800">
+                  {seoState.error}
+                  {/ANTHROPIC_API_KEY/i.test(seoState.error) && (
+                    <div className="mt-2 text-xs">
+                      Add ANTHROPIC_API_KEY to Railway env vars, then retry.
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {seoState.mode === 'batch' && (
+                <div className="mb-4">
+                  <div className="flex justify-between text-xs text-slate-600 mb-1">
+                    <span>
+                      {seoState.progress.generated} generated · {seoState.progress.failed} failed · {seoState.progress.skipped} skipped
+                      {seoState.progress.pushed > 0 && ` · ${seoState.progress.pushed} pushed to Shopify`}
+                    </span>
+                    <span>Remaining: {seoState.remaining}</span>
+                  </div>
+                  <div className="w-full bg-purple-100 rounded-full h-2">
+                    <div
+                      className="bg-purple-600 h-2 rounded-full transition-all"
+                      style={{
+                        width: `${
+                          seoState.startTotal > 0
+                            ? Math.min(
+                                100,
+                                (seoState.progress.generated /
+                                  seoState.startTotal) *
+                                  100
+                              )
+                            : 0
+                        }%`,
+                      }}
+                    />
+                  </div>
+                  <div className="text-[11px] text-slate-500 mt-1">
+                    Tokens in: {seoState.tokens.in.toLocaleString()} · out: {seoState.tokens.out.toLocaleString()}
+                    {seoState.tokens.cacheRead > 0 && ` · cache-hit: ${seoState.tokens.cacheRead.toLocaleString()}`}
+                  </div>
+                </div>
+              )}
+
+              {seoState.samples.length > 0 && (
+                <div className="space-y-3">
+                  <h3 className="text-xs font-semibold text-slate-500 uppercase tracking-wide">
+                    {seoState.mode === 'dryrun' ? 'Preview samples (dry run)' : 'Latest results'}
+                  </h3>
+                  {seoState.samples.map((s) => (
+                    <div
+                      key={s.productId}
+                      className={`border rounded-lg p-3 text-sm ${
+                        s.status === 'SUCCESS'
+                          ? 'border-emerald-200 bg-emerald-50/40'
+                          : s.status === 'FAILED'
+                            ? 'border-red-200 bg-red-50'
+                            : 'border-slate-200'
+                      }`}
+                    >
+                      <div className="flex items-start justify-between gap-2 flex-wrap mb-2">
+                        <span className="font-medium text-slate-900">
+                          {s.title || s.productId}
+                        </span>
+                        <span
+                          className={`text-[11px] px-2 py-0.5 rounded-full border ${
+                            s.status === 'SUCCESS'
+                              ? 'bg-emerald-100 text-emerald-700 border-emerald-200'
+                              : s.status === 'FAILED'
+                                ? 'bg-red-100 text-red-700 border-red-200'
+                                : 'bg-slate-100 text-slate-700 border-slate-200'
+                          }`}
+                        >
+                          {s.status}
+                          {s.pushed && ' · pushed'}
+                        </span>
+                      </div>
+                      {s.generated ? (
+                        <>
+                          <div>
+                            <span className="text-[11px] uppercase tracking-wide text-slate-500">
+                              SEO Title
+                            </span>
+                            <div className="text-slate-800">{s.generated.seoTitle}</div>
+                          </div>
+                          <div className="mt-1">
+                            <span className="text-[11px] uppercase tracking-wide text-slate-500">
+                              Meta Description
+                            </span>
+                            <div className="text-slate-800">{s.generated.seoDescription}</div>
+                          </div>
+                        </>
+                      ) : (
+                        <div className="text-slate-600 text-xs">{s.message}</div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
 
             {/* AI Recommendations */}
