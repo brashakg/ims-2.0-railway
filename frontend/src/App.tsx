@@ -50,6 +50,7 @@ const ReportsPage = lazy(() => import('./pages/reports/ReportsPage').then(m => (
 const SettingsPage = lazy(() => import('./pages/settings/SettingsPage').then(m => ({ default: m.SettingsPage })));
 const DayEndReport = lazy(() => import('./pages/reports/DayEndReport'));
 const OutstandingPaymentsReport = lazy(() => import('./pages/reports/OutstandingPaymentsReport'));
+const PrintPage = lazy(() => import('./pages/print/PrintPage'));
 const ReturnsPage = lazy(() => import('./pages/orders/ReturnsPage'));
 const SetupPage = lazy(() => import('./pages/settings/SetupPage'));
 
@@ -536,6 +537,18 @@ function App() {
                         allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT']}
                       >
                         <OutstandingPaymentsReport />
+                      </ProtectedRoute>
+                    }
+                  />
+
+                  {/* Print templates index — directory of all printable docs */}
+                  <Route
+                    path="print"
+                    element={
+                      <ProtectedRoute
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT', 'CASHIER', 'SALES_CASHIER', 'SALES_STAFF']}
+                      >
+                        <PrintPage />
                       </ProtectedRoute>
                     }
                   />

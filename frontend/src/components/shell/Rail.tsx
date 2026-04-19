@@ -57,7 +57,7 @@ const RAIL_GROUPS: NavItem[][] = [
   ],
   // Support + Jarvis + Setup
   [
-    { id: 'print', label: 'Print', to: '/reports/day-end', icon: 'printer' },
+    { id: 'print', label: 'Print', to: '/print', icon: 'printer' },
     { id: 'jarvis', label: 'Jarvis', to: '/jarvis', icon: 'cpu', requireRoles: ['SUPERADMIN'] },
     { id: 'setup', label: 'Store Setup', to: '/settings', icon: 'settings' },
   ],

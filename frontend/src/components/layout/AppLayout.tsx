@@ -54,6 +54,7 @@ const SEGMENT_LABELS: Record<string, string> = {
   executive: 'Executive',
   analytics: 'Analytics',
   footfall: 'Footfall',
+  print: 'Print',
 };
 
 function pathToCrumbs(pathname: string): Crumb[] {
