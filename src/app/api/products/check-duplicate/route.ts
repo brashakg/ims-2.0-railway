@@ -48,8 +48,6 @@ export async function GET(request: NextRequest) {
         title: p.title,
         brand: p.brand,
         modelNo: p.modelNo,
-        colorCode: p.colorCode,
-        frameSize: p.frameSize,
         category: p.category,
         status: p.status,
         mrp: p.mrp,

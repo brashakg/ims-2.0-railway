@@ -131,18 +131,6 @@ model Product {
   gtin String?
   upc  String?
 
-  // ── LEGACY fields (kept for backward compat with existing data) ──
-  // These move to ProductVariant for new products
-  colorCode   String?
-  frameColor  String?
-  templeColor String?
-  frameSize   String?
-  bridge      String?
-  templeLength String?
-  weight      String?
-  lensColour  String?
-  tint        String?
-
   // Relations
   createdById String?
   createdBy   User?    @relation(fields: [createdById], references: [id])

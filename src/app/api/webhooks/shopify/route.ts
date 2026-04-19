@@ -116,12 +116,12 @@ async function handleProductCreateUpdate(payload: any) {
     compareAtPrice: mrp,
   };
 
-  // Add parsed tag fields if present
+  // Add parsed tag fields if present.
+  // Legacy variant-level fields (frameColor, frameSize) are NOT written to
+  // Product anymore — they live on ProductVariant.
   if (parsedTags.shape) updateData.shape = parsedTags.shape;
-  if (parsedTags.frameColor) updateData.frameColor = parsedTags.frameColor;
   if (parsedTags.frameMaterial) updateData.frameMaterial = parsedTags.frameMaterial;
   if (parsedTags.frameType) updateData.frameType = parsedTags.frameType;
-  if (parsedTags.frameSize) updateData.frameSize = parsedTags.frameSize;
   if (parsedTags.gender) updateData.gender = parsedTags.gender;
   if (parsedTags.collection) updateData.collection = parsedTags.collection;
   if (parsedTags.style) updateData.style = parsedTags.style;
