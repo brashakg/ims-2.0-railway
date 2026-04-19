@@ -1,0 +1,262 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>IMS 2.0 · Print templates</title>
+<meta name="viewport" content="width=1440" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="shell/tokens.css" />
+<link rel="stylesheet" href="shell/shell.css" />
+<style>
+.pr-body {
+  display: grid;
+  grid-template-columns: 240px 1fr 320px;
+  height: calc(100vh - 52px);
+  min-height: 0;
+}
+
+/* Left nav */
+.pr-nav { background: var(--surface); border-right: 1px solid var(--line); padding: 20px 12px; overflow-y: auto; }
+.pr-nav .eyebrow { padding: 0 10px 8px; }
+.pr-tpl {
+  display: flex; align-items: center; gap: 12px; padding: 10px;
+  border-radius: 8px; cursor: pointer; margin-bottom: 2px;
+  border: 1px solid transparent; transition: background .1s, border-color .1s;
+}
+.pr-tpl:hover { background: var(--bg-sunk); }
+.pr-tpl.on { background: var(--ink); color: #fff; }
+.pr-tpl .mini {
+  width: 32px; height: 42px; border-radius: 3px;
+  background: #fff; border: 1px solid var(--line-strong);
+  flex-shrink: 0; position: relative; overflow: hidden;
+}
+.pr-tpl.on .mini { border-color: #3a3a37; background: #1a1a19; }
+.pr-tpl .mini::before {
+  content: ''; position: absolute; left: 4px; right: 4px; top: 4px;
+  height: 4px; border-radius: 1px; background: var(--ink-5);
+}
+.pr-tpl.on .mini::before { background: #4a4a46; }
+.pr-tpl .mini::after {
+  content: ''; position: absolute; left: 4px; right: 10px; top: 12px; bottom: 6px;
+  background: linear-gradient(to bottom, var(--line) 0 1px, transparent 1px 4px);
+  background-size: 100% 4px;
+}
+.pr-tpl.on .mini::after { background: linear-gradient(to bottom, #3a3a37 0 1px, transparent 1px 4px); background-size: 100% 4px; }
+.pr-tpl.thermal .mini { width: 22px; height: 44px; }
+.pr-tpl .t { font: 600 13px/1.2 var(--font-sans); }
+.pr-tpl.on .t { color: #fff; }
+.pr-tpl .s { font-family: var(--font-mono); font-size: 10.5px; color: var(--ink-4); margin-top: 2px; text-transform: uppercase; letter-spacing: .08em; }
+.pr-tpl.on .s { color: rgba(255,255,255,.55); }
+.pr-tpl .tag { margin-left: auto; font: 500 9.5px/1 var(--font-mono); color: var(--ink-4); border: 1px solid var(--line); padding: 3px 5px; border-radius: 3px; text-transform: uppercase; letter-spacing: .06em; }
+.pr-tpl.on .tag { border-color: #3a3a37; color: rgba(255,255,255,.55); }
+
+/* Center workbench */
+.pr-stage {
+  overflow: auto; padding: 40px;
+  background:
+    radial-gradient(circle at 20% 10%, rgba(86,95,227,.04), transparent 40%),
+    var(--bg);
+  background-attachment: fixed;
+  display: grid; place-items: center;
+}
+.pr-stage-inner {
+  display: flex; flex-direction: column; align-items: center; gap: 28px;
+  min-height: 100%;
+}
+.paper {
+  background: #fff; box-shadow: 0 30px 60px -20px rgba(0,0,0,.22), 0 6px 20px -10px rgba(0,0,0,.12);
+  position: relative; overflow: hidden;
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: 12px;
+}
+.paper.a4       { width: 794px; min-height: 1123px; }
+.paper.a5       { width: 559px; min-height: 794px; }
+.paper.a6       { width: 420px; min-height: 594px; }
+.paper.thermal  { width: 302px; min-height: 460px; font-size: 11px; }
+
+.pr-caption {
+  font: 500 11px/1 var(--font-mono); color: var(--ink-4);
+  text-transform: uppercase; letter-spacing: .12em; margin-top: 6px;
+  display: flex; gap: 10px; align-items: center;
+}
+.pr-caption .dim { color: var(--ink-3); }
+
+/* Right inspector */
+.pr-insp { background: var(--surface); border-left: 1px solid var(--line); padding: 20px; overflow-y: auto; }
+.pr-insp h3 { margin: 0 0 4px; font: 600 14px/1.2 var(--font-sans); }
+.pr-insp .sub { font-size: 12px; color: var(--ink-4); margin-bottom: 18px; line-height: 1.5; }
+.pr-insp-sec { margin-bottom: 22px; }
+.pr-insp-sec .lbl { font: 500 10px/1 var(--font-mono); color: var(--ink-4); text-transform: uppercase; letter-spacing: .1em; margin-bottom: 10px; }
+
+.meta-grid { display: grid; grid-template-columns: auto 1fr; gap: 6px 14px; font-size: 11.5px; }
+.meta-grid .k { color: var(--ink-4); }
+.meta-grid .v { font-family: var(--font-mono); color: var(--ink); }
+
+.field-list { font-size: 12px; }
+.field-list .row { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px dashed var(--line); }
+.field-list .row:last-child { border-bottom: 0; }
+.field-list .k { color: var(--ink-3); }
+.field-list .v { font-family: var(--font-mono); font-size: 10.5px; color: var(--ink-4); }
+
+.pr-btn-stack { display: grid; gap: 8px; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+
+<script src="shell/data.js"></script>
+<script type="text/babel" src="shell/shell.jsx"></script>
+<script type="text/babel" src="print/templates.jsx"></script>
+<script type="text/babel">
+const { useState } = React;
+
+const TEMPLATES = [
+  { id:'invoice', n:'Tax invoice',      sub:'A4 · customer copy',    size:'A4',      kind:'paper',   Cmp: TplInvoice,
+    printers:['Laser · HP-M404 (A4)','Thermal · Epson TM-T82'], fields:[['invoice.number','system'],['cust.*','POS step 1'],['lines[]','POS step 3'],['tax.cgst/sgst','GST engine'],['doctor.rx','Clinical'],['sign.signatory','store config']] },
+  { id:'rx',      n:'Prescription card',sub:'A5 · customer keepsake',size:'A5',      kind:'paper',   Cmp: TplRxCard,
+    printers:['Laser · HP-M404 (A5)'], fields:[['patient.*','Clinical step 1'],['rx.{sph,cyl,axis,add}','refraction'],['findings','clinical notes'],['doctor.signature','e-sign']] },
+  { id:'job',     n:'Lens job card',    sub:'A5 · lab dispatch',     size:'A5',      kind:'paper',   Cmp: TplJobCard,
+    printers:['Laser · Lab-Canon-LBP','Thermal · Epson TM-T82'], fields:[['job.priority','POS queue'],['rx.*','Clinical'],['frame.sku','POS step 3'],['lens.spec','optician'],['checklist.steps[]','workflow']] },
+  { id:'token',   n:'Queue token',      sub:'80mm thermal',          size:'80mm',    kind:'thermal', Cmp: TplToken,
+    printers:['Thermal · Epson TM-T82'], fields:[['token.number','queue engine'],['chamber','rota'],['eta','predictor']] },
+  { id:'challan', n:'Delivery challan', sub:'A4 · inter-store',      size:'A4',      kind:'paper',   Cmp: TplChallan,
+    printers:['Laser · HP-M404 (A4)'], fields:[['dispatch.consignor/consignee','warehouse'],['lines[]','WH pick list'],['eway.number','GST portal'],['transport.vehicle','logistics']] },
+  { id:'credit',  n:'Credit note',      sub:'A5 · refund / exchange',size:'A5',      kind:'paper',   Cmp: TplCreditNote,
+    printers:['Laser · HP-M404 (A5)'], fields:[['cn.againstInvoice','POS lookup'],['reason','SOP-CX-04'],['approver','manager PIN'],['wallet.credit','ledger']] },
+];
+
+function App() {
+  const [sel, setSel] = useState('invoice');
+  const tpl = TEMPLATES.find(t => t.id === sel);
+  const Cmp = tpl.Cmp;
+
+  const doPrint = () => {
+    const stage = document.querySelector('.pr-stage');
+    const html = stage.querySelector('[data-doc]').outerHTML;
+    const stylesheets = [...document.querySelectorAll('link[rel=stylesheet]')].map(l => l.outerHTML).join('');
+    const inline = [...document.querySelectorAll('style')].map(s => s.outerHTML).join('');
+    const w = window.open('', '_blank', 'width=900,height=1200');
+    w.document.write(`<!doctype html><html><head><title>${tpl.n}</title>${stylesheets}${inline}<style>body{margin:0;background:#fff} .paper{box-shadow:none!important;margin:0 auto}</style></head><body>${html}<script>setTimeout(()=>window.print(),500)<\/script></body></html>`);
+    w.document.close();
+  };
+
+  return (
+    <Shell active="print" crumbs={['Print templates', tpl.n]} role="Store Manager"
+      actions={<>
+        <button className="btn sm"><Icon.file width="14" height="14" /> Edit template</button>
+        <button className="btn sm primary" onClick={doPrint}><Icon.printer width="14" height="14" /> Print preview</button>
+      </>}>
+      <div className="pr-body">
+        {/* Left: template list */}
+        <nav className="pr-nav">
+          <div className="eyebrow">Documents · {TEMPLATES.length} active</div>
+          {TEMPLATES.map(t => (
+            <div key={t.id} className={'pr-tpl' + (sel===t.id?' on':'') + (t.kind==='thermal'?' thermal':'')} onClick={()=>setSel(t.id)}>
+              <div className="mini" />
+              <div>
+                <div className="t">{t.n}</div>
+                <div className="s">{t.size}</div>
+              </div>
+              <span className="tag">{t.kind}</span>
+            </div>
+          ))}
+          <div className="divider" />
+          <div className="eyebrow">Deprecated</div>
+          <div className="pr-tpl" style={{opacity:.5}}>
+            <div className="mini"/>
+            <div>
+              <div className="t">Loyalty card</div>
+              <div className="s">PVC · 54×86</div>
+            </div>
+            <span className="tag">v1 only</span>
+          </div>
+        </nav>
+
+        {/* Center: the paper */}
+        <div className="pr-stage">
+          <div className="pr-stage-inner">
+            <Cmp />
+            <div className="pr-caption">
+              <span>{tpl.n}</span><span className="dim">·</span>
+              <span className="dim">{tpl.size}{tpl.size==='A4'?' · 210 × 297 mm':tpl.size==='A5'?' · 148 × 210 mm':' · 80 × ~120 mm'}</span>
+              <span className="dim">·</span>
+              <span className="dim">preview at 1.0×</span>
+            </div>
+          </div>
+        </div>
+
+        {/* Right: inspector */}
+        <aside className="pr-insp">
+          <h3>{tpl.n}</h3>
+          <div className="sub">{tpl.sub}. Print-ready, GST-compliant, renders identically on any Chromium browser. Field sources listed below come from the IMS data model.</div>
+
+          <div className="pr-insp-sec">
+            <div className="lbl">Document meta</div>
+            <div className="meta-grid">
+              <span className="k">Template ID</span><span className="v">tpl.{tpl.id}.v3</span>
+              <span className="k">Size</span><span className="v">{tpl.size}</span>
+              <span className="k">Last edited</span><span className="v">12-Apr-2026</span>
+              <span className="k">Author</span><span className="v">Priya B.</span>
+              <span className="k">Used · 30d</span><span className="v">{ {invoice:1284, rx:312, job:218, token:942, challan:24, credit:18}[tpl.id] }×</span>
+            </div>
+          </div>
+
+          <div className="pr-insp-sec">
+            <div className="lbl">Data bindings</div>
+            <div className="field-list">
+              {tpl.fields.map(([k,v],i) => (
+                <div key={i} className="row"><span className="k mono">{'{{ '+k+' }}'}</span><span className="v">{v}</span></div>
+              ))}
+            </div>
+          </div>
+
+          <div className="pr-insp-sec">
+            <div className="lbl">Compatible printers</div>
+            {tpl.printers.map(p => (
+              <div key={p} style={{display:'flex', alignItems:'center', gap:8, padding:'6px 0', fontSize:12}}>
+                <Icon.printer width="14" height="14" />
+                <span>{p}</span>
+                <span style={{marginLeft:'auto', fontFamily:'var(--font-mono)', fontSize:10, color:'var(--ok)'}}>● ready</span>
+              </div>
+            ))}
+          </div>
+
+          <div className="pr-insp-sec">
+            <div className="lbl">Actions</div>
+            <div className="pr-btn-stack">
+              <button className="btn block lg primary" onClick={doPrint}><Icon.printer width="14" height="14" /> Print preview</button>
+              <button className="btn block"><Icon.file width="14" height="14" /> Download PDF</button>
+              <button className="btn block">Send test to Sonia</button>
+              <button className="btn block ghost">Duplicate as draft</button>
+            </div>
+          </div>
+
+          <div className="pr-insp-sec" style={{background:'var(--bg-sunk)', margin:'0 -20px', padding:'14px 20px', borderTop:'1px solid var(--line)', borderBottom:'1px solid var(--line)'}}>
+            <div className="lbl" style={{color:'var(--ink-3)'}}>SOP reference</div>
+            <div style={{fontSize:12, color:'var(--ink-2)', lineHeight:1.55, marginBottom:8}}>
+              {tpl.id==='invoice' && 'SOP-FIN-01 · every sale generates a tax invoice. Must include HSN, GST split, place of supply.'}
+              {tpl.id==='rx'      && 'SOP-CLN-02 · Rx card handed to customer after every eye exam, even if no purchase made.'}
+              {tpl.id==='job'     && 'SOP-LAB-03 · job card accompanies lens to lab. Customer copy stapled to invoice.'}
+              {tpl.id==='token'   && 'SOP-CLN-01 · token issued on walk-in or appointment confirm. Auto-called by queue agent.'}
+              {tpl.id==='challan' && 'SOP-INV-07 · all inter-store stock movement must carry challan + e-way bill if > ₹50k.'}
+              {tpl.id==='credit'  && 'SOP-CX-04 · refunds and exchanges require manager approval and a credit note within 24h.'}
+            </div>
+            <a href="tasks.html" style={{fontSize:11, fontFamily:'var(--font-mono)', color:'var(--bv)', textTransform:'uppercase', letterSpacing:'.1em'}}>View SOP tasks →</a>
+          </div>
+        </aside>
+      </div>
+    </Shell>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>

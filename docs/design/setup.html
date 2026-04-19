@@ -1,0 +1,289 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>IMS 2.0 · Store Setup</title>
+<meta name="viewport" content="width=1440" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="shell/tokens.css" />
+<link rel="stylesheet" href="shell/shell.css" />
+<style>
+.s-body { display: grid; grid-template-columns: 240px 1fr 380px; height: calc(100vh - 52px); min-height: 0; }
+.s-nav { border-right: 1px solid var(--line); background: var(--surface); padding: 20px 12px; overflow-y: auto; }
+.s-content { overflow-y: auto; padding: 28px 32px; background: var(--bg); }
+.s-audit { border-left: 1px solid var(--line); background: var(--surface); overflow-y: auto; padding: 20px; }
+
+.s-nav .eyebrow { padding: 0 10px 8px; }
+.s-nav a {
+  display: flex; align-items: center; gap: 10px; padding: 8px 10px;
+  font-size: 13px; color: var(--ink-2); text-decoration: none; border-radius: 6px;
+  margin-bottom: 1px; cursor: pointer;
+}
+.s-nav a:hover { background: var(--bg-sunk); }
+.s-nav a.on { background: var(--ink); color: #fff; }
+.s-nav a .ct {
+  margin-left: auto; font-family: var(--font-mono); font-size: 10.5px;
+  color: var(--ink-4); background: var(--bg-sunk); padding: 1px 6px; border-radius: 3px;
+}
+.s-nav a.on .ct { background: #2a2a28; color: #9a9a92; }
+
+.s-head h2 { margin: 0 0 4px; font-family: var(--font-display); font-size: 32px; letter-spacing: -0.01em; }
+.s-head .sub { color: var(--ink-3); font-size: 13px; margin-bottom: 20px; max-width: 600px; line-height: 1.55; }
+
+/* Toggle row */
+.s-section { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-lg); margin-bottom: 14px; }
+.s-section-head { padding: 16px 20px; border-bottom: 1px solid var(--line); display: flex; align-items: center; }
+.s-section-head h3 { margin: 0; font: 600 13px/1.2 var(--font-sans); }
+.s-section-head .hint { margin-left: 12px; color: var(--ink-4); font-size: 12px; }
+.s-section-head .spacer { flex: 1; }
+
+.s-row {
+  display: grid; grid-template-columns: 1fr auto; gap: 14px;
+  padding: 14px 20px; border-bottom: 1px solid var(--line-soft);
+  align-items: center;
+}
+.s-row:last-child { border-bottom: 0; }
+.s-row .t { font: 500 13px/1.3 var(--font-sans); }
+.s-row .d { font-size: 12px; color: var(--ink-4); margin-top: 2px; line-height: 1.45; max-width: 560px; }
+.s-row .sr { font: 500 10px/1 var(--font-mono); color: var(--ink-4); margin-top: 5px; text-transform: uppercase; letter-spacing: .08em; }
+.s-row .sr.locked { color: var(--warn); }
+.s-row .changed { font: 500 10px/1 var(--font-mono); color: var(--bv); background: var(--bv-soft); padding: 3px 6px; border-radius: 3px; text-transform: uppercase; letter-spacing: .06em; display:inline-block; margin-top:6px;}
+
+.tgl {
+  width: 40px; height: 22px; border-radius: 11px; background: var(--line-strong);
+  position: relative; cursor: pointer; transition: background .18s;
+  flex-shrink: 0;
+}
+.tgl::after {
+  content: ''; position: absolute; top: 2px; left: 2px;
+  width: 18px; height: 18px; border-radius: 50%; background: #fff;
+  box-shadow: 0 1px 2px rgba(0,0,0,.25); transition: transform .18s;
+}
+.tgl.on { background: var(--ok); }
+.tgl.on::after { transform: translateX(18px); }
+
+.s-row select, .s-row input.val {
+  height: 34px; padding: 0 10px; border: 1px solid var(--line-strong);
+  border-radius: 6px; background: var(--surface); font-size: 12.5px;
+  min-width: 160px;
+}
+
+/* Audit log */
+.s-audit .eyebrow { margin-bottom: 10px; }
+.audit-row {
+  padding: 12px 0; border-bottom: 1px solid var(--line-soft); font-size: 12.5px;
+}
+.audit-row .ts { font-family: var(--font-mono); font-size: 10.5px; color: var(--ink-4); margin-bottom: 3px; display: flex; gap: 8px; }
+.audit-row .msg { color: var(--ink); line-height: 1.45; }
+.audit-row .msg b { color: var(--ink); font-weight: 600; }
+.audit-row .diff {
+  margin-top: 6px; padding: 6px 8px; background: var(--bg-sunk);
+  border-radius: 4px; font-family: var(--font-mono); font-size: 11px;
+}
+.audit-row .diff .was { color: var(--err); text-decoration: line-through; }
+.audit-row .diff .now { color: var(--ok); }
+.audit-row .who { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: var(--ink-3); margin-top: 4px; }
+.audit-row .who .av { width: 16px; height: 16px; border-radius: 50%; background: var(--ink); color: #fff; display: grid; place-items: center; font-size: 9px; font-weight: 600; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+
+<script src="shell/data.js"></script>
+<script type="text/babel" src="shell/shell.jsx"></script>
+<script type="text/babel">
+const { useState } = React;
+
+const SECTIONS = [
+  { id:'billing',   n:'Billing & GST',      c: 12 },
+  { id:'pos',       n:'POS behaviour',      c: 14 },
+  { id:'clinical',  n:'Clinical & Rx',      c:  9 },
+  { id:'inventory', n:'Inventory',          c: 16 },
+  { id:'pricing',   n:'Pricing & discounts', c: 11 },
+  { id:'print',     n:'Print templates',    c:  7 },
+  { id:'roles',     n:'Roles & permissions', c:  8 },
+  { id:'jarvis',    n:'Jarvis agents',      c:  8 },
+  { id:'integrations', n:'Integrations',    c: 10 },
+  { id:'notify',    n:'Notifications',      c:  6 },
+];
+
+function Toggle({ on, set }) { return <div className={'tgl' + (on ? ' on' : '')} onClick={() => set(!on)} />; }
+
+function Row({ title, desc, sr, control, locked, changed }) {
+  return (
+    <div className="s-row">
+      <div>
+        <div className="t">{title}</div>
+        {desc && <div className="d">{desc}</div>}
+        <div className="row" style={{gap:8}}>
+          {sr && <div className={'sr' + (locked ? ' locked' : '')}>{locked && '🔒 '}{sr}</div>}
+          {changed && <span className="changed">Edited {changed}</span>}
+        </div>
+      </div>
+      <div>{control}</div>
+    </div>
+  );
+}
+
+function Setup() {
+  const [sec, setSec] = useState('pos');
+  const [toggles, setToggles] = useState({
+    prompt_cust: true, req_phone: true, allow_walkin: true, allow_price_override: false,
+    req_exit_survey: true, allow_advance: true, split_any: true, auto_attach_rx: true,
+    round_off: true, drawer_close_count: true, merge_family: true, fallback_offline: true,
+  });
+  const tg = (k) => setToggles({...toggles, [k]: !toggles[k]});
+
+  return (
+    <Shell active="setup" crumbs={['Store Setup', SECTIONS.find(s=>s.id===sec).n]} role="Store Manager"
+      actions={<>
+        <button className="btn sm"><Icon.file width="14" height="14" /> Export config</button>
+        <button className="btn sm primary">Save all</button>
+      </>}>
+      <div className="s-body">
+        {/* Nav */}
+        <nav className="s-nav">
+          <div className="eyebrow">Configuration · 84 settings</div>
+          {SECTIONS.map(s => (
+            <a key={s.id} className={sec===s.id?'on':''} onClick={()=>setSec(s.id)}>
+              {s.n}<span className="ct">{s.c}</span>
+            </a>
+          ))}
+          <div className="divider" />
+          <div className="eyebrow">Dangerous</div>
+          <a style={{color:'var(--err)'}}><Icon.lock width="14" height="14" /> Close this store</a>
+          <a style={{color:'var(--err)'}}>Force full resync</a>
+        </nav>
+
+        {/* Content */}
+        <div className="s-content">
+          <div className="s-head">
+            <div className="eyebrow" style={{marginBottom:6}}>{SECTIONS.find(s=>s.id===sec).n}</div>
+            <h2>POS behaviour</h2>
+            <div className="sub">Controls how the checkout flow behaves for this store. Some settings are <strong>locked at HQ level</strong> — changes require superadmin approval and are recorded in audit.</div>
+          </div>
+
+          {sec === 'pos' && (
+            <>
+              <div className="s-section">
+                <div className="s-section-head">
+                  <h3>Customer capture</h3>
+                  <span className="hint">Required for loyalty + Rx reconciliation</span>
+                </div>
+                <Row title="Prompt for customer at step 1" desc="If off, cashier can skip straight to product scan as walk-in." sr="POS.CUST_PROMPT"
+                     control={<Toggle on={toggles.prompt_cust} set={()=>tg('prompt_cust')} />} changed="2d ago" />
+                <Row title="Require phone number" desc="Walk-ins pass-through; all named customers must have a valid 10-digit phone for SMS receipts." sr="POS.PHONE_REQ"
+                     control={<Toggle on={toggles.req_phone} set={()=>tg('req_phone')} />} />
+                <Row title="Allow walk-in mode" desc="Instant checkout without creating a customer record." sr="POS.WALKIN" locked
+                     control={<Toggle on={toggles.allow_walkin} set={()=>tg('allow_walkin')} />} />
+                <Row title="Merge into family on match" desc="When phone matches an existing household, auto-offer to link as family member." sr="POS.FAMILY_MERGE"
+                     control={<Toggle on={toggles.merge_family} set={()=>tg('merge_family')} />} />
+              </div>
+
+              <div className="s-section">
+                <div className="s-section-head"><h3>Prescription at checkout</h3></div>
+                <Row title="Auto-attach latest Rx" desc="Pulls the customer's most recent prescription into step 2, editable by optometrist role only." sr="POS.RX_AUTO"
+                     control={<Toggle on={toggles.auto_attach_rx} set={()=>tg('auto_attach_rx')} />} />
+                <Row title="Rx reconciliation enforcement" desc="Block confirmation if Rx Reconciler flags mismatch beyond tolerance." sr="POS.RX_ENFORCE"
+                     control={<select defaultValue="warn"><option>off</option><option value="warn">warn only</option><option>hard block</option></select>} />
+                <Row title="External Rx upload required" desc="If Rx is from non-Better-Vision doctor, require scanned upload before sale." sr="POS.RX_EXT_REQ"
+                     control={<Toggle on={true} set={()=>{}} />} />
+              </div>
+
+              <div className="s-section">
+                <div className="s-section-head"><h3>Pricing & tenders</h3></div>
+                <Row title="Allow cashier price override" desc="When enabled, cashier can edit the line price with manager PIN." sr="POS.PRICE_OVR" locked
+                     control={<Toggle on={toggles.allow_price_override} set={()=>tg('allow_price_override')} />} changed="by Ops Head · 11 Apr" />
+                <Row title="Max discount · cashier" desc="Percentage cap without approval." sr="POS.DISC_MAX_C"
+                     control={<select defaultValue="5"><option>0</option><option>5</option><option>10</option></select>} />
+                <Row title="Allow split across any tender" desc="Mix card + UPI + cash + advance freely on one cart." sr="POS.SPLIT_ANY"
+                     control={<Toggle on={toggles.split_any} set={()=>tg('split_any')} />} />
+                <Row title="Advance / job-order balance" desc="Lens job orders can be confirmed with partial payment; balance due on pickup." sr="POS.ADV_ALLOW"
+                     control={<Toggle on={toggles.allow_advance} set={()=>tg('allow_advance')} />} />
+                <Row title="Round-off at 50p" desc="Final tender rounded to nearest rupee; delta posted to Rounding Expense." sr="POS.ROUND"
+                     control={<Toggle on={toggles.round_off} set={()=>tg('round_off')} />} />
+              </div>
+
+              <div className="s-section">
+                <div className="s-section-head"><h3>Close-of-shift</h3></div>
+                <Row title="Drawer count mandatory" desc="Blocks POS logout until drawer counted and variance signed." sr="POS.DRAWER_CLOSE"
+                     control={<Toggle on={toggles.drawer_close_count} set={()=>tg('drawer_close_count')} />} />
+                <Row title="Variance threshold · auto-task" desc="Variance above this triggers SOP-FIN-02 escalation." sr="POS.VAR_THRESH"
+                     control={<select defaultValue="50"><option>25</option><option>50</option><option>100</option></select>} />
+                <Row title="Require exit NPS survey" desc="Prompt customer for NPS on printed receipt QR." sr="POS.NPS_PROMPT"
+                     control={<Toggle on={toggles.req_exit_survey} set={()=>tg('req_exit_survey')} />} />
+                <Row title="Offline fallback mode" desc="Continue billing during connectivity loss; sync when online." sr="POS.OFFLINE"
+                     control={<Toggle on={toggles.fallback_offline} set={()=>tg('fallback_offline')} />} />
+              </div>
+            </>
+          )}
+
+          {sec !== 'pos' && (
+            <div className="s-section" style={{padding:40, textAlign:'center'}}>
+              <div className="eyebrow" style={{marginBottom:10}}>{SECTIONS.find(s=>s.id===sec).n}</div>
+              <div style={{fontFamily:'var(--font-display)', fontSize:22, marginBottom:8}}>
+                {SECTIONS.find(s=>s.id===sec).c} settings in this section
+              </div>
+              <div className="hint">Switch back to <b>POS behaviour</b> for a fully wired example.</div>
+            </div>
+          )}
+        </div>
+
+        {/* Audit log */}
+        <aside className="s-audit">
+          <div className="eyebrow">Audit log · this store</div>
+          <div className="hint" style={{marginBottom:14}}>Every configuration change is recorded, versioned, and reversible for 90 days.</div>
+
+          <div className="audit-row">
+            <div className="ts"><span>19 Apr · 11:42</span><span className="chip">config</span></div>
+            <div className="msg"><b>POS.RX_ENFORCE</b> changed</div>
+            <div className="diff"><span className="was">off</span> → <span className="now">warn only</span></div>
+            <div className="who"><span className="av">SK</span>Sonia K. · Store Manager</div>
+          </div>
+
+          <div className="audit-row">
+            <div className="ts"><span>17 Apr · 09:12</span><span className="chip accent">jarvis</span></div>
+            <div className="msg">Agent <b>NPS Nudger</b> paused</div>
+            <div className="who"><span className="av" style={{background:'var(--bv)'}}>P</span>Priya B. · Ops Head</div>
+          </div>
+
+          <div className="audit-row">
+            <div className="ts"><span>15 Apr · 18:28</span><span className="chip">print</span></div>
+            <div className="msg"><b>PRINT.INVOICE_TEMPLATE</b> changed</div>
+            <div className="diff"><span className="was">classic-v1</span> → <span className="now">classic-v2-gstready</span></div>
+            <div className="who"><span className="av" style={{background:'var(--bv)'}}>P</span>Priya B. · Ops Head</div>
+          </div>
+
+          <div className="audit-row">
+            <div className="ts"><span>11 Apr · 14:02</span><span className="chip warn">locked</span></div>
+            <div className="msg"><b>POS.PRICE_OVR</b> set to off · HQ lock</div>
+            <div className="who"><span className="av" style={{background:'var(--err)'}}>R</span>Rajat D. · Superadmin</div>
+          </div>
+
+          <div className="audit-row">
+            <div className="ts"><span>08 Apr · 10:11</span><span className="chip">roles</span></div>
+            <div className="msg">Role <b>Cashier-Trainee</b> created</div>
+            <div className="who"><span className="av">SK</span>Sonia K. · Store Manager</div>
+          </div>
+
+          <div className="audit-row">
+            <div className="ts"><span>04 Apr · 17:45</span><span className="chip">billing</span></div>
+            <div className="msg"><b>GST_RATE_CL</b> updated</div>
+            <div className="diff"><span className="was">12%</span> → <span className="now">18%</span></div>
+            <div className="who"><span className="av" style={{background:'var(--err)'}}>R</span>Rajat D. · Superadmin</div>
+          </div>
+        </aside>
+      </div>
+    </Shell>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<Setup />);
+</script>
+</body>
+</html>

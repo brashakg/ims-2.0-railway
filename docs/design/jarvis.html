@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>IMS 2.0 · Jarvis</title>
+<meta name="viewport" content="width=1440" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="shell/tokens.css" />
+<link rel="stylesheet" href="shell/shell.css" />
+<style>
+.j-body { padding: 24px 28px; overflow-y: auto; height: calc(100vh - 52px); background: var(--bg); }
+
+.j-hero {
+  background: var(--ink); color: #fff;
+  border-radius: var(--r-xl);
+  padding: 32px 32px 28px;
+  margin-bottom: 20px;
+  display: grid; grid-template-columns: 1fr auto; gap: 32px; align-items: end;
+  position: relative; overflow: hidden;
+}
+.j-hero::before {
+  content: ''; position: absolute; inset: 0;
+  background:
+    radial-gradient(400px 180px at 85% 0%, rgba(205,32,26,.22), transparent 60%),
+    radial-gradient(600px 300px at 30% 110%, rgba(255,255,255,.04), transparent 60%);
+  pointer-events: none;
+}
+.j-hero > * { position: relative; }
+.j-hero .eyebrow { color: #9a9a92; margin-bottom: 12px; }
+.j-hero h2 { margin: 0 0 10px; font-family: var(--font-display); font-size: 44px; line-height: 1.02; letter-spacing: -0.02em; max-width: 600px; }
+.j-hero p { margin: 0; color: #b6b6ae; max-width: 520px; font-size: 13.5px; line-height: 1.55; }
+.j-hero .pulse {
+  display: flex; gap: 18px; font-family: var(--font-mono); font-size: 11px;
+  color: #8a8a82; margin-top: 16px; text-transform: uppercase; letter-spacing: .08em;
+}
+.j-hero .pulse .v { font-family: var(--font-figure); font-weight: 600; font-variant-numeric: tabular-nums; font-size: 26px; color: #fff; letter-spacing: -.02em; text-transform: none; }
+.j-hero .pulse > div { padding-right: 18px; border-right: 1px solid #2e2e2b; }
+.j-hero .pulse > div:last-child { border-right: 0; }
+
+.j-grid {
+  display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px;
+  margin-bottom: 24px;
+}
+
+.agent-card {
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-lg);
+  padding: 18px; position: relative; overflow: hidden;
+  display: grid; grid-template-columns: 48px 1fr auto; gap: 14px; align-items: flex-start;
+}
+.agent-card .ic {
+  width: 48px; height: 48px; border-radius: 10px;
+  background: var(--ink); color: #fff;
+  display: grid; place-items: center; font-family: var(--font-mono); font-size: 12px; font-weight: 600;
+  letter-spacing: .04em;
+}
+.agent-card .ic.off { background: var(--bg-sunk); color: var(--ink-4); }
+.agent-card h3 { margin: 0 0 3px; font: 600 14px/1.2 var(--font-sans); }
+.agent-card .desc { font-size: 12.5px; color: var(--ink-3); line-height: 1.5; margin-bottom: 10px; }
+.agent-card .meta { display: flex; gap: 14px; font-size: 11px; color: var(--ink-4); font-family: var(--font-mono); }
+.agent-card .meta strong { color: var(--ink); font-family: var(--font-sans); font-weight: 600; font-size: 12px; }
+.agent-card.off .ic { filter: grayscale(1); opacity: .6; }
+
+/* Toggle */
+.tgl {
+  width: 40px; height: 22px; border-radius: 11px; background: var(--line-strong);
+  position: relative; cursor: pointer; transition: background .18s;
+  flex-shrink: 0;
+}
+.tgl::after {
+  content: ''; position: absolute; top: 2px; left: 2px;
+  width: 18px; height: 18px; border-radius: 50%; background: #fff;
+  box-shadow: 0 1px 2px rgba(0,0,0,.25);
+  transition: transform .18s;
+}
+.tgl.on { background: var(--ok); }
+.tgl.on::after { transform: translateX(18px); }
+
+.schedule-pill {
+  display: inline-flex; align-items: center; gap: 4px;
+  font: 500 10px/1 var(--font-mono); color: var(--ink-4);
+  padding: 3px 6px; border-radius: 4px; background: var(--bg-sunk);
+  text-transform: uppercase; letter-spacing: .06em;
+}
+
+/* Log */
+.log-card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-lg); }
+.log-row {
+  display: grid; grid-template-columns: 90px 110px 1fr 90px 100px; gap: 12px; align-items: center;
+  padding: 10px 16px; border-bottom: 1px solid var(--line-soft); font-size: 12.5px;
+}
+.log-row:last-child { border-bottom: 0; }
+.log-row .ts { font-family: var(--font-mono); font-size: 11px; color: var(--ink-4); }
+.log-row .ag { font: 600 11.5px/1 var(--font-sans); color: var(--ink); }
+.log-row .msg { color: var(--ink-2); }
+.log-row .res { text-align: right; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+
+<script src="shell/data.js"></script>
+<script type="text/babel" src="shell/shell.jsx"></script>
+<script type="text/babel">
+const { useState } = React;
+
+function Jarvis() {
+  const [agents, setAgents] = useState(MOCK.agents);
+  const on = agents.filter(a => a.on).length;
+  const toggle = (id) => setAgents(agents.map(a => a.id === id ? {...a, on: !a.on} : a));
+  const actions24 = agents.reduce((a,b) => a + b.actions24h, 0);
+
+  const logs = [
+    { ts:'14:42', ag:'Stock Sentinel',  msg:'Drafted PO-D-0042 · Acuvue Oasys 1-Day · qty 24',        res:'Awaiting approval', pri:'P2' },
+    { ts:'14:38', ag:'Escalation Engine', msg:'Escalated TSK-2209 to Ops Head (overdue 8m)',           res:'Completed', pri:'P1' },
+    { ts:'14:30', ag:'Price Patrol',    msg:'Ray-Ban RB3025 · competitor 6% below MRP on LensKart',    res:'Flagged', pri:'P3' },
+    { ts:'14:22', ag:'Aging Advisor',   msg:'Suggested 20% markdown on Vogue VO5485 (126 days idle)',  res:'Awaiting approval', pri:'P2' },
+    { ts:'14:05', ag:'Rx Reconciler',   msg:'Cart BV-DRFT-07 · lens power vs Rx within tolerance',     res:'Confirmed', pri:'P4' },
+    { ts:'13:58', ag:'Stock Sentinel',  msg:'Low-stock alert · BV-RB-AV-5823 (stock 3, cover 2.1d)',   res:'Task created', pri:'P2' },
+    { ts:'13:40', ag:'Attendance Sentinel', msg:'Riya P. · break exceeded 30m (SOP: 20m)',              res:'Notified ASM', pri:'P3' },
+    { ts:'13:12', ag:'Escalation Engine', msg:'Escalated TSK-2211 Stage 1 → Stage 2',                  res:'Completed', pri:'P1' },
+  ];
+
+  return (
+    <Shell active="jarvis" crumbs={['Jarvis · Superadmin']} role="Superadmin"
+      actions={<>
+        <button className="btn sm"><Icon.file width="14" height="14" /> Audit log</button>
+        <button className="btn sm primary">+ Deploy agent</button>
+      </>}>
+      <div className="j-body">
+        <div className="j-hero">
+          <div>
+            <div className="eyebrow">Jarvis · Always-on automation</div>
+            <h2>Eight agents. One shift.<br/>Quietly keeping things in line.</h2>
+            <p>Jarvis watches the feeds every store ignores — stock, pricing, Rx alignment, task SLAs — and takes the smallest action it can, then asks for approval when the stakes matter.</p>
+            <div className="pulse">
+              <div><div className="v">{on}/8</div>agents online</div>
+              <div><div className="v">{actions24}</div>actions · 24h</div>
+              <div><div className="v">5</div>awaiting approval</div>
+              <div><div className="v">2.3s</div>median act time</div>
+            </div>
+          </div>
+          <div style={{display:'flex', gap:8}}>
+            <button className="btn sm" style={{background:'#2a2a28', color:'#fff', borderColor:'#3a3a36'}}>Pause all</button>
+            <button className="btn sm accent">Approve drafts (5)</button>
+          </div>
+        </div>
+
+        <div className="eyebrow" style={{marginBottom:10}}>Agents</div>
+        <div className="j-grid">
+          {agents.map(a => (
+            <div key={a.id} className={'agent-card' + (a.on ? '' : ' off')}>
+              <div className={'ic' + (a.on ? '' : ' off')}>
+                {a.id.replace('AG-','').substring(0,3)}
+              </div>
+              <div>
+                <h3>{a.name}</h3>
+                <div className="desc">{a.desc}</div>
+                <div className="meta">
+                  <span>Status · <strong>{a.on ? 'running' : 'paused'}</strong></span>
+                  <span>Last run · <strong>{a.lastRun}</strong></span>
+                  <span>24h · <strong>{a.actions24h} acts</strong></span>
+                </div>
+                <div style={{marginTop:10, display:'flex', gap:6, flexWrap:'wrap'}}>
+                  <span className="schedule-pill">Every 5m</span>
+                  <span className="schedule-pill">All stores</span>
+                  <span className="schedule-pill">Draft only</span>
+                </div>
+              </div>
+              <div className={'tgl' + (a.on ? ' on' : '')} onClick={()=>toggle(a.id)}></div>
+            </div>
+          ))}
+        </div>
+
+        <div className="eyebrow" style={{marginBottom:10, display:'flex', alignItems:'center', gap:10}}>
+          Live log
+          <span className="hint" style={{textTransform:'none', letterSpacing:0, fontFamily:'var(--font-sans)'}}>· last 30 minutes</span>
+        </div>
+        <div className="log-card">
+          <div className="log-row" style={{background:'var(--surface-2)', borderBottom:'1px solid var(--line)', fontFamily:'var(--font-mono)', fontSize:10.5, color:'var(--ink-4)', textTransform:'uppercase', letterSpacing:'.08em'}}>
+            <span>Time</span><span>Agent</span><span>Action</span><span>Priority</span><span className="res">Result</span>
+          </div>
+          {logs.map((l, i) => (
+            <div key={i} className="log-row">
+              <span className="ts">{l.ts}</span>
+              <span className="ag">{l.ag}</span>
+              <span className="msg">{l.msg}</span>
+              <span><span className={'pill-'+l.pri}>{l.pri}</span></span>
+              <span className="res">
+                <span className={'chip ' + (l.res.includes('Await')?'warn':l.res.includes('Flag')?'info':'ok')}>{l.res}</span>
+              </span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </Shell>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<Jarvis />);
+</script>
+</body>
+</html>

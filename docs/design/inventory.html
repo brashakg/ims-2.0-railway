@@ -1,0 +1,437 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>IMS 2.0 · Inventory</title>
+<meta name="viewport" content="width=1440" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="shell/tokens.css" />
+<link rel="stylesheet" href="shell/shell.css" />
+<style>
+.inv-body { padding: 24px 28px; overflow-y: auto; height: calc(100vh - 52px); background: var(--bg); }
+.inv-head { display: flex; justify-content: space-between; align-items: flex-end; margin-bottom: 20px; }
+.inv-head h2 { margin: 0 0 4px; font-family: var(--font-display); font-size: 32px; letter-spacing: -0.01em; }
+
+.inv-tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--line); margin-bottom: 18px; }
+.inv-tabs button {
+  height: 36px; padding: 0 14px; border: 0; background: transparent;
+  font: 500 12.5px/1 var(--font-sans); color: var(--ink-4); cursor: pointer;
+  position: relative; border-bottom: 2px solid transparent; margin-bottom: -1px;
+}
+.inv-tabs button.on { color: var(--ink); border-bottom-color: var(--ink); }
+.inv-tabs button:hover:not(.on) { color: var(--ink-2); }
+.inv-tabs .count { font-family: var(--font-mono); font-size: 10px; color: var(--ink-4); margin-left: 4px; }
+
+/* Stat strip */
+.stat-strip {
+  display: grid; grid-template-columns: repeat(5, 1fr); gap: 0;
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-lg);
+  margin-bottom: 18px;
+}
+.stat-strip > div { padding: 14px 18px; border-right: 1px solid var(--line); }
+.stat-strip > div:last-child { border-right: 0; }
+.stat-strip .l { font: 500 10.5px/1 var(--font-mono); color: var(--ink-4); text-transform: uppercase; letter-spacing: .08em; margin-bottom: 8px; }
+.stat-strip .v { font-family: var(--font-figure); font-weight: 600; font-variant-numeric: tabular-nums; font-size: 26px; line-height: 1; letter-spacing: -.02em; }
+.stat-strip .d { font-size: 11.5px; color: var(--ink-4); margin-top: 4px; }
+.stat-strip .d.bad { color: var(--err); }
+.stat-strip .d.good { color: var(--ok); }
+
+/* Filter row */
+.filter-row { display: flex; gap: 8px; margin-bottom: 12px; align-items: center; }
+
+/* Lens power matrix */
+.matrix-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: var(--r-lg); background: var(--surface); }
+.matrix {
+  border-collapse: collapse;
+  font-size: 11px;
+  font-family: var(--font-mono);
+  min-width: 100%;
+}
+.matrix th, .matrix td {
+  border-right: 1px solid var(--line-soft);
+  border-bottom: 1px solid var(--line-soft);
+  padding: 6px 8px;
+  text-align: center;
+  min-width: 38px;
+  white-space: nowrap;
+}
+.matrix thead th { background: var(--surface-2); font-weight: 600; color: var(--ink-3); position: sticky; top: 0; }
+.matrix th.axis-lbl { background: var(--ink); color: #fff; text-align: left; position: sticky; left: 0; z-index: 2; min-width: 110px; }
+.matrix td.axis-lbl { background: var(--surface-2); color: var(--ink-3); text-align: left; font-weight: 600; position: sticky; left: 0; z-index: 1; min-width: 110px; }
+.matrix td.zero { color: var(--ink-5); }
+.matrix td.low { background: var(--err-50); color: var(--err); font-weight: 600; }
+.matrix td.med { background: var(--warn-50); color: var(--warn); font-weight: 500; }
+.matrix td.hi { color: var(--ink-2); font-weight: 500; }
+.matrix .corner { background: var(--ink); color: #fff; text-align: left; padding: 10px; font-family: var(--font-sans); font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase; }
+
+.legend { display: flex; gap: 14px; padding: 10px 14px; border-top: 1px solid var(--line); background: var(--surface-2); font-size: 11.5px; color: var(--ink-3); align-items: center; }
+.legend .sw { display: inline-block; width: 14px; height: 14px; border-radius: 3px; margin-right: 5px; vertical-align: middle; }
+
+.inv-layout { display: grid; grid-template-columns: 1fr 320px; gap: 16px; }
+.aged-card { padding: 14px; border: 1px solid var(--line); border-radius: var(--r-lg); background: var(--surface); }
+.aged-row { padding: 10px 0; border-bottom: 1px solid var(--line-soft); font-size: 12.5px; }
+.aged-row:last-child { border-bottom: 0; }
+.aged-row .r1 { display: flex; justify-content: space-between; margin-bottom: 3px; }
+.aged-row .m { color: var(--ink-3); font-size: 11.5px; }
+.aged-row .bar { height: 4px; background: var(--line); border-radius: 3px; margin-top: 6px; overflow: hidden; }
+.aged-row .bar > div { height: 100%; background: var(--err); }
+
+/* Count session */
+.count-banner {
+  background: var(--bv-soft); border: 1px solid var(--bv-50);
+  border-radius: 10px; padding: 14px 18px;
+  display: flex; gap: 14px; align-items: center; margin-bottom: 16px;
+}
+.count-banner .icn {
+  width: 40px; height: 40px; background: var(--bv); color: #fff;
+  border-radius: 8px; display: grid; place-items: center;
+  font-family: var(--font-display); font-size: 22px;
+}
+.count-banner .t { font: 600 13px/1.2 var(--font-sans); margin-bottom: 2px; color: var(--ink); }
+.count-banner .s { font-size: 11.5px; color: var(--ink-3); }
+.count-banner .spacer { flex: 1; }
+
+.transfer-strip {
+  display: grid; grid-template-columns: 1fr auto 1fr auto; gap: 14px;
+  align-items: center; padding: 14px;
+  background: var(--surface); border: 1px dashed var(--line-strong);
+  border-radius: var(--r-lg);
+}
+.transfer-strip .store {
+  padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px;
+  background: var(--surface-2);
+}
+.transfer-strip .store .n { font: 600 13px/1.2 var(--font-sans); }
+.transfer-strip .store .c { font-family: var(--font-mono); font-size: 11px; color: var(--ink-4); margin-top: 2px; }
+.transfer-strip .arr {
+  width: 32px; height: 32px; border-radius: 50%;
+  background: var(--ink); color: #fff; display: grid; place-items: center;
+}
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+
+<script src="shell/data.js"></script>
+<script type="text/babel" src="shell/shell.jsx"></script>
+<script type="text/babel">
+const { useState } = React;
+const fmt = (n) => '₹ ' + Number(n).toLocaleString('en-IN');
+
+const SPH = ['+4.00','+3.00','+2.00','+1.00','0.00','-1.00','-2.00','-3.00','-4.00','-5.00','-6.00'];
+const CYL = ['0.00','-0.25','-0.50','-0.75','-1.00','-1.25','-1.50','-1.75','-2.00'];
+
+// Seeded pseudo-stock
+function stockAt(si, ci) {
+  const h = (si * 7 + ci * 3 + 11) % 13;
+  if (h < 2) return 0;
+  if (h < 4) return 1;
+  if (h < 6) return 3;
+  if (h < 9) return 6;
+  return 10 + (h - 9) * 2;
+}
+
+function Matrix() {
+  return (
+    <div className="matrix-wrap">
+      <table className="matrix">
+        <thead>
+          <tr>
+            <th className="corner">Crizal Prevencia 1.6 · CYL →<br/>SPH ↓</th>
+            {CYL.map(c => <th key={c}>{c}</th>)}
+          </tr>
+        </thead>
+        <tbody>
+          {SPH.map((s, si) => (
+            <tr key={s}>
+              <td className="axis-lbl">{s}</td>
+              {CYL.map((c, ci) => {
+                const q = stockAt(si, ci);
+                const cls = q === 0 ? 'zero' : q < 3 ? 'low' : q < 6 ? 'med' : 'hi';
+                return <td key={c} className={cls}>{q === 0 ? '—' : q}</td>;
+              })}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <div className="legend">
+        <span><span className="sw" style={{background:'var(--err-50)'}}></span>Low (&lt;3)</span>
+        <span><span className="sw" style={{background:'var(--warn-50)'}}></span>Medium (3–5)</span>
+        <span><span className="sw" style={{background:'var(--surface-2)', border:'1px solid var(--line)'}}></span>Healthy (6+)</span>
+        <span><span className="sw" style={{background:'var(--surface)'}}></span>Zero</span>
+        <span className="spacer" style={{flex:1}}></span>
+        <span className="hint">99 cells · click a cell to inspect lot / reorder</span>
+      </div>
+    </div>
+  );
+}
+
+function Inventory() {
+  const [tab, setTab] = useState('stock');
+
+  const low = MOCK.catalog.filter(i => i.stock < 5);
+
+  return (
+    <Shell active="inventory" crumbs={['Inventory']} role="Store Manager"
+      actions={<>
+        <button className="btn sm">+ Adjustment</button>
+        <button className="btn sm primary">+ Receive GRN</button>
+      </>}>
+      <div className="inv-body">
+        <div className="inv-head">
+          <div>
+            <div className="eyebrow" style={{marginBottom:6}}>Inventory</div>
+            <h2>What's on the floor.</h2>
+          </div>
+          <div className="row" style={{gap:8}}>
+            <button className="btn sm"><Icon.file width="14" height="14" /> Export CSV</button>
+            <button className="btn sm"><Icon.printer width="14" height="14" /> Print count sheet</button>
+          </div>
+        </div>
+
+        <div className="stat-strip">
+          <div>
+            <div className="l">Total SKUs</div>
+            <div className="v">1,240</div>
+            <div className="d">across 6 categories</div>
+          </div>
+          <div>
+            <div className="l">Stock value</div>
+            <div className="v">₹ 58.4L</div>
+            <div className="d good">+2.1% vs LM</div>
+          </div>
+          <div>
+            <div className="l">Low stock</div>
+            <div className="v" style={{color:'var(--err)'}}>17</div>
+            <div className="d bad">3 auto-drafted by Jarvis</div>
+          </div>
+          <div>
+            <div className="l">Non-moving (90d+)</div>
+            <div className="v" style={{color:'var(--warn)'}}>38</div>
+            <div className="d">Worth ₹ 2.84L</div>
+          </div>
+          <div>
+            <div className="l">Last count</div>
+            <div className="v" style={{fontSize:22}}>4 days ago</div>
+            <div className="d">Variance: ₹ 820</div>
+          </div>
+        </div>
+
+        <div className="inv-tabs">
+          {[
+            ['stock','Stock ledger', 1240],
+            ['matrix','Lens power matrix', 99],
+            ['count','Cycle count', 3],
+            ['nonmoving','Non-moving', 38],
+            ['transfer','Transfers', 2],
+            ['reorder','Reorder drafts', 5],
+          ].map(([k, n, c]) => (
+            <button key={k} className={tab===k?'on':''} onClick={()=>setTab(k)}>
+              {n}<span className="count">· {c}</span>
+            </button>
+          ))}
+        </div>
+
+        {tab === 'stock' && (
+          <>
+            <div className="filter-row">
+              <input className="input" style={{maxWidth:320}} placeholder="Search SKU, brand, model…" />
+              <select className="input" style={{maxWidth:140}}>
+                <option>All brands</option><option>Ray-Ban</option><option>Oakley</option>
+              </select>
+              <select className="input" style={{maxWidth:140}}>
+                <option>All types</option><option>Frame</option><option>Lens</option><option>CL</option>
+              </select>
+              <span className="spacer" style={{flex:1}}></span>
+              <div className="chip warn">17 low</div>
+              <div className="chip info">Jarvis: 3 reorder drafts ready</div>
+            </div>
+
+            <div className="card">
+              <table className="tbl">
+                <thead><tr>
+                  <th></th><th>SKU</th><th>Brand · Model</th><th>Type</th>
+                  <th className="right">MRP</th><th className="right">Cost</th>
+                  <th className="right">Stock</th><th className="right">Reorder pt.</th>
+                  <th className="right">Value</th><th></th>
+                </tr></thead>
+                <tbody>
+                {MOCK.catalog.map((i, idx) => (
+                  <tr key={i.sku}>
+                    <td><div className="ph" style={{width:36, height:28, fontSize:8}}>{i.type.slice(0,3)}</div></td>
+                    <td className="mono">{i.sku}</td>
+                    <td>
+                      <div style={{fontSize:11, color:'var(--ink-4)', textTransform:'uppercase', letterSpacing:'.04em'}}>{i.brand}</div>
+                      <div className="strong">{i.model}</div>
+                    </td>
+                    <td><span className="chip">{i.type}</span></td>
+                    <td className="right mono tnum">{fmt(i.mrp)}</td>
+                    <td className="right mono tnum mute">{fmt(Math.round(i.mrp * 0.55))}</td>
+                    <td className="right">
+                      <span className={'chip ' + (i.stock < 3 ? 'err' : i.stock < 5 ? 'warn' : 'ok')}>{i.stock}</span>
+                    </td>
+                    <td className="right mono mute">{i.type === 'Lens' ? '20' : '3'}</td>
+                    <td className="right mono tnum strong">{fmt(i.price * i.stock)}</td>
+                    <td className="right">
+                      {i.stock < 3 && <span className="chip accent">Draft PO</span>}
+                    </td>
+                  </tr>
+                ))}
+                </tbody>
+              </table>
+            </div>
+          </>
+        )}
+
+        {tab === 'matrix' && (
+          <>
+            <div className="filter-row">
+              <select className="input" style={{maxWidth:280}}><option>Crizal Prevencia 1.6 Blue-cut</option></select>
+              <select className="input" style={{maxWidth:140}}><option>Single vision</option></select>
+              <select className="input" style={{maxWidth:140}}><option>Plano cyl</option></select>
+              <span className="spacer" style={{flex:1}}></span>
+              <button className="btn sm">Save as count sheet</button>
+              <button className="btn sm primary">Bulk reorder low</button>
+            </div>
+            <Matrix />
+          </>
+        )}
+
+        {tab === 'count' && (
+          <>
+            <div className="count-banner">
+              <div className="icn">C</div>
+              <div>
+                <div className="t">Cycle count in progress · shelf A-12 to A-18</div>
+                <div className="s">Started 10:04 by Riya P. · 42 of 78 SKUs counted · 3 variances flagged</div>
+              </div>
+              <div className="spacer"></div>
+              <button className="btn sm">Pause</button>
+              <button className="btn sm primary">Resume count</button>
+            </div>
+            <div className="card">
+              <div className="card-head"><h3>Variances this session</h3><span className="meta">Lock requires ASM approval</span></div>
+              <table className="tbl">
+                <thead><tr><th>SKU</th><th>Product</th><th className="right">System</th><th className="right">Counted</th><th className="right">Δ</th><th>Note</th><th></th></tr></thead>
+                <tbody>
+                  <tr>
+                    <td className="mono">BV-RB-AV-5823</td>
+                    <td className="strong">Ray-Ban · Aviator Classic</td>
+                    <td className="right mono">3</td>
+                    <td className="right mono">2</td>
+                    <td className="right"><span className="chip err">−1</span></td>
+                    <td className="hint">Possibly at repair bench</td>
+                    <td><button className="btn sm ghost">Investigate</button></td>
+                  </tr>
+                  <tr>
+                    <td className="mono">BV-CN-MICRO</td>
+                    <td className="strong">Microfiber Cloth</td>
+                    <td className="right mono">220</td>
+                    <td className="right mono">228</td>
+                    <td className="right"><span className="chip ok">+8</span></td>
+                    <td className="hint">Receipt not yet posted</td>
+                    <td><button className="btn sm ghost">Investigate</button></td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </>
+        )}
+
+        {tab === 'nonmoving' && (
+          <div className="inv-layout">
+            <div className="card">
+              <div className="card-head"><h3>Non-moving · 90 days with no sale</h3><span className="meta">38 SKUs · ₹ 2.84L tied up</span></div>
+              <table className="tbl">
+                <thead><tr><th>SKU</th><th>Product</th><th className="right">Days since sale</th><th className="right">Stock</th><th className="right">Value</th><th>Suggested action</th></tr></thead>
+                <tbody>
+                  <tr><td className="mono">BV-VO-VO5485</td><td className="strong">Vogue · Cat-Eye Tortoise</td><td className="right mono">126</td><td className="right">2</td><td className="right mono tnum">{fmt(10180)}</td><td><span className="chip warn">Discount 20%</span></td></tr>
+                  <tr><td className="mono">BV-TT-TI-102</td><td className="strong">Titan · Titanium Rimless</td><td className="right mono">104</td><td className="right">5</td><td className="right mono tnum">{fmt(31875)}</td><td><span className="chip info">Move to sister store</span></td></tr>
+                  <tr><td className="mono">BV-CN-CASE-LX</td><td className="strong">Better Vision · Luxe Case</td><td className="right mono">98</td><td className="right">12</td><td className="right mono tnum">{fmt(5400)}</td><td><span className="chip warn">Bundle at checkout</span></td></tr>
+                  <tr><td className="mono">BV-OK-FL-RX88</td><td className="strong">Oakley · Flak 2.0 Rx</td><td className="right mono">91</td><td className="right">1</td><td className="right mono tnum">{fmt(14200)}</td><td><span className="chip accent">Return to vendor</span></td></tr>
+                </tbody>
+              </table>
+            </div>
+            <div className="col" style={{gap:12}}>
+              <div className="aged-card">
+                <div className="eyebrow" style={{marginBottom:10}}>Aging cohorts</div>
+                <div className="aged-row">
+                  <div className="r1"><strong>31–60 days</strong><span>14 SKU · ₹ 1.02L</span></div>
+                  <div className="m">Watch · normal turn</div>
+                  <div className="bar"><div style={{width:'30%', background:'var(--ok)'}}></div></div>
+                </div>
+                <div className="aged-row">
+                  <div className="r1"><strong>61–90 days</strong><span>21 SKU · ₹ 1.40L</span></div>
+                  <div className="m">Markdown candidates</div>
+                  <div className="bar"><div style={{width:'58%', background:'var(--warn)'}}></div></div>
+                </div>
+                <div className="aged-row">
+                  <div className="r1"><strong>91+ days</strong><span>38 SKU · ₹ 2.84L</span></div>
+                  <div className="m">Action needed</div>
+                  <div className="bar"><div style={{width:'85%'}}></div></div>
+                </div>
+              </div>
+              <div className="aged-card">
+                <div className="eyebrow" style={{marginBottom:10}}>Jarvis · Aging Advisor</div>
+                <p style={{fontSize:12.5, color:'var(--ink-3)', margin:'0 0 10px'}}>Drafted 4 markdown runs and 2 inter-store transfers. All held for your review.</p>
+                <button className="btn sm block primary">Review drafts</button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {tab === 'transfer' && (
+          <div className="stack-lg">
+            <div className="transfer-strip">
+              <div className="store">
+                <div className="n">GK-I Flagship</div>
+                <div className="c">BV-DELHI-GK1 · from</div>
+              </div>
+              <div className="arr"><Icon.chevron /></div>
+              <div className="store">
+                <div className="n">Saket DLF</div>
+                <div className="c">BV-DELHI-SKT · to</div>
+              </div>
+              <button className="btn primary">Create transfer</button>
+            </div>
+            <div className="card">
+              <div className="card-head"><h3>Active transfers</h3><span className="meta">2 in flight</span></div>
+              <table className="tbl">
+                <thead><tr><th>TRF ID</th><th>From → To</th><th>Items</th><th>Value</th><th>Status</th><th>Dispatched</th><th></th></tr></thead>
+                <tbody>
+                  <tr><td className="mono">TRF-0119</td><td><strong>GK-I</strong> → Saket</td><td>6 SKU · 14 qty</td><td className="mono tnum">{fmt(38400)}</td><td><span className="chip info">In transit</span></td><td className="mono mute">18 Apr 17:22</td><td><button className="btn sm">Track</button></td></tr>
+                  <tr><td className="mono">TRF-0118</td><td>Okhla → <strong>GK-I</strong></td><td>12 SKU · 48 qty</td><td className="mono tnum">{fmt(112800)}</td><td><span className="chip warn">Pending GRN</span></td><td className="mono mute">18 Apr 09:40</td><td><button className="btn sm primary">Receive</button></td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
+        {tab === 'reorder' && (
+          <div className="card">
+            <div className="card-head"><h3>Reorder drafts · pending approval</h3><span className="meta">Auto-drafted by Jarvis · Stock Sentinel</span></div>
+            <table className="tbl">
+              <thead><tr><th>PO draft</th><th>Vendor</th><th>Lines</th><th className="right">Value</th><th>Reason</th><th></th></tr></thead>
+              <tbody>
+                <tr><td className="mono">PO-D-0042</td><td>Johnson & Johnson</td><td>1 · Acuvue Oasys 1-Day</td><td className="right mono tnum">{fmt(47520)}</td><td className="hint">Stock 14, avg-day 2.1, cover 6.6d (&lt; 10d SLA)</td><td><button className="btn sm primary">Approve</button></td></tr>
+                <tr><td className="mono">PO-D-0041</td><td>Essilor India</td><td>4 · Crizal 1.6 / 1.67</td><td className="right mono tnum">{fmt(82400)}</td><td className="hint">Low stock on 4 power points · matrix flagged</td><td><button className="btn sm primary">Approve</button></td></tr>
+                <tr><td className="mono">PO-D-0040</td><td>Luxottica (Ray-Ban)</td><td>3 · Aviator, Wayfarer</td><td className="right mono tnum">{fmt(31200)}</td><td className="hint">Sell-through 74% · replenishment</td><td><button className="btn sm primary">Approve</button></td></tr>
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </Shell>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<Inventory />);
+</script>
+</body>
+</html>

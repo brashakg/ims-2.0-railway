@@ -1,0 +1,1215 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>IMS 2.0 — Jarvis Agent Architecture</title>
+<style>
+  :root {
+    --bg: #0f1117;
+    --surface: #1a1d27;
+    --surface2: #232733;
+    --border: #2e3345;
+    --text: #e4e7ef;
+    --text2: #8b90a0;
+    --accent: #CD201A;
+    --jarvis: #e11d48;
+    --sentinel: #22c55e;
+    --pixel: #a855f7;
+    --megaphone: #f59e0b;
+    --oracle: #3b82f6;
+    --taskmaster: #ef4444;
+    --nexus: #06b6d4;
+    --cortex: #f97316;
+  }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace; background: var(--bg); color: var(--text); line-height: 1.6; }
+
+  /* Header */
+  .header { padding: 32px 40px 24px; border-bottom: 1px solid var(--border); }
+  .header h1 { font-size: 28px; font-weight: 700; letter-spacing: -0.5px; }
+  .header h1 span { color: var(--accent); }
+  .header p { color: var(--text2); font-size: 13px; margin-top: 4px; }
+  .badge { display: inline-block; background: var(--accent); color: #fff; font-size: 10px; padding: 2px 8px; border-radius: 3px; font-weight: 600; letter-spacing: 0.5px; margin-left: 8px; vertical-align: middle; }
+
+  /* Tabs */
+  .tabs { display: flex; gap: 0; padding: 0 40px; border-bottom: 1px solid var(--border); overflow-x: auto; }
+  .tab { padding: 14px 20px; font-size: 12px; font-weight: 600; color: var(--text2); cursor: pointer; border-bottom: 2px solid transparent; transition: all 0.2s; white-space: nowrap; letter-spacing: 0.3px; text-transform: uppercase; }
+  .tab:hover { color: var(--text); background: var(--surface); }
+  .tab.active { color: var(--text); border-bottom-color: var(--accent); }
+  .tab .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }
+
+  /* Content */
+  .content { padding: 32px 40px; max-width: 1200px; }
+  .panel { display: none; }
+  .panel.active { display: block; }
+
+  /* Overview Grid */
+  .grid-8 { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 16px; }
+  .agent-card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 20px; cursor: pointer; transition: all 0.2s; position: relative; overflow: hidden; }
+  .agent-card:hover { border-color: #555; transform: translateY(-2px); }
+  .agent-card::before { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 3px; }
+  .agent-card[data-agent="jarvis"]::before { background: var(--jarvis); }
+  .agent-card[data-agent="sentinel"]::before { background: var(--sentinel); }
+  .agent-card[data-agent="pixel"]::before { background: var(--pixel); }
+  .agent-card[data-agent="megaphone"]::before { background: var(--megaphone); }
+  .agent-card[data-agent="oracle"]::before { background: var(--oracle); }
+  .agent-card[data-agent="taskmaster"]::before { background: var(--taskmaster); }
+  .agent-card[data-agent="nexus"]::before { background: var(--nexus); }
+  .agent-card[data-agent="cortex"]::before { background: var(--cortex); }
+  .card-icon { font-size: 28px; margin-bottom: 8px; }
+  .card-name { font-size: 16px; font-weight: 700; margin-bottom: 2px; }
+  .card-role { font-size: 11px; color: var(--text2); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 10px; }
+  .card-desc { font-size: 13px; color: var(--text2); line-height: 1.5; }
+  .card-meta { display: flex; gap: 12px; margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); }
+  .meta-item { font-size: 11px; color: var(--text2); }
+  .meta-item strong { color: var(--text); }
+
+  /* Toggle Switch */
+  .toggle-container { display: flex; align-items: center; gap: 8px; position: absolute; top: 12px; right: 12px; }
+  .toggle-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600; }
+  .toggle-label.on { color: #4ade80; }
+  .toggle-label.off { color: #f87171; }
+  .toggle-switch { position: relative; width: 40px; height: 22px; }
+  .toggle-switch input { opacity: 0; width: 0; height: 0; }
+  .toggle-slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background: #374151; border-radius: 11px; transition: 0.3s; }
+  .toggle-slider:before { content: ''; position: absolute; height: 16px; width: 16px; left: 3px; bottom: 3px; background: #f87171; border-radius: 50%; transition: 0.3s; }
+  .toggle-switch input:checked + .toggle-slider { background: #166534; }
+  .toggle-switch input:checked + .toggle-slider:before { transform: translateX(18px); background: #4ade80; }
+
+  /* Detail Sections */
+  h2 { font-size: 22px; font-weight: 700; margin-bottom: 6px; }
+  h2 .agent-dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 8px; }
+  .subtitle { color: var(--text2); font-size: 13px; margin-bottom: 24px; }
+  h3 { font-size: 14px; font-weight: 600; color: var(--text); margin: 24px 0 10px; text-transform: uppercase; letter-spacing: 0.5px; padding-bottom: 6px; border-bottom: 1px solid var(--border); }
+
+  /* Tables */
+  table { width: 100%; border-collapse: collapse; font-size: 13px; margin-bottom: 16px; }
+  th { text-align: left; padding: 10px 12px; background: var(--surface2); color: var(--text2); font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; border: 1px solid var(--border); }
+  td { padding: 10px 12px; border: 1px solid var(--border); vertical-align: top; }
+  tr:hover td { background: var(--surface); }
+
+  /* Code blocks */
+  .code { background: var(--surface2); border: 1px solid var(--border); border-radius: 6px; padding: 16px; font-size: 12px; overflow-x: auto; margin: 10px 0 16px; white-space: pre; line-height: 1.7; }
+  .code .comment { color: #6a7085; }
+  .code .keyword { color: #c678dd; }
+  .code .string { color: #98c379; }
+  .code .type { color: #e5c07b; }
+  .code .fn { color: #61afef; }
+
+  /* Flow diagram */
+  .flow { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 16px 0; }
+  .flow-step { background: var(--surface2); border: 1px solid var(--border); border-radius: 6px; padding: 8px 14px; font-size: 12px; font-weight: 600; }
+  .flow-arrow { color: var(--text2); font-size: 16px; }
+
+  /* Tags */
+  .tag { display: inline-block; padding: 2px 8px; border-radius: 3px; font-size: 11px; font-weight: 600; margin-right: 4px; margin-bottom: 4px; }
+  .tag-green { background: #16a34a22; color: #4ade80; border: 1px solid #16a34a44; }
+  .tag-blue { background: #2563eb22; color: #60a5fa; border: 1px solid #2563eb44; }
+  .tag-yellow { background: #ca8a0422; color: #fbbf24; border: 1px solid #ca8a0444; }
+  .tag-red { background: #dc262622; color: #f87171; border: 1px solid #dc262644; }
+  .tag-purple { background: #9333ea22; color: #c084fc; border: 1px solid #9333ea44; }
+  .tag-orange { background: #ea580c22; color: #fb923c; border: 1px solid #ea580c44; }
+  .tag-cyan { background: #0891b222; color: #22d3ee; border: 1px solid #0891b244; }
+
+  /* Architecture diagram */
+  .arch-box { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 20px; margin: 12px 0; }
+  .arch-row { display: flex; gap: 12px; margin: 10px 0; align-items: stretch; flex-wrap: wrap; }
+  .arch-node { flex: 1; min-width: 120px; background: var(--surface2); border: 1px solid var(--border); border-radius: 6px; padding: 12px; text-align: center; }
+  .arch-node.highlight { border-color: var(--cortex); }
+  .arch-node .node-title { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px; }
+  .arch-node .node-desc { font-size: 11px; color: var(--text2); }
+  .arch-connector { text-align: center; color: var(--text2); font-size: 18px; padding: 4px 0; }
+
+  /* Control Panel */
+  .control-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; margin: 16px 0; }
+  .control-card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px; position: relative; }
+  .control-card .status-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; margin-right: 6px; }
+  .control-card .status-dot.running { background: #4ade80; box-shadow: 0 0 6px #4ade8066; animation: pulse 2s infinite; }
+  .control-card .status-dot.stopped { background: #f87171; }
+  .control-card .status-dot.sleeping { background: #fbbf24; animation: pulse 3s infinite; }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+
+  /* Hero avatars */
+  .hero-avatar { width: 64px; height: 64px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 32px; margin-bottom: 8px; position: relative; overflow: hidden; }
+  .hero-avatar svg { width: 48px; height: 48px; }
+  .hero-tag { font-size: 10px; color: var(--text2); font-style: italic; margin-top: 2px; letter-spacing: 0.3px; }
+  .hero-tag strong { color: var(--text); font-style: normal; }
+  .hero-banner { display: flex; align-items: center; gap: 16px; margin-bottom: 20px; padding: 16px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; }
+  .hero-banner .hero-avatar { margin-bottom: 0; }
+  .hero-info { flex: 1; }
+  .hero-quote { font-size: 12px; color: var(--text2); font-style: italic; margin-top: 4px; }
+
+  /* Scrollbar */
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: var(--bg); }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+  /* Status bar */
+  .status-bar { display: flex; align-items: center; gap: 16px; padding: 8px 16px; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; margin: 12px 0; font-size: 12px; flex-wrap: wrap; }
+  .status-item { display: flex; align-items: center; gap: 6px; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>IMS 2.0 — <span>Jarvis</span> Agent Architecture <span class="badge">8 AGENTS</span></h1>
+  <p>Deep-dive specifications for JARVIS core + 6 domain agents + CORTEX orchestrator &middot; Always-on background execution &middot; Per-agent ON/OFF control &middot; Architecture-first design</p>
+</div>
+
+<div class="tabs" id="tabs">
+  <div class="tab active" data-tab="overview">OVERVIEW</div>
+  <div class="tab" data-tab="control"><span class="dot" style="background:#4ade80"></span>CONTROL PANEL</div>
+  <div class="tab" data-tab="jarvis"><span class="dot" style="background:var(--jarvis)"></span>JARVIS</div>
+  <div class="tab" data-tab="cortex"><span class="dot" style="background:var(--cortex)"></span>CORTEX</div>
+  <div class="tab" data-tab="sentinel"><span class="dot" style="background:var(--sentinel)"></span>SENTINEL</div>
+  <div class="tab" data-tab="pixel"><span class="dot" style="background:var(--pixel)"></span>PIXEL</div>
+  <div class="tab" data-tab="megaphone"><span class="dot" style="background:var(--megaphone)"></span>MEGAPHONE</div>
+  <div class="tab" data-tab="oracle"><span class="dot" style="background:var(--oracle)"></span>ORACLE</div>
+  <div class="tab" data-tab="taskmaster"><span class="dot" style="background:var(--taskmaster)"></span>TASKMASTER</div>
+  <div class="tab" data-tab="nexus"><span class="dot" style="background:var(--nexus)"></span>NEXUS</div>
+</div>
+
+<!-- ===================== OVERVIEW ===================== -->
+<div class="content">
+<div class="panel active" id="panel-overview">
+
+<h2>System Architecture</h2>
+<p class="subtitle">8 agents running as always-on background daemons inside FastAPI, orchestrated by CORTEX, with individual ON/OFF control per agent via MongoDB config.</p>
+
+<div class="status-bar">
+  <div class="status-item"><span style="color:#4ade80;font-weight:700;">ALWAYS-ON</span> — All agents run as background asyncio tasks inside FastAPI</div>
+  <div class="status-item">|</div>
+  <div class="status-item"><span style="color:#fbbf24;font-weight:700;">TOGGLE</span> — Each agent can be turned ON/OFF at will via API or frontend</div>
+  <div class="status-item">|</div>
+  <div class="status-item"><span style="color:#60a5fa;font-weight:700;">SCHEDULER</span> — APScheduler manages intervals, cron jobs, and event triggers</div>
+</div>
+
+<div class="arch-box">
+  <div style="text-align:center;margin-bottom:8px;font-size:11px;color:var(--text2);text-transform:uppercase;letter-spacing:1px;">Jarvis Agent Ecosystem — Always-On Architecture</div>
+
+  <div class="arch-row">
+    <div class="arch-node" style="flex:1 1 100%;border-color:var(--accent);">
+      <div class="node-title" style="color:var(--accent);">SUPERADMIN CONTROL PANEL</div>
+      <div class="node-desc">Toggle agents ON/OFF &middot; View live status &middot; Adjust schedules &middot; Force-run/pause &middot; View audit logs</div>
+    </div>
+  </div>
+  <div class="arch-connector">&darr; &nbsp; controls &nbsp; &darr;</div>
+
+  <div class="arch-row">
+    <div class="arch-node" style="flex:1 1 100%;border-color:var(--jarvis);">
+      <div class="node-title" style="color:var(--jarvis);">JARVIS — The Foundation</div>
+      <div class="node-desc">NLP &middot; Claude Integration &middot; Conversation Memory &middot; Query Interface &middot; AGENT_REGISTRY &middot; Base Classes</div>
+    </div>
+  </div>
+  <div class="arch-connector">&darr; &nbsp; hosts &nbsp; &darr;</div>
+
+  <div class="arch-row">
+    <div class="arch-node highlight" style="flex:1 1 100%;">
+      <div class="node-title" style="color:var(--cortex);">CORTEX — The Orchestrator</div>
+      <div class="node-desc">Routes queries &middot; Coordinates multi-agent workflows &middot; Manages lifecycle &middot; Retries &amp; fallbacks</div>
+    </div>
+  </div>
+  <div class="arch-connector">&darr; &nbsp; dispatches to &nbsp; &darr;</div>
+  <div class="arch-row">
+    <div class="arch-node"><div class="node-title" style="color:var(--sentinel);">SENTINEL</div><div class="node-desc">Health &amp; Monitoring</div></div>
+    <div class="arch-node"><div class="node-title" style="color:var(--pixel);">PIXEL</div><div class="node-desc">UI/UX Quality</div></div>
+    <div class="arch-node"><div class="node-title" style="color:var(--megaphone);">MEGAPHONE</div><div class="node-desc">Marketing</div></div>
+    <div class="arch-node"><div class="node-title" style="color:var(--oracle);">ORACLE</div><div class="node-desc">AI Analysis</div></div>
+    <div class="arch-node"><div class="node-title" style="color:var(--taskmaster);">TASKMASTER</div><div class="node-desc">Task Handling</div></div>
+    <div class="arch-node"><div class="node-title" style="color:var(--nexus);">NEXUS</div><div class="node-desc">Data &amp; Integrations</div></div>
+  </div>
+  <div class="arch-connector">&darr; &nbsp; reads / writes &nbsp; &darr;</div>
+  <div class="arch-row">
+    <div class="arch-node"><div class="node-title">MongoDB</div><div class="node-desc">Primary data + agent config</div></div>
+    <div class="arch-node"><div class="node-title">Redis</div><div class="node-desc">Cache, event bus, job queue</div></div>
+    <div class="arch-node"><div class="node-title">APScheduler</div><div class="node-desc">Background task scheduling</div></div>
+    <div class="arch-node"><div class="node-title">External APIs</div><div class="node-desc">Shopify, Razorpay, etc.</div></div>
+    <div class="arch-node"><div class="node-title">Claude API</div><div class="node-desc">NLP reasoning layer</div></div>
+  </div>
+</div>
+
+<h3>Background Daemon Architecture</h3>
+<p style="font-size:13px;color:var(--text2);margin-bottom:12px;">Every agent runs continuously as an asyncio background task spawned on FastAPI startup. APScheduler manages each agent's schedule — interval-based, cron-based, or event-triggered. When you toggle an agent OFF, its scheduler jobs are paused (not deleted), so turning it back ON resumes from where it left off.</p>
+
+<div class="code"><span class="comment"># FastAPI lifespan — spawns all agents as background daemons</span>
+<span class="keyword">from</span> apscheduler.schedulers.asyncio <span class="keyword">import</span> <span class="type">AsyncIOScheduler</span>
+<span class="keyword">from</span> apscheduler.triggers.interval <span class="keyword">import</span> <span class="type">IntervalTrigger</span>
+<span class="keyword">from</span> apscheduler.triggers.cron <span class="keyword">import</span> <span class="type">CronTrigger</span>
+
+scheduler = <span class="type">AsyncIOScheduler</span>()
+
+<span class="keyword">@asynccontextmanager</span>
+<span class="keyword">async def</span> <span class="fn">lifespan</span>(app: <span class="type">FastAPI</span>):
+    <span class="comment"># Load agent configs from MongoDB</span>
+    configs = <span class="keyword">await</span> db.agent_config.<span class="fn">find</span>().<span class="fn">to_list</span>()
+
+    <span class="keyword">for</span> config <span class="keyword">in</span> configs:
+        agent = AGENT_REGISTRY[config[<span class="string">"agent_id"</span>]][<span class="string">"instance"</span>]
+        <span class="keyword">if</span> config[<span class="string">"enabled"</span>]:
+            scheduler.<span class="fn">add_job</span>(
+                agent.<span class="fn">background_tick</span>,
+                trigger=config[<span class="string">"trigger"</span>],  <span class="comment"># IntervalTrigger or CronTrigger</span>
+                id=config[<span class="string">"agent_id"</span>],
+                replace_existing=<span class="keyword">True</span>,
+                misfire_grace_time=60
+            )
+
+    scheduler.<span class="fn">start</span>()
+    <span class="keyword">yield</span>
+    scheduler.<span class="fn">shutdown</span>()</div>
+
+<h3>Per-Agent ON/OFF Toggle</h3>
+<p style="font-size:13px;color:var(--text2);margin-bottom:12px;">Each agent has an <code>enabled: bool</code> flag in MongoDB's <code>agent_config</code> collection. Flipping this flag pauses/resumes that agent's background jobs instantly — no restart needed.</p>
+
+<div class="code"><span class="comment"># MongoDB: agent_config collection</span>
+{
+    <span class="string">"agent_id"</span>: <span class="string">"sentinel"</span>,
+    <span class="string">"agent_name"</span>: <span class="string">"SENTINEL"</span>,
+    <span class="string">"enabled"</span>: <span class="keyword">true</span>,                 <span class="comment"># ON/OFF toggle</span>
+    <span class="string">"schedule_type"</span>: <span class="string">"interval"</span>,       <span class="comment"># "interval" | "cron" | "event"</span>
+    <span class="string">"schedule_value"</span>: <span class="string">"60s"</span>,          <span class="comment"># how often it runs</span>
+    <span class="string">"last_run"</span>: <span class="string">"2026-04-10T14:32:00Z"</span>,
+    <span class="string">"last_status"</span>: <span class="string">"success"</span>,         <span class="comment"># "success" | "error" | "skipped"</span>
+    <span class="string">"last_error"</span>: <span class="keyword">null</span>,
+    <span class="string">"run_count"</span>: 847,
+    <span class="string">"error_count"</span>: 3,
+    <span class="string">"avg_run_time_ms"</span>: 1250,
+    <span class="string">"config_overrides"</span>: {},          <span class="comment"># agent-specific settings</span>
+    <span class="string">"toggled_by"</span>: <span class="string">"superadmin"</span>,
+    <span class="string">"toggled_at"</span>: <span class="string">"2026-04-10T09:00:00Z"</span>
+}
+
+<span class="comment"># Toggle API — instantly pauses/resumes background jobs</span>
+PATCH /jarvis/agents/{agent_id}/toggle  <span class="comment"># Body: { "enabled": true/false }</span>
+
+<span class="keyword">async def</span> <span class="fn">toggle_agent</span>(agent_id: <span class="type">str</span>, enabled: <span class="type">bool</span>):
+    <span class="keyword">await</span> db.agent_config.<span class="fn">update_one</span>(
+        {<span class="string">"agent_id"</span>: agent_id},
+        {<span class="string">"$set"</span>: {<span class="string">"enabled"</span>: enabled, <span class="string">"toggled_at"</span>: utcnow(), <span class="string">"toggled_by"</span>: current_user.username}}
+    )
+    <span class="keyword">if</span> enabled:
+        scheduler.<span class="fn">resume_job</span>(agent_id)
+    <span class="keyword">else</span>:
+        scheduler.<span class="fn">pause_job</span>(agent_id)</div>
+
+<h3>All 8 Agents at a Glance</h3>
+<div class="grid-8">
+
+  <div class="agent-card" data-agent="jarvis" onclick="switchTab('jarvis')">
+    <div class="hero-avatar" style="background:linear-gradient(135deg, #e11d4822, #e11d4844);">
+      <svg viewBox="0 0 100 100"><circle cx="50" cy="50" r="45" fill="#1a1d27" stroke="#e11d48" stroke-width="3"/><path d="M35 35 L50 25 L65 35 L65 55 L50 65 L35 55Z" fill="none" stroke="#e11d48" stroke-width="2.5"/><circle cx="50" cy="45" r="8" fill="#e11d48" opacity="0.8"/><path d="M42 70 L50 75 L58 70" fill="none" stroke="#e11d48" stroke-width="2"/></svg>
+    </div>
+    <div class="card-name">JARVIS</div>
+    <div class="card-role">The Foundation — NLP &amp; Conversation Core</div>
+    <div class="hero-tag">Inspired by: <strong>Iron Man's J.A.R.V.I.S.</strong> (Marvel)</div>
+    <div class="card-desc">The AI brain that already exists. Natural language understanding, Claude integration, conversation memory, query interface, and the AGENT_REGISTRY that all other agents plug into.</div>
+    <div class="card-meta">
+      <div class="meta-item"><strong>Status:</strong> Built (1,772 LOC)</div>
+      <div class="meta-item"><strong>Background:</strong> Always listening</div>
+      <div class="meta-item"><strong>Toggle:</strong> Always ON (core)</div>
+    </div>
+  </div>
+
+  <div class="agent-card" data-agent="cortex" onclick="switchTab('cortex')">
+    <div class="hero-avatar" style="background:linear-gradient(135deg, #f9731622, #f9731644);">
+      <svg viewBox="0 0 100 100"><circle cx="50" cy="50" r="45" fill="#1a1d27" stroke="#f97316" stroke-width="3"/><ellipse cx="50" cy="42" rx="22" ry="18" fill="none" stroke="#f97316" stroke-width="2"/><path d="M30 42 Q35 25 50 22 Q65 25 70 42" fill="none" stroke="#f97316" stroke-width="2" stroke-dasharray="3,2"/><circle cx="42" cy="40" r="3" fill="#f97316"/><circle cx="58" cy="40" r="3" fill="#f97316"/><circle cx="50" cy="50" r="2.5" fill="#f97316"/><path d="M38 55 Q50 62 62 55" fill="none" stroke="#f97316" stroke-width="1.5"/><line x1="50" y1="22" x2="50" y2="15" stroke="#f97316" stroke-width="1.5"/><line x1="30" y1="42" x2="22" y2="38" stroke="#f97316" stroke-width="1.5"/><line x1="70" y1="42" x2="78" y2="38" stroke="#f97316" stroke-width="1.5"/></svg>
+    </div>
+    <div class="card-name">CORTEX</div>
+    <div class="card-role">Orchestrator &amp; Command Router</div>
+    <div class="hero-tag">Inspired by: <strong>Professor X / Charles Xavier</strong> (Marvel)</div>
+    <div class="card-desc">The brain. Routes every query to the right agent, coordinates multi-agent workflows, manages priorities, retries failures, and maintains system-wide conversation context.</div>
+    <div class="card-meta">
+      <div class="meta-item"><strong>Priority:</strong> P0</div>
+      <div class="meta-item"><strong>Build:</strong> 3-4 days</div>
+      <div class="meta-item"><strong>Background:</strong> Event-driven</div>
+    </div>
+  </div>
+
+  <div class="agent-card" data-agent="sentinel" onclick="switchTab('sentinel')">
+    <div class="hero-avatar" style="background:linear-gradient(135deg, #22c55e22, #22c55e44);">
+      <svg viewBox="0 0 100 100"><circle cx="50" cy="50" r="45" fill="#1a1d27" stroke="#22c55e" stroke-width="3"/><path d="M50 20 L75 35 L75 55 L50 75 L25 55 L25 35Z" fill="none" stroke="#22c55e" stroke-width="2.5"/><path d="M50 30 L65 40 L65 52 L50 62 L35 52 L35 40Z" fill="#22c55e" opacity="0.15"/><circle cx="50" cy="46" r="10" fill="none" stroke="#22c55e" stroke-width="2"/><circle cx="50" cy="46" r="4" fill="#22c55e"/></svg>
+    </div>
+    <div class="card-name">SENTINEL</div>
+    <div class="card-role">System Health &amp; Monitoring</div>
+    <div class="hero-tag">Inspired by: <strong>The Sentinels</strong> (Marvel) — tireless guardians that never stop watching</div>
+    <div class="card-desc">Watches everything. API health, database performance, frontend errors, deployment status, uptime tracking. Alerts on Slack when something breaks before staff notices.</div>
+    <div class="card-meta">
+      <div class="meta-item"><strong>Priority:</strong> P0</div>
+      <div class="meta-item"><strong>Build:</strong> 4-5 days</div>
+      <div class="meta-item"><strong>Background:</strong> Every 60s</div>
+    </div>
+  </div>
+
+  <div class="agent-card" data-agent="pixel" onclick="switchTab('pixel')">
+    <div class="hero-avatar" style="background:linear-gradient(135deg, #a855f722, #a855f744);">
+      <svg viewBox="0 0 100 100"><circle cx="50" cy="50" r="45" fill="#1a1d27" stroke="#a855f7" stroke-width="3"/><rect x="30" y="30" width="40" height="30" rx="3" fill="none" stroke="#a855f7" stroke-width="2"/><line x1="30" y1="45" x2="70" y2="45" stroke="#a855f7" stroke-width="1" opacity="0.5"/><line x1="50" y1="30" x2="50" y2="60" stroke="#a855f7" stroke-width="1" opacity="0.5"/><circle cx="43" cy="38" r="4" fill="#a855f7" opacity="0.6"/><path d="M38 65 L50 70 L62 65" fill="none" stroke="#a855f7" stroke-width="2"/><circle cx="50" cy="38" r="2" fill="#a855f7"/></svg>
+    </div>
+    <div class="card-name">PIXEL</div>
+    <div class="card-role">UI/UX Quality Agent</div>
+    <div class="hero-tag">Inspired by: <strong>Batman / The Detective</strong> (DC) — sees every flaw, misses nothing</div>
+    <div class="card-desc">Audits every page. Performance scores (INP, LCP, CLS), accessibility compliance, broken layouts, touch targets, responsive issues. Generates visual regression reports.</div>
+    <div class="card-meta">
+      <div class="meta-item"><strong>Priority:</strong> P1</div>
+      <div class="meta-item"><strong>Build:</strong> 5-7 days</div>
+      <div class="meta-item"><strong>Background:</strong> On deploy + daily</div>
+    </div>
+  </div>
+
+  <div class="agent-card" data-agent="megaphone" onclick="switchTab('megaphone')">
+    <div class="hero-avatar" style="background:linear-gradient(135deg, #f59e0b22, #f59e0b44);">
+      <svg viewBox="0 0 100 100"><circle cx="50" cy="50" r="45" fill="#1a1d27" stroke="#f59e0b" stroke-width="3"/><path d="M30 40 L45 35 L65 25 L65 65 L45 55 L30 50Z" fill="#f59e0b" opacity="0.2" stroke="#f59e0b" stroke-width="2"/><rect x="25" y="38" width="8" height="14" rx="2" fill="#f59e0b" opacity="0.6"/><path d="M65 30 Q80 45 65 60" fill="none" stroke="#f59e0b" stroke-width="2"/><path d="M70 25 Q90 45 70 65" fill="none" stroke="#f59e0b" stroke-width="1.5" opacity="0.5"/><circle cx="50" cy="72" r="3" fill="#f59e0b" opacity="0.6"/></svg>
+    </div>
+    <div class="card-name">MEGAPHONE</div>
+    <div class="card-role">Marketing &amp; Engagement</div>
+    <div class="hero-tag">Inspired by: <strong>Black Canary</strong> (DC) — powerful voice that reaches everyone</div>
+    <div class="card-desc">Handles all customer outreach. WhatsApp campaigns, Rx expiry reminders, Google Review nudges, birthday messages, RFM-targeted promotions, NPS surveys.</div>
+    <div class="card-meta">
+      <div class="meta-item"><strong>Priority:</strong> P1</div>
+      <div class="meta-item"><strong>Build:</strong> 7-10 days</div>
+      <div class="meta-item"><strong>Background:</strong> Every 30 min</div>
+    </div>
+  </div>
+
+  <div class="agent-card" data-agent="oracle" onclick="switchTab('oracle')">
+    <div class="hero-avatar" style="background:linear-gradient(135deg, #3b82f622, #3b82f644);">
+      <svg viewBox="0 0 100 100"><circle cx="50" cy="50" r="45" fill="#1a1d27" stroke="#3b82f6" stroke-width="3"/><circle cx="50" cy="42" r="18" fill="none" stroke="#3b82f6" stroke-width="2"/><circle cx="50" cy="42" r="10" fill="none" stroke="#3b82f6" stroke-width="1.5" opacity="0.6"/><circle cx="50" cy="42" r="4" fill="#3b82f6"/><path d="M35 65 Q50 72 65 65" fill="none" stroke="#3b82f6" stroke-width="2"/><line x1="50" y1="60" x2="50" y2="65" stroke="#3b82f6" stroke-width="1.5"/><line x1="32" y1="42" x2="25" y2="42" stroke="#3b82f6" stroke-width="1.5"/><line x1="68" y1="42" x2="75" y2="42" stroke="#3b82f6" stroke-width="1.5"/><line x1="50" y1="24" x2="50" y2="18" stroke="#3b82f6" stroke-width="1.5"/></svg>
+    </div>
+    <div class="card-name">ORACLE</div>
+    <div class="card-role">AI Analysis &amp; Intelligence</div>
+    <div class="hero-tag">Inspired by: <strong>Oracle / Barbara Gordon</strong> (DC) — all-seeing analyst behind the screen</div>
+    <div class="card-desc">Deep business intelligence. Demand forecasting, discount abuse detection, prescription fraud flags, vendor margin optimization, cross-store benchmarking, root cause analysis.</div>
+    <div class="card-meta">
+      <div class="meta-item"><strong>Priority:</strong> P1</div>
+      <div class="meta-item"><strong>Build:</strong> 7-10 days</div>
+      <div class="meta-item"><strong>Background:</strong> Hourly + EOD</div>
+    </div>
+  </div>
+
+  <div class="agent-card" data-agent="taskmaster" onclick="switchTab('taskmaster')">
+    <div class="hero-avatar" style="background:linear-gradient(135deg, #ef444422, #ef444444);">
+      <svg viewBox="0 0 100 100"><circle cx="50" cy="50" r="45" fill="#1a1d27" stroke="#ef4444" stroke-width="3"/><circle cx="50" cy="40" r="16" fill="none" stroke="#ef4444" stroke-width="2.5"/><line x1="34" y1="40" x2="66" y2="40" stroke="#ef4444" stroke-width="2"/><line x1="50" y1="24" x2="50" y2="56" stroke="#ef4444" stroke-width="2"/><path d="M36 58 L42 68 L50 62 L58 68 L64 58" fill="none" stroke="#ef4444" stroke-width="2"/><circle cx="43" cy="38" r="2" fill="#ef4444"/><circle cx="57" cy="38" r="2" fill="#ef4444"/></svg>
+    </div>
+    <div class="card-name">TASKMASTER</div>
+    <div class="card-role">AI Task Execution &amp; Operations</div>
+    <div class="hero-tag">Inspired by: <strong>Taskmaster</strong> (Marvel) — masters any task, executes with precision</div>
+    <div class="card-desc">The agent that actually does things. Auto-reorders stock, creates follow-up tasks, escalates overdue items, enforces SOPs, schedules shifts, flags compliance violations.</div>
+    <div class="card-meta">
+      <div class="meta-item"><strong>Priority:</strong> P0</div>
+      <div class="meta-item"><strong>Build:</strong> 7-10 days</div>
+      <div class="meta-item"><strong>Background:</strong> Every 5 min</div>
+    </div>
+  </div>
+
+  <div class="agent-card" data-agent="nexus" onclick="switchTab('nexus')">
+    <div class="hero-avatar" style="background:linear-gradient(135deg, #06b6d422, #06b6d444);">
+      <svg viewBox="0 0 100 100"><circle cx="50" cy="50" r="45" fill="#1a1d27" stroke="#06b6d4" stroke-width="3"/><circle cx="50" cy="45" r="6" fill="#06b6d4" opacity="0.8"/><circle cx="30" cy="35" r="4" fill="none" stroke="#06b6d4" stroke-width="2"/><circle cx="70" cy="35" r="4" fill="none" stroke="#06b6d4" stroke-width="2"/><circle cx="30" cy="60" r="4" fill="none" stroke="#06b6d4" stroke-width="2"/><circle cx="70" cy="60" r="4" fill="none" stroke="#06b6d4" stroke-width="2"/><line x1="35" y1="37" x2="44" y2="43" stroke="#06b6d4" stroke-width="1.5"/><line x1="65" y1="37" x2="56" y2="43" stroke="#06b6d4" stroke-width="1.5"/><line x1="35" y1="58" x2="44" y2="48" stroke="#06b6d4" stroke-width="1.5"/><line x1="65" y1="58" x2="56" y2="48" stroke="#06b6d4" stroke-width="1.5"/><path d="M30 35 Q20 47 30 60" fill="none" stroke="#06b6d4" stroke-width="1" opacity="0.4"/><path d="M70 35 Q80 47 70 60" fill="none" stroke="#06b6d4" stroke-width="1" opacity="0.4"/></svg>
+    </div>
+    <div class="card-name">NEXUS</div>
+    <div class="card-role">Data &amp; Integration Orchestration</div>
+    <div class="hero-tag">Inspired by: <strong>Cyborg / Victor Stone</strong> (DC) — bridges every system, connects all data</div>
+    <div class="card-desc">Manages all external data flows. Shopify sync, Razorpay reconciliation, Shiprocket tracking, Tally export, Google Reviews API. Handles webhooks, retries, and conflict resolution.</div>
+    <div class="card-meta">
+      <div class="meta-item"><strong>Priority:</strong> P2</div>
+      <div class="meta-item"><strong>Build:</strong> 10-14 days</div>
+      <div class="meta-item"><strong>Background:</strong> Real-time + hourly</div>
+    </div>
+  </div>
+
+</div>
+
+<h3>Hero Identity Map — Why These Characters?</h3>
+<table>
+  <tr><th>Agent</th><th>Hero</th><th>Universe</th><th>Why This Match</th></tr>
+  <tr><td style="color:var(--jarvis);font-weight:700;">JARVIS</td><td><strong>J.A.R.V.I.S.</strong> (Iron Man's AI)</td><td>Marvel</td><td>The original AI assistant — conversational, always available, powers everything Tony builds. Our foundation layer.</td></tr>
+  <tr><td style="color:var(--cortex);font-weight:700;">CORTEX</td><td><strong>Professor X</strong> (Charles Xavier)</td><td>Marvel</td><td>The world's most powerful telepath reads minds and coordinates the X-Men. CORTEX reads intent and dispatches agents.</td></tr>
+  <tr><td style="color:var(--sentinel);font-weight:700;">SENTINEL</td><td><strong>The Sentinels</strong></td><td>Marvel</td><td>Giant robots programmed for one thing: detect and respond to threats. Our SENTINEL never stops scanning for system anomalies.</td></tr>
+  <tr><td style="color:var(--pixel);font-weight:700;">PIXEL</td><td><strong>Batman</strong> (The Detective)</td><td>DC</td><td>The world's greatest detective — obsessive attention to detail, finds what others miss. PIXEL catches every UI flaw.</td></tr>
+  <tr><td style="color:var(--megaphone);font-weight:700;">MEGAPHONE</td><td><strong>Black Canary</strong> (Dinah Lance)</td><td>DC</td><td>Her Canary Cry is unstoppable communication power. MEGAPHONE reaches every customer at the right moment.</td></tr>
+  <tr><td style="color:var(--oracle);font-weight:700;">ORACLE</td><td><strong>Oracle</strong> (Barbara Gordon)</td><td>DC</td><td>The actual Oracle from DC Comics — information broker, intelligence analyst, feeds data to every hero. Perfect match.</td></tr>
+  <tr><td style="color:var(--taskmaster);font-weight:700;">TASKMASTER</td><td><strong>Taskmaster</strong> (Tony Masters)</td><td>Marvel</td><td>The actual Taskmaster from Marvel — photographic reflexes, masters any task instantly. Our execution powerhouse.</td></tr>
+  <tr><td style="color:var(--nexus);font-weight:700;">NEXUS</td><td><strong>Cyborg</strong> (Victor Stone)</td><td>DC</td><td>Can interface with any digital system on Earth. NEXUS bridges every external platform into one unified data layer.</td></tr>
+</table>
+
+<h3>Background Schedule Summary</h3>
+<table>
+  <tr><th>Agent</th><th>Schedule Type</th><th>Frequency</th><th>What Runs in Background</th><th>Default State</th></tr>
+  <tr><td style="color:var(--jarvis);font-weight:700;">JARVIS</td><td>Always-On</td><td>Continuous</td><td>Listens for user queries via API, maintains conversation context, processes NLP intents</td><td><span class="tag tag-green">ON (Core)</span></td></tr>
+  <tr><td style="color:var(--cortex);font-weight:700;">CORTEX</td><td>Event-Driven</td><td>On query + on event</td><td>Dispatches incoming queries, coordinates multi-agent workflows, handles retries</td><td><span class="tag tag-green">ON (Core)</span></td></tr>
+  <tr><td style="color:var(--sentinel);font-weight:700;">SENTINEL</td><td>Interval</td><td>Every 60 seconds</td><td>Pings all 31 API routers, checks MongoDB health, monitors Vercel deploy status, scans error logs</td><td><span class="tag tag-green">ON</span></td></tr>
+  <tr><td style="color:var(--pixel);font-weight:700;">PIXEL</td><td>Cron + Event</td><td>Daily 2 AM + on Vercel deploy</td><td>Full UI crawl, performance audit, accessibility scan, visual regression diff</td><td><span class="tag tag-green">ON</span></td></tr>
+  <tr><td style="color:var(--megaphone);font-weight:700;">MEGAPHONE</td><td>Interval + Cron</td><td>Every 30 min + daily 9 AM</td><td>Checks Rx expiry dates, birthday list, overdue follow-ups, queues messages (DND: 9PM-9AM)</td><td><span class="tag tag-green">ON</span></td></tr>
+  <tr><td style="color:var(--oracle);font-weight:700;">ORACLE</td><td>Cron</td><td>Hourly + EOD 10 PM</td><td>Hourly: anomaly scan. EOD: full analytics refresh, demand forecast update, fraud detection sweep</td><td><span class="tag tag-green">ON</span></td></tr>
+  <tr><td style="color:var(--taskmaster);font-weight:700;">TASKMASTER</td><td>Interval</td><td>Every 5 minutes</td><td>SLA escalation check, overdue task scan, SOP verification, auto-reorder trigger, expense anomaly scan</td><td><span class="tag tag-green">ON</span></td></tr>
+  <tr><td style="color:var(--nexus);font-weight:700;">NEXUS</td><td>Interval + Event</td><td>Hourly + on webhook</td><td>Shopify/Razorpay/Shiprocket sync cycle, webhook processing queue, Tally daily export at 11 PM</td><td><span class="tag tag-yellow">ON (when integrations active)</span></td></tr>
+</table>
+
+<h3>Integration into Existing Jarvis</h3>
+<p style="font-size:13px;color:var(--text2);margin-bottom:12px;">Each agent registers itself into the existing <code>AGENT_REGISTRY</code> dict in jarvis.py. CORTEX replaces the current <code>process_query_async()</code> dispatcher with intelligent routing. JARVIS remains the foundation — its NLP, Claude client, and conversation memory are shared by all agents.</p>
+
+<div class="code"><span class="comment"># Extended AGENT_REGISTRY with background config</span>
+<span class="type">AGENT_REGISTRY</span> = {
+    <span class="comment"># JARVIS core (the foundation — not toggleable)</span>
+    <span class="string">"jarvis"</span>: {
+        <span class="string">"name"</span>: <span class="string">"JARVIS"</span>, <span class="string">"instance"</span>: JarvisCore(),
+        <span class="string">"type"</span>: <span class="string">"foundation"</span>, <span class="string">"toggleable"</span>: <span class="keyword">False</span>
+    },
+    <span class="comment"># Existing 5 subagents (now managed by ORACLE)</span>
+    <span class="string">"stock_health"</span>:       { <span class="string">"name"</span>: <span class="string">"Stock Health"</span>, <span class="string">"handler"</span>: analyze_stock_health, <span class="string">"parent"</span>: <span class="string">"oracle"</span> },
+    <span class="string">"payment_collection"</span>: { <span class="string">"name"</span>: <span class="string">"Payment Collection"</span>, <span class="string">"handler"</span>: analyze_payments, <span class="string">"parent"</span>: <span class="string">"oracle"</span> },
+    <span class="string">"sop_compliance"</span>:     { <span class="string">"name"</span>: <span class="string">"SOP Compliance"</span>, <span class="string">"handler"</span>: analyze_sop, <span class="string">"parent"</span>: <span class="string">"taskmaster"</span> },
+    <span class="string">"incentive_tracking"</span>: { <span class="string">"name"</span>: <span class="string">"Incentive Tracking"</span>, <span class="string">"handler"</span>: analyze_incentives, <span class="string">"parent"</span>: <span class="string">"oracle"</span> },
+    <span class="string">"discount_abuse"</span>:     { <span class="string">"name"</span>: <span class="string">"Discount Abuse"</span>, <span class="string">"handler"</span>: analyze_discounts, <span class="string">"parent"</span>: <span class="string">"oracle"</span> },
+
+    <span class="comment"># NEW: 7 architecture-first agents (all background-enabled)</span>
+    <span class="string">"cortex"</span>:     { <span class="string">"name"</span>: <span class="string">"CORTEX"</span>,     <span class="string">"instance"</span>: CortexOrchestrator(), <span class="string">"type"</span>: <span class="string">"orchestrator"</span>, <span class="string">"toggleable"</span>: <span class="keyword">False</span> },
+    <span class="string">"sentinel"</span>:   { <span class="string">"name"</span>: <span class="string">"SENTINEL"</span>,   <span class="string">"instance"</span>: SentinelAgent(),      <span class="string">"type"</span>: <span class="string">"monitor"</span>,      <span class="string">"toggleable"</span>: <span class="keyword">True</span> },
+    <span class="string">"pixel"</span>:      { <span class="string">"name"</span>: <span class="string">"PIXEL"</span>,      <span class="string">"instance"</span>: PixelAgent(),         <span class="string">"type"</span>: <span class="string">"auditor"</span>,      <span class="string">"toggleable"</span>: <span class="keyword">True</span> },
+    <span class="string">"megaphone"</span>:  { <span class="string">"name"</span>: <span class="string">"MEGAPHONE"</span>,  <span class="string">"instance"</span>: MegaphoneAgent(),     <span class="string">"type"</span>: <span class="string">"executor"</span>,     <span class="string">"toggleable"</span>: <span class="keyword">True</span> },
+    <span class="string">"oracle"</span>:     { <span class="string">"name"</span>: <span class="string">"ORACLE"</span>,     <span class="string">"instance"</span>: OracleAgent(),        <span class="string">"type"</span>: <span class="string">"analyzer"</span>,     <span class="string">"toggleable"</span>: <span class="keyword">True</span> },
+    <span class="string">"taskmaster"</span>: { <span class="string">"name"</span>: <span class="string">"TASKMASTER"</span>, <span class="string">"instance"</span>: TaskmasterAgent(),    <span class="string">"type"</span>: <span class="string">"executor"</span>,     <span class="string">"toggleable"</span>: <span class="keyword">True</span> },
+    <span class="string">"nexus"</span>:      { <span class="string">"name"</span>: <span class="string">"NEXUS"</span>,      <span class="string">"instance"</span>: NexusAgent(),         <span class="string">"type"</span>: <span class="string">"integrator"</span>,   <span class="string">"toggleable"</span>: <span class="keyword">True</span> },
+}</div>
+
+<h3>Shared Base Class</h3>
+<div class="code"><span class="keyword">class</span> <span class="type">JarvisAgent</span>(ABC):
+    <span class="string">"""Base class every agent extends. Provides logging, DB access, background loop, error handling."""</span>
+
+    agent_id: <span class="type">str</span>
+    agent_name: <span class="type">str</span>
+    capabilities: <span class="type">List[str]</span>
+    requires_confirmation: <span class="type">List[str]</span>  <span class="comment"># commands needing human approval</span>
+
+    <span class="keyword">async def</span> <span class="fn">run</span>(self, query: <span class="type">str</span>, context: <span class="type">AgentContext</span>) -> <span class="type">AgentResponse</span>:
+        <span class="string">"""On-demand entry point. CORTEX calls this for user queries."""</span>
+
+    <span class="keyword">async def</span> <span class="fn">background_tick</span>(self):
+        <span class="string">"""Background loop entry point. APScheduler calls this on schedule.
+        Checks if agent is enabled before doing work."""</span>
+        config = <span class="keyword">await</span> self.<span class="fn">get_config</span>()
+        <span class="keyword">if not</span> config[<span class="string">"enabled"</span>]:
+            <span class="keyword">return</span>  <span class="comment"># Agent is toggled OFF — skip this tick</span>
+        <span class="keyword">try</span>:
+            <span class="keyword">await</span> self.<span class="fn">_do_background_work</span>()
+            <span class="keyword">await</span> self.<span class="fn">update_status</span>(<span class="string">"success"</span>)
+        <span class="keyword">except</span> <span class="type">Exception</span> <span class="keyword">as</span> e:
+            <span class="keyword">await</span> self.<span class="fn">update_status</span>(<span class="string">"error"</span>, error=str(e))
+            <span class="keyword">await</span> self.<span class="fn">emit_event</span>(<span class="string">"agent.error"</span>, {<span class="string">"agent"</span>: self.agent_id, <span class="string">"error"</span>: str(e)})
+
+    <span class="keyword">@abstractmethod</span>
+    <span class="keyword">async def</span> <span class="fn">_do_background_work</span>(self):
+        <span class="string">"""Each agent implements its own background logic here."""</span>
+
+    <span class="keyword">async def</span> <span class="fn">health_check</span>(self) -> <span class="type">HealthStatus</span>:
+        <span class="string">"""Self-diagnostic. SENTINEL polls this."""</span>
+
+    <span class="keyword">def</span> <span class="fn">get_db</span>(self) -> <span class="type">AsyncIOMotorDatabase</span>:
+        <span class="string">"""Shared MongoDB connection pool."""</span>
+
+    <span class="keyword">def</span> <span class="fn">get_redis</span>(self) -> <span class="type">Redis</span>:
+        <span class="string">"""Shared Redis for caching &amp; pub/sub events."""</span>
+
+    <span class="keyword">async def</span> <span class="fn">emit_event</span>(self, event: <span class="type">str</span>, payload: <span class="type">dict</span>):
+        <span class="string">"""Publish event to Redis pub/sub for other agents."""</span>
+
+    <span class="keyword">async def</span> <span class="fn">log_action</span>(self, action: <span class="type">str</span>, details: <span class="type">dict</span>):
+        <span class="string">"""Immutable audit log entry in agent_audit_log collection."""</span>
+
+    <span class="keyword">async def</span> <span class="fn">get_config</span>(self) -> <span class="type">dict</span>:
+        <span class="string">"""Read this agent's config from agent_config collection."""</span>
+
+    <span class="keyword">async def</span> <span class="fn">update_status</span>(self, status: <span class="type">str</span>, error: <span class="type">str</span> = <span class="keyword">None</span>):
+        <span class="string">"""Update last_run, last_status, run_count in agent_config."""</span></div>
+
+<h3>Event Bus (Inter-Agent Communication)</h3>
+<p style="font-size:13px;color:var(--text2);margin-bottom:12px;">Agents talk to each other through Redis Pub/Sub channels. This decouples them completely.</p>
+<table>
+  <tr><th>Event</th><th>Publisher</th><th>Subscriber(s)</th><th>Action</th></tr>
+  <tr><td><code>stock.below_reorder</code></td><td>SENTINEL</td><td>TASKMASTER, ORACLE</td><td>TASKMASTER auto-creates PO; ORACLE logs pattern</td></tr>
+  <tr><td><code>order.completed</code></td><td>NEXUS</td><td>MEGAPHONE, ORACLE</td><td>MEGAPHONE sends WhatsApp confirmation; ORACLE updates analytics</td></tr>
+  <tr><td><code>campaign.scheduled</code></td><td>MEGAPHONE</td><td>CORTEX</td><td>CORTEX logs campaign in agent timeline</td></tr>
+  <tr><td><code>anomaly.detected</code></td><td>ORACLE</td><td>SENTINEL, CORTEX</td><td>SENTINEL raises alert; CORTEX notifies Superadmin</td></tr>
+  <tr><td><code>task.overdue</code></td><td>TASKMASTER</td><td>MEGAPHONE, CORTEX</td><td>MEGAPHONE sends reminder; CORTEX escalates</td></tr>
+  <tr><td><code>sync.failed</code></td><td>NEXUS</td><td>SENTINEL, CORTEX</td><td>SENTINEL logs failure; CORTEX triggers retry</td></tr>
+  <tr><td><code>ux.degraded</code></td><td>PIXEL</td><td>SENTINEL</td><td>SENTINEL adds to health dashboard</td></tr>
+  <tr><td><code>agent.error</code></td><td>Any agent</td><td>CORTEX, SENTINEL</td><td>CORTEX retries; SENTINEL logs</td></tr>
+  <tr><td><code>agent.toggled</code></td><td>CORTEX</td><td>SENTINEL</td><td>SENTINEL logs state change; updates health dashboard</td></tr>
+</table>
+
+<h3>Control API Endpoints</h3>
+<div class="code"><span class="comment"># Agent lifecycle management (Superadmin only)</span>
+GET    /jarvis/agents                     <span class="comment"># List all agents with status + config</span>
+GET    /jarvis/agents/{id}/status         <span class="comment"># Single agent live status</span>
+PATCH  /jarvis/agents/{id}/toggle         <span class="comment"># Turn agent ON/OFF</span>
+PATCH  /jarvis/agents/{id}/config         <span class="comment"># Update schedule/settings</span>
+POST   /jarvis/agents/{id}/run-now        <span class="comment"># Force immediate background tick</span>
+GET    /jarvis/agents/{id}/logs           <span class="comment"># Recent audit log for this agent</span>
+GET    /jarvis/agents/timeline            <span class="comment"># Unified timeline of all agent actions</span></div>
+
+</div>
+
+<!-- ===================== CONTROL PANEL ===================== -->
+<div class="panel" id="panel-control">
+<h2>Agent Control Panel</h2>
+<p class="subtitle">Superadmin dashboard for managing all background agents — toggle ON/OFF, view live status, force-run, and inspect logs.</p>
+
+<h3>Live Agent Status</h3>
+<p style="font-size:13px;color:var(--text2);margin-bottom:16px;">This is the frontend UI concept. Each card shows the agent's real-time state, last run time, error count, and a toggle switch to enable/disable. Click any card to drill into that agent's detail view.</p>
+
+<div class="control-grid">
+  <div class="control-card">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+      <div><span class="status-dot running"></span><strong style="color:var(--jarvis);">JARVIS</strong></div>
+      <span class="tag tag-green">CORE — ALWAYS ON</span>
+    </div>
+    <div style="font-size:12px;color:var(--text2);">The foundation. Cannot be turned off.</div>
+    <div style="font-size:11px;color:var(--text2);margin-top:8px;">Last query: 2 min ago &middot; Queries today: 47 &middot; Claude calls: 23</div>
+  </div>
+
+  <div class="control-card">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+      <div><span class="status-dot running"></span><strong style="color:var(--cortex);">CORTEX</strong></div>
+      <span class="tag tag-green">CORE — ALWAYS ON</span>
+    </div>
+    <div style="font-size:12px;color:var(--text2);">Orchestrator. Cannot be turned off.</div>
+    <div style="font-size:11px;color:var(--text2);margin-top:8px;">Dispatches today: 34 &middot; Multi-agent workflows: 8 &middot; Retries: 2</div>
+  </div>
+
+  <div class="control-card">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+      <div><span class="status-dot running"></span><strong style="color:var(--sentinel);">SENTINEL</strong></div>
+      <div class="toggle-container">
+        <label class="toggle-switch"><input type="checkbox" checked onchange="toggleDemo(this, 'sentinel')"><span class="toggle-slider"></span></label>
+      </div>
+    </div>
+    <div style="font-size:12px;color:var(--text2);">Health checks every 60s</div>
+    <div style="font-size:11px;color:var(--text2);margin-top:8px;">Last run: 23s ago &middot; Runs today: 847 &middot; Alerts fired: 3 &middot; System score: 94/100</div>
+  </div>
+
+  <div class="control-card">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+      <div><span class="status-dot sleeping"></span><strong style="color:var(--pixel);">PIXEL</strong></div>
+      <div class="toggle-container">
+        <label class="toggle-switch"><input type="checkbox" checked onchange="toggleDemo(this, 'pixel')"><span class="toggle-slider"></span></label>
+      </div>
+    </div>
+    <div style="font-size:12px;color:var(--text2);">Next audit: 2:00 AM tomorrow</div>
+    <div style="font-size:11px;color:var(--text2);margin-top:8px;">Last run: 8h ago &middot; Pages audited: 41 &middot; Issues found: 7 &middot; INP avg: 1,200ms</div>
+  </div>
+
+  <div class="control-card">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+      <div><span class="status-dot running"></span><strong style="color:var(--megaphone);">MEGAPHONE</strong></div>
+      <div class="toggle-container">
+        <label class="toggle-switch"><input type="checkbox" checked onchange="toggleDemo(this, 'megaphone')"><span class="toggle-slider"></span></label>
+      </div>
+    </div>
+    <div style="font-size:12px;color:var(--text2);">Checks outreach queue every 30 min</div>
+    <div style="font-size:11px;color:var(--text2);margin-top:8px;">Last run: 12m ago &middot; Messages sent today: 24 &middot; Pending: 6 &middot; Delivery rate: 97%</div>
+  </div>
+
+  <div class="control-card">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+      <div><span class="status-dot running"></span><strong style="color:var(--oracle);">ORACLE</strong></div>
+      <div class="toggle-container">
+        <label class="toggle-switch"><input type="checkbox" checked onchange="toggleDemo(this, 'oracle')"><span class="toggle-slider"></span></label>
+      </div>
+    </div>
+    <div style="font-size:12px;color:var(--text2);">Hourly anomaly scan + EOD analytics</div>
+    <div style="font-size:11px;color:var(--text2);margin-top:8px;">Last run: 34m ago &middot; Anomalies detected: 2 &middot; Predictions: 15 &middot; Accuracy: 87%</div>
+  </div>
+
+  <div class="control-card">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+      <div><span class="status-dot running"></span><strong style="color:var(--taskmaster);">TASKMASTER</strong></div>
+      <div class="toggle-container">
+        <label class="toggle-switch"><input type="checkbox" checked onchange="toggleDemo(this, 'taskmaster')"><span class="toggle-slider"></span></label>
+      </div>
+    </div>
+    <div style="font-size:12px;color:var(--text2);">Task scan every 5 min</div>
+    <div style="font-size:11px;color:var(--text2);margin-top:8px;">Last run: 2m ago &middot; Tasks created: 12 &middot; Escalations: 3 &middot; Auto-executed: 8</div>
+  </div>
+
+  <div class="control-card">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+      <div><span class="status-dot stopped"></span><strong style="color:var(--nexus);">NEXUS</strong></div>
+      <div class="toggle-container">
+        <label class="toggle-switch"><input type="checkbox" onchange="toggleDemo(this, 'nexus')"><span class="toggle-slider"></span></label>
+      </div>
+    </div>
+    <div style="font-size:12px;color:var(--text2);">Paused — no live integrations yet</div>
+    <div style="font-size:11px;color:var(--text2);margin-top:8px;">All 6 integrations currently mocked. Turn ON when Shopify/Razorpay credentials are configured.</div>
+  </div>
+</div>
+
+<h3>How Toggle Works (Technical)</h3>
+<div class="code"><span class="comment"># Frontend: React toggle calls this API</span>
+<span class="keyword">const</span> toggleAgent = <span class="keyword">async</span> (agentId: <span class="type">string</span>, enabled: <span class="type">boolean</span>) => {
+  <span class="keyword">await</span> api.<span class="fn">patch</span>(<span class="string">`/jarvis/agents/${agentId}/toggle`</span>, { enabled });
+  <span class="fn">toast</span>(<span class="string">`${agentId} ${enabled ? 'enabled' : 'disabled'}`</span>);
+};
+
+<span class="comment"># Backend: FastAPI endpoint</span>
+<span class="keyword">@router.patch</span>(<span class="string">"/jarvis/agents/{agent_id}/toggle"</span>)
+<span class="keyword">async def</span> <span class="fn">toggle_agent</span>(agent_id: <span class="type">str</span>, body: <span class="type">ToggleBody</span>, user = <span class="fn">require_superadmin</span>()):
+    agent = AGENT_REGISTRY.<span class="fn">get</span>(agent_id)
+    <span class="keyword">if not</span> agent <span class="keyword">or not</span> agent.<span class="fn">get</span>(<span class="string">"toggleable"</span>, <span class="keyword">True</span>):
+        <span class="keyword">raise</span> <span class="type">HTTPException</span>(400, <span class="string">"Cannot toggle core agents"</span>)
+
+    <span class="keyword">await</span> db.agent_config.<span class="fn">update_one</span>(
+        {<span class="string">"agent_id"</span>: agent_id},
+        {<span class="string">"$set"</span>: {<span class="string">"enabled"</span>: body.enabled, <span class="string">"toggled_by"</span>: user.username, <span class="string">"toggled_at"</span>: utcnow()}}
+    )
+
+    <span class="keyword">if</span> body.enabled:
+        scheduler.<span class="fn">resume_job</span>(agent_id)
+    <span class="keyword">else</span>:
+        scheduler.<span class="fn">pause_job</span>(agent_id)
+
+    <span class="comment"># Notify other agents of the state change</span>
+    <span class="keyword">await</span> redis.<span class="fn">publish</span>(<span class="string">"agent.toggled"</span>, {<span class="string">"agent_id"</span>: agent_id, <span class="string">"enabled"</span>: body.enabled})
+
+    <span class="keyword">return</span> {<span class="string">"agent_id"</span>: agent_id, <span class="string">"enabled"</span>: body.enabled}</div>
+
+<h3>Frontend Route</h3>
+<p style="font-size:13px;color:var(--text2);margin-bottom:12px;">Add a new route at <code>/settings/agents</code> accessible to SUPERADMIN. This page renders the control grid above with live WebSocket updates for real-time status changes. Each card links to the agent's detailed log/config page.</p>
+
+<div class="code"><span class="comment"># New frontend route</span>
+/settings/agents                     <span class="comment"># Agent control panel (Superadmin only)</span>
+/settings/agents/{agentId}           <span class="comment"># Agent detail: logs, config, metrics</span>
+/settings/agents/{agentId}/config    <span class="comment"># Edit schedule, thresholds, overrides</span>
+
+<span class="comment"># WebSocket for live status updates</span>
+ws://api/v1/jarvis/agents/live       <span class="comment"># Pushes status changes in real-time</span></div>
+
+</div>
+
+<!-- ===================== JARVIS ===================== -->
+<div class="panel" id="panel-jarvis">
+<h2><span class="agent-dot" style="background:var(--jarvis)"></span>JARVIS — The Foundation</h2>
+<div class="hero-banner">
+  <div class="hero-avatar" style="background:linear-gradient(135deg, #e11d4822, #e11d4844);flex-shrink:0;">
+    <svg viewBox="0 0 100 100"><circle cx="50" cy="50" r="45" fill="#1a1d27" stroke="#e11d48" stroke-width="3"/><path d="M35 35 L50 25 L65 35 L65 55 L50 65 L35 55Z" fill="none" stroke="#e11d48" stroke-width="2.5"/><circle cx="50" cy="45" r="8" fill="#e11d48" opacity="0.8"/><path d="M42 70 L50 75 L58 70" fill="none" stroke="#e11d48" stroke-width="2"/></svg>
+  </div>
+  <div class="hero-info">
+    <div style="font-size:13px;"><strong style="color:var(--jarvis);">Hero Identity:</strong> Iron Man's J.A.R.V.I.S. (Marvel)</div>
+    <div class="hero-quote">"Just A Rather Very Intelligent System" — the AI backbone that makes everything else possible. Like Tony Stark's AI, JARVIS is the conversational core that every other agent depends on.</div>
+  </div>
+</div>
+<p class="subtitle">The AI core that already exists (1,772 lines). NLP engine, Claude integration, conversation memory, and the AGENT_REGISTRY that all other agents plug into.</p>
+
+<h3>Why It's Listed as an Agent</h3>
+<p style="font-size:13px;color:var(--text2);margin-bottom:16px;">JARVIS isn't a subagent — it's the foundation everything else builds on. But it runs continuously in the background (listening for queries, maintaining context), and the other agents inherit its infrastructure. Listing it here makes the complete ecosystem visible.</p>
+
+<h3>Current Architecture (What Exists Today)</h3>
+<table>
+  <tr><th>Component</th><th>What It Does</th><th>Lines</th><th>Status</th></tr>
+  <tr><td><strong>JarvisNLP</strong></td><td>Intent detection via keyword patterns (INTENT_PATTERNS dict). Maps user queries to JarvisQueryType enum (9 types: SALES, INVENTORY, STAFF, etc.)</td><td>~120</td><td><span class="tag tag-green">Built</span></td></tr>
+  <tr><td><strong>ClaudeClient</strong></td><td>Claude Sonnet 4 integration with 20-message rolling context. System prompt with IMS domain knowledge. Handles streaming responses.</td><td>~200</td><td><span class="tag tag-green">Built</span></td></tr>
+  <tr><td><strong>JarvisAnalyticsEngine</strong></td><td>7 static methods: get_business_overview, get_sales_insights, get_inventory_insights, get_customer_insights, get_staff_insights, get_predictions, get_recommendations</td><td>~350</td><td><span class="tag tag-green">Built</span></td></tr>
+  <tr><td><strong>AGENT_REGISTRY</strong></td><td>Dict-based subagent registration. Currently 5 agents: stock_health, payment_collection, sop_compliance, incentive_tracking, discount_abuse</td><td>~50</td><td><span class="tag tag-green">Built</span></td></tr>
+  <tr><td><strong>execute_command()</strong></td><td>6 commands: generate_report, reorder_stock, send_campaign, transfer_staff, create_task, analyze_store</td><td>~150</td><td><span class="tag tag-red">All Mocked</span></td></tr>
+  <tr><td><strong>API Endpoints</strong></td><td>10+ endpoints, all SUPERADMIN-only. /jarvis/query, /jarvis/command, /jarvis/analytics, /jarvis/agents, etc.</td><td>~300</td><td><span class="tag tag-green">Built</span></td></tr>
+  <tr><td><strong>Conversation Memory</strong></td><td>Per-user rolling message history stored in MongoDB. Passed to Claude for context-aware responses.</td><td>~100</td><td><span class="tag tag-green">Built</span></td></tr>
+</table>
+
+<h3>What Changes with the New Architecture</h3>
+<table>
+  <tr><th>Component</th><th>Before (Current)</th><th>After (With New Agents)</th></tr>
+  <tr><td><strong>JarvisNLP</strong></td><td>Keyword matching → JarvisQueryType enum</td><td>Still used as fallback. CORTEX adds Claude-powered intent classification with confidence scores on top.</td></tr>
+  <tr><td><strong>ClaudeClient</strong></td><td>Called directly by process_query_async</td><td>Becomes a shared service. All agents access Claude through JarvisAgent.get_claude(). Context window expanded from 20 to 30 messages with agent metadata.</td></tr>
+  <tr><td><strong>process_query_async()</strong></td><td>Flat dispatcher — dumps all 7 analytics into Claude</td><td>Replaced by CORTEX.dispatch() — only calls relevant agents, in the right order, with proper error handling.</td></tr>
+  <tr><td><strong>execute_command()</strong></td><td>Returns fake {"success": true}</td><td>TASKMASTER takes over command execution. Real database writes, real side effects, audit-logged.</td></tr>
+  <tr><td><strong>AGENT_REGISTRY</strong></td><td>5 simple handler functions</td><td>13 entries: 5 legacy handlers (now wrapped) + 8 new agent instances with background scheduling.</td></tr>
+  <tr><td><strong>Existing 5 subagents</strong></td><td>Standalone analysis functions</td><td>Adopted by ORACLE (stock_health, payment_collection, incentive_tracking, discount_abuse) and TASKMASTER (sop_compliance). Their logic is preserved, wrapped in the new agent pattern.</td></tr>
+</table>
+
+<h3>JARVIS Background Loop</h3>
+<div class="code"><span class="keyword">class</span> <span class="type">JarvisCore</span>:
+    <span class="string">"""The foundation agent — always on, cannot be toggled off."""</span>
+
+    agent_id = <span class="string">"jarvis"</span>
+    agent_name = <span class="string">"JARVIS"</span>
+
+    <span class="keyword">async def</span> <span class="fn">background_tick</span>(self):
+        <span class="string">"""Runs every 30s — lightweight housekeeping."""</span>
+        <span class="comment"># 1. Prune expired conversation contexts (>24h inactive)</span>
+        <span class="keyword">await</span> self.<span class="fn">prune_stale_contexts</span>()
+
+        <span class="comment"># 2. Refresh Claude system prompt if config changed</span>
+        <span class="keyword">await</span> self.<span class="fn">refresh_system_prompt</span>()
+
+        <span class="comment"># 3. Update agent registry health cache</span>
+        <span class="keyword">for</span> agent_id, agent <span class="keyword">in</span> AGENT_REGISTRY.<span class="fn">items</span>():
+            <span class="keyword">if</span> <span class="fn">hasattr</span>(agent.<span class="fn">get</span>(<span class="string">"instance"</span>), <span class="string">"health_check"</span>):
+                self.health_cache[agent_id] = <span class="keyword">await</span> agent[<span class="string">"instance"</span>].<span class="fn">health_check</span>()
+
+    <span class="keyword">async def</span> <span class="fn">process_query</span>(self, query: <span class="type">str</span>, user: <span class="type">User</span>) -> <span class="type">JarvisResponse</span>:
+        <span class="string">"""Main entry point for user queries. Delegates to CORTEX."""</span>
+        <span class="keyword">return await</span> CORTEX.<span class="fn">dispatch</span>(query, user)
+
+    <span class="keyword">async def</span> <span class="fn">get_claude</span>(self) -> <span class="type">ClaudeClient</span>:
+        <span class="string">"""Shared Claude client for all agents."""</span>
+        <span class="keyword">return</span> self._claude_client</div>
+
+<h3>Key Design Decision</h3>
+<p style="font-size:13px;color:var(--text2);">JARVIS is not just another agent — it's the foundation layer. Think of it as the operating system kernel: it provides shared services (DB, Redis, Claude, event bus) that all other agents consume. It cannot be toggled off because without it, no other agent can function. The existing 1,772 lines of code remain mostly intact; the new agents extend this foundation rather than replacing it.</p>
+</div>
+
+<!-- ===================== CORTEX ===================== -->
+<div class="panel" id="panel-cortex">
+<h2><span class="agent-dot" style="background:var(--cortex)"></span>CORTEX — The Orchestrator</h2>
+<div class="hero-banner">
+  <div class="hero-avatar" style="background:linear-gradient(135deg, #f9731622, #f9731644);flex-shrink:0;">
+    <svg viewBox="0 0 100 100"><circle cx="50" cy="50" r="45" fill="#1a1d27" stroke="#f97316" stroke-width="3"/><ellipse cx="50" cy="42" rx="22" ry="18" fill="none" stroke="#f97316" stroke-width="2"/><path d="M30 42 Q35 25 50 22 Q65 25 70 42" fill="none" stroke="#f97316" stroke-width="2" stroke-dasharray="3,2"/><circle cx="42" cy="40" r="3" fill="#f97316"/><circle cx="58" cy="40" r="3" fill="#f97316"/><circle cx="50" cy="50" r="2.5" fill="#f97316"/></svg>
+  </div>
+  <div class="hero-info">
+    <div style="font-size:13px;"><strong style="color:var(--cortex);">Hero Identity:</strong> Professor X / Charles Xavier (Marvel)</div>
+    <div class="hero-quote">The world's most powerful telepath doesn't fight — he coordinates. Like Xavier using Cerebro to locate and guide every mutant, CORTEX reads intent and dispatches the right agent for every query.</div>
+  </div>
+</div>
+<p class="subtitle">Routes every query to the right agent, coordinates multi-agent workflows, manages priorities and fallbacks. Cannot be toggled off (core agent).</p>
+
+<h3>Why It Exists</h3>
+<p style="font-size:13px;color:var(--text2);margin-bottom:16px;">Currently, Jarvis uses a flat <code>process_query_async()</code> that classifies intent via keyword matching and then dumps ALL 7 analytics categories into Claude regardless of the query. CORTEX replaces this with intelligent routing — only calling the agents that matter for the query, in the right order, with proper error handling.</p>
+
+<h3>Core Responsibilities</h3>
+<table>
+  <tr><th>Responsibility</th><th>How It Works</th><th>Replaces</th></tr>
+  <tr><td><strong>Intent Classification</strong></td><td>Uses Claude to classify user query into 1+ agent targets with confidence scores. Falls back to keyword matching if Claude is unavailable.</td><td>Current JarvisNLP.detect_intent()</td></tr>
+  <tr><td><strong>Agent Dispatch</strong></td><td>Calls the target agent(s) in parallel via asyncio.gather(). Respects agent dependencies and checks enabled status before dispatch.</td><td>Current process_query_async()</td></tr>
+  <tr><td><strong>Multi-Agent Coordination</strong></td><td>For complex queries ("Why did revenue drop and what should we do?"), CORTEX chains: ORACLE (diagnose) → TASKMASTER (recommend actions) → MEGAPHONE (draft communications).</td><td>Not possible today</td></tr>
+  <tr><td><strong>Retry &amp; Fallback</strong></td><td>If an agent fails, CORTEX retries once after 2s. If still failing, returns partial results with a degraded notice.</td><td>No error handling exists</td></tr>
+  <tr><td><strong>Agent Lifecycle</strong></td><td>Manages ON/OFF toggles, monitors background health, handles graceful shutdown. Knows which agents are up and routes around downed agents.</td><td>Not possible today</td></tr>
+  <tr><td><strong>Priority Queue</strong></td><td>Urgent queries (anomaly alerts, system errors) preempt lower-priority analytics queries.</td><td>FIFO only</td></tr>
+</table>
+
+<h3>Dispatch Pipeline</h3>
+<div class="flow">
+  <div class="flow-step">User Query</div>
+  <div class="flow-arrow">→</div>
+  <div class="flow-step">Claude Intent Classify</div>
+  <div class="flow-arrow">→</div>
+  <div class="flow-step">Check Agent Status</div>
+  <div class="flow-arrow">→</div>
+  <div class="flow-step">Parallel Dispatch</div>
+  <div class="flow-arrow">→</div>
+  <div class="flow-step">Merge Results</div>
+  <div class="flow-arrow">→</div>
+  <div class="flow-step">Claude Synthesis</div>
+  <div class="flow-arrow">→</div>
+  <div class="flow-step">Response</div>
+</div>
+
+<h3>Background Role</h3>
+<div class="code"><span class="comment"># CORTEX runs event-driven (not on a timer)</span>
+<span class="comment"># It wakes up when:</span>
+  1. A user query arrives via /jarvis/query
+  2. An agent emits an event via Redis pub/sub
+  3. A background agent reports an error (agent.error event)
+  4. An agent toggle event occurs (agent.toggled event)
+
+<span class="comment"># CORTEX also runs a lightweight heartbeat every 30s:</span>
+<span class="keyword">async def</span> <span class="fn">_do_background_work</span>(self):
+    <span class="comment"># Check all agent health</span>
+    <span class="keyword">for</span> agent_id <span class="keyword">in</span> self.managed_agents:
+        status = <span class="keyword">await</span> AGENT_REGISTRY[agent_id][<span class="string">"instance"</span>].<span class="fn">health_check</span>()
+        <span class="keyword">if</span> status == <span class="string">"unhealthy"</span>:
+            <span class="keyword">await</span> self.<span class="fn">handle_unhealthy_agent</span>(agent_id)</div>
+
+<h3>Multi-Agent Workflow Example</h3>
+<div class="code"><span class="comment"># Query: "Bokaro revenue dropped 15% — why and what do we do?"</span>
+<span class="type">CortexOrchestrator</span>.<span class="fn">dispatch</span>():
+  1. <span class="fn">classify_intent</span>() → [ORACLE(0.95), TASKMASTER(0.70), MEGAPHONE(0.40)]
+  2. <span class="fn">check_agents_enabled</span>() → all 3 are ON, proceed
+  3. <span class="keyword">await</span> ORACLE.<span class="fn">run</span>(<span class="string">"revenue_drop_analysis"</span>, store=<span class="string">"Bokaro"</span>)
+     → Returns: footfall down 22%, avg bill value down 8%, top categories affected
+  4. <span class="keyword">await</span> TASKMASTER.<span class="fn">run</span>(<span class="string">"generate_action_plan"</span>, oracle_context=...)
+     → Returns: 4 tasks (restock bestsellers, run promo, staff training, review pricing)
+  5. <span class="keyword">await</span> MEGAPHONE.<span class="fn">run</span>(<span class="string">"draft_reactivation"</span>, customer_segment=<span class="string">"at_risk"</span>)
+     → Returns: WhatsApp campaign draft for churning Bokaro customers
+  6. <span class="fn">synthesize</span>() → Unified response with diagnosis + actions + campaign draft</div>
+</div>
+
+<!-- ===================== SENTINEL ===================== -->
+<div class="panel" id="panel-sentinel">
+<h2><span class="agent-dot" style="background:var(--sentinel)"></span>SENTINEL — System Health &amp; Monitoring</h2>
+<div class="hero-banner">
+  <div class="hero-avatar" style="background:linear-gradient(135deg, #22c55e22, #22c55e44);flex-shrink:0;">
+    <svg viewBox="0 0 100 100"><circle cx="50" cy="50" r="45" fill="#1a1d27" stroke="#22c55e" stroke-width="3"/><path d="M50 20 L75 35 L75 55 L50 75 L25 55 L25 35Z" fill="none" stroke="#22c55e" stroke-width="2.5"/><path d="M50 30 L65 40 L65 52 L50 62 L35 52 L35 40Z" fill="#22c55e" opacity="0.15"/><circle cx="50" cy="46" r="10" fill="none" stroke="#22c55e" stroke-width="2"/><circle cx="50" cy="46" r="4" fill="#22c55e"/></svg>
+  </div>
+  <div class="hero-info">
+    <div style="font-size:13px;"><strong style="color:var(--sentinel);">Hero Identity:</strong> The Sentinels (Marvel)</div>
+    <div class="hero-quote">Tireless, relentless, always scanning. The Sentinels never sleep and never miss a threat. Our SENTINEL does the same — monitoring every heartbeat of the IMS 2.0 infrastructure 24/7.</div>
+  </div>
+</div>
+<p class="subtitle">24/7 watchdog for infrastructure, performance, and data integrity across the entire IMS 2.0 stack. Toggleable ON/OFF.</p>
+
+<h3>Background Schedule</h3>
+<div class="status-bar">
+  <div class="status-item"><strong>Interval:</strong> Every 60 seconds</div>
+  <div class="status-item">|</div>
+  <div class="status-item"><strong>Default:</strong> ON</div>
+  <div class="status-item">|</div>
+  <div class="status-item"><strong>When OFF:</strong> No health checks run. System score frozen at last known value. Other agents lose real-time health visibility.</div>
+</div>
+
+<h3>Monitoring Domains</h3>
+<table>
+  <tr><th>Domain</th><th>What It Watches</th><th>Check Interval</th><th>Alert Threshold</th></tr>
+  <tr><td><strong>API Health</strong></td><td>Response times per router (31 routers), error rates, 5xx spikes</td><td>Every 60s</td><td>p95 latency > 2s or error rate > 5%</td></tr>
+  <tr><td><strong>Database</strong></td><td>MongoDB connection pool, slow queries (>500ms), collection sizes, index usage</td><td>Every 5 min</td><td>Pool exhaustion > 80% or slow queries > 10/min</td></tr>
+  <tr><td><strong>Frontend</strong></td><td>Core Web Vitals (LCP, INP, CLS) via Vercel Speed Insights API, JS errors from window.onerror</td><td>Continuous</td><td>INP > 500ms, LCP > 2.5s, CLS > 0.1</td></tr>
+  <tr><td><strong>Deployments</strong></td><td>Vercel deployment status, Railway container health, build failures</td><td>On deploy + every 10 min</td><td>Any failed deployment or unhealthy container</td></tr>
+  <tr><td><strong>Data Integrity</strong></td><td>Orphan orders (no customer), stock count mismatches, duplicate records</td><td>Every 30 min</td><td>Any integrity violation</td></tr>
+  <tr><td><strong>Security</strong></td><td>Failed login attempts, unusual API patterns, token abuse</td><td>Continuous</td><td>5+ failed logins per IP in 15 min</td></tr>
+  <tr><td><strong>Agent Health</strong></td><td>Polls every agent's health_check(). Detects crashed or erroring agents.</td><td>Every 60s</td><td>Any agent reporting unhealthy or 3+ consecutive errors</td></tr>
+</table>
+
+<h3>Alert Pipeline</h3>
+<div class="flow">
+  <div class="flow-step">Health Check Runs</div>
+  <div class="flow-arrow">→</div>
+  <div class="flow-step">Threshold Breach?</div>
+  <div class="flow-arrow">→</div>
+  <div class="flow-step">Deduplicate</div>
+  <div class="flow-arrow">→</div>
+  <div class="flow-step">Severity Classification</div>
+  <div class="flow-arrow">→</div>
+  <div class="flow-step">Emit Event</div>
+  <div class="flow-arrow">→</div>
+  <div class="flow-step">Slack / Dashboard</div>
+</div>
+
+<h3>Background Tick Implementation</h3>
+<div class="code"><span class="keyword">class</span> <span class="type">SentinelAgent</span>(<span class="type">JarvisAgent</span>):
+    agent_id = <span class="string">"sentinel"</span>
+
+    <span class="keyword">async def</span> <span class="fn">_do_background_work</span>(self):
+        <span class="string">"""Runs every 60s when enabled."""</span>
+        results = <span class="keyword">await</span> asyncio.<span class="fn">gather</span>(
+            self.<span class="fn">check_api_health</span>(),      <span class="comment"># Ping all 31 routers</span>
+            self.<span class="fn">check_db_health</span>(),       <span class="comment"># MongoDB connection pool + slow queries</span>
+            self.<span class="fn">check_agent_health</span>(),    <span class="comment"># Poll all agent health_check()</span>
+            self.<span class="fn">check_security</span>(),        <span class="comment"># Failed logins, token abuse</span>
+        )
+        score = self.<span class="fn">compute_health_score</span>(results)
+        <span class="keyword">await</span> self.<span class="fn">store_health_check</span>(results, score)
+        <span class="keyword">if</span> score < 70:
+            <span class="keyword">await</span> self.<span class="fn">emit_event</span>(<span class="string">"system.degraded"</span>, {<span class="string">"score"</span>: score})</div>
+
+<h3>Key Design: Degradation Scoring</h3>
+<p style="font-size:13px;color:var(--text2);">SENTINEL computes a system health score (0-100) by weighting each domain: API (25%), Database (25%), Frontend (15%), Deployments (10%), Data Integrity (10%), Security (5%), Agent Health (10%). A score below 70 triggers automatic notification to CORTEX, which can pause non-critical agent operations to reduce system load.</p>
+</div>
+
+<!-- ===================== PIXEL ===================== -->
+<div class="panel" id="panel-pixel">
+<h2><span class="agent-dot" style="background:var(--pixel)"></span>PIXEL — UI/UX Quality Agent</h2>
+<div class="hero-banner">
+  <div class="hero-avatar" style="background:linear-gradient(135deg, #a855f722, #a855f744);flex-shrink:0;">
+    <svg viewBox="0 0 100 100"><circle cx="50" cy="50" r="45" fill="#1a1d27" stroke="#a855f7" stroke-width="3"/><rect x="30" y="30" width="40" height="30" rx="3" fill="none" stroke="#a855f7" stroke-width="2"/><line x1="30" y1="45" x2="70" y2="45" stroke="#a855f7" stroke-width="1" opacity="0.5"/><line x1="50" y1="30" x2="50" y2="60" stroke="#a855f7" stroke-width="1" opacity="0.5"/><circle cx="43" cy="38" r="4" fill="#a855f7" opacity="0.6"/><circle cx="50" cy="38" r="2" fill="#a855f7"/></svg>
+  </div>
+  <div class="hero-info">
+    <div style="font-size:13px;"><strong style="color:var(--pixel);">Hero Identity:</strong> Batman / The Detective (DC)</div>
+    <div class="hero-quote">The world's greatest detective misses nothing. Batman audits Gotham's every shadow — PIXEL audits every pixel on screen, every broken layout, every performance regression. No flaw escapes its watch.</div>
+  </div>
+</div>
+<p class="subtitle">Continuous frontend quality auditing across all 65+ pages — performance, accessibility, visual consistency, and responsive behavior. Toggleable ON/OFF.</p>
+
+<h3>Background Schedule</h3>
+<div class="status-bar">
+  <div class="status-item"><strong>Cron:</strong> Daily at 2:00 AM IST</div>
+  <div class="status-item">|</div>
+  <div class="status-item"><strong>Event:</strong> On every Vercel deployment</div>
+  <div class="status-item">|</div>
+  <div class="status-item"><strong>When OFF:</strong> No audits run. Visual regressions go undetected until re-enabled.</div>
+</div>
+
+<h3>Audit Capabilities</h3>
+<table>
+  <tr><th>Capability</th><th>What It Checks</th><th>Tools Used</th><th>Output</th></tr>
+  <tr><td><strong>Performance Audit</strong></td><td>INP, LCP, CLS, FCP, TTFB per page. Identifies heavy re-renders, large bundles, slow API calls</td><td>Vercel Speed Insights API, Lighthouse CI</td><td>Per-page score card with fix recommendations</td></tr>
+  <tr><td><strong>Accessibility Audit</strong></td><td>WCAG 2.1 AA compliance: color contrast, aria-labels, focus order, touch targets (44px min for iPad)</td><td>axe-core headless, custom validators</td><td>Violations list with severity and element selectors</td></tr>
+  <tr><td><strong>Visual Regression</strong></td><td>Screenshot comparison before/after deployments. Detects layout shifts, broken CSS, missing icons</td><td>Puppeteer screenshots + pixel diff</td><td>Diff images highlighting changed regions</td></tr>
+  <tr><td><strong>Route Integrity</strong></td><td>Crawls all 41+ routes, detects 404s, broken navigation links, missing lazy-load chunks</td><td>Headless browser crawl</td><td>Route map with status codes</td></tr>
+  <tr><td><strong>Responsive Audit</strong></td><td>Tests at 3 breakpoints: iPad (768px), Desktop (1280px), Mobile (375px). Checks overflow, truncation</td><td>Puppeteer viewport emulation</td><td>Per-breakpoint pass/fail with screenshots</td></tr>
+  <tr><td><strong>Dark Theme Consistency</strong></td><td>Ensures bg-gray-800/900 + BV Red (#CD201A) accent applied consistently, no white flash on load</td><td>CSS property extraction</td><td>Inconsistency report</td></tr>
+</table>
+
+<h3>Known Issues It Would Catch Today</h3>
+<table>
+  <tr><th>Issue</th><th>Detection Method</th><th>Severity</th></tr>
+  <tr><td>POS page freezing (INP 3,800ms)</td><td>Performance audit → INP > 500ms</td><td><span class="tag tag-red">CRITICAL</span></td></tr>
+  <tr><td>/finance returns 404</td><td>Route integrity crawl</td><td><span class="tag tag-yellow">HIGH</span></td></tr>
+  <tr><td>Missing aria-labels on POS quantity input</td><td>Accessibility audit → axe-core</td><td><span class="tag tag-blue">MEDIUM</span></td></tr>
+  <tr><td>Hold/Recall buttons invisible (dark on dark)</td><td>Color contrast check</td><td><span class="tag tag-blue">MEDIUM</span></td></tr>
+</table>
+</div>
+
+<!-- ===================== MEGAPHONE ===================== -->
+<div class="panel" id="panel-megaphone">
+<h2><span class="agent-dot" style="background:var(--megaphone)"></span>MEGAPHONE — Marketing &amp; Customer Engagement</h2>
+<div class="hero-banner">
+  <div class="hero-avatar" style="background:linear-gradient(135deg, #f59e0b22, #f59e0b44);flex-shrink:0;">
+    <svg viewBox="0 0 100 100"><circle cx="50" cy="50" r="45" fill="#1a1d27" stroke="#f59e0b" stroke-width="3"/><path d="M30 40 L45 35 L65 25 L65 65 L45 55 L30 50Z" fill="#f59e0b" opacity="0.2" stroke="#f59e0b" stroke-width="2"/><rect x="25" y="38" width="8" height="14" rx="2" fill="#f59e0b" opacity="0.6"/><path d="M65 30 Q80 45 65 60" fill="none" stroke="#f59e0b" stroke-width="2"/><path d="M70 25 Q90 45 70 65" fill="none" stroke="#f59e0b" stroke-width="1.5" opacity="0.5"/></svg>
+  </div>
+  <div class="hero-info">
+    <div style="font-size:13px;"><strong style="color:var(--megaphone);">Hero Identity:</strong> Black Canary / Dinah Lance (DC)</div>
+    <div class="hero-quote">Black Canary's Canary Cry reaches everyone in range. MEGAPHONE's campaigns reach every customer at the right time, on the right channel, with a message that resonates.</div>
+  </div>
+</div>
+<p class="subtitle">Automated multi-channel customer outreach driven by CRM data, prescription lifecycle, and RFM segmentation. Toggleable ON/OFF.</p>
+
+<h3>Background Schedule</h3>
+<div class="status-bar">
+  <div class="status-item"><strong>Interval:</strong> Every 30 minutes</div>
+  <div class="status-item">|</div>
+  <div class="status-item"><strong>Cron:</strong> Daily 9 AM (morning batch)</div>
+  <div class="status-item">|</div>
+  <div class="status-item"><strong>DND:</strong> No sends 9 PM — 9 AM IST</div>
+  <div class="status-item">|</div>
+  <div class="status-item"><strong>When OFF:</strong> No campaigns sent. Queued messages wait until re-enabled.</div>
+</div>
+
+<h3>Campaign Types</h3>
+<table>
+  <tr><th>Campaign</th><th>Trigger</th><th>Channel</th><th>Target Segment</th><th>Content</th></tr>
+  <tr><td><strong>Rx Expiry Reminder</strong></td><td>Prescription expires in 30/15/7 days</td><td>WhatsApp</td><td>Patients with expiring Rx</td><td>"Hi {name}, your prescription expires on {date}. Book a free eye test at {store}."</td></tr>
+  <tr><td><strong>Post-Purchase Follow-up</strong></td><td>3 days after delivery</td><td>WhatsApp</td><td>Recent buyers</td><td>Satisfaction check + Google Review request</td></tr>
+  <tr><td><strong>Birthday Greeting</strong></td><td>Customer DOB</td><td>WhatsApp + SMS</td><td>All registered customers</td><td>Birthday wish + 10% birthday discount code</td></tr>
+  <tr><td><strong>Reactivation</strong></td><td>No purchase in 90+ days</td><td>WhatsApp</td><td>RFM "At Risk" + "Hibernating"</td><td>Win-back offer based on last purchase category</td></tr>
+  <tr><td><strong>Seasonal Promo</strong></td><td>Scheduled by Superadmin</td><td>WhatsApp + SMS</td><td>Configurable segments</td><td>Festival offers, clearance sales, new collection</td></tr>
+  <tr><td><strong>Google Review Nudge</strong></td><td>7 days after positive NPS response</td><td>WhatsApp</td><td>NPS 9-10 respondents</td><td>Direct link to Google Review page</td></tr>
+  <tr><td><strong>Workshop Status</strong></td><td>Job status change</td><td>WhatsApp</td><td>Order customer</td><td>"Your glasses are ready for pickup at {store}."</td></tr>
+</table>
+
+<h3>Background Tick Implementation</h3>
+<div class="code"><span class="keyword">class</span> <span class="type">MegaphoneAgent</span>(<span class="type">JarvisAgent</span>):
+    agent_id = <span class="string">"megaphone"</span>
+    requires_confirmation = [<span class="string">"campaign_execute"</span>, <span class="string">"bulk_send"</span>]
+
+    <span class="keyword">async def</span> <span class="fn">_do_background_work</span>(self):
+        <span class="string">"""Runs every 30 min. Scans for outreach triggers."""</span>
+        now = utcnow()
+        <span class="keyword">if</span> self.<span class="fn">is_dnd_hours</span>(now):  <span class="comment"># 9 PM — 9 AM IST</span>
+            <span class="keyword">return</span>  <span class="comment"># Queue messages but don't send</span>
+
+        <span class="comment"># 1. Check Rx expiry triggers</span>
+        expiring = <span class="keyword">await</span> self.<span class="fn">find_expiring_prescriptions</span>(days=[30, 15, 7])
+        <span class="keyword">for</span> rx <span class="keyword">in</span> expiring:
+            <span class="keyword">await</span> self.<span class="fn">queue_message</span>(<span class="string">"rx_expiry"</span>, rx.customer_id)
+
+        <span class="comment"># 2. Check post-purchase follow-ups (3 days after delivery)</span>
+        followups = <span class="keyword">await</span> self.<span class="fn">find_pending_followups</span>()
+
+        <span class="comment"># 3. Check birthday list for today</span>
+        birthdays = <span class="keyword">await</span> self.<span class="fn">find_todays_birthdays</span>()
+
+        <span class="comment"># 4. Process send queue (messages queued during DND)</span>
+        <span class="keyword">await</span> self.<span class="fn">process_send_queue</span>()</div>
+
+<h3>Key Design: DND &amp; Compliance</h3>
+<p style="font-size:13px;color:var(--text2);">India's TRAI regulations require DND (Do Not Disturb) compliance. MEGAPHONE checks the customer's opt-in status before every send. Messages are only sent between 9 AM and 9 PM IST. Bulk campaigns require CORTEX confirmation gate. All sends are logged in <code>notification_log</code> collection with delivery status tracking.</p>
+</div>
+
+<!-- ===================== ORACLE ===================== -->
+<div class="panel" id="panel-oracle">
+<h2><span class="agent-dot" style="background:var(--oracle)"></span>ORACLE — AI Analysis &amp; Business Intelligence</h2>
+<div class="hero-banner">
+  <div class="hero-avatar" style="background:linear-gradient(135deg, #3b82f622, #3b82f644);flex-shrink:0;">
+    <svg viewBox="0 0 100 100"><circle cx="50" cy="50" r="45" fill="#1a1d27" stroke="#3b82f6" stroke-width="3"/><circle cx="50" cy="42" r="18" fill="none" stroke="#3b82f6" stroke-width="2"/><circle cx="50" cy="42" r="10" fill="none" stroke="#3b82f6" stroke-width="1.5" opacity="0.6"/><circle cx="50" cy="42" r="4" fill="#3b82f6"/><path d="M35 65 Q50 72 65 65" fill="none" stroke="#3b82f6" stroke-width="2"/></svg>
+  </div>
+  <div class="hero-info">
+    <div style="font-size:13px;"><strong style="color:var(--oracle);">Hero Identity:</strong> Oracle / Barbara Gordon (DC)</div>
+    <div class="hero-quote">After hanging up the Batgirl cowl, Barbara Gordon became Oracle — the all-seeing analyst who feeds intelligence to every hero. Our ORACLE does the same: analyzing every data stream to surface the insights that drive action.</div>
+  </div>
+</div>
+<p class="subtitle">Deep analytical engine that goes beyond dashboards — root cause analysis, forecasting, anomaly detection, and strategic recommendations. Toggleable ON/OFF.</p>
+
+<h3>Background Schedule</h3>
+<div class="status-bar">
+  <div class="status-item"><strong>Cron:</strong> Hourly anomaly scan</div>
+  <div class="status-item">|</div>
+  <div class="status-item"><strong>Cron:</strong> EOD 10 PM full analytics refresh</div>
+  <div class="status-item">|</div>
+  <div class="status-item"><strong>When OFF:</strong> No anomaly detection. Predictions freeze at last computed values. Manual /jarvis/query still works for on-demand analysis.</div>
+</div>
+
+<h3>Analysis Capabilities</h3>
+<table>
+  <tr><th>Capability</th><th>Input</th><th>Method</th><th>Output</th></tr>
+  <tr><td><strong>Revenue Root Cause Analysis</strong></td><td>Store + time period with revenue change</td><td>Decomposition: footfall x conversion x avg bill value x category mix</td><td>Ranked factors explaining the change with confidence %</td></tr>
+  <tr><td><strong>Demand Forecasting</strong></td><td>Product/category + store + horizon</td><td>Exponential smoothing with seasonal decomposition (Indian festivals, monsoon)</td><td>Predicted demand with confidence intervals + reorder suggestions</td></tr>
+  <tr><td><strong>Discount Abuse Detection</strong></td><td>Sales data over 30-day rolling window</td><td>Statistical outlier detection: z-score on discount% per staff member</td><td>Flagged staff with anomalous discount patterns + examples</td></tr>
+  <tr><td><strong>Prescription Fraud Detection</strong></td><td>Rx database</td><td>Duplicate Rx detection (same values for unrelated patients), redo rate analysis per optometrist</td><td>Suspicious prescriptions with fraud probability score</td></tr>
+  <tr><td><strong>Cross-Store Benchmarking</strong></td><td>All stores</td><td>Normalized KPI comparison (revenue/sqft, conversion rate, avg bill value)</td><td>Store rankings with peer-relative performance scores</td></tr>
+  <tr><td><strong>Customer Churn Prediction</strong></td><td>Customer purchase history</td><td>RFM + purchase gap analysis with seasonal normalization</td><td>Churn risk score (0-100) per customer with recommended action</td></tr>
+  <tr><td><strong>Vendor Margin Optimization</strong></td><td>Purchase prices + selling prices + return rates</td><td>Margin waterfall analysis per vendor per category</td><td>Ranked vendors by true margin (after returns + defects)</td></tr>
+</table>
+
+<h3>Absorbs Existing 5 Subagents</h3>
+<div class="code"><span class="comment"># ORACLE wraps the existing Jarvis subagents:</span>
+stock_health       → ORACLE.<span class="fn">analyze_stock_health</span>()      <span class="comment"># Enhanced with demand forecasting</span>
+payment_collection → ORACLE.<span class="fn">analyze_payment_aging</span>()     <span class="comment"># Enhanced with aging buckets</span>
+incentive_tracking → ORACLE.<span class="fn">track_incentives</span>()          <span class="comment"># Enhanced with fraud detection</span>
+discount_abuse     → ORACLE.<span class="fn">detect_discount_abuse</span>()     <span class="comment"># Enhanced with z-score outliers</span>
+sop_compliance     → TASKMASTER.<span class="fn">verify_sop</span>()            <span class="comment"># Moved to TASKMASTER (it's an action)</span></div>
+
+<h3>Key Design: Accuracy Feedback Loop</h3>
+<p style="font-size:13px;color:var(--text2);">ORACLE tracks its own prediction accuracy. Every forecast gets a <code>predicted_value</code>; when actual data arrives, ORACLE backfills <code>actual_value</code> and computes <code>accuracy_score</code>. Over time, this feedback loop identifies which prediction models are reliable and which need recalibration. CORTEX surfaces accuracy trends to the Superadmin so trust in AI recommendations is data-driven, not blind faith.</p>
+</div>
+
+<!-- ===================== TASKMASTER ===================== -->
+<div class="panel" id="panel-taskmaster">
+<h2><span class="agent-dot" style="background:var(--taskmaster)"></span>TASKMASTER — AI Task Execution &amp; Operations</h2>
+<div class="hero-banner">
+  <div class="hero-avatar" style="background:linear-gradient(135deg, #ef444422, #ef444444);flex-shrink:0;">
+    <svg viewBox="0 0 100 100"><circle cx="50" cy="50" r="45" fill="#1a1d27" stroke="#ef4444" stroke-width="3"/><circle cx="50" cy="40" r="16" fill="none" stroke="#ef4444" stroke-width="2.5"/><line x1="34" y1="40" x2="66" y2="40" stroke="#ef4444" stroke-width="2"/><line x1="50" y1="24" x2="50" y2="56" stroke="#ef4444" stroke-width="2"/><path d="M36 58 L42 68 L50 62 L58 68 L64 58" fill="none" stroke="#ef4444" stroke-width="2"/></svg>
+  </div>
+  <div class="hero-info">
+    <div style="font-size:13px;"><strong style="color:var(--taskmaster);">Hero Identity:</strong> Taskmaster / Tony Masters (Marvel)</div>
+    <div class="hero-quote">Taskmaster can perfectly replicate any skill he observes. Our TASKMASTER similarly masters every operational workflow — reorders, escalations, SOP enforcement, shift scheduling — executing each with mechanical precision.</div>
+  </div>
+</div>
+<p class="subtitle">The only agent that actually changes state in the system. Automates operational workflows, enforces SOPs, and handles escalations. Toggleable ON/OFF.</p>
+
+<h3>Background Schedule</h3>
+<div class="status-bar">
+  <div class="status-item"><strong>Interval:</strong> Every 5 minutes</div>
+  <div class="status-item">|</div>
+  <div class="status-item"><strong>Default:</strong> ON</div>
+  <div class="status-item">|</div>
+  <div class="status-item"><strong>When OFF:</strong> No auto-escalations, no SOP checks, no auto-reorders. Manual task creation still works via API.</div>
+</div>
+
+<h3>Automated Workflows</h3>
+<table>
+  <tr><th>Workflow</th><th>Trigger</th><th>Actions</th><th>Confirmation</th></tr>
+  <tr><td><strong>Auto-Reorder</strong></td><td>Stock hits reorder point</td><td>Creates draft PO for Store Manager approval with suggested quantities from ORACLE demand forecast</td><td>Required (Store Manager)</td></tr>
+  <tr><td><strong>Outstanding Follow-up</strong></td><td>Payment overdue > 30 days</td><td>Creates P2 task for sales staff, attaches customer contact + order details, sets 3-day deadline</td><td>Auto-created</td></tr>
+  <tr><td><strong>Escalation Engine</strong></td><td>Task unacknowledged past SLA</td><td>P0: 30 min → Area Manager. P1: 2 hrs → Store Manager. P2: 24 hrs → Area Manager. P3: 48 hrs → notification only.</td><td>Auto-escalated</td></tr>
+  <tr><td><strong>SOP Enforcement</strong></td><td>Daily at store open/close</td><td>Verifies daily checklists completed. Flags skipped items. Detects fake closures (all items marked done in &lt;2 min).</td><td>Auto-flagged</td></tr>
+  <tr><td><strong>Shift Scheduling</strong></td><td>Weekly (configurable day)</td><td>Generates shift plan based on historical footfall + leave calendar + staff skills. Optometrist coverage ensured.</td><td>Required (Store Manager)</td></tr>
+  <tr><td><strong>Workshop Nudge</strong></td><td>Job past expected delivery date</td><td>Creates P1 task for workshop staff. If 2 days past due, auto-sends customer delay notification via MEGAPHONE.</td><td>Auto-created</td></tr>
+  <tr><td><strong>Expense Anomaly</strong></td><td>Expense exceeds category cap</td><td>Blocks submission, creates approval task for Store Manager with explanation requirement.</td><td>Required (Manager)</td></tr>
+</table>
+
+<h3>Execution Safety Model</h3>
+<div class="code"><span class="comment"># TASKMASTER follows a 3-tier execution model:</span>
+
+<span class="type">Tier 1 — Auto-Execute</span> (no confirmation needed):
+  - Create tasks, send reminders, log SOP violations, update status fields
+  - <span class="comment">These are informational/tracking actions with no financial impact</span>
+
+<span class="type">Tier 2 — Draft + Confirm</span> (human must approve):
+  - Purchase orders, stock transfers, campaign sends, shift schedules
+  - <span class="comment">Financial or customer-facing actions. Creates draft, waits for approval.</span>
+
+<span class="type">Tier 3 — Advisory Only</span> (never auto-executes):
+  - Price changes, discount rule modifications, role assignments, system config
+  - <span class="comment">Governance actions. TASKMASTER recommends, human decides.</span></div>
+
+<h3>Replaces Mocked execute_command()</h3>
+<p style="font-size:13px;color:var(--text2);">The current <code>execute_command()</code> in Jarvis returns <code>{"success": true}</code> without doing anything. TASKMASTER replaces this with real execution — actual database writes, actual PO creation, actual task assignments. Every action goes through the 3-tier safety model above, and every action is audit-logged with before/after state.</p>
+</div>
+
+<!-- ===================== NEXUS ===================== -->
+<div class="panel" id="panel-nexus">
+<h2><span class="agent-dot" style="background:var(--nexus)"></span>NEXUS — Data &amp; Integration Orchestration</h2>
+<div class="hero-banner">
+  <div class="hero-avatar" style="background:linear-gradient(135deg, #06b6d422, #06b6d444);flex-shrink:0;">
+    <svg viewBox="0 0 100 100"><circle cx="50" cy="50" r="45" fill="#1a1d27" stroke="#06b6d4" stroke-width="3"/><circle cx="50" cy="45" r="6" fill="#06b6d4" opacity="0.8"/><circle cx="30" cy="35" r="4" fill="none" stroke="#06b6d4" stroke-width="2"/><circle cx="70" cy="35" r="4" fill="none" stroke="#06b6d4" stroke-width="2"/><circle cx="30" cy="60" r="4" fill="none" stroke="#06b6d4" stroke-width="2"/><circle cx="70" cy="60" r="4" fill="none" stroke="#06b6d4" stroke-width="2"/><line x1="35" y1="37" x2="44" y2="43" stroke="#06b6d4" stroke-width="1.5"/><line x1="65" y1="37" x2="56" y2="43" stroke="#06b6d4" stroke-width="1.5"/><line x1="35" y1="58" x2="44" y2="48" stroke="#06b6d4" stroke-width="1.5"/><line x1="65" y1="58" x2="56" y2="48" stroke="#06b6d4" stroke-width="1.5"/></svg>
+  </div>
+  <div class="hero-info">
+    <div style="font-size:13px;"><strong style="color:var(--nexus);">Hero Identity:</strong> Cyborg / Victor Stone (DC)</div>
+    <div class="hero-quote">Half man, half machine — Cyborg can interface with any system on the planet. NEXUS does the same: bridging Shopify, Razorpay, Shiprocket, WhatsApp, Tally, and Google into one unified data fabric.</div>
+  </div>
+</div>
+<p class="subtitle">Single point of control for all data flowing in and out of IMS 2.0 — syncs, webhooks, reconciliation, and conflict resolution. Toggleable ON/OFF.</p>
+
+<h3>Background Schedule</h3>
+<div class="status-bar">
+  <div class="status-item"><strong>Interval:</strong> Hourly full sync cycle</div>
+  <div class="status-item">|</div>
+  <div class="status-item"><strong>Event:</strong> Real-time webhook processing</div>
+  <div class="status-item">|</div>
+  <div class="status-item"><strong>Cron:</strong> Tally export daily 11 PM</div>
+  <div class="status-item">|</div>
+  <div class="status-item"><strong>Default:</strong> OFF until integrations are configured with real API keys</div>
+</div>
+
+<h3>Integration Matrix</h3>
+<table>
+  <tr><th>Integration</th><th>Direction</th><th>Sync Method</th><th>Frequency</th><th>Current Status</th></tr>
+  <tr><td><strong>Shopify</strong></td><td>Bidirectional</td><td>REST API + Webhooks</td><td>Real-time (webhooks) + hourly full sync</td><td><span class="tag tag-yellow">Mocked</span></td></tr>
+  <tr><td><strong>Razorpay</strong></td><td>Inbound</td><td>Webhooks (payment.captured, refund.processed)</td><td>Real-time</td><td><span class="tag tag-yellow">Mocked</span></td></tr>
+  <tr><td><strong>Shiprocket</strong></td><td>Bidirectional</td><td>REST API + Tracking webhooks</td><td>On shipment + hourly status poll</td><td><span class="tag tag-yellow">Mocked</span></td></tr>
+  <tr><td><strong>WhatsApp Business</strong></td><td>Outbound + Inbound</td><td>Cloud API + Webhooks (delivery receipts, replies)</td><td>Real-time</td><td><span class="tag tag-yellow">Mocked</span></td></tr>
+  <tr><td><strong>Tally</strong></td><td>Outbound</td><td>XML push to Tally server</td><td>Daily batch (end of day)</td><td><span class="tag tag-yellow">Mocked</span></td></tr>
+  <tr><td><strong>Google Business</strong></td><td>Inbound</td><td>Business Profile API (reviews, insights)</td><td>Every 6 hours</td><td><span class="tag tag-red">Not built</span></td></tr>
+</table>
+
+<h3>Sync Architecture</h3>
+<div class="code"><span class="keyword">class</span> <span class="type">NexusAgent</span>(<span class="type">JarvisAgent</span>):
+    agent_id = <span class="string">"nexus"</span>
+
+    <span class="keyword">async def</span> <span class="fn">_do_background_work</span>(self):
+        <span class="string">"""Hourly sync cycle for all active integrations."""</span>
+        active = <span class="keyword">await</span> self.<span class="fn">get_active_integrations</span>()
+        <span class="keyword">for</span> integration <span class="keyword">in</span> active:
+            <span class="keyword">try</span>:
+                <span class="keyword">await</span> self.<span class="fn">sync_cycle</span>(integration)
+            <span class="keyword">except</span> <span class="type">Exception</span> <span class="keyword">as</span> e:
+                <span class="keyword">await</span> self.<span class="fn">emit_event</span>(<span class="string">"sync.failed"</span>, {
+                    <span class="string">"integration"</span>: integration, <span class="string">"error"</span>: str(e)
+                })
+
+    <span class="keyword">async def</span> <span class="fn">sync_cycle</span>(self, integration: <span class="type">str</span>):
+        1. <span class="fn">fetch_remote_changes</span>()     <span class="comment"># Pull new data from external API</span>
+        2. <span class="fn">diff_with_local</span>()           <span class="comment"># Compare against MongoDB state</span>
+        3. <span class="fn">detect_conflicts</span>()          <span class="comment"># Same entity modified both sides</span>
+        4. <span class="fn">resolve_conflicts</span>()         <span class="comment"># IMS is master; log overrides</span>
+        5. <span class="fn">apply_changes</span>()             <span class="comment"># Update local DB + push to remote</span>
+        6. <span class="fn">log_sync_result</span>()           <span class="comment"># Success/failure + item counts</span>
+        7. <span class="fn">emit_events</span>()               <span class="comment"># Notify other agents of changes</span></div>
+
+<h3>Conflict Resolution Strategy</h3>
+<table>
+  <tr><th>Conflict Type</th><th>Example</th><th>Resolution Rule</th></tr>
+  <tr><td>Stock quantity mismatch</td><td>IMS says 5, Shopify says 3</td><td><strong>IMS is master.</strong> Push IMS value to Shopify. Log discrepancy.</td></tr>
+  <tr><td>Price mismatch</td><td>IMS MRP updated, Shopify still shows old price</td><td><strong>IMS is master.</strong> Push new price. Alert if Shopify had active orders at old price.</td></tr>
+  <tr><td>Order exists only in Shopify</td><td>Online order not yet in IMS</td><td><strong>Create in IMS.</strong> Map Shopify order → IMS order with source="shopify".</td></tr>
+  <tr><td>Payment webhook retry</td><td>Razorpay sends same payment.captured twice</td><td><strong>Idempotency check.</strong> Deduplicate by razorpay_payment_id.</td></tr>
+  <tr><td>Simultaneous sale</td><td>Item sold in-store and online at same time</td><td><strong>First-write-wins.</strong> Second sale gets stock error. NEXUS emits oversell alert.</td></tr>
+</table>
+
+<h3>Key Design: IMS-as-Master</h3>
+<p style="font-size:13px;color:var(--text2);">The fundamental design principle is: <strong>IMS 2.0 is always the master system.</strong> External platforms (Shopify, Razorpay) are consumers of IMS data, not the other way around. When conflicts occur, IMS wins. This prevents the chaos of distributed truth that comes with bidirectional sync. The only exception is online orders from Shopify — those originate externally and are imported into IMS as the source of truth for fulfillment.</p>
+</div>
+
+</div><!-- end .content -->
+
+<script>
+function switchTab(tabId) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+  document.querySelector(`.tab[data-tab="${tabId}"]`).classList.add('active');
+  document.getElementById(`panel-${tabId}`).classList.add('active');
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+document.querySelectorAll('.tab').forEach(tab => {
+  tab.addEventListener('click', () => switchTab(tab.dataset.tab));
+});
+
+function toggleDemo(el, agentId) {
+  const card = el.closest('.control-card');
+  const dot = card.querySelector('.status-dot');
+  if (el.checked) {
+    dot.className = 'status-dot running';
+  } else {
+    dot.className = 'status-dot stopped';
+  }
+}
+</script>
+</body>
+</html>

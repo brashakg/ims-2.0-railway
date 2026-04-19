@@ -1,0 +1,121 @@
+/* IMS 2.0 — Design Tokens
+   Neutral-first, light-modern. Better Vision red as rare accent.
+   Typography: Inter (UI), Instrument Serif (display numerics), JetBrains Mono (codes/SKUs). */
+
+:root {
+  /* ── Surfaces (neutrals, cool tint) ────────────────────────── */
+  --bg:            #fafaf9;        /* app canvas */
+  --bg-sunk:       #f4f4f2;        /* below surface */
+  --surface:       #ffffff;
+  --surface-2:     #fbfbfa;
+  --line:          #ececea;
+  --line-strong:   #d8d8d5;
+  --line-soft:     #f1f1ef;
+
+  /* ── Ink ───────────────────────────────────────────────────── */
+  --ink:           #141413;
+  --ink-2:         #2a2a28;
+  --ink-3:         #55554f;
+  --ink-4:         #8a8a82;
+  --ink-5:         #b6b6ae;
+
+  /* ── Better Vision brand ───────────────────────────────────── */
+  --bv:            #CD201A;
+  --bv-600:        #B81A15;
+  --bv-50:         #fbe8e6;
+  --bv-soft:       #f8eeed;
+
+  /* ── WizOpt accent (from wizopt.com — bright teal/blue) ────── */
+  --wz:            #0e8c8c;
+  --wz-50:         #e6f4f4;
+
+  /* ── Semantic ──────────────────────────────────────────────── */
+  --ok:            #0d7b4c;
+  --ok-50:         #e5f3ed;
+  --warn:          #b46a00;
+  --warn-50:       #fbf1df;
+  --err:           #b42318;
+  --err-50:        #fbeae7;
+  --info:          #1e5eb3;
+  --info-50:       #e5eef9;
+
+  /* ── Priority (P0-P4) ──────────────────────────────────────── */
+  --p0: #8b0000; --p0-bg: #f8e8e6;
+  --p1: #b42318; --p1-bg: #fbeae7;
+  --p2: #b46a00; --p2-bg: #fbf1df;
+  --p3: #1e5eb3; --p3-bg: #e5eef9;
+  --p4: #55554f; --p4-bg: #f1f1ef;
+
+  /* ── Radii ─────────────────────────────────────────────────── */
+  --r-xs: 4px; --r-sm: 6px; --r-md: 8px; --r-lg: 12px; --r-xl: 16px; --r-2xl: 20px;
+
+  /* ── Shadows (very subtle) ─────────────────────────────────── */
+  --sh-xs: 0 1px 0 rgba(17,17,17,.03);
+  --sh-sm: 0 1px 2px rgba(17,17,17,.04), 0 0 0 .5px rgba(17,17,17,.04);
+  --sh-md: 0 4px 12px rgba(17,17,17,.06), 0 0 0 .5px rgba(17,17,17,.04);
+  --sh-lg: 0 12px 32px rgba(17,17,17,.09), 0 0 0 .5px rgba(17,17,17,.05);
+  --sh-pop:0 20px 48px rgba(17,17,17,.14), 0 0 0 .5px rgba(17,17,17,.06);
+
+  /* ── Type ──────────────────────────────────────────────────── */
+  --font-sans: 'Inter', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --font-display: 'Instrument Serif', 'Times New Roman', serif;
+  --font-figure: 'Inter', ui-sans-serif, system-ui, sans-serif;  /* numerals, tabular */
+  --font-mono: 'JetBrains Mono', ui-monospace, Menlo, monospace;
+
+  /* ── Density ───────────────────────────────────────────────── */
+  --cell:          34px;
+  --row:           44px;
+  --btn:           36px;
+  --btn-lg:        44px;
+}
+
+[data-density="compact"] {
+  --cell: 28px; --row: 36px; --btn: 32px; --btn-lg: 38px;
+}
+
+[data-brand="wizopt"] {
+  --bv: var(--wz);
+  --bv-600: #0b7777;
+  --bv-50: var(--wz-50);
+  --bv-soft: #edf6f6;
+}
+
+/* ── Base ──────────────────────────────────────────────────── */
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body {
+  font-family: var(--font-sans);
+  font-size: 13.5px;
+  line-height: 1.45;
+  color: var(--ink);
+  background: var(--bg);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  font-feature-settings: "ss01", "cv11";
+}
+.num, .tnum { font-variant-numeric: tabular-nums; font-feature-settings: "tnum"; }
+.mono { font-family: var(--font-mono); font-size: 12px; }
+.display { font-family: var(--font-display); font-weight: 400; letter-spacing: -0.01em; }
+
+/* ── Numeric display class (for big KPI figures, totals, tokens) ──
+   Uses tabular Inter with tight tracking. Applies wherever we want
+   large numbers to read as precise operational data rather than editorial. */
+.figure {
+  font-family: var(--font-sans);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum", "ss01";
+  letter-spacing: -0.02em;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { background: #d8d8d5; border-radius: 10px; border: 2px solid transparent; background-clip: padding-box; }
+::-webkit-scrollbar-thumb:hover { background: #b6b6ae; background-clip: padding-box; border: 2px solid transparent; }
+
+/* Focus */
+:focus-visible { outline: 2px solid var(--bv); outline-offset: 2px; border-radius: 4px; }
+
+/* Tweaks panel baseline */
+.tweaks-panel { display: none; }
+body.tweaks-on .tweaks-panel { display: block; }

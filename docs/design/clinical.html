@@ -1,0 +1,341 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>IMS 2.0 · Clinical</title>
+<meta name="viewport" content="width=1440" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="shell/tokens.css" />
+<link rel="stylesheet" href="shell/shell.css" />
+<style>
+.cl-body {
+  display: grid;
+  grid-template-columns: 360px 1fr 380px;
+  height: calc(100vh - 52px);
+  min-height: 0;
+}
+.queue-col, .detail-col, .rx-col {
+  overflow-y: auto; min-height: 0;
+}
+.queue-col { border-right: 1px solid var(--line); background: var(--surface); }
+.detail-col { padding: 24px 28px; background: var(--bg); }
+.rx-col { border-left: 1px solid var(--line); background: var(--surface); padding: 20px; }
+
+.qhead {
+  padding: 16px 18px; border-bottom: 1px solid var(--line);
+  position: sticky; top: 0; background: var(--surface); z-index: 2;
+}
+.qtabs { display: flex; gap: 4px; background: var(--bg-sunk); padding: 3px; border-radius: 8px; }
+.qtabs button {
+  flex: 1; height: 30px; border: 0; background: transparent;
+  font: 500 12px/1 var(--font-sans); color: var(--ink-3);
+  border-radius: 6px; cursor: pointer;
+}
+.qtabs button.on { background: var(--surface); color: var(--ink); box-shadow: var(--sh-xs); }
+
+.q-item {
+  padding: 14px 18px; border-bottom: 1px solid var(--line-soft);
+  cursor: pointer; transition: background .12s;
+}
+.q-item:hover { background: var(--bg-sunk); }
+.q-item.sel { background: var(--bv-soft); border-left: 3px solid var(--bv); padding-left: 15px; }
+.q-item .r1 { display: flex; justify-content: space-between; margin-bottom: 4px; }
+.q-item .tok { font: 600 13px/1 var(--font-mono); color: var(--bv); letter-spacing: .04em; }
+.q-item .waited { font: 500 11px/1 var(--font-mono); color: var(--ink-4); }
+.q-item .n { font: 600 14px/1.2 var(--font-sans); margin-bottom: 2px; }
+.q-item .p { font-size: 12px; color: var(--ink-3); margin-bottom: 6px; }
+.q-item .chips { display: flex; gap: 6px; }
+
+.dhead { margin-bottom: 20px; display: flex; justify-content: space-between; align-items: flex-start; gap: 24px; }
+.dhead .who { }
+.dhead h2 { margin: 0 0 6px; font-family: var(--font-display); font-size: 36px; letter-spacing: -0.01em; }
+.dhead .meta { color: var(--ink-4); font-size: 12.5px; display: flex; gap: 12px; }
+.dhead .meta .mono { color: var(--ink-3); }
+.dhead .actions { display: flex; gap: 8px; }
+
+.exam-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.exam-card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-lg); padding: 16px; }
+.exam-card h3 { margin: 0 0 12px; font: 500 11px/1 var(--font-mono); color: var(--ink-4); text-transform: uppercase; letter-spacing: .1em; }
+
+.eyepad {
+  display: grid; grid-template-columns: repeat(6, 1fr);
+  gap: 6px; text-align: center;
+  font: 500 10px/1 var(--font-mono); color: var(--ink-4); text-transform: uppercase;
+}
+.eyepad .eye-label { font: 600 12px/1 var(--font-mono); background: var(--bg-sunk); padding: 10px 4px; border-radius: 6px; display: grid; place-items: center; }
+.eyepad input { height: 36px; text-align: center; font-family: var(--font-mono); font-size: 13px; border: 1px solid var(--line-strong); border-radius: 6px; background: var(--surface); }
+.eyepad input:focus { outline: none; border-color: var(--ink); }
+.eyepad .hh { padding: 4px 0 8px; }
+
+.opt-grid {
+  display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px;
+}
+.opt {
+  height: 34px; padding: 0 10px; border: 1px solid var(--line-strong);
+  border-radius: 6px; background: var(--surface); font-size: 12.5px;
+  cursor: pointer; display: flex; align-items: center; justify-content: space-between;
+}
+.opt.on { border-color: var(--ink); background: var(--ink); color: #fff; }
+.opt .chk { font-family: var(--font-mono); font-size: 10px; opacity: .6; }
+.opt.on .chk { opacity: 1; }
+
+/* Rx card (A5, right column) */
+.rx-card-title { margin-bottom: 12px; }
+.rx-a5 {
+  aspect-ratio: 148 / 210;
+  background: #fffdf7;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  padding: 24px 20px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--ink);
+  position: relative;
+  box-shadow: var(--sh-sm);
+  display: flex; flex-direction: column;
+}
+.rx-a5 .rx-head {
+  display: flex; justify-content: space-between; align-items: flex-start;
+  border-bottom: 1px solid var(--ink);
+  padding-bottom: 10px; margin-bottom: 12px;
+}
+.rx-a5 .rx-logo {
+  width: 30px; height: 30px; background: var(--bv); color: #fff;
+  display: grid; place-items: center; font-family: var(--font-display); font-size: 18px;
+  border-radius: 4px;
+}
+.rx-a5 .rx-ttl { font-family: var(--font-display); font-size: 18px; letter-spacing: -.01em; }
+.rx-a5 .rx-sub { font-size: 8.5px; color: var(--ink-4); }
+.rx-a5 .rx-kv { display: grid; grid-template-columns: auto 1fr; gap: 3px 10px; margin-bottom: 12px; }
+.rx-a5 .rx-kv .k { color: var(--ink-4); }
+.rx-a5 table { width: 100%; border-collapse: collapse; font-size: 10px; margin-bottom: 10px; }
+.rx-a5 table th, .rx-a5 table td { border: 1px solid var(--ink-5); padding: 5px 4px; text-align: center; }
+.rx-a5 table th { background: #f4f1e8; font-weight: 600; }
+.rx-a5 .notes { border-top: 1px dashed var(--ink-5); padding-top: 8px; font-size: 9px; color: var(--ink-3); flex: 1; }
+.rx-a5 .sig { display: flex; justify-content: space-between; align-items: flex-end; margin-top: 12px; padding-top: 8px; border-top: 1px solid var(--ink); font-size: 9px; }
+.rx-a5 .sig .drname { font-family: var(--font-display); font-size: 13px; color: var(--ink); }
+
+.token-preview {
+  margin-top: 14px; padding: 14px; background: var(--bg-sunk);
+  border-radius: 8px; text-align: center; font-family: var(--font-mono);
+}
+.token-preview .t {
+  font-family: var(--font-figure); font-weight: 700; font-variant-numeric: tabular-nums;
+  font-size: 52px; line-height: 1; color: var(--bv); letter-spacing: -.03em;
+}
+.token-preview .l { font-size: 10px; color: var(--ink-4); text-transform: uppercase; letter-spacing: .08em; margin-bottom: 6px; }
+
+.pretest { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.pre-cell { border: 1px solid var(--line); border-radius: 8px; padding: 10px; }
+.pre-cell .l { font: 500 10px/1 var(--font-mono); color: var(--ink-4); text-transform: uppercase; letter-spacing: .08em; margin-bottom: 6px; }
+.pre-cell .v { font-family: var(--font-mono); font-size: 14px; color: var(--ink); }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+
+<script src="shell/data.js"></script>
+<script type="text/babel" src="shell/shell.jsx"></script>
+<script type="text/babel">
+const { useState } = React;
+
+function Clinical() {
+  const [tab, setTab] = useState('Waiting');
+  const [sel, setSel] = useState(MOCK.queue[1]); // Meera is in exam
+
+  const filtered = MOCK.queue.filter(q => tab === 'All' || q.status === tab);
+
+  return (
+    <Shell active="clinical" crumbs={['Clinical', 'Queue', sel?.name || '']} role="Optometrist"
+      actions={<>
+        <button className="btn sm"><Icon.ticket width="14" height="14" /> New token</button>
+        <button className="btn sm primary">+ Walk-in</button>
+      </>}>
+      <div className="cl-body">
+        {/* Queue */}
+        <div className="queue-col">
+          <div className="qhead">
+            <div style={{display:'flex', justifyContent:'space-between', alignItems:'baseline', marginBottom:10}}>
+              <span className="eyebrow">Today's queue</span>
+              <span className="hint">{MOCK.queue.length} patients · avg wait 8m</span>
+            </div>
+            <div className="qtabs">
+              {['Waiting','In exam','Called','All'].map(t =>
+                <button key={t} className={tab===t?'on':''} onClick={()=>setTab(t)}>{t}</button>
+              )}
+            </div>
+          </div>
+          {filtered.map(p => (
+            <div key={p.tok} className={'q-item' + (sel?.tok === p.tok ? ' sel' : '')} onClick={()=>setSel(p)}>
+              <div className="r1">
+                <span className="tok">{p.tok}</span>
+                <span className="waited">{p.status === 'In exam' ? p.room : `${p.waited}m waited`}</span>
+              </div>
+              <div className="n">{p.name}</div>
+              <div className="p">{p.purpose} · age {p.age}</div>
+              <div className="chips">
+                <span className={'chip ' + (p.status==='In exam' ? 'accent' : p.status==='Waiting' ? 'info' : 'ok')}>
+                  <span className="dot"></span>{p.status}
+                </span>
+                {p.flag && <span className="chip warn">{p.flag}</span>}
+              </div>
+            </div>
+          ))}
+        </div>
+
+        {/* Exam */}
+        <div className="detail-col">
+          <div className="dhead">
+            <div className="who">
+              <div className="eyebrow" style={{marginBottom:6}}>Token {sel?.tok} · {sel?.status} · Room R-2</div>
+              <h2>{sel?.name}</h2>
+              <div className="meta">
+                <span>Age {sel?.age}</span><span>·</span>
+                <span>{sel?.purpose}</span><span>·</span>
+                <span className="mono">CUS-10390</span><span>·</span>
+                <span>Last visit 14 Mar 2026</span>
+              </div>
+            </div>
+            <div className="actions">
+              <button className="btn"><Icon.printer width="14" height="14" /> Print Rx card</button>
+              <button className="btn primary">Save & send to POS →</button>
+            </div>
+          </div>
+
+          <div className="exam-grid">
+            <div className="exam-card" style={{gridColumn:'1 / -1'}}>
+              <h3>Pre-test · auto-refractometer + tonometer</h3>
+              <div className="pretest">
+                <div className="pre-cell"><div className="l">Auto-ref OD</div><div className="v">−2.25 / −0.75 × 180</div></div>
+                <div className="pre-cell"><div className="l">Auto-ref OS</div><div className="v">−2.50 / −0.50 × 175</div></div>
+                <div className="pre-cell"><div className="l">Keratometry</div><div className="v">43.25 / 43.50</div></div>
+                <div className="pre-cell"><div className="l">IOP · NCT</div><div className="v">14 / 15 mmHg</div></div>
+                <div className="pre-cell"><div className="l">Pupil size</div><div className="v">3.2 / 3.1 mm</div></div>
+                <div className="pre-cell"><div className="l">Color vision</div><div className="v">Ishihara · normal</div></div>
+              </div>
+            </div>
+
+            <div className="exam-card" style={{gridColumn:'1 / -1'}}>
+              <h3>Refraction · subjective</h3>
+              <div className="eyepad">
+                <span></span><span className="hh">Sph</span><span className="hh">Cyl</span><span className="hh">Axis</span><span className="hh">Add</span><span className="hh">VA</span>
+                <span className="eye-label">OD</span>
+                <input defaultValue="−2.25" /><input defaultValue="−0.75" /><input defaultValue="180" /><input defaultValue="—" /><input defaultValue="6/6" />
+                <span className="eye-label">OS</span>
+                <input defaultValue="−2.50" /><input defaultValue="−0.50" /><input defaultValue="175" /><input defaultValue="—" /><input defaultValue="6/6" />
+              </div>
+              <div className="row" style={{gap:10, marginTop:14, flexWrap:'wrap'}}>
+                <span className="eyebrow" style={{flexBasis:'100%', marginBottom:2}}>PD · mm</span>
+                <div className="row" style={{gap:6}}>
+                  <span className="hint">Far</span>
+                  <input className="input" style={{width:70, textAlign:'center'}} defaultValue="63" />
+                  <span className="hint">Near</span>
+                  <input className="input" style={{width:70, textAlign:'center'}} defaultValue="60" />
+                  <span className="hint">Mono R / L</span>
+                  <input className="input" style={{width:60, textAlign:'center'}} defaultValue="32" />
+                  <input className="input" style={{width:60, textAlign:'center'}} defaultValue="31" />
+                </div>
+              </div>
+            </div>
+
+            <div className="exam-card">
+              <h3>Lens recommendation</h3>
+              <div className="opt-grid">
+                <div className="opt on">Single vision<span className="chk">✓</span></div>
+                <div className="opt">Progressive</div>
+                <div className="opt">Bifocal</div>
+                <div className="opt">Office / computer</div>
+                <div className="opt on">Anti-reflective<span className="chk">✓</span></div>
+                <div className="opt on">Blue-cut<span className="chk">✓</span></div>
+                <div className="opt">Photochromic</div>
+                <div className="opt">Polarised</div>
+              </div>
+              <div className="divider" />
+              <label style={{fontSize:12.5, display:'flex', gap:8, alignItems:'center'}}>
+                <input type="checkbox" /> Mark as <strong>external doctor</strong> (upload scan)
+              </label>
+              <label style={{fontSize:12.5, display:'flex', gap:8, alignItems:'center', marginTop:6}}>
+                <input type="checkbox" /> Link as <strong>family member</strong> of CUS-10390
+              </label>
+            </div>
+
+            <div className="exam-card">
+              <h3>Assessment notes</h3>
+              <textarea className="input" style={{height:120, padding:10}} defaultValue="Mild myopia progression +0.25 OD since last visit. Recommend blue-cut for daily screen use (8–10 hrs). Patient reports occasional headaches — advised break routine. Next review: 12 months."></textarea>
+              <div className="row" style={{marginTop:10, gap:8, flexWrap:'wrap'}}>
+                <span className="chip">Headaches</span>
+                <span className="chip">Screen fatigue</span>
+                <span className="chip info">Follow-up 12m</span>
+                <button className="btn sm ghost"><Icon.plus width="11" height="11" /> tag</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* A5 Rx Card preview */}
+        <aside className="rx-col">
+          <div className="rx-card-title">
+            <div className="eyebrow" style={{marginBottom:4}}>A5 Prescription Card</div>
+            <div className="hint">Prints to Epson TM-T88 · portrait</div>
+          </div>
+
+          <div className="rx-a5">
+            <div className="rx-head">
+              <div>
+                <div className="rx-ttl">Better Vision</div>
+                <div className="rx-sub">GK-I Flagship · New Delhi<br/>+91 11 4678 2200 · bettervision.in</div>
+              </div>
+              <div className="rx-logo">B</div>
+            </div>
+            <div className="rx-kv">
+              <span className="k">Patient</span><span>{sel?.name}</span>
+              <span className="k">Age / Sex</span><span>{sel?.age} / F</span>
+              <span className="k">ID</span><span>CUS-10390</span>
+              <span className="k">Date</span><span>19-Apr-2026</span>
+              <span className="k">Token</span><span>{sel?.tok}</span>
+            </div>
+            <table>
+              <thead><tr><th>Eye</th><th>Sph</th><th>Cyl</th><th>Axis</th><th>Add</th><th>PD</th></tr></thead>
+              <tbody>
+                <tr><td>OD</td><td>−2.25</td><td>−0.75</td><td>180</td><td>—</td><td>32</td></tr>
+                <tr><td>OS</td><td>−2.50</td><td>−0.50</td><td>175</td><td>—</td><td>31</td></tr>
+              </tbody>
+            </table>
+            <div className="notes">
+              Single vision · Blue-cut AR coating advised.<br/>
+              Mild myopia progression. Follow-up 12m.
+            </div>
+            <div className="sig">
+              <div>
+                <div>Optometrist</div>
+                <div className="drname">Dr. R. Malhotra</div>
+                <div>Reg. DOPT/2019/4421</div>
+              </div>
+              <div style={{textAlign:'right'}}>
+                <div style={{fontSize:28, color:'var(--bv)', fontFamily:'var(--font-display)'}}>Rx</div>
+                <div>Valid 12 months</div>
+              </div>
+            </div>
+          </div>
+
+          <div className="token-preview">
+            <div className="l">Token ticket · 58mm thermal</div>
+            <div className="t">{sel?.tok}</div>
+            <div className="hint">Room R-2 · 19 Apr 14:22</div>
+          </div>
+        </aside>
+      </div>
+    </Shell>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<Clinical />);
+</script>
+</body>
+</html>

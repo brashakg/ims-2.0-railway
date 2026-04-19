@@ -1,0 +1,405 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>IMS 2.0 · Reports</title>
+<meta name="viewport" content="width=1440" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="shell/tokens.css" />
+<link rel="stylesheet" href="shell/shell.css" />
+<style>
+.r-body { padding: 24px 28px; overflow-y: auto; height: calc(100vh - 52px); background: var(--bg); }
+
+.r-head { display: flex; justify-content: space-between; align-items: flex-end; margin-bottom: 18px; }
+.r-head h2 { margin: 0 0 4px; font-family: var(--font-display); font-size: 32px; letter-spacing: -0.01em; }
+
+.r-tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--line); margin-bottom: 20px; }
+.r-tabs button {
+  height: 36px; padding: 0 14px; border: 0; background: transparent;
+  font: 500 12.5px/1 var(--font-sans); color: var(--ink-4); cursor: pointer;
+  border-bottom: 2px solid transparent; margin-bottom: -1px;
+}
+.r-tabs button.on { color: var(--ink); border-bottom-color: var(--ink); }
+
+.kpi-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 18px; }
+.kpi {
+  background: var(--surface); border: 1px solid var(--line);
+  border-radius: var(--r-lg); padding: 16px 18px;
+}
+.kpi .l { font: 500 10.5px/1 var(--font-mono); color: var(--ink-4); text-transform: uppercase; letter-spacing: .1em; margin-bottom: 10px; }
+.kpi .v {
+  font-family: var(--font-figure); font-weight: 600; font-variant-numeric: tabular-nums;
+  font-size: 30px; line-height: 1; letter-spacing: -0.02em;
+}
+.kpi .r { display: flex; gap: 10px; margin-top: 8px; align-items: center; font-size: 11.5px; }
+.kpi .r .dlt {
+  font-family: var(--font-figure); font-weight: 600; font-variant-numeric: tabular-nums;
+  padding: 3px 6px; border-radius: 4px; font-size: 11px;
+}
+.kpi .r .dlt.up { background: var(--ok-50); color: var(--ok); }
+.kpi .r .dlt.dn { background: var(--err-50); color: var(--err); }
+.kpi .r .vs { color: var(--ink-4); }
+
+/* Spark/bar charts */
+.chart-row { display: grid; grid-template-columns: 2fr 1fr; gap: 14px; margin-bottom: 18px; }
+
+.chart-card {
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-lg);
+}
+.chart-head {
+  padding: 14px 18px; border-bottom: 1px solid var(--line);
+  display: flex; align-items: center; gap: 10px;
+}
+.chart-head h3 { margin: 0; font: 600 13px/1 var(--font-sans); }
+.chart-head .spacer { flex: 1; }
+.chart-head .legend { display: flex; gap: 10px; font-size: 11px; color: var(--ink-3); }
+.chart-head .legend .sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: middle; }
+
+.chart-body { padding: 18px; }
+
+.bars {
+  display: grid; grid-template-columns: 36px 1fr; gap: 12px 16px;
+  align-items: center;
+  font-size: 12px;
+}
+.bars .label { font-family: var(--font-mono); font-size: 11px; color: var(--ink-3); }
+.bars .track {
+  height: 20px; background: var(--bg-sunk); border-radius: 4px; position: relative; overflow: hidden;
+  display: flex; align-items: center;
+}
+.bars .fill { height: 100%; background: var(--ink); border-radius: 4px; }
+.bars .fill.bv { background: var(--bv); }
+.bars .val {
+  position: absolute; right: 8px;
+  font-family: var(--font-figure); font-weight: 600; font-variant-numeric: tabular-nums;
+  font-size: 11px; color: #fff;
+}
+.bars .val.out { color: var(--ink-2); right: unset; left: calc(100% + 6px); }
+
+/* Line chart (SVG) */
+.line-chart { width: 100%; height: 200px; display: block; }
+
+/* Sell-through table */
+.st-table {
+  width: 100%; border-collapse: collapse; font-size: 12.5px;
+}
+.st-table th, .st-table td { padding: 10px 14px; border-bottom: 1px solid var(--line-soft); }
+.st-table th {
+  text-align: left; font: 500 10.5px/1 var(--font-mono); color: var(--ink-4);
+  text-transform: uppercase; letter-spacing: .08em; background: var(--surface-2);
+}
+.st-table .right { text-align: right; }
+.st-bar {
+  height: 6px; border-radius: 3px; background: var(--bg-sunk); overflow: hidden;
+  width: 120px; display: inline-block; vertical-align: middle;
+}
+.st-bar > div { height: 100%; background: var(--ink); }
+
+/* Day-end panel */
+.dayend {
+  display: grid; grid-template-columns: 1.2fr 1fr; gap: 14px;
+  margin-bottom: 18px;
+}
+.dayend-sec {
+  background: var(--surface); border: 1px solid var(--line);
+  border-radius: var(--r-lg); padding: 18px 20px;
+}
+.dayend-sec h3 { margin: 0 0 14px; font: 500 11px/1 var(--font-mono); color: var(--ink-4); text-transform: uppercase; letter-spacing: .1em; }
+.dayend-row { display: flex; justify-content: space-between; padding: 7px 0; border-bottom: 1px dashed var(--line); font-size: 13px; }
+.dayend-row:last-child { border-bottom: 0; }
+.dayend-row .l { color: var(--ink-3); }
+.dayend-row .v { font-family: var(--font-figure); font-weight: 500; font-variant-numeric: tabular-nums; }
+.dayend-row.total { border-top: 1px solid var(--ink); margin-top: 8px; padding-top: 12px; }
+.dayend-row.total .l { color: var(--ink); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: .1em; }
+.dayend-row.total .v { font-size: 22px; letter-spacing: -.02em; }
+
+.tender-split {
+  display: flex; height: 12px; border-radius: 6px; overflow: hidden;
+  margin: 16px 0 8px; border: 1px solid var(--line);
+}
+.tender-split > div { height: 100%; }
+.tender-legend { display: flex; gap: 14px; font-size: 11.5px; }
+.tender-legend .sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; vertical-align: middle; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+
+<script src="shell/data.js"></script>
+<script type="text/babel" src="shell/shell.jsx"></script>
+<script type="text/babel">
+const { useState } = React;
+const fmt = (n) => '₹ ' + Number(n).toLocaleString('en-IN');
+const fmtL = (n) => '₹ ' + (n/100000).toFixed(2) + 'L';
+
+function LineChart() {
+  // Hand-draw a simple trend line + bars for MoM
+  const months = ['Nov','Dec','Jan','Feb','Mar','Apr'];
+  const actual = [820, 920, 980, 1020, 1140, 1240];
+  const ly     = [700, 820, 860, 920,  980, 1060];
+  const max = 1400;
+  const W = 640, H = 180, pad = { l: 30, r: 12, t: 10, b: 26 };
+  const w = W - pad.l - pad.r, h = H - pad.t - pad.b;
+  const x = (i) => pad.l + (i * w / (months.length - 1));
+  const y = (v) => pad.t + h - (v * h / max);
+  const path = (arr) => arr.map((v, i) => (i === 0 ? 'M' : 'L') + x(i) + ',' + y(v)).join(' ');
+  const area = (arr) => path(arr) + ` L${x(arr.length-1)},${pad.t+h} L${x(0)},${pad.t+h} Z`;
+
+  return (
+    <svg className="line-chart" viewBox={`0 0 ${W} ${H}`}>
+      {[0, 350, 700, 1050, 1400].map(v => (
+        <g key={v}>
+          <line x1={pad.l} x2={W-pad.r} y1={y(v)} y2={y(v)} stroke="var(--line)" strokeDasharray="2,3" />
+          <text x={4} y={y(v)+3} fontFamily="var(--font-mono)" fontSize="9" fill="var(--ink-4)">{v/100}L</text>
+        </g>
+      ))}
+      <path d={area(ly)} fill="var(--bg-sunk)" opacity=".6" />
+      <path d={path(ly)} stroke="var(--ink-5)" strokeWidth="1.5" fill="none" strokeDasharray="3,3" />
+      <path d={path(actual)} stroke="var(--bv)" strokeWidth="2.2" fill="none" />
+      {actual.map((v, i) => (
+        <g key={i}>
+          <circle cx={x(i)} cy={y(v)} r="3.5" fill="#fff" stroke="var(--bv)" strokeWidth="2" />
+          <text x={x(i)} y={y(v)-10} textAnchor="middle" fontFamily="var(--font-figure)" fontSize="10" fontWeight="600" fill="var(--ink)">{(v/100).toFixed(1)}L</text>
+        </g>
+      ))}
+      {months.map((m, i) => (
+        <text key={m} x={x(i)} y={H-8} textAnchor="middle" fontFamily="var(--font-mono)" fontSize="10" fill="var(--ink-3)">{m}</text>
+      ))}
+    </svg>
+  );
+}
+
+function Reports() {
+  const [tab, setTab] = useState('dayend');
+
+  const categories = [
+    { n:'Frames',   v: 842000, pct: 58 },
+    { n:'Lenses',   v: 1024000, pct: 82 },
+    { n:'Contact lenses', v: 218000, pct: 38 },
+    { n:'Accessories', v: 42000, pct: 22 },
+    { n:'Sunglasses', v: 396000, pct: 46 },
+  ];
+
+  return (
+    <Shell active="reports" crumbs={['Reports']} role="Store Manager"
+      actions={<>
+        <select className="input sm" style={{height:30, width:130, fontSize:12}}>
+          <option>This month</option><option>Last 7 days</option><option>Quarter</option>
+        </select>
+        <button className="btn sm"><Icon.file width="14" height="14" /> Export</button>
+      </>}>
+      <div className="r-body">
+        <div className="r-head">
+          <div>
+            <div className="eyebrow" style={{marginBottom:6}}>Analytics</div>
+            <h2>Numbers that run the store.</h2>
+          </div>
+          <div className="hint">Last refreshed 2m ago · <button className="btn sm ghost" style={{padding:0}}>refresh</button></div>
+        </div>
+
+        <div className="r-tabs">
+          {[
+            ['dayend','Day-end close'],
+            ['mom','MoM & YoY'],
+            ['sellthru','Sell-through'],
+            ['aging','Aging'],
+            ['staff','Staff performance'],
+            ['rx','Rx / Clinical'],
+          ].map(([k,n]) =>
+            <button key={k} className={tab===k?'on':''} onClick={()=>setTab(k)}>{n}</button>
+          )}
+        </div>
+
+        {tab === 'dayend' && (
+          <>
+            <div className="kpi-grid">
+              <div className="kpi"><div className="l">Gross sales · today</div><div className="v">₹ 48,210</div><div className="r"><span className="dlt up">+12.4%</span><span className="vs">vs 4-wk avg</span></div></div>
+              <div className="kpi"><div className="l">Transactions</div><div className="v">42</div><div className="r"><span className="dlt up">+6</span><span className="vs">vs yesterday</span></div></div>
+              <div className="kpi"><div className="l">Avg basket</div><div className="v">₹ 6,840</div><div className="r"><span className="dlt dn">−3.1%</span><span className="vs">vs LM</span></div></div>
+              <div className="kpi"><div className="l">Footfall · exam → buy</div><div className="v">68<span style={{fontSize:16}}>%</span></div><div className="r"><span className="dlt up">+4 pp</span><span className="vs">vs LW</span></div></div>
+            </div>
+
+            <div className="dayend">
+              <div className="dayend-sec">
+                <h3>Tender breakdown · today</h3>
+                <div className="tender-split">
+                  <div style={{width:'38%', background:'var(--ink)'}} title="Card"></div>
+                  <div style={{width:'32%', background:'var(--bv)'}} title="UPI"></div>
+                  <div style={{width:'20%', background:'var(--ok)'}} title="Cash"></div>
+                  <div style={{width:'8%', background:'var(--warn)'}} title="EMI"></div>
+                  <div style={{width:'2%', background:'var(--info)'}} title="Wallet"></div>
+                </div>
+                <div className="tender-legend">
+                  <span><span className="sw" style={{background:'var(--ink)'}}></span>Card ₹ 18,320</span>
+                  <span><span className="sw" style={{background:'var(--bv)'}}></span>UPI ₹ 15,430</span>
+                  <span><span className="sw" style={{background:'var(--ok)'}}></span>Cash ₹ 9,640</span>
+                  <span><span className="sw" style={{background:'var(--warn)'}}></span>EMI ₹ 3,860</span>
+                  <span><span className="sw" style={{background:'var(--info)'}}></span>Wallet ₹ 960</span>
+                </div>
+                <div className="divider" style={{marginTop:16}}></div>
+                <div className="dayend-row"><span className="l">Gross sales</span><span className="v">₹ 48,210</span></div>
+                <div className="dayend-row"><span className="l">Discounts</span><span className="v">− ₹ 1,280</span></div>
+                <div className="dayend-row"><span className="l">Returns</span><span className="v">− ₹ 0</span></div>
+                <div className="dayend-row"><span className="l">Taxable sales</span><span className="v">₹ 46,930</span></div>
+                <div className="dayend-row"><span className="l">CGST 6%</span><span className="v">₹ 2,816</span></div>
+                <div className="dayend-row"><span className="l">SGST 6%</span><span className="v">₹ 2,816</span></div>
+                <div className="dayend-row total"><span className="l">Net collected</span><span className="v">₹ 48,210</span></div>
+              </div>
+
+              <div className="dayend-sec">
+                <h3>Cash drawer</h3>
+                <div className="dayend-row"><span className="l">Opening float</span><span className="v">₹ 5,000</span></div>
+                <div className="dayend-row"><span className="l">Cash tenders (+)</span><span className="v">+ ₹ 9,640</span></div>
+                <div className="dayend-row"><span className="l">Refunds (−)</span><span className="v">− ₹ 0</span></div>
+                <div className="dayend-row"><span className="l">Expected</span><span className="v">₹ 14,640</span></div>
+                <div className="dayend-row"><span className="l">Counted</span><span className="v">₹ 14,520</span></div>
+                <div className="dayend-row" style={{color:'var(--err)'}}><span className="l">Variance</span><span className="v">− ₹ 120</span></div>
+                <div style={{marginTop:14, padding:'10px 12px', background:'var(--warn-50)', borderRadius:8, fontSize:12, color:'var(--warn)'}}>
+                  <strong>TSK-2211</strong> auto-created — variance &gt; ₹50 per SOP-FIN-02.
+                </div>
+                <button className="btn block lg" style={{marginTop:12}}>Lock day-end close →</button>
+              </div>
+            </div>
+
+            <div className="chart-row">
+              <div className="chart-card">
+                <div className="chart-head">
+                  <h3>Hourly sales · today</h3>
+                  <div className="spacer"></div>
+                  <div className="hint">Peaks 12–2pm and 6–8pm</div>
+                </div>
+                <div className="chart-body">
+                  <div style={{display:'grid', gridTemplateColumns:'repeat(12, 1fr)', gap:4, alignItems:'end', height:140}}>
+                    {[8,14,22,48,72,65,42,58,78,92,70,38].map((h, i) => (
+                      <div key={i} style={{height: h+'%', background: i>=9 || (i>=3 && i<=5) ? 'var(--ink)' : 'var(--ink-5)', borderRadius:'3px 3px 0 0'}} title={`${10+i}:00 · ₹ ${h*110}`} />
+                    ))}
+                  </div>
+                  <div style={{display:'grid', gridTemplateColumns:'repeat(12, 1fr)', gap:4, marginTop:6, fontSize:10, fontFamily:'var(--font-mono)', color:'var(--ink-4)', textAlign:'center'}}>
+                    {['10','11','12','1p','2','3','4','5','6','7','8','9'].map(h => <span key={h}>{h}</span>)}
+                  </div>
+                </div>
+              </div>
+              <div className="chart-card">
+                <div className="chart-head"><h3>Top categories today</h3></div>
+                <div className="chart-body">
+                  <div className="bars">
+                    <span className="label">Lens</span>
+                    <div className="track"><div className="fill" style={{width:'78%'}}></div><span className="val">₹ 21,080</span></div>
+                    <span className="label">Frame</span>
+                    <div className="track"><div className="fill" style={{width:'58%'}}></div><span className="val">₹ 15,640</span></div>
+                    <span className="label">CL</span>
+                    <div className="track"><div className="fill" style={{width:'28%'}}></div><span className="val">₹ 7,540</span></div>
+                    <span className="label">Sun</span>
+                    <div className="track"><div className="fill" style={{width:'12%'}}></div><span className="val out">₹ 3,200</span></div>
+                    <span className="label">Acc.</span>
+                    <div className="track"><div className="fill" style={{width:'3%'}}></div><span className="val out">₹ 750</span></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </>
+        )}
+
+        {tab === 'mom' && (
+          <>
+            <div className="kpi-grid">
+              <div className="kpi"><div className="l">MTD sales</div><div className="v">₹ 12.40L</div><div className="r"><span className="dlt up">+8.2%</span><span className="vs">MoM · Mar</span></div></div>
+              <div className="kpi"><div className="l">YTD sales</div><div className="v">₹ 52.8L</div><div className="r"><span className="dlt up">+17%</span><span className="vs">YoY · Apr'25</span></div></div>
+              <div className="kpi"><div className="l">Gross margin</div><div className="v">42.8<span style={{fontSize:18}}>%</span></div><div className="r"><span className="dlt up">+1.2 pp</span><span className="vs">vs LY</span></div></div>
+              <div className="kpi"><div className="l">Return rate</div><div className="v">1.4<span style={{fontSize:18}}>%</span></div><div className="r"><span className="dlt dn">−0.3 pp</span><span className="vs">improving</span></div></div>
+            </div>
+            <div className="chart-card">
+              <div className="chart-head">
+                <h3>Revenue · last 6 months</h3>
+                <div className="spacer"></div>
+                <div className="legend">
+                  <span><span className="sw" style={{background:'var(--bv)'}}></span>This year</span>
+                  <span><span className="sw" style={{background:'var(--ink-5)'}}></span>Last year</span>
+                </div>
+              </div>
+              <div className="chart-body"><LineChart /></div>
+            </div>
+          </>
+        )}
+
+        {tab === 'sellthru' && (
+          <div className="chart-card">
+            <div className="chart-head"><h3>Sell-through · last 30 days</h3><div className="spacer"></div><div className="hint">Target: 60%+</div></div>
+            <table className="st-table">
+              <thead><tr><th>Category</th><th className="right">Opening stock</th><th className="right">Sold</th><th>Sell-through</th><th className="right">Revenue</th><th className="right">Margin</th></tr></thead>
+              <tbody>
+                {categories.map(c => (
+                  <tr key={c.n}>
+                    <td className="strong">{c.n}</td>
+                    <td className="right mono">{Math.round(c.v/800)}</td>
+                    <td className="right mono">{Math.round(c.v/800 * c.pct/100)}</td>
+                    <td>
+                      <span className="st-bar"><div style={{width:c.pct+'%', background: c.pct >= 60 ? 'var(--ok)' : c.pct >= 40 ? 'var(--warn)' : 'var(--err)'}}></div></span>
+                      <span style={{marginLeft:10, fontFamily:'var(--font-figure)', fontWeight:600, fontVariantNumeric:'tabular-nums'}}>{c.pct}%</span>
+                    </td>
+                    <td className="right mono tnum strong">{fmtL(c.v)}</td>
+                    <td className="right mono">{(30 + (c.pct % 15)).toFixed(1)}%</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        {tab === 'aging' && (
+          <div className="chart-card">
+            <div className="chart-head"><h3>Inventory aging cohorts</h3></div>
+            <div className="chart-body">
+              <div className="bars" style={{gridTemplateColumns:'120px 1fr'}}>
+                <span className="label">0–30 days</span>
+                <div className="track"><div className="fill" style={{width:'72%', background:'var(--ok)'}}></div><span className="val">842 SKU · ₹ 41.2L</span></div>
+                <span className="label">31–60 days</span>
+                <div className="track"><div className="fill" style={{width:'32%', background:'var(--ok)'}}></div><span className="val out" style={{color:'var(--ink)'}}>324 SKU · ₹ 11.8L</span></div>
+                <span className="label">61–90 days</span>
+                <div className="track"><div className="fill" style={{width:'16%', background:'var(--warn)'}}></div><span className="val out" style={{color:'var(--ink)'}}>36 SKU · ₹ 1.40L</span></div>
+                <span className="label">91+ days</span>
+                <div className="track"><div className="fill" style={{width:'22%', background:'var(--err)'}}></div><span className="val" style={{color:'#fff'}}>38 SKU · ₹ 2.84L</span></div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {tab === 'staff' && (
+          <div className="chart-card">
+            <div className="chart-head"><h3>Staff performance · April</h3></div>
+            <table className="st-table">
+              <thead><tr><th>Staff</th><th>Role</th><th className="right">Tx</th><th className="right">Revenue</th><th className="right">Avg basket</th><th>Conversion</th><th className="right">NPS</th></tr></thead>
+              <tbody>
+                <tr><td className="strong">Sonia K.</td><td>Store Manager</td><td className="right mono">184</td><td className="right mono tnum strong">₹ 12.4L</td><td className="right mono">₹ 6,740</td><td><span className="st-bar"><div style={{width:'72%', background:'var(--ok)'}}></div></span> <span style={{fontFamily:'var(--font-figure)', fontWeight:600}}>72%</span></td><td className="right mono">+58</td></tr>
+                <tr><td className="strong">Rohan P.</td><td>ASM</td><td className="right mono">156</td><td className="right mono tnum strong">₹ 9.8L</td><td className="right mono">₹ 6,280</td><td><span className="st-bar"><div style={{width:'68%', background:'var(--ok)'}}></div></span> <span style={{fontFamily:'var(--font-figure)', fontWeight:600}}>68%</span></td><td className="right mono">+52</td></tr>
+                <tr><td className="strong">Riya P.</td><td>Cashier</td><td className="right mono">122</td><td className="right mono tnum strong">₹ 7.4L</td><td className="right mono">₹ 6,060</td><td><span className="st-bar"><div style={{width:'61%', background:'var(--warn)'}}></div></span> <span style={{fontFamily:'var(--font-figure)', fontWeight:600}}>61%</span></td><td className="right mono">+47</td></tr>
+                <tr><td className="strong">Arjun S.</td><td>Optician</td><td className="right mono">98</td><td className="right mono tnum strong">₹ 5.9L</td><td className="right mono">₹ 6,020</td><td><span className="st-bar"><div style={{width:'64%', background:'var(--ok)'}}></div></span> <span style={{fontFamily:'var(--font-figure)', fontWeight:600}}>64%</span></td><td className="right mono">+61</td></tr>
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        {tab === 'rx' && (
+          <>
+            <div className="kpi-grid">
+              <div className="kpi"><div className="l">Exams · MTD</div><div className="v">312</div><div className="r"><span className="dlt up">+14</span><span className="vs">vs LM</span></div></div>
+              <div className="kpi"><div className="l">Exam → buy conv.</div><div className="v">68<span style={{fontSize:18}}>%</span></div><div className="r"><span className="dlt up">+4 pp</span></div></div>
+              <div className="kpi"><div className="l">Avg wait</div><div className="v">8<span style={{fontSize:18}}>m</span></div><div className="r"><span className="dlt dn">−3m</span><span className="vs">target 10m</span></div></div>
+              <div className="kpi"><div className="l">External Rx ratio</div><div className="v">22<span style={{fontSize:18}}>%</span></div><div className="r"><span className="vs">Dr. Malhotra: 78%</span></div></div>
+            </div>
+          </>
+        )}
+      </div>
+    </Shell>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<Reports />);
+</script>
+</body>
+</html>
