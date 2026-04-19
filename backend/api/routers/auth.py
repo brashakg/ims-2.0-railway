@@ -34,12 +34,17 @@ def _haversine_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> f
 security = HTTPBearer(auto_error=False)
 
 # JWT Configuration
-_default_secret = os.getenv("JWT_SECRET_KEY", "")
-if not _default_secret:
-    logger.warning("JWT_SECRET_KEY not set — generating ephemeral secret. Set JWT_SECRET_KEY env var for production!")
-    import secrets as _sec
-    _default_secret = _sec.token_hex(32)
-SECRET_KEY = _default_secret
+# The previous fallback generated a per-process random secret if JWT_SECRET_KEY
+# was unset. With `uvicorn --workers 4` (see backend/Dockerfile) each worker
+# held a different secret, so a token signed by one worker failed to decode on
+# another → /auth/me returned 401 "Invalid token" right after a successful
+# login. Fail fast on missing config instead of silently corrupting tokens.
+SECRET_KEY = os.getenv("JWT_SECRET_KEY")
+if not SECRET_KEY:
+    raise RuntimeError(
+        "JWT_SECRET_KEY environment variable is required. "
+        "Generate one with: openssl rand -hex 32"
+    )
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 480  # 8 hours
 
