@@ -29,6 +29,7 @@ import {
   HardDriveDownload,
   Percent,
   AlertTriangle,
+  Palette,
 } from "lucide-react";
 
 interface NavItem {
@@ -79,6 +80,14 @@ export default function Sidebar() {
 
   const userRole = (session?.user as any)?.role || "USER";
   const isAdmin = userRole === "ADMIN";
+  const isDesigner = userRole === "DESIGN_MANAGER";
+  const canSeeDesignQueue = isAdmin || isDesigner;
+
+  const designQueueLink: NavItem = {
+    href: "/dashboard/design-queue",
+    label: "Design Queue",
+    icon: <Palette className="w-5 h-5 flex-shrink-0" />,
+  };
 
   const closeMobile = () => setIsMobileMenuOpen(false);
 
@@ -157,6 +166,10 @@ export default function Sidebar() {
         <nav className="flex-1 px-3 py-3 overflow-y-auto overflow-x-hidden scrollbar-thin">
           {/* Main */}
           <div className="space-y-0.5">{mainLinks.map(renderLink)}</div>
+
+          {/* Design Queue — visible to designers and admins */}
+          {canSeeDesignQueue &&
+            renderSection("Design", [designQueueLink])}
 
           {/* Insights */}
           {renderSection("Insights", insightLinks)}

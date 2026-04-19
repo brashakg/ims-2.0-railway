@@ -106,6 +106,7 @@ export interface CreateProductInput {
   seoDescription?: string;
   tags?: string[];
   productType?: string;
+  status?: "ACTIVE" | "DRAFT" | "ARCHIVED";
 }
 
 export interface CreateProductResult {
@@ -153,7 +154,7 @@ export async function createProduct(
     title: productData.title,
     descriptionHtml: productData.description || "",
     tags: productData.tags || [],
-    status: "ACTIVE",
+    status: productData.status || "ACTIVE",
     productType: productData.productType || "",
     seo: {
       title: productData.seoTitle || productData.title,
@@ -244,7 +245,7 @@ export interface UpdateProductInput {
 
 export async function updateProduct(
   shopifyId: string,
-  productData: UpdateProductInput
+  productData: UpdateProductInput & { status?: "ACTIVE" | "DRAFT" | "ARCHIVED" }
 ): Promise<{ success: boolean; message: string }> {
   const mutation = `
     mutation UpdateProduct($input: ProductInput!) {
@@ -260,6 +261,7 @@ export async function updateProduct(
   if (productData.description) input.descriptionHtml = productData.description;
   if (productData.tags) input.tags = productData.tags;
   if (productData.productType !== undefined) input.productType = productData.productType;
+  if (productData.status) input.status = productData.status;
 
   const seo: Record<string, string> = {};
   if (productData.seoTitle) seo.title = productData.seoTitle;
@@ -281,6 +283,55 @@ export async function updateProduct(
     return { success: false, message: errors.map((e) => `${e.field}: ${e.message}`).join("; ") };
   }
   return { success: true, message: "Product updated successfully" };
+}
+
+// Attach images (media) to an existing Shopify product. Used by the
+// three-role design workflow: cataloger creates the product as DRAFT
+// without images; designer later uploads edited images and calls this.
+export async function attachMediaToProduct(
+  shopifyProductId: string,
+  images: Array<{ src: string; alt?: string }>
+): Promise<{ success: boolean; message: string; mediaIds?: string[] }> {
+  if (images.length === 0) {
+    return { success: true, message: "No images to attach" };
+  }
+  const mutation = `
+    mutation ProductCreateMedia($productId: ID!, $media: [CreateMediaInput!]!) {
+      productCreateMedia(productId: $productId, media: $media) {
+        media { id alt mediaContentType status }
+        mediaUserErrors { field message code }
+      }
+    }
+  `;
+  const media = images.map((img) => ({
+    originalSource: img.src,
+    alt: img.alt || "",
+    mediaContentType: "IMAGE",
+  }));
+  const result = await makeGraphQLRequest<{
+    productCreateMedia: {
+      media: Array<{ id: string; alt: string | null }>;
+      mediaUserErrors: Array<{ field: string; message: string; code: string }>;
+    };
+  }>(mutation, { productId: shopifyProductId, media });
+  if (!result.success) {
+    return {
+      success: false,
+      message: result.error || "Failed to attach media",
+    };
+  }
+  const errs = result.data?.productCreateMedia.mediaUserErrors || [];
+  if (errs.length > 0) {
+    return {
+      success: false,
+      message: errs.map((e) => `${e.field}: ${e.message}`).join("; "),
+    };
+  }
+  return {
+    success: true,
+    message: `Attached ${result.data?.productCreateMedia.media.length || 0} image(s)`,
+    mediaIds: result.data?.productCreateMedia.media.map((m) => m.id),
+  };
 }
 
 // ─── CREATE / UPDATE VARIANT ───────────────────────────

@@ -72,6 +72,11 @@ model Product {
   category         String   // SPECTACLES, SUNGLASSES, SOLUTIONS
   status           String   @default("DRAFT") // DRAFT, PUBLISHED, ARCHIVED
   shopifyProductId String?
+  // Three-role design workflow:
+  //   PENDING_DESIGN = cataloger submitted raw images, awaiting designer
+  //   READY          = designer uploaded edited images, product published
+  //   null           = not in the design workflow (e.g. pulled from Shopify)
+  imageDesignStatus String?
 
   // Brand & Identity
   brand       String
@@ -227,6 +232,9 @@ model VariantLocation {
 model ProductImage {
   id             String   @id @default(cuid())
   productId      String
+  // "RAW"    = uploaded by cataloger, awaiting designer work (not pushed to Shopify)
+  // "EDITED" = uploaded by designer, pushed to Shopify (default for back-compat)
+  role           String   @default("EDITED")
   product        Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
   url            String
   originalUrl    String?
