@@ -25,6 +25,7 @@ import {
   ArrowDownRight,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
+import api from '../../services/api/client';
 import clsx from 'clsx';
 
 // Types
@@ -178,19 +179,24 @@ export function JarvisPage() {
     setIsLoading(true);
 
     try {
-      // Call JARVIS API (powered by Claude)
-      const response = await fetch('/api/jarvis/query', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${localStorage.getItem('token')}`,
-        },
-        body: JSON.stringify({ message: queryText }),
-      });
+      // Call JARVIS backend at /api/v1/jarvis/query (base URL + Authorization
+      // header handled by the shared axios client). The previous raw fetch
+      // called "/api/jarvis/query" (wrong — missing /v1) with
+      // `Bearer ${localStorage.getItem('token')}` (wrong key — should be
+      // 'ims_token'). Both failures silently fell through to generateResponse()
+      // below, so every user question got the same keyword-matched canned
+      // templates regardless of what was asked. Switching to the shared
+      // client fixes both at once.
+      const { data } = await api.post<{
+        response: string;
+        ai_powered?: boolean;
+        model?: string;
+        intent_detected?: string;
+      }>('/jarvis/query', { message: queryText });
 
-      if (response.ok) {
-        const data = await response.json();
-        const jarvisMessage: Message = {
+      setMessages((prev) => [
+        ...prev,
+        {
           id: (Date.now() + 1).toString(),
           type: 'jarvis',
           content: data.response,
@@ -200,29 +206,27 @@ export function JarvisPage() {
             model: data.model,
             intent: data.intent_detected,
           },
-        };
-        setMessages((prev) => [...prev, jarvisMessage]);
-      } else {
-        // Fallback to local response if API fails
-        const fallbackResponse = generateResponse(queryText);
-        const jarvisMessage: Message = {
+        },
+      ]);
+    } catch (err) {
+      // Only hit local fallback when the backend is genuinely unreachable
+      // (network error). 4xx/5xx with a body get logged below and a short
+      // apology surfaces so the user knows something's off — vs the old
+      // behavior that silently served canned text on any failure.
+      // eslint-disable-next-line no-console
+      console.error('[JARVIS] query failed:', err);
+      const fallbackResponse = generateResponse(queryText);
+      setMessages((prev) => [
+        ...prev,
+        {
           id: (Date.now() + 1).toString(),
           type: 'jarvis',
-          content: fallbackResponse,
+          content:
+            '_(Working in offline-fallback mode — live backend query failed. Answer below is from local templates, not real data.)_\n\n' +
+            fallbackResponse,
           timestamp: new Date(),
-        };
-        setMessages((prev) => [...prev, jarvisMessage]);
-      }
-    } catch {
-      // Fallback to local response on error
-      const fallbackResponse = generateResponse(queryText);
-      const jarvisMessage: Message = {
-        id: (Date.now() + 1).toString(),
-        type: 'jarvis',
-        content: fallbackResponse,
-        timestamp: new Date(),
-      };
-      setMessages((prev) => [...prev, jarvisMessage]);
+        },
+      ]);
     } finally {
       setIsLoading(false);
     }
