@@ -44,8 +44,6 @@ interface ShopifyOrder {
     phone: string;
     firstName: string;
     lastName: string;
-    ordersCount: string;
-    totalSpentV2: { amount: string };
     addresses: Array<{
       address1: string;
       address2: string;
@@ -56,7 +54,7 @@ interface ShopifyOrder {
     }>;
     tags: string[];
     note: string;
-    acceptsMarketing: boolean;
+    emailMarketingConsent: { marketingState: string } | null;
     taxExempt: boolean;
     verifiedEmail: boolean;
   } | null;
@@ -117,8 +115,6 @@ export async function POST() {
                 phone
                 firstName
                 lastName
-                ordersCount
-                totalSpentV2 { amount }
                 addresses(first: 1) {
                   address1
                   address2
@@ -129,7 +125,7 @@ export async function POST() {
                 }
                 tags
                 note
-                acceptsMarketing
+                emailMarketingConsent { marketingState }
                 taxExempt
                 verifiedEmail
               }
@@ -223,7 +219,8 @@ export async function POST() {
           country: addr?.country || undefined,
           tags: c.tags?.join(", ") || undefined,
           note: c.note || undefined,
-          acceptsMarketing: c.acceptsMarketing || false,
+          acceptsMarketing:
+            c.emailMarketingConsent?.marketingState === "SUBSCRIBED",
           taxExempt: c.taxExempt || false,
           verified: c.verifiedEmail || false,
         };
