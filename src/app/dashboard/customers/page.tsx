@@ -1,17 +1,34 @@
 'use client';
 
 import { useState, useEffect } from 'react';
+import Link from 'next/link';
 import { Loader2, Search, Check, X, RefreshCw } from 'lucide-react';
+
+type Segment = 'all' | 'subscribed' | 'has_orders' | 'no_orders';
+
+const SEGMENTS: Array<{ key: Segment; label: string }> = [
+  { key: 'all', label: 'All customers' },
+  { key: 'has_orders', label: 'With orders' },
+  { key: 'subscribed', label: 'Email subscribers' },
+  { key: 'no_orders', label: 'No orders yet' },
+];
 
 interface Customer {
   id: string;
-  name: string;
-  email: string;
+  name?: string;
+  firstName?: string | null;
+  lastName?: string | null;
+  email: string | null;
   phone: string | null;
   city: string | null;
   ordersCount: number;
   totalSpent: number;
   acceptsMarketing: boolean;
+}
+
+function customerName(c: Customer): string {
+  const full = [c.firstName, c.lastName].filter(Boolean).join(' ').trim();
+  return c.name || full || c.email || c.phone || 'Unnamed';
 }
 
 interface Stats {
@@ -26,6 +43,7 @@ export default function CustomersPage() {
   const [stats, setStats] = useState<Stats | null>(null);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
+  const [segment, setSegment] = useState<Segment>('all');
   const [page, setPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
   const [error, setError] = useState<string | null>(null);
@@ -82,6 +100,7 @@ export default function CustomersPage() {
         const params = new URLSearchParams({
           page: page.toString(),
           limit: ITEMS_PER_PAGE.toString(),
+          segment,
           ...(search && { search }),
         });
         const res = await fetch(`/api/customers?${params}`);
@@ -97,7 +116,7 @@ export default function CustomersPage() {
       }
     };
     fetchCustomers();
-  }, [page, search]);
+  }, [page, search, segment]);
 
   return (
     <div className="min-h-screen bg-slate-50 p-4 sm:p-8">
@@ -151,8 +170,26 @@ export default function CustomersPage() {
           </div>
         )}
 
-        {/* Search */}
-        <div className="bg-white rounded-lg shadow p-6 mb-6">
+        {/* Segment tabs + search */}
+        <div className="bg-white rounded-lg shadow p-4 mb-6">
+          <div className="flex items-center gap-2 flex-wrap border-b border-gray-200 -mx-4 px-4 pb-3 mb-3">
+            {SEGMENTS.map((s) => (
+              <button
+                key={s.key}
+                onClick={() => {
+                  setSegment(s.key);
+                  setPage(1);
+                }}
+                className={`px-3 py-1.5 text-sm rounded-lg border transition-colors ${
+                  segment === s.key
+                    ? 'bg-blue-600 text-white border-blue-600'
+                    : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-50'
+                }`}
+              >
+                {s.label}
+              </button>
+            ))}
+          </div>
           <div className="relative">
             <Search className="absolute left-3 top-2.5 w-4 h-4 text-gray-400" />
             <input
@@ -196,8 +233,15 @@ export default function CustomersPage() {
                   <tbody className="divide-y divide-gray-200">
                     {customers.map((customer) => (
                       <tr key={customer.id} className="hover:bg-gray-50">
-                        <td className="px-6 py-4 text-sm font-medium text-gray-900">{customer.name}</td>
-                        <td className="px-6 py-4 text-sm text-gray-600">{customer.email}</td>
+                        <td className="px-6 py-4 text-sm font-medium text-gray-900">
+                          <Link
+                            href={`/dashboard/customers/${customer.id}`}
+                            className="text-blue-700 hover:underline"
+                          >
+                            {customerName(customer)}
+                          </Link>
+                        </td>
+                        <td className="px-6 py-4 text-sm text-gray-600">{customer.email || '—'}</td>
                         <td className="px-6 py-4 text-sm text-gray-600">{customer.phone || '—'}</td>
                         <td className="px-6 py-4 text-sm text-gray-600">{customer.city || '—'}</td>
                         <td className="px-6 py-4 text-sm font-medium text-gray-900">{customer.ordersCount}</td>

@@ -60,7 +60,7 @@ export async function makeGraphQLRequest<T>(
   try {
     const accessToken = await getAccessToken();
     const response = await fetch(
-      `${SHOPIFY_STORE_URL}/admin/api/2026-01/graphql.json`,
+      `${SHOPIFY_STORE_URL}/admin/api/${process.env.SHOPIFY_API_VERSION || "2026-04"}/graphql.json`,
       {
         method: "POST",
         headers: {
