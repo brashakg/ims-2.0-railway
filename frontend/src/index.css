@@ -508,6 +508,126 @@
 }
 .cmdk .kbd { margin-left: auto; }
 
+/* ============================================================================
+   Hub screen — hero + meta grid + module grid.
+   Ported from docs/design/hub.html
+   ============================================================================ */
+.hub-bg { background: var(--bg); min-height: calc(100vh - 52px); overflow: auto; }
+
+.hub-hero {
+  padding: 48px 48px 24px;
+  display: grid; grid-template-columns: 1.2fr 1fr; gap: 48px;
+  align-items: end;
+  border-bottom: 1px solid var(--line);
+  background:
+    radial-gradient(1200px 300px at 80% -50%, rgba(205,32,26,.08), transparent 70%),
+    var(--surface);
+}
+.hub-hero .eyebrow { margin-bottom: 14px; }
+.hub-h1 {
+  font-family: var(--font-display); font-weight: 400;
+  font-size: 56px; line-height: 1.02; letter-spacing: -0.02em;
+  margin: 0 0 14px;
+  color: var(--ink) !important; /* defeat legacy `main h1 !important` override */
+}
+.hub-h1 em { font-style: italic; color: var(--bv) !important; }
+.hub-sub { max-width: 520px; color: var(--ink-3); font-size: 14px; line-height: 1.55; margin: 0; }
+
+.hub-meta-grid {
+  display: grid; grid-template-columns: repeat(3, 1fr); gap: 24px;
+  border-left: 1px solid var(--line); padding-left: 32px;
+}
+.hub-meta-grid .k {
+  font: 500 10.5px/1 var(--font-mono); color: var(--ink-4);
+  text-transform: uppercase; letter-spacing: .1em; margin-bottom: 6px;
+}
+.hub-meta-grid .v {
+  font-size: 32px; line-height: 1; color: var(--ink);
+}
+.hub-meta-grid .sm { font-size: 12px; color: var(--ink-4); margin-top: 4px; }
+.hub-meta-sub { font-size: 16px; color: var(--ink-4); font-weight: 500; letter-spacing: 0; }
+
+/* Module grid */
+.modules {
+  padding: 32px 48px 48px;
+  display: grid; grid-template-columns: repeat(12, 1fr); gap: 16px;
+}
+.mod-card {
+  grid-column: span 4;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  padding: 20px;
+  display: flex; flex-direction: column; gap: 14px;
+  transition: border-color .15s, transform .15s, box-shadow .15s;
+  cursor: pointer;
+  text-decoration: none; color: inherit;
+  min-height: 180px;
+  position: relative;
+  overflow: hidden;
+}
+.mod-card:hover {
+  border-color: var(--line-strong);
+  box-shadow: var(--sh-md);
+  transform: translateY(-1px);
+}
+.mod-card.feature {
+  grid-column: span 6;
+  background: var(--ink); color: #fff; border-color: var(--ink);
+}
+.mod-card.feature .eyebrow { color: #9a9a92; }
+.mod-card.feature .mod-title { color: #fff; }
+.mod-card.feature .mod-desc { color: #b6b6ae; }
+.mod-card.feature .mod-meta { color: #8a8a82; border-top-color: #2a2a28; }
+.mod-card.feature .mod-meta strong { color: #fff; }
+.mod-card.feature .mod-badge { background: var(--bv); color: #fff; }
+.mod-card.feature .mod-icon { background: #2a2a28; color: #fff; }
+
+.mod-head {
+  display: flex; justify-content: space-between; align-items: flex-start; gap: 12px;
+}
+.mod-icon {
+  width: 36px; height: 36px; border-radius: 8px;
+  background: var(--bg-sunk); display: grid; place-items: center;
+  color: var(--ink-2); flex-shrink: 0;
+}
+.mod-title {
+  font-family: var(--font-display); font-size: 28px; line-height: 1.05;
+  letter-spacing: -0.01em; margin: 0;
+  color: var(--ink) !important; /* defeat legacy `main h3 !important` override */
+}
+.mod-card.feature .mod-title { color: #fff !important; }
+.mod-desc {
+  font-size: 12.5px; color: var(--ink-3); line-height: 1.5; flex: 1; margin: 0;
+}
+.mod-meta {
+  display: flex; gap: 16px; padding-top: 12px;
+  border-top: 1px solid var(--line); margin-top: auto;
+  font: 500 10.5px/1 var(--font-mono); color: var(--ink-4);
+  text-transform: uppercase; letter-spacing: .06em;
+}
+.mod-meta > div { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.mod-meta strong {
+  font-family: var(--font-sans); font-size: 13px; font-weight: 600;
+  color: var(--ink); text-transform: none; letter-spacing: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.mod-badge {
+  position: absolute; top: 16px; right: 16px;
+  background: var(--bv-50); color: var(--bv);
+  font: 500 10px/1 var(--font-mono); letter-spacing: .08em;
+  text-transform: uppercase; padding: 4px 7px; border-radius: 4px;
+}
+
+.section-head {
+  grid-column: 1 / -1;
+  display: flex; align-items: baseline; gap: 16px;
+  margin: 20px 0 -4px;
+}
+.section-head .eyebrow { flex: 0; }
+.section-head .line { flex: 1; height: 1px; background: var(--line); }
+.section-head .sub { font-size: 12px; color: var(--ink-4); }
+
 /* Print only */
 @media print {
   .no-print { display: none !important; }

@@ -20,7 +20,7 @@ import { Analytics } from '@vercel/analytics/react';
 
 // Lazy load pages for code splitting
 const LoginPage = lazy(() => import('./pages/auth/LoginPage').then(m => ({ default: m.LoginPage })));
-const DashboardPage = lazy(() => import('./pages/dashboard/DashboardPage'));
+const DashboardPage = lazy(() => import('./pages/dashboard/HubPage'));
 const ExecutiveDashboard = lazy(() => import('./pages/dashboard/ExecutiveDashboard').then(m => ({ default: m.ExecutiveDashboard })));
 const EnterpriseAnalyticsDashboard = lazy(() => import('./pages/dashboard/EnterpriseAnalyticsDashboard'));
 const POSPage = lazy(() => import('./pages/pos/POSPage').then(m => ({ default: m.POSPage })));
