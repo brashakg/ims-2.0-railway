@@ -16,4 +16,7 @@ types-python-dateutil==2.9.0.20240316
 # Security
 bandit==1.7.6
 safety==3.0.1
+# safety 3.0.1 references typer.rich_utils.STYLE_HELPTEXT which was removed in typer 0.13.
+# Pin until safety upstream catches up.
+typer<0.13
 

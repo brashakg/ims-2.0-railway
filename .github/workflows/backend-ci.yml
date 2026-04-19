@@ -53,7 +53,10 @@ jobs:
         continue-on-error: true  # formatting is advisory
 
       - name: Lint with Pylint (errors only)
-        run: pylint api/ --disable=all --enable=E,F
+        # --extension-pkg-allow-list=pydantic: Pydantic v2 ships C extensions that pylint
+        # can't introspect statically, otherwise every BaseModel/field_validator import
+        # is flagged E0611 "no-name-in-module".
+        run: pylint api/ --disable=all --enable=E,F --extension-pkg-allow-list=pydantic
 
       - name: Type check with mypy
         run: mypy api/
