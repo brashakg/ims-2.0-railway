@@ -235,7 +235,7 @@ function parseTagsToFields(tags: string[]): {
 // Sync real Shopify locations into the local Location table and return
 // a map of shopifyLocationId → local Location.id that upsertProduct can
 // use to write per-location VariantLocation rows in a single pass.
-async function syncShopifyLocationsToMap(): Promise<{
+export async function syncShopifyLocationsToMap(): Promise<{
   locationMap: Map<string, string>;
   synced: number;
 }> {
@@ -275,7 +275,7 @@ async function syncShopifyLocationsToMap(): Promise<{
   return { locationMap: map, synced };
 }
 
-async function upsertProduct(
+export async function upsertProduct(
   sp: ShopifyProductNode,
   locationMap: Map<string, string> = new Map()
 ) {

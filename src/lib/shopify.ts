@@ -1053,6 +1053,105 @@ export async function fetchAllProducts(): Promise<{
   return { success: true, products: allProducts };
 }
 
+// Fetch a single page of products (for resumable/chunked pulls).
+// Returns the nodes plus pagination info so the caller can loop, persist
+// the cursor, or stop early.
+export async function fetchProductsPage(
+  cursor: string | null
+): Promise<{
+  success: boolean;
+  products?: ShopifyProductNode[];
+  nextCursor?: string | null;
+  hasNextPage?: boolean;
+  error?: string;
+}> {
+  const PRODUCTS_PER_PAGE = Number(process.env.SHOPIFY_PULL_PAGE_SIZE) || 20;
+  const VARIANTS_PER_PRODUCT =
+    Number(process.env.SHOPIFY_PULL_VARIANTS_PER_PRODUCT) || 25;
+  const LOCATIONS_PER_VARIANT =
+    Number(process.env.SHOPIFY_PULL_LOCATIONS_PER_VARIANT) || 5;
+  const IMAGES_PER_PRODUCT = 10;
+  const METAFIELDS_PER_PRODUCT = 15;
+
+  const query = `
+    query FetchProductsPage($cursor: String) {
+      products(first: ${PRODUCTS_PER_PAGE}, after: $cursor) {
+        edges {
+          cursor
+          node {
+            id
+            title
+            handle
+            descriptionHtml
+            status
+            vendor
+            productType
+            tags
+            totalInventory
+            createdAt
+            updatedAt
+            seo { title description }
+            featuredImage { url altText }
+            images(first: ${IMAGES_PER_PRODUCT}) {
+              edges { node { id url altText } }
+            }
+            variants(first: ${VARIANTS_PER_PRODUCT}) {
+              edges {
+                node {
+                  id
+                  title
+                  sku
+                  price
+                  compareAtPrice
+                  barcode
+                  inventoryQuantity
+                  selectedOptions { name value }
+                  inventoryItem {
+                    id
+                    inventoryLevels(first: ${LOCATIONS_PER_VARIANT}) {
+                      edges {
+                        node {
+                          location { id }
+                          quantities(names: ["available"]) { name quantity }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+            metafields(first: ${METAFIELDS_PER_PRODUCT}) {
+              edges { node { namespace key value type } }
+            }
+          }
+        }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  `;
+
+  interface ProductsResponse {
+    products: {
+      edges: Array<{ cursor: string; node: ShopifyProductNode }>;
+      pageInfo: { hasNextPage: boolean; endCursor: string | null };
+    };
+  }
+
+  const result = await makeGraphQLRequest<ProductsResponse>(query, { cursor });
+  if (!result.success || !result.data) {
+    return {
+      success: false,
+      error: result.error || "Failed to fetch products page",
+    };
+  }
+  return {
+    success: true,
+    products: result.data.products.edges.map((e) => e.node),
+    nextCursor: result.data.products.pageInfo.endCursor,
+    hasNextPage: result.data.products.pageInfo.hasNextPage,
+  };
+}
+
 export async function fetchProductByShopifyId(shopifyGid: string): Promise<{
   success: boolean;
   product?: ShopifyProductNode;

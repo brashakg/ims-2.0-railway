@@ -96,52 +96,67 @@ export default function ShopifySettingsPage() {
     }
   }, [activeTab, fetchWebhooks]);
 
-  // ── Pull products FROM Shopify (runs in background) ──
-  const handlePullFromShopify = () => {
+  // ── Pull products FROM Shopify in RESUMABLE CHUNKS ──
+  // The old /api/shopify/pull call routinely blew past Railway's 300s
+  // maxDuration when the store has thousands of products + paced GraphQL.
+  // This driver loops /api/shopify/pull/chunk with a cursor, so no single
+  // server call exceeds ~60-90s. UI shows live running totals.
+  const handlePullFromShopify = async () => {
     setPulling(true);
     setError(null);
-    setSuccess("Pull started! This runs in the background — you can navigate away. A notification will appear when complete.");
+    setSuccess(null);
 
-    // Fire the pull in the background — don't block the UI
-    fetch("/api/shopify/pull", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({}),
-    })
-      .then((res) => res.json())
-      .then((data) => {
-        if (data.success) {
-          setSuccess(data.message);
-          fetchAll();
-          // Browser notification if permission granted
-          if (Notification.permission === "granted") {
-            new Notification("Shopify Pull Complete", {
-              body: data.message,
-              icon: "/app-icon.png",
-            });
-          }
-        } else {
-          setError(data.error || "Pull failed");
-          setSuccess(null);
-          if (Notification.permission === "granted") {
-            new Notification("Shopify Pull Failed", {
-              body: data.error || "Pull failed",
-              icon: "/app-icon.png",
-            });
-          }
-        }
-      })
-      .catch((err) => {
-        setError(err instanceof Error ? err.message : "Pull failed");
-        setSuccess(null);
-      })
-      .finally(() => {
-        setPulling(false);
-      });
-
-    // Request notification permission for future pulls
     if (typeof Notification !== "undefined" && Notification.permission === "default") {
       Notification.requestPermission();
+    }
+
+    let cursor: string | null = null;
+    let done = false;
+    let totalPages = 0;
+    let totalNew = 0;
+    let totalUpdated = 0;
+    let totalErrors = 0;
+    let safetyCounter = 0;
+
+    while (!done && safetyCounter < 300) {
+      safetyCounter++;
+      try {
+        const res = await fetch("/api/shopify/pull/chunk", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ cursor, maxSeconds: 60 }),
+        });
+        const data = await res.json();
+        if (!res.ok || !data.success) {
+          setError(data.error || `Chunk failed at cursor ${cursor}`);
+          setPulling(false);
+          return;
+        }
+        totalPages += data.summary?.pagesProcessed || 0;
+        totalNew += data.summary?.newCount || 0;
+        totalUpdated += data.summary?.updatedCount || 0;
+        totalErrors += data.summary?.errorCount || 0;
+        cursor = data.nextCursor;
+        done = data.done === true;
+        setSuccess(
+          `Pulling… ${totalNew + totalUpdated} products so far (${totalNew} new, ${totalUpdated} updated) across ${totalPages} pages${totalErrors ? ` · ${totalErrors} errors` : ""}. ${done ? "Done." : "Fetching next chunk…"}`
+        );
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Chunk call failed");
+        setPulling(false);
+        return;
+      }
+    }
+
+    const doneMsg = `Pull complete: ${totalNew} new, ${totalUpdated} updated, ${totalErrors} errors across ${totalPages} pages.`;
+    setSuccess(doneMsg);
+    setPulling(false);
+    fetchAll();
+    if (Notification.permission === "granted") {
+      new Notification("Shopify Pull Complete", {
+        body: doneMsg,
+        icon: "/app-icon.png",
+      });
     }
   };
 
