@@ -46,7 +46,13 @@ interface FiltersResponse {
 }
 
 const CATEGORIES = ['All', 'Spectacles', 'Sunglasses', 'Solutions'];
-const STATUSES = ['All', 'Draft', 'Published', 'Archived'];
+
+const STATUS_SEGMENTS: Array<{ key: string; label: string }> = [
+  { key: 'All', label: 'All' },
+  { key: 'Published', label: 'Active' },
+  { key: 'Draft', label: 'Draft' },
+  { key: 'Archived', label: 'Archived' },
+];
 
 export default function ProductsPage() {
   const [products, setProducts] = useState<Product[]>([]);
@@ -75,6 +81,32 @@ export default function ProductsPage() {
     new Set()
   );
   const [syncLoading, setSyncLoading] = useState(false);
+  const [statusCounts, setStatusCounts] = useState<{
+    total: number;
+    published: number;
+    draft: number;
+    archived: number;
+  } | null>(null);
+
+  // Fetch status counts for segment tab badges
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await fetch('/api/products/stats');
+        const data = await res.json();
+        if (data.success && data.data) {
+          setStatusCounts({
+            total: data.data.total || 0,
+            published: data.data.published || 0,
+            draft: data.data.draft || 0,
+            archived: data.data.archived || 0,
+          });
+        }
+      } catch (err) {
+        console.error('Error fetching product stats:', err);
+      }
+    })();
+  }, [page]);
 
   // Fetch locations
   useEffect(() => {
@@ -301,9 +333,53 @@ export default function ProductsPage() {
           </Link>
         </div>
 
+        {/* Status segment tabs (matches Shopify Products layout) */}
+        <div className="bg-white rounded-lg shadow p-3 mb-4">
+          <div className="flex items-center gap-2 flex-wrap">
+            {STATUS_SEGMENTS.map((s) => {
+              const count = !statusCounts
+                ? null
+                : s.key === 'All'
+                  ? statusCounts.total
+                  : s.key === 'Published'
+                    ? statusCounts.published
+                    : s.key === 'Draft'
+                      ? statusCounts.draft
+                      : statusCounts.archived;
+              return (
+                <button
+                  key={s.key}
+                  onClick={() => {
+                    setStatus(s.key);
+                    setPage(1);
+                  }}
+                  className={`inline-flex items-center gap-2 px-3 py-1.5 text-sm rounded-lg border transition-colors ${
+                    status === s.key
+                      ? 'bg-blue-600 text-white border-blue-600'
+                      : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-50'
+                  }`}
+                >
+                  <span>{s.label}</span>
+                  {count !== null && (
+                    <span
+                      className={`text-[11px] px-1.5 rounded-full ${
+                        status === s.key
+                          ? 'bg-white/20 text-white'
+                          : 'bg-slate-100 text-slate-600'
+                      }`}
+                    >
+                      {count}
+                    </span>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
         {/* Filters */}
         <div className="bg-white rounded-lg shadow p-4 mb-6">
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 sm:gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
             <SearchableDropdown
               label="Product Type"
               options={CATEGORIES}
@@ -315,12 +391,6 @@ export default function ProductsPage() {
               options={brands}
               value={brand}
               onChange={setBrand}
-            />
-            <SearchableDropdown
-              label="Status"
-              options={STATUSES}
-              value={status}
-              onChange={setStatus}
             />
             <SearchableDropdown
               label="Location"
@@ -514,8 +584,13 @@ export default function ProductsPage() {
                         <td className="px-2 sm:px-6 py-4 text-xs sm:text-sm font-medium text-gray-900">
                           {product.brand}
                         </td>
-                        <td className="px-2 sm:px-6 py-4 text-xs sm:text-sm text-gray-900 max-w-xs truncate">
-                          {product.title}
+                        <td className="px-2 sm:px-6 py-4 text-xs sm:text-sm max-w-xs truncate">
+                          <Link
+                            href={`/dashboard/products/edit/${product.id}`}
+                            className="text-blue-700 hover:underline font-medium"
+                          >
+                            {product.title}
+                          </Link>
                         </td>
                         <td className="px-2 sm:px-6 py-4 text-xs sm:text-sm text-gray-600">
                           {product.category}
@@ -525,15 +600,15 @@ export default function ProductsPage() {
                         </td>
                         <td className="px-2 sm:px-6 py-4 text-xs sm:text-sm">
                           <span
-                            className={`inline-block px-3 py-1 rounded-full text-xs font-semibold ${
+                            className={`inline-block px-2.5 py-0.5 rounded-full text-[11px] font-medium border ${
                               product.status === 'PUBLISHED'
-                                ? 'bg-green-100 text-green-800'
+                                ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
                                 : product.status === 'DRAFT'
-                                ? 'bg-yellow-100 text-yellow-800'
-                                : 'bg-gray-100 text-gray-800'
+                                ? 'bg-amber-50 text-amber-700 border-amber-200'
+                                : 'bg-slate-100 text-slate-700 border-slate-200'
                             }`}
                           >
-                            {product.status}
+                            {product.status === 'PUBLISHED' ? 'Active' : product.status === 'DRAFT' ? 'Draft' : 'Archived'}
                           </span>
                         </td>
                         <td className="px-6 py-4 text-sm text-gray-900">
