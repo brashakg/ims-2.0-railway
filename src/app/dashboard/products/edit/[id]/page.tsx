@@ -556,21 +556,15 @@ export default function EditProductPage() {
                       className="w-full px-3 py-3 min-h-[44px] border border-gray-300 rounded-lg focus:outline-none focus:border-blue-500"
                     />
                   </div>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">
-                      Color Code
-                    </label>
-                    <input
-                      type="text"
-                      value={formData.colorCode}
-                      onChange={(e) => handleInputChange('colorCode', e.target.value)}
-                      className="w-full px-3 py-3 min-h-[44px] border border-gray-300 rounded-lg focus:outline-none focus:border-blue-500"
-                    />
-                  </div>
                 </div>
+                <p className="mt-4 text-xs text-slate-500 bg-slate-50 border border-slate-200 rounded p-2">
+                  Color, size, bridge, temple length, weight, lens colour and
+                  tint are now edited <b>per variant</b>. Scroll down to the
+                  &ldquo;Variants&rdquo; section to manage them.
+                </p>
               </div>
 
-              {/* Section 2: Frame Attributes */}
+              {/* Section 2: Frame Attributes (product-level only) */}
               {formData.category !== 'SOLUTIONS' && (
                 <div className="border-b border-gray-200 p-6">
                   <h3 className="text-base font-semibold text-gray-900 mb-4">
@@ -582,18 +576,6 @@ export default function EditProductPage() {
                       options={getAttributeOptions('shape')}
                       value={formData.shape}
                       onChange={(val) => handleInputChange('shape', val)}
-                    />
-                    <SearchableDropdown
-                      label="Frame Color"
-                      options={getAttributeOptions('framecolor')}
-                      value={formData.frameColor}
-                      onChange={(val) => handleInputChange('frameColor', val)}
-                    />
-                    <SearchableDropdown
-                      label="Temple Color"
-                      options={getAttributeOptions('templecolor')}
-                      value={formData.templeColor}
-                      onChange={(val) => handleInputChange('templeColor', val)}
                     />
                     <SearchableDropdown
                       label="Frame Material"
@@ -617,84 +599,13 @@ export default function EditProductPage() {
                 </div>
               )}
 
-              {/* Section 3: Measurements */}
-              {formData.category !== 'SOLUTIONS' && (
-                <div className="border-b border-gray-200 p-6">
-                  <h3 className="text-base font-semibold text-gray-900 mb-4">
-                    Measurements
-                  </h3>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 sm:gap-4">
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1">
-                        Frame Size (mm)
-                      </label>
-                      <input
-                        type="text"
-                        placeholder="e.g., 52"
-                        value={formData.frameSize}
-                        onChange={(e) => handleInputChange('frameSize', e.target.value)}
-                        className="w-full px-3 py-3 min-h-[44px] border border-gray-300 rounded-lg focus:outline-none focus:border-blue-500"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1">
-                        Bridge (mm)
-                      </label>
-                      <input
-                        type="text"
-                        placeholder="e.g., 18"
-                        value={formData.bridge}
-                        onChange={(e) => handleInputChange('bridge', e.target.value)}
-                        className="w-full px-3 py-3 min-h-[44px] border border-gray-300 rounded-lg focus:outline-none focus:border-blue-500"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1">
-                        Temple Length (mm)
-                      </label>
-                      <input
-                        type="text"
-                        placeholder="e.g., 145"
-                        value={formData.templeLength}
-                        onChange={(e) => handleInputChange('templeLength', e.target.value)}
-                        className="w-full px-3 py-3 min-h-[44px] border border-gray-300 rounded-lg focus:outline-none focus:border-blue-500"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1">
-                        Weight (grams)
-                      </label>
-                      <input
-                        type="text"
-                        placeholder="e.g., 25"
-                        value={formData.weight}
-                        onChange={(e) => handleInputChange('weight', e.target.value)}
-                        className="w-full px-3 py-3 min-h-[44px] border border-gray-300 rounded-lg focus:outline-none focus:border-blue-500"
-                      />
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              {/* Section 4: Lens Attributes */}
+              {/* Section 4: Lens Attributes (product-level only) */}
               {formData.category === 'SUNGLASSES' && (
                 <div className="border-b border-gray-200 p-6">
                   <h3 className="text-base font-semibold text-gray-900 mb-4">
                     Lens Attributes
                   </h3>
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 sm:gap-4">
-                    <SearchableDropdown
-                      label="Lens Colour"
-                      options={getAttributeOptions('lenscolour')}
-                      value={formData.lensColour}
-                      onChange={(val) => handleInputChange('lensColour', val)}
-                    />
-                    <SearchableDropdown
-                      label="Tint"
-                      options={getAttributeOptions('tint')}
-                      value={formData.tint}
-                      onChange={(val) => handleInputChange('tint', val)}
-                    />
                     <SearchableDropdown
                       label="Lens Material"
                       options={getAttributeOptions('lensmaterial')}

@@ -53,35 +53,23 @@ export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
 
-    // Check if this is a sync request from Shopify
+    // Only Shopify-sync is supported. Locations must be defined in Shopify
+    // and pulled in via sync — the app doesn't create local-only locations.
     if (body.action === 'sync_from_shopify') {
       return await syncLocationsFromShopify();
     }
 
-    // Otherwise, create a new location
-    const { name, code, address, isActive = true } = body;
-
-    if (!name || !code) {
-      return NextResponse.json(
-        { error: 'Name and code are required' },
-        { status: 400 }
-      );
-    }
-
-    const location = await prisma.location.create({
-      data: {
-        name,
-        code,
-        address,
-        isActive,
-      },
-    });
-
-    return NextResponse.json(location, { status: 201 });
-  } catch (error) {
-    console.error('Location creation error:', error);
     return NextResponse.json(
-      { error: 'Failed to create location' },
+      {
+        error:
+          "Creating local locations is not supported. Locations must be defined in Shopify and pulled via { action: 'sync_from_shopify' }.",
+      },
+      { status: 400 }
+    );
+  } catch (error) {
+    console.error('Location endpoint error:', error);
+    return NextResponse.json(
+      { error: 'Locations endpoint error' },
       { status: 500 }
     );
   }

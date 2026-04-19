@@ -7,7 +7,6 @@ import {
   AlertTriangle,
   CheckCircle2,
   Trash2,
-  Plus,
   MapPin,
   Store,
 } from "lucide-react";
@@ -45,15 +44,8 @@ export default function LocationsPage() {
     text: string;
     details?: string;
   } | null>(null);
-  const [showModal, setShowModal] = useState(false);
-  const [saving, setSaving] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
-  const [formData, setFormData] = useState({
-    name: "",
-    code: "",
-    address: "",
-  });
 
   const fetchLocations = useCallback(async () => {
     try {
@@ -106,34 +98,6 @@ export default function LocationsPage() {
     }
   };
 
-  const handleAddLocation = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!formData.name || !formData.code) {
-      setError("Name and code are required");
-      return;
-    }
-    try {
-      setSaving(true);
-      const response = await fetch("/api/locations", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(formData),
-      });
-      if (!response.ok) {
-        const data = await response.json();
-        throw new Error(data.error || data.message || "Failed to create location");
-      }
-      setFormData({ name: "", code: "", address: "" });
-      setShowModal(false);
-      setError(null);
-      await fetchLocations();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to create location");
-    } finally {
-      setSaving(false);
-    }
-  };
-
   const handleDelete = async (loc: Location) => {
     if (!confirm(`Delete "${loc.name}" (${loc.code})? This cannot be undone.`)) return;
     setDeletingId(loc.id);
@@ -171,27 +135,18 @@ export default function LocationsPage() {
               Physical stores and Shopify-linked inventory locations.
             </p>
           </div>
-          <div className="flex gap-2">
-            <button
-              onClick={handleSyncFromShopify}
-              disabled={syncing}
-              className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 text-sm"
-            >
-              {syncing ? (
-                <Loader2 className="w-4 h-4 animate-spin" />
-              ) : (
-                <RefreshCw className="w-4 h-4" />
-              )}
-              Sync from Shopify
-            </button>
-            <button
-              onClick={() => setShowModal(true)}
-              className="flex items-center gap-2 px-4 py-2 border border-slate-300 bg-white text-slate-700 rounded-lg hover:bg-slate-50 text-sm"
-            >
-              <Plus className="w-4 h-4" />
-              Add local
-            </button>
-          </div>
+          <button
+            onClick={handleSyncFromShopify}
+            disabled={syncing}
+            className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 text-sm"
+          >
+            {syncing ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <RefreshCw className="w-4 h-4" />
+            )}
+            Sync from Shopify
+          </button>
         </div>
 
         {banner && (
@@ -283,90 +238,6 @@ export default function LocationsPage() {
           </>
         )}
       </div>
-
-      {/* Add Location Modal */}
-      {showModal && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
-          <div className="bg-white rounded-lg shadow-xl max-w-md w-full">
-            <div className="p-6 border-b border-slate-200">
-              <h2 className="text-xl font-semibold text-slate-900">
-                Add Local Location
-              </h2>
-              <p className="text-xs text-slate-500 mt-1">
-                For locations that don&apos;t exist in Shopify. Shopify-linked
-                locations appear automatically after sync.
-              </p>
-            </div>
-            <form onSubmit={handleAddLocation} className="p-6 space-y-4">
-              <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1">
-                  Location Name
-                </label>
-                <input
-                  type="text"
-                  value={formData.name}
-                  onChange={(e) =>
-                    setFormData({ ...formData, name: e.target.value })
-                  }
-                  className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  placeholder="Main Warehouse"
-                  disabled={saving}
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1">
-                  Code
-                </label>
-                <input
-                  type="text"
-                  value={formData.code}
-                  onChange={(e) =>
-                    setFormData({ ...formData, code: e.target.value })
-                  }
-                  className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  placeholder="MAIN"
-                  disabled={saving}
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1">
-                  Address
-                </label>
-                <input
-                  type="text"
-                  value={formData.address}
-                  onChange={(e) =>
-                    setFormData({ ...formData, address: e.target.value })
-                  }
-                  className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  placeholder="123 Main Street"
-                  disabled={saving}
-                />
-              </div>
-              <div className="flex gap-2 pt-2">
-                <button
-                  type="submit"
-                  disabled={saving}
-                  className="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:bg-slate-300 text-sm"
-                >
-                  {saving ? "Creating..." : "Create"}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setShowModal(false);
-                    setError(null);
-                    setFormData({ name: "", code: "", address: "" });
-                  }}
-                  className="flex-1 px-4 py-2 border border-slate-300 bg-white text-slate-700 rounded-lg hover:bg-slate-50 text-sm"
-                >
-                  Cancel
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
     </div>
   );
 }
