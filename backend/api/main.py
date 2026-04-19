@@ -5,7 +5,6 @@ Main entry point for the API server
 """
 
 from fastapi import FastAPI, Request, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
 from collections import defaultdict
@@ -254,25 +253,35 @@ else:
 logger.info(f"CORS Origins configured: {CORS_ORIGINS}")
 logger.info("✓ All *.vercel.app and *.up.railway.app domains allowed")
 
-# Add CORS middleware FIRST (before other middlewares)
-# In FastAPI, middlewares are applied in reverse order of definition
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=CORS_ORIGINS,
-    allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
-    allow_headers=[
-        "Authorization",
-        "Content-Type",
-        "Accept",
-        "Origin",
-        "X-Requested-With",
-        "Cache-Control",
-    ],
-    expose_headers=[
-        "X-Process-Time",
-        "Content-Disposition",
-    ],
+# ============================================================================
+# CORS — origin-whitelisted, headers reflected from request.
+#
+# Why not starlette's CORSMiddleware with a static allow_headers list?
+# ----------------------------------------------------------------------------
+# We used to list headers explicitly ("Authorization, Content-Type, Accept,
+# Origin, X-Requested-With, Cache-Control"). That list silently drifts out
+# of date every time the frontend adds a client-side header (e.g. a retry
+# counter, request-ID, version tag). The browser's CORS preflight asks for
+# the new header in `Access-Control-Request-Headers`, the server's list
+# doesn't include it → preflight 400 → axios sees `!error.response` → the
+# user sees "Network error connecting to API" with no actionable clue.
+#
+# This has happened more than once. Permanent fix: keep the strict origin
+# whitelist (that's the real security boundary) but REFLECT whatever
+# headers the browser requests in preflight. CORS is a browser-level
+# mechanism — we still enforce auth, rate limits, and validation on the
+# server side. Reflecting headers from an allowed origin does not weaken
+# security; it just stops friendly preflights from failing.
+# ============================================================================
+
+_CORS_ALLOW_METHODS = "GET, POST, PUT, DELETE, PATCH, OPTIONS"
+_CORS_EXPOSE_HEADERS = "X-Process-Time, Content-Disposition"
+# Sensible fallback when a request doesn't include Access-Control-Request-Headers
+# (some tools send a preflight without listing anything).
+_CORS_DEFAULT_ALLOW_HEADERS = (
+    "Authorization, Content-Type, Accept, Origin, X-Requested-With, "
+    "Cache-Control, X-Retry-Count, X-Request-ID, X-Client-Version, "
+    "X-Idempotency-Key"
 )
 
 
@@ -336,26 +345,54 @@ async def add_security_headers(request: Request, call_next):
     return response
 
 
-# Custom CORS handler for dynamic origin validation (additional safety layer)
+# Full CORS middleware — handles preflight + adds CORS headers to all responses.
+# Reflects `Access-Control-Request-Headers` so any custom frontend header works.
 @app.middleware("http")
 async def dynamic_cors_handler(request: Request, call_next):
     origin = request.headers.get("origin")
+    origin_allowed = bool(origin and _is_allowed_origin(origin))
 
-    # Log CORS requests for debugging
+    # Preflight: short-circuit without invoking downstream routing.
+    # Origins we don't allow get the default 405 so browsers refuse.
     if request.method == "OPTIONS":
-        logger.debug(f"CORS preflight request from origin: {origin}")
-        if origin:
-            logger.debug(f"Origin allowed: {_is_allowed_origin(origin)}")
+        if not origin_allowed:
+            logger.debug(f"CORS preflight rejected for origin: {origin!r}")
+            return await call_next(request)
 
-    # Process the request
+        # Reflect what the browser asked for — permanent fix for the "add a
+        # custom header, CORS breaks" class of bug.
+        requested_headers = request.headers.get(
+            "access-control-request-headers", _CORS_DEFAULT_ALLOW_HEADERS
+        )
+        requested_method = request.headers.get(
+            "access-control-request-method", _CORS_ALLOW_METHODS
+        )
+
+        logger.debug(
+            f"CORS preflight OK origin={origin} headers={requested_headers!r} method={requested_method}"
+        )
+        return JSONResponse(
+            status_code=200,
+            content=None,
+            headers={
+                "Access-Control-Allow-Origin": origin,
+                "Access-Control-Allow-Credentials": "true",
+                "Access-Control-Allow-Headers": requested_headers,
+                "Access-Control-Allow-Methods": _CORS_ALLOW_METHODS,
+                "Access-Control-Max-Age": "600",  # cache preflight for 10 min
+                "Vary": "Origin, Access-Control-Request-Headers, Access-Control-Request-Method",
+            },
+        )
+
+    # Normal request: pass through, then add CORS headers to the response.
     response = await call_next(request)
-
-    # Ensure CORS headers are present for all responses
-    origin = request.headers.get("origin")
-    if origin and _is_allowed_origin(origin):
+    if origin_allowed:
         response.headers["Access-Control-Allow-Origin"] = origin
         response.headers["Access-Control-Allow-Credentials"] = "true"
-
+        response.headers["Access-Control-Expose-Headers"] = _CORS_EXPOSE_HEADERS
+        # Prevent cache poisoning across origins.
+        existing_vary = response.headers.get("Vary", "")
+        response.headers["Vary"] = (existing_vary + ", Origin").strip(", ") if existing_vary else "Origin"
     return response
 
 

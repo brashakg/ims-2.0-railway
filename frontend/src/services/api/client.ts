@@ -54,16 +54,18 @@ const api: AxiosInstance = axios.create({
   },
 });
 
-// Request interceptor - add auth token and retry config
+// Retry-count tracking off the wire: keyed by config object so it never leaves
+// the browser. Sending it as an `x-retry-count` header triggered a CORS preflight
+// that the backend's allow_headers list didn't cover, causing every request to
+// fail with "Network error" before even reaching the backend.
+type RetryTrackedConfig = InternalAxiosRequestConfig & { __retryCount?: number };
+
+// Request interceptor - add auth token (retry counter lives on the config object)
 api.interceptors.request.use(
   (config: InternalAxiosRequestConfig) => {
     const token = localStorage.getItem('ims_token');
     if (token && config.headers) {
       config.headers.Authorization = `Bearer ${token}`;
-    }
-    // Initialize retry count
-    if (config.headers) {
-      config.headers['x-retry-count'] = config.headers['x-retry-count'] || '0';
     }
     return config;
   },
@@ -106,18 +108,18 @@ const handleFinalError = (error: AxiosError<{ message?: string; detail?: string 
 api.interceptors.response.use(
   (response) => response,
   async (error: AxiosError<{ message?: string; detail?: string | Array<Record<string, unknown>> }>) => {
-    const config = error.config;
+    const config = error.config as RetryTrackedConfig | undefined;
 
-    // Don't retry if no config or already exceeded retries
-    if (!config || !config.headers) {
+    // Don't retry if no config
+    if (!config) {
       return handleFinalError(error);
     }
 
-    const retryCount = parseInt(config.headers['x-retry-count'] as string || '0', 10);
+    const retryCount = config.__retryCount ?? 0;
 
     // Check if we should retry
     if (isRetryableError(error) && retryCount < MAX_RETRIES) {
-      config.headers['x-retry-count'] = String(retryCount + 1);
+      config.__retryCount = retryCount + 1;
 
       // Exponential backoff: 1s, 2s, 4s
       const backoffDelay = RETRY_DELAY_MS * Math.pow(2, retryCount);
