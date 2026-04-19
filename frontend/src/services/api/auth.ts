@@ -79,8 +79,35 @@ export const authApi = {
   },
 
   getProfile: async (): Promise<User> => {
-    const response = await api.get<User>('/auth/me');
-    return response.data;
+    // Backend /auth/me returns the JWT payload verbatim (snake_case:
+    // user_id, store_ids, active_store_id, roles, exp). Frontend User type
+    // is camelCase. Without this transform, AuthContext overwrote the
+    // freshly-logged-in user with one missing activeStoreId on every mount,
+    // which made the topbar store pill flip to "No store" and broke POS.
+    const response = await api.get<{
+      user_id: string;
+      username: string;
+      full_name?: string;
+      roles: string[];
+      store_ids: string[];
+      active_store_id: string;
+      exp?: number;
+    }>('/auth/me');
+    const raw = response.data;
+    return {
+      id: raw.user_id,
+      email: raw.username,
+      name: raw.full_name ?? raw.username,
+      phone: '',
+      roles: raw.roles as import('../../types').UserRole[],
+      activeRole: (raw.roles[0] ?? 'SALES_STAFF') as import('../../types').UserRole,
+      storeIds: raw.store_ids ?? [],
+      activeStoreId: raw.active_store_id,
+      discountCap: 0,
+      isActive: true,
+      geoRestricted: false,
+      createdAt: new Date().toISOString(),
+    };
   },
 
   changePassword: async (currentPassword: string, newPassword: string): Promise<ApiResponse<void>> => {
