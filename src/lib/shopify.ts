@@ -6,6 +6,13 @@ const SHOPIFY_LEGACY_TOKEN = process.env.SHOPIFY_ACCESS_TOKEN || process.env.SHO
 
 let cachedToken: { token: string; expiresAt: number } | null = null;
 
+// Force-clear the in-memory OAuth token cache. Call after changing app
+// scopes in Shopify so the next request mints a fresh token without a
+// server restart.
+export function clearCachedShopifyToken(): void {
+  cachedToken = null;
+}
+
 async function getAccessToken(): Promise<string> {
   if (SHOPIFY_CLIENT_ID && SHOPIFY_CLIENT_SECRET) {
     if (cachedToken && Date.now() < cachedToken.expiresAt - 300000) {
