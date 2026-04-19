@@ -878,9 +878,21 @@ export async function fetchAllProducts(): Promise<{
   products?: ShopifyProductNode[];
   error?: string;
 }> {
+  // Page sizes are tuned against Shopify's GraphQL cost cap (1000 per query
+  // on standard plans). The previous combination (products:50 × variants:100
+  // × inventoryLevels:10) blew past it once the inventoryLevels field was
+  // added. New defaults keep us well under the cap; tune via env if needed.
+  const PRODUCTS_PER_PAGE = Number(process.env.SHOPIFY_PULL_PAGE_SIZE) || 20;
+  const VARIANTS_PER_PRODUCT =
+    Number(process.env.SHOPIFY_PULL_VARIANTS_PER_PRODUCT) || 25;
+  const LOCATIONS_PER_VARIANT =
+    Number(process.env.SHOPIFY_PULL_LOCATIONS_PER_VARIANT) || 5;
+  const IMAGES_PER_PRODUCT = 10;
+  const METAFIELDS_PER_PRODUCT = 15;
+
   const query = `
     query FetchProducts($cursor: String) {
-      products(first: 50, after: $cursor) {
+      products(first: ${PRODUCTS_PER_PAGE}, after: $cursor) {
         edges {
           cursor
           node {
@@ -897,12 +909,12 @@ export async function fetchAllProducts(): Promise<{
             updatedAt
             seo { title description }
             featuredImage { url altText }
-            images(first: 20) {
+            images(first: ${IMAGES_PER_PRODUCT}) {
               edges {
                 node { id url altText }
               }
             }
-            variants(first: 100) {
+            variants(first: ${VARIANTS_PER_PRODUCT}) {
               edges {
                 node {
                   id
@@ -915,7 +927,7 @@ export async function fetchAllProducts(): Promise<{
                   selectedOptions { name value }
                   inventoryItem {
                     id
-                    inventoryLevels(first: 10) {
+                    inventoryLevels(first: ${LOCATIONS_PER_VARIANT}) {
                       edges {
                         node {
                           location { id }
@@ -927,7 +939,7 @@ export async function fetchAllProducts(): Promise<{
                 }
               }
             }
-            metafields(first: 20) {
+            metafields(first: ${METAFIELDS_PER_PRODUCT}) {
               edges {
                 node { namespace key value type }
               }
