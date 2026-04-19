@@ -55,42 +55,117 @@ interface GraphQLError {
   locations?: Array<{ line: number; column: number }>;
   path?: string[];
 }
+interface GraphQLThrottleStatus {
+  maximumAvailable: number;
+  currentlyAvailable: number;
+  restoreRate: number;
+}
 interface GraphQLResponse<T> {
   data?: T;
-  errors?: GraphQLError[];
+  errors?: Array<GraphQLError & { extensions?: { code?: string } }>;
+  extensions?: {
+    cost?: {
+      requestedQueryCost?: number;
+      actualQueryCost?: number | null;
+      throttleStatus?: GraphQLThrottleStatus;
+    };
+  };
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+// Sleep long enough for Shopify's cost bucket to refill to `needed` points.
+// `restoreRate` is points per second, so we sleep (needed - currentlyAvailable) / restoreRate.
+function msUntilAvailable(
+  throttle: GraphQLThrottleStatus,
+  needed: number
+): number {
+  if (throttle.currentlyAvailable >= needed) return 0;
+  const deficit = needed - throttle.currentlyAvailable;
+  const seconds = deficit / Math.max(throttle.restoreRate, 1);
+  // Add a 500ms buffer to be safe, cap at 30s.
+  return Math.min(Math.ceil(seconds * 1000) + 500, 30_000);
 }
 
 export async function makeGraphQLRequest<T>(
   query: string,
   variables?: Record<string, unknown>
 ): Promise<{ success: boolean; data?: T; error?: string }> {
-  try {
-    const accessToken = await getAccessToken();
-    const response = await fetch(
-      `${SHOPIFY_STORE_URL}/admin/api/${process.env.SHOPIFY_API_VERSION || "2026-04"}/graphql.json`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Shopify-Access-Token": accessToken,
-        },
-        body: JSON.stringify({ query, variables: variables || {} }),
+  const maxAttempts = 4;
+  let lastError = "Unknown error";
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const accessToken = await getAccessToken();
+      const response = await fetch(
+        `${SHOPIFY_STORE_URL}/admin/api/${process.env.SHOPIFY_API_VERSION || "2026-04"}/graphql.json`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Shopify-Access-Token": accessToken,
+          },
+          body: JSON.stringify({ query, variables: variables || {} }),
+        }
+      );
+
+      // 429 Too Many Requests: honor Retry-After header or back off.
+      if (response.status === 429) {
+        const retryAfter = Number(response.headers.get("Retry-After")) || 2;
+        await sleep(retryAfter * 1000);
+        lastError = `HTTP 429 (retry-after ${retryAfter}s)`;
+        continue;
       }
-    );
-    if (!response.ok) {
-      return { success: false, error: `HTTP ${response.status}: ${response.statusText}` };
+      if (!response.ok) {
+        return {
+          success: false,
+          error: `HTTP ${response.status}: ${response.statusText}`,
+        };
+      }
+
+      const result: GraphQLResponse<T> = await response.json();
+      const throttle = result.extensions?.cost?.throttleStatus;
+      const throttled = (result.errors || []).some(
+        (e) => e.extensions?.code === "THROTTLED" || /throttl/i.test(e.message)
+      );
+
+      if (throttled && throttle && attempt < maxAttempts) {
+        const requested = result.extensions?.cost?.requestedQueryCost || 100;
+        await sleep(msUntilAvailable(throttle, requested));
+        lastError = "throttled, retrying after bucket refill";
+        continue;
+      }
+
+      if (result.errors && result.errors.length > 0) {
+        return {
+          success: false,
+          error: result.errors.map((e) => e.message).join("; "),
+        };
+      }
+
+      // Proactively pause after successful calls when the bucket is low —
+      // the next call in a tight loop (e.g. pagination) would otherwise
+      // throttle. Only waits if less than 20% of max remains.
+      if (
+        throttle &&
+        throttle.currentlyAvailable < throttle.maximumAvailable * 0.2
+      ) {
+        await sleep(
+          msUntilAvailable(throttle, throttle.maximumAvailable * 0.5)
+        );
+      }
+
+      return { success: true, data: result.data };
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : "Unknown error";
+      if (attempt < maxAttempts) {
+        await sleep(1000 * attempt);
+        continue;
+      }
     }
-    const result: GraphQLResponse<T> = await response.json();
-    if (result.errors && result.errors.length > 0) {
-      return { success: false, error: result.errors.map((e) => e.message).join("; ") };
-    }
-    return { success: true, data: result.data };
-  } catch (error) {
-    return {
-      success: false,
-      error: error instanceof Error ? error.message : "Unknown error",
-    };
   }
+
+  return { success: false, error: lastError };
 }
 
 // ─── Types ─────────────────────────────────────────────
