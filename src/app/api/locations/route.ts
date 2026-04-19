@@ -16,12 +16,27 @@ export async function GET(request: NextRequest) {
     const searchParams = request.nextUrl.searchParams;
     const active = searchParams.get('active');
 
-    let locations = await prisma.location.findMany();
+    let locations = await prisma.location.findMany({
+      include: {
+        _count: {
+          select: {
+            products: true,
+            variants: true,
+            users: true,
+          },
+        },
+      },
+      orderBy: [
+        // Shopify-linked locations first, then mock/local-only.
+        { shopifyLocationId: { sort: 'asc', nulls: 'last' } },
+        { name: 'asc' },
+      ],
+    });
 
     // Filter by active status if specified
     if (active !== null) {
       const isActive = active === 'true';
-      locations = locations.filter(loc => loc.isActive === isActive);
+      locations = locations.filter((loc) => loc.isActive === isActive);
     }
 
     return NextResponse.json(locations);
@@ -78,9 +93,20 @@ async function syncLocationsFromShopify() {
     const result = await fetchShopifyLocations();
 
     if (!result.success || !result.locations) {
+      const raw = result.error || 'Failed to fetch locations from Shopify';
+      // Detect the common missing-scope case and tell the admin exactly
+      // what to grant in Shopify instead of surfacing the raw GraphQL error.
+      const missingScope =
+        /read_locations|read_markets_home|Access denied/i.test(raw);
       return NextResponse.json(
-        { error: result.error || 'Failed to fetch locations from Shopify' },
-        { status: 500 }
+        {
+          error: missingScope
+            ? 'Shopify access denied — the app is missing the `read_locations` scope. Open Shopify admin → Apps → BV Inventory-1 → API access → add read_locations and reinstall, then retry.'
+            : raw,
+          scopeIssue: missingScope,
+          rawError: raw,
+        },
+        { status: missingScope ? 403 : 502 }
       );
     }
 
