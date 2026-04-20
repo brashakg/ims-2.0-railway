@@ -1,20 +1,12 @@
-// Defer the import so a missing/mismatched SDK can't break the whole
-// Next.js build when this lib is imported but never called.
-type AnthropicClient = {
-  messages: {
-    create: (params: Record<string, unknown>) => Promise<{
-      content: Array<{ type: string; text?: string }>;
-      usage?: {
-        input_tokens?: number;
-        output_tokens?: number;
-        cache_read_input_tokens?: number;
-      };
-    }>;
-  };
-};
+// Anthropic API wrapper using fetch — no SDK dependency, so package-lock.json
+// stays in sync with package.json without any extra install step.
+// Uses claude-haiku-4-5 with an ephemeral-cached system prompt so bulk
+// runs pay full input-token cost only on the first call.
 
-// Shared system prompt. Cached via cache_control on every call so
-// subsequent requests in a batch hit Anthropic's prompt cache.
+const ANTHROPIC_URL = "https://api.anthropic.com/v1/messages";
+const ANTHROPIC_VERSION = "2023-06-01";
+const MODEL = "claude-haiku-4-5-20251001";
+
 const SYSTEM_PROMPT = `You generate SEO metadata for an eyewear retail catalog.
 
 Given a product's attributes, output exactly one JSON object with two fields:
@@ -27,25 +19,6 @@ Rules:
 - Avoid repeating the same word back-to-back.
 - Keep descriptions factual, short, and scannable.
 - Output ONLY the JSON object — no markdown, no code fences, no preamble, no trailing commentary.`;
-
-const MODEL = "claude-haiku-4-5-20251001";
-
-let _client: AnthropicClient | null = null;
-async function getClient(): Promise<AnthropicClient> {
-  if (_client) return _client;
-  const key = process.env.ANTHROPIC_API_KEY;
-  if (!key) {
-    throw new Error(
-      "ANTHROPIC_API_KEY is not set. Add it to Railway environment variables."
-    );
-  }
-  // Dynamic import — keeps the whole Next.js build from failing if the
-  // SDK has a mismatched signature or fails to resolve.
-  const mod = await import("@anthropic-ai/sdk");
-  const AnthropicCtor = (mod.default || (mod as unknown as { Anthropic: new (...a: unknown[]) => AnthropicClient }).Anthropic) as new (opts: { apiKey: string }) => AnthropicClient;
-  _client = new AnthropicCtor({ apiKey: key });
-  return _client;
-}
 
 export interface SeoInput {
   brand: string | null;
@@ -72,6 +45,17 @@ export interface GeneratedSeo {
   tokensIn?: number;
   tokensOut?: number;
   cacheReadTokens?: number;
+}
+
+interface AnthropicMessageResponse {
+  content: Array<{ type: string; text?: string }>;
+  usage?: {
+    input_tokens?: number;
+    output_tokens?: number;
+    cache_creation_input_tokens?: number;
+    cache_read_input_tokens?: number;
+  };
+  error?: { type: string; message: string };
 }
 
 function attributesToUserPrompt(input: SeoInput): string {
@@ -105,14 +89,19 @@ function attributesToUserPrompt(input: SeoInput): string {
 export async function generateSeoForProduct(
   input: SeoInput
 ): Promise<GeneratedSeo> {
-  const client = await getClient();
-  const userPrompt = attributesToUserPrompt(input);
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) {
+    throw new Error(
+      "ANTHROPIC_API_KEY is not set. Add it to Railway environment variables."
+    );
+  }
 
+  const userPrompt = attributesToUserPrompt(input);
   if (!userPrompt.trim()) {
     throw new Error("Cannot generate SEO: no product attributes provided");
   }
 
-  const response = await client.messages.create({
+  const body = {
     model: MODEL,
     max_tokens: 350,
     system: [
@@ -123,39 +112,49 @@ export async function generateSeoForProduct(
       },
     ],
     messages: [
-      {
-        role: "user",
-        content: userPrompt,
-      },
-      {
-        // Prefill the assistant turn with an opening brace so Claude is
-        // forced to continue a JSON object.
-        role: "assistant",
-        content: '{"seoTitle":',
-      },
+      { role: "user", content: userPrompt },
+      // Prefill assistant turn so Claude is forced to continue a JSON object.
+      { role: "assistant", content: '{"seoTitle":' },
     ],
+  };
+
+  const response = await fetch(ANTHROPIC_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": apiKey,
+      "anthropic-version": ANTHROPIC_VERSION,
+      "anthropic-beta": "prompt-caching-2024-07-31",
+    },
+    body: JSON.stringify(body),
   });
 
-  // Concatenate text blocks from the assistant's response.
-  // Use duck-typing so this works across SDK versions that may or may not
-  // export Anthropic.TextBlock as a named type.
-  const textOut = (response.content as Array<{ type: string; text?: string }>)
+  if (!response.ok) {
+    const errText = await response.text();
+    throw new Error(
+      `Anthropic API HTTP ${response.status}: ${errText.slice(0, 300)}`
+    );
+  }
+
+  const data = (await response.json()) as AnthropicMessageResponse;
+  if (data.error) {
+    throw new Error(`Anthropic API error: ${data.error.type} — ${data.error.message}`);
+  }
+
+  const textOut = (data.content || [])
     .filter((b) => b.type === "text" && typeof b.text === "string")
     .map((b) => b.text as string)
     .join("");
 
-  // Because we prefilled `{"seoTitle":`, Claude's response starts at the
-  // value. Reconstruct full JSON and parse.
+  // Reconstruct full JSON (we prefilled `{"seoTitle":`).
   const raw = `{"seoTitle":${textOut}`.trim();
-
-  // Trim anything after the final `}` in case Claude added a stray newline.
   const lastBrace = raw.lastIndexOf("}");
   const jsonText = lastBrace >= 0 ? raw.slice(0, lastBrace + 1) : raw;
 
   let parsed: { seoTitle?: unknown; seoDescription?: unknown };
   try {
     parsed = JSON.parse(jsonText);
-  } catch (e) {
+  } catch {
     throw new Error(
       `Model did not return valid JSON: ${jsonText.slice(0, 300)}`
     );
@@ -173,10 +172,8 @@ export async function generateSeoForProduct(
   return {
     seoTitle: parsed.seoTitle.trim(),
     seoDescription: parsed.seoDescription.trim(),
-    tokensIn: response.usage?.input_tokens,
-    tokensOut: response.usage?.output_tokens,
-    cacheReadTokens:
-      (response.usage as unknown as { cache_read_input_tokens?: number })
-        ?.cache_read_input_tokens ?? 0,
+    tokensIn: data.usage?.input_tokens,
+    tokensOut: data.usage?.output_tokens,
+    cacheReadTokens: data.usage?.cache_read_input_tokens ?? 0,
   };
 }
