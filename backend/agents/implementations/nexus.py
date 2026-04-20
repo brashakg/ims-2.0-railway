@@ -26,10 +26,17 @@ Scope of MVP implementation:
 """
 
 from typing import Dict, Any, List
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import logging
 
 from ..base import JarvisAgent, AgentType, AgentResponse, AgentContext
+from ..nexus_providers import (
+    SyncResult,
+    shopify_pull_orders,
+    razorpay_list_payments,
+    shiprocket_track_awb,
+    tally_build_day_voucher_xml,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -121,19 +128,142 @@ class NexusAgent(JarvisAgent):
 
     async def _run_integration_sync(self, integ_type: str) -> Dict[str, Any]:
         """
-        Heartbeat sync — records a successful "ping" run. Real implementation
-        would call into the matching admin.py route or provider client.
-        Designed to fail soft so a single broken integration doesn't kill
-        the tick for the others.
+        Dispatch to the right provider client. Each call returns a
+        SyncResult which we normalize into the sync_runs row shape.
+        Fails soft — a single bad integration returns ok=False but
+        doesn't stop the tick from processing the others.
         """
+        ran_at = datetime.now(timezone.utc).isoformat()
+        result: SyncResult
+
+        try:
+            if integ_type == "shopify":
+                # Pull recent orders from Shopify for fulfillment routing.
+                # Catalog push happens via explicit product-updated events.
+                result = await shopify_pull_orders(self.db, since_hours=2)
+            elif integ_type == "razorpay":
+                # Reconcile payments — read-only, safe in any DISPATCH_MODE
+                result = await razorpay_list_payments(self.db, since_hours=2)
+            elif integ_type == "shiprocket":
+                # Pull tracking for recently-shipped orders — one call per AWB.
+                # MVP: just heartbeat for now; real iteration happens in
+                # _sync_shiprocket_outbound below when we have outbound AWBs.
+                result = await self._sync_shiprocket_outbound()
+            elif integ_type == "tally":
+                # Nightly export (only runs at 23:00 per INTEGRATION_SCHEDULES)
+                result = await self._build_tally_export()
+            else:
+                # Integrations we declared but don't yet have a client for
+                result = SyncResult(
+                    ok=True,
+                    provider=integ_type,
+                    kind="pull",
+                    items_synced=0,
+                    notes=f"{integ_type} — no provider client yet, heartbeat only",
+                )
+        except Exception as e:
+            logger.warning(f"[NEXUS] {integ_type} sync raised: {e}")
+            result = SyncResult(ok=False, provider=integ_type, kind="pull", error=str(e))
+
+        # Normalize for sync_runs collection
         return {
             "integration": integ_type,
-            "ok": True,
-            "ran_at": datetime.now(timezone.utc).isoformat(),
-            "kind": "heartbeat",
-            "items_synced": 0,
-            "notes": "MVP heartbeat — provider client wiring is next pass",
+            "ok": result.ok,
+            "ran_at": ran_at,
+            "kind": result.kind,
+            "items_synced": result.items_synced,
+            "error": result.error,
+            "notes": result.notes,
+            "payload": result.payload,
         }
+
+    async def _sync_shiprocket_outbound(self) -> SyncResult:
+        """
+        For each order in SHIPPED state with an AWB, pull the latest
+        tracking status from Shiprocket and update orders if changed.
+        """
+        orders_coll = self.get_collection("orders")
+        if orders_coll is None:
+            return SyncResult(ok=True, provider="shiprocket", kind="pull",
+                              notes="orders collection unavailable — heartbeat")
+        try:
+            shipped_with_awb = list(orders_coll.find({
+                "status": "SHIPPED",
+                "awb": {"$exists": True, "$ne": ""},
+            }).limit(50))
+        except Exception as e:
+            return SyncResult(ok=False, provider="shiprocket", kind="pull", error=str(e))
+
+        updated = 0
+        for order in shipped_with_awb:
+            awb = order.get("awb")
+            r = await shiprocket_track_awb(self.db, awb)
+            if not r.ok:
+                continue
+            new_status = (r.payload or {}).get("latest_status")
+            if new_status and new_status != order.get("tracking_status"):
+                try:
+                    orders_coll.update_one(
+                        {"_id": order["_id"]},
+                        {"$set": {"tracking_status": new_status,
+                                  "tracking_updated_at": datetime.now(timezone.utc).isoformat()}},
+                    )
+                    updated += 1
+                except Exception as e:
+                    logger.warning(f"[NEXUS] Order tracking update failed: {e}")
+
+        return SyncResult(
+            ok=True, provider="shiprocket", kind="pull",
+            items_synced=updated,
+            notes=f"Checked {len(shipped_with_awb)} AWBs, {updated} status changes",
+        )
+
+    async def _build_tally_export(self) -> SyncResult:
+        """
+        Nightly Tally XML export — aggregate today's sales orders into
+        a single voucher XML, write to tally_exports collection for the
+        CA to download. Real push to Tally's HTTP Server is optional
+        (some tenants prefer manual import).
+        """
+        orders_coll = self.get_collection("orders")
+        export_coll = self.get_collection("tally_exports")
+        if orders_coll is None or export_coll is None:
+            return SyncResult(ok=True, provider="tally", kind="export",
+                              notes="required collection unavailable — heartbeat")
+
+        try:
+            today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+            todays_orders = list(orders_coll.find({
+                "created_at": {"$gte": today.isoformat()},
+                "status": {"$in": ["COMPLETED", "DELIVERED", "PAID"]},
+            }))
+        except Exception as e:
+            return SyncResult(ok=False, provider="tally", kind="export", error=str(e))
+
+        if not todays_orders:
+            return SyncResult(ok=True, provider="tally", kind="export",
+                              notes="No completed orders today — nothing to export")
+
+        xml = tally_build_day_voucher_xml(todays_orders)
+
+        try:
+            export_coll.insert_one({
+                "agent_id": self.agent_id,
+                "export_date": today.isoformat(),
+                "voucher_count": len(todays_orders),
+                "xml": xml,
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "consumed": False,
+            })
+        except Exception as e:
+            return SyncResult(ok=False, provider="tally", kind="export",
+                              error=f"tally_exports write failed: {e}")
+
+        return SyncResult(
+            ok=True, provider="tally", kind="export",
+            items_synced=len(todays_orders),
+            notes=f"Exported {len(todays_orders)} voucher(s), XML size {len(xml)} bytes",
+        )
 
     async def _record_sync_runs(self, runs: List[Dict[str, Any]]):
         coll = self.get_collection("sync_runs")
