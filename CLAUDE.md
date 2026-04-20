@@ -6,7 +6,7 @@ Self-contained context for any Claude session (local CLI or web) picking up this
 
 ## 👋 IF YOU ARE A FRESH SESSION TAKING OVER — READ THIS FIRST
 
-**Last session summary** (ended 2026-04-20, 35 commits):
+**Last session summary** (ended 2026-04-20, 36 commits):
 
 Shipped phases:
 - **Phase 0–1.9**: all 9 design-prototype screens ported (Hub, Store Setup, Inventory, Reports, Clinical, POS, Tasks, Print, Jarvis). Design tokens + shell chrome (64px rail + 52px topbar) in `frontend/src/components/shell/`.
@@ -21,6 +21,7 @@ Shipped phases:
 - **Phase 6.1 — Observability hardening**: Sentry APM fully wired (FastAPI + Starlette integrations, noise-filtered traces sampler, release tag, per-agent-tick transactions via `backend/observability.py::agent_tick_span`). Slack webhook alerting for CRITICAL anomalies from ORACLE (threshold tunable via `SLACK_ALERT_SEVERITY`). 13 unit tests in `backend/tests/test_observability.py`. Contract: every helper fail-soft — missing env = silent no-op.
 - **Phase 6.1b — TypeScript cleanup**: tsconfig `ignoreDeprecations: "5.0"` to silence the `baseUrl` deprecation + explicit parameter types across all of `posStore.ts` (action methods, set/reduce/filter callbacks, persist middleware hooks). Zero runtime change — bundle byte-identical. `tsc --noEmit` now exits 0.
 - **Phase 6.2 — Event bus durability**: Cross-worker agent event dispatch via Redis pub/sub (`backend/agents/event_bus.py`). When `REDIS_URL` is set, events emitted in one Railway worker reach subscribers in every worker — `stock.below_reorder` from SENTINEL in worker A reliably wakes TASKMASTER in worker B. Every event also persisted to `agent_events` MongoDB collection for audit trail + activity-feed queries. Fail-soft: no Redis → identical pre-6.2 in-process dispatch with a single startup warning. `registry.subscribe_event` / `dispatch_event` public API unchanged — callers don't need to care. 11 unit tests in `backend/tests/test_event_bus.py` covering in-process fallback, Mongo persistence, Redis envelope shape, listener dispatch, and cross-worker simulation via a shared fake Redis.
+- **Phase 6.3 — Feature backlog first slice (reports)**: Non-moving-stock report (`GET /api/v1/reports/inventory/non-moving-stock?days=N&limit=M`) — identifies SKUs with no sales in the last N days (default 90). Never-sold products surface at the top with `never_sold: true`. Mongo aggregation over `orders.items` for last_sold_at + total_sold_all_time, joined against active `products`. Fail-soft: DB absent → empty envelope. Exposed on Reports page Inventory tab as a sortable table with CSV export, color-coded by staleness (≥180 days red, ≥120 orange, else yellow). MoM / YoY sales growth (endpoint already existed) surfaced on Sales Comparison card with proper %-change + rupee deltas. 10 unit tests in `backend/tests/test_non_moving_stock.py`. Two more items moved from ❌ to ✅ in `docs/reference/IMS2_Updated_Feature_Status.md` (132 built / 8 partial / 155 remaining).
 
 Plus 5 infra fixes: CORS permanent (reflection + 15 regression tests), CI unbroken (safety/pydantic), admin router SUPERADMIN gate, Rx range tightening, Jarvis canned-reply fix, store pill snake_case transform.
 

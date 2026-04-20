@@ -1771,3 +1771,152 @@ async def gstr3b_report(
         },
         "lateFee": 0.0,
     }
+
+
+# ============================================================================
+# NON-MOVING STOCK REPORT (Phase 6.3)
+# ============================================================================
+# "Which SKUs are tying up cash without turning over?" — core question for
+# an optical retailer doing monthly clearance decisions. Anything that
+# hasn't sold in 90+ days is a candidate for discount, transfer, or return.
+# Finance dashboards traditionally pull this as "dead stock" aging.
+
+
+@router.get("/inventory/non-moving-stock")
+async def non_moving_stock(
+    store_id: Optional[str] = Query(None),
+    days: int = Query(90, ge=1, le=365, description="Products with no sale in the last N days"),
+    limit: int = Query(200, ge=1, le=1000),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Products that haven't sold in the last N days (default 90).
+
+    Returns one row per stale product, sorted by most stale first. A
+    product that has NEVER sold is surfaced at the top with
+    `never_sold: true` and `days_since_sold: null`. `last_sold_at` is the
+    ISO timestamp of the most recent non-cancelled order containing the
+    product.
+
+    Response shape:
+        {
+            "data": [ {product_id, sku, brand, model, category, mrp,
+                        last_sold_at, days_since_sold, never_sold,
+                        total_sold_all_time} ... ],
+            "count": int,
+            "as_of": ISO timestamp,
+            "days_threshold": int,
+            "store_id": str,
+        }
+
+    Edge cases:
+      - DB unavailable -> returns empty data + 0 count. Does not raise.
+      - Product has sale timestamp in a format we can't parse -> treated
+        as never_sold (conservative: surface it rather than hide it).
+      - `days=1` gives you yesterday's dead pile; `days=365` gives you
+        the full year of no-movement.
+    """
+    from datetime import timezone  # local import, keeps module-top imports minimal
+    active_store = store_id or current_user.get("active_store_id")
+    db = get_db()
+
+    if db is None or not getattr(db, "is_connected", True):
+        return {
+            "data": [],
+            "count": 0,
+            "as_of": datetime.now(timezone.utc).isoformat(),
+            "days_threshold": days,
+            "store_id": active_store,
+        }
+
+    # 1. Build per-product sales summary (last_sold_at + total units sold)
+    # from the orders collection using a single aggregation.
+    sales_map = {}
+    try:
+        orders_coll = db.get_collection("orders")
+        pipeline = [
+            {"$match": {
+                "store_id": active_store,
+                "status": {"$nin": ["CANCELLED", "DRAFT"]},
+            }},
+            {"$unwind": "$items"},
+            {"$group": {
+                "_id": "$items.product_id",
+                "last_sold_at": {"$max": "$created_at"},
+                "total_sold": {"$sum": {"$ifNull": ["$items.quantity", 1]}},
+            }},
+        ]
+        for doc in orders_coll.aggregate(pipeline):
+            pid = doc.get("_id")
+            if pid:
+                sales_map[str(pid)] = {
+                    "last_sold_at": doc.get("last_sold_at"),
+                    "total_sold": doc.get("total_sold") or 0,
+                }
+    except Exception:
+        # If aggregation fails (e.g., no orders collection yet), treat
+        # sales_map as empty and every product falls into "never_sold".
+        sales_map = {}
+
+    # 2. Walk active products, classify each as "stale" or not.
+    try:
+        products_coll = db.get_collection("products")
+        products = list(products_coll.find({"is_active": True}))
+    except Exception:
+        products = []
+
+    now = datetime.now(timezone.utc)
+    results = []
+    for p in products:
+        pid = str(p.get("product_id") or p.get("_id") or "")
+        s = sales_map.get(pid, {})
+        last_sold_at = s.get("last_sold_at")
+        total_sold = s.get("total_sold", 0)
+
+        days_since = None
+        never_sold = last_sold_at is None
+        if last_sold_at is not None:
+            try:
+                # Mongo may return a datetime or an ISO string depending on
+                # how the order was inserted. Handle both.
+                if isinstance(last_sold_at, datetime):
+                    last_dt = last_sold_at
+                else:
+                    last_dt = datetime.fromisoformat(str(last_sold_at).replace("Z", "+00:00"))
+                if last_dt.tzinfo is None:
+                    last_dt = last_dt.replace(tzinfo=timezone.utc)
+                days_since = (now - last_dt).days
+            except (ValueError, TypeError):
+                days_since = None
+                never_sold = True
+
+        if never_sold or (days_since is not None and days_since >= days):
+            results.append({
+                "product_id": pid or None,
+                "sku": p.get("sku"),
+                "brand": p.get("brand"),
+                "model": p.get("model"),
+                "category": p.get("category"),
+                "mrp": p.get("mrp") or 0,
+                "last_sold_at": last_sold_at if isinstance(last_sold_at, str) else (
+                    last_sold_at.isoformat() if isinstance(last_sold_at, datetime) else None
+                ),
+                "days_since_sold": days_since,
+                "never_sold": never_sold,
+                "total_sold_all_time": total_sold,
+            })
+
+    # 3. Sort — never-sold first (infinite staleness), then by days desc.
+    results.sort(key=lambda r: (
+        0 if r["never_sold"] else 1,
+        -(r["days_since_sold"] or 0),
+    ))
+    results = results[:limit]
+
+    return {
+        "data": results,
+        "count": len(results),
+        "as_of": now.isoformat(),
+        "days_threshold": days,
+        "store_id": active_store,
+    }

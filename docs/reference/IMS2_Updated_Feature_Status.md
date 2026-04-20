@@ -2,6 +2,9 @@
 
 **Before this session:** 117 built, 12 partial, 166 not built
 **After this session:** 130 built, 8 partial, 157 not built
+**After Phase 6.3 (2026-04-20):** 132 built, 8 partial, 155 not built
+  - ✅ Non-moving stock report (90+ days) — backend + frontend + 10 tests
+  - ✅ MoM / YoY sales growth — backend endpoint pre-existed, now surfaced on the Reports page Sales Comparison card
 
 ---
 
@@ -112,7 +115,7 @@
 - ❌ Daily stock count per staff member
 - ❌ Stock count barcode scanning interface
 - ❌ Auto-variance detection (system vs physical count)
-- ❌ Non-moving stock identification (90+ days)
+- ✅ Non-moving stock identification (90+ days) — `GET /api/v1/reports/inventory/non-moving-stock?days=N` + Reports page table (Phase 6.3)
 - ❌ AI-recommended inter-store transfer
 - ❌ Stock photo gallery per product
 - ❌ Sell-through % per brand group
@@ -123,7 +126,7 @@
 
 **Reports (12 items)**
 - ❌ Daily/Monthly/Yearly sales comparison
-- ❌ MoM and YoY growth reports
+- ✅ MoM and YoY growth reports — `GET /api/v1/reports/sales/growth?year=Y&month=M` + surfaced in Reports page Sales Comparison card (backend pre-existed; frontend wired Phase 6.3)
 - ❌ Profit by category and store
 - ❌ Discount average by category and store
 - ❌ Staff performance ranking

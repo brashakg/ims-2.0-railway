@@ -116,6 +116,24 @@ export function ReportsPage() {
   const [dailyTrend, setDailyTrend] = useState<DailyTrend[]>([]);
   const [_salesComparison] = useState<any>(null);
   const [_growthMetrics] = useState<any>(null);
+  // Phase 6.3 — cash-tied-up-on-shelves & MoM/YoY growth
+  const [nonMovingStock, setNonMovingStock] = useState<Array<{
+    product_id: string | null;
+    sku: string | null;
+    brand: string | null;
+    model: string | null;
+    category: string | null;
+    mrp: number;
+    last_sold_at: string | null;
+    days_since_sold: number | null;
+    never_sold: boolean;
+    total_sold_all_time: number;
+  }>>([]);
+  const [salesGrowth, setSalesGrowth] = useState<{
+    current_month: { sales: number; orders: number };
+    mom_growth: { percent: number; previous_month_sales: number };
+    yoy_growth: { percent: number; previous_year_sales: number };
+  } | null>(null);
   const [staffRanking, ] = useState<any[]>([]);
   const [stockCount, ] = useState<any>(null);
   const [brandSellthrough, ] = useState<any[]>([]);
@@ -212,6 +230,21 @@ export function ReportsPage() {
         if (response.dailyTrend) {
           setDailyTrend(response.dailyTrend);
         }
+      }
+
+      // Phase 6.3 — fetch non-moving stock + MoM/YoY growth in parallel.
+      // Both are additive — if either fails, the page still renders with
+      // the core sales summary above.
+      const now = new Date();
+      const [nmsRes, growthRes] = await Promise.allSettled([
+        reportsApi.getNonMovingStock(user.activeStoreId, 90, 200),
+        reportsApi.getSalesGrowth(user.activeStoreId, now.getFullYear(), now.getMonth() + 1),
+      ]);
+      if (nmsRes.status === 'fulfilled') {
+        setNonMovingStock(nmsRes.value.data || []);
+      }
+      if (growthRes.status === 'fulfilled') {
+        setSalesGrowth(growthRes.value);
       }
     } catch {
       setError('Failed to load report data. Please try again.');
@@ -545,28 +578,51 @@ export function ReportsPage() {
       )}
 
 
-      {/* Sales Comparison Card */}
+      {/* Sales Comparison Card — MoM + YoY from /reports/sales/growth */}
       <div className="card">
         <div className="flex items-center justify-between mb-4">
-          <h3 className="font-semibold text-gray-900">Sales Comparison</h3>
+          <h3 className="font-semibold text-gray-900">Sales Comparison — Month-over-Month &amp; Year-over-Year</h3>
         </div>
         {isLoading ? (
           <div className="h-32 flex items-center justify-center">
             <Loader2 className="w-6 h-6 animate-spin text-bv-red-600" />
           </div>
-        ) : (
-          <div className="space-y-4">
-            <div className="grid grid-cols-2 gap-4">
-              <div className="bg-white rounded p-3">
-                <p className="text-xs text-gray-500">Current Period</p>
-                <p className="text-lg font-bold text-gray-900 mt-1">₹{(salesSummary.totalSales / 100000).toFixed(2)}L</p>
-              </div>
-              <div className="bg-white rounded p-3">
-                <p className="text-xs text-gray-500">Trend</p>
-                <p className="text-lg font-bold text-green-400 mt-1">+12.5%</p>
-              </div>
+        ) : salesGrowth ? (
+          <div className="grid grid-cols-2 tablet:grid-cols-3 gap-4">
+            <div className="bg-white rounded p-3">
+              <p className="text-xs text-gray-500">This Month</p>
+              <p className="text-lg font-bold text-gray-900 mt-1">
+                ₹{(salesGrowth.current_month.sales / 100000).toFixed(2)}L
+              </p>
+              <p className="text-xs text-gray-500 mt-1">{salesGrowth.current_month.orders} orders</p>
+            </div>
+            <div className="bg-white rounded p-3">
+              <p className="text-xs text-gray-500">MoM Growth</p>
+              <p className={`text-lg font-bold mt-1 ${
+                salesGrowth.mom_growth.percent >= 0 ? 'text-green-600' : 'text-red-600'
+              }`}>
+                {salesGrowth.mom_growth.percent >= 0 ? '+' : ''}
+                {salesGrowth.mom_growth.percent.toFixed(1)}%
+              </p>
+              <p className="text-xs text-gray-500 mt-1">
+                vs ₹{(salesGrowth.mom_growth.previous_month_sales / 100000).toFixed(2)}L last month
+              </p>
+            </div>
+            <div className="bg-white rounded p-3">
+              <p className="text-xs text-gray-500">YoY Growth</p>
+              <p className={`text-lg font-bold mt-1 ${
+                salesGrowth.yoy_growth.percent >= 0 ? 'text-green-600' : 'text-red-600'
+              }`}>
+                {salesGrowth.yoy_growth.percent >= 0 ? '+' : ''}
+                {salesGrowth.yoy_growth.percent.toFixed(1)}%
+              </p>
+              <p className="text-xs text-gray-500 mt-1">
+                vs ₹{(salesGrowth.yoy_growth.previous_year_sales / 100000).toFixed(2)}L this month last year
+              </p>
             </div>
           </div>
+        ) : (
+          <p className="text-sm text-gray-500">Growth data unavailable for the current period.</p>
         )}
       </div>
 
@@ -712,6 +768,111 @@ export function ReportsPage() {
                     </div>
                   </div>
                 ))}
+              </div>
+            )}
+          </div>
+
+          {/* Non-moving Stock — full-width table below the 2-col grid.
+              Surfaces products with no sale in the last 90 days. Never-sold
+              SKUs float to the top. Read by store managers making clearance
+              + transfer decisions. */}
+          <div className="card laptop:col-span-2">
+            <div className="flex items-center justify-between mb-4">
+              <div>
+                <h3 className="font-semibold text-gray-900">Non-moving Stock (90+ days)</h3>
+                <p className="text-xs text-gray-500 mt-1">
+                  {nonMovingStock.length} product{nonMovingStock.length === 1 ? '' : 's'} with no sales in the last 90 days
+                </p>
+              </div>
+              {canExport && nonMovingStock.length > 0 && (
+                <button
+                  onClick={() => {
+                    exportToCSV(
+                      nonMovingStock.map(p => ({
+                        sku: p.sku || '',
+                        brand: p.brand || '',
+                        model: p.model || '',
+                        category: p.category || '',
+                        mrp: p.mrp,
+                        last_sold_at: p.last_sold_at || 'Never sold',
+                        days_since_sold: p.never_sold ? 'Never' : String(p.days_since_sold ?? '-'),
+                        total_sold_all_time: p.total_sold_all_time,
+                      })),
+                      'non_moving_stock_90d',
+                      [
+                        { key: 'sku', label: 'SKU' },
+                        { key: 'brand', label: 'Brand' },
+                        { key: 'model', label: 'Model' },
+                        { key: 'category', label: 'Category' },
+                        { key: 'mrp', label: 'MRP (₹)' },
+                        { key: 'last_sold_at', label: 'Last Sold' },
+                        { key: 'days_since_sold', label: 'Days Since' },
+                        { key: 'total_sold_all_time', label: 'Lifetime Units Sold' },
+                      ]
+                    );
+                    toast.success('Non-moving stock exported');
+                  }}
+                  className="text-sm text-bv-red-600 hover:text-bv-red-700 flex items-center gap-1"
+                >
+                  <Download className="w-4 h-4" />
+                  Export CSV
+                </button>
+              )}
+            </div>
+            {isLoading ? (
+              <div className="h-32 flex items-center justify-center">
+                <Loader2 className="w-6 h-6 animate-spin text-bv-red-600" />
+              </div>
+            ) : nonMovingStock.length === 0 ? (
+              <div className="py-8 text-center text-gray-500">
+                <p>No stale inventory detected — everything has turned over in the last 90 days.</p>
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead className="border-b border-gray-200 text-left text-xs uppercase tracking-wider text-gray-500">
+                    <tr>
+                      <th className="py-2 pr-3">SKU</th>
+                      <th className="py-2 pr-3">Brand · Model</th>
+                      <th className="py-2 pr-3">Category</th>
+                      <th className="py-2 pr-3 text-right">MRP</th>
+                      <th className="py-2 pr-3">Last Sold</th>
+                      <th className="py-2 pr-3 text-right">Days Stale</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {nonMovingStock.slice(0, 50).map((p, idx) => (
+                      <tr key={p.product_id || p.sku || idx} className="border-b border-gray-100 last:border-b-0">
+                        <td className="py-2 pr-3 font-mono text-xs text-gray-700">{p.sku || '-'}</td>
+                        <td className="py-2 pr-3 text-gray-900">
+                          <span className="font-medium">{p.brand || 'Unbranded'}</span>
+                          {p.model ? <span className="text-gray-500"> · {p.model}</span> : null}
+                        </td>
+                        <td className="py-2 pr-3 text-gray-600">{p.category || '-'}</td>
+                        <td className="py-2 pr-3 text-right text-gray-700">₹{(p.mrp || 0).toLocaleString('en-IN')}</td>
+                        <td className="py-2 pr-3 text-gray-600">
+                          {p.never_sold
+                            ? <span className="text-red-600 font-medium">Never sold</span>
+                            : (p.last_sold_at ? new Date(p.last_sold_at).toLocaleDateString('en-IN') : '-')}
+                        </td>
+                        <td className="py-2 pr-3 text-right">
+                          <span className={`font-medium ${
+                            p.never_sold || (p.days_since_sold ?? 0) >= 180 ? 'text-red-600'
+                            : (p.days_since_sold ?? 0) >= 120 ? 'text-orange-600'
+                            : 'text-yellow-600'
+                          }`}>
+                            {p.never_sold ? '∞' : p.days_since_sold}
+                          </span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                {nonMovingStock.length > 50 && (
+                  <p className="text-xs text-gray-500 mt-3">
+                    Showing first 50 of {nonMovingStock.length}. Export CSV for the full list.
+                  </p>
+                )}
               </div>
             )}
           </div>
