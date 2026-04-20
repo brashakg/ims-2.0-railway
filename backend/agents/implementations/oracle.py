@@ -21,12 +21,39 @@ TASKMASTER (TASKMASTER may auto-create a task if severity ≥ HIGH).
 
 from typing import Dict, Any, List
 from datetime import datetime, timezone, timedelta
+import json
 import logging
 import statistics
 
 from ..base import JarvisAgent, AgentType, AgentResponse, AgentContext
+from ..claude_client import call_claude, call_claude_json, is_claude_available
 
 logger = logging.getLogger(__name__)
+
+
+# System prompt for anomaly narrative enrichment. Kept short; ORACLE tick
+# fires hourly and each anomaly = one Claude call, so we want cheap Haiku.
+_ANOMALY_NARRATIVE_SYSTEM = """You are ORACLE, the analysis agent for an Indian \
+optical retail chain (Better Vision Optics). You receive a raw anomaly \
+detection and your job is to produce a one-paragraph plain-English \
+narrative explaining what likely happened and a single actionable \
+recommendation.
+
+Rules:
+- The store owner is reading this at a glance. Be direct, no fluff.
+- Indian Rupees in ₹, lakhs as "L" (e.g. ₹12.4L), crores as "Cr".
+- Don't invent numbers that aren't in the input.
+- Recommendation must be concrete and executable by a store manager in one shift.
+- Output strictly the JSON object requested, no markdown fence.
+"""
+
+
+_ON_DEMAND_SYSTEM = """You are ORACLE, the analysis brain for Better Vision \
+Optics. You help the CEO investigate questions that start with "why" or \
+"what's driving" by correlating recent anomalies, sales data, and \
+inventory metrics. Be a detective, not a spokesperson. Cite specific \
+numbers from the provided context. If the data doesn't support a \
+conclusion, say so directly."""
 
 
 class OracleAgent(JarvisAgent):
@@ -73,6 +100,23 @@ class OracleAgent(JarvisAgent):
         #    anything sneaking through
         anomalies.extend(await self._detect_rx_anomalies())
 
+        # Enrich each anomaly with a Claude narrative + recommendation
+        # BEFORE persisting. Failing soft: if Claude is unavailable or times
+        # out, the anomaly persists without the narrative (keys still present
+        # but set to None) so downstream consumers don't blow up on missing
+        # fields and we still get the raw signal.
+        if anomalies and is_claude_available():
+            for a in anomalies:
+                narrative, recommendation = await self._enrich_with_claude(a)
+                a["narrative"] = narrative
+                a["recommended_action"] = recommendation
+                a["ai_powered"] = narrative is not None
+        else:
+            for a in anomalies:
+                a.setdefault("narrative", None)
+                a.setdefault("recommended_action", None)
+                a.setdefault("ai_powered", False)
+
         # Persist + emit
         if anomalies:
             await self._record_anomalies(anomalies, eod=is_eod)
@@ -80,7 +124,8 @@ class OracleAgent(JarvisAgent):
 
         self._anomalies_found += len(anomalies)
         logger.info(f"[ORACLE] tick complete — {len(anomalies)} anomalies "
-                    f"({'EOD' if is_eod else 'hourly'} scan)")
+                    f"({'EOD' if is_eod else 'hourly'} scan); "
+                    f"{sum(1 for a in anomalies if a.get('ai_powered'))} ai-enriched")
 
     async def _detect_sales_anomalies(self) -> List[Dict[str, Any]]:
         """Compare today's revenue against trailing 4-week average."""
@@ -209,18 +254,133 @@ class OracleAgent(JarvisAgent):
                 except Exception as e:
                     logger.warning(f"[ORACLE] Event dispatch failed: {e}")
 
+    # ------------------------------------------------------------------
+    # Claude integration
+    # ------------------------------------------------------------------
+
+    async def _enrich_with_claude(self, anomaly: Dict[str, Any]) -> tuple:
+        """
+        Ask Claude for a one-paragraph narrative + concrete recommendation
+        for a single anomaly. Returns (narrative, recommendation), either
+        of which may be None on failure.
+        """
+        prompt = (
+            "Here is an anomaly detected by our hourly scan. Explain in "
+            "ONE paragraph what likely happened and give ONE concrete "
+            "recommendation a store manager can act on this shift.\n\n"
+            "Anomaly JSON:\n" + json.dumps(anomaly, default=str, indent=2) + "\n\n"
+            "Respond with this JSON shape:\n"
+            '{"narrative": "<one paragraph>", "recommendation": "<one imperative sentence>"}'
+        )
+        result = await call_claude_json(_ANOMALY_NARRATIVE_SYSTEM, prompt, max_tokens=400)
+        if not result or not isinstance(result, dict):
+            return None, None
+        return result.get("narrative"), result.get("recommendation")
+
+    async def _build_context_for_query(self, query: str) -> Dict[str, Any]:
+        """
+        Bundle recent data the run() query can reason over without
+        needing a DB of its own. Everything is sampled — we cap each
+        slice at a small number to keep the Claude token budget sane.
+        """
+        context: Dict[str, Any] = {"query": query}
+
+        # Recent unresolved anomalies
+        anomalies_coll = self.get_collection("anomalies")
+        if anomalies_coll is not None:
+            try:
+                context["recent_anomalies"] = list(
+                    anomalies_coll.find({"resolved": False}, {"_id": 0})
+                    .sort("detected_at", -1)
+                    .limit(15)
+                )
+            except Exception:
+                context["recent_anomalies"] = []
+
+        # Last 7 days revenue by day
+        orders_coll = self.get_collection("orders")
+        if orders_coll is not None:
+            try:
+                now = datetime.now(timezone.utc)
+                by_day: Dict[str, float] = {}
+                for d in range(7):
+                    day_start = (now - timedelta(days=d)).replace(hour=0, minute=0, second=0, microsecond=0)
+                    day_end = day_start + timedelta(days=1)
+                    day_total = sum(
+                        o.get("grand_total", 0) or 0
+                        for o in orders_coll.find(
+                            {"created_at": {"$gte": day_start.isoformat(), "$lt": day_end.isoformat()}},
+                            {"grand_total": 1},
+                        )
+                    )
+                    by_day[day_start.date().isoformat()] = round(float(day_total), 2)
+                context["revenue_last_7d"] = by_day
+            except Exception:
+                context["revenue_last_7d"] = {}
+
+        return context
+
     async def run(self, query: str, context: AgentContext) -> AgentResponse:
-        """On-demand: list recent unresolved anomalies."""
+        """
+        On-demand: answer analytical questions. Two modes:
+          - Claude available: bundle recent anomalies + 7-day revenue
+            into context, let Claude reason across them, return narrative
+          - Claude unavailable: fall back to listing recent unresolved
+            anomalies (the pre-Phase-4 behavior)
+        """
         coll = self.get_collection("anomalies")
         if coll is None:
-            return AgentResponse(success=False, agent_id=self.agent_id, message="anomalies collection unavailable")
+            return AgentResponse(
+                success=False,
+                agent_id=self.agent_id,
+                message="anomalies collection unavailable",
+            )
+
         try:
             recent = list(coll.find({"resolved": False}, {"_id": 0}).sort("detected_at", -1).limit(20))
         except Exception as e:
             return AgentResponse(success=False, agent_id=self.agent_id, message=str(e))
+
+        # If Claude isn't available, return the raw list (old behavior)
+        if not is_claude_available():
+            return AgentResponse(
+                success=True,
+                agent_id=self.agent_id,
+                data={"unresolved_anomalies": recent, "count": len(recent), "ai_powered": False},
+                message=f"ORACLE: {len(recent)} unresolved anomaly/ies (deterministic)",
+            )
+
+        # Claude path — assemble context and ask
+        ctx = await self._build_context_for_query(query)
+        user_prompt = (
+            f"Question: {query}\n\n"
+            f"Context (JSON):\n{json.dumps(ctx, default=str, indent=2)}\n\n"
+            "Using only the data above, produce a grounded answer. Cite "
+            "specific numbers. If the data doesn't answer the question, "
+            "say which collection would need to be checked and stop."
+        )
+        answer = await call_claude(_ON_DEMAND_SYSTEM, user_prompt, max_tokens=800)
+
+        if not answer:
+            # Soft fallback — Claude failed, still return the list
+            return AgentResponse(
+                success=True,
+                agent_id=self.agent_id,
+                data={"unresolved_anomalies": recent, "count": len(recent), "ai_powered": False},
+                message=f"ORACLE: Claude unavailable, returning {len(recent)} raw anomaly/ies",
+            )
+
         return AgentResponse(
             success=True,
             agent_id=self.agent_id,
-            data={"unresolved_anomalies": recent, "count": len(recent)},
-            message=f"ORACLE: {len(recent)} unresolved anomaly/ies",
+            data={
+                "answer": answer,
+                "grounded_on": {
+                    "anomaly_count": len(ctx.get("recent_anomalies", [])),
+                    "revenue_days": len(ctx.get("revenue_last_7d", {})),
+                },
+                "ai_powered": True,
+            },
+            message=f"ORACLE answered using {len(ctx.get('recent_anomalies', []))} recent anomaly/ies",
         )
+
