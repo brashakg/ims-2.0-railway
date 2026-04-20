@@ -2,6 +2,71 @@
 
 Self-contained context for any Claude session (local CLI or web) picking up this repo.
 
+---
+
+## 👋 IF YOU ARE A FRESH SESSION TAKING OVER — READ THIS FIRST
+
+**Last session summary** (ended 2026-04-20, 32 commits):
+
+Shipped phases:
+- **Phase 0–1.9**: all 9 design-prototype screens ported (Hub, Store Setup, Inventory, Reports, Clinical, POS, Tasks, Print, Jarvis). Design tokens + shell chrome (64px rail + 52px topbar) in `frontend/src/components/shell/`.
+- **Phase 2 + 2.5 + 2.6**: all 18 interior modules re-skinned via legacy-class bridge (`.btn-primary`, `.card`, `.input-field`, `.badge-*` redefined to use design tokens). `bv-gold` palette remapped to BV red.
+- **Phase 3 + 3.5**: all 7 backend agents implemented (CORTEX, SENTINEL, PIXEL, MEGAPHONE, ORACLE, TASKMASTER, NEXUS) with live toggle UI on `/jarvis`. Registry in `backend/agents/registry.py`. Each agent has seeded config in `backend/agents/config.py`.
+- **Phase 4.1–4.4**: all 5 new agents wired to real providers:
+  - ORACLE → Claude API (`backend/agents/claude_client.py`) for anomaly narratives + grounded on-demand analysis
+  - MEGAPHONE → MSG91 WhatsApp + SMS (`backend/agents/providers.py`) with `DISPATCH_MODE=off|test|live` safety gate
+  - PIXEL → Google PageSpeed Insights for real Lighthouse audits
+  - NEXUS → Shopify/Razorpay/Shiprocket/Tally (`backend/agents/nexus_providers.py`)
+- **Phase 5**: unified cross-agent activity feed (`GET /api/v1/jarvis/agents/activity`) + rendering panel on the Jarvis page between agent grid and chat card.
+
+Plus 5 infra fixes: CORS permanent (reflection + 15 regression tests), CI unbroken (safety/pydantic), admin router SUPERADMIN gate, Rx range tightening, Jarvis canned-reply fix, store pill snake_case transform.
+
+### Phase 6 — next-session menu, pick one
+
+1. **Observability hardening** — wire Sentry APM (already imported in `backend/api/main.py` but just initialized when `SENTRY_DSN` is set), add OpenTelemetry traces across agent ticks, add a Slack webhook alert path for CRITICAL anomalies emitted by ORACLE
+2. **Event bus durability** — `backend/agents/registry.py` dispatches events in-process. Railway runs 4 uvicorn workers, so an event emitted in worker A is invisible to subscribers in worker B. Move to MongoDB change streams or Redis pub/sub so `stock.below_reorder` from SENTINEL reliably wakes TASKMASTER regardless of worker
+3. **Feature backlog** — start on the ~166 deferred items in [docs/reference/IMS2_Updated_Feature_Status.md](docs/reference/IMS2_Updated_Feature_Status.md) (footfall tracking, EMI payments, credit note balance tracking per customer, workshop QC checklist, daily stock count with barcode scanning, etc.)
+4. **End-to-end prod verification** — pause shipping new features, walk each of the 9 module routes in Chrome (user has the Claude-in-Chrome extension connected to `https://ims-2-0-railway.vercel.app`), log any visual/functional bugs, fix them
+
+### Env vars needed for full agent activation on Railway
+
+| Var | Owner | Purpose |
+|---|---|---|
+| `ANTHROPIC_API_KEY` | ORACLE, JARVIS chat | Claude calls |
+| `AGENT_CLAUDE_MODEL` | ORACLE | Default `claude-haiku-4-5` |
+| `PAGESPEED_API_KEY` | PIXEL | Google PageSpeed Insights |
+| `FRONTEND_BASE_URL` | PIXEL | Default `https://ims-2-0-railway.vercel.app` |
+| `MSG91_API_KEY` | MEGAPHONE | WhatsApp + SMS |
+| `MSG91_WHATSAPP_INTEGRATED_NUMBER` | MEGAPHONE | From MSG91 dashboard |
+| `MSG91_WHATSAPP_NAMESPACE` | MEGAPHONE | Per-template |
+| `MSG91_SMS_TEMPLATE_ID` | MEGAPHONE | DLT-approved |
+| `MSG91_SENDER` | MEGAPHONE | DLT-registered 6-char, defaults `BVOPTL` |
+| `DISPATCH_MODE` | MEGAPHONE + NEXUS writes | `off` (default) / `test` / `live` |
+| `TEST_PHONE` | MEGAPHONE test mode | Only recipient in `DISPATCH_MODE=test` |
+| `SENTRY_DSN` | observability (Phase 6) | If unset, Sentry quietly skipped |
+
+All calls **fail soft** — missing env = no degraded behavior, just no outbound call, status `SIMULATED` or `FAILED`. A fresh Railway deploy doesn't accidentally spam customers.
+
+### Working preferences (inherited from the user)
+
+- **Commit + push at the end of every phase.** Not batched. Small scoped commits.
+- **Always verify frontend after changes.** `tsc --noEmit` + `vite build` + browser preview. Screenshots flaky on Windows; prefer `preview_inspect` / `javascript_tool` eval.
+- **No emojis in Python** — Windows cp1252 crash risk.
+- **Theme is light-only.** Dark mode removed pre-session.
+- **Ask before touching POS** — it's revenue-critical.
+
+### Key files the next session should skim
+
+- [`CLAUDE.md`](CLAUDE.md) (this file) — full briefing below
+- [`docs/design/README.md`](docs/design/README.md) — design handoff with tokens, shell, 9 prototypes
+- [`docs/reference/IMS2_Agent_Architecture.html`](docs/reference/IMS2_Agent_Architecture.html) — 8-agent spec (hero identity, schedule, event bus)
+- [`backend/agents/registry.py`](backend/agents/registry.py) — where agents register + event subscriptions
+- [`backend/agents/claude_client.py`](backend/agents/claude_client.py), [`backend/agents/providers.py`](backend/agents/providers.py), [`backend/agents/nexus_providers.py`](backend/agents/nexus_providers.py) — Phase 4 provider wiring patterns
+- [`frontend/src/pages/jarvis/JarvisPage.tsx`](frontend/src/pages/jarvis/JarvisPage.tsx) — live agent grid + toggles + activity feed
+- [`backend/api/routers/agents.py`](backend/api/routers/agents.py) — Phase 5 `/jarvis/agents/activity` endpoint
+
+---
+
 ## What this is
 
 **IMS 2.0** — Retail Operating System for Avinash's Indian optical chains (**Better Vision** + **WizOpt**). Replaces ~15 Excel files, WhatsApp-based task management, and manual ledgers across POS · Inventory · Clinical/Optometry · HR/Payroll · Finance · CRM/Marketing · Vendor Management · Task/SOP enforcement · AI (Jarvis).
