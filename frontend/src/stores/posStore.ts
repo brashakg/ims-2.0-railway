@@ -85,6 +85,11 @@ export interface CartLineItem {
 
   // Item-level notes (PD, fitting, tint, etc.)
   notes?: string;
+
+  // Second note field used by POSLayout's optical-detail panel (distinct
+  // from `notes`, which is written by POSCart). Kept as a separate field
+  // because the two UIs show/write them independently.
+  item_note?: string;
 }
 
 export interface PaymentEntry {
@@ -301,19 +306,19 @@ export const usePOSStore = create<POSState>()(
         set((state) => ({ cart: [...(state.cart || []), newItem] }));
       },
 
-      removeFromCart: (lineId) => {
-        set((state) => ({
-          cart: (state.cart || []).filter((item) => item.id !== lineId),
+      removeFromCart: (lineId: string) => {
+        set((state: POSState) => ({
+          cart: (state.cart || []).filter((item: CartLineItem) => item.id !== lineId),
         }));
       },
 
-      updateQuantity: (lineId, qty) => {
+      updateQuantity: (lineId: string, qty: number) => {
         if (qty <= 0) {
           get().removeFromCart(lineId);
           return;
         }
-        set((state) => ({
-          cart: (state.cart || []).map((item) =>
+        set((state: POSState) => ({
+          cart: (state.cart || []).map((item: CartLineItem) =>
             item.id === lineId
               ? {
                   ...item,
@@ -326,9 +331,9 @@ export const usePOSStore = create<POSState>()(
         }));
       },
 
-      applyDiscount: (lineId, percent, reason, approvedBy) => {
-        set((state) => ({
-          cart: (state.cart || []).map((item) => {
+      applyDiscount: (lineId: string, percent: number, reason?: string, approvedBy?: string) => {
+        set((state: POSState) => ({
+          cart: (state.cart || []).map((item: CartLineItem) => {
             if (item.id !== lineId) return item;
             const discountAmt = item.unit_price * item.quantity * (percent / 100);
             return {
@@ -343,22 +348,24 @@ export const usePOSStore = create<POSState>()(
         }));
       },
 
-      updateItemNote: (lineId, note) => {
-        set((state) => ({
-          cart: (state.cart || []).map((item) =>
+      updateItemNote: (lineId: string, note: string) => {
+        set((state: POSState) => ({
+          cart: (state.cart || []).map((item: CartLineItem) =>
             item.id === lineId ? { ...item, notes: note } : item
           ),
         }));
       },
 
-      setCartNote: (note) => set({ cart_note: note }),
-      setItemNote: (lineId, note) => set(state => ({
-        cart: (state.cart || []).map(item => item.id === lineId ? { ...item, item_note: note } : item),
+      setCartNote: (note: string) => set({ cart_note: note }),
+      setItemNote: (lineId: string, note: string) => set((state: POSState) => ({
+        cart: (state.cart || []).map((item: CartLineItem) =>
+          item.id === lineId ? { ...item, item_note: note } : item
+        ),
       })),
 
-      linkLensToFrame: (lensLineId, frameLineId) => {
-        set((state) => ({
-          cart: (state.cart || []).map((item) =>
+      linkLensToFrame: (lensLineId: string, frameLineId: string) => {
+        set((state: POSState) => ({
+          cart: (state.cart || []).map((item: CartLineItem) =>
             item.id === lensLineId
               ? { ...item, linked_frame_id: frameLineId }
               : item
@@ -367,8 +374,8 @@ export const usePOSStore = create<POSState>()(
       },
 
       // --- Payment ---
-      addPayment: (payment) => {
-        set((state) => ({
+      addPayment: (payment: Omit<PaymentEntry, 'timestamp'>) => {
+        set((state: POSState) => ({
           payments: [
             ...(state.payments || []),
             { ...payment, timestamp: new Date().toISOString() },
@@ -376,35 +383,35 @@ export const usePOSStore = create<POSState>()(
         }));
       },
 
-      removePayment: (index) => {
-        set((state) => ({
-          payments: (state.payments || []).filter((_, i) => i !== index),
+      removePayment: (index: number) => {
+        set((state: POSState) => ({
+          payments: (state.payments || []).filter((_: PaymentEntry, i: number) => i !== index),
         }));
       },
 
-      setAdvancePayment: (isAdvance) => set({ is_advance_payment: isAdvance }),
-      setDeliveryDate: (date) => set({ delivery_date: date }),
+      setAdvancePayment: (isAdvance: boolean) => set({ is_advance_payment: isAdvance }),
+      setDeliveryDate: (date: string | null) => set({ delivery_date: date }),
 
       // --- Order ---
-      setOrderResult: (orderId, orderNumber) => set({ order_id: orderId, order_number: orderNumber }),
-      setProcessing: (val) => set({ is_processing: val }),
+      setOrderResult: (orderId: string, orderNumber: string) => set({ order_id: orderId, order_number: orderNumber }),
+      setProcessing: (val: boolean) => set({ is_processing: val }),
 
       // --- Loyalty & Vouchers ---
-      setCustomerLoyaltyPoints: (points) => set({ customerLoyaltyPoints: points }),
-      
-      setCustomerHistory: (lastOrder, lastRx) => set({ 
-        customerLastOrder: lastOrder, 
-        customerLastRx: lastRx 
+      setCustomerLoyaltyPoints: (points: number) => set({ customerLoyaltyPoints: points }),
+
+      setCustomerHistory: (lastOrder?: any, lastRx?: any) => set({
+        customerLastOrder: lastOrder,
+        customerLastRx: lastRx
       }),
-      
-      applyVoucher: (code, discountAmount) => set({ 
-        appliedVoucher: { code, discountAmount } 
+
+      applyVoucher: (code: string, discountAmount: number) => set({
+        appliedVoucher: { code, discountAmount }
       }),
-      
+
       removeVoucher: () => set({ appliedVoucher: undefined }),
-      
-      redeemLoyaltyPoints: (pointsToRedeem) => set({ 
-        loyaltyPointsRedeemed: pointsToRedeem 
+
+      redeemLoyaltyPoints: (pointsToRedeem: number) => set({
+        loyaltyPointsRedeemed: pointsToRedeem
       }),
 
       // --- Reset ---
@@ -424,11 +431,17 @@ export const usePOSStore = create<POSState>()(
 
       // --- Computed (with null guards) ---
       getSubtotal: () => {
-        return (get().cart || []).reduce((sum, item) => sum + item.unit_price * item.quantity, 0);
+        return (get().cart || []).reduce(
+          (sum: number, item: CartLineItem) => sum + item.unit_price * item.quantity,
+          0
+        );
       },
 
       getTotalDiscount: () => {
-        return (get().cart || []).reduce((sum, item) => sum + (item.discount_amount || 0), 0);
+        return (get().cart || []).reduce(
+          (sum: number, item: CartLineItem) => sum + (item.discount_amount || 0),
+          0
+        );
       },
 
       getGrandTotal: () => {
@@ -446,7 +459,10 @@ export const usePOSStore = create<POSState>()(
       },
 
       getTotalPaid: () => {
-        return (get().payments || []).reduce((sum, p) => sum + p.amount, 0);
+        return (get().payments || []).reduce(
+          (sum: number, p: PaymentEntry) => sum + p.amount,
+          0
+        );
       },
 
       getBalance: () => {
@@ -457,7 +473,7 @@ export const usePOSStore = create<POSState>()(
       name: 'ims-pos-draft',
       storage: createJSONStorage(() => debouncedLocalStorage),
       // Only persist cart-critical fields, not UI state
-      partialize: (state) => ({
+      partialize: (state: POSState) => ({
         ...state,
         // Reset transient state
         is_processing: false,
@@ -465,7 +481,7 @@ export const usePOSStore = create<POSState>()(
         order_number: null,
       }),
       // Safe merge: ensure arrays are never undefined after hydration
-      onRehydrateStorage: () => (state) => {
+      onRehydrateStorage: () => (state: POSState | undefined) => {
         if (state) {
           if (!Array.isArray(state.cart)) state.cart = [];
           if (!Array.isArray(state.payments)) state.payments = [];
