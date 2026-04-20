@@ -25,12 +25,18 @@ Scope of MVP implementation:
 """
 
 from typing import Dict, Any, List
-from datetime import datetime, timezone, timedelta, time as dtime
+from datetime import datetime, timezone, timedelta
 import logging
 
 from ..base import JarvisAgent, AgentType, AgentResponse, AgentContext
+from ..providers import send_whatsapp, send_sms, dispatch_mode, provider_ready
 
 logger = logging.getLogger(__name__)
+
+# How many PENDING notifications to drain per tick. Keeps the 30-min loop
+# bounded and stops a backed-up queue from taking hours to clear (at 60/tick
+# we drain 120/hour = 2,880/day, well above typical Rx reminder volume).
+DRAIN_BATCH_SIZE = 60
 
 
 class MegaphoneAgent(JarvisAgent):
@@ -119,6 +125,15 @@ class MegaphoneAgent(JarvisAgent):
             logger.info(f"[MEGAPHONE] Queued {queued_this_run} notifications "
                         f"({len(rx_expiring)} Rx expiry, {len(birthdays)} birthday)")
 
+        # 3. Drain the queue — up to DRAIN_BATCH_SIZE PENDING messages
+        drain_stats = await self._drain_pending(notif_coll)
+        if drain_stats["attempted"] > 0:
+            logger.info(
+                f"[MEGAPHONE] Drain: attempted={drain_stats['attempted']} "
+                f"sent={drain_stats['sent']} simulated={drain_stats['simulated']} "
+                f"failed={drain_stats['failed']} mode={dispatch_mode()}"
+            )
+
     async def _scan_rx_expiring(self) -> List[Dict[str, Any]]:
         """Find prescriptions expiring in the next 7 / 30 / 90 days."""
         coll = self.get_collection("prescriptions")
@@ -154,22 +169,151 @@ class MegaphoneAgent(JarvisAgent):
             logger.debug(f"[MEGAPHONE] Birthday scan error (non-fatal): {e}")
             return []
 
+    # ------------------------------------------------------------------
+    # Drain pass — pick up PENDING messages and dispatch via provider
+    # ------------------------------------------------------------------
+
+    async def _drain_pending(self, notif_coll) -> Dict[str, int]:
+        """
+        Select up to DRAIN_BATCH_SIZE PENDING messages and dispatch them.
+        Respects DND: rows whose scheduled_for is in the future stay PENDING.
+
+        Contract: every selected row transitions to SENT / SIMULATED / FAILED.
+        No row stays stuck on PENDING after a dispatch attempt — the status
+        column is the source of truth for monitoring.
+        """
+        stats = {"attempted": 0, "sent": 0, "simulated": 0, "failed": 0, "skipped": 0}
+
+        # If MEGAPHONE is inside the DND window and the row wasn't
+        # explicitly scheduled for later, we'd still not want to send.
+        # Rx expiry / birthday rows already set scheduled_for to the DND
+        # end-of-window when queued; we only send rows whose scheduled_for
+        # is null OR <= now.
+        now_iso = datetime.now(timezone.utc).isoformat()
+
+        try:
+            candidates = list(
+                notif_coll.find({
+                    "status": "PENDING",
+                    "$or": [
+                        {"scheduled_for": None},
+                        {"scheduled_for": {"$lte": now_iso}},
+                    ],
+                }).limit(DRAIN_BATCH_SIZE)
+            )
+        except Exception as e:
+            logger.warning(f"[MEGAPHONE] Drain candidate fetch failed: {e}")
+            return stats
+
+        for row in candidates:
+            stats["attempted"] += 1
+            channel = (row.get("channel") or "whatsapp").lower()
+            phone = row.get("customer_phone") or row.get("phone") or ""
+            message = row.get("message") or row.get("body") or ""
+            template_id = row.get("template_id")
+
+            # We need a phone and SOMETHING to send. If message is empty
+            # and we can populate from template, that's notification_service's
+            # job — MEGAPHONE only drains pre-populated messages.
+            if not phone or not message:
+                self._update_status(
+                    notif_coll, row,
+                    status="FAILED",
+                    error="missing phone or message",
+                )
+                stats["failed"] += 1
+                continue
+
+            # Dispatch
+            try:
+                if channel == "sms":
+                    result = await send_sms(phone, message)
+                else:
+                    result = await send_whatsapp(phone, message, template_id=template_id)
+            except Exception as e:
+                # Defense-in-depth — provider clients already fail soft, but
+                # if something slips through we don't want to kill the drain.
+                logger.warning(f"[MEGAPHONE] Unexpected provider raise: {e}")
+                self._update_status(notif_coll, row, status="FAILED", error=f"unexpected: {e}")
+                stats["failed"] += 1
+                continue
+
+            # Record result
+            self._update_status(
+                notif_coll, row,
+                status=result.status,
+                provider_id=result.provider_id,
+                error=result.error,
+            )
+            if result.status == "SENT":
+                stats["sent"] += 1
+            elif result.status == "SIMULATED":
+                stats["simulated"] += 1
+            elif result.status == "FAILED":
+                stats["failed"] += 1
+            else:
+                stats["skipped"] += 1
+
+        return stats
+
+    def _update_status(self, coll, row: Dict[str, Any], *, status: str,
+                       provider_id: str = None, error: str = None):
+        """Persist a status transition on a notification_logs row."""
+        updates = {
+            "status": status,
+            "dispatched_at": datetime.now(timezone.utc).isoformat(),
+        }
+        if provider_id:
+            updates["provider_id"] = provider_id
+        if error:
+            updates["failure_reason"] = error
+        if status == "SENT":
+            updates["sent_at"] = updates["dispatched_at"]
+        try:
+            coll.update_one({"_id": row["_id"]}, {"$set": updates})
+        except Exception as e:
+            logger.warning(f"[MEGAPHONE] Status update failed: {e}")
+
     async def run(self, query: str, context: AgentContext) -> AgentResponse:
-        """On-demand: report queued notifications by kind for current shift."""
+        """On-demand: report queued/sent notifications + dispatch mode."""
         coll = self.get_collection("notification_logs")
         if coll is None:
             return AgentResponse(success=False, agent_id=self.agent_id, message="notification_logs unavailable")
         try:
             today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
-            queued_today = coll.count_documents({
-                "agent_id": self.agent_id,
-                "queued_at": {"$gte": today_start},
-            })
+            counts = {
+                "queued_today": coll.count_documents({
+                    "agent_id": self.agent_id,
+                    "queued_at": {"$gte": today_start},
+                }),
+                "sent_today": coll.count_documents({
+                    "agent_id": self.agent_id,
+                    "sent_at": {"$gte": today_start},
+                }),
+                "pending_now": coll.count_documents({"status": "PENDING"}),
+                "failed_today": coll.count_documents({
+                    "agent_id": self.agent_id,
+                    "status": "FAILED",
+                    "dispatched_at": {"$gte": today_start},
+                }),
+            }
         except Exception:
-            queued_today = 0
+            counts = {"queued_today": 0, "sent_today": 0, "pending_now": 0, "failed_today": 0}
+
         return AgentResponse(
             success=True,
             agent_id=self.agent_id,
-            data={"queued_today": queued_today, "in_dnd": self._in_dnd_window()},
-            message=f"MEGAPHONE queued {queued_today} message(s) today; DND={self._in_dnd_window()}",
+            data={
+                **counts,
+                "in_dnd": self._in_dnd_window(),
+                "dispatch_mode": dispatch_mode(),
+                "whatsapp_ready": provider_ready("whatsapp"),
+                "sms_ready": provider_ready("sms"),
+            },
+            message=(
+                f"MEGAPHONE · queued {counts['queued_today']} today, "
+                f"sent {counts['sent_today']}, pending {counts['pending_now']}, "
+                f"failed {counts['failed_today']}; DND={self._in_dnd_window()}; "
+                f"mode={dispatch_mode()}"
+            ),
         )
