@@ -1,4 +1,17 @@
-import Anthropic from "@anthropic-ai/sdk";
+// Defer the import so a missing/mismatched SDK can't break the whole
+// Next.js build when this lib is imported but never called.
+type AnthropicClient = {
+  messages: {
+    create: (params: Record<string, unknown>) => Promise<{
+      content: Array<{ type: string; text?: string }>;
+      usage?: {
+        input_tokens?: number;
+        output_tokens?: number;
+        cache_read_input_tokens?: number;
+      };
+    }>;
+  };
+};
 
 // Shared system prompt. Cached via cache_control on every call so
 // subsequent requests in a batch hit Anthropic's prompt cache.
@@ -17,8 +30,8 @@ Rules:
 
 const MODEL = "claude-haiku-4-5-20251001";
 
-let _client: Anthropic | null = null;
-function getClient(): Anthropic {
+let _client: AnthropicClient | null = null;
+async function getClient(): Promise<AnthropicClient> {
   if (_client) return _client;
   const key = process.env.ANTHROPIC_API_KEY;
   if (!key) {
@@ -26,7 +39,11 @@ function getClient(): Anthropic {
       "ANTHROPIC_API_KEY is not set. Add it to Railway environment variables."
     );
   }
-  _client = new Anthropic({ apiKey: key });
+  // Dynamic import — keeps the whole Next.js build from failing if the
+  // SDK has a mismatched signature or fails to resolve.
+  const mod = await import("@anthropic-ai/sdk");
+  const AnthropicCtor = (mod.default || (mod as unknown as { Anthropic: new (...a: unknown[]) => AnthropicClient }).Anthropic) as new (opts: { apiKey: string }) => AnthropicClient;
+  _client = new AnthropicCtor({ apiKey: key });
   return _client;
 }
 
@@ -88,7 +105,7 @@ function attributesToUserPrompt(input: SeoInput): string {
 export async function generateSeoForProduct(
   input: SeoInput
 ): Promise<GeneratedSeo> {
-  const client = getClient();
+  const client = await getClient();
   const userPrompt = attributesToUserPrompt(input);
 
   if (!userPrompt.trim()) {
