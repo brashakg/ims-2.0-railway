@@ -131,32 +131,40 @@
   --font-display: 'Instrument Serif', 'Times New Roman', serif;
   --font-mono:    'JetBrains Mono', ui-monospace, Menlo, monospace;
 
-  /* ——— Legacy color palette (kept for backwards compat with existing pages) ——— */
-  /* Better Vision Brand Colors (gold alias kept; new canonical is --color-bv) */
-  --color-bv-gold-50: #fdfaf7;
-  --color-bv-gold-100: #f9f0e6;
-  --color-bv-gold-200: #f2dcc8;
-  --color-bv-gold-300: #e8c3a0;
-  --color-bv-gold-400: #d4a373;
-  --color-bv-gold-500: #ba8659;
-  --color-bv-gold-600: #a67547;
-  --color-bv-gold-700: #8b5e3a;
-  --color-bv-gold-800: #6f4a2f;
-  --color-bv-gold-900: #533724;
-  --color-bv-gold-950: #2d1d14;
+  /* ——— Legacy brand palette — now MAPPED to BV red (Phase 2.5) ———
+     The old bv-gold / bv-red scales (~63 call sites across 15 files) used to
+     render as warm gold. Gold was retired in Phase 0 design refresh. Instead
+     of touching every call site, we redirect the 50→950 scale to the new
+     BV red palette so any `bg-bv-gold-500`, `text-bv-red-600`, etc. renders
+     as BV red #CD201A ± shades. Design says BV red is a RARE accent; using
+     it here where legacy code signaled "brand" is the right mapping —
+     those locations were already semantically brand-level. Future re-skin
+     can selectively replace `bv-gold-500` → `ink` or `--bg-sunk` where
+     red intensity is too loud. */
+  --color-bv-gold-50:  #fbe8e6;
+  --color-bv-gold-100: #fad1cf;
+  --color-bv-gold-200: #f5a8a4;
+  --color-bv-gold-300: #eb7b75;
+  --color-bv-gold-400: #dd4c45;
+  --color-bv-gold-500: #CD201A;
+  --color-bv-gold-600: #B81A15;
+  --color-bv-gold-700: #9e1611;
+  --color-bv-gold-800: #7d110d;
+  --color-bv-gold-900: #5d0d0a;
+  --color-bv-gold-950: #3e0806;
 
-  /* Legacy alias (bv-red kept pointing at gold for backwards compat) */
-  --color-bv-red-50: #fdfaf7;
-  --color-bv-red-100: #f9f0e6;
-  --color-bv-red-200: #f2dcc8;
-  --color-bv-red-300: #e8c3a0;
-  --color-bv-red-400: #d4a373;
-  --color-bv-red-500: #ba8659;
-  --color-bv-red-600: #a67547;
-  --color-bv-red-700: #8b5e3a;
-  --color-bv-red-800: #6f4a2f;
-  --color-bv-red-900: #533724;
-  --color-bv-red-950: #2d1d14;
+  /* bv-red alias — same palette as the gold scale now that gold is retired */
+  --color-bv-red-50:  #fbe8e6;
+  --color-bv-red-100: #fad1cf;
+  --color-bv-red-200: #f5a8a4;
+  --color-bv-red-300: #eb7b75;
+  --color-bv-red-400: #dd4c45;
+  --color-bv-red-500: #CD201A;
+  --color-bv-red-600: #B81A15;
+  --color-bv-red-700: #9e1611;
+  --color-bv-red-800: #7d110d;
+  --color-bv-red-900: #5d0d0a;
+  --color-bv-red-950: #3e0806;
 
   /* WizOpt Brand Colors (legacy full scale) */
   --color-wz-teal-50: #f0fdfa;

@@ -8,33 +8,33 @@ export default {
   theme: {
     extend: {
       colors: {
-        // Better Vision Brand Colors (Gold/Brown - from bettervision.in)
+        // Better Vision Brand (BV red — gold scale retained as alias for
+        // backwards compat; both now point at the new BV red palette).
         'bv-gold': {
-          50: '#fdfaf7',
-          100: '#f9f0e6',
-          200: '#f2dcc8',
-          300: '#e8c3a0',
-          400: '#d4a373',
-          500: '#ba8659', // Primary Better Vision Gold
-          600: '#a67547',
-          700: '#8b5e3a',
-          800: '#6f4a2f',
-          900: '#533724',
-          950: '#2d1d14',
+          50:  '#fbe8e6',
+          100: '#fad1cf',
+          200: '#f5a8a4',
+          300: '#eb7b75',
+          400: '#dd4c45',
+          500: '#CD201A',
+          600: '#B81A15',
+          700: '#9e1611',
+          800: '#7d110d',
+          900: '#5d0d0a',
+          950: '#3e0806',
         },
-        // Legacy alias for backwards compatibility
         'bv-red': {
-          50: '#fdfaf7',
-          100: '#f9f0e6',
-          200: '#f2dcc8',
-          300: '#e8c3a0',
-          400: '#d4a373',
-          500: '#ba8659',
-          600: '#a67547', // Primary (was #CD201A)
-          700: '#8b5e3a',
-          800: '#6f4a2f',
-          900: '#533724',
-          950: '#2d1d14',
+          50:  '#fbe8e6',
+          100: '#fad1cf',
+          200: '#f5a8a4',
+          300: '#eb7b75',
+          400: '#dd4c45',
+          500: '#CD201A',
+          600: '#B81A15',
+          700: '#9e1611',
+          800: '#7d110d',
+          900: '#5d0d0a',
+          950: '#3e0806',
         },
         // WizOpt Brand Colors (Teal/Blue)
         'wz-teal': {
