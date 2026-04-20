@@ -5,6 +5,9 @@
 **After Phase 6.3 (2026-04-20):** 132 built, 8 partial, 155 not built
   - ✅ Non-moving stock report (90+ days) — backend + frontend + 10 tests
   - ✅ MoM / YoY sales growth — backend endpoint pre-existed, now surfaced on the Reports page Sales Comparison card
+**After Phase 6.4 (2026-04-20):** 134 built, 8 partial, 153 not built
+  - ✅ Workshop dashboard KPIs (pending, overdue, completed today, avg turnaround) — `GET /api/v1/workshop/dashboard-kpis` + wired into WorkshopPage header
+  - ✅ Pending jobs report with aging buckets (0-3d / 3-7d / 7+d) + per-technician breakdown — rewrote `GET /api/v1/reports/workshop/pending-jobs` to use `workshop_jobs` collection (was incorrectly reading from `tasks` collection, never populated)
 
 ---
 
@@ -105,7 +108,7 @@
 - ❌ Family-based prescription view
 
 **Workshop (5 items)**
-- ❌ Workshop dashboard KPIs (pending, overdue, completed today)
+- ✅ Workshop dashboard KPIs (pending, overdue, completed today, avg turnaround) — Phase 6.4, `GET /api/v1/workshop/dashboard-kpis`
 - ❌ Lens order tracking (ordered → received → mounted)
 - ❌ QC checklist (power verification, fitting, cosmetic check)
 - ❌ Customer notification when job is ready
@@ -132,7 +135,7 @@
 - ❌ Staff performance ranking
 - ❌ Daily stock count report
 - ❌ Eye test count report
-- ❌ Pending jobs report
+- ✅ Pending jobs report — Phase 6.4, `GET /api/v1/reports/workshop/pending-jobs` with aging buckets + per-tech breakdown
 - ❌ Expense vs revenue report
 - ❌ Customer acquisition/retention report
 - ❌ Brand-wise sell-through report

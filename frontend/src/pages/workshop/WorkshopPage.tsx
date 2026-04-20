@@ -75,6 +75,16 @@ export function WorkshopPage() {
   // Data state
   const [jobs, setJobs] = useState<Job[]>([]);
   const [selectedJob, setSelectedJob] = useState<Job | null>(null);
+  // Phase 6.4 — server-side KPIs. Falls back to client-side counts if
+  // the endpoint is unreachable or the backend doesn't expose it yet.
+  const [kpis, setKpis] = useState<{
+    pending: number;
+    qc_failed: number;
+    ready_for_pickup: number;
+    overdue: number;
+    completed_today: number;
+    avg_turnaround_days: number | null;
+  } | null>(null);
 
   // UI state
   const [searchQuery, setSearchQuery] = useState('');
@@ -100,10 +110,23 @@ const loadJobs = async () => {
     setError(null);
 
     try {
-      const response = await workshopApi.getJobs(user.activeStoreId);
-      const jobsData = response?.jobs || response || [];
-      setJobs(Array.isArray(jobsData) ? jobsData : []);
-      
+      // Fetch jobs + server-side KPIs in parallel. KPIs use allSettled
+      // because a missing endpoint on older backends shouldn't prevent
+      // the page from rendering the jobs list.
+      const [jobsResp, kpisResp] = await Promise.allSettled([
+        workshopApi.getJobs(user.activeStoreId),
+        workshopApi.getDashboardKpis(user.activeStoreId),
+      ]);
+      if (jobsResp.status === 'fulfilled') {
+        const jobsData = jobsResp.value?.jobs || jobsResp.value || [];
+        setJobs(Array.isArray(jobsData) ? jobsData : []);
+      } else {
+        throw jobsResp.reason;
+      }
+      if (kpisResp.status === 'fulfilled') {
+        setKpis(kpisResp.value);
+      }
+
       // Load store info for printing
       if (!storeInfo) {
         try {
@@ -258,7 +281,7 @@ const loadJobs = async () => {
         </div>
       )}
 
-      {/* Stats Cards */}
+      {/* Stats Cards — Phase 6.4: server-side KPIs with client fallback. */}
       <div className="grid grid-cols-2 tablet:grid-cols-4 gap-4">
         <div className="card">
           <div className="flex items-center gap-3">
@@ -267,7 +290,10 @@ const loadJobs = async () => {
             </div>
             <div>
               <p className="text-sm text-gray-500">Active Jobs</p>
-              <p className="text-2xl font-bold text-gray-900">{activeJobs.length}</p>
+              <p className="text-2xl font-bold text-gray-900">{kpis?.pending ?? activeJobs.length}</p>
+              {kpis?.completed_today !== undefined && kpis?.completed_today !== null && (
+                <p className="text-xs text-gray-500">{kpis.completed_today} completed today</p>
+              )}
             </div>
           </div>
         </div>
@@ -279,6 +305,9 @@ const loadJobs = async () => {
             <div>
               <p className="text-sm text-gray-500">Urgent</p>
               <p className="text-2xl font-bold text-red-400">{urgentJobs.length}</p>
+              {kpis?.qc_failed ? (
+                <p className="text-xs text-red-500">{kpis.qc_failed} in QC rework</p>
+              ) : null}
             </div>
           </div>
         </div>
@@ -289,7 +318,10 @@ const loadJobs = async () => {
             </div>
             <div>
               <p className="text-sm text-gray-500">Ready for Pickup</p>
-              <p className="text-2xl font-bold text-green-400">{readyJobs.length}</p>
+              <p className="text-2xl font-bold text-green-400">{kpis?.ready_for_pickup ?? readyJobs.length}</p>
+              {kpis?.avg_turnaround_days != null && (
+                <p className="text-xs text-gray-500">Avg {kpis.avg_turnaround_days}d turnaround</p>
+              )}
             </div>
           </div>
         </div>
@@ -300,7 +332,7 @@ const loadJobs = async () => {
             </div>
             <div>
               <p className="text-sm text-gray-500">Overdue</p>
-              <p className="text-2xl font-bold text-orange-400">{overdueJobs.length}</p>
+              <p className="text-2xl font-bold text-orange-400">{kpis?.overdue ?? overdueJobs.length}</p>
             </div>
           </div>
         </div>

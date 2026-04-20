@@ -196,6 +196,157 @@ async def get_technician_workload(
     return {"workload": []}
 
 
+# ---------------------------------------------------------------------------
+# Phase 6.4 — single-shot KPIs for the workshop dashboard header.
+# The frontend currently computes Active / Urgent / Ready / Overdue on the
+# client from the full job list. That works at small scale but means every
+# workshop page load pulls every job in the store. This endpoint lets the
+# client drop 4 HTTP calls and ~a few hundred KB of JSON in favour of one
+# small summary call — and as a bonus exposes `avg_turnaround_days` and
+# `completed_today` which the client couldn't cheaply compute before.
+# ---------------------------------------------------------------------------
+
+
+@router.get("/dashboard-kpis")
+async def get_dashboard_kpis(
+    store_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Aggregated workshop KPIs for the dashboard header.
+
+    Returns:
+        pending            — PENDING + IN_PROGRESS (i.e. "Active Jobs")
+        in_progress        — IN_PROGRESS only
+        qc_failed          — jobs sent back for rework
+        ready_for_pickup   — READY status
+        overdue            — pending/in_progress past expected_date
+        completed_today    — COMPLETED or READY with completed_at == today
+        delivered_today    — DELIVERED with status_updated_at == today
+        avg_turnaround_days — mean (completed_at - created_at) across the
+                              last 100 closed jobs. `None` if fewer than 5
+                              samples exist (avoids noisy averages).
+
+    Fail-soft: repo absent → returns zeros with null turnaround, never raises.
+    """
+    repo = get_workshop_repository()
+    active_store = store_id or current_user.get("active_store_id")
+
+    empty = {
+        "pending": 0,
+        "in_progress": 0,
+        "qc_failed": 0,
+        "ready_for_pickup": 0,
+        "overdue": 0,
+        "completed_today": 0,
+        "delivered_today": 0,
+        "avg_turnaround_days": None,
+        "store_id": active_store,
+        "as_of": datetime.now().isoformat(),
+    }
+
+    if repo is None or not active_store:
+        return empty
+
+    try:
+        # One pass over the store's jobs so we don't hit Mongo five times
+        # for what is effectively a group-by-status.
+        all_jobs = repo.find_by_store(active_store)
+    except Exception:
+        return empty
+
+    now = datetime.now()
+    today_str = now.date().isoformat()
+
+    pending = 0
+    in_progress = 0
+    qc_failed = 0
+    ready = 0
+    overdue = 0
+    completed_today = 0
+    delivered_today = 0
+    turnaround_samples = []
+
+    for job in all_jobs:
+        status = job.get("status", "")
+
+        if status == "PENDING":
+            pending += 1
+        elif status == "IN_PROGRESS":
+            in_progress += 1
+            pending += 1  # "Active" is PENDING + IN_PROGRESS in the UI
+        elif status == "QC_FAILED":
+            qc_failed += 1
+        elif status == "READY":
+            ready += 1
+
+        # Overdue = open-ish job whose expected_date is in the past
+        if status in ("PENDING", "IN_PROGRESS"):
+            expected = job.get("expected_date")
+            if expected:
+                try:
+                    if isinstance(expected, str):
+                        exp_dt = datetime.fromisoformat(expected.replace("Z", "+00:00"))
+                    elif isinstance(expected, datetime):
+                        exp_dt = expected
+                    else:
+                        exp_dt = None
+                    if exp_dt is not None and exp_dt < now:
+                        overdue += 1
+                except (ValueError, TypeError):
+                    pass
+
+        # Today counts — both by completed_at and by status_updated_at for
+        # DELIVERED, so the "what shipped today" number is always live.
+        completed_at = job.get("completed_at")
+        if completed_at:
+            ca_str = completed_at if isinstance(completed_at, str) else completed_at.isoformat()
+            if ca_str.startswith(today_str):
+                completed_today += 1
+
+        if status == "DELIVERED":
+            sua = job.get("status_updated_at")
+            if sua:
+                sua_str = sua if isinstance(sua, str) else sua.isoformat()
+                if sua_str.startswith(today_str):
+                    delivered_today += 1
+
+        # Turnaround sample — only include finished jobs with both ts.
+        if status in ("COMPLETED", "READY", "DELIVERED"):
+            ca = job.get("completed_at")
+            cr = job.get("created_at")
+            if ca and cr:
+                try:
+                    ca_dt = ca if isinstance(ca, datetime) else datetime.fromisoformat(str(ca).replace("Z", "+00:00"))
+                    cr_dt = cr if isinstance(cr, datetime) else datetime.fromisoformat(str(cr).replace("Z", "+00:00"))
+                    days = (ca_dt - cr_dt).total_seconds() / 86400.0
+                    if days >= 0:
+                        turnaround_samples.append(days)
+                except (ValueError, TypeError):
+                    pass
+
+    # Cap sample size — latest 100 closed jobs are plenty and we've already
+    # walked them; take the tail for a rolling view rather than all-time.
+    if len(turnaround_samples) >= 5:
+        recent = turnaround_samples[-100:]
+        avg_turnaround = round(sum(recent) / len(recent), 2)
+    else:
+        avg_turnaround = None
+
+    return {
+        "pending": pending,                   # PENDING + IN_PROGRESS
+        "in_progress": in_progress,
+        "qc_failed": qc_failed,
+        "ready_for_pickup": ready,
+        "overdue": overdue,
+        "completed_today": completed_today,
+        "delivered_today": delivered_today,
+        "avg_turnaround_days": avg_turnaround,
+        "store_id": active_store,
+        "as_of": now.isoformat(),
+    }
+
+
 @router.get("/jobs")
 async def list_jobs(
     status: Optional[str] = Query(None),

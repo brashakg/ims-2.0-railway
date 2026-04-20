@@ -1111,34 +1111,128 @@ async def pending_workshop_jobs(
     store_id: Optional[str] = Query(None),
     current_user: dict = Depends(get_current_user),
 ):
-    """Pending workshop jobs report"""
+    """
+    Pending workshop jobs report — Phase 6.4.
+
+    Rewritten to query the `workshop_jobs` collection via WorkshopJobRepository
+    (the previous implementation used the generic `tasks` collection with
+    task_type='workshop_job', which the real workshop flow never populates).
+
+    Response shape:
+        {
+            "data": [  # one row per pending job, sorted by age desc
+                { "job_id", "job_number", "order_id", "status",
+                  "technician_id", "expected_date", "created_at",
+                  "age_days", "aging_bucket" } ],
+            "summary": {
+                "total_pending": int,
+                "overdue": int,
+                "by_aging_bucket": {"0-3d": n, "3-7d": n, "7+d": n},
+                "by_technician": [ {"technician_id", "count"} ],
+            },
+        }
+
+    Aging buckets are computed from created_at. `age_days` is the number of
+    days the job has been sitting in PENDING or IN_PROGRESS. A job whose
+    `expected_date` has passed is counted as overdue regardless of age.
+    """
+    from database.repositories.workshop_repository import WorkshopJobRepository  # lazy
+    from ..dependencies import get_db as _get_db
+
     active_store = store_id or current_user.get("active_store_id")
-    task_repo = get_task_repository()
+    db = _get_db()
+    if db is None or not getattr(db, "is_connected", True):
+        return {
+            "data": [],
+            "summary": {
+                "total_pending": 0,
+                "overdue": 0,
+                "by_aging_bucket": {"0-3d": 0, "3-7d": 0, "7+d": 0},
+                "by_technician": [],
+            },
+        }
 
-    if task_repo is None:
-        return {"data": [], "total_pending": 0}
+    repo = WorkshopJobRepository(db.get_collection("workshop_jobs"))
+    jobs = repo.find_pending(active_store)  # PENDING + IN_PROGRESS, sorted by expected_date
 
-    pending_tasks = task_repo.find_many({
-        "store_id": active_store,
-        "task_type": "workshop_job",
-        "status": {"$in": ["OPEN", "IN_PROGRESS"]},
-    })
-
+    now = datetime.now()
     data = []
-    for task in pending_tasks:
+    bucket_counts = {"0-3d": 0, "3-7d": 0, "7+d": 0}
+    tech_counts = {}
+    overdue_count = 0
+
+    for job in jobs:
+        created = job.get("created_at")
+        expected = job.get("expected_date")
+
+        # Age in days from created_at. Defensive parse for str or datetime.
+        age_days = None
+        if created:
+            try:
+                cr_dt = created if isinstance(created, datetime) else datetime.fromisoformat(str(created).replace("Z", "+00:00"))
+                # Normalize tz — the stored timestamps are naive in dev but
+                # may be tz-aware in prod Mongo. Strip tz for the subtraction.
+                if cr_dt.tzinfo is not None:
+                    cr_dt = cr_dt.replace(tzinfo=None)
+                age_days = max(0, (now - cr_dt).days)
+            except (ValueError, TypeError):
+                age_days = None
+
+        if age_days is None:
+            bucket = "0-3d"  # unknown age — treat as fresh so we don't panic-escalate
+        elif age_days < 3:
+            bucket = "0-3d"
+        elif age_days < 7:
+            bucket = "3-7d"
+        else:
+            bucket = "7+d"
+        bucket_counts[bucket] += 1
+
+        # Overdue check — expected_date is in the past
+        is_overdue = False
+        if expected:
+            try:
+                exp_dt = expected if isinstance(expected, datetime) else datetime.fromisoformat(str(expected).replace("Z", "+00:00"))
+                if exp_dt.tzinfo is not None:
+                    exp_dt = exp_dt.replace(tzinfo=None)
+                if exp_dt < now:
+                    is_overdue = True
+                    overdue_count += 1
+            except (ValueError, TypeError):
+                pass
+
+        tech = job.get("technician_id") or "unassigned"
+        tech_counts[tech] = tech_counts.get(tech, 0) + 1
+
         data.append({
-            "job_id": task.get("task_id"),
-            "description": task.get("title"),
-            "status": task.get("status"),
-            "priority": task.get("priority"),
-            "assigned_to": task.get("assigned_to_name"),
-            "due_date": task.get("due_date"),
-            "created_at": task.get("created_at"),
+            "job_id": job.get("job_id") or str(job.get("_id", "")),
+            "job_number": job.get("job_number"),
+            "order_id": job.get("order_id"),
+            "status": job.get("status"),
+            "technician_id": job.get("technician_id"),
+            "expected_date": expected.isoformat() if isinstance(expected, datetime) else expected,
+            "created_at": created.isoformat() if isinstance(created, datetime) else created,
+            "age_days": age_days,
+            "aging_bucket": bucket,
+            "is_overdue": is_overdue,
         })
+
+    # Sort: oldest first, with overdue jumping to the top regardless of age.
+    data.sort(key=lambda r: (not r["is_overdue"], -(r["age_days"] or 0)))
+
+    by_technician = sorted(
+        [{"technician_id": t, "count": c} for t, c in tech_counts.items()],
+        key=lambda r: -r["count"],
+    )
 
     return {
         "data": data,
-        "total_pending": len(pending_tasks),
+        "summary": {
+            "total_pending": len(data),
+            "overdue": overdue_count,
+            "by_aging_bucket": bucket_counts,
+            "by_technician": by_technician,
+        },
     }
 
 
