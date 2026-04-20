@@ -151,10 +151,12 @@ async def lifespan(app: FastAPI):
 
     # Initialize Agent System (JARVIS Agents)
     _scheduler = None
+    _event_bus = None
     try:
         from agents.config import AgentConfigManager
         from agents.registry import initialize_registry, AGENT_REGISTRY
         from agents.scheduler import AgentScheduler
+        from agents.event_bus import get_event_bus
 
         if DATABASE_AVAILABLE:
             from database.connection import get_seeded_db
@@ -170,6 +172,15 @@ async def lifespan(app: FastAPI):
         # Initialize agent registry (creates CORTEX + SENTINEL instances)
         initialize_registry(db=db)
         logger.info(f"[AGENTS] Registry initialized — {len(AGENT_REGISTRY)} agents")
+
+        # Start the cross-worker event bus (Redis pub/sub when REDIS_URL is
+        # set; in-process fallback otherwise). Must start AFTER registry so
+        # subscribers are already registered before any handler fires.
+        _event_bus = get_event_bus(db=db)
+        await _event_bus.start()
+        logger.info(
+            f"[AGENTS] Event bus started ({'DISTRIBUTED' if _event_bus.is_distributed else 'IN-PROCESS'})"
+        )
 
         # Start the background scheduler
         _scheduler = AgentScheduler(db=db)
@@ -195,6 +206,14 @@ async def lifespan(app: FastAPI):
             logger.info("[AGENTS] Scheduler shutdown")
         except Exception as e:
             logger.warning(f"[AGENTS] Scheduler shutdown error: {e}")
+
+    # Shutdown Event Bus (cancel listener task, close Redis conn)
+    if _event_bus:
+        try:
+            await _event_bus.stop()
+            logger.info("[AGENTS] Event bus stopped")
+        except Exception as e:
+            logger.warning(f"[AGENTS] Event bus shutdown error: {e}")
 
     if DATABASE_AVAILABLE:
         close_db()

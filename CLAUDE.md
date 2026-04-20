@@ -6,7 +6,7 @@ Self-contained context for any Claude session (local CLI or web) picking up this
 
 ## 👋 IF YOU ARE A FRESH SESSION TAKING OVER — READ THIS FIRST
 
-**Last session summary** (ended 2026-04-20, 33 commits):
+**Last session summary** (ended 2026-04-20, 35 commits):
 
 Shipped phases:
 - **Phase 0–1.9**: all 9 design-prototype screens ported (Hub, Store Setup, Inventory, Reports, Clinical, POS, Tasks, Print, Jarvis). Design tokens + shell chrome (64px rail + 52px topbar) in `frontend/src/components/shell/`.
@@ -19,13 +19,15 @@ Shipped phases:
   - NEXUS → Shopify/Razorpay/Shiprocket/Tally (`backend/agents/nexus_providers.py`)
 - **Phase 5**: unified cross-agent activity feed (`GET /api/v1/jarvis/agents/activity`) + rendering panel on the Jarvis page between agent grid and chat card.
 - **Phase 6.1 — Observability hardening**: Sentry APM fully wired (FastAPI + Starlette integrations, noise-filtered traces sampler, release tag, per-agent-tick transactions via `backend/observability.py::agent_tick_span`). Slack webhook alerting for CRITICAL anomalies from ORACLE (threshold tunable via `SLACK_ALERT_SEVERITY`). 13 unit tests in `backend/tests/test_observability.py`. Contract: every helper fail-soft — missing env = silent no-op.
+- **Phase 6.1b — TypeScript cleanup**: tsconfig `ignoreDeprecations: "5.0"` to silence the `baseUrl` deprecation + explicit parameter types across all of `posStore.ts` (action methods, set/reduce/filter callbacks, persist middleware hooks). Zero runtime change — bundle byte-identical. `tsc --noEmit` now exits 0.
+- **Phase 6.2 — Event bus durability**: Cross-worker agent event dispatch via Redis pub/sub (`backend/agents/event_bus.py`). When `REDIS_URL` is set, events emitted in one Railway worker reach subscribers in every worker — `stock.below_reorder` from SENTINEL in worker A reliably wakes TASKMASTER in worker B. Every event also persisted to `agent_events` MongoDB collection for audit trail + activity-feed queries. Fail-soft: no Redis → identical pre-6.2 in-process dispatch with a single startup warning. `registry.subscribe_event` / `dispatch_event` public API unchanged — callers don't need to care. 11 unit tests in `backend/tests/test_event_bus.py` covering in-process fallback, Mongo persistence, Redis envelope shape, listener dispatch, and cross-worker simulation via a shared fake Redis.
 
 Plus 5 infra fixes: CORS permanent (reflection + 15 regression tests), CI unbroken (safety/pydantic), admin router SUPERADMIN gate, Rx range tightening, Jarvis canned-reply fix, store pill snake_case transform.
 
 ### Phase 6 — next-session menu, pick one
 
 1. ~~**Observability hardening**~~ — DONE in Phase 6.1. Sentry APM + Slack webhooks wired, per-agent-tick transactions tagged, 13 unit tests green. Remaining stretch: OpenTelemetry distributed tracing (Sentry already gives per-agent spans but OTel would let us ship traces to Jaeger/Honeycomb too)
-2. **Event bus durability** — `backend/agents/registry.py` dispatches events in-process. Railway runs 4 uvicorn workers, so an event emitted in worker A is invisible to subscribers in worker B. Move to MongoDB change streams or Redis pub/sub so `stock.below_reorder` from SENTINEL reliably wakes TASKMASTER regardless of worker
+2. ~~**Event bus durability**~~ — DONE in Phase 6.2. Redis pub/sub + Mongo audit log, fail-soft to in-process when REDIS_URL unset, 11 unit tests green. Remaining stretch: consumer-group-based replay for workers that were down when an event fired (Redis streams instead of pub/sub); right now a worker that comes up after an event was published does NOT see it
 3. **Feature backlog** — start on the ~166 deferred items in [docs/reference/IMS2_Updated_Feature_Status.md](docs/reference/IMS2_Updated_Feature_Status.md) (footfall tracking, EMI payments, credit note balance tracking per customer, workshop QC checklist, daily stock count with barcode scanning, etc.)
 4. **End-to-end prod verification** — pause shipping new features, walk each of the 9 module routes in Chrome (user has the Claude-in-Chrome extension connected to `https://ims-2-0-railway.vercel.app`), log any visual/functional bugs, fix them
 
@@ -50,6 +52,9 @@ Plus 5 infra fixes: CORS permanent (reflection + 15 regression tests), CI unbrok
 | `SENTRY_RELEASE` | observability | Release tag (falls back to `RAILWAY_DEPLOYMENT_ID` → `ims-2.0@dev`) |
 | `SLACK_WEBHOOK_URL` | observability | Incoming-webhook URL for CRITICAL anomaly alerts from ORACLE. If unset, alerts silently skipped |
 | `SLACK_ALERT_SEVERITY` | observability | Minimum severity to notify — `CRITICAL` / `HIGH` / `MEDIUM` / `LOW` (default `CRITICAL`) |
+| `REDIS_URL` | event bus + cache | Full Redis URL (e.g. `redis://default:pw@host:6379/0`). If unset, agent events fall back to in-process dispatch (single-worker only) |
+| `REDIS_HOST` / `REDIS_PORT` / `REDIS_PASSWORD` / `REDIS_DB` | event bus + cache | Component-style fallback if `REDIS_URL` isn't used. Matches `backend/api/services/cache.py` convention |
+| `AGENT_EVENT_CHANNEL` | event bus | Redis pub/sub channel name (default `ims.agents.events`) |
 
 All calls **fail soft** — missing env = no degraded behavior, just no outbound call, status `SIMULATED` or `FAILED`. A fresh Railway deploy doesn't accidentally spam customers.
 
@@ -70,6 +75,8 @@ All calls **fail soft** — missing env = no degraded behavior, just no outbound
 - [`backend/agents/claude_client.py`](backend/agents/claude_client.py), [`backend/agents/providers.py`](backend/agents/providers.py), [`backend/agents/nexus_providers.py`](backend/agents/nexus_providers.py) — Phase 4 provider wiring patterns
 - [`frontend/src/pages/jarvis/JarvisPage.tsx`](frontend/src/pages/jarvis/JarvisPage.tsx) — live agent grid + toggles + activity feed
 - [`backend/api/routers/agents.py`](backend/api/routers/agents.py) — Phase 5 `/jarvis/agents/activity` endpoint
+- [`backend/observability.py`](backend/observability.py) — Phase 6.1 Sentry/Slack helpers with fail-soft contract
+- [`backend/agents/event_bus.py`](backend/agents/event_bus.py) — Phase 6.2 cross-worker event dispatch (Redis pub/sub + Mongo persistence)
 
 ---
 
