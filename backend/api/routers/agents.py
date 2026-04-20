@@ -10,7 +10,7 @@ Toggle ON/OFF, view status, force-run, inspect logs.
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from typing import Optional, Dict, Any, List
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import logging
 
 from .auth import get_current_user
@@ -352,3 +352,174 @@ async def get_health_history(hours: int = Query(24, le=168),
         return {"history": entries, "total": len(entries)}
     except Exception as e:
         return {"history": [], "total": 0, "error": str(e)}
+
+
+# ============================================================================
+# UNIFIED ACTIVITY FEED (Phase 5)
+# ============================================================================
+#
+# Fans out across every collection where a Jarvis agent records an action:
+#   - ORACLE       → anomalies
+#   - NEXUS        → sync_runs
+#   - TASKMASTER   → agent_audit_log (tier-gated executions)
+#   - MEGAPHONE    → notification_logs
+#   - PIXEL        → ui_audits
+#
+# Normalizes each source row into a common envelope so the frontend can
+# render them in one chronological list without caring about the per-agent
+# schema.
+
+
+def _iso(ts) -> str:
+    """Coerce a timestamp field (string or datetime) to ISO string."""
+    if ts is None:
+        return ""
+    if hasattr(ts, "isoformat"):
+        return ts.isoformat()
+    return str(ts)
+
+
+@router.get("/agents/activity")
+async def get_agent_activity(
+    limit: int = Query(50, ge=1, le=200),
+    since_hours: int = Query(24, ge=1, le=720),
+    agent_id: Optional[str] = Query(None),
+    user: dict = Depends(require_superadmin),
+):
+    """
+    Unified recent activity across all 7 agents.
+
+    Returns a list of normalized events sorted newest first, each with:
+      { agent_id, kind, timestamp, summary, severity?, status?, details }
+
+    `kind` is one of: anomaly | sync_run | task_execution | notification | ui_audit
+    Callers can filter by `agent_id` to narrow to one agent, or pull the
+    whole cross-agent feed.
+    """
+    try:
+        import sys as _sys
+        import os as _os
+        _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))))
+        from database.connection import get_seeded_db
+        db = get_seeded_db()
+    except Exception as e:
+        return {"events": [], "total": 0, "error": f"db init: {e}"}
+
+    if db is None:
+        return {"events": [], "total": 0, "error": "database unavailable"}
+
+    since = datetime.now(timezone.utc) - timedelta(hours=since_hours)
+    since_iso = since.isoformat()
+
+    events: List[Dict[str, Any]] = []
+
+    def _safe_find(coll_name: str, ts_field: str, match_extra: Dict = None):
+        """Find docs with ts >= since. Tolerates missing collection."""
+        try:
+            coll = db.get_collection(coll_name)
+            q: Dict[str, Any] = {ts_field: {"$gte": since_iso}}
+            if match_extra:
+                q.update(match_extra)
+            return list(coll.find(q, {"_id": 0}).sort(ts_field, -1).limit(limit))
+        except Exception as e:
+            logger.debug(f"[ACTIVITY] {coll_name} read failed: {e}")
+            return []
+
+    # --- ORACLE anomalies ---------------------------------------------------
+    if not agent_id or agent_id == "oracle":
+        for a in _safe_find("anomalies", "detected_at"):
+            narrative = a.get("narrative") or a.get("summary") or "Anomaly detected"
+            events.append({
+                "agent_id": "oracle",
+                "kind": "anomaly",
+                "timestamp": _iso(a.get("detected_at")),
+                "severity": a.get("severity"),
+                "summary": narrative[:200],
+                "recommended_action": a.get("recommended_action"),
+                "ai_powered": a.get("ai_powered", False),
+                "details": a,
+            })
+
+    # --- NEXUS sync_runs ---------------------------------------------------
+    if not agent_id or agent_id == "nexus":
+        for s in _safe_find("sync_runs", "ran_at"):
+            items = s.get("items_synced", 0)
+            provider = s.get("integration") or s.get("provider", "?")
+            ok = s.get("ok", True)
+            summary = (
+                f"{provider} {s.get('kind', 'sync')}: {items} items"
+                if ok
+                else f"{provider} {s.get('kind', 'sync')} FAILED: {s.get('error', '?')}"
+            )
+            events.append({
+                "agent_id": "nexus",
+                "kind": "sync_run",
+                "timestamp": _iso(s.get("ran_at")),
+                "status": "ok" if ok else "error",
+                "summary": summary[:200],
+                "details": s,
+            })
+
+    # --- TASKMASTER audit log ---------------------------------------------
+    if not agent_id or agent_id == "taskmaster":
+        for t in _safe_find("agent_audit_log", "executed_at",
+                            match_extra={"agent_id": "taskmaster"}):
+            action = t.get("action", "action")
+            target = t.get("target", "")
+            tier = t.get("safety_tier", "?")
+            events.append({
+                "agent_id": "taskmaster",
+                "kind": "task_execution",
+                "timestamp": _iso(t.get("executed_at")),
+                "summary": f"{action} → {target} (tier {tier})"[:200],
+                "details": t,
+            })
+
+    # --- MEGAPHONE notifications (dispatched only, not queued) ------------
+    if not agent_id or agent_id == "megaphone":
+        for n in _safe_find("notification_logs", "dispatched_at",
+                            match_extra={"agent_id": "megaphone",
+                                         "status": {"$in": ["SENT", "SIMULATED", "FAILED"]}}):
+            kind = n.get("kind", "message")
+            channel = n.get("channel", "?")
+            status = n.get("status", "?")
+            events.append({
+                "agent_id": "megaphone",
+                "kind": "notification",
+                "timestamp": _iso(n.get("dispatched_at")),
+                "status": status.lower() if isinstance(status, str) else "ok",
+                "summary": f"{kind} via {channel}: {status}"[:200],
+                "details": n,
+            })
+
+    # --- PIXEL audit runs ---------------------------------------------------
+    if not agent_id or agent_id == "pixel":
+        for u in _safe_find("ui_audits", "ran_at"):
+            summary = u.get("summary") or {}
+            pages = summary.get("pages_audited", 0)
+            min_perf = summary.get("overall_min_perf")
+            regressions = len(u.get("regressions") or [])
+            line = (
+                f"Audit · {pages} pages · min perf {min_perf} · {regressions} regressions"
+                if u.get("kind") == "scheduled_audit"
+                else f"Audit heartbeat ({u.get('notes', '')})"
+            )
+            events.append({
+                "agent_id": "pixel",
+                "kind": "ui_audit",
+                "timestamp": _iso(u.get("ran_at")),
+                "status": "warn" if regressions else "ok",
+                "summary": line[:200],
+                "details": u,
+            })
+
+    # Sort newest first, cap at limit
+    events.sort(key=lambda e: e.get("timestamp") or "", reverse=True)
+    events = events[:limit]
+
+    return {
+        "events": events,
+        "total": len(events),
+        "since_hours": since_hours,
+        "filter_agent": agent_id,
+    }
