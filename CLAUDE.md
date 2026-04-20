@@ -6,7 +6,7 @@ Self-contained context for any Claude session (local CLI or web) picking up this
 
 ## 👋 IF YOU ARE A FRESH SESSION TAKING OVER — READ THIS FIRST
 
-**Last session summary** (ended 2026-04-20, 32 commits):
+**Last session summary** (ended 2026-04-20, 33 commits):
 
 Shipped phases:
 - **Phase 0–1.9**: all 9 design-prototype screens ported (Hub, Store Setup, Inventory, Reports, Clinical, POS, Tasks, Print, Jarvis). Design tokens + shell chrome (64px rail + 52px topbar) in `frontend/src/components/shell/`.
@@ -18,12 +18,13 @@ Shipped phases:
   - PIXEL → Google PageSpeed Insights for real Lighthouse audits
   - NEXUS → Shopify/Razorpay/Shiprocket/Tally (`backend/agents/nexus_providers.py`)
 - **Phase 5**: unified cross-agent activity feed (`GET /api/v1/jarvis/agents/activity`) + rendering panel on the Jarvis page between agent grid and chat card.
+- **Phase 6.1 — Observability hardening**: Sentry APM fully wired (FastAPI + Starlette integrations, noise-filtered traces sampler, release tag, per-agent-tick transactions via `backend/observability.py::agent_tick_span`). Slack webhook alerting for CRITICAL anomalies from ORACLE (threshold tunable via `SLACK_ALERT_SEVERITY`). 13 unit tests in `backend/tests/test_observability.py`. Contract: every helper fail-soft — missing env = silent no-op.
 
 Plus 5 infra fixes: CORS permanent (reflection + 15 regression tests), CI unbroken (safety/pydantic), admin router SUPERADMIN gate, Rx range tightening, Jarvis canned-reply fix, store pill snake_case transform.
 
 ### Phase 6 — next-session menu, pick one
 
-1. **Observability hardening** — wire Sentry APM (already imported in `backend/api/main.py` but just initialized when `SENTRY_DSN` is set), add OpenTelemetry traces across agent ticks, add a Slack webhook alert path for CRITICAL anomalies emitted by ORACLE
+1. ~~**Observability hardening**~~ — DONE in Phase 6.1. Sentry APM + Slack webhooks wired, per-agent-tick transactions tagged, 13 unit tests green. Remaining stretch: OpenTelemetry distributed tracing (Sentry already gives per-agent spans but OTel would let us ship traces to Jaeger/Honeycomb too)
 2. **Event bus durability** — `backend/agents/registry.py` dispatches events in-process. Railway runs 4 uvicorn workers, so an event emitted in worker A is invisible to subscribers in worker B. Move to MongoDB change streams or Redis pub/sub so `stock.below_reorder` from SENTINEL reliably wakes TASKMASTER regardless of worker
 3. **Feature backlog** — start on the ~166 deferred items in [docs/reference/IMS2_Updated_Feature_Status.md](docs/reference/IMS2_Updated_Feature_Status.md) (footfall tracking, EMI payments, credit note balance tracking per customer, workshop QC checklist, daily stock count with barcode scanning, etc.)
 4. **End-to-end prod verification** — pause shipping new features, walk each of the 9 module routes in Chrome (user has the Claude-in-Chrome extension connected to `https://ims-2-0-railway.vercel.app`), log any visual/functional bugs, fix them
@@ -43,7 +44,12 @@ Plus 5 infra fixes: CORS permanent (reflection + 15 regression tests), CI unbrok
 | `MSG91_SENDER` | MEGAPHONE | DLT-registered 6-char, defaults `BVOPTL` |
 | `DISPATCH_MODE` | MEGAPHONE + NEXUS writes | `off` (default) / `test` / `live` |
 | `TEST_PHONE` | MEGAPHONE test mode | Only recipient in `DISPATCH_MODE=test` |
-| `SENTRY_DSN` | observability (Phase 6) | If unset, Sentry quietly skipped |
+| `SENTRY_DSN` | observability | If unset, Sentry quietly skipped |
+| `SENTRY_TRACES_RATE` | observability | Default `0.2` — % of HTTP + agent-tick transactions sampled |
+| `SENTRY_PROFILES_RATE` | observability | Default `0.1` — CPU profiling sample rate |
+| `SENTRY_RELEASE` | observability | Release tag (falls back to `RAILWAY_DEPLOYMENT_ID` → `ims-2.0@dev`) |
+| `SLACK_WEBHOOK_URL` | observability | Incoming-webhook URL for CRITICAL anomaly alerts from ORACLE. If unset, alerts silently skipped |
+| `SLACK_ALERT_SEVERITY` | observability | Minimum severity to notify — `CRITICAL` / `HIGH` / `MEDIUM` / `LOW` (default `CRITICAL`) |
 
 All calls **fail soft** — missing env = no degraded behavior, just no outbound call, status `SIMULATED` or `FAILED`. A fresh Railway deploy doesn't accidentally spam customers.
 

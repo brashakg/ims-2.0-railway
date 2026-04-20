@@ -18,18 +18,42 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ── Sentry APM — error tracking & performance monitoring ────────────────
+# Fail-soft: if SENTRY_DSN is unset we skip init entirely. With the DSN set,
+# we register FastAPI + Starlette integrations explicitly so every HTTP
+# request becomes a transaction, errors get tagged with route, and the
+# per-agent transactions created in `observability.agent_tick_span` nest
+# cleanly under the outer HTTP span when agents are triggered via API.
 _sentry_dsn = os.getenv("SENTRY_DSN")
 if _sentry_dsn:
     try:
         import sentry_sdk
+        from sentry_sdk.integrations.fastapi import FastApiIntegration
+        from sentry_sdk.integrations.starlette import StarletteIntegration
+
+        def _sentry_traces_sampler(sampling_context):
+            """Drop noisy endpoints (health + docs + OPTIONS) from tracing."""
+            req = sampling_context.get("asgi_scope") or {}
+            path = req.get("path", "") if isinstance(req, dict) else ""
+            method = req.get("method", "") if isinstance(req, dict) else ""
+            if path in ("/health", "/docs", "/redoc", "/openapi.json"):
+                return 0.0
+            if method == "OPTIONS":
+                return 0.0
+            return float(os.getenv("SENTRY_TRACES_RATE", "0.2"))
+
         sentry_sdk.init(
             dsn=_sentry_dsn,
             environment=os.getenv("NODE_ENV", "development"),
-            traces_sample_rate=float(os.getenv("SENTRY_TRACES_RATE", "0.2")),
+            release=os.getenv("SENTRY_RELEASE") or os.getenv("RAILWAY_DEPLOYMENT_ID") or "ims-2.0@dev",
+            traces_sampler=_sentry_traces_sampler,
             profiles_sample_rate=float(os.getenv("SENTRY_PROFILES_RATE", "0.1")),
             send_default_pii=False,  # don't send user IPs/emails to Sentry
+            integrations=[
+                FastApiIntegration(transaction_style="endpoint"),
+                StarletteIntegration(transaction_style="endpoint"),
+            ],
         )
-        logger.info("[APM] Sentry initialized")
+        logger.info("[APM] Sentry initialized with FastAPI integration")
     except Exception as e:
         logger.warning(f"[APM] Sentry init failed: {e}")
 
