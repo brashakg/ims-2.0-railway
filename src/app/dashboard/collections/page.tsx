@@ -14,7 +14,17 @@ import {
   CheckCircle,
   Tag,
   Filter,
+  Eye,
+  EyeOff,
 } from 'lucide-react';
+
+type Segment = 'all' | 'active' | 'hidden';
+
+const SEGMENTS: Array<{ key: Segment; label: string }> = [
+  { key: 'all', label: 'All' },
+  { key: 'active', label: 'Active' },
+  { key: 'hidden', label: 'Hidden' },
+];
 
 interface Collection {
   id: string;
@@ -45,6 +55,20 @@ export default function CollectionsPage() {
   const [syncMessage, setSyncMessage] = useState('');
   const [search, setSearch] = useState('');
   const [typeFilter, setTypeFilter] = useState<string>('');
+  const [segment, setSegment] = useState<Segment>('all');
+
+  // Filter locally since API doesn't have a "published" filter yet — cheap
+  // since the page loads at most 100 collections.
+  const visibleCollections = collections.filter((c) => {
+    if (segment === 'active') return c.published;
+    if (segment === 'hidden') return !c.published;
+    return true;
+  });
+  const counts = {
+    all: collections.length,
+    active: collections.filter((c) => c.published).length,
+    hidden: collections.filter((c) => !c.published).length,
+  };
 
   const fetchCollections = async () => {
     setLoading(true);
@@ -153,7 +177,34 @@ export default function CollectionsPage() {
           </div>
         )}
 
-        {/* Filters */}
+        {/* Shopify-style status segment tabs */}
+        <div className="bg-white rounded-lg shadow mb-4 p-3">
+          <div className="flex items-center gap-2 flex-wrap">
+            {SEGMENTS.map((s) => (
+              <button
+                key={s.key}
+                type="button"
+                onClick={() => setSegment(s.key)}
+                className={`inline-flex items-center gap-2 px-3 py-1.5 text-sm rounded-lg border transition-colors ${
+                  segment === s.key
+                    ? 'bg-blue-600 text-white border-blue-600'
+                    : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-50'
+                }`}
+              >
+                <span>{s.label}</span>
+                <span
+                  className={`text-[11px] px-1.5 rounded-full ${
+                    segment === s.key ? 'bg-white/20 text-white' : 'bg-slate-100 text-slate-600'
+                  }`}
+                >
+                  {counts[s.key]}
+                </span>
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Search + type filter */}
         <div className="bg-white rounded-lg shadow mb-6 p-4">
           <div className="flex flex-col sm:flex-row gap-3">
             <div className="relative flex-1">
@@ -166,40 +217,28 @@ export default function CollectionsPage() {
                 className="w-full pl-10 pr-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm"
               />
             </div>
-            <div className="flex gap-2">
-              <button
-                type="button"
-                onClick={() => setTypeFilter('')}
-                className={`px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
-                  typeFilter === ''
-                    ? 'bg-blue-600 text-white'
-                    : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-                }`}
-              >
-                All
-              </button>
-              <button
-                type="button"
-                onClick={() => setTypeFilter('CUSTOM')}
-                className={`px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
-                  typeFilter === 'CUSTOM'
-                    ? 'bg-blue-600 text-white'
-                    : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-                }`}
-              >
-                Custom
-              </button>
-              <button
-                type="button"
-                onClick={() => setTypeFilter('SMART')}
-                className={`px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
-                  typeFilter === 'SMART'
-                    ? 'bg-blue-600 text-white'
-                    : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-                }`}
-              >
-                Smart
-              </button>
+            <div className="flex gap-2 items-center">
+              <span className="text-xs text-slate-500 uppercase tracking-wider">
+                Type
+              </span>
+              {[
+                { val: '', label: 'All' },
+                { val: 'CUSTOM', label: 'Custom' },
+                { val: 'SMART', label: 'Smart' },
+              ].map((t) => (
+                <button
+                  key={t.val}
+                  type="button"
+                  onClick={() => setTypeFilter(t.val)}
+                  className={`px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
+                    typeFilter === t.val
+                      ? 'bg-blue-600 text-white'
+                      : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                  }`}
+                >
+                  {t.label}
+                </button>
+              ))}
             </div>
           </div>
         </div>
@@ -209,19 +248,21 @@ export default function CollectionsPage() {
           <div className="flex items-center justify-center py-12">
             <Loader2 className="w-8 h-8 animate-spin text-blue-600" />
           </div>
-        ) : collections.length === 0 ? (
+        ) : visibleCollections.length === 0 ? (
           <div className="bg-white rounded-lg shadow p-12 text-center">
             <FolderOpen className="w-12 h-12 text-gray-300 mx-auto mb-4" />
             <h3 className="text-lg font-semibold text-gray-900 mb-2">No collections found</h3>
             <p className="text-sm text-gray-500 mb-4">
               {search
                 ? 'Try a different search term.'
-                : 'Click "Sync from Shopify" to pull your collections.'}
+                : segment !== 'all'
+                  ? `No ${segment} collections. Switch to "All" to see everything.`
+                  : 'Click "Sync from Shopify" to pull your collections.'}
             </p>
           </div>
         ) : (
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-            {collections.map((col) => (
+            {visibleCollections.map((col) => (
               <Link
                 key={col.id}
                 href={`/dashboard/collections/${col.id}`}
@@ -241,20 +282,36 @@ export default function CollectionsPage() {
                     </div>
                   )}
 
-                  {/* Type badge */}
-                  <span
-                    className={`absolute top-2 right-2 px-2 py-0.5 rounded text-xs font-medium ${
-                      col.collectionType === 'SMART'
-                        ? 'bg-purple-100 text-purple-700'
-                        : 'bg-blue-100 text-blue-700'
-                    }`}
-                  >
-                    {col.collectionType}
-                  </span>
+                  {/* Top-right stack: type + published status */}
+                  <div className="absolute top-2 right-2 flex flex-col gap-1 items-end">
+                    <span
+                      className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium border ${
+                        col.collectionType === 'SMART'
+                          ? 'bg-purple-50 text-purple-700 border-purple-200'
+                          : 'bg-blue-50 text-blue-700 border-blue-200'
+                      }`}
+                    >
+                      {col.collectionType}
+                    </span>
+                    <span
+                      className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium border ${
+                        col.published
+                          ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                          : 'bg-slate-100 text-slate-600 border-slate-200'
+                      }`}
+                    >
+                      {col.published ? (
+                        <Eye className="w-3 h-3" />
+                      ) : (
+                        <EyeOff className="w-3 h-3" />
+                      )}
+                      {col.published ? 'Active' : 'Hidden'}
+                    </span>
+                  </div>
 
                   {/* Locally modified badge */}
                   {col.locallyModified && (
-                    <span className="absolute top-2 left-2 px-2 py-0.5 rounded text-xs font-medium bg-amber-100 text-amber-700">
+                    <span className="absolute top-2 left-2 px-2 py-0.5 rounded-full text-[11px] font-medium bg-amber-50 text-amber-700 border border-amber-200">
                       Modified
                     </span>
                   )}
@@ -262,9 +319,23 @@ export default function CollectionsPage() {
 
                 {/* Content */}
                 <div className="p-4">
-                  <h3 className="font-semibold text-gray-900 group-hover:text-blue-600 transition-colors truncate">
-                    {col.title}
-                  </h3>
+                  <div className="flex items-start justify-between gap-2">
+                    <h3 className="font-semibold text-gray-900 group-hover:text-blue-600 transition-colors truncate flex-1">
+                      {col.title}
+                    </h3>
+                    {col.shopifyCollectionId && (
+                      <a
+                        href={`https://${(process.env.NEXT_PUBLIC_SHOPIFY_STORE_URL || 'bokaro-better-vision.myshopify.com')}/admin/collections/${col.shopifyCollectionId.split('/').pop()}`}
+                        target="_blank"
+                        rel="noreferrer"
+                        onClick={(e) => e.stopPropagation()}
+                        className="text-slate-400 hover:text-blue-600 flex-shrink-0"
+                        title="Open in Shopify"
+                      >
+                        <ExternalLink className="w-3.5 h-3.5" />
+                      </a>
+                    )}
+                  </div>
                   {col.description && (
                     <p className="text-sm text-gray-500 mt-1 line-clamp-2">{col.description}</p>
                   )}
@@ -289,10 +360,11 @@ export default function CollectionsPage() {
         )}
 
         {/* Summary */}
-        {!loading && collections.length > 0 && (
+        {!loading && visibleCollections.length > 0 && (
           <div className="mt-4 text-sm text-gray-500 text-center">
-            {collections.length} collection{collections.length !== 1 ? 's' : ''}
-            {typeFilter && ` (${typeFilter.toLowerCase()})`}
+            Showing {visibleCollections.length} of {collections.length} collection{collections.length !== 1 ? 's' : ''}
+            {typeFilter && ` · type ${typeFilter.toLowerCase()}`}
+            {segment !== 'all' && ` · ${segment}`}
           </div>
         )}
       </div>
