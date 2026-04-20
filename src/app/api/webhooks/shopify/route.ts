@@ -561,6 +561,143 @@ async function handleCollectionDelete(payload: any) {
     .catch(() => {});
 }
 
+// ── Location CRUD webhooks ──────────────────────────────
+// Payload shape (REST): { id, name, address1, city, province, zip, country,
+//                         active, ... }
+async function handleLocationCreateUpdate(payload: any): Promise<string | null> {
+  if (!payload?.id) return "missing location id";
+  const shopifyLocationId = `gid://shopify/Location/${payload.id}`;
+  const code =
+    (payload.name || "")
+      .toString()
+      .toUpperCase()
+      .replace(/[^A-Z0-9]/g, "")
+      .substring(0, 10) || `SHOP-${payload.id}`;
+  const addressParts = [
+    payload.address1,
+    payload.address2,
+    [payload.city, payload.province, payload.zip].filter(Boolean).join(", "),
+    payload.country,
+  ].filter((p): p is string => Boolean(p && p.trim()));
+  await prisma.location.upsert({
+    where: { shopifyLocationId },
+    update: {
+      name: payload.name || "",
+      address: addressParts.join(", ") || null,
+      isActive: payload.active !== false,
+    },
+    create: {
+      name: payload.name || "",
+      code,
+      address: addressParts.join(", ") || null,
+      shopifyLocationId,
+      isActive: payload.active !== false,
+    },
+  });
+  return null;
+}
+
+async function handleLocationDelete(payload: any): Promise<string | null> {
+  if (!payload?.id) return "missing location id";
+  const shopifyLocationId = `gid://shopify/Location/${payload.id}`;
+  const existing = await prisma.location.findUnique({
+    where: { shopifyLocationId },
+    select: { id: true, name: true },
+  });
+  if (!existing) return "location not in local DB";
+  // Soft-delete — mark inactive rather than drop rows that inventory still references.
+  await prisma.location.update({
+    where: { id: existing.id },
+    data: { isActive: false, shopifyLocationId: null },
+  });
+  return null;
+}
+
+// ── Inventory item (SKU/barcode changes on a variant) ───
+async function handleInventoryItemUpdate(payload: any): Promise<string | null> {
+  const rawId = payload?.id;
+  if (!rawId) return "missing inventory_item id";
+  const itemGid = `gid://shopify/InventoryItem/${rawId}`;
+  const variant = await prisma.productVariant.findFirst({
+    where: { shopifyInventoryItemId: itemGid },
+    select: { id: true },
+  });
+  if (!variant) return `variant not found for inventory_item ${rawId}`;
+  const data: Record<string, unknown> = {};
+  if (typeof payload.sku === "string" && payload.sku.trim()) data.sku = payload.sku;
+  // Shopify sometimes ships barcode directly on inventory_item
+  if (typeof payload.barcode === "string") data.barcode = payload.barcode || null;
+  if (Object.keys(data).length === 0) return "no sku/barcode changes in payload";
+  await prisma.productVariant.update({ where: { id: variant.id }, data });
+  return null;
+}
+
+// ── Order delete ────────────────────────────────────────
+async function handleOrderDelete(payload: any): Promise<string | null> {
+  if (!payload?.id) return "missing order id";
+  const shopifyOrderId = `gid://shopify/Order/${payload.id}`;
+  const existing = await prisma.order.findUnique({
+    where: { shopifyOrderId },
+    select: { id: true, customerId: true },
+  });
+  if (!existing) return "order not in local DB";
+  await prisma.order.delete({ where: { id: existing.id } });
+  if (existing.customerId) {
+    await recomputeCustomerAggregates([existing.customerId]);
+  }
+  return null;
+}
+
+// ── Refund ──────────────────────────────────────────────
+// Payload has { id, order_id, note, transactions[], refund_line_items[], ... }
+async function handleRefundCreate(payload: any): Promise<string | null> {
+  if (!payload?.order_id) return "missing order_id";
+  const shopifyOrderId = `gid://shopify/Order/${payload.order_id}`;
+  const order = await prisma.order.findUnique({
+    where: { shopifyOrderId },
+    select: { id: true, customerId: true },
+  });
+  if (!order) return "order not in local DB — did orders/sync run?";
+  // Flag the order as refunded/partially_refunded; exact state depends
+  // on whether the refund covers the full total, which we don't compute
+  // here. Just mark "partially_refunded" and let the next orders sync
+  // correct it.
+  await prisma.order.update({
+    where: { id: order.id },
+    data: { financialStatus: "partially_refunded" },
+  });
+  // Recompute customer totals so refunds affect lifetime spent.
+  if (order.customerId) {
+    await recomputeCustomerAggregates([order.customerId]);
+  }
+  return null;
+}
+
+// ── Fulfillment (order fulfillment status transitions) ──
+async function handleFulfillmentCreateUpdate(payload: any): Promise<string | null> {
+  const rawOrderId = payload?.order_id;
+  if (!rawOrderId) return "missing order_id";
+  const shopifyOrderId = `gid://shopify/Order/${rawOrderId}`;
+  const order = await prisma.order.findUnique({
+    where: { shopifyOrderId },
+    select: { id: true },
+  });
+  if (!order) return "order not in local DB";
+  // Map Shopify's fulfillment status (e.g. "success", "in_transit", "cancelled")
+  // to something our orders list can group on. Conservative mapping:
+  const s = (payload.status || "").toLowerCase();
+  let fulfillmentStatus: string | null = null;
+  if (s === "success" || s === "delivered") fulfillmentStatus = "fulfilled";
+  else if (s === "in_transit" || s === "pending") fulfillmentStatus = "partial";
+  else if (s === "cancelled" || s === "failure") fulfillmentStatus = "unfulfilled";
+  if (!fulfillmentStatus) return `unknown fulfillment status: ${payload.status}`;
+  await prisma.order.update({
+    where: { id: order.id },
+    data: { fulfillmentStatus },
+  });
+  return null;
+}
+
 function guessCategory(payload: any): string {
   const type = (payload.product_type || "").toLowerCase();
   const tags = (payload.tags || "").toLowerCase();
@@ -629,7 +766,25 @@ async function processWebhookInBackground(
         break;
       case "fulfillments/create":
       case "fulfillments/update":
-        console.log(`Fulfillment event: ${topic} for order ${payload.order_id}`);
+        skipReason = await handleFulfillmentCreateUpdate(payload);
+        break;
+      case "locations/create":
+      case "locations/update":
+      case "locations/activate":
+      case "locations/deactivate":
+        skipReason = await handleLocationCreateUpdate(payload);
+        break;
+      case "locations/delete":
+        skipReason = await handleLocationDelete(payload);
+        break;
+      case "inventory_items/update":
+        skipReason = await handleInventoryItemUpdate(payload);
+        break;
+      case "orders/delete":
+        skipReason = await handleOrderDelete(payload);
+        break;
+      case "refunds/create":
+        skipReason = await handleRefundCreate(payload);
         break;
       case "app/uninstalled":
         console.warn("App uninstalled from Shopify store!");

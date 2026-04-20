@@ -7,25 +7,45 @@ import {
   deleteWebhook,
 } from "@/lib/shopify";
 
-// The webhook topics we want to subscribe to
+// The webhook topics we want to subscribe to. GraphQL uses SHOUTY_SNAKE_CASE
+// for topic names; the incoming webhook payload's X-Shopify-Topic header
+// uses dotted lowercase (e.g. "orders/create") which is what the dispatcher
+// in /api/webhooks/shopify/route.ts matches on.
 const WEBHOOK_TOPICS = [
+  // Products
   "PRODUCTS_CREATE",
   "PRODUCTS_UPDATE",
   "PRODUCTS_DELETE",
+  // Inventory
   "INVENTORY_LEVELS_UPDATE",
+  "INVENTORY_ITEMS_UPDATE",
+  // Orders
   "ORDERS_CREATE",
   "ORDERS_UPDATED",
   "ORDERS_CANCELLED",
   "ORDERS_FULFILLED",
   "ORDERS_PAID",
+  "ORDERS_DELETE",
+  // Refunds (track refunded orders + recompute customer totals)
+  "REFUNDS_CREATE",
+  // Customers
   "CUSTOMERS_CREATE",
   "CUSTOMERS_UPDATE",
   "CUSTOMERS_DELETE",
+  // Collections
   "COLLECTIONS_CREATE",
   "COLLECTIONS_UPDATE",
   "COLLECTIONS_DELETE",
+  // Fulfillments (order ship/deliver state)
   "FULFILLMENTS_CREATE",
   "FULFILLMENTS_UPDATE",
+  // Locations (keep our Location table auto-synced)
+  "LOCATIONS_CREATE",
+  "LOCATIONS_UPDATE",
+  "LOCATIONS_DELETE",
+  "LOCATIONS_ACTIVATE",
+  "LOCATIONS_DEACTIVATE",
+  // App lifecycle
   "APP_UNINSTALLED",
 ] as const;
 
