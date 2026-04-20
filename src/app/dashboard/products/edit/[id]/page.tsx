@@ -481,9 +481,9 @@ export default function EditProductPage() {
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 sm:gap-6">
           {/* Form */}
           <form onSubmit={(e) => handleSubmit(e, 'DRAFT')} className="lg:col-span-2">
-            <div className="bg-white rounded-lg shadow">
+            <div className="space-y-4">
               {/* Product Type Selector */}
-              <div className="border-b border-gray-200 p-6">
+              <div className="bg-white rounded-lg shadow-sm border border-slate-200 p-6">
                 <h2 className="text-lg font-semibold text-gray-900 mb-4">
                   Product Type
                 </h2>
@@ -506,7 +506,7 @@ export default function EditProductPage() {
               </div>
 
               {/* Section 1: Brand & Identity */}
-              <div className="border-b border-gray-200 p-6">
+              <div className="bg-white rounded-lg shadow-sm border border-slate-200 p-6">
                 <h3 className="text-base font-semibold text-gray-900 mb-4">
                   Brand & Identity
                 </h3>
@@ -566,7 +566,7 @@ export default function EditProductPage() {
 
               {/* Section 2: Frame Attributes (product-level only) */}
               {formData.category !== 'SOLUTIONS' && (
-                <div className="border-b border-gray-200 p-6">
+                <div className="bg-white rounded-lg shadow-sm border border-slate-200 p-6">
                   <h3 className="text-base font-semibold text-gray-900 mb-4">
                     Frame Attributes
                   </h3>
@@ -601,7 +601,7 @@ export default function EditProductPage() {
 
               {/* Section 4: Lens Attributes (product-level only) */}
               {formData.category === 'SUNGLASSES' && (
-                <div className="border-b border-gray-200 p-6">
+                <div className="bg-white rounded-lg shadow-sm border border-slate-200 p-6">
                   <h3 className="text-base font-semibold text-gray-900 mb-4">
                     Lens Attributes
                   </h3>
@@ -636,7 +636,7 @@ export default function EditProductPage() {
 
               {/* Section 5: Solutions Info */}
               {formData.category === 'SOLUTIONS' && (
-                <div className="border-b border-gray-200 p-6">
+                <div className="bg-white rounded-lg shadow-sm border border-slate-200 p-6">
                   <h3 className="text-base font-semibold text-gray-900 mb-4">
                     Solutions Info
                   </h3>
@@ -701,7 +701,7 @@ export default function EditProductPage() {
               )}
 
               {/* Section 6: General Info */}
-              <div className="border-b border-gray-200 p-6">
+              <div className="bg-white rounded-lg shadow-sm border border-slate-200 p-6">
                 <h3 className="text-base font-semibold text-gray-900 mb-4">
                   General Info
                 </h3>
@@ -768,7 +768,7 @@ export default function EditProductPage() {
               </div>
 
               {/* Section 7: Stock by Location */}
-              <div className="border-b border-gray-200 p-6">
+              <div className="bg-white rounded-lg shadow-sm border border-slate-200 p-6">
                 <h3 className="text-base font-semibold text-gray-900 mb-4">
                   Stock by Location
                 </h3>
@@ -793,7 +793,7 @@ export default function EditProductPage() {
               </div>
 
               {/* Section 8: Images */}
-              <div className="border-b border-gray-200 p-6">
+              <div className="bg-white rounded-lg shadow-sm border border-slate-200 p-6">
                 <h3 className="text-base font-semibold text-gray-900 mb-4">
                   Images
                 </h3>
@@ -843,7 +843,7 @@ export default function EditProductPage() {
               </div>
 
               {/* Submit Buttons */}
-              <div className="p-6 flex gap-4">
+              <div className="bg-white rounded-lg shadow-sm border border-slate-200 p-6 flex gap-4">
                 <button
                   type="submit"
                   disabled={loading}
