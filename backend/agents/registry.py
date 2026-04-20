@@ -64,27 +64,55 @@ async def dispatch_event(event: str, payload: Dict[str, Any], source: str = ""):
 def initialize_registry(db=None):
     """
     Create and register all agent instances.
-    Called during FastAPI startup.
+    Called during FastAPI startup. Wires the 8-agent Jarvis ecosystem
+    (CORTEX + SENTINEL + 5 domain agents from Phase 3 + JARVIS NLP core
+    that lives in api/routers/jarvis.py).
     """
-    from .implementations.sentinel import SentinelAgent
+    # Core agents — not toggleable
     from .implementations.cortex import CortexOrchestrator
+    from .implementations.sentinel import SentinelAgent
+    # Phase 3 domain agents — toggleable
+    from .implementations.pixel import PixelAgent
+    from .implementations.megaphone import MegaphoneAgent
+    from .implementations.oracle import OracleAgent
+    from .implementations.taskmaster import TaskmasterAgent
+    from .implementations.nexus import NexusAgent
 
-    # Register core agents (not toggleable)
-    cortex = CortexOrchestrator(db=db)
-    register_agent(cortex)
+    # Core
+    register_agent(CortexOrchestrator(db=db))
+    register_agent(SentinelAgent(db=db))
 
-    # Register domain agents (toggleable)
-    sentinel = SentinelAgent(db=db)
-    register_agent(sentinel)
+    # Domain (Phase 3)
+    register_agent(PixelAgent(db=db))
+    register_agent(MegaphoneAgent(db=db))
+    register_agent(OracleAgent(db=db))
+    register_agent(TaskmasterAgent(db=db))
+    register_agent(NexusAgent(db=db))
 
-    # Subscribe to events
-    subscribe_event("agent.error", "cortex")
-    subscribe_event("agent.error", "sentinel")
-    subscribe_event("agent.toggled", "sentinel")
-    subscribe_event("system.degraded", "cortex")
-    subscribe_event("stock.below_reorder", "sentinel")
-    subscribe_event("anomaly.detected", "sentinel")
-    subscribe_event("anomaly.detected", "cortex")
+    # ── Event bus wiring ───────────────────────────────────────────
+    # CORTEX is the orchestrator — it sees system-wide signals
+    subscribe_event("agent.error",       "cortex")
+    subscribe_event("system.degraded",   "cortex")
+    subscribe_event("anomaly.detected",  "cortex")
+
+    # SENTINEL watches everything operational
+    subscribe_event("agent.error",       "sentinel")
+    subscribe_event("agent.toggled",     "sentinel")
+    subscribe_event("stock.below_reorder","sentinel")
+    subscribe_event("anomaly.detected",  "sentinel")
+    subscribe_event("sync.failed",       "sentinel")
+
+    # PIXEL listens for Vercel deploy events to trigger an audit cycle
+    subscribe_event("deploy.success",    "pixel")
+    subscribe_event("deploy.failure",    "pixel")
+
+    # TASKMASTER acts on actionable signals (the only agent that writes state)
+    subscribe_event("stock.below_reorder", "taskmaster")
+    subscribe_event("anomaly.detected",    "taskmaster")
+    subscribe_event("sla.breached",        "taskmaster")
+
+    # NEXUS handles inbound webhooks
+    subscribe_event("webhook.received",  "nexus")
 
     logger.info(f"[REGISTRY] Initialized {len(AGENT_REGISTRY)} agents")
     return AGENT_REGISTRY

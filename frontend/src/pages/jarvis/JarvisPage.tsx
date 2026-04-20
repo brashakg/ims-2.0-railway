@@ -370,18 +370,21 @@ Is there a specific aspect you'd like me to dive deeper into? I can provide deta
   ];
 
   // 8 Jarvis superhero agents — from docs/reference/IMS2_Agent_Architecture.html.
-  // Current state: CORTEX + SENTINEL implemented (backend/agents/implementations),
-  // the other 6 are Phase 3 work. Shown here as "pending" so the control surface
-  // reflects the roadmap honestly.
+  // Phase 3 (commit incoming) lit up PIXEL, MEGAPHONE, ORACLE, TASKMASTER,
+  // NEXUS — all 8 agents are now live in backend/agents/implementations.
+  // Each is OFF by default per their seeded config (Superadmin opts in via
+  // the toggle); the status here just says "the code exists and runs".
+  // The acts24h numbers are mock-derived sample values until SENTINEL
+  // populates them from the agent_audit_log collection (next pass).
   const AGENTS = [
-    { id: 'JARVIS',     hero: 'J.A.R.V.I.S. (Marvel)',    role: 'Foundation · NLP & conversation core',             schedule: 'Always-on',               status: 'live',    acts24h: 0 },
-    { id: 'CORTEX',     hero: 'Professor X (Marvel)',     role: 'Orchestrator · command router',                    schedule: 'Event-driven',            status: 'live',    acts24h: 12 },
-    { id: 'SENTINEL',   hero: 'The Sentinels (Marvel)',   role: 'System health & monitoring',                       schedule: 'Every 60s',               status: 'live',    acts24h: 94 },
-    { id: 'PIXEL',      hero: 'Batman (DC)',              role: 'UI/UX quality · deploy audit · a11y',              schedule: 'Daily 2 AM + on deploy',  status: 'pending', acts24h: 0 },
-    { id: 'MEGAPHONE',  hero: 'Black Canary (DC)',        role: 'Marketing · Rx expiry / birthday / follow-up',     schedule: '30 min + daily 9 AM',     status: 'pending', acts24h: 0 },
-    { id: 'ORACLE',     hero: 'Oracle / Barbara Gordon',  role: 'AI analysis · anomaly scan + EOD sweep',           schedule: 'Hourly + 10 PM',          status: 'pending', acts24h: 0 },
-    { id: 'TASKMASTER', hero: 'Taskmaster (Marvel)',      role: 'Real execution · SLA, SOP, auto-reorder',          schedule: 'Every 5 min',             status: 'pending', acts24h: 0 },
-    { id: 'NEXUS',      hero: 'Cyborg (DC)',              role: 'Integration sync · Shopify / Razorpay / Shiprocket', schedule: 'Hourly + webhook',        status: 'pending', acts24h: 0 },
+    { id: 'JARVIS',     hero: 'J.A.R.V.I.S. (Marvel)',    role: 'Foundation · NLP & conversation core',             schedule: 'Always-on',               status: 'live', acts24h: 0 },
+    { id: 'CORTEX',     hero: 'Professor X (Marvel)',     role: 'Orchestrator · command router',                    schedule: 'Event-driven',            status: 'live', acts24h: 12 },
+    { id: 'SENTINEL',   hero: 'The Sentinels (Marvel)',   role: 'System health & monitoring',                       schedule: 'Every 60s',               status: 'live', acts24h: 94 },
+    { id: 'PIXEL',      hero: 'Batman (DC)',              role: 'UI/UX quality · deploy audit · a11y',              schedule: 'Daily 2 AM + on deploy',  status: 'live', acts24h: 0 },
+    { id: 'MEGAPHONE',  hero: 'Black Canary (DC)',        role: 'Marketing · Rx expiry / birthday / follow-up',     schedule: '30 min + daily 9 AM',     status: 'live', acts24h: 0 },
+    { id: 'ORACLE',     hero: 'Oracle / Barbara Gordon',  role: 'AI analysis · anomaly scan + EOD sweep',           schedule: 'Hourly + 10 PM',          status: 'live', acts24h: 0 },
+    { id: 'TASKMASTER', hero: 'Taskmaster (Marvel)',      role: 'Real execution · SLA, SOP, auto-reorder',          schedule: 'Every 5 min',             status: 'live', acts24h: 0 },
+    { id: 'NEXUS',      hero: 'Cyborg (DC)',              role: 'Integration sync · Shopify / Razorpay / Shiprocket', schedule: 'Hourly + webhook',        status: 'live', acts24h: 0 },
   ];
   const liveAgents = AGENTS.filter(a => a.status === 'live').length;
   const totalActs24h = AGENTS.reduce((sum, a) => sum + a.acts24h, 0);
