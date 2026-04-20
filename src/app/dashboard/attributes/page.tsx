@@ -162,9 +162,18 @@ export default function AttributesPage() {
   }
 
   return (
-    <div className="min-h-screen bg-slate-50 p-8">
+    <div className="min-h-screen bg-slate-50 p-4 sm:p-8">
       <div className="max-w-6xl mx-auto">
-        <h1 className="text-3xl font-bold text-slate-900 mb-8">Attribute Management</h1>
+        <div className="mb-6">
+          <h1 className="text-2xl sm:text-3xl font-bold text-slate-900">
+            Attributes
+          </h1>
+          <p className="text-sm text-slate-600 mt-1">
+            Dropdown options used across product forms (brands, shapes, frame
+            materials, lens types, etc.). Edit values here to have them appear
+            in every new/edit product screen.
+          </p>
+        </div>
 
         {error && (
           <div className="mb-4 p-4 bg-red-50 border border-red-200 rounded-lg text-red-700">

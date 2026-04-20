@@ -131,13 +131,19 @@ export default function UsersPage() {
   }
 
   return (
-    <div className="min-h-screen bg-slate-50 p-8">
+    <div className="min-h-screen bg-slate-50 p-4 sm:p-8">
       <div className="max-w-6xl mx-auto">
-        <div className="flex justify-between items-center mb-8">
-          <h1 className="text-3xl font-bold text-slate-900">User Management</h1>
+        <div className="flex justify-between items-start gap-4 flex-wrap mb-6">
+          <div>
+            <h1 className="text-2xl sm:text-3xl font-bold text-slate-900">Users</h1>
+            <p className="text-sm text-slate-600 mt-1">
+              Manage app accounts, roles (Admin / Catalog Manager / Design Manager),
+              and per-user location assignments.
+            </p>
+          </div>
           <button
             onClick={() => setShowModal(true)}
-            className="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition"
+            className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition text-sm"
           >
             Add User
           </button>
