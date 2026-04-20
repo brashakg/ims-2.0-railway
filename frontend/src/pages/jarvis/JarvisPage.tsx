@@ -60,6 +60,29 @@ interface Recommendation {
   impact: string;
 }
 
+// Live agent data shape from GET /api/v1/jarvis/agents
+interface LiveAgent {
+  agent_id: string;
+  agent_name: string;
+  agent_type: string;
+  description: string;
+  version: string;
+  enabled: boolean;
+  toggleable: boolean;
+  status: string;    // running | sleeping | stopped | error | starting
+  health: string;    // healthy | degraded | unhealthy | unknown
+  schedule_type: string;
+  schedule_value: string;
+  last_run: string | null;
+  last_status?: string;
+  last_error?: string | null;
+  run_count: number;
+  error_count: number;
+  avg_run_time_ms: number;
+  hero: string;
+  capabilities: string[];
+}
+
 export function JarvisPage() {
   const { hasRole } = useAuth();
   const [messages, setMessages] = useState<Message[]>([]);
@@ -68,6 +91,9 @@ export function JarvisPage() {
   const [insights, setInsights] = useState<QuickInsight | null>(null);
   const [recommendations, setRecommendations] = useState<Recommendation[]>([]);
   const [isListening, setIsListening] = useState(false);
+  const [liveAgents, setLiveAgents] = useState<LiveAgent[] | null>(null);
+  const [agentsErr, setAgentsErr] = useState<string | null>(null);
+  const [togglingId, setTogglingId] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   // STRICT ACCESS CONTROL - SUPERADMIN ONLY
@@ -83,10 +109,11 @@ export function JarvisPage() {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
-  // Load initial insights
+  // Load initial insights + live agent list
   useEffect(() => {
     loadInsights();
     loadRecommendations();
+    loadAgents();
     // Add initial greeting
     setMessages([
       {
@@ -97,6 +124,56 @@ export function JarvisPage() {
       },
     ]);
   }, []);
+
+  // ── Live agent fetch ───────────────────────────────────────────────
+  const loadAgents = async () => {
+    try {
+      const { data } = await api.get<{ agents: LiveAgent[]; total: number; enabled_count: number }>(
+        '/jarvis/agents'
+      );
+      setLiveAgents(data.agents ?? []);
+      setAgentsErr(null);
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.error('[JARVIS] Failed to load agents:', e);
+      setAgentsErr(e instanceof Error ? e.message : 'Could not load agents');
+      setLiveAgents(null);
+    }
+  };
+
+  const handleToggleAgent = async (agentId: string, nextEnabled: boolean) => {
+    setTogglingId(agentId);
+    try {
+      await api.patch(`/jarvis/agents/${agentId}/toggle`, { enabled: nextEnabled });
+      // Optimistic UI — flip locally, then refetch to pick up scheduler-side state
+      setLiveAgents((prev) =>
+        prev ? prev.map((a) => (a.agent_id === agentId ? { ...a, enabled: nextEnabled } : a)) : prev
+      );
+      // Refetch in the background for authoritative truth
+      loadAgents().catch(() => {});
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.error(`[JARVIS] Toggle failed for ${agentId}:`, e);
+    } finally {
+      setTogglingId(null);
+    }
+  };
+
+  const handleRunNow = async (agentId: string) => {
+    setTogglingId(agentId);
+    try {
+      await api.post(`/jarvis/agents/${agentId}/run-now`);
+      // Give the agent a moment, then refresh
+      setTimeout(() => {
+        loadAgents().catch(() => {});
+      }, 1500);
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.error(`[JARVIS] Run-now failed for ${agentId}:`, e);
+    } finally {
+      setTogglingId(null);
+    }
+  };
 
   const getGreeting = () => {
     const hour = new Date().getHours();
@@ -369,25 +446,54 @@ Is there a specific aspect you'd like me to dive deeper into? I can provide deta
     { label: 'Recommendations', query: 'What do you recommend?' },
   ];
 
-  // 8 Jarvis superhero agents — from docs/reference/IMS2_Agent_Architecture.html.
-  // Phase 3 (commit incoming) lit up PIXEL, MEGAPHONE, ORACLE, TASKMASTER,
-  // NEXUS — all 8 agents are now live in backend/agents/implementations.
-  // Each is OFF by default per their seeded config (Superadmin opts in via
-  // the toggle); the status here just says "the code exists and runs".
-  // The acts24h numbers are mock-derived sample values until SENTINEL
-  // populates them from the agent_audit_log collection (next pass).
-  const AGENTS = [
-    { id: 'JARVIS',     hero: 'J.A.R.V.I.S. (Marvel)',    role: 'Foundation · NLP & conversation core',             schedule: 'Always-on',               status: 'live', acts24h: 0 },
-    { id: 'CORTEX',     hero: 'Professor X (Marvel)',     role: 'Orchestrator · command router',                    schedule: 'Event-driven',            status: 'live', acts24h: 12 },
-    { id: 'SENTINEL',   hero: 'The Sentinels (Marvel)',   role: 'System health & monitoring',                       schedule: 'Every 60s',               status: 'live', acts24h: 94 },
-    { id: 'PIXEL',      hero: 'Batman (DC)',              role: 'UI/UX quality · deploy audit · a11y',              schedule: 'Daily 2 AM + on deploy',  status: 'live', acts24h: 0 },
-    { id: 'MEGAPHONE',  hero: 'Black Canary (DC)',        role: 'Marketing · Rx expiry / birthday / follow-up',     schedule: '30 min + daily 9 AM',     status: 'live', acts24h: 0 },
-    { id: 'ORACLE',     hero: 'Oracle / Barbara Gordon',  role: 'AI analysis · anomaly scan + EOD sweep',           schedule: 'Hourly + 10 PM',          status: 'live', acts24h: 0 },
-    { id: 'TASKMASTER', hero: 'Taskmaster (Marvel)',      role: 'Real execution · SLA, SOP, auto-reorder',          schedule: 'Every 5 min',             status: 'live', acts24h: 0 },
-    { id: 'NEXUS',      hero: 'Cyborg (DC)',              role: 'Integration sync · Shopify / Razorpay / Shiprocket', schedule: 'Hourly + webhook',        status: 'live', acts24h: 0 },
-  ];
-  const liveAgents = AGENTS.filter(a => a.status === 'live').length;
-  const totalActs24h = AGENTS.reduce((sum, a) => sum + a.acts24h, 0);
+  // Pretty schedule labels shown on each card — maps the MongoDB
+  // schedule_type + schedule_value into something human-readable.
+  const prettySchedule = (type: string, value: string) => {
+    if (type === 'event') return 'Event-driven';
+    if (type === 'interval') {
+      const secs = Number(value);
+      if (secs >= 3600) return `Every ${Math.round(secs / 3600)} h`;
+      if (secs >= 60) return `Every ${Math.round(secs / 60)} min`;
+      return `Every ${secs}s`;
+    }
+    if (type === 'cron') return `Cron: ${value}`;
+    return value || '—';
+  };
+
+  // JARVIS NLP core isn't a scheduler-tick agent — it lives in the
+  // /jarvis/query endpoint (api/routers/jarvis.py). Prepend it synthetically
+  // so the grid stays an 8-card roster per the architecture doc.
+  const JARVIS_STUB: LiveAgent = {
+    agent_id: 'jarvis',
+    agent_name: 'JARVIS',
+    agent_type: 'foundation',
+    description: 'Foundation · NLP & conversation core',
+    version: '1.0.0',
+    enabled: true,
+    toggleable: false,
+    status: 'running',
+    health: 'healthy',
+    schedule_type: 'event',
+    schedule_value: 'always-on',
+    last_run: null,
+    run_count: 0,
+    error_count: 0,
+    avg_run_time_ms: 0,
+    hero: "Iron Man's J.A.R.V.I.S.",
+    capabilities: ['nlp', 'conversation', 'claude_bridge'],
+  };
+
+  // Merge JARVIS (synthetic) + live registry agents, in architecture order
+  const ORDER = ['jarvis', 'cortex', 'sentinel', 'pixel', 'megaphone', 'oracle', 'taskmaster', 'nexus'];
+  const agentsForGrid: LiveAgent[] = liveAgents
+    ? [JARVIS_STUB, ...liveAgents].sort(
+        (a, b) => ORDER.indexOf(a.agent_id) - ORDER.indexOf(b.agent_id)
+      )
+    : [JARVIS_STUB];
+
+  const enabledCount = agentsForGrid.filter((a) => a.enabled).length;
+  const totalActs24h = agentsForGrid.reduce((s, a) => s + (a.run_count || 0), 0);
+  const awaitingApproval = 0; // Phase 4: count from agent_audit_log where tier=2 requires_approval=true
 
   return (
     <div style={{ padding: '24px 28px 60px', background: 'var(--bg)', minHeight: 'calc(100vh - 52px)', overflowY: 'auto' }}>
@@ -422,15 +528,15 @@ Is there a specific aspect you'd like me to dive deeper into? I can provide deta
           </p>
           <div style={{ display: 'flex', gap: 18, fontFamily: 'var(--font-mono)', fontSize: 11, color: '#8a8a82', marginTop: 16, textTransform: 'uppercase', letterSpacing: '.08em' }}>
             <div style={{ paddingRight: 18, borderRight: '1px solid #2e2e2b' }}>
-              <div className="figure" style={{ fontSize: 26, color: '#fff', textTransform: 'none', letterSpacing: '-.02em' }}>{liveAgents}/8</div>
-              agents live
+              <div className="figure" style={{ fontSize: 26, color: '#fff', textTransform: 'none', letterSpacing: '-.02em' }}>{enabledCount}/8</div>
+              agents enabled
             </div>
             <div style={{ paddingRight: 18, borderRight: '1px solid #2e2e2b' }}>
               <div className="figure" style={{ fontSize: 26, color: '#fff', textTransform: 'none', letterSpacing: '-.02em' }}>{totalActs24h}</div>
-              actions · 24h
+              runs · lifetime
             </div>
             <div>
-              <div className="figure" style={{ fontSize: 26, color: '#fff', textTransform: 'none', letterSpacing: '-.02em' }}>0</div>
+              <div className="figure" style={{ fontSize: 26, color: '#fff', textTransform: 'none', letterSpacing: '-.02em' }}>{awaitingApproval}</div>
               awaiting approval
             </div>
           </div>
@@ -442,6 +548,7 @@ Is there a specific aspect you'd like me to dive deeper into? I can provide deta
             onClick={() => {
               loadInsights();
               loadRecommendations();
+              loadAgents();
             }}
           >
             <RefreshCw className="w-3.5 h-3.5" /> Refresh
@@ -452,57 +559,131 @@ Is there a specific aspect you'd like me to dive deeper into? I can provide deta
         </div>
       </section>
 
-      {/* ── Agent grid (2 cols) ── */}
-      <div className="eyebrow" style={{ marginBottom: 10 }}>Agents</div>
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(380px, 1fr))', gap: 14, marginBottom: 24 }}>
-        {AGENTS.map((a) => (
-          <div
-            key={a.id}
-            style={{
-              background: 'var(--surface)',
-              border: '1px solid var(--line)',
-              borderRadius: 'var(--r-lg)',
-              padding: 18,
-              display: 'grid',
-              gridTemplateColumns: '48px 1fr auto',
-              gap: 14,
-              alignItems: 'flex-start',
-              position: 'relative',
-              overflow: 'hidden',
-              opacity: a.status === 'pending' ? 0.7 : 1,
-            }}
-          >
+      {/* ── Agent grid ── */}
+      <div className="eyebrow" style={{ marginBottom: 10, display: 'flex', alignItems: 'center', gap: 10 }}>
+        <span>Agents · {enabledCount}/{agentsForGrid.length} enabled</span>
+        {agentsErr && (
+          <span className="chip err" style={{ marginLeft: 'auto' }}>Live fetch failed: {agentsErr}</span>
+        )}
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(420px, 1fr))', gap: 14, marginBottom: 24 }}>
+        {agentsForGrid.map((a) => {
+          const isToggling = togglingId === a.agent_id;
+          const isHealthy = a.health === 'healthy' || a.health === 'unknown';
+          const chipTone = !a.enabled ? 'neutral' : a.health === 'unhealthy' ? 'err' : a.health === 'degraded' ? 'warn' : 'ok';
+          const statusLabel = !a.enabled ? 'paused'
+            : a.health === 'unhealthy' ? 'error'
+            : a.status === 'running' ? 'running'
+            : a.status === 'sleeping' ? 'sleeping'
+            : a.status;
+          return (
             <div
+              key={a.agent_id}
               style={{
-                width: 48,
-                height: 48,
-                borderRadius: 10,
-                background: a.status === 'live' ? 'var(--ink)' : 'var(--bg-sunk)',
-                color: a.status === 'live' ? '#fff' : 'var(--ink-4)',
+                background: 'var(--surface)',
+                border: '1px solid var(--line)',
+                borderRadius: 'var(--r-lg)',
+                padding: 18,
                 display: 'grid',
-                placeItems: 'center',
-                fontFamily: 'var(--font-mono)',
-                fontSize: 12,
-                fontWeight: 600,
-                letterSpacing: '.04em',
+                gridTemplateColumns: '48px 1fr auto',
+                gap: 14,
+                alignItems: 'flex-start',
+                position: 'relative',
+                overflow: 'hidden',
+                opacity: a.enabled ? 1 : 0.7,
               }}
             >
-              {a.id.slice(0, 3)}
-            </div>
-            <div>
-              <h3 style={{ margin: '0 0 3px', font: '600 14px/1.2 var(--font-sans)', color: 'var(--ink)' }}>{a.id}</h3>
-              <div style={{ fontSize: 11, color: 'var(--ink-4)', marginBottom: 4, fontStyle: 'italic' }}>{a.hero}</div>
-              <div style={{ fontSize: 12.5, color: 'var(--ink-3)', lineHeight: 1.5, marginBottom: 10 }}>{a.role}</div>
-              <div style={{ display: 'flex', gap: 14, fontSize: 11, color: 'var(--ink-4)', fontFamily: 'var(--font-mono)' }}>
-                <span>Cadence · <strong style={{ color: 'var(--ink)', fontFamily: 'var(--font-sans)', fontWeight: 600, fontSize: 12 }}>{a.schedule}</strong></span>
-                <span>24h · <strong style={{ color: 'var(--ink)', fontFamily: 'var(--font-sans)', fontWeight: 600, fontSize: 12 }}>{a.acts24h} acts</strong></span>
+              <div
+                style={{
+                  width: 48,
+                  height: 48,
+                  borderRadius: 10,
+                  background: a.enabled && isHealthy ? 'var(--ink)' : 'var(--bg-sunk)',
+                  color: a.enabled && isHealthy ? '#fff' : 'var(--ink-4)',
+                  display: 'grid',
+                  placeItems: 'center',
+                  fontFamily: 'var(--font-mono)',
+                  fontSize: 12,
+                  fontWeight: 600,
+                  letterSpacing: '.04em',
+                  filter: a.enabled ? 'none' : 'grayscale(1)',
+                }}
+              >
+                {a.agent_name.slice(0, 3)}
+              </div>
+              <div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 3 }}>
+                  <h3 style={{ margin: 0, font: '600 14px/1.2 var(--font-sans)', color: 'var(--ink)' }}>
+                    {a.agent_name}
+                  </h3>
+                  {!a.toggleable && (
+                    <span className="chip" style={{ height: 18, fontSize: 9.5, fontFamily: 'var(--font-mono)' }}>CORE</span>
+                  )}
+                </div>
+                <div style={{ fontSize: 11, color: 'var(--ink-4)', marginBottom: 4, fontStyle: 'italic' }}>
+                  {a.hero || a.agent_type}
+                </div>
+                <div style={{ fontSize: 12.5, color: 'var(--ink-3)', lineHeight: 1.5, marginBottom: 10 }}>
+                  {a.description}
+                </div>
+                <div style={{ display: 'flex', gap: 14, fontSize: 11, color: 'var(--ink-4)', fontFamily: 'var(--font-mono)', flexWrap: 'wrap' }}>
+                  <span>Cadence · <strong style={{ color: 'var(--ink)', fontFamily: 'var(--font-sans)', fontWeight: 600, fontSize: 12 }}>
+                    {prettySchedule(a.schedule_type, a.schedule_value)}
+                  </strong></span>
+                  <span>Runs · <strong style={{ color: 'var(--ink)', fontFamily: 'var(--font-sans)', fontWeight: 600, fontSize: 12 }}>{a.run_count}</strong></span>
+                  {a.error_count > 0 && (
+                    <span style={{ color: 'var(--err)' }}>
+                      Errors · <strong style={{ fontFamily: 'var(--font-sans)', fontWeight: 600, fontSize: 12 }}>{a.error_count}</strong>
+                    </span>
+                  )}
+                </div>
+                {a.last_run && (
+                  <div style={{ fontSize: 10.5, color: 'var(--ink-5)', marginTop: 4, fontFamily: 'var(--font-mono)' }}>
+                    Last run: {new Date(a.last_run).toLocaleString([], { hour: '2-digit', minute: '2-digit', month: 'short', day: '2-digit' })}
+                  </div>
+                )}
+                {a.last_error && (
+                  <div style={{ fontSize: 10.5, color: 'var(--err)', marginTop: 4 }}>
+                    {a.last_error.slice(0, 120)}
+                  </div>
+                )}
+                {a.toggleable && a.enabled && (
+                  <button
+                    type="button"
+                    onClick={() => handleRunNow(a.agent_id)}
+                    disabled={isToggling}
+                    className="btn sm ghost"
+                    style={{ marginTop: 10, fontSize: 11, padding: '0 8px', height: 24 }}
+                  >
+                    <Zap className="w-3 h-3" /> Run now
+                  </button>
+                )}
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 10 }}>
+                <span className={'chip ' + chipTone}>
+                  <span className="dot" />{statusLabel}
+                </span>
+                {/* Toggle switch */}
+                {a.toggleable ? (
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={a.enabled}
+                    aria-label={`${a.enabled ? 'Disable' : 'Enable'} ${a.agent_name}`}
+                    onClick={() => handleToggleAgent(a.agent_id, !a.enabled)}
+                    disabled={isToggling}
+                    className={'tgl' + (a.enabled ? ' on' : '')}
+                    style={{ opacity: isToggling ? 0.5 : 1 }}
+                  />
+                ) : (
+                  <span style={{ fontFamily: 'var(--font-mono)', fontSize: 9.5, color: 'var(--ink-4)', textTransform: 'uppercase', letterSpacing: '.08em' }}>
+                    always on
+                  </span>
+                )}
               </div>
             </div>
-            <span className={'chip ' + (a.status === 'live' ? 'ok' : 'warn')}>
-              {a.status === 'live' ? 'running' : 'pending · Phase 3'}
-            </span>
-          </div>
-        ))}
+          );
+        })}
       </div>
 
       {/* ── Jarvis conversation (preserves original chat logic) ── */}
