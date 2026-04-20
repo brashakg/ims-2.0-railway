@@ -109,11 +109,14 @@ export function ReferralTracker() {
   const totalEarnings = REFERRERS.reduce((sum, r) => sum + r.earnings, 0);
 
   return (
-    <div className="space-y-6">
-      {/* Header */}
-      <div>
-        <h1 className="text-3xl font-bold">Referral Tracker</h1>
-        <p className="text-gray-500">Customer referral program analytics and management</p>
+    <div className="inv-body">
+      {/* Editorial header */}
+      <div className="inv-head">
+        <div>
+          <div className="eyebrow" style={{ marginBottom: 6 }}>CRM · Referrals</div>
+          <h1>Word of mouth, tracked.</h1>
+          <div className="hint">Who sent whom. Leaderboard with referral count, conversion rate, and earned rewards paid via wallet credit.</div>
+        </div>
       </div>
 
       {/* Summary Stats */}

@@ -207,19 +207,16 @@ export function FollowUpDashboard() {
   };
 
   return (
-    <div className="space-y-6">
-      {/* Header */}
-      <div className="flex items-center justify-between">
+    <div className="inv-body">
+      {/* Editorial header */}
+      <div className="inv-head">
         <div>
-          <h1 className="text-3xl font-bold text-gray-900">Follow-up Management</h1>
-          <p className="text-gray-500 mt-1">Track and manage customer follow-ups</p>
+          <div className="eyebrow" style={{ marginBottom: 6 }}>CRM · Follow-ups</div>
+          <h1>The nudge queue.</h1>
+          <div className="hint">Rx expiry · frame replacement · delivery confirm · NPS · birthday. Auto-generate from event triggers, staff-owned with due dates.</div>
         </div>
-        <button
-          onClick={handleAutoGenerate}
-          className="flex items-center gap-2 bg-blue-700 hover:bg-blue-600 text-white px-4 py-2 rounded-lg transition"
-        >
-          <RotateCcw className="w-4 h-4" />
-          Auto-Generate
+        <button onClick={handleAutoGenerate} className="btn sm primary">
+          <RotateCcw className="w-4 h-4" /> Auto-generate
         </button>
       </div>
 

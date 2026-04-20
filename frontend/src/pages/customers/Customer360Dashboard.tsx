@@ -323,16 +323,23 @@ export function Customer360Dashboard() {
   }
 
   return (
-    <div className="space-y-6">
-      {/* Header */}
-      <div className="flex items-center gap-4 mb-6">
-        <button
-          onClick={() => navigate('/customers')}
-          className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
-        >
-          <ArrowLeft className="w-5 h-5" />
-        </button>
-        <h1 className="text-3xl font-bold">Customer 360</h1>
+    <div className="inv-body">
+      {/* Editorial header */}
+      <div className="inv-head">
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          <button
+            onClick={() => navigate('/customers')}
+            className="btn icon ghost sm"
+            aria-label="Back to customers list"
+          >
+            <ArrowLeft className="w-4 h-4" />
+          </button>
+          <div>
+            <div className="eyebrow" style={{ marginBottom: 6 }}>Customer 360</div>
+            <h1>{customer?.name || 'Customer profile'}</h1>
+            <div className="hint">Full story: purchases, prescriptions, patients, loyalty, follow-ups, communication log.</div>
+          </div>
+        </div>
       </div>
 
       {/* Customer Header Card */}

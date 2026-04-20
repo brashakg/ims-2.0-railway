@@ -114,11 +114,14 @@ export function CustomerSegmentation() {
   const totalValue = SEGMENTS.reduce((sum, s) => sum + (s.avgLifetimeValue * s.customerCount), 0);
 
   return (
-    <div className="space-y-6">
-      {/* Header */}
-      <div className="space-y-2">
-        <h1 className="text-3xl font-bold">Customer Segmentation</h1>
-        <p className="text-gray-500">RFM Analysis: Identify customer segments and target campaigns</p>
+    <div className="inv-body">
+      {/* Editorial header */}
+      <div className="inv-head">
+        <div>
+          <div className="eyebrow" style={{ marginBottom: 6 }}>CRM · Segmentation</div>
+          <h1>Who to talk to, about what.</h1>
+          <div className="hint">RFM-based segments: Champions, Loyal, At-Risk, Hibernating, Lost. Feed campaigns and follow-up priority.</div>
+        </div>
       </div>
 
       {/* Summary Stats */}

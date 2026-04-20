@@ -6,7 +6,6 @@
 import { useState, useEffect } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import {
-  ShoppingBag,
   Plus,
   Search,
   FileText,
@@ -211,22 +210,20 @@ export function PurchaseManagementPage() {
   };
 
   return (
-    <div className="space-y-6">
-      {/* Header */}
-      <div className="flex items-center justify-between">
+    <div className="inv-body">
+      {/* Editorial header */}
+      <div className="inv-head">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900 flex items-center gap-2">
-            <ShoppingBag className="w-7 h-7 text-blue-600" />
-            Purchase Management
-          </h1>
-          <p className="text-gray-500 mt-1">Manage suppliers, purchase orders, and cost tracking</p>
+          <div className="eyebrow" style={{ marginBottom: 6 }}>Purchase &amp; Supply</div>
+          <h1>Stock, from upstream.</h1>
+          <div className="hint">Vendor ledger, purchase orders, GRN verification with quantity + price variance, payment aging, credit notes.</div>
         </div>
         <button
           onClick={() => activeTab === 'purchase-orders' ? setShowCreatePO(true) : setShowSupplierModal(true)}
-          className="btn-primary flex items-center gap-2"
+          className="btn sm primary"
         >
           <Plus className="w-4 h-4" />
-          {activeTab === 'purchase-orders' ? 'Create PO' : 'Add Supplier'}
+          {activeTab === 'purchase-orders' ? 'New PO' : 'New supplier'}
         </button>
       </div>
 

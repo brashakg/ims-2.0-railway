@@ -226,28 +226,20 @@ const loadJobs = async () => {
   };
 
   return (
-    <div className="space-y-4">
-      {/* Header */}
-      <div className="flex items-center justify-between">
+    <div className="inv-body">
+      {/* Editorial header */}
+      <div className="inv-head">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">Workshop</h1>
-          <p className="text-gray-500">Manage lens fitting and job orders</p>
+          <div className="eyebrow" style={{ marginBottom: 6 }}>Workshop</div>
+          <h1>From Rx to finished job.</h1>
+          <div className="hint">Lens ordered → received → mounted → QC. Assign by technician, auto-notify when ready, customer pickup with OTP verify.</div>
         </div>
-        <div className="flex items-center gap-2">
-          <button onClick={() => setShowCreateJob(true)}
-            className="btn-primary flex items-center gap-2 text-sm">
-            <Wrench className="w-4 h-4" /> Create Job from Order
+        <div className="row" style={{ gap: 8 }}>
+          <button onClick={() => setShowCreateJob(true)} className="btn sm primary">
+            <Wrench className="w-4 h-4" /> New job from order
           </button>
-          <button
-            onClick={loadJobs}
-            disabled={isLoading}
-            className="btn-outline flex items-center gap-2"
-          >
-            {isLoading ? (
-              <Loader2 className="w-4 h-4 animate-spin" />
-            ) : (
-              <RefreshCw className="w-4 h-4" />
-            )}
+          <button onClick={loadJobs} disabled={isLoading} className="btn sm">
+            {isLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
             Refresh
           </button>
         </div>

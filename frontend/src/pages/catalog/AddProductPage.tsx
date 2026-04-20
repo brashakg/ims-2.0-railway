@@ -858,11 +858,14 @@ export function AddProductPage() {
   };
 
   return (
-    <div className="space-y-6">
-      {/* Header */}
-      <div>
-        <h1 className="text-2xl font-bold text-gray-900">Add Product</h1>
-        <p className="text-gray-500">Create a new product in your catalog</p>
+    <div className="inv-body">
+      {/* Editorial header */}
+      <div className="inv-head">
+        <div>
+          <div className="eyebrow" style={{ marginBottom: 6 }}>Catalog · Add product</div>
+          <h1>A new SKU, end to end.</h1>
+          <div className="hint">Category → brand → attributes → pricing → store activation. Store-specific barcode generated on first GRN.</div>
+        </div>
       </div>
 
       {/* Progress Steps */}

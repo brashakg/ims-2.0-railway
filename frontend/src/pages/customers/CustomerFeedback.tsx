@@ -95,11 +95,14 @@ export function CustomerFeedback() {
   const complaints = FEEDBACK_DATA.filter(f => f.type === 'complaint');
 
   return (
-    <div className="space-y-6">
-      {/* Header */}
-      <div>
-        <h1 className="text-3xl font-bold">Customer Feedback</h1>
-        <p className="text-gray-500">NPS scores, sentiment analysis, complaints & store comparison</p>
+    <div className="inv-body">
+      {/* Editorial header */}
+      <div className="inv-head">
+        <div>
+          <div className="eyebrow" style={{ marginBottom: 6 }}>CRM · Feedback</div>
+          <h1>What they actually thought.</h1>
+          <div className="hint">NPS after every sale + eye test. Sentiment, complaint queue, store-vs-store comparison, Google review incentive.</div>
+        </div>
       </div>
 
       {/* Summary Stats */}

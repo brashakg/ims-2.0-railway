@@ -158,12 +158,13 @@ export function HRPage() {
   };
 
   return (
-    <div className="space-y-4">
-      {/* Header */}
-      <div className="flex items-center justify-between">
+    <div className="inv-body">
+      {/* Editorial header */}
+      <div className="inv-head">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">HR Management</h1>
-          <p className="text-gray-500">Attendance tracking and leave management</p>
+          <div className="eyebrow" style={{ marginBottom: 6 }}>HR &amp; Attendance</div>
+          <h1>Who's on the floor.</h1>
+          <div className="hint">Geo-fenced check-in, leave management, shift roster, payroll prep. Late marks auto-calculated from shift start.</div>
         </div>
         <div className="flex items-center gap-2">
           <button

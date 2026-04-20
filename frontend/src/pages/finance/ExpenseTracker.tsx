@@ -5,7 +5,6 @@
 
 import { useState, useEffect } from 'react';
 import {
-  DollarSign,
   Plus,
   Search,
   CheckCircle,
@@ -238,28 +237,22 @@ export default function ExpenseTracker() {
   }
 
   return (
-    <div className="min-h-screen bg-gray-50 p-6">
-      {/* Header */}
-      <div className="mb-8">
-        <div className="flex items-center justify-between mb-6">
-          <div className="flex items-center gap-3">
-            <div className="w-12 h-12 bg-blue-600 rounded-lg flex items-center justify-center">
-              <DollarSign className="w-6 h-6 text-white" />
-            </div>
-            <div>
-              <h1 className="text-3xl font-bold text-gray-900">Expense Tracking</h1>
-              <p className="text-gray-500">Manage and approve store expenses</p>
-            </div>
-          </div>
-          <button
-            onClick={() => setShowSubmitModal(true)}
-            className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
-          >
-            <Plus className="w-5 h-5" />
-            Submit Expense
-          </button>
+    <div className="inv-body">
+      {/* Editorial header */}
+      <div className="inv-head">
+        <div>
+          <div className="eyebrow" style={{ marginBottom: 6 }}>Expenses</div>
+          <h1>What went out.</h1>
+          <div className="hint">Submit · approve · settle. Category caps by role, mandatory bill attachment, duplicate-bill detection, aging for reimbursements.</div>
         </div>
-
+        <button
+          onClick={() => setShowSubmitModal(true)}
+          className="btn sm primary"
+        >
+          <Plus className="w-4 h-4" /> Submit expense
+        </button>
+      </div>
+      <div className="mb-8">
         {/* Summary Cards */}
         {summary && (
           <div className="grid grid-cols-1 md:grid-cols-4 gap-4">

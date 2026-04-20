@@ -293,20 +293,20 @@ export function OrdersPage() {
   };
 
   return (
-    <div className="space-y-4">
-      {/* Header */}
-      <div className="flex items-center justify-between">
+    <div className="inv-body">
+      {/* Editorial header */}
+      <div className="inv-head">
         <div>
-          <h1 className="text-2xl font-bold text-white">Orders</h1>
-          <p className="text-gray-500">View and manage all orders</p>
+          <div className="eyebrow" style={{ marginBottom: 6 }}>Orders</div>
+          <h1>What's in flight.</h1>
+          <div className="hint">Draft · confirmed · workshop · ready · delivered. Status moves only with role-gated transitions.</div>
         </div>
         <button
           onClick={loadOrders}
-          className="btn-outline flex items-center gap-2"
+          className="btn sm"
           disabled={isLoading}
         >
-          <RefreshCw className={clsx('w-4 h-4', isLoading && 'animate-spin')} />
-          Refresh
+          <RefreshCw className={clsx('w-4 h-4', isLoading && 'animate-spin')} /> Refresh
         </button>
       </div>
 

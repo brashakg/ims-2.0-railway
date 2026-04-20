@@ -137,8 +137,17 @@ export default function FinanceDashboard() {
   }
 
   return (
-    <div className="min-h-screen bg-gray-50 p-4 md:p-6">
-      <div className="max-w-7xl mx-auto">
+    <div className="inv-body">
+      {/* Editorial header */}
+      <div className="inv-head">
+        <div>
+          <div className="eyebrow" style={{ marginBottom: 6 }}>Finance &amp; Accounting</div>
+          <h1>The books, in real time.</h1>
+          <div className="hint">Revenue, P&amp;L, GST collected / payable, outstanding aging, cash flow, period lock after month-end. Tally export on sync.</div>
+        </div>
+      </div>
+
+      <div>
         <FinanceFilters
           selectedYear={selectedYear}
           onYearChange={setSelectedYear}

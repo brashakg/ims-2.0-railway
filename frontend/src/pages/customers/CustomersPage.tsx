@@ -295,20 +295,20 @@ export function CustomersPage() {
   // Customer List View
   if (viewMode === 'list') {
     return (
-      <div className="space-y-4">
-        {/* Header */}
-        <div className="flex items-center justify-between">
+      <div className="inv-body">
+        {/* Editorial header */}
+        <div className="inv-head">
           <div>
-            <h1 className="text-2xl font-bold text-gray-900">Customers</h1>
-            <p className="text-gray-500">Manage customers and patients</p>
+            <div className="eyebrow" style={{ marginBottom: 6 }}>Customers</div>
+            <h1>Every person who walked through.</h1>
+            <div className="hint">Unified profiles with patients, Rx history, loyalty tier, and follow-up reminders.</div>
           </div>
           {canAddCustomer && (
             <button
               onClick={() => setShowAddCustomerModal(true)}
-              className="btn-primary flex items-center gap-2"
+              className="btn sm primary"
             >
-              <Plus className="w-4 h-4" />
-              New Customer
+              <Plus className="w-4 h-4" /> New customer
             </button>
           )}
         </div>

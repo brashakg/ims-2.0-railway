@@ -5,7 +5,6 @@
 
 import { useState, useEffect } from 'react';
 import {
-  TrendingUp,
   Target,
   Zap,
   Medal,
@@ -159,15 +158,13 @@ export function IncentiveDashboard() {
   const data = dashboardData;
 
   return (
-    <div className="space-y-6 pb-8">
-      {/* Header */}
-      <div className="flex items-center justify-between">
+    <div className="inv-body">
+      {/* Editorial header */}
+      <div className="inv-head">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900 flex items-center gap-2">
-            <TrendingUp className="w-6 h-6 text-yellow-500" />
-            Incentive Tracking
-          </h1>
-          <p className="text-gray-500">Sales targets, kickers, and earnings dashboard</p>
+          <div className="eyebrow" style={{ marginBottom: 6 }}>Incentives</div>
+          <h1>Who earned what.</h1>
+          <div className="hint">3-tier slab (0.8% / 1.0% / 1.5%) with 80%-target floor and Zeiss/Safilo kickers. Real-time leaderboard, month-locked at close.</div>
         </div>
 
         {/* Month/Year Selector */}

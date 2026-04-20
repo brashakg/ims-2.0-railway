@@ -90,16 +90,16 @@ export function CampaignManager() {
   const [selectedCampaign, setSelectedCampaign] = useState<string | null>(null);
 
   return (
-    <div className="space-y-6">
-      {/* Header */}
-      <div className="flex items-center justify-between">
+    <div className="inv-body">
+      {/* Editorial header */}
+      <div className="inv-head">
         <div>
-          <h1 className="text-3xl font-bold">Campaign Manager</h1>
-          <p className="text-gray-500">Marketing campaigns for customer engagement</p>
+          <div className="eyebrow" style={{ marginBottom: 6 }}>Marketing · Campaigns</div>
+          <h1>Reach, on cue.</h1>
+          <div className="hint">WhatsApp + SMS campaigns against customer segments, triggered by life events (Rx expiry, birthday, walkout) or scheduled.</div>
         </div>
-        <button className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-semibold flex items-center gap-2">
-          <Plus className="w-5 h-5" />
-          Create Campaign
+        <button className="btn sm primary">
+          <Plus className="w-4 h-4" /> New campaign
         </button>
       </div>
 

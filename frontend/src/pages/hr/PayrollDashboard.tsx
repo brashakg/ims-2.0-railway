@@ -230,12 +230,13 @@ export function PayrollDashboard() {
   };
 
   return (
-    <div className="space-y-6">
-      {/* Header */}
-      <div className="flex items-center justify-between">
+    <div className="inv-body">
+      {/* Editorial header */}
+      <div className="inv-head">
         <div>
-          <h1 className="text-3xl font-bold text-gray-900">Payroll Management</h1>
-          <p className="text-gray-500">Indian optical retail chain salary structure</p>
+          <div className="eyebrow" style={{ marginBottom: 6 }}>Payroll</div>
+          <h1>Month-end, by the rupee.</h1>
+          <div className="hint">Basic + HRA + allowances − PF − ESI − PT − TDS − advances. Payslips, salary sheet export, month-lock after close.</div>
         </div>
       </div>
 

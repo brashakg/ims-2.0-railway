@@ -97,16 +97,16 @@ export function LoyaltyProgram() {
   const totalCustomers = LOYALTY_TIERS.reduce((sum, t) => sum + t.customerCount, 0);
 
   return (
-    <div className="space-y-6">
-      {/* Header */}
-      <div className="flex items-center justify-between">
+    <div className="inv-body">
+      {/* Editorial header */}
+      <div className="inv-head">
         <div>
-          <h1 className="text-3xl font-bold">Loyalty Program</h1>
-          <p className="text-gray-500">5-tier system with rewards and promotions</p>
+          <div className="eyebrow" style={{ marginBottom: 6 }}>CRM · Loyalty</div>
+          <h1>Reward what comes back.</h1>
+          <div className="hint">5-tier system (Silver / Gold / Platinum / Diamond / VIP). Points on ₹100 spend, redeemable at POS with cap.</div>
         </div>
-        <button className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-semibold flex items-center gap-2">
-          <Settings className="w-5 h-5" />
-          Program Settings
+        <button className="btn sm">
+          <Settings className="w-4 h-4" /> Program settings
         </button>
       </div>
 
