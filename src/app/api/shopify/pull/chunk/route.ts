@@ -4,9 +4,9 @@ import { requireAuth } from "@/lib/apiAuth";
 import { logActivity } from "@/lib/activityLog";
 import { fetchProductsPage } from "@/lib/shopify";
 import {
-  upsertProduct,
+  upsertShopifyProduct,
   syncShopifyLocationsToMap,
-} from "@/app/api/shopify/pull/route";
+} from "@/lib/shopifyPullHelpers";
 
 // Stay well under Railway's 300s cap so the browser never sees a
 // request killed mid-flight.
@@ -75,7 +75,7 @@ export async function POST(request: NextRequest) {
             where: { shopifyProductId: sp.id },
             select: { id: true },
           });
-          await upsertProduct(sp, locationMap);
+          await upsertShopifyProduct(sp, locationMap);
           productsProcessed++;
           if (existing) updatedCount++;
           else newCount++;

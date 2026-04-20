@@ -120,9 +120,11 @@ export async function generateSeoForProduct(
   });
 
   // Concatenate text blocks from the assistant's response.
-  const textOut = response.content
-    .filter((b): b is Anthropic.TextBlock => b.type === "text")
-    .map((b) => b.text)
+  // Use duck-typing so this works across SDK versions that may or may not
+  // export Anthropic.TextBlock as a named type.
+  const textOut = (response.content as Array<{ type: string; text?: string }>)
+    .filter((b) => b.type === "text" && typeof b.text === "string")
+    .map((b) => b.text as string)
     .join("");
 
   // Because we prefilled `{"seoTitle":`, Claude's response starts at the
