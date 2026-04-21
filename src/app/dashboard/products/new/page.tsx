@@ -1591,8 +1591,15 @@ export default function NewProductPage() {
                 </div>
               )}
 
-              {/* Section 8b: Variant Manager (hidden for categories that don't use color/size variants — accessories) */}
-              {variantMode && formData.category && formData.category !== 'ACCESSORIES' && (
+              {/* Section 8b: Variant Manager. Shown for every category that
+                   uses color/size variants. The old "variantMode" gate is
+                   dropped — the wizard already routes variant-only flows
+                   through stage='add-variant'; when we get here we're in
+                   the full-product form and should always offer variant
+                   entry. Only accessories and contact-lens boxes don't use
+                   color/size variants. */}
+              {formData.category &&
+                !['ACCESSORIES'].includes(formData.category) && (
                 <div className="bg-white rounded-lg shadow-sm border border-slate-200 p-6">
                   <h3 className="text-base font-semibold text-gray-900 mb-2">
                     Variants (Color × Size)

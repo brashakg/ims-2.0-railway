@@ -2,8 +2,17 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { requireAuth } from "@/lib/apiAuth";
 
-// GET /api/products/check-duplicate?brand=BOSS&modelNo=1234
-// Returns existing product(s) that share the same brand + model no
+// Strip every non-alphanumeric character and lowercase. Used to tolerate
+// variant spellings on brand and model number lookups:
+//   "Ray-Ban" <-> "Ray Ban" <-> "RAYBAN" <-> "rayban"
+//   "RB 3025" <-> "RB3025" <-> "rb-3025"
+function normalize(s: string): string {
+  return s.trim().toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+// GET /api/products/check-duplicate?brand=Ray+Ban&modelNo=RB+3025
+// Returns existing product(s) whose brand + modelNo match, tolerant of
+// punctuation / spacing differences between the query and stored values.
 export async function GET(request: NextRequest) {
   try {
     const auth = await requireAuth();
@@ -20,7 +29,9 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    const existing = await prisma.product.findMany({
+    // Stage 1: cheap exact case-insensitive match (hits most cases).
+    let matchMode: "exact" | "normalized" | "none" = "none";
+    let existing = await prisma.product.findMany({
       where: {
         brand: { equals: brand, mode: "insensitive" },
         modelNo: { equals: modelNo, mode: "insensitive" },
@@ -36,10 +47,51 @@ export async function GET(request: NextRequest) {
         images: { orderBy: { position: "asc" }, take: 1 },
       },
     });
+    if (existing.length > 0) matchMode = "exact";
+
+    // Stage 2: if nothing matched, fall back to a normalized (punctuation-
+    // and-spacing-insensitive) comparison. Narrow the candidate set using a
+    // prefix-letter contains-filter to keep the pull bounded.
+    if (existing.length === 0) {
+      const normBrand = normalize(brand);
+      const normModel = normalize(modelNo);
+      if (normBrand && normModel) {
+        const brandHead = normBrand.slice(0, Math.min(3, normBrand.length));
+        const modelHead = normModel.slice(0, Math.min(2, normModel.length));
+        const candidates = await prisma.product.findMany({
+          where: {
+            AND: [
+              // Tolerant prefix-contains on both fields to keep the DB scan
+              // manageable; final filter is the normalized equality below.
+              { brand: { contains: brandHead, mode: "insensitive" } },
+              { modelNo: { contains: modelHead, mode: "insensitive" } },
+            ],
+          },
+          include: {
+            variants: {
+              include: {
+                images: { orderBy: { position: "asc" }, take: 1 },
+                locations: { include: { location: true } },
+              },
+              orderBy: [{ colorCode: "asc" }, { frameSize: "asc" }],
+            },
+            images: { orderBy: { position: "asc" }, take: 1 },
+          },
+          take: 200,
+        });
+        existing = candidates.filter(
+          (p) =>
+            normalize(p.brand || "") === normBrand &&
+            normalize(p.modelNo || "") === normModel
+        );
+        if (existing.length > 0) matchMode = "normalized";
+      }
+    }
 
     return NextResponse.json({
       success: true,
       found: existing.length > 0,
+      matchMode,
       products: existing.map((p) => ({
         id: p.id,
         title: p.title,
