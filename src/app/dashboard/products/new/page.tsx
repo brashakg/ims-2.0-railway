@@ -8,7 +8,29 @@ import Link from 'next/link';
 import SearchableDropdown from '@/components/SearchableDropdown';
 import VariantManager from '@/components/VariantManager';
 import { CATEGORIES as CATEGORY_DEFS } from '@/lib/categories';
-import { isAttrApplicable } from '@/lib/categoryAttributes';
+import {
+  isAttrApplicable,
+  attributesForCategory,
+  ATTRIBUTES,
+} from '@/lib/categoryAttributes';
+
+// Attribute keys that already have dedicated inputs elsewhere in the
+// form. Everything in categoryAttributes NOT in this set renders in the
+// dynamic "Category Attributes" section.
+const HARDCODED_FORM_ATTRS = new Set<string>([
+  'brand', 'subBrand', 'modelNo', 'label', 'productName',
+  'shape', 'frameMaterial', 'templeMaterial', 'frameType',
+  'lensMaterial', 'lensColour', 'tint', 'polarization', 'uvProtection', 'lensUSP',
+  'gender', 'countryOfOrigin', 'warranty',
+  'mrp', 'gtin', 'upc', 'productUSP',
+  // Auto-populated (don't render):
+  'description', 'tags', 'sku',
+  // Variant-level (rendered by VariantManager):
+  'colorCode', 'colorName', 'frameColor', 'templeColor', 'frameSize',
+  'bridgeSize', 'lensSize', 'templeLength', 'weightGrams',
+  // Quantity is per-location via Stock section
+  'quantity',
+]);
 import {
   generateTitle,
   generateSKU,
@@ -134,6 +156,14 @@ export default function NewProductPage() {
     images: [] as string[],
   });
   const [savingVariant, setSavingVariant] = useState(false);
+
+  // Values for category-specific attributes that don't have a dedicated
+  // form input. Flattened into the product body at submit time so
+  // generateTags can pick them up (stored as Shopify tags; columns on
+  // Product are added later as needed).
+  const [extraAttrs, setExtraAttrs] = useState<Record<string, string>>({});
+  const setExtra = (key: string, value: string) =>
+    setExtraAttrs((prev) => ({ ...prev, [key]: value }));
 
   // Real DB brands/shapes/etc. — sourced from /api/products/filters (distinct
   // values from the 4k+ actual products), NOT from the seeded AttributeType
@@ -433,6 +463,17 @@ export default function NewProductPage() {
             ? [{ locationId: userLocationId, quantity: 0 }]
             : [],
       };
+
+      // Flatten dynamic category attributes into the payload so
+      // generateTags picks them up and tagsForProductAttributes emits
+      // tokens for them. Unknown keys on the server are ignored by the
+      // Prisma update call unless they match a real column — the only
+      // persisted side-effect is the tag list.
+      for (const [k, v] of Object.entries(extraAttrs)) {
+        if (v !== undefined && v !== null && String(v).trim() !== '') {
+          (payload as Record<string, unknown>)[k] = v;
+        }
+      }
 
       // Include variants if any were added
       if (productVariants.length > 0) {
@@ -1250,6 +1291,58 @@ export default function NewProductPage() {
                   </div>
                 </div>
               )}
+
+              {/* Section 4b: Category Attributes — renders every applicable
+                   attribute from categoryAttributes.ts that doesn't have a
+                   dedicated input above. Values flow through as Shopify tags
+                   via generateTags when the product saves. */}
+              {formData.category && (() => {
+                const dynamicAttrs = attributesForCategory(formData.category, 'product')
+                  .filter((m) => !m.autoPopulate && !HARDCODED_FORM_ATTRS.has(m.key));
+                if (dynamicAttrs.length === 0) return null;
+                return (
+                  <div className="bg-white rounded-lg shadow-sm border border-slate-200 p-6">
+                    <h3 className="text-base font-semibold text-gray-900 mb-1">
+                      Category Attributes
+                    </h3>
+                    <p className="text-xs text-slate-500 mb-4">
+                      Specific to {CATEGORY_DEFS.find((c) => c.key === formData.category)?.label || formData.category}.
+                      Saved to product tags (e.g. <code>{dynamicAttrs[0]?.key.toLowerCase()}_value</code>).
+                    </p>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 sm:gap-4">
+                      {dynamicAttrs.map((meta) => {
+                        const value = extraAttrs[meta.key] ?? '';
+                        const typeName = meta.attributeTypeName || meta.key.toLowerCase();
+                        const options = getAttributeOptions(typeName);
+                        if (options.length > 0) {
+                          return (
+                            <SearchableDropdown
+                              key={meta.key}
+                              label={meta.label}
+                              options={options}
+                              value={value}
+                              onChange={(val) => setExtra(meta.key, val)}
+                            />
+                          );
+                        }
+                        return (
+                          <div key={meta.key}>
+                            <label className="block text-sm font-medium text-gray-700 mb-1">
+                              {meta.label}
+                            </label>
+                            <input
+                              type="text"
+                              value={value}
+                              onChange={(e) => setExtra(meta.key, e.target.value)}
+                              className="w-full px-3 py-3 min-h-[44px] border border-gray-300 rounded-lg focus:outline-none focus:border-blue-500"
+                            />
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              })()}
 
               {/* Section 5: Contact Lens / Solutions Info (renamed from SOLUTIONS — now applies to CONTACT_LENSES category) */}
               {formData.category === 'CONTACT_LENSES' && (

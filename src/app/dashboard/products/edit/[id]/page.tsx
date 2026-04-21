@@ -5,7 +5,25 @@ import { useRouter, useParams } from 'next/navigation';
 import { Upload, X, Loader2 } from 'lucide-react';
 import SearchableDropdown from '@/components/SearchableDropdown';
 import { CATEGORIES as CATEGORY_DEFS } from '@/lib/categories';
-import { isAttrApplicable } from '@/lib/categoryAttributes';
+import {
+  isAttrApplicable,
+  attributesForCategory,
+} from '@/lib/categoryAttributes';
+
+// Attribute keys that already have dedicated inputs in the form.
+// Everything applicable to the category and NOT in this set renders
+// in the dynamic "Category Attributes" section.
+const HARDCODED_FORM_ATTRS = new Set<string>([
+  'brand', 'subBrand', 'modelNo', 'label', 'productName',
+  'shape', 'frameMaterial', 'templeMaterial', 'frameType',
+  'lensMaterial', 'lensColour', 'tint', 'polarization', 'uvProtection', 'lensUSP',
+  'gender', 'countryOfOrigin', 'warranty',
+  'mrp', 'gtin', 'upc', 'productUSP',
+  'description', 'tags', 'sku',
+  'colorCode', 'colorName', 'frameColor', 'templeColor', 'frameSize',
+  'bridgeSize', 'lensSize', 'templeLength', 'weightGrams',
+  'quantity',
+]);
 import {
   generateTitle,
   generateSKU,
@@ -88,6 +106,7 @@ export default function EditProductPage() {
   const [attributes, setAttributes] = useState<Attribute[]>([]);
   const [locations, setLocations] = useState<Location[]>([]);
   const [uploadingImage, setUploadingImage] = useState(false);
+  const [extraAttrs, setExtraAttrs] = useState<Record<string, string>>({});
 
   const [formData, setFormData] = useState<FormData>({
     category: '',
@@ -391,6 +410,13 @@ export default function EditProductPage() {
         ),
       };
 
+      // Flatten dynamic category attributes so generateTags picks them up.
+      for (const [k, v] of Object.entries(extraAttrs)) {
+        if (v !== undefined && v !== null && String(v).trim() !== '') {
+          (payload as Record<string, unknown>)[k] = v;
+        }
+      }
+
       const res = await fetch(`/api/products/${productId}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
@@ -656,6 +682,62 @@ export default function EditProductPage() {
                   </div>
                 </div>
               )}
+
+              {/* Section 4b: Category Attributes — dynamic render for every
+                   applicable attr from categoryAttributes.ts that lacks a
+                   dedicated input above. Values flow through as Shopify tags
+                   via generateTags on save. */}
+              {formData.category && (() => {
+                const dynamicAttrs = attributesForCategory(formData.category, 'product')
+                  .filter((m) => !m.autoPopulate && !HARDCODED_FORM_ATTRS.has(m.key));
+                if (dynamicAttrs.length === 0) return null;
+                return (
+                  <div className="bg-white rounded-lg shadow-sm border border-slate-200 p-6">
+                    <h3 className="text-base font-semibold text-gray-900 mb-1">
+                      Category Attributes
+                    </h3>
+                    <p className="text-xs text-slate-500 mb-4">
+                      Specific to {CATEGORY_DEFS.find((c) => c.key === formData.category)?.label || formData.category}.
+                      Stored as Shopify tags.
+                    </p>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 sm:gap-4">
+                      {dynamicAttrs.map((meta) => {
+                        const value = extraAttrs[meta.key] ?? '';
+                        const typeName = meta.attributeTypeName || meta.key.toLowerCase();
+                        const options = getAttributeOptions(typeName);
+                        if (options.length > 0) {
+                          return (
+                            <SearchableDropdown
+                              key={meta.key}
+                              label={meta.label}
+                              options={options}
+                              value={value}
+                              onChange={(val) =>
+                                setExtraAttrs((p) => ({ ...p, [meta.key]: val }))
+                              }
+                            />
+                          );
+                        }
+                        return (
+                          <div key={meta.key}>
+                            <label className="block text-sm font-medium text-gray-700 mb-1">
+                              {meta.label}
+                            </label>
+                            <input
+                              type="text"
+                              value={value}
+                              onChange={(e) =>
+                                setExtraAttrs((p) => ({ ...p, [meta.key]: e.target.value }))
+                              }
+                              className="w-full px-3 py-3 min-h-[44px] border border-gray-300 rounded-lg focus:outline-none focus:border-blue-500"
+                            />
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              })()}
 
               {/* Section 5: Contact Lens / Solutions Info — renamed from SOLUTIONS category which no longer exists. */}
               {formData.category === 'CONTACT_LENSES' && (
