@@ -1754,25 +1754,16 @@ async def subagent_analyze(
 # ============================================================================
 # SUBAGENT ENDPOINTS
 # ============================================================================
-
-@router.get("/agents")
-async def list_agents(current_user: dict = Depends(require_superadmin)):
-    """List all registered subagents"""
-    try:
-        from core.subagents import AGENT_REGISTRY  # pylint: disable=import-outside-toplevel
-        return {
-            "agents": [
-                {
-                    "id": agent_id,
-                    "name": cls.agent_name,
-                    "description": cls.description,
-                    "schedule": cls.schedule,
-                }
-                for agent_id, cls in AGENT_REGISTRY.items()
-            ]
-        }
-    except ImportError:
-        return {"agents": [], "error": "Subagent module not available"}
+# NOTE: The legacy `GET /agents` handler that previously lived here has been
+# removed in Phase 6.5b. It was reading from `core.subagents.AGENT_REGISTRY`
+# (the pre-Phase-3 5-agent system) and shadowing the canonical 8-agent
+# endpoint in `api/routers/agents.py` because jarvis_router is mounted
+# before agents_router in main.py. The shadowing is exactly why the Jarvis
+# page on production showed 5 of 8 agents instead of 8 of 8. The new
+# endpoint at agents.py::list_agents now wins. The other endpoints on this
+# file (`POST /agents/run-all`, `POST /agents/{id}/run`) live on distinct
+# paths and continue to serve the legacy core.subagents flow for
+# backwards-compat with anything still calling them.
 
 
 @router.post("/agents/run-all")

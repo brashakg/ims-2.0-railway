@@ -44,23 +44,34 @@ class ConfigUpdateRequest(BaseModel):
     config_overrides: Optional[Dict[str, Any]] = None
 
 class AgentStatusResponse(BaseModel):
-    agent_id: str
-    agent_name: str
-    agent_type: str
+    """Single agent status row returned by /jarvis/agents and
+    /jarvis/agents/{id}/status."""
+    agent_id: str = Field(..., description="Stable identifier (e.g. 'oracle')")
+    agent_name: str = Field(..., description="Display name (e.g. 'ORACLE')")
+    agent_type: str = Field(..., description="Category — foundation | orchestrator | monitor | analyzer | executor | integrator")
     description: str
-    enabled: bool
-    toggleable: bool
-    status: str
-    health: str = "unknown"
-    schedule_type: str = ""
-    schedule_value: str = ""
-    last_run: Optional[str] = None
-    last_status: Optional[str] = None
-    last_error: Optional[str] = None
+    version: str = "1.0.0"
+    enabled: bool = Field(..., description="Toggle state from agent_config")
+    toggleable: bool = Field(..., description="False for core agents (JARVIS, CORTEX) that cannot be turned off")
+    status: str = Field(..., description="Live runtime state — running | sleeping | stopped | error | starting")
+    health: str = Field("unknown", description="Self-reported health — healthy | degraded | unhealthy | unknown")
+    schedule_type: str = Field("", description="interval | cron | event")
+    schedule_value: str = Field("", description="Seconds for interval, cron expression for cron, descriptor for event")
+    last_run: Optional[str] = Field(None, description="ISO8601 timestamp of most recent tick or null")
+    last_status: Optional[str] = Field(None, description="success | error from the last tick")
+    last_error: Optional[str] = Field(None, description="Most recent error message, if any")
     run_count: int = 0
     error_count: int = 0
     avg_run_time_ms: float = 0
-    hero: str = ""
+    hero: str = Field("", description="Comic-book hero identity — purely cosmetic on the UI card")
+    capabilities: List[str] = Field(default_factory=list, description="What kinds of work the agent can do")
+
+
+class ListAgentsResponse(BaseModel):
+    """Envelope for /jarvis/agents — full 8-agent roster + roll-ups."""
+    agents: List[AgentStatusResponse]
+    total: int = Field(..., description="Number of registered agents (expected 8 in healthy state)")
+    enabled_count: int = Field(..., description="Number with enabled=True. Core agents always count.")
 
 
 # ============================================================================
@@ -108,7 +119,21 @@ def _get_scheduler():
 # ============================================================================
 
 
-@router.get("/agents")
+@router.get(
+    "/agents",
+    response_model=ListAgentsResponse,
+    summary="List all Jarvis agents",
+    description=(
+        "Returns the full 8-agent roster (JARVIS, CORTEX, SENTINEL, PIXEL, "
+        "MEGAPHONE, ORACLE, TASKMASTER, NEXUS) with live runtime status "
+        "joined against the agent_config collection. SUPERADMIN-only — "
+        "non-superadmin callers get 404 (deliberate: doesn't leak the "
+        "endpoint's existence)."
+    ),
+    responses={
+        404: {"description": "Not a SUPERADMIN — endpoint hidden"},
+    },
+)
 async def list_agents(user: dict = Depends(require_superadmin)):
     """
     List all registered agents with their current status and config.
@@ -153,6 +178,64 @@ async def list_agents(user: dict = Depends(require_superadmin)):
         "agents": agents_list,
         "total": len(agents_list),
         "enabled_count": sum(1 for a in agents_list if a["enabled"]),
+    }
+
+
+@router.get(
+    "/agents/diagnostic",
+    summary="Agent registry diagnostic — what's wired vs what's expected",
+    description=(
+        "Phase 6.5c: live introspection of the 8-agent registry. Returns "
+        "the canonical roster, which agents actually registered on this "
+        "worker, which agents have a row in `agent_config`, and a "
+        "computed diff of what's missing. Use this when the Jarvis page "
+        "shows fewer than 8 cards — the response tells you exactly which "
+        "agent didn't register so you can grep the deploy log for the "
+        "matching `[REGISTRY] Failed to register agent 'X'` traceback. "
+        "SUPERADMIN-only."
+    ),
+)
+async def agents_diagnostic(user: dict = Depends(require_superadmin)):
+    """
+    Returns:
+        canonical: list of 8 expected agent_ids
+        registered: list of agent_ids actually in AGENT_REGISTRY (per-worker)
+        configured: list of agent_ids with a doc in agent_config (DB-wide)
+        missing_from_registry: canonical - registered  (these are the ones
+            that failed at startup; check Railway logs for traceback)
+        missing_from_config: canonical - configured (DB never seeded)
+        worker_id: which uvicorn worker answered this request
+        as_of: ISO timestamp
+    """
+    from datetime import datetime, timezone
+    import os
+
+    registry = _get_registry()
+    registered = sorted(registry.keys())
+
+    config_mgr = _get_config_manager()
+    try:
+        configs = config_mgr.get_all_configs()
+        configured = sorted(c["agent_id"] for c in configs)
+    except Exception:
+        configured = []
+
+    # Pull the canonical list from the registry module so it stays in sync
+    try:
+        from agents.registry import CANONICAL_AGENT_IDS
+        canonical = list(CANONICAL_AGENT_IDS)
+    except ImportError:
+        canonical = ["jarvis", "cortex", "sentinel", "pixel",
+                     "megaphone", "oracle", "taskmaster", "nexus"]
+
+    return {
+        "canonical": canonical,
+        "registered": registered,
+        "configured": configured,
+        "missing_from_registry": [a for a in canonical if a not in registered],
+        "missing_from_config": [a for a in canonical if a not in configured],
+        "worker_id": os.getenv("HOSTNAME") or os.getenv("RAILWAY_REPLICA_ID") or "unknown",
+        "as_of": datetime.now(timezone.utc).isoformat(),
     }
 
 

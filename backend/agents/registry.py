@@ -220,5 +220,29 @@ def initialize_registry(db=None):
     # NEXUS handles inbound webhooks
     subscribe_event("webhook.received",  "nexus")
 
-    logger.info(f"[REGISTRY] Initialized {len(AGENT_REGISTRY)} agents")
+    # Final roster log — Phase 6.5. If anything dropped out, this line
+    # makes it obvious in Railway logs without needing a separate diag
+    # endpoint round-trip. Looks for the canonical 8 by id and prints the
+    # missing set with a CRITICAL severity prefix so it's grep-able.
+    registered_ids = sorted(AGENT_REGISTRY.keys())
+    missing = [aid for aid in CANONICAL_AGENT_IDS if aid not in AGENT_REGISTRY]
+    if missing:
+        logger.error(
+            f"[REGISTRY] CRITICAL: only {len(registered_ids)}/8 agents registered. "
+            f"Missing: {missing}. Registered: {registered_ids}. "
+            f"Look upward in this log for the [REGISTRY] Failed to register agent '<id>' "
+            f"line(s) — that's the root cause for each missing agent."
+        )
+    else:
+        logger.info(
+            f"[REGISTRY] OK: 8/8 canonical agents registered: {registered_ids}"
+        )
     return AGENT_REGISTRY
+
+
+# Canonical 8-agent roster — single source of truth used by both the
+# startup diagnostic above and the /jarvis/agents/diagnostic endpoint.
+CANONICAL_AGENT_IDS = (
+    "jarvis", "cortex", "sentinel", "pixel",
+    "megaphone", "oracle", "taskmaster", "nexus",
+)
