@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { requireAuth } from "@/lib/apiAuth";
 import { logActivity } from "@/lib/activityLog";
+import { ATTRIBUTES } from "@/lib/categoryAttributes";
 
 // POST /api/admin/resync-attributes
 // Wipes AttributeType.options and repopulates them from the real
@@ -113,13 +114,43 @@ export async function POST() {
       await repopulate(col.name, col.label, values);
     }
 
+    // Ensure every ATTRIBUTES registry entry has an AttributeType row —
+    // even those with hasColumn: false (manufacturer, nosepadMaterial,
+    // photochromatic, USP fields, etc.). Without this, the Add Product
+    // form's dynamic Category Attributes block renders them as plain text
+    // inputs because no AttributeType exists → no options to look up, so
+    // no dropdown. We only UPSERT the type here; we do NOT delete existing
+    // options (unlike the column-backed attrs above, which re-derive from
+    // live data each run). Admins add options via the Attributes page.
+    let extraTypesCreated = 0;
+    for (const meta of Object.values(ATTRIBUTES)) {
+      const name = (meta.attributeTypeName || meta.key).toLowerCase();
+      const existing = await prisma.attributeType.findUnique({
+        where: { name },
+      });
+      if (existing) {
+        // Keep the existing options; optionally update the label if changed.
+        if (existing.label !== meta.label) {
+          await prisma.attributeType.update({
+            where: { name },
+            data: { label: meta.label },
+          });
+        }
+      } else {
+        await prisma.attributeType.create({
+          data: { name, label: meta.label },
+        });
+        extraTypesCreated++;
+      }
+    }
+
     logActivity({
       userId: (auth.session?.user as any)?.id,
       userName: auth.session?.user?.name,
       userEmail: auth.session?.user?.email,
       action: "ATTRIBUTES_RESYNC",
       entity: "ATTRIBUTE_TYPE",
-      details: `Resynced ${attrTypesTouched} attribute type(s) from real product data. Removed ${optionsRemoved} old option(s); created ${optionsCreated} from DB.`,
+      details: `Resynced ${attrTypesTouched} attribute type(s) from real product data. Removed ${optionsRemoved} old option(s); created ${optionsCreated} from DB. Ensured ${extraTypesCreated} additional AttributeType row(s) for registry-only attributes.`,
     });
 
     return NextResponse.json({
@@ -128,6 +159,7 @@ export async function POST() {
         attrTypesTouched,
         optionsRemoved,
         optionsCreated,
+        extraTypesCreated,
       },
     });
   } catch (error) {

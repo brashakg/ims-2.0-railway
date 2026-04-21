@@ -475,14 +475,20 @@ export default function NewProductPage() {
         }
       }
 
-      // Include variants if any were added
+      // Include variants. We send every variant (saved or not) but warn the
+      // user on the VariantManager itself; unsaved rows are just not locked.
+      // MRP is now the variant's own (product-level MRP was removed from the
+      // form in the Batch 2 reorg).
       if (productVariants.length > 0) {
         payload.variants = productVariants.map((v) => ({
           colorCode: v.colorCode,
           colorName: v.colorName || '',
           frameSize: v.frameSize || '',
-          mrp: v.mrp || parseFloat(formData.mrp || '0'),
-          lensColour: v.lensColor || '',
+          mrp: v.mrp || 0,
+          discountedPrice: v.srp || undefined,
+          // VariantManager stores British-spelled lensColour. Keep that on
+          // the wire — /api/products Product/Variant schema matches.
+          lensColour: v.lensColour || v.lensColor || '',
           tint: v.tint || '',
           locations: Object.entries(v.stockByLocation || {}).map(
             ([locationId, quantity]) => ({

@@ -26,6 +26,9 @@ interface VariantInput {
   lensColour?: string;
   tint?: string;
   mrp?: number;
+  /** Explicit SRP entered by the user. When absent or 0, backend falls
+   *  back to the category × brand × sub-brand discount rule applied to MRP. */
+  discountedPrice?: number;
   barcode?: string;
   locations?: Array<{ locationId: string; quantity: number }>;
 }
@@ -234,17 +237,20 @@ export async function POST(request: NextRequest) {
           colorCode: v.colorCode,
         });
 
-        // Calculate discounted price for variant
+        // Calculate discounted price for variant. Use the caller's explicit
+        // SRP if they entered one on the form; otherwise fall back to the
+        // category × brand × sub-brand discount rule applied to MRP.
         const variantMrp = v.mrp || body.mrp || 0;
-        // Variants inherit the parent product's brand+subBrand for discount
-        // rule matching, but the variant's own mrp drives the discount amount.
-        const variantDiscountedPrice = calculateDiscountedPrice(
-          variantMrp,
-          body.category,
-          discountRulesForVariants,
-          body.brand,
-          body.subBrand
-        );
+        const variantDiscountedPrice =
+          typeof v.discountedPrice === "number" && v.discountedPrice > 0
+            ? v.discountedPrice
+            : calculateDiscountedPrice(
+                variantMrp,
+                body.category,
+                discountRulesForVariants,
+                body.brand,
+                body.subBrand
+              );
 
         const variant = await prisma.productVariant.create({
           data: {

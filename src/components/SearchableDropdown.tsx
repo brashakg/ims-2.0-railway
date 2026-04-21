@@ -10,6 +10,11 @@ interface SearchableDropdownProps {
   placeholder?: string;
   label?: string;
   disabled?: boolean;
+  /**
+   * Visual size. 'md' uses base-size text and 44px min-height for
+   * variant-manager and mobile-friendly forms where characters must be
+   * fully visible. Default 'sm' keeps the compact filter-bar look. */
+  size?: 'sm' | 'md';
 }
 
 export default function SearchableDropdown({
@@ -19,7 +24,10 @@ export default function SearchableDropdown({
   placeholder = 'Select...',
   label,
   disabled = false,
+  size = 'sm',
 }: SearchableDropdownProps) {
+  const textCls = size === 'md' ? 'text-base' : 'text-sm';
+  const padCls = size === 'md' ? 'px-3 py-2.5 min-h-[44px]' : 'px-3 py-2';
   const [isOpen, setIsOpen] = useState(false);
   const [search, setSearch] = useState('');
   const [filteredOptions, setFilteredOptions] = useState(options);
@@ -77,7 +85,7 @@ export default function SearchableDropdown({
         } ${isOpen ? 'border-blue-500 ring-1 ring-blue-500' : 'border-gray-300'}`}
         onClick={() => !disabled && setIsOpen(!isOpen)}
       >
-        <div className="flex items-center justify-between px-3 py-2">
+        <div className={`flex items-center justify-between ${padCls}`}>
           {isOpen ? (
             <input
               ref={inputRef}
@@ -85,13 +93,17 @@ export default function SearchableDropdown({
               placeholder={placeholder}
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              className="flex-1 outline-none text-sm"
+              className={`flex-1 outline-none ${textCls}`}
               onClick={(e) => e.stopPropagation()}
               disabled={disabled}
               autoFocus
             />
           ) : (
-            <span className={`text-sm flex-1 ${!value ? 'text-gray-500' : 'text-gray-900'}`}>
+            <span
+              className={`${textCls} flex-1 truncate ${
+                !value ? 'text-gray-500' : 'text-gray-900'
+              }`}
+            >
               {displayValue}
             </span>
           )}
