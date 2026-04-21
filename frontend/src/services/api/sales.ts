@@ -147,6 +147,37 @@ export const workshopApi = {
     };
   },
 
+  // Phase 6.8 — attach / update lens fitting details on a workshop job.
+  // Called from the POS LensFittingFormModal right after an Rx order is
+  // created, so the workshop tech sees the full fitting measurements
+  // + sales confirmation when they pick up the job.
+  updateFittingDetails: async (
+    jobId: string,
+    fittingDetails: {
+      dia?: string;
+      fh?: string;
+      b_size?: string;
+      dbl?: string;
+      tint?: string;
+      base_curve?: string;
+      coating?: string;
+      other?: string;
+      vendor_order_id?: string;
+      order_date?: string;
+      order_time?: string;
+      ordered_by?: string;
+      ordered_by_name?: string;
+      expected_lens_receive_date?: string;
+      confirmed_by_sales: boolean;
+      confirmed_at?: string;
+    },
+  ) => {
+    const response = await api.patch(`/workshop/jobs/${jobId}/fitting-details`, {
+      fitting_details: fittingDetails,
+    });
+    return response.data;
+  },
+
   // Phase 6.4 — pending jobs report with aging buckets + per-tech breakdown.
   getPendingJobsReport: async (storeId?: string) => {
     const response = await api.get('/reports/workshop/pending-jobs', {

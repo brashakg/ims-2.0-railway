@@ -48,6 +48,8 @@ import { PrescriptionForm } from './PrescriptionForm';
 import { PrescriptionPanel } from './PrescriptionPanel';
 import { PrescriptionSelectModal } from './PrescriptionSelectModal';
 import { LensDetailsModal } from './LensDetailsModal';
+import { LensFittingFormModal } from './LensFittingFormModal';
+import type { LensFittingFormValue } from './LensFittingFormModal';
 import { LensSuggestionPanel } from './LensSuggestionPanel';
 import { DiscountModal } from './DiscountModal';
 import { DayEndReport } from './DayEndReport';
@@ -131,6 +133,12 @@ export function POSLayout() {
   const [showDayEnd, setShowDayEnd] = useState(false);
   const [showNewConfirm, setShowNewConfirm] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  // Phase 6.8 — workshop handoff modal. When an Rx order spawns a workshop
+  // job, we hold the jobId here and open LensFittingFormModal so sales can
+  // attach the physical fitting measurements before the Complete step.
+  const [fittingJobId, setFittingJobId] = useState<string | null>(null);
+  const [fittingSaving, setFittingSaving] = useState(false);
+  const [fittingCoating, setFittingCoating] = useState<string>('');
 
   // Held bills from localStorage — cached to avoid repeated JSON.parse in render
   const [heldBillsCache, setHeldBillsCache] = useState<Array<{ id: string; customer: string; items: number; total: number; heldAt: string; state: any }>>([]);
@@ -312,15 +320,23 @@ export function POSLayout() {
         }
         store.setOrderResult(result.order_id, result.order_number);
 
-        // Auto-create workshop job for prescription orders
-        if (store.sale_type === 'prescription_order' && store.prescription) {
+        // Phase 6.8 — auto-create workshop job + prompt sales to fill
+        // fitting details. Only fires for Rx orders that actually ship a
+        // lens. Earlier code matched category==='RX_LENSES' which never
+        // matched the real catalog (categories are OPTICAL_LENS /
+        // SPECTACLE_LENS). We also no longer silently swallow errors.
+        const LENS_CATS = ['OPTICAL_LENS', 'OPTICAL_LENSES', 'SPECTACLE_LENS', 'SPECTACLE_LENSES', 'RX_LENSES', 'LENS', 'LENSES'];
+        const FRAME_CATS = ['FRAMES', 'FRAME', 'SUNGLASSES', 'SUNGLASS', 'SPECTACLE_FRAME'];
+        const cartItems = store.cart || [];
+        const frameItem = cartItems.find(i => FRAME_CATS.includes((i.category || '').toUpperCase()));
+        const lensItem = cartItems.find(
+          i => LENS_CATS.includes((i.category || '').toUpperCase()) || !!i.lens_details,
+        );
+        if (store.sale_type === 'prescription_order' && store.prescription && (frameItem || lensItem)) {
           try {
-            const frameItem = (store.cart || []).find(i => i.category === 'FRAMES' || i.category === 'SUNGLASSES');
-            const lensItem = (store.cart || []).find(i => i.category === 'RX_LENSES' || i.lens_details);
             const expectedDate = new Date();
             expectedDate.setDate(expectedDate.getDate() + 5);
-
-            await workshopApi.createJob({
+            const jobResp = await workshopApi.createJob({
               order_id: result.order_id,
               frame_details: frameItem ? {
                 product_id: frameItem.product_id,
@@ -333,11 +349,33 @@ export function POSLayout() {
                 name: lensItem?.name,
               },
               prescription_id: store.prescription.id || '',
-              fitting_instructions: (store.cart || []).filter(i => i.notes).map(i => `${i.name}: ${i.notes}`).join('; ') || undefined,
+              fitting_instructions: cartItems
+                .filter(i => i.notes)
+                .map(i => `${i.name}: ${i.notes}`)
+                .join('; ') || undefined,
               special_notes: store.cart_note || undefined,
               expected_date: expectedDate.toISOString().split('T')[0],
             });
-          } catch {
+            // Open fitting-details modal with the new jobId — Complete step
+            // is advanced from the modal's onSave / onBack handlers.
+            if (jobResp?.job_id) {
+              setFittingJobId(jobResp.job_id);
+              setFittingCoating(
+                (lensItem?.lens_details?.coatings || []).join(', ') || '',
+              );
+              // Keep the POS in its current step; the modal overlays above
+              // and advances to 'complete' when resolved. Processing flag
+              // already turned off in `finally` below.
+              return;
+            }
+          } catch (e) {
+            // Non-fatal — the order IS created. Surface a warning so staff
+            // can manually create the workshop job / call IT if necessary.
+            // eslint-disable-next-line no-console
+            console.warn('[POS] Workshop job auto-create failed:', e);
+            setErrorMsg(
+              'Order saved, but workshop job auto-create failed — please add it manually from the Workshop page.',
+            );
           }
         }
 
@@ -727,6 +765,41 @@ export function POSLayout() {
           onClose={() => setDiscountItem(null)} />
       )}
       {showReceipt && <POSReceipt onClose={() => setShowReceipt(false)} />}
+
+      {/* Phase 6.8 — Sales→Workshop fitting handoff. Opens right after an
+          Rx order spawns a workshop job; advances POS to Complete on save
+          or back. Either way the order is already created. */}
+      {fittingJobId && (
+        <LensFittingFormModal
+          prefilledCoating={fittingCoating}
+          isSaving={fittingSaving}
+          onSave={async (v: LensFittingFormValue) => {
+            setFittingSaving(true);
+            try {
+              await workshopApi.updateFittingDetails(fittingJobId, v);
+              setFittingJobId(null);
+              setFittingCoating('');
+              store.setStep('complete');
+            } catch (e) {
+              // Keep the modal open so sales can retry; surface the error.
+              // Rest of the order is already persisted — no revenue at risk.
+              // eslint-disable-next-line no-console
+              console.error('[POS] Save fitting details failed:', e);
+              setErrorMsg('Could not save fitting details — please try again or skip for now.');
+            } finally {
+              setFittingSaving(false);
+            }
+          }}
+          onBack={() => {
+            // "Back" dismisses the modal but still advances to Complete —
+            // the order + workshop job are already created; fitting details
+            // can be filled later from the Workshop page.
+            setFittingJobId(null);
+            setFittingCoating('');
+            store.setStep('complete');
+          }}
+        />
+      )}
       {holdConfirm && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
           <div className="bg-white rounded-xl p-6 max-w-sm">

@@ -35,6 +35,34 @@ router = APIRouter()
 # ============================================================================
 
 
+class FittingDetails(BaseModel):
+    """Phase 6.8 — physical measurements the sales staff hands over to
+    the workshop technician for lens cutting / fitting. All fields are
+    optional individually, but `confirmed_by_sales` must be True for
+    the workshop to accept the job (sales explicitly confirming that
+    power + product details are correct).
+    """
+    dia: Optional[str] = None            # Lens diameter (e.g. "65", "70")
+    fh: Optional[str] = None             # Fitting height (for progressive/bifocal)
+    b_size: Optional[str] = None         # Lens vertical measurement
+    dbl: Optional[str] = None            # Distance between lenses (bridge width)
+    tint: Optional[str] = None           # Tint colour / percentage
+    base_curve: Optional[str] = None     # Base curve (e.g. "6", "8")
+    coating: Optional[str] = None        # Coating name (redundant with lens_details.coating but captured here for sales confirmation)
+    other: Optional[str] = None          # Free-text notes
+    order_date: Optional[str] = None     # ISO date (auto-filled on save)
+    order_time: Optional[str] = None     # HH:MM (auto-filled on save)
+    ordered_by: Optional[str] = None     # User id of sales staff
+    ordered_by_name: Optional[str] = None
+    expected_lens_receive_date: Optional[date] = None
+    # Phase 6.8 — vendor (lens supplier) PO reference. Sales enters the ID
+    # issued when the lens was ordered from Zeiss / Essilor / etc; workshop
+    # + finance use it to reconcile incoming lens stock.
+    vendor_order_id: Optional[str] = None
+    confirmed_by_sales: bool = False     # Must be True to submit
+    confirmed_at: Optional[str] = None   # ISO timestamp
+
+
 class WorkshopJobCreate(BaseModel):
     order_id: str
     frame_details: dict
@@ -43,12 +71,20 @@ class WorkshopJobCreate(BaseModel):
     fitting_instructions: Optional[str] = None
     special_notes: Optional[str] = None
     expected_date: date
+    # Phase 6.8 — optional at create time; sales fills via a modal
+    # right after order confirmation (PATCH /jobs/{id}/fitting-details)
+    fitting_details: Optional[FittingDetails] = None
 
 
 class WorkshopJobUpdate(BaseModel):
     fitting_instructions: Optional[str] = None
     special_notes: Optional[str] = None
     expected_date: Optional[date] = None
+
+
+class FittingDetailsUpdate(BaseModel):
+    """Payload for PATCH /workshop/jobs/{id}/fitting-details."""
+    fitting_details: FittingDetails
 
 
 # ============================================================================
@@ -403,6 +439,9 @@ async def create_job(
             "fitting_instructions": job.fitting_instructions,
             "special_notes": job.special_notes,
             "expected_date": job.expected_date.isoformat(),
+            "fitting_details": (
+                job.fitting_details.model_dump(mode="json") if job.fitting_details else None
+            ),
             "status": "PENDING",
             "created_by": current_user.get("user_id"),
         }
@@ -422,6 +461,43 @@ async def create_job(
         "jobNumber": generate_job_number(),
         "message": "Workshop job created",
     }
+
+
+@router.patch("/jobs/{job_id}/fitting-details")
+async def update_fitting_details(
+    job_id: str,
+    payload: FittingDetailsUpdate,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Phase 6.8 — attach / update the lens-fitting measurements the sales
+    staff fill after creating a prescription order. The sales staff
+    confirms the power + product details are correct via the
+    `confirmed_by_sales` checkbox before the workshop can accept the job.
+    """
+    repo = get_workshop_repository()
+    if repo is None:
+        raise HTTPException(status_code=503, detail="Workshop repository unavailable")
+
+    job = repo.find_by_id(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Workshop job not found")
+
+    # Stamp metadata we want server-controlled rather than trusting the client.
+    fd = payload.fitting_details.model_dump(mode="json")
+    now = datetime.now()
+    fd["order_date"] = fd.get("order_date") or now.date().isoformat()
+    fd["order_time"] = fd.get("order_time") or now.strftime("%H:%M")
+    fd["ordered_by"] = fd.get("ordered_by") or current_user.get("user_id")
+    fd["ordered_by_name"] = fd.get("ordered_by_name") or current_user.get("username")
+    if fd.get("confirmed_by_sales"):
+        fd["confirmed_at"] = fd.get("confirmed_at") or now.isoformat()
+
+    ok = repo.update(job_id, {"fitting_details": fd})
+    if not ok:
+        raise HTTPException(status_code=500, detail="Failed to save fitting details")
+
+    return {"job_id": job_id, "fitting_details": fd, "message": "Fitting details saved"}
 
 
 @router.get("/jobs/{job_id}")
