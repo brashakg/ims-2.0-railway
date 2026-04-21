@@ -8,6 +8,7 @@ import Link from 'next/link';
 import SearchableDropdown from '@/components/SearchableDropdown';
 import VariantManager from '@/components/VariantManager';
 import { CATEGORIES as CATEGORY_DEFS } from '@/lib/categories';
+import { isAttrApplicable } from '@/lib/categoryAttributes';
 import {
   generateTitle,
   generateSKU,
@@ -1159,78 +1160,99 @@ export default function NewProductPage() {
                 </p>
               </div>
 
-              {/* Section 2: Frame Attributes (product-level only) */}
-              {formData.category !== 'SOLUTIONS' && (
+              {/* Section 2: Frame Attributes (hidden for categories that have no frame — Contact Lenses, Watches, Smartwatches, Accessories) */}
+              {(isAttrApplicable('shape', formData.category) ||
+                isAttrApplicable('frameMaterial', formData.category) ||
+                isAttrApplicable('frameType', formData.category)) && (
                 <div className="bg-white rounded-lg shadow-sm border border-slate-200 p-6">
                   <h3 className="text-base font-semibold text-gray-900 mb-4">
                     Frame Attributes
                   </h3>
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 sm:gap-4">
-                    <SearchableDropdown
-                      label="Shape"
-                      options={getAttributeOptions('shape')}
-                      value={formData.shape}
-                      onChange={(val) => handleInputChange('shape', val)}
-                    />
-                    <SearchableDropdown
-                      label="Frame Material"
-                      options={getAttributeOptions('framematerial')}
-                      value={formData.frameMaterial}
-                      onChange={(val) => handleInputChange('frameMaterial', val)}
-                    />
-                    <SearchableDropdown
-                      label="Temple Material"
-                      options={getAttributeOptions('templematerial')}
-                      value={formData.templeMaterial}
-                      onChange={(val) => handleInputChange('templeMaterial', val)}
-                    />
-                    <SearchableDropdown
-                      label="Frame Type"
-                      options={getAttributeOptions('frametype')}
-                      value={formData.frameType}
-                      onChange={(val) => handleInputChange('frameType', val)}
-                    />
+                    {isAttrApplicable('shape', formData.category) && (
+                      <SearchableDropdown
+                        label="Shape"
+                        options={getAttributeOptions('shape')}
+                        value={formData.shape}
+                        onChange={(val) => handleInputChange('shape', val)}
+                      />
+                    )}
+                    {isAttrApplicable('frameMaterial', formData.category) && (
+                      <SearchableDropdown
+                        label="Frame Material"
+                        options={getAttributeOptions('framematerial')}
+                        value={formData.frameMaterial}
+                        onChange={(val) => handleInputChange('frameMaterial', val)}
+                      />
+                    )}
+                    {isAttrApplicable('templeMaterial', formData.category) && (
+                      <SearchableDropdown
+                        label="Temple Material"
+                        options={getAttributeOptions('templematerial')}
+                        value={formData.templeMaterial}
+                        onChange={(val) => handleInputChange('templeMaterial', val)}
+                      />
+                    )}
+                    {isAttrApplicable('frameType', formData.category) && (
+                      <SearchableDropdown
+                        label="Frame Type"
+                        options={getAttributeOptions('frametype')}
+                        value={formData.frameType}
+                        onChange={(val) => handleInputChange('frameType', val)}
+                      />
+                    )}
                   </div>
                 </div>
               )}
 
-              {/* Section 4: Lens Attributes (product-level only) */}
-              {formData.category === 'SUNGLASSES' && (
+              {/* Section 4: Lens Attributes — category-driven: sunglasses, clip-ons, smartglasses, contact-lenses share lens fields via the category-attribute map. */}
+              {(isAttrApplicable('lensMaterial', formData.category) ||
+                isAttrApplicable('lensColour', formData.category) ||
+                isAttrApplicable('polarization', formData.category) ||
+                isAttrApplicable('uvProtection', formData.category)) && (
                 <div className="bg-white rounded-lg shadow-sm border border-slate-200 p-6">
                   <h3 className="text-base font-semibold text-gray-900 mb-4">
                     Lens Attributes
                   </h3>
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 sm:gap-4">
-                    <SearchableDropdown
-                      label="Lens Material"
-                      options={getAttributeOptions('lensmaterial')}
-                      value={formData.lensMaterial}
-                      onChange={(val) => handleInputChange('lensMaterial', val)}
-                    />
-                    <SearchableDropdown
-                      label="Lens USP"
-                      options={getAttributeOptions('lensUSP')}
-                      value={formData.lensUSP}
-                      onChange={(val) => handleInputChange('lensUSP', val)}
-                    />
-                    <SearchableDropdown
-                      label="Polarization"
-                      options={getAttributeOptions('polarization')}
-                      value={formData.polarization}
-                      onChange={(val) => handleInputChange('polarization', val)}
-                    />
-                    <SearchableDropdown
-                      label="UV Protection"
-                      options={getAttributeOptions('uvprotection')}
-                      value={formData.uvProtection}
-                      onChange={(val) => handleInputChange('uvProtection', val)}
-                    />
+                    {isAttrApplicable('lensMaterial', formData.category) && (
+                      <SearchableDropdown
+                        label="Lens Material"
+                        options={getAttributeOptions('lensmaterial')}
+                        value={formData.lensMaterial}
+                        onChange={(val) => handleInputChange('lensMaterial', val)}
+                      />
+                    )}
+                    {isAttrApplicable('lensUSP', formData.category) && (
+                      <SearchableDropdown
+                        label="Lens USP"
+                        options={getAttributeOptions('lensUSP')}
+                        value={formData.lensUSP}
+                        onChange={(val) => handleInputChange('lensUSP', val)}
+                      />
+                    )}
+                    {isAttrApplicable('polarization', formData.category) && (
+                      <SearchableDropdown
+                        label="Polarization"
+                        options={getAttributeOptions('polarization')}
+                        value={formData.polarization}
+                        onChange={(val) => handleInputChange('polarization', val)}
+                      />
+                    )}
+                    {isAttrApplicable('uvProtection', formData.category) && (
+                      <SearchableDropdown
+                        label="UV Protection"
+                        options={getAttributeOptions('uvprotection')}
+                        value={formData.uvProtection}
+                        onChange={(val) => handleInputChange('uvProtection', val)}
+                      />
+                    )}
                   </div>
                 </div>
               )}
 
-              {/* Section 5: Solutions Info */}
-              {formData.category === 'SOLUTIONS' && (
+              {/* Section 5: Contact Lens / Solutions Info (renamed from SOLUTIONS — now applies to CONTACT_LENSES category) */}
+              {formData.category === 'CONTACT_LENSES' && (
                 <div className="bg-white rounded-lg shadow-sm border border-slate-200 p-6">
                   <h3 className="text-base font-semibold text-gray-900 mb-4">
                     Solutions Info
@@ -1476,8 +1498,8 @@ export default function NewProductPage() {
                 </div>
               )}
 
-              {/* Section 8b: Variant Manager (only if user chose "Add as Variant") */}
-              {variantMode && formData.category && formData.category !== 'SOLUTIONS' && (
+              {/* Section 8b: Variant Manager (hidden for categories that don't use color/size variants — accessories) */}
+              {variantMode && formData.category && formData.category !== 'ACCESSORIES' && (
                 <div className="bg-white rounded-lg shadow-sm border border-slate-200 p-6">
                   <h3 className="text-base font-semibold text-gray-900 mb-2">
                     Variants (Color × Size)
