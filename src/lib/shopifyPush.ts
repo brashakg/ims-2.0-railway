@@ -20,6 +20,8 @@ export interface PushSummary {
   success: number;
   failed: number;
   skipped: number;
+  aborted?: boolean;
+  abortReason?: string;
 }
 
 type ProductWithRelations = Awaited<ReturnType<typeof fetchProductsForPush>>[number];
@@ -43,6 +45,13 @@ export async function fetchProductsForPush(ids: string[]) {
 export interface PushOptions {
   batchSize?: number;
   batchDelayMs?: number;
+  /**
+   * Circuit breaker: bail out of the push loop after this many CONSECUTIVE
+   * failures. Default 5. Set to 0 to disable. Protects against the scenario
+   * where Shopify is returning errors for every call (bad creds, rate cap,
+   * validation failures repeating) so we don't hammer the API 60+ times.
+   */
+  maxConsecutiveFailures?: number;
 }
 
 export async function pushProductsToShopify(
@@ -51,8 +60,12 @@ export async function pushProductsToShopify(
 ): Promise<{ results: PushResult[]; summary: PushSummary }> {
   const BATCH_SIZE = options.batchSize ?? 10;
   const BATCH_DELAY_MS = options.batchDelayMs ?? 1000;
+  const MAX_CONSECUTIVE_FAILURES = options.maxConsecutiveFailures ?? 5;
 
   const results: PushResult[] = [];
+  let consecutiveFailures = 0;
+  let aborted = false;
+  let abortReason: string | undefined;
 
   for (let i = 0; i < products.length; i++) {
     const product = products[i];
@@ -218,6 +231,7 @@ export async function pushProductsToShopify(
           variantCount: shopifyResult.variantIds?.length || 0,
           message: shopifyResult.message,
         });
+        consecutiveFailures = 0;
       } else {
         await prisma.syncLog.create({
           data: {
@@ -233,6 +247,7 @@ export async function pushProductsToShopify(
           status: "FAILED",
           message: shopifyResult.message,
         });
+        consecutiveFailures++;
       }
     } catch (syncError) {
       const errMsg =
@@ -252,6 +267,20 @@ export async function pushProductsToShopify(
         status: "FAILED",
         message: errMsg,
       });
+      consecutiveFailures++;
+    }
+
+    // Circuit breaker: after N consecutive failures, assume the system is in
+    // a bad state (auth expired, throttle-storm, validation bug) and stop.
+    // Without this, a broken config would churn through hundreds of products
+    // and bury the real error in a wall of failed SyncLog rows.
+    if (
+      MAX_CONSECUTIVE_FAILURES > 0 &&
+      consecutiveFailures >= MAX_CONSECUTIVE_FAILURES
+    ) {
+      aborted = true;
+      abortReason = `Aborted after ${consecutiveFailures} consecutive failures. Check Shopify credentials, scopes, and recent SyncLog entries before retrying.`;
+      break;
     }
   }
 
@@ -260,6 +289,8 @@ export async function pushProductsToShopify(
     success: results.filter((r) => r.status === "SUCCESS").length,
     failed: results.filter((r) => r.status === "FAILED").length,
     skipped: results.filter((r) => r.status === "SKIPPED").length,
+    aborted,
+    abortReason,
   };
 
   return { results, summary };

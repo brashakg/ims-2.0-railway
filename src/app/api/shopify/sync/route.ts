@@ -42,6 +42,8 @@ export async function POST(request: NextRequest) {
         success: summary.success,
         failed: summary.failed,
         skipped: summary.skipped,
+        aborted: summary.aborted || false,
+        abortReason: summary.abortReason,
       },
     });
   } catch (error) {

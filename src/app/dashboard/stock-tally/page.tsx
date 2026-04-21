@@ -64,7 +64,7 @@ export default function StockTallyPage() {
   const barcodeInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    fetch("/api/locations")
+    fetch("/api/locations?excludeSynthetic=true")
       .then((r) => r.json())
       .then((data) => setLocations(Array.isArray(data) ? data : data.data || []))
       .catch(console.error);

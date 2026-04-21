@@ -65,7 +65,14 @@ interface PushResultRow {
 interface PushResponse {
   success: boolean;
   results: PushResultRow[];
-  summary: { total: number; success: number; failed: number; skipped: number };
+  summary: {
+    total: number;
+    success: number;
+    failed: number;
+    skipped: number;
+    aborted?: boolean;
+    abortReason?: string;
+  };
   remainingPushable: number;
   error?: string;
 }
@@ -210,6 +217,12 @@ export default function OrphansPage() {
     let skipped = 0;
     let remaining = startTotal;
     let loops = 0;
+    // Client-side circuit breaker: stop after 5 consecutive chunks where the
+    // backend reported zero successes. Pairs with the server-side breaker in
+    // pushProductsToShopify so we don't hammer Shopify 60+ times.
+    let consecutiveEmptyChunks = 0;
+    const MAX_EMPTY_CHUNKS = 5;
+    let abortReason: string | undefined;
 
     while (remaining > 0 && loops < 200) {
       const chunk = await runPushChunk();
@@ -226,6 +239,25 @@ export default function OrphansPage() {
         remaining,
       });
       if (chunk.summary.total === 0) break;
+
+      // Honor server-side abort
+      if (chunk.summary.aborted) {
+        abortReason = chunk.summary.abortReason || "Server aborted push loop";
+        break;
+      }
+
+      // Client-side guard: if nothing succeeded this chunk, treat it as a
+      // "failed try" and count against the 5-try cap.
+      if (chunk.summary.success === 0) {
+        consecutiveEmptyChunks++;
+        if (consecutiveEmptyChunks >= MAX_EMPTY_CHUNKS) {
+          abortReason = `Stopped after ${MAX_EMPTY_CHUNKS} chunks with zero successes. Check Shopify credentials and the most recent sync log.`;
+          break;
+        }
+      } else {
+        consecutiveEmptyChunks = 0;
+      }
+
       loops++;
       // small UI breathing room
       await new Promise((r) => setTimeout(r, 200));
@@ -234,8 +266,10 @@ export default function OrphansPage() {
     setPushRunning(false);
     setSelected(new Set());
     setBanner({
-      type: failed > 0 ? "error" : "success",
-      text: `Push finished. ${pushed} pushed, ${failed} failed, ${skipped} skipped. Remaining pushable: ${remaining}.`,
+      type: failed > 0 || abortReason ? "error" : "success",
+      text: abortReason
+        ? `Push halted. ${pushed} pushed, ${failed} failed, ${skipped} skipped. ${abortReason}`
+        : `Push finished. ${pushed} pushed, ${failed} failed, ${skipped} skipped. Remaining pushable: ${remaining}.`,
     });
     await fetchOrphans(1);
   };

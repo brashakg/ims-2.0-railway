@@ -158,18 +158,33 @@ export async function PUT(
         productType: product.category || undefined,
       } as any);
 
-      // Sync variant prices to Shopify
+      // Sync variant prices to Shopify. Bail out after 5 consecutive failures
+      // — without this cap, a product with 60+ variants in a throttle storm
+      // would churn through every variant × the GraphQL client's internal
+      // retries before returning a single error to the user.
       if (shopifyResult.success) {
         const variants = await prisma.productVariant.findMany({
           where: { productId: params.id, shopifyVariantId: { not: null } },
         });
+        let consecutiveVariantFailures = 0;
+        const MAX_VARIANT_FAILURES = 5;
         for (const v of variants) {
-          if (v.shopifyVariantId) {
-            await updateVariantPrice(
-              v.shopifyVariantId,
-              String(v.discountedPrice || v.mrp || 0),
-              v.mrp ? String(v.mrp) : undefined
-            ).catch(() => {}); // Best-effort variant sync
+          if (!v.shopifyVariantId) continue;
+          const r = await updateVariantPrice(
+            v.shopifyVariantId,
+            String(v.discountedPrice || v.mrp || 0),
+            v.mrp ? String(v.mrp) : undefined
+          ).catch(() => ({ success: false } as { success: boolean }));
+          if (r && (r as any).success) {
+            consecutiveVariantFailures = 0;
+          } else {
+            consecutiveVariantFailures++;
+            if (consecutiveVariantFailures >= MAX_VARIANT_FAILURES) {
+              console.warn(
+                `[products/${params.id}] Aborting variant price sync after ${consecutiveVariantFailures} consecutive failures.`
+              );
+              break;
+            }
           }
         }
       }

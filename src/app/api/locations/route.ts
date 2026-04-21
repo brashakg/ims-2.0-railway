@@ -15,6 +15,12 @@ export async function GET(request: NextRequest) {
   try {
     const searchParams = request.nextUrl.searchParams;
     const active = searchParams.get('active');
+    // excludeSynthetic=true hides the internal "Shopify Online Store" aggregate
+    // location (code: SHOPIFY) used only during pull to store totalInventory.
+    // Staff-facing UIs (stock tally, variant stock edit, user assignment,
+    // product forms) should pass this flag so the dropdown only shows real
+    // physical stores. Admin/location-management UIs omit it to see the row.
+    const excludeSynthetic = searchParams.get('excludeSynthetic') === 'true';
 
     let locations = await prisma.location.findMany({
       include: {
@@ -37,6 +43,10 @@ export async function GET(request: NextRequest) {
     if (active !== null) {
       const isActive = active === 'true';
       locations = locations.filter((loc) => loc.isActive === isActive);
+    }
+
+    if (excludeSynthetic) {
+      locations = locations.filter((loc) => loc.code !== 'SHOPIFY');
     }
 
     return NextResponse.json(locations);

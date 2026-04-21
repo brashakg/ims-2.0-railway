@@ -40,7 +40,7 @@ export default function ImagesPage() {
   useEffect(() => {
     const fetchLocations = async () => {
       try {
-        const res = await fetch('/api/locations');
+        const res = await fetch('/api/locations?excludeSynthetic=true');
         const data: Location[] = await res.json();
         setLocations(data || []);
       } catch (error) {

@@ -90,7 +90,7 @@ export default function StockTransfersPage() {
   useEffect(() => {
     const fetchLocations = async () => {
       try {
-        const res = await fetch('/api/locations');
+        const res = await fetch('/api/locations?excludeSynthetic=true');
         if (!res.ok) throw new Error('Failed to fetch locations');
         const data = await res.json();
         setLocations(data || []);

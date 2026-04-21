@@ -43,7 +43,7 @@ export default function UsersPage() {
       setLoading(true);
       const [usersRes, locationsRes] = await Promise.all([
         fetch("/api/users"),
-        fetch("/api/locations"),
+        fetch("/api/locations?excludeSynthetic=true"),
       ]);
 
       if (!usersRes.ok || !locationsRes.ok) {

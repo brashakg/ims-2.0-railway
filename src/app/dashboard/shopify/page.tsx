@@ -189,9 +189,15 @@ export default function ShopifySettingsPage() {
 
       const data = await res.json();
       if (data.success) {
-        setSuccess(
-          `Pushed ${data.summary?.success || 0} products to Shopify (${data.summary?.failed || 0} failed)`
-        );
+        const s = data.summary || {};
+        const base = `Pushed ${s.success || 0} products to Shopify (${s.failed || 0} failed, ${s.skipped || 0} skipped)`;
+        if (s.aborted) {
+          setError(
+            `${base}. ${s.abortReason || "Push aborted after repeated failures."}`
+          );
+        } else {
+          setSuccess(base);
+        }
         await fetchAll();
       } else {
         setError(data.error || "Push failed");

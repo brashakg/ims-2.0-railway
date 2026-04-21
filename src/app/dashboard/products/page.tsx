@@ -113,7 +113,7 @@ export default function ProductsPage() {
   useEffect(() => {
     const fetchLocations = async () => {
       try {
-        const res = await fetch('/api/locations');
+        const res = await fetch('/api/locations?excludeSynthetic=true');
         const data = await res.json();
         // Handle both array and { data: [...] } response formats
         setLocations(Array.isArray(data) ? data : (data?.data || []));
