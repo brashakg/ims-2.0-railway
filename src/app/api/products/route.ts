@@ -146,7 +146,9 @@ export async function POST(request: NextRequest) {
       discountedPrice: calculateDiscountedPrice(
         body.mrp,
         body.category,
-        discountRules
+        discountRules,
+        body.brand,
+        body.subBrand
       ),
     };
 
@@ -234,12 +236,15 @@ export async function POST(request: NextRequest) {
 
         // Calculate discounted price for variant
         const variantMrp = v.mrp || body.mrp || 0;
-        const rule = discountRulesForVariants.find(
-          (r) => r.category.toUpperCase() === body.category.toUpperCase()
+        // Variants inherit the parent product's brand+subBrand for discount
+        // rule matching, but the variant's own mrp drives the discount amount.
+        const variantDiscountedPrice = calculateDiscountedPrice(
+          variantMrp,
+          body.category,
+          discountRulesForVariants,
+          body.brand,
+          body.subBrand
         );
-        const variantDiscountedPrice = rule
-          ? Math.round(variantMrp * (1 - rule.discountPercentage / 100))
-          : variantMrp;
 
         const variant = await prisma.productVariant.create({
           data: {

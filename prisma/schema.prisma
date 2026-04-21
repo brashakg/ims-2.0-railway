@@ -57,9 +57,21 @@ model AttributeOption {
 
 model DiscountRule {
   id                 String   @id @default(cuid())
-  category           String   @unique
+  category           String   // SPECTACLES, WATCHES, etc.
+  brand              String?  // Optional — narrow by brand (case-insensitive)
+  subBrand           String?  // Optional — narrow further by subBrand
   discountPercentage Float
   createdAt          DateTime @default(now())
+  updatedAt          DateTime @default(now()) @updatedAt
+
+  // Multiple rules per category allowed (one per category-only, one per brand, one per subBrand).
+  // Composite uniqueness is enforced at application level via findFirst +
+  // update/create because Prisma + Postgres treat NULLs as distinct in a
+  // composite @@unique, which would let duplicate "category=X,brand=null,subBrand=null"
+  // rows slip through.
+  @@index([category])
+  @@index([category, brand])
+  @@index([category, brand, subBrand])
 }
 
 // ─────────────────────────────────────────────────────────

@@ -109,7 +109,13 @@ export async function POST(request: NextRequest) {
           }
           if (newMrp < 0) newMrp = 0;
 
-          const newDiscounted = calculateDiscountedPrice(newMrp, product.category, discountRules);
+          const newDiscounted = calculateDiscountedPrice(
+            newMrp,
+            product.category,
+            discountRules,
+            product.brand,
+            product.subBrand,
+          );
 
           await prisma.product.update({
             where: { id },

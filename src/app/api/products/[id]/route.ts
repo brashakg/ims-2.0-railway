@@ -93,7 +93,9 @@ export async function PUT(
       discountedPrice: calculateDiscountedPrice(
         body.mrp || product.mrp,
         body.category || product.category,
-        discountRules
+        discountRules,
+        body.brand || product.brand,
+        body.subBrand || product.subBrand
       ),
     };
 

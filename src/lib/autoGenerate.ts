@@ -3,6 +3,8 @@ type Product = Record<string, any>;
 
 interface DiscountRule {
   category: string;
+  brand?: string | null;
+  subBrand?: string | null;
   percentage?: number;
   discountPercentage?: number;
 }
@@ -309,22 +311,73 @@ export function generateHTMLDescription(product: Product): string {
 }
 
 /**
- * Calculate discounted price based on category discount rules.
+ * Calculate discounted price based on discount rules, with specificity
+ * ranking: (category + brand + subBrand) > (category + brand) > (category).
+ * The most specific matching rule wins.
+ *
+ * Returns MRP unchanged if no rule matches (no discount).
  */
 export function calculateDiscountedPrice(
   mrp: number,
   category: string,
-  discountRules: DiscountRule[]
+  discountRules: DiscountRule[],
+  brand?: string | null,
+  subBrand?: string | null
 ): number {
   if (!mrp || mrp <= 0) return 0;
 
-  const rule = discountRules.find(
-    (r) => r.category.toLowerCase() === category.toLowerCase()
+  const rule = findMatchingDiscountRule(
+    discountRules,
+    category,
+    brand,
+    subBrand
   );
-
   if (!rule) return mrp;
 
-  const pct = rule.discountPercentage || rule.percentage || 0;
+  const pct = rule.discountPercentage ?? rule.percentage ?? 0;
   const discountAmount = (mrp * pct) / 100;
   return Math.round((mrp - discountAmount) * 100) / 100;
+}
+
+/**
+ * Pick the most specific matching discount rule for a product.
+ * Exported so other call sites can reuse the same precedence.
+ */
+export function findMatchingDiscountRule(
+  rules: DiscountRule[],
+  category: string,
+  brand?: string | null,
+  subBrand?: string | null
+): DiscountRule | undefined {
+  const cat = (category || "").toLowerCase();
+  const br = (brand || "").toLowerCase().trim();
+  const sb = (subBrand || "").toLowerCase().trim();
+
+  // Partition rules by category-match first to limit the search.
+  const catMatches = rules.filter((r) => r.category.toLowerCase() === cat);
+  if (catMatches.length === 0) return undefined;
+
+  // 1) Most specific: category + brand + subBrand.
+  if (br && sb) {
+    const exact = catMatches.find(
+      (r) =>
+        (r.brand || "").toLowerCase() === br &&
+        (r.subBrand || "").toLowerCase() === sb
+    );
+    if (exact) return exact;
+  }
+  // 2) category + brand (subBrand null/empty on rule).
+  if (br) {
+    const byBrand = catMatches.find(
+      (r) =>
+        (r.brand || "").toLowerCase() === br &&
+        !(r.subBrand && r.subBrand.trim())
+    );
+    if (byBrand) return byBrand;
+  }
+  // 3) category only (brand null on rule).
+  const byCat = catMatches.find(
+    (r) => !(r.brand && r.brand.trim()) && !(r.subBrand && r.subBrand.trim())
+  );
+  return byCat;
 }
