@@ -293,6 +293,14 @@ export function POSLayout() {
           item_note: (item as any).item_note || undefined,
         })),
         notes: store.cart_note || undefined,
+        // Phase 6.7 — pass delivery + cart-discount fields through to backend
+        delivery_date: store.delivery_date || undefined,
+        delivery_time_slot: store.delivery_time_slot || undefined,
+        delivery_priority: store.delivery_priority || 'NORMAL',
+        cart_discount_percent: store.cart_discount_percent || 0,
+        cart_discount_amount: store.cart_discount_amount || 0,
+        cart_discount_reason: store.cart_discount_reason || undefined,
+        cart_discount_approved_by: store.cart_discount_approved_by || undefined,
       } as any);
       if (result?.order_id) {
         for (const p of (store.payments || [])) {
@@ -1497,6 +1505,7 @@ function StepProducts({ onOpenLensModal }: { onOpenLensModal: () => void }) {
 // ============================================================================
 function StepReview({ onOpenDiscount }: { onOpenDiscount: (item: CartLineItem) => void }) {
   const store = usePOSStore();
+  const { user } = useAuth();
   const subtotal = store.getSubtotal(); const discount = store.getTotalDiscount();
 
   const taxBreakdown = useMemo(() => {
@@ -1576,6 +1585,101 @@ function StepReview({ onOpenDiscount }: { onOpenDiscount: (item: CartLineItem) =
 
       <textarea value={store.cart_note} onChange={(e) => store.setCartNote(e.target.value)} placeholder="Order notes, fitting instructions..." className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm h-16 resize-none" />
 
+      {/* Phase 6.7 — Order-level discount. Stacks on top of per-item
+          discounts. Capped at the user's role discount cap. */}
+      <div className="bg-white border border-gray-200 rounded-xl p-4 space-y-2 text-sm">
+        <div className="flex items-center justify-between">
+          <div>
+            <label className="font-medium text-gray-900">Overall Discount</label>
+            <p className="text-xs text-gray-500">Applied to subtotal (after per-item discounts)</p>
+          </div>
+          <div className="flex items-center gap-2">
+            <input
+              type="number"
+              min={0}
+              max={user?.discountCap ?? 10}
+              step={0.5}
+              value={store.cart_discount_percent || 0}
+              onChange={(e) => {
+                const pct = Math.max(0, Math.min(user?.discountCap ?? 10, parseFloat(e.target.value) || 0));
+                store.setCartDiscount(pct);
+              }}
+              onFocus={(e) => e.target.select()}
+              className="w-20 px-2 py-1 border border-gray-300 rounded text-sm text-right text-gray-900"
+              placeholder="0"
+            />
+            <span className="text-sm text-gray-500">%</span>
+          </div>
+        </div>
+        {store.cart_discount_percent > 0 && (
+          <div className="pt-2 space-y-2 border-t border-gray-200">
+            <input
+              type="text"
+              value={store.cart_discount_reason || ''}
+              onChange={(e) => store.setCartDiscount(store.cart_discount_percent, e.target.value, store.cart_discount_approved_by || undefined)}
+              placeholder="Reason (loyal customer, damaged box, festival offer...)"
+              className="w-full px-2 py-1 border border-gray-300 rounded text-xs text-gray-900"
+            />
+            <div className="flex items-center justify-between text-xs">
+              <span className="text-gray-500">Max allowed: {user?.discountCap ?? 10}% (role cap)</span>
+              <span className="text-green-600 font-medium">-{fc(store.cart_discount_amount || 0)}</span>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Phase 6.7 — Delivery scheduling (all sale types, not just Rx orders).
+          Stores collect pickup/delivery prefs at order time so Workshop + the
+          Orders list can sort by priority. */}
+      <div className="bg-white border border-gray-200 rounded-xl p-4 space-y-3 text-sm">
+        <div>
+          <label className="font-medium text-gray-900">Delivery / Collection</label>
+          <p className="text-xs text-gray-500">Date, time window, and priority. Required for prescription orders.</p>
+        </div>
+        <div className="grid grid-cols-1 tablet:grid-cols-3 gap-3">
+          <div>
+            <label className="text-xs text-gray-500 block mb-1">Date</label>
+            <input
+              type="date"
+              value={store.delivery_date || ''}
+              onChange={(e) => store.setDeliveryDate(e.target.value || null)}
+              className="w-full px-2 py-1.5 border border-gray-300 rounded text-sm text-gray-900"
+            />
+          </div>
+          <div>
+            <label className="text-xs text-gray-500 block mb-1">Time slot</label>
+            <select
+              value={store.delivery_time_slot || ''}
+              onChange={(e) => store.setDeliveryTimeSlot(e.target.value || null)}
+              className="w-full px-2 py-1.5 border border-gray-300 rounded text-sm text-gray-900"
+            >
+              <option value="">Any time</option>
+              <option value="10:00-12:00">10:00 – 12:00</option>
+              <option value="12:00-14:00">12:00 – 14:00</option>
+              <option value="14:00-16:00">14:00 – 16:00</option>
+              <option value="16:00-18:00">16:00 – 18:00</option>
+              <option value="18:00-20:00">18:00 – 20:00</option>
+            </select>
+          </div>
+          <div>
+            <label className="text-xs text-gray-500 block mb-1">Priority</label>
+            <select
+              value={store.delivery_priority || 'NORMAL'}
+              onChange={(e) => store.setDeliveryPriority(e.target.value as 'NORMAL' | 'EXPRESS' | 'URGENT')}
+              className={`w-full px-2 py-1.5 border rounded text-sm font-medium ${
+                store.delivery_priority === 'URGENT' ? 'border-red-300 text-red-700 bg-red-50' :
+                store.delivery_priority === 'EXPRESS' ? 'border-orange-300 text-orange-700 bg-orange-50' :
+                'border-gray-300 text-gray-700'
+              }`}
+            >
+              <option value="NORMAL">Normal</option>
+              <option value="EXPRESS">Express (+surcharge)</option>
+              <option value="URGENT">Urgent (same day)</option>
+            </select>
+          </div>
+        </div>
+      </div>
+
       <div className="bg-white border border-gray-200 rounded-xl p-4 space-y-2 text-sm">
         <div className="flex justify-between"><span className="text-gray-500">Subtotal</span><span>{fc(subtotal)}</span></div>
         {discount > 0 && <div className="flex justify-between text-green-600"><span>Discount</span><span>-{fc(discount)}</span></div>}
@@ -1601,11 +1705,6 @@ function StepReview({ onOpenDiscount }: { onOpenDiscount: (item: CartLineItem) =
             <input type="checkbox" checked={store.is_advance_payment} onChange={(e) => store.setAdvancePayment(e.target.checked)} className="rounded border-gray-300" />
             <span className="font-medium text-blue-700">Advance payment only</span><span className="text-blue-500 text-xs">(Balance on delivery)</span>
           </label>
-          {store.is_advance_payment && (
-            <div className="mt-2 flex items-center gap-2"><label className="text-xs text-blue-600">Delivery date:</label>
-              <input type="date" value={store.delivery_date || ''} onChange={(e) => store.setDeliveryDate(e.target.value)} className="px-2 py-1 border border-blue-200 rounded text-sm" />
-            </div>
-          )}
         </div>
       )}
     </div>

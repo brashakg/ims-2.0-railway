@@ -63,6 +63,9 @@ export function StepComplete({ onPrint, onReset }: StepCompleteProps) {
       itemType: item.category || 'FRAMES',
       productId: item.product_id,
       productName: item.name,
+      brand: item.brand,       // carried into GSTInvoice for customer-friendly description
+      subbrand: item.subbrand,
+      category: item.category,
       sku: item.sku || '',
       quantity: item.quantity,
       unitPrice: item.unit_price,

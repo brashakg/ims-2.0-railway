@@ -229,6 +229,14 @@ class OrderCreate(BaseModel):
     items: List[OrderItemCreate]
     notes: Optional[str] = None
     expected_delivery_days: int = Field(default=7, ge=1)
+    # Phase 6.7 — delivery scheduling + order-level discount
+    delivery_date: Optional[date] = None
+    delivery_time_slot: Optional[str] = None   # e.g. "10:00-12:00"
+    delivery_priority: Optional[str] = Field(default="NORMAL")  # NORMAL | EXPRESS | URGENT
+    cart_discount_percent: float = Field(default=0.0, ge=0.0, le=100.0)
+    cart_discount_amount: float = Field(default=0.0, ge=0.0)
+    cart_discount_reason: Optional[str] = None
+    cart_discount_approved_by: Optional[str] = None
 
 
 class OrderUpdate(BaseModel):
@@ -611,11 +619,20 @@ async def create_order(
 
         # Calculate tax (18% GST default)
         tax_rate = 18.0
-        tax_amount = subtotal * (tax_rate / 100)
-        grand_total = subtotal + tax_amount
-        expected_delivery = datetime.now() + timedelta(
-            days=order.expected_delivery_days
-        )
+        # Phase 6.7 — apply order-level discount on top of per-item discounts.
+        # Discount comes off taxable subtotal BEFORE GST so invoice math is
+        # consistent (tax charged on what the customer actually pays).
+        cart_discount_percent = max(0.0, min(100.0, order.cart_discount_percent or 0.0))
+        cart_discount_amount = round(subtotal * (cart_discount_percent / 100.0), 2)
+        taxable_after_cart_discount = round(subtotal - cart_discount_amount, 2)
+        tax_amount = round(taxable_after_cart_discount * (tax_rate / 100), 2)
+        grand_total = round(taxable_after_cart_discount + tax_amount, 2)
+
+        # Resolve delivery date — explicit date > expected_delivery_days
+        if order.delivery_date:
+            expected_delivery = datetime.combine(order.delivery_date, datetime.min.time())
+        else:
+            expected_delivery = datetime.now() + timedelta(days=order.expected_delivery_days)
 
         order_data = {
             "order_number": generate_order_number(store_id),
@@ -627,6 +644,10 @@ async def create_order(
             "salesperson_id": salesperson_id,
             "items": items_data,
             "subtotal": subtotal,
+            "cart_discount_percent": cart_discount_percent,
+            "cart_discount_amount": cart_discount_amount,
+            "cart_discount_reason": order.cart_discount_reason,
+            "cart_discount_approved_by": order.cart_discount_approved_by,
             "tax_rate": tax_rate,
             "tax_amount": tax_amount,
             "grand_total": grand_total,
@@ -635,6 +656,8 @@ async def create_order(
             "payment_status": "UNPAID",
             "status": "DRAFT",
             "expected_delivery": expected_delivery.isoformat(),
+            "delivery_time_slot": order.delivery_time_slot,
+            "delivery_priority": (order.delivery_priority or "NORMAL").upper(),
             "notes": order.notes,
             "payments": [],
         }

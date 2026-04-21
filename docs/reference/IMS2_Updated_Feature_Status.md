@@ -8,6 +8,10 @@
 **After Phase 6.4 (2026-04-20):** 134 built, 8 partial, 153 not built
   - ✅ Workshop dashboard KPIs (pending, overdue, completed today, avg turnaround) — `GET /api/v1/workshop/dashboard-kpis` + wired into WorkshopPage header
   - ✅ Pending jobs report with aging buckets (0-3d / 3-7d / 7+d) + per-technician breakdown — rewrote `GET /api/v1/reports/workshop/pending-jobs` to use `workshop_jobs` collection (was incorrectly reading from `tasks` collection, never populated)
+**After Phase 6.7 (2026-04-21):** 137 built, 8 partial, 150 not built
+  - ✅ Simplified customer invoice — "Brand Category" (e.g. "Ray-Ban Sunglass") on thermal + A4 receipt + GST tax invoice. Helper in `frontend/src/utils/receiptFormat.ts`
+  - ✅ Delivery date + time slot + priority fields on POS orders (frontend posStore + POSLayout Review UI + backend OrderCreate schema + persistence)
+  - ✅ Overall cart discount (order-level, stacks on per-item discounts, capped at user's role discountCap) — frontend + backend, GST recomputed on post-discount taxable value
 
 ---
 

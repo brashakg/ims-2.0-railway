@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { Printer, Mail, Share2, Download, FileText, Receipt } from 'lucide-react';
+import { describeForReceipt } from '../../utils/receiptFormat';
 
 interface ReceiptPreviewProps {
   billData: any;
@@ -126,7 +127,7 @@ export function ReceiptPreview({
                 {cartItems.map((item, idx) => (
                   <div key={idx} className="text-xs space-y-1">
                     <div className="flex justify-between">
-                      <span className="flex-1">{item.name}</span>
+                      <span className="flex-1">{describeForReceipt(item)}</span>
                       <span className="w-12 text-right">{item.quantity}</span>
                       <span className="w-16 text-right">₹{(item.unit_price * item.quantity).toFixed(2)}</span>
                     </div>
@@ -222,8 +223,7 @@ export function ReceiptPreview({
                     {cartItems.map((item, idx) => (
                       <tr key={idx} className="border-b border-gray-300">
                         <td className="py-2">
-                          <p className="font-semibold">{item.name}</p>
-                          <p className="text-xs text-gray-600">{item.sku} • {item.brand}</p>
+                          <p className="font-semibold">{describeForReceipt(item)}</p>
                         </td>
                         <td className="text-center py-2">{item.quantity}</td>
                         <td className="text-right py-2">₹{item.unit_price.toLocaleString('en-IN')}</td>

@@ -129,6 +129,21 @@ export interface POSState {
   payments: PaymentEntry[];
   is_advance_payment: boolean;
   delivery_date: string | null;
+  // Phase 6.7 — time + priority for delivery/collection.
+  // time_slot uses 2-hour windows (e.g. "10:00-12:00") to match the
+  // way store staff schedule pickups; priority drives queue ordering
+  // in workshop + sorting on the Orders list.
+  delivery_time_slot: string | null;
+  delivery_priority: 'NORMAL' | 'EXPRESS' | 'URGENT';
+
+  // Order-level discount (applied AFTER per-item discounts, on the
+  // taxable subtotal). Capped at the user's role discount cap when the
+  // Review step validates; caller must pass approved_by for any value
+  // above a junior staff's cap. 0% by default.
+  cart_discount_percent: number;
+  cart_discount_amount: number;
+  cart_discount_reason: string | null;
+  cart_discount_approved_by: string | null;
 
   // Order result
   order_id: string | null;
@@ -180,6 +195,12 @@ export interface POSState {
   removePayment: (index: number) => void;
   setAdvancePayment: (isAdvance: boolean) => void;
   setDeliveryDate: (date: string | null) => void;
+  setDeliveryTimeSlot: (slot: string | null) => void;
+  setDeliveryPriority: (priority: 'NORMAL' | 'EXPRESS' | 'URGENT') => void;
+
+  // Cart-level discount — applied to subtotal after per-item discounts.
+  // Passing percent=0 clears the discount.
+  setCartDiscount: (percent: number, reason?: string, approvedBy?: string) => void;
 
   // Order
   setOrderResult: (orderId: string, orderNumber: string) => void;
@@ -243,6 +264,12 @@ const initialState = {
   payments: [] as PaymentEntry[],
   is_advance_payment: false,
   delivery_date: null,
+  delivery_time_slot: null,
+  delivery_priority: 'NORMAL' as 'NORMAL' | 'EXPRESS' | 'URGENT',
+  cart_discount_percent: 0,
+  cart_discount_amount: 0,
+  cart_discount_reason: null,
+  cart_discount_approved_by: null,
   order_id: null,
   order_number: null,
   is_processing: false,
@@ -391,6 +418,27 @@ export const usePOSStore = create<POSState>()(
 
       setAdvancePayment: (isAdvance: boolean) => set({ is_advance_payment: isAdvance }),
       setDeliveryDate: (date: string | null) => set({ delivery_date: date }),
+      setDeliveryTimeSlot: (slot: string | null) => set({ delivery_time_slot: slot }),
+      setDeliveryPriority: (priority: 'NORMAL' | 'EXPRESS' | 'URGENT') => set({ delivery_priority: priority }),
+
+      setCartDiscount: (percent: number, reason?: string, approvedBy?: string) => {
+        // Recompute cart_discount_amount from the current taxable subtotal
+        // (post item-discount) so it re-evaluates when items change.
+        set((state: POSState) => {
+          const clamped = Math.max(0, Math.min(100, percent));
+          const subtotalAfterItemDiscounts = (state.cart || []).reduce(
+            (sum: number, item: CartLineItem) => sum + (item.line_total || 0),
+            0
+          );
+          const amt = Math.round(subtotalAfterItemDiscounts * (clamped / 100) * 100) / 100;
+          return {
+            cart_discount_percent: clamped,
+            cart_discount_amount: amt,
+            cart_discount_reason: reason ?? null,
+            cart_discount_approved_by: approvedBy ?? null,
+          };
+        });
+      },
 
       // --- Order ---
       setOrderResult: (orderId: string, orderNumber: string) => set({ order_id: orderId, order_number: orderNumber }),
@@ -438,24 +486,49 @@ export const usePOSStore = create<POSState>()(
       },
 
       getTotalDiscount: () => {
-        return (get().cart || []).reduce(
+        // Sum of per-item discounts + cart-level discount. Drives the
+        // "Total Discount" line on the Review step + GST invoice.
+        const state = get();
+        const itemDiscount = (state.cart || []).reduce(
           (sum: number, item: CartLineItem) => sum + (item.discount_amount || 0),
           0
         );
+        return Math.round((itemDiscount + (state.cart_discount_amount || 0)) * 100) / 100;
       },
 
       getGrandTotal: () => {
-        // Sum line totals (after discount) + GST per item using correct HSN-based rates
-        const cart = get().cart || [];
-        let subtotal = 0;
+        // Flow: raw_line_total → per-item discount → per-item taxable
+        //   → apply cart-level discount proportionally → GST per category
+        //   → sum.
+        // GST is calculated on the POST-cart-discount taxable value so
+        // the invoice math stays legally consistent (GST on the actual
+        // amount charged).
+        const state = get();
+        const cart = state.cart || [];
+        const subtotalAfterItem = cart.reduce(
+          (sum: number, item: CartLineItem) => sum + (item.line_total || 0),
+          0
+        );
+        const cartDiscountPct = state.cart_discount_percent || 0;
+        const cartDiscountFactor = 1 - cartDiscountPct / 100;  // 1.0 when 0
+
+        let taxable = 0;
         let totalTax = 0;
         for (const item of cart) {
           const lineTotal = item.line_total || 0;
-          subtotal += lineTotal;
+          const itemTaxable = Math.round(lineTotal * cartDiscountFactor * 100) / 100;
+          taxable += itemTaxable;
           const gstRate = getGSTRateByCategory(item.category);
-          totalTax += lineTotal * (gstRate / 100);
+          totalTax += itemTaxable * (gstRate / 100);
         }
-        return Math.round((subtotal + totalTax) * 100) / 100;
+        // Side-effect: keep cart_discount_amount in sync with the current
+        // subtotal so "Total Discount" on the Review card reflects reality
+        // even after the user edits cart quantities.
+        const syncedCartDiscountAmt = Math.round(subtotalAfterItem * (cartDiscountPct / 100) * 100) / 100;
+        if (Math.abs(syncedCartDiscountAmt - (state.cart_discount_amount || 0)) > 0.01) {
+          set({ cart_discount_amount: syncedCartDiscountAmt });
+        }
+        return Math.round((taxable + totalTax) * 100) / 100;
       },
 
       getTotalPaid: () => {
@@ -480,7 +553,8 @@ export const usePOSStore = create<POSState>()(
         order_id: null,
         order_number: null,
       }),
-      // Safe merge: ensure arrays are never undefined after hydration
+      // Safe merge: ensure arrays are never undefined after hydration and
+      // backfill Phase 6.7 fields if the persisted draft predates them.
       onRehydrateStorage: () => (state: POSState | undefined) => {
         if (state) {
           if (!Array.isArray(state.cart)) state.cart = [];
@@ -489,6 +563,14 @@ export const usePOSStore = create<POSState>()(
           state.is_processing = false;
           state.order_id = null;
           state.order_number = null;
+          // Phase 6.7 backfill — persisted drafts from earlier builds won't
+          // have these keys; default them so the Review UI doesn't crash.
+          if (state.delivery_time_slot === undefined) state.delivery_time_slot = null;
+          if (state.delivery_priority === undefined) state.delivery_priority = 'NORMAL';
+          if (state.cart_discount_percent === undefined) state.cart_discount_percent = 0;
+          if (state.cart_discount_amount === undefined) state.cart_discount_amount = 0;
+          if (state.cart_discount_reason === undefined) state.cart_discount_reason = null;
+          if (state.cart_discount_approved_by === undefined) state.cart_discount_approved_by = null;
         }
       },
     }
