@@ -3,7 +3,8 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import { useSession } from 'next-auth/react';
-import { Upload, X, Loader2, AlertTriangle } from 'lucide-react';
+import { Upload, X, Loader2, AlertTriangle, Search, Package, Plus, Edit3, ArrowRight, Store } from 'lucide-react';
+import Link from 'next/link';
 import SearchableDropdown from '@/components/SearchableDropdown';
 import VariantManager from '@/components/VariantManager';
 import { CATEGORIES as CATEGORY_DEFS } from '@/lib/categories';
@@ -79,9 +80,23 @@ interface DuplicateProduct {
   mrp: number;
   sku: string;
   image: string | null;
-  variants: Array<{ id: string; colorCode: string; colorName: string; frameSize: string; sku: string }>;
+  variants: Array<{
+    id: string;
+    colorCode: string;
+    colorName: string | null;
+    frameColor: string | null;
+    frameSize: string | null;
+    sku: string | null;
+    barcode: string | null;
+    mrp: number;
+    image: string | null;
+    locations: Array<{ id: string; locationId: string; locationName: string; quantity: number }>;
+    totalStock: number;
+  }>;
   variantCount: number;
 }
+
+type WizardStage = 'identify' | 'match' | 'new-product' | 'add-variant' | 'update-stock';
 
 export default function NewProductPage() {
   const router = useRouter();
@@ -95,6 +110,29 @@ export default function NewProductPage() {
   const [uploadingImage, setUploadingImage] = useState(false);
 
   const [productVariants, setProductVariants] = useState<any[]>([]);
+
+  // ── Wizard state (Identify → Match → Branch) ──
+  const [stage, setStage] = useState<WizardStage>('identify');
+  const [wizardCategory, setWizardCategory] = useState('');
+  const [wizardBrand, setWizardBrand] = useState('');
+  const [wizardModelNo, setWizardModelNo] = useState('');
+  const [matchChecking, setMatchChecking] = useState(false);
+  const [matchResults, setMatchResults] = useState<DuplicateProduct[]>([]);
+  const [selectedMatch, setSelectedMatch] = useState<DuplicateProduct | null>(null);
+  const [matchError, setMatchError] = useState<string | null>(null);
+
+  // "Add variant" sub-form state (used when stage === 'add-variant')
+  const [newVariantData, setNewVariantData] = useState({
+    colorCode: '',
+    colorName: '',
+    frameColor: '',
+    frameSize: '',
+    barcode: '',
+    mrp: '',
+    stockByLocation: {} as Record<string, number>,
+    images: [] as string[],
+  });
+  const [savingVariant, setSavingVariant] = useState(false);
 
   // Duplicate detection state
   const [duplicateProducts, setDuplicateProducts] = useState<DuplicateProduct[]>([]);
@@ -474,9 +512,548 @@ export default function NewProductPage() {
     }),
   };
 
+  // ── Wizard actions ──
+  const runIdentifyCheck = async () => {
+    if (!wizardCategory || !wizardBrand.trim() || !wizardModelNo.trim()) {
+      setMatchError('Please fill in category, brand, and model no.');
+      return;
+    }
+    setMatchError(null);
+    setMatchChecking(true);
+    try {
+      const res = await fetch(
+        `/api/products/check-duplicate?brand=${encodeURIComponent(wizardBrand.trim())}&modelNo=${encodeURIComponent(wizardModelNo.trim())}`
+      );
+      const data = await res.json();
+      if (!res.ok || !data.success) throw new Error(data.error || 'Check failed');
+      if (data.found && (data.products || []).length > 0) {
+        setMatchResults(data.products);
+        setSelectedMatch(null);
+        setStage('match');
+      } else {
+        // Pre-fill the full form with the wizard-collected fields and go
+        // straight to 'new-product' stage.
+        setFormData((prev) => ({
+          ...prev,
+          category: wizardCategory,
+          brand: wizardBrand.trim(),
+          modelNo: wizardModelNo.trim(),
+        }));
+        setStage('new-product');
+      }
+    } catch (e) {
+      setMatchError(e instanceof Error ? e.message : 'Match check failed');
+    } finally {
+      setMatchChecking(false);
+    }
+  };
+
+  const chooseCreateAnyway = (match: DuplicateProduct | null) => {
+    setFormData((prev) => ({
+      ...prev,
+      category: wizardCategory || (match?.category ?? ''),
+      brand: wizardBrand.trim() || (match?.brand ?? ''),
+      modelNo: wizardModelNo.trim() || (match?.modelNo ?? ''),
+    }));
+    setStage('new-product');
+  };
+
+  const chooseAddVariant = (match: DuplicateProduct) => {
+    setSelectedMatch(match);
+    setNewVariantData({
+      colorCode: '',
+      colorName: '',
+      frameColor: '',
+      frameSize: '',
+      barcode: '',
+      mrp: match.mrp ? String(match.mrp) : '',
+      stockByLocation: {},
+      images: [],
+    });
+    setStage('add-variant');
+  };
+
+  const chooseUpdateStock = (match: DuplicateProduct) => {
+    setSelectedMatch(match);
+    setStage('update-stock');
+  };
+
+  // Called by the Update Stock UI whenever a quantity input loses focus.
+  // Posts to the new instant-save endpoint; returns true on success.
+  const saveVariantStock = async (
+    variantId: string,
+    locationId: string,
+    quantity: number
+  ): Promise<boolean> => {
+    try {
+      const res = await fetch(`/api/variants/${variantId}/stock`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ locationId, quantity }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success) throw new Error(data.error || 'Stock update failed');
+      // Reflect updated quantity in local match state so the UI stays accurate.
+      setSelectedMatch((m) => {
+        if (!m) return m;
+        return {
+          ...m,
+          variants: m.variants.map((v) =>
+            v.id === variantId
+              ? {
+                  ...v,
+                  locations: v.locations.map((l) =>
+                    l.locationId === locationId ? { ...l, quantity } : l
+                  ),
+                  totalStock:
+                    v.locations.reduce(
+                      (s, l) =>
+                        s + (l.locationId === locationId ? quantity : l.quantity),
+                      0
+                    ),
+                }
+              : v
+          ),
+        };
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  const handleCreateVariant = async () => {
+    if (!selectedMatch) return;
+    if (!newVariantData.colorCode.trim()) {
+      setMatchError('Color code is required');
+      return;
+    }
+    setSavingVariant(true);
+    setMatchError(null);
+    try {
+      const res = await fetch(`/api/products/${selectedMatch.id}/variants`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          colorCode: newVariantData.colorCode.trim(),
+          colorName: newVariantData.colorName.trim() || null,
+          frameColor: newVariantData.frameColor.trim() || null,
+          frameSize: newVariantData.frameSize.trim() || null,
+          barcode: newVariantData.barcode.trim() || null,
+          mrp: newVariantData.mrp ? parseFloat(newVariantData.mrp) : selectedMatch.mrp,
+          locations: Object.entries(newVariantData.stockByLocation)
+            .filter(([, q]) => q > 0)
+            .map(([locationId, quantity]) => ({ locationId, quantity })),
+          images: newVariantData.images.map((url) => ({ url, role: 'RAW' })),
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success) throw new Error(data.error || 'Variant save failed');
+      alert('Variant added successfully. Raw images are queued for the designer.');
+      router.push(`/dashboard/products/edit/${selectedMatch.id}`);
+    } catch (e) {
+      setMatchError(e instanceof Error ? e.message : 'Variant save failed');
+    } finally {
+      setSavingVariant(false);
+    }
+  };
+
+  // ── Wizard stages (early-return UIs) ──
+
+  if (stage === 'identify') {
+    return (
+      <div className="p-4 sm:p-6 bg-slate-50 min-h-screen">
+        <div className="max-w-2xl mx-auto">
+          <div className="mb-6">
+            <h1 className="text-2xl sm:text-3xl font-bold text-slate-900">
+              Add Product
+            </h1>
+            <p className="text-sm text-slate-600 mt-1">
+              Start by entering the category, brand and model number. We&apos;ll
+              check if this product already exists — if it does, you can add a
+              new color/size variant or update stock instead of re-entering
+              everything.
+            </p>
+          </div>
+          <div className="bg-white rounded-lg shadow-sm border border-slate-200 p-6 space-y-4">
+            <div>
+              <label className="block text-sm font-medium text-slate-700 mb-1">
+                Product Category
+              </label>
+              <select
+                value={wizardCategory}
+                onChange={(e) => setWizardCategory(e.target.value)}
+                className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm"
+              >
+                <option value="">Select category…</option>
+                {CATEGORY_DEFS.map((c) => (
+                  <option key={c.key} value={c.key}>
+                    {c.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-slate-700 mb-1">
+                Brand
+              </label>
+              <input
+                list="wizard-brand-list"
+                type="text"
+                value={wizardBrand}
+                onChange={(e) => setWizardBrand(e.target.value)}
+                placeholder="e.g. Ray-Ban"
+                className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm"
+              />
+              <datalist id="wizard-brand-list">
+                {getAttributeOptions('brand').map((b) => (
+                  <option key={b} value={b} />
+                ))}
+              </datalist>
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-slate-700 mb-1">
+                Model No
+              </label>
+              <input
+                type="text"
+                value={wizardModelNo}
+                onChange={(e) => setWizardModelNo(e.target.value)}
+                placeholder="e.g. RB3025"
+                className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm"
+              />
+            </div>
+            {matchError && (
+              <div className="p-2 bg-red-50 border border-red-200 rounded text-red-800 text-sm">
+                {matchError}
+              </div>
+            )}
+            <button
+              onClick={runIdentifyCheck}
+              disabled={matchChecking || !wizardCategory || !wizardBrand.trim() || !wizardModelNo.trim()}
+              className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 text-sm font-medium"
+            >
+              {matchChecking ? <Loader2 className="w-4 h-4 animate-spin" /> : <Search className="w-4 h-4" />}
+              {matchChecking ? 'Checking…' : 'Continue'}
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (stage === 'match') {
+    return (
+      <div className="p-4 sm:p-6 bg-slate-50 min-h-screen">
+        <div className="max-w-3xl mx-auto">
+          <button
+            onClick={() => setStage('identify')}
+            className="text-sm text-slate-600 hover:text-slate-900 mb-4"
+          >
+            ← Back
+          </button>
+          <h1 className="text-2xl sm:text-3xl font-bold text-slate-900 mb-2">
+            Match found
+          </h1>
+          <p className="text-sm text-slate-600 mb-4">
+            A product with brand <b>{wizardBrand}</b> and model <b>{wizardModelNo}</b> already exists. What do you want to do?
+          </p>
+          <div className="space-y-3">
+            {matchResults.map((m) => (
+              <div
+                key={m.id}
+                className="bg-white rounded-lg shadow-sm border border-slate-200 overflow-hidden"
+              >
+                <div className="p-4 flex items-start gap-3 border-b border-slate-100">
+                  {m.image ? (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img src={m.image} alt={m.title || ''} className="w-14 h-14 rounded object-cover border border-slate-200" />
+                  ) : (
+                    <div className="w-14 h-14 rounded bg-slate-100 border border-slate-200 flex items-center justify-center">
+                      <Package className="w-6 h-6 text-slate-400" />
+                    </div>
+                  )}
+                  <div className="flex-1 min-w-0">
+                    <h3 className="font-semibold text-slate-900 truncate">
+                      {m.title || `${m.brand} ${m.modelNo}`}
+                    </h3>
+                    <div className="text-xs text-slate-500">
+                      {m.category} · {m.brand}
+                      {m.modelNo ? ` · ${m.modelNo}` : ''} · MRP ₹{m.mrp || 0}
+                    </div>
+                  </div>
+                </div>
+
+                {m.variants.length > 0 && (
+                  <div className="divide-y divide-slate-100 text-sm">
+                    <div className="px-4 py-2 bg-slate-50 text-xs font-medium text-slate-500 uppercase tracking-wider">
+                      Existing variants ({m.variants.length})
+                    </div>
+                    {m.variants.map((v) => (
+                      <div key={v.id} className="px-4 py-2 flex items-center gap-3">
+                        <span className="font-medium text-slate-900">
+                          {v.colorName || v.colorCode}
+                          {v.frameSize ? ` / ${v.frameSize}` : ''}
+                        </span>
+                        <span className="text-xs text-slate-500 ml-auto">
+                          <Store className="w-3 h-3 inline mr-1" />
+                          {v.totalStock} in stock
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                <div className="p-3 flex flex-wrap gap-2 bg-slate-50 border-t border-slate-100">
+                  <button
+                    onClick={() => chooseAddVariant(m)}
+                    className="flex items-center gap-2 px-3 py-1.5 text-sm rounded bg-emerald-600 text-white hover:bg-emerald-700"
+                  >
+                    <Plus className="w-4 h-4" />
+                    Add new color/size variant
+                  </button>
+                  <button
+                    onClick={() => chooseUpdateStock(m)}
+                    disabled={m.variants.length === 0}
+                    className="flex items-center gap-2 px-3 py-1.5 text-sm rounded border border-slate-300 bg-white text-slate-700 hover:bg-slate-100 disabled:opacity-50"
+                  >
+                    <Edit3 className="w-4 h-4" />
+                    Update stock on existing variants
+                  </button>
+                  <Link
+                    href={`/dashboard/products/edit/${m.id}`}
+                    className="flex items-center gap-2 px-3 py-1.5 text-sm rounded border border-slate-300 bg-white text-slate-700 hover:bg-slate-100"
+                  >
+                    <ArrowRight className="w-4 h-4" />
+                    Open full edit
+                  </Link>
+                </div>
+              </div>
+            ))}
+          </div>
+          <div className="mt-4 text-center">
+            <button
+              onClick={() => chooseCreateAnyway(null)}
+              className="text-xs text-slate-500 hover:text-slate-700 underline"
+            >
+              I know what I&apos;m doing — create a separate product anyway
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (stage === 'add-variant' && selectedMatch) {
+    const parent = selectedMatch;
+    return (
+      <div className="p-4 sm:p-6 bg-slate-50 min-h-screen">
+        <div className="max-w-2xl mx-auto">
+          <button onClick={() => setStage('match')} className="text-sm text-slate-600 hover:text-slate-900 mb-4">
+            ← Back
+          </button>
+          <h1 className="text-2xl sm:text-3xl font-bold text-slate-900 mb-1">
+            Add variant to {parent.brand} {parent.modelNo}
+          </h1>
+          <p className="text-sm text-slate-600 mb-4">
+            Only color + size fields and stock — everything else inherits from the parent product.
+          </p>
+          <div className="bg-white rounded-lg shadow-sm border border-slate-200 p-6 space-y-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1">Color Code *</label>
+                <input
+                  type="text"
+                  value={newVariantData.colorCode}
+                  onChange={(e) => setNewVariantData((d) => ({ ...d, colorCode: e.target.value }))}
+                  placeholder="e.g. 001, BLK"
+                  className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1">Color Name</label>
+                <input
+                  type="text"
+                  value={newVariantData.colorName}
+                  onChange={(e) => setNewVariantData((d) => ({ ...d, colorName: e.target.value }))}
+                  placeholder="e.g. Gold, Black"
+                  className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1">Frame Color</label>
+                <input
+                  type="text"
+                  value={newVariantData.frameColor}
+                  onChange={(e) => setNewVariantData((d) => ({ ...d, frameColor: e.target.value }))}
+                  className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1">Size</label>
+                <input
+                  type="text"
+                  value={newVariantData.frameSize}
+                  onChange={(e) => setNewVariantData((d) => ({ ...d, frameSize: e.target.value }))}
+                  placeholder="e.g. 55, 58, S, M, L"
+                  className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1">Barcode</label>
+                <input
+                  type="text"
+                  value={newVariantData.barcode}
+                  onChange={(e) => setNewVariantData((d) => ({ ...d, barcode: e.target.value }))}
+                  className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1">
+                  MRP <span className="text-slate-400">(defaults to ₹{parent.mrp || 0})</span>
+                </label>
+                <input
+                  type="number"
+                  value={newVariantData.mrp}
+                  onChange={(e) => setNewVariantData((d) => ({ ...d, mrp: e.target.value }))}
+                  className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm"
+                />
+              </div>
+            </div>
+
+            {locations.length > 0 && (
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-2">Stock by location</label>
+                <div className="grid grid-cols-2 gap-2">
+                  {locations.map((loc) => (
+                    <div key={loc.id} className="flex items-center gap-2 text-sm">
+                      <span className="text-slate-700 truncate flex-1">{loc.name}</span>
+                      <input
+                        type="number"
+                        min={0}
+                        value={newVariantData.stockByLocation[loc.id] ?? 0}
+                        onChange={(e) =>
+                          setNewVariantData((d) => ({
+                            ...d,
+                            stockByLocation: { ...d.stockByLocation, [loc.id]: Number(e.target.value) },
+                          }))
+                        }
+                        className="w-24 px-2 py-1 border border-slate-300 rounded text-sm text-right"
+                      />
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {matchError && (
+              <div className="p-2 bg-red-50 border border-red-200 rounded text-red-800 text-sm">{matchError}</div>
+            )}
+
+            <div className="text-xs text-slate-500 bg-slate-50 border border-slate-200 rounded p-2">
+              Raw variant images upload in the existing full-edit flow. Use
+              <Link href={`/dashboard/products/edit/${parent.id}`} className="text-blue-600 hover:underline mx-1">full edit</Link>
+              to upload variant-specific photos — they go through the Design Queue.
+            </div>
+
+            <div className="flex gap-2 pt-2">
+              <button
+                onClick={handleCreateVariant}
+                disabled={savingVariant || !newVariantData.colorCode.trim()}
+                className="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 text-sm font-medium"
+              >
+                {savingVariant ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
+                Save variant
+              </button>
+              <button
+                type="button"
+                onClick={() => setStage('match')}
+                className="px-4 py-2.5 rounded-lg border border-slate-300 text-slate-700 bg-white hover:bg-slate-50 text-sm"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (stage === 'update-stock' && selectedMatch) {
+    const parent = selectedMatch;
+    const allLocationIds = Array.from(
+      new Set(parent.variants.flatMap((v) => v.locations.map((l) => l.locationId)))
+    );
+    const locationNamesById = new Map(
+      parent.variants
+        .flatMap((v) => v.locations)
+        .map((l) => [l.locationId, l.locationName])
+    );
+    return (
+      <div className="p-4 sm:p-6 bg-slate-50 min-h-screen">
+        <div className="max-w-5xl mx-auto">
+          <button onClick={() => setStage('match')} className="text-sm text-slate-600 hover:text-slate-900 mb-4">
+            ← Back
+          </button>
+          <h1 className="text-2xl sm:text-3xl font-bold text-slate-900 mb-1">
+            Update stock — {parent.brand} {parent.modelNo}
+          </h1>
+          <p className="text-sm text-slate-600 mb-4">
+            Edit any quantity cell. Changes save instantly when you tab out of the cell.
+          </p>
+          <div className="bg-white rounded-lg shadow-sm border border-slate-200 overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead className="bg-slate-50 border-b border-slate-200">
+                <tr>
+                  <th className="px-3 py-2 text-left font-medium text-slate-600">Variant</th>
+                  {allLocationIds.map((lid) => (
+                    <th key={lid} className="px-3 py-2 text-right font-medium text-slate-600">
+                      {locationNamesById.get(lid)}
+                    </th>
+                  ))}
+                  <th className="px-3 py-2 text-right font-medium text-slate-600">Total</th>
+                </tr>
+              </thead>
+              <tbody>
+                {parent.variants.map((v) => (
+                  <tr key={v.id} className="border-b border-slate-100 last:border-0">
+                    <td className="px-3 py-2 font-medium text-slate-900">
+                      {v.colorName || v.colorCode}
+                      {v.frameSize ? ` / ${v.frameSize}` : ''}
+                      {v.sku && <span className="text-xs text-slate-400 ml-2">{v.sku}</span>}
+                    </td>
+                    {allLocationIds.map((lid) => {
+                      const row = v.locations.find((l) => l.locationId === lid);
+                      return (
+                        <td key={lid} className="px-3 py-2">
+                          <StockCell
+                            initialQty={row?.quantity ?? 0}
+                            onSave={(qty) => saveVariantStock(v.id, lid, qty)}
+                          />
+                        </td>
+                      );
+                    })}
+                    <td className="px-3 py-2 text-right font-medium text-slate-900">{v.totalStock}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // Fall-through: stage === 'new-product' → render the existing full form.
   return (
     <div className="p-4 sm:p-6 bg-gray-50 min-h-screen">
       <div className="max-w-7xl mx-auto">
+        <button
+          onClick={() => setStage('identify')}
+          className="text-sm text-slate-600 hover:text-slate-900 mb-4"
+        >
+          ← Back to match check
+        </button>
         <h1 className="text-3xl font-bold text-gray-900 mb-6">Add Product</h1>
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 sm:gap-6">
@@ -1062,6 +1639,47 @@ export default function NewProductPage() {
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+// Instant-save stock cell. Calls onSave when the input loses focus and the
+// value has changed; shows a tiny saving/saved flash.
+function StockCell({
+  initialQty,
+  onSave,
+}: {
+  initialQty: number;
+  onSave: (qty: number) => Promise<boolean>;
+}) {
+  const [qty, setQty] = useState(initialQty);
+  const [state, setState] = useState<'idle' | 'saving' | 'ok' | 'err'>('idle');
+
+  const handleBlur = async () => {
+    if (qty === initialQty) return;
+    setState('saving');
+    const ok = await onSave(qty);
+    setState(ok ? 'ok' : 'err');
+    if (ok) setTimeout(() => setState('idle'), 1200);
+  };
+
+  return (
+    <div className="flex items-center justify-end gap-1">
+      <input
+        type="number"
+        min={0}
+        value={qty}
+        onChange={(e) => setQty(Math.max(0, Number(e.target.value) || 0))}
+        onBlur={handleBlur}
+        className={`w-20 px-2 py-1 border rounded text-sm text-right ${
+          state === 'ok'
+            ? 'border-emerald-400 bg-emerald-50'
+            : state === 'err'
+              ? 'border-red-400 bg-red-50'
+              : 'border-slate-300'
+        }`}
+      />
+      {state === 'saving' && <Loader2 className="w-3 h-3 animate-spin text-slate-400" />}
     </div>
   );
 }

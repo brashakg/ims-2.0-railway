@@ -27,16 +27,13 @@ export async function GET(request: NextRequest) {
       },
       include: {
         variants: {
-          select: {
-            id: true,
-            colorCode: true,
-            colorName: true,
-            frameSize: true,
-            sku: true,
+          include: {
+            images: { orderBy: { position: "asc" }, take: 1 },
+            locations: { include: { location: true } },
           },
           orderBy: [{ colorCode: "asc" }, { frameSize: "asc" }],
         },
-        images: { take: 1 },
+        images: { orderBy: { position: "asc" }, take: 1 },
       },
     });
 
@@ -47,13 +44,32 @@ export async function GET(request: NextRequest) {
         id: p.id,
         title: p.title,
         brand: p.brand,
+        subBrand: p.subBrand,
         modelNo: p.modelNo,
         category: p.category,
         status: p.status,
         mrp: p.mrp,
         sku: p.sku,
         image: p.images[0]?.url || null,
-        variants: p.variants,
+        variants: p.variants.map((v) => ({
+          id: v.id,
+          colorCode: v.colorCode,
+          colorName: v.colorName,
+          frameColor: v.frameColor,
+          frameSize: v.frameSize,
+          sku: v.sku,
+          barcode: v.barcode,
+          mrp: v.mrp,
+          discountedPrice: v.discountedPrice,
+          image: v.images[0]?.url || null,
+          locations: v.locations.map((vl) => ({
+            id: vl.id,
+            locationId: vl.locationId,
+            locationName: vl.location.name,
+            quantity: vl.quantity,
+          })),
+          totalStock: v.locations.reduce((s, vl) => s + vl.quantity, 0),
+        })),
         variantCount: p.variants.length,
       })),
     });
