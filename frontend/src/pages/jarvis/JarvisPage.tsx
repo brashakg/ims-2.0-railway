@@ -492,9 +492,12 @@ Is there a specific aspect you'd like me to dive deeper into? I can provide deta
     return value || '—';
   };
 
-  // JARVIS NLP core isn't a scheduler-tick agent — it lives in the
-  // /jarvis/query endpoint (api/routers/jarvis.py). Prepend it synthetically
-  // so the grid stays an 8-card roster per the architecture doc.
+  // JARVIS NLP core. Since Phase 6.5 the backend registers JARVIS as a
+  // real agent (see backend/agents/implementations/jarvis.py), so it
+  // flows through /jarvis/agents naturally. This stub remains as a
+  // fallback for the brief window after a frontend deploy but before
+  // the matching backend deploy ships — if the backend doesn't yet
+  // include JARVIS, we prepend it; otherwise the dedupe below drops it.
   const JARVIS_STUB: LiveAgent = {
     agent_id: 'jarvis',
     agent_name: 'JARVIS',
@@ -515,13 +518,18 @@ Is there a specific aspect you'd like me to dive deeper into? I can provide deta
     capabilities: ['nlp', 'conversation', 'claude_bridge'],
   };
 
-  // Merge JARVIS (synthetic) + live registry agents, in architecture order
+  // Merge + dedupe + sort in architecture order. Dedupe is keyed on
+  // agent_id so if the backend returns `jarvis`, the synthetic stub is
+  // dropped in favour of the live record.
   const ORDER = ['jarvis', 'cortex', 'sentinel', 'pixel', 'megaphone', 'oracle', 'taskmaster', 'nexus'];
-  const agentsForGrid: LiveAgent[] = liveAgents
-    ? [JARVIS_STUB, ...liveAgents].sort(
-        (a, b) => ORDER.indexOf(a.agent_id) - ORDER.indexOf(b.agent_id)
-      )
-    : [JARVIS_STUB];
+  const mergedById = new Map<string, LiveAgent>();
+  mergedById.set(JARVIS_STUB.agent_id, JARVIS_STUB);
+  for (const a of liveAgents ?? []) {
+    mergedById.set(a.agent_id, a);  // backend entry wins over stub
+  }
+  const agentsForGrid: LiveAgent[] = Array.from(mergedById.values()).sort(
+    (a, b) => ORDER.indexOf(a.agent_id) - ORDER.indexOf(b.agent_id)
+  );
 
   const enabledCount = agentsForGrid.filter((a) => a.enabled).length;
   const totalActs24h = agentsForGrid.reduce((s, a) => s + (a.run_count || 0), 0);

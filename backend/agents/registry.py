@@ -20,10 +20,22 @@ the full agent stack locally.
 from typing import Dict, Optional, List, Any
 import logging
 
+from importlib import import_module
+
 from .base import JarvisAgent
 from .event_bus import get_event_bus
 
 logger = logging.getLogger(__name__)
+
+
+def _import_class(module_path: str, class_name: str):
+    """
+    Lazy, per-agent import so one bad module can't break `import registry`
+    at module-parse time. `module_path` is relative to the `agents`
+    package (e.g. `.implementations.oracle`).
+    """
+    module = import_module(module_path, package="agents")
+    return getattr(module, class_name)
 
 
 # ============================================================================
@@ -122,12 +134,37 @@ async def dispatch_event(event: str, payload: Dict[str, Any], source: str = ""):
             pass
 
 
+def _safe_register(name: str, loader):
+    """
+    Import + instantiate + register a single agent, catching ANY failure.
+
+    Before Phase 6.5, initialize_registry() registered agents in a single
+    straight-line function. If any one of them failed at import time
+    (missing env var in a module-level getenv, incompatible Python on
+    Railway, etc.) the whole registry would get only the agents that
+    happened to come before the failure in the list — the rest silently
+    never ran. That's how a dev machine could show 8 agents while
+    production showed 5. Each agent now survives its neighbors' failures.
+
+    `loader` is a zero-arg callable that returns a constructed agent.
+    """
+    try:
+        agent = loader()
+        register_agent(agent)
+    except Exception as e:
+        # Log loudly — this is the ONE error we never want to swallow.
+        # The operator needs to know which agent isn't alive on this worker.
+        logger.error(
+            f"[REGISTRY] Failed to register agent '{name}': {type(e).__name__}: {e}",
+            exc_info=True,
+        )
+
+
 def initialize_registry(db=None):
     """
-    Create and register all agent instances.
-    Called during FastAPI startup. Wires the 8-agent Jarvis ecosystem
-    (CORTEX + SENTINEL + 5 domain agents from Phase 3 + JARVIS NLP core
-    that lives in api/routers/jarvis.py).
+    Create and register all 8 Jarvis agents.
+    Called during FastAPI startup. Every agent is registered in its own
+    try/except so one failure doesn't take out the rest.
     """
     # Bind the DB to the event bus so publish() can persist to
     # agent_events for the activity feed + audit trail.
@@ -136,26 +173,27 @@ def initialize_registry(db=None):
     except Exception as e:
         logger.warning(f"[REGISTRY] Event bus init warning: {e}")
 
-    # Core agents — not toggleable
-    from .implementations.cortex import CortexOrchestrator
-    from .implementations.sentinel import SentinelAgent
-    # Phase 3 domain agents — toggleable
-    from .implementations.pixel import PixelAgent
-    from .implementations.megaphone import MegaphoneAgent
-    from .implementations.oracle import OracleAgent
-    from .implementations.taskmaster import TaskmasterAgent
-    from .implementations.nexus import NexusAgent
+    # Foundation — always on, NLP core (real work lives in /jarvis/query)
+    _safe_register("jarvis",
+        lambda: _import_class(".implementations.jarvis", "JarvisCore")(db=db))
 
-    # Core
-    register_agent(CortexOrchestrator(db=db))
-    register_agent(SentinelAgent(db=db))
+    # Core orchestrator + health monitor — not toggleable
+    _safe_register("cortex",
+        lambda: _import_class(".implementations.cortex", "CortexOrchestrator")(db=db))
+    _safe_register("sentinel",
+        lambda: _import_class(".implementations.sentinel", "SentinelAgent")(db=db))
 
-    # Domain (Phase 3)
-    register_agent(PixelAgent(db=db))
-    register_agent(MegaphoneAgent(db=db))
-    register_agent(OracleAgent(db=db))
-    register_agent(TaskmasterAgent(db=db))
-    register_agent(NexusAgent(db=db))
+    # Domain agents (Phase 3) — toggleable
+    _safe_register("pixel",
+        lambda: _import_class(".implementations.pixel", "PixelAgent")(db=db))
+    _safe_register("megaphone",
+        lambda: _import_class(".implementations.megaphone", "MegaphoneAgent")(db=db))
+    _safe_register("oracle",
+        lambda: _import_class(".implementations.oracle", "OracleAgent")(db=db))
+    _safe_register("taskmaster",
+        lambda: _import_class(".implementations.taskmaster", "TaskmasterAgent")(db=db))
+    _safe_register("nexus",
+        lambda: _import_class(".implementations.nexus", "NexusAgent")(db=db))
 
     # ── Event bus wiring ───────────────────────────────────────────
     # CORTEX is the orchestrator — it sees system-wide signals
