@@ -134,6 +134,18 @@ export default function NewProductPage() {
   });
   const [savingVariant, setSavingVariant] = useState(false);
 
+  // Real DB brands/shapes/etc. — sourced from /api/products/filters (distinct
+  // values from the 4k+ actual products), NOT from the seeded AttributeType
+  // options (which are a curated starter list that doesn't cover the full
+  // catalog). Used for autocomplete in the wizard's brand input.
+  const [dbBrands, setDbBrands] = useState<string[]>([]);
+  useEffect(() => {
+    fetch('/api/products/filters')
+      .then((r) => r.json())
+      .then((d) => setDbBrands(Array.isArray(d?.brands) ? d.brands : []))
+      .catch(() => {});
+  }, []);
+
   // Duplicate detection state
   const [duplicateProducts, setDuplicateProducts] = useState<DuplicateProduct[]>([]);
   const [showDuplicatePopup, setShowDuplicatePopup] = useState(false);
@@ -706,10 +718,15 @@ export default function NewProductPage() {
                 className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm"
               />
               <datalist id="wizard-brand-list">
-                {getAttributeOptions('brand').map((b) => (
+                {dbBrands.map((b) => (
                   <option key={b} value={b} />
                 ))}
               </datalist>
+              {dbBrands.length > 0 && (
+                <p className="text-xs text-slate-500 mt-1">
+                  {dbBrands.length} brands in your catalog — start typing to filter.
+                </p>
+              )}
             </div>
             <div>
               <label className="block text-sm font-medium text-slate-700 mb-1">
