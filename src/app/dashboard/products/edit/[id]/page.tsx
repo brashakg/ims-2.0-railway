@@ -805,7 +805,9 @@ export default function EditProductPage() {
                 </div>
               )}
 
-              {/* Section 6: General Info */}
+              {/* General Info — MRP / GTIN / UPC live per-variant (see Variants
+                   section on the product detail page). Keep only truly
+                   product-level descriptors here. */}
               <div className="bg-white rounded-lg shadow-sm border border-slate-200 p-6">
                 <h3 className="text-base font-semibold text-gray-900 mb-4">
                   General Info
@@ -835,40 +837,6 @@ export default function EditProductPage() {
                     value={formData.productUSP}
                     onChange={(val) => handleInputChange('productUSP', val)}
                   />
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">
-                      MRP (₹)
-                    </label>
-                    <input
-                      type="number"
-                      min="0"
-                      value={formData.mrp}
-                      onChange={(e) => handleInputChange('mrp', e.target.value)}
-                      className="w-full px-3 py-3 min-h-[44px] border border-gray-300 rounded-lg focus:outline-none focus:border-blue-500"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">
-                      GTIN
-                    </label>
-                    <input
-                      type="text"
-                      value={formData.gtin}
-                      onChange={(e) => handleInputChange('gtin', e.target.value)}
-                      className="w-full px-3 py-3 min-h-[44px] border border-gray-300 rounded-lg focus:outline-none focus:border-blue-500"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">
-                      UPC
-                    </label>
-                    <input
-                      type="text"
-                      value={formData.upc}
-                      onChange={(e) => handleInputChange('upc', e.target.value)}
-                      className="w-full px-3 py-3 min-h-[44px] border border-gray-300 rounded-lg focus:outline-none focus:border-blue-500"
-                    />
-                  </div>
                 </div>
               </div>
 

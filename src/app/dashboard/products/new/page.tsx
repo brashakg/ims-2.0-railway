@@ -1196,12 +1196,117 @@ export default function NewProductPage() {
                 </div>
                 <p className="mt-4 text-xs text-slate-500 bg-slate-50 border border-slate-200 rounded p-2">
                   Color, size, bridge, temple length, weight, lens colour and
-                  tint are now set <b>per variant</b>. Scroll down to the
-                  &ldquo;Variants&rdquo; section to add one or more variants.
+                  tint are now set <b>per variant</b> in the Variants section
+                  below.
                 </p>
               </div>
 
-              {/* Section 2: Frame Attributes (hidden for categories that have no frame — Contact Lenses, Watches, Smartwatches, Accessories) */}
+              {/* Duplicate Detection Popup — appears between Brand & Identity
+                   and Variants so the user can decide "variant or new product"
+                   before spending time on variant details. */}
+              {showDuplicatePopup && (
+                <div className="bg-white rounded-lg shadow-sm border border-slate-200 p-6">
+                  <div className="bg-amber-50 border border-amber-300 rounded-lg p-5">
+                    <div className="flex items-start gap-3">
+                      <AlertTriangle className="w-6 h-6 text-amber-600 flex-shrink-0 mt-0.5" />
+                      <div className="flex-1">
+                        <h3 className="text-base font-semibold text-amber-900 mb-2">
+                          Existing Product Found
+                        </h3>
+                        <p className="text-sm text-amber-800 mb-4">
+                          A product with brand <strong>{formData.brand}</strong> and model <strong>{formData.modelNo}</strong> already exists.
+                          Would you like to add this as a <strong>variant</strong> (different color/size) or create a <strong>separate product</strong>?
+                        </p>
+
+                        {/* Show existing product details */}
+                        <div className="space-y-2 mb-4">
+                          {duplicateProducts.map((dp) => (
+                            <div key={dp.id} className="bg-white border border-amber-200 rounded-lg p-3 flex items-center gap-3">
+                              {dp.image && (
+                                <img src={dp.image} alt={dp.title || ''} className="w-12 h-12 object-cover rounded" />
+                              )}
+                              <div className="flex-1">
+                                <p className="text-sm font-semibold text-gray-900">{dp.title || `${dp.brand} ${dp.modelNo}`}</p>
+                                <p className="text-xs text-gray-500">
+                                  SKU: {dp.sku} · Status: {dp.status} · MRP: ₹{dp.mrp}
+                                  {dp.colorCode && ` · Color: ${dp.colorCode}`}
+                                  {dp.frameSize && ` · Size: ${dp.frameSize}`}
+                                </p>
+                                {dp.variantCount > 0 && (
+                                  <p className="text-xs text-blue-600 mt-1">
+                                    {dp.variantCount} variant{dp.variantCount !== 1 ? 's' : ''}: {dp.variants.map(v => `${v.colorCode}/${v.frameSize || '-'}`).join(', ')}
+                                  </p>
+                                )}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+
+                        <div className="flex gap-3">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setVariantMode(true);
+                              setShowDuplicatePopup(false);
+                              setDuplicateChecked(true);
+                            }}
+                            className="px-4 py-2 bg-blue-600 text-white font-medium rounded-lg hover:bg-blue-700 transition-colors"
+                          >
+                            Add as Variant
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setVariantMode(false);
+                              setShowDuplicatePopup(false);
+                              setDuplicateChecked(true);
+                            }}
+                            className="px-4 py-2 bg-gray-100 text-gray-700 font-medium rounded-lg hover:bg-gray-200 border border-gray-300 transition-colors"
+                          >
+                            Create Unique Product
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Checking indicator */}
+              {checkingDuplicate && (
+                <div className="bg-white rounded-lg shadow-sm border border-slate-200 p-4">
+                  <div className="flex items-center gap-2 text-sm text-gray-500">
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    Checking for existing products...
+                  </div>
+                </div>
+              )}
+
+              {/* Section 2: Variants (Color × Size). Moved to 2nd position —
+                   pricing, barcodes, stock and colour/size all live per-variant,
+                   so this is the second thing you touch after brand/model.
+                   Hidden only for ACCESSORIES (single-SKU items). */}
+              {formData.category &&
+                !['ACCESSORIES'].includes(formData.category) && (
+                <div className="bg-white rounded-lg shadow-sm border border-slate-200 p-6">
+                  <h3 className="text-base font-semibold text-gray-900 mb-2">
+                    Variants (Color × Size)
+                  </h3>
+                  <p className="text-xs text-gray-500 mb-4">
+                    Add color and size combinations for <strong>{formData.brand} {formData.modelNo}</strong>.
+                    Example: Colors 086, 567 and sizes 55, 52 will create 4 variants.
+                  </p>
+                  <VariantManager
+                    productId=""
+                    category={formData.category}
+                    attributes={attributes}
+                    locations={locations}
+                    onVariantsChange={setProductVariants}
+                  />
+                </div>
+              )}
+
+              {/* Section 3: Frame Attributes (hidden for categories that have no frame — Contact Lenses, Watches, Smartwatches, Accessories) */}
               {(isAttrApplicable('shape', formData.category) ||
                 isAttrApplicable('frameMaterial', formData.category) ||
                 isAttrApplicable('frameType', formData.category)) && (
@@ -1410,7 +1515,10 @@ export default function NewProductPage() {
                 </div>
               )}
 
-              {/* Section 6: General Info */}
+              {/* General Info — MRP, GTIN and UPC removed: those are variant-
+                   level (each colour/size has its own price and barcode), so
+                   they live in the Variants section above. Keep only truly
+                   product-level descriptors here. */}
               <div className="bg-white rounded-lg shadow-sm border border-slate-200 p-6">
                 <h3 className="text-base font-semibold text-gray-900 mb-4">
                   General Info
@@ -1440,40 +1548,6 @@ export default function NewProductPage() {
                     value={formData.productUSP}
                     onChange={(val) => handleInputChange('productUSP', val)}
                   />
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">
-                      MRP (₹)
-                    </label>
-                    <input
-                      type="number"
-                      min="0"
-                      value={formData.mrp}
-                      onChange={(e) => handleInputChange('mrp', e.target.value)}
-                      className="w-full px-3 py-3 min-h-[44px] border border-gray-300 rounded-lg focus:outline-none focus:border-blue-500"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">
-                      GTIN
-                    </label>
-                    <input
-                      type="text"
-                      value={formData.gtin}
-                      onChange={(e) => handleInputChange('gtin', e.target.value)}
-                      className="w-full px-3 py-3 min-h-[44px] border border-gray-300 rounded-lg focus:outline-none focus:border-blue-500"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">
-                      UPC
-                    </label>
-                    <input
-                      type="text"
-                      value={formData.upc}
-                      onChange={(e) => handleInputChange('upc', e.target.value)}
-                      className="w-full px-3 py-3 min-h-[44px] border border-gray-300 rounded-lg focus:outline-none focus:border-blue-500"
-                    />
-                  </div>
                 </div>
               </div>
 
@@ -1512,113 +1586,7 @@ export default function NewProductPage() {
                 </div>
               )}
 
-              {/* Section 8: Duplicate Detection Popup */}
-              {showDuplicatePopup && (
-                <div className="bg-white rounded-lg shadow-sm border border-slate-200 p-6">
-                  <div className="bg-amber-50 border border-amber-300 rounded-lg p-5">
-                    <div className="flex items-start gap-3">
-                      <AlertTriangle className="w-6 h-6 text-amber-600 flex-shrink-0 mt-0.5" />
-                      <div className="flex-1">
-                        <h3 className="text-base font-semibold text-amber-900 mb-2">
-                          Existing Product Found
-                        </h3>
-                        <p className="text-sm text-amber-800 mb-4">
-                          A product with brand <strong>{formData.brand}</strong> and model <strong>{formData.modelNo}</strong> already exists.
-                          Would you like to add this as a <strong>variant</strong> (different color/size) or create a <strong>separate product</strong>?
-                        </p>
-
-                        {/* Show existing product details */}
-                        <div className="space-y-2 mb-4">
-                          {duplicateProducts.map((dp) => (
-                            <div key={dp.id} className="bg-white border border-amber-200 rounded-lg p-3 flex items-center gap-3">
-                              {dp.image && (
-                                <img src={dp.image} alt={dp.title || ''} className="w-12 h-12 object-cover rounded" />
-                              )}
-                              <div className="flex-1">
-                                <p className="text-sm font-semibold text-gray-900">{dp.title || `${dp.brand} ${dp.modelNo}`}</p>
-                                <p className="text-xs text-gray-500">
-                                  SKU: {dp.sku} · Status: {dp.status} · MRP: ₹{dp.mrp}
-                                  {dp.colorCode && ` · Color: ${dp.colorCode}`}
-                                  {dp.frameSize && ` · Size: ${dp.frameSize}`}
-                                </p>
-                                {dp.variantCount > 0 && (
-                                  <p className="text-xs text-blue-600 mt-1">
-                                    {dp.variantCount} variant{dp.variantCount !== 1 ? 's' : ''}: {dp.variants.map(v => `${v.colorCode}/${v.frameSize || '-'}`).join(', ')}
-                                  </p>
-                                )}
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-
-                        <div className="flex gap-3">
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setVariantMode(true);
-                              setShowDuplicatePopup(false);
-                              setDuplicateChecked(true);
-                            }}
-                            className="px-4 py-2 bg-blue-600 text-white font-medium rounded-lg hover:bg-blue-700 transition-colors"
-                          >
-                            Add as Variant
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setVariantMode(false);
-                              setShowDuplicatePopup(false);
-                              setDuplicateChecked(true);
-                            }}
-                            className="px-4 py-2 bg-gray-100 text-gray-700 font-medium rounded-lg hover:bg-gray-200 border border-gray-300 transition-colors"
-                          >
-                            Create Unique Product
-                          </button>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              {/* Checking indicator */}
-              {checkingDuplicate && (
-                <div className="border-b border-gray-200 p-4">
-                  <div className="flex items-center gap-2 text-sm text-gray-500">
-                    <Loader2 className="w-4 h-4 animate-spin" />
-                    Checking for existing products...
-                  </div>
-                </div>
-              )}
-
-              {/* Section 8b: Variant Manager. Shown for every category that
-                   uses color/size variants. The old "variantMode" gate is
-                   dropped — the wizard already routes variant-only flows
-                   through stage='add-variant'; when we get here we're in
-                   the full-product form and should always offer variant
-                   entry. Only accessories and contact-lens boxes don't use
-                   color/size variants. */}
-              {formData.category &&
-                !['ACCESSORIES'].includes(formData.category) && (
-                <div className="bg-white rounded-lg shadow-sm border border-slate-200 p-6">
-                  <h3 className="text-base font-semibold text-gray-900 mb-2">
-                    Variants (Color × Size)
-                  </h3>
-                  <p className="text-xs text-gray-500 mb-4">
-                    Add color and size combinations for <strong>{formData.brand} {formData.modelNo}</strong>.
-                    Example: Colors 086, 567 and sizes 55, 52 will create 4 variants.
-                  </p>
-                  <VariantManager
-                    productId=""
-                    category={formData.category}
-                    attributes={attributes}
-                    locations={locations}
-                    onVariantsChange={setProductVariants}
-                  />
-                </div>
-              )}
-
-              {/* Section 9: Images */}
+              {/* Images */}
               <div className="bg-white rounded-lg shadow-sm border border-slate-200 p-6">
                 <h3 className="text-base font-semibold text-gray-900 mb-4">
                   Images
