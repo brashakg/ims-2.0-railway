@@ -1,7 +1,17 @@
 import { tagsForProductAttributes } from "@/lib/categoryAttributes";
+import { normalizeCategory, CATEGORIES } from "@/lib/categories";
 
 // Use Record type for flexibility with Prisma models
 type Product = Record<string, any>;
+
+// Look up the SEO-friendly noun form ("Sunglasses", "Watch") for a category.
+// Falls back to the display label, then to the raw key.
+function categorySeoNoun(key: string | null | undefined): string {
+  if (!key) return "";
+  const norm = normalizeCategory(key);
+  const def = CATEGORIES.find((c) => c.key === norm);
+  return def?.seoNoun || def?.label || key;
+}
 
 interface DiscountRule {
   category: string;
@@ -13,8 +23,16 @@ interface DiscountRule {
 
 /**
  * Generate product title for Shopify listing.
- * Format: Brand [SubBrand] ModelNo [ColorCode] [FrameSize] [FrameColor] [Shape]
- * Example: "Boss 1234 086 55 Gold Square"
+ *
+ * Canonical format (per Avinash 2026-04):
+ *   Brand + SubBrand + ModelNo + ColorCode + FrameSize + Label + CategoryNoun
+ *
+ * Example: "Ray-Ban Aviator RB3025 002/32 58 Classic Sunglasses"
+ *
+ * All fields are optional — missing values simply drop out of the title so
+ * product-level generation (before variants exist) still yields a clean
+ * title, and variant-level generation adds colour code + size as they're
+ * filled in.
  */
 export function generateTitle(product: Product): string {
   const parts = [
@@ -23,32 +41,52 @@ export function generateTitle(product: Product): string {
     product.fullModelNo || product.modelNo,
     product.colorCode,
     product.frameSize,
-    product.frameColor,
-    product.shape,
-  ].filter(Boolean);
+    product.label,
+    categorySeoNoun(product.category),
+  ]
+    .map((v) => (typeof v === "string" ? v.trim() : v))
+    .filter(Boolean);
 
-  return parts.join(" ");
+  // Collapse any double spaces introduced by empty fields between filled ones.
+  return parts.join(" ").replace(/\s+/g, " ").trim();
 }
 
 /**
- * Generate SKU code.
- * Format: SP-BOSS-1234-086-55
+ * Generate SKU code. Format: <CAT>-<BRAND>-<MODEL>-<COLOR>-<SIZE>
+ * e.g. SG-RAYB-RB3025-00232-58
+ *
+ * Category codes cover all 11 canonical categories + legacy SOLUTIONS
+ * alias. Unknown categories fall back to "XX".
  */
 export function generateSKU(product: Product): string {
   const catMap: Record<string, string> = {
     SPECTACLES: "SP",
+    CLIP_ON_FRAMES: "CF",
     SUNGLASSES: "SG",
-    SOLUTIONS: "SL",
+    READING_GLASSES: "RG",
+    COMPUTER_GLASSES: "CG",
+    SAFETY_GLASSES: "SA",
+    CONTACT_LENSES: "CL",
+    SMARTGLASSES: "SM",
+    WATCHES: "WT",
+    SMARTWATCHES: "SW",
+    ACCESSORIES: "AC",
+    SOLUTIONS: "CL", // legacy alias
   };
-  const prefix = catMap[(product.category || "").toUpperCase()] || "XX";
+  const norm = normalizeCategory(product.category);
+  const prefix = catMap[norm] || "XX";
 
   const brand = (product.brand || "XX")
     .replace(/[^A-Za-z]/g, "")
     .substring(0, 4)
     .toUpperCase();
 
-  const modelNo = (product.modelNo || "XXXX").replace(/[^A-Za-z0-9]/g, "").toUpperCase();
-  const color = (product.colorCode || "").replace(/[^A-Za-z0-9]/g, "").toUpperCase();
+  const modelNo = (product.modelNo || "XXXX")
+    .replace(/[^A-Za-z0-9]/g, "")
+    .toUpperCase();
+  const color = (product.colorCode || "")
+    .replace(/[^A-Za-z0-9]/g, "")
+    .toUpperCase();
   const size = (product.frameSize || "").replace(/[^\w]/g, "").toUpperCase();
 
   const parts = [prefix, brand, modelNo];
@@ -59,67 +97,97 @@ export function generateSKU(product: Product): string {
 }
 
 /**
- * Generate SEO title optimized for search.
- * ~60 chars, keyword-rich.
+ * Generate SEO title optimized for search. ~60 chars, keyword-rich.
+ * Mirrors the canonical title order so SERP and product listing stay
+ * consistent, and includes colour code + size when present so variant
+ * pages show a unique SEO title per variant.
  */
 export function generateSEOTitle(product: Product): string {
-  const cat = (product.category || "").toUpperCase();
-  const categoryLabel =
-    cat === "SUNGLASSES" ? "Sunglasses" :
-    cat === "SOLUTIONS" ? "Lens Care" :
-    "Eyeglasses";
-
   const parts = [
     "Buy",
     product.brand,
+    product.subBrand,
     product.fullModelNo || product.modelNo,
-    product.shape,
-    product.frameColor,
+    product.colorCode,
+    product.frameSize,
+    product.label,
     product.gender,
-    categoryLabel,
+    categorySeoNoun(product.category),
     "| Better Vision",
-  ].filter(Boolean);
+  ]
+    .map((v) => (typeof v === "string" ? v.trim() : v))
+    .filter(Boolean);
 
-  return parts.join(" ").trim();
+  return parts.join(" ").replace(/\s+/g, " ").trim();
 }
 
 /**
- * Generate SEO meta description.
- * ~160 chars, category-specific messaging.
+ * Generate SEO meta description. ~160 chars, category-specific messaging.
+ * Includes brand, sub-brand, model, colour code and size so variant-level
+ * descriptions stay distinct — key for Shopify variant SEO.
  */
 export function generateSEODescription(product: Product): string {
-  const cat = (product.category || "").toUpperCase();
+  const norm = normalizeCategory(product.category);
+  const noun = categorySeoNoun(product.category).toLowerCase();
+  const brandPhrase = [
+    product.brand,
+    product.subBrand,
+    product.fullModelNo || product.modelNo,
+  ]
+    .filter(Boolean)
+    .join(" ");
+  const variantPhrase = [product.colorCode, product.frameSize]
+    .filter(Boolean)
+    .join(" ");
 
-  if (cat === "SUNGLASSES") {
+  if (norm === "SUNGLASSES" || norm === "CLIP_ON_FRAMES") {
     return [
-      `Shop authentic ${product.brand || ""} ${product.fullModelNo || product.modelNo || ""} sunglasses.`,
-      product.shape ? `${product.shape} frame` : "",
-      product.lensColour ? `with ${product.lensColour} lenses.` : "",
+      `Shop authentic ${brandPhrase} ${noun}${variantPhrase ? ` (${variantPhrase})` : ""}.`,
+      product.shape ? `${product.shape} frame.` : "",
+      product.lensColour ? `${product.lensColour} lenses.` : "",
       product.polarization ? `${product.polarization}.` : "",
       "Best discounted prices with pan-India free shipping. COD available.",
-    ].filter(Boolean).join(" ").trim();
+    ]
+      .filter(Boolean)
+      .join(" ")
+      .trim();
   }
 
-  if (cat === "SOLUTIONS") {
+  if (norm === "CONTACT_LENSES") {
     return [
-      `Buy ${product.brand || ""} ${product.productName || ""}.`,
-      product.recommendedFor ? `Recommended for ${product.recommendedFor}.` : "",
-      product.benefits ? `${product.benefits}.` : "",
+      `Buy ${brandPhrase} contact lenses${variantPhrase ? ` (${variantPhrase})` : ""}.`,
+      product.wearSchedule ? `${product.wearSchedule} wear.` : "",
+      product.packSize ? `${product.packSize} pack.` : "",
       "Best prices with pan-India free shipping. COD available.",
-    ].filter(Boolean).join(" ").trim();
+    ]
+      .filter(Boolean)
+      .join(" ")
+      .trim();
   }
 
-  // Default: SPECTACLES
+  if (norm === "WATCHES" || norm === "SMARTWATCHES") {
+    return [
+      `Buy ${brandPhrase} ${noun}${variantPhrase ? ` (${variantPhrase})` : ""}.`,
+      product.gender ? `${product.gender}'s ${noun}.` : "",
+      product.warranty ? `${product.warranty}.` : "",
+      "Authentic with pan-India free shipping. COD available.",
+    ]
+      .filter(Boolean)
+      .join(" ")
+      .trim();
+  }
+
+  // Default: SPECTACLES, READING / COMPUTER / SAFETY GLASSES, SMARTGLASSES
   return [
-    `Shop authentic ${product.brand || ""} ${product.fullModelNo || product.modelNo || ""}`,
-    product.shape ? `${product.shape}` : "",
-    product.frameType ? `${product.frameType}` : "",
-    "eyeglasses.",
-    product.frameColor ? `${product.frameColor} frame` : "",
-    product.templeColor ? `with ${product.templeColor} temples.` : "",
+    `Shop authentic ${brandPhrase} ${noun}${variantPhrase ? ` (${variantPhrase})` : ""}.`,
+    product.shape ? `${product.shape} frame.` : "",
+    product.frameType ? `${product.frameType}.` : "",
     product.frameMaterial ? `${product.frameMaterial} frame.` : "",
     "Best discounted prices with pan-India free shipping. COD available.",
-  ].filter(Boolean).join(" ").trim();
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .trim();
 }
 
 /**
