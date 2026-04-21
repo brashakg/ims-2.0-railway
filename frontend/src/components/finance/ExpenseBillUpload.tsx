@@ -127,7 +127,7 @@ export function ExpenseBillUpload({ expenseId, onBillUpload }: ExpenseBillUpload
           className={clsx(
             'border-2 border-dashed rounded-lg p-8 text-center cursor-pointer transition',
             isDragging
-              ? 'border-blue-500 bg-blue-900 bg-opacity-20'
+              ? 'border-blue-500 bg-blue-50 bg-opacity-20'
               : 'border-gray-300 bg-white hover:border-gray-400'
           )}
         >
@@ -149,7 +149,7 @@ export function ExpenseBillUpload({ expenseId, onBillUpload }: ExpenseBillUpload
                 {isUploading ? '' : 'or click to browse (Image or PDF)'}
               </p>
             </div>
-            {isUploading && <Loader2 className="w-5 h-5 text-blue-400 animate-spin" />}
+            {isUploading && <Loader2 className="w-5 h-5 text-blue-600 animate-spin" />}
             {!isUploading && (
               <button
                 onClick={() => fileInputRef.current?.click()}
@@ -164,14 +164,14 @@ export function ExpenseBillUpload({ expenseId, onBillUpload }: ExpenseBillUpload
         <div className={clsx(
           'p-4 rounded-lg border-2',
           bill.status === 'duplicate'
-            ? 'bg-yellow-900 bg-opacity-20 border-yellow-600'
-            : 'bg-green-900 bg-opacity-20 border-green-600'
+            ? 'bg-yellow-50 bg-opacity-20 border-yellow-600'
+            : 'bg-green-50 bg-opacity-20 border-green-600'
         )}>
           <div className="flex items-start justify-between">
             <div className="flex items-start gap-3">
               <File className={clsx(
                 'w-5 h-5 mt-1',
-                bill.status === 'duplicate' ? 'text-yellow-400' : 'text-green-400'
+                bill.status === 'duplicate' ? 'text-yellow-600' : 'text-green-600'
               )} />
               <div>
                 <p className="font-medium text-gray-900">{bill.name}</p>
@@ -200,7 +200,7 @@ export function ExpenseBillUpload({ expenseId, onBillUpload }: ExpenseBillUpload
 
       {/* Upload Error */}
       {uploadError && (
-        <div className="p-3 bg-red-900 bg-opacity-30 border border-red-600 rounded text-red-200 text-sm flex items-center gap-2">
+        <div className="p-3 bg-red-50 bg-opacity-30 border border-red-600 rounded text-red-200 text-sm flex items-center gap-2">
           <AlertTriangle className="w-4 h-4 flex-shrink-0" />
           {uploadError}
         </div>
@@ -208,9 +208,9 @@ export function ExpenseBillUpload({ expenseId, onBillUpload }: ExpenseBillUpload
 
       {/* Duplicate Alert */}
       {duplicate && (
-        <div className="p-4 bg-yellow-900 bg-opacity-30 border-2 border-yellow-600 rounded-lg">
+        <div className="p-4 bg-yellow-50 bg-opacity-30 border-2 border-yellow-600 rounded-lg">
           <div className="flex gap-3 mb-3">
-            <AlertTriangle className="w-5 h-5 text-yellow-400 flex-shrink-0 mt-0.5" />
+            <AlertTriangle className="w-5 h-5 text-yellow-600 flex-shrink-0 mt-0.5" />
             <div>
               <h4 className="font-semibold text-yellow-200 mb-2">Possible Duplicate Bill Detected</h4>
               <p className="text-sm text-yellow-100 mb-3">
@@ -239,7 +239,7 @@ export function ExpenseBillUpload({ expenseId, onBillUpload }: ExpenseBillUpload
                 </button>
                 <button
                   onClick={() => setDuplicate(null)}
-                  className="flex-1 px-3 py-2 text-sm bg-yellow-600 text-white rounded hover:bg-yellow-700 transition"
+                  className="flex-1 px-3 py-2 text-sm bg-yellow-600 text-gray-900 rounded hover:bg-yellow-700 transition"
                 >
                   Continue Anyway
                 </button>
@@ -250,7 +250,7 @@ export function ExpenseBillUpload({ expenseId, onBillUpload }: ExpenseBillUpload
       )}
 
       {/* Info Box */}
-      <div className="p-3 bg-blue-900 bg-opacity-30 border border-blue-700 rounded text-xs text-blue-200">
+      <div className="p-3 bg-blue-50 bg-opacity-30 border border-blue-700 rounded text-xs text-blue-200">
         <p>
           <strong>Important:</strong> All expense submissions require a bill image or PDF. Bills are scanned for duplicates to prevent fraud.
         </p>

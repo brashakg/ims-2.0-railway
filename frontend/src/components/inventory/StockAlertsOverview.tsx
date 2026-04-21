@@ -331,7 +331,7 @@ export function StockAlertsOverview() {
           <button
             onClick={loadAlerts}
             disabled={isLoading}
-            className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded-lg text-sm font-medium transition-colors flex items-center gap-2"
+            className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-gray-900 rounded-lg text-sm font-medium transition-colors flex items-center gap-2"
           >
             <RefreshCw className={clsx('w-4 h-4', isLoading && 'animate-spin')} />
             Refresh

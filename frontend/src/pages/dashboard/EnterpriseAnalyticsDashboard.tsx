@@ -678,7 +678,7 @@ export default function EnterpriseAnalyticsDashboard() {
               </>
             ) : (
               <>
-                <p className="text-3xl font-bold text-red-400 mb-2">N/A</p>
+                <p className="text-3xl font-bold text-red-600 mb-2">N/A</p>
                 <p className="text-sm text-red-600">No data available</p>
               </>
             )}
@@ -703,7 +703,7 @@ export default function EnterpriseAnalyticsDashboard() {
               </>
             ) : (
               <>
-                <p className="text-3xl font-bold text-green-400 mb-2">N/A</p>
+                <p className="text-3xl font-bold text-green-600 mb-2">N/A</p>
                 <p className="text-sm text-green-600">No data available</p>
               </>
             )}
@@ -789,7 +789,7 @@ export default function EnterpriseAnalyticsDashboard() {
                     className="flex items-center justify-between p-2 hover:bg-gray-50 rounded-lg transition-colors"
                   >
                     <div className="flex items-center gap-3 flex-1">
-                      <div className="w-8 h-8 rounded-full bg-gradient-to-br from-blue-400 to-purple-500 flex items-center justify-center text-white text-sm font-bold">
+                      <div className="w-8 h-8 rounded-full bg-gradient-to-br from-blue-400 to-purple-500 flex items-center justify-center text-gray-900 text-sm font-bold">
                         {idx + 1}
                       </div>
                       <div>
@@ -828,7 +828,7 @@ export default function EnterpriseAnalyticsDashboard() {
                 key={item.action}
                 onClick={() => handleQuickAction(item.action)}
                 className={clsx(
-                  'flex flex-col items-center gap-2 px-4 py-3 rounded-lg text-white font-medium transition-colors',
+                  'flex flex-col items-center gap-2 px-4 py-3 rounded-lg text-gray-900 font-medium transition-colors',
                   item.color
                 )}
               >

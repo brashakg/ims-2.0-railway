@@ -177,9 +177,9 @@ export function FollowUpDashboard() {
   const getStatusColor = (status: string) => {
     switch (status) {
       case 'pending':
-        return 'text-yellow-400';
+        return 'text-yellow-600';
       case 'completed':
-        return 'text-green-400';
+        return 'text-green-600';
       case 'skipped':
         return 'text-gray-500';
       default:
@@ -225,7 +225,7 @@ export function FollowUpDashboard() {
         <div className="bg-red-50 border border-red-200 rounded-lg p-4">
           <div className="flex items-center justify-between">
             <div>
-              <p className="text-red-300 text-sm font-medium">Due Today</p>
+              <p className="text-red-700 text-sm font-medium">Due Today</p>
               <p className="text-2xl font-bold text-gray-900 mt-1">{summary.due_today}</p>
             </div>
             <AlertCircle className="w-8 h-8 text-red-500" />
@@ -235,7 +235,7 @@ export function FollowUpDashboard() {
         <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4">
           <div className="flex items-center justify-between">
             <div>
-              <p className="text-yellow-300 text-sm font-medium">This Week</p>
+              <p className="text-yellow-700 text-sm font-medium">This Week</p>
               <p className="text-2xl font-bold text-gray-900 mt-1">{summary.this_week}</p>
             </div>
             <Calendar className="w-8 h-8 text-yellow-500" />
@@ -245,7 +245,7 @@ export function FollowUpDashboard() {
         <div className="bg-orange-50 border border-orange-200 rounded-lg p-4">
           <div className="flex items-center justify-between">
             <div>
-              <p className="text-orange-300 text-sm font-medium">Overdue</p>
+              <p className="text-orange-700 text-sm font-medium">Overdue</p>
               <p className="text-2xl font-bold text-gray-900 mt-1">{summary.overdue}</p>
             </div>
             <Clock className="w-8 h-8 text-orange-500" />
@@ -255,7 +255,7 @@ export function FollowUpDashboard() {
         <div className="bg-green-50 border border-green-200 rounded-lg p-4">
           <div className="flex items-center justify-between">
             <div>
-              <p className="text-green-300 text-sm font-medium">Completed</p>
+              <p className="text-green-700 text-sm font-medium">Completed</p>
               <p className="text-2xl font-bold text-gray-900 mt-1">{summary.completed_this_month}</p>
             </div>
             <CheckCircle2 className="w-8 h-8 text-green-500" />
@@ -265,7 +265,7 @@ export function FollowUpDashboard() {
         <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
           <div className="flex items-center justify-between">
             <div>
-              <p className="text-blue-300 text-sm font-medium">Pending</p>
+              <p className="text-blue-700 text-sm font-medium">Pending</p>
               <p className="text-2xl font-bold text-gray-900 mt-1">{summary.pending_total}</p>
             </div>
             <Phone className="w-8 h-8 text-blue-500" />
@@ -282,7 +282,7 @@ export function FollowUpDashboard() {
             className={clsx(
               'whitespace-nowrap px-4 py-2 rounded-lg font-medium transition',
               activeType === type.id
-                ? `${type.color} text-white ring-2 ring-offset-2 ring-offset-white`
+                ? `${type.color} text-gray-900 ring-2 ring-offset-2 ring-offset-white`
                 : 'bg-gray-100 hover:bg-gray-200 text-gray-700'
             )}
           >
@@ -328,7 +328,7 @@ export function FollowUpDashboard() {
                       <div className="flex items-center gap-1">
                         <span>{formatDate(fu.scheduled_date)}</span>
                         {isOverdue(fu.scheduled_date) && fu.status === 'pending' && (
-                          <span className="text-red-400 text-xs ml-1">
+                          <span className="text-red-600 text-xs ml-1">
                             ({getDaysUntilDue(fu.scheduled_date)} days overdue)
                           </span>
                         )}
@@ -362,7 +362,7 @@ export function FollowUpDashboard() {
                           <button
                             onClick={() => handleComplete(fu.follow_up_id)}
                             disabled={!selectedOutcome[fu.follow_up_id] || completing === fu.follow_up_id}
-                            className="bg-green-600 hover:bg-green-700 disabled:bg-gray-200 disabled:text-gray-400 text-white px-3 py-1 rounded text-sm transition"
+                            className="bg-green-600 hover:bg-green-700 disabled:bg-gray-200 disabled:text-gray-500 text-gray-900 px-3 py-1 rounded text-sm transition"
                           >
                             {completing === fu.follow_up_id ? 'Saving...' : 'Complete'}
                           </button>

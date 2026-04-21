@@ -163,7 +163,7 @@ export function FamilyPrescriptionsView({
               <option value="Other">Other</option>
             </select>
             {addError && (
-              <p className="text-sm text-red-400">{addError}</p>
+              <p className="text-sm text-red-600">{addError}</p>
             )}
             <div className="flex gap-2">
               <button
@@ -205,9 +205,9 @@ export function FamilyPrescriptionsView({
                   className={clsx(
                     'p-4 rounded-lg border-2 transition',
                     rx.status === 'expired'
-                      ? 'bg-red-900 bg-opacity-20 border-red-600'
+                      ? 'bg-red-50 bg-opacity-20 border-red-600'
                       : daysLeft < 30
-                      ? 'bg-yellow-900 bg-opacity-20 border-yellow-600'
+                      ? 'bg-yellow-50 bg-opacity-20 border-yellow-600'
                       : 'bg-gray-50 border-gray-200'
                   )}
                 >
@@ -240,7 +240,7 @@ export function FamilyPrescriptionsView({
                           <span>Valid Until: {formatDate(rx.validUntil)}</span>
                         </div>
                         {rx.status === 'active' && (
-                          <div className="ml-auto font-semibold text-yellow-400">
+                          <div className="ml-auto font-semibold text-yellow-600">
                             {daysLeft} days remaining
                           </div>
                         )}

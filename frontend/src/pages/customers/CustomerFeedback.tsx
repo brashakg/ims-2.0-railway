@@ -109,22 +109,22 @@ export function CustomerFeedback() {
       <div className="grid grid-cols-4 gap-4">
         <div className="bg-white border border-gray-200 rounded-lg p-4">
           <p className="text-gray-500 text-sm mb-1">NPS Score</p>
-          <p className="text-2xl font-bold text-blue-400">{npsScore.toFixed(0)}</p>
+          <p className="text-2xl font-bold text-blue-600">{npsScore.toFixed(0)}</p>
           <p className="text-xs text-gray-500">Excellent</p>
         </div>
         <div className="bg-white border border-gray-200 rounded-lg p-4">
           <p className="text-gray-500 text-sm mb-1">Avg Rating</p>
-          <p className="text-2xl font-bold text-green-400">{avgNPS}/10</p>
+          <p className="text-2xl font-bold text-green-600">{avgNPS}/10</p>
           <p className="text-xs text-gray-500">{npsScores.length} responses</p>
         </div>
         <div className="bg-white border border-gray-200 rounded-lg p-4">
           <p className="text-gray-500 text-sm mb-1">Positive Sentiment</p>
-          <p className="text-2xl font-bold text-green-400">{sentiments.positive}</p>
+          <p className="text-2xl font-bold text-green-600">{sentiments.positive}</p>
           <p className="text-xs text-gray-500">{((sentiments.positive / FEEDBACK_DATA.length) * 100).toFixed(0)}% of feedback</p>
         </div>
         <div className="bg-white border border-gray-200 rounded-lg p-4">
           <p className="text-gray-500 text-sm mb-1">Open Complaints</p>
-          <p className="text-2xl font-bold text-orange-400">{complaints.filter(c => c.status === 'open').length}</p>
+          <p className="text-2xl font-bold text-orange-600">{complaints.filter(c => c.status === 'open').length}</p>
           <p className="text-xs text-gray-500">Need attention</p>
         </div>
       </div>
@@ -138,7 +138,7 @@ export function CustomerFeedback() {
             className={clsx(
               'px-4 py-3 font-medium border-b-2 transition-colors',
               activeTab === tab
-                ? 'border-blue-500 text-blue-400'
+                ? 'border-blue-500 text-blue-600'
                 : 'border-transparent text-gray-500 hover:text-gray-700'
             )}
           >
@@ -161,7 +161,7 @@ export function CustomerFeedback() {
                     <div className="flex items-center justify-between mb-1">
                       <span className={clsx(
                         'text-sm font-semibold',
-                        score >= 9 ? 'text-green-400' : score >= 7 ? 'text-blue-400' : 'text-orange-400'
+                        score >= 9 ? 'text-green-600' : score >= 7 ? 'text-blue-600' : 'text-orange-600'
                       )}>
                         {score}
                       </span>
@@ -188,15 +188,15 @@ export function CustomerFeedback() {
             <div className="space-y-4">
               <div className="p-4 bg-green-50 border border-green-200 rounded-lg">
                 <div className="flex items-center justify-between mb-2">
-                  <span className="text-green-400 font-semibold">Promoters (9-10)</span>
-                  <span className="text-2xl font-bold text-green-400">{promoters}</span>
+                  <span className="text-green-600 font-semibold">Promoters (9-10)</span>
+                  <span className="text-2xl font-bold text-green-600">{promoters}</span>
                 </div>
                 <p className="text-gray-500 text-xs">Loyal customers who will recommend</p>
               </div>
               <div className="p-4 bg-blue-50 border border-blue-200 rounded-lg">
                 <div className="flex items-center justify-between mb-2">
-                  <span className="text-blue-400 font-semibold">Passives (7-8)</span>
-                  <span className="text-2xl font-bold text-blue-400">
+                  <span className="text-blue-600 font-semibold">Passives (7-8)</span>
+                  <span className="text-2xl font-bold text-blue-600">
                     {npsScores.filter(f => (f.score || 0) >= 7 && (f.score || 0) <= 8).length}
                   </span>
                 </div>
@@ -204,8 +204,8 @@ export function CustomerFeedback() {
               </div>
               <div className="p-4 bg-orange-50 border border-orange-200 rounded-lg">
                 <div className="flex items-center justify-between mb-2">
-                  <span className="text-orange-400 font-semibold">Detractors (0-6)</span>
-                  <span className="text-2xl font-bold text-orange-400">{detractors}</span>
+                  <span className="text-orange-600 font-semibold">Detractors (0-6)</span>
+                  <span className="text-2xl font-bold text-orange-600">{detractors}</span>
                 </div>
                 <p className="text-gray-500 text-xs">Unhappy customers who may switch</p>
               </div>
@@ -221,26 +221,26 @@ export function CustomerFeedback() {
             <h3 className="text-lg font-semibold text-gray-900 mb-4">Overall Sentiment</h3>
             <div className="grid grid-cols-3 gap-4">
               <div className="text-center p-4 bg-green-50 border border-green-200 rounded-lg">
-                <Heart className="w-8 h-8 text-green-400 mx-auto mb-2" />
-                <p className="text-2xl font-bold text-green-400">{sentiments.positive}</p>
+                <Heart className="w-8 h-8 text-green-600 mx-auto mb-2" />
+                <p className="text-2xl font-bold text-green-600">{sentiments.positive}</p>
                 <p className="text-gray-500 text-sm">Positive</p>
-                <p className="text-green-400 text-xs font-semibold">
+                <p className="text-green-600 text-xs font-semibold">
                   {((sentiments.positive / FEEDBACK_DATA.length) * 100).toFixed(0)}%
                 </p>
               </div>
               <div className="text-center p-4 bg-blue-50 border border-blue-200 rounded-lg">
-                <MessageSquare className="w-8 h-8 text-blue-400 mx-auto mb-2" />
-                <p className="text-2xl font-bold text-blue-400">{sentiments.neutral}</p>
+                <MessageSquare className="w-8 h-8 text-blue-600 mx-auto mb-2" />
+                <p className="text-2xl font-bold text-blue-600">{sentiments.neutral}</p>
                 <p className="text-gray-500 text-sm">Neutral</p>
-                <p className="text-blue-400 text-xs font-semibold">
+                <p className="text-blue-600 text-xs font-semibold">
                   {((sentiments.neutral / FEEDBACK_DATA.length) * 100).toFixed(0)}%
                 </p>
               </div>
               <div className="text-center p-4 bg-orange-50 border border-orange-200 rounded-lg">
-                <AlertCircle className="w-8 h-8 text-orange-400 mx-auto mb-2" />
-                <p className="text-2xl font-bold text-orange-400">{sentiments.negative}</p>
+                <AlertCircle className="w-8 h-8 text-orange-600 mx-auto mb-2" />
+                <p className="text-2xl font-bold text-orange-600">{sentiments.negative}</p>
                 <p className="text-gray-500 text-sm">Negative</p>
-                <p className="text-orange-400 text-xs font-semibold">
+                <p className="text-orange-600 text-xs font-semibold">
                   {((sentiments.negative / FEEDBACK_DATA.length) * 100).toFixed(0)}%
                 </p>
               </div>
@@ -341,15 +341,15 @@ export function CustomerFeedback() {
                   <tr key={store.name} className="border-b border-gray-200 hover:bg-gray-100/50">
                     <td className="py-3 px-4 text-gray-900 text-sm">{store.name}</td>
                     <td className="py-3 px-4 text-right font-semibold">
-                      <span className="text-blue-400">{store.nps}</span>
+                      <span className="text-blue-600">{store.nps}</span>
                     </td>
                     <td className="py-3 px-4 text-right">
-                      <span className="text-green-400">{store.positive}%</span>
+                      <span className="text-green-600">{store.positive}%</span>
                     </td>
                     <td className="py-3 px-4 text-right">
                       <span className={clsx(
                         'font-semibold',
-                        store.complaints <= 2 ? 'text-green-400' : 'text-orange-400'
+                        store.complaints <= 2 ? 'text-green-600' : 'text-orange-600'
                       )}>
                         {store.complaints}
                       </span>

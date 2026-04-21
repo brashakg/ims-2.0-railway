@@ -25,7 +25,7 @@ const LOYALTY_TIERS: LoyaltyTier[] = [
     name: 'Bronze',
     minValue: 0,
     maxValue: 10000,
-    color: 'text-amber-400',
+    color: 'text-amber-600',
     bgColor: 'bg-amber-50 border-amber-200',
     badge: '🥉',
     benefits: ['1x points per purchase', 'Monthly newsletter', 'Email promotions'],
@@ -37,7 +37,7 @@ const LOYALTY_TIERS: LoyaltyTier[] = [
     name: 'Silver',
     minValue: 10000,
     maxValue: 25000,
-    color: 'text-slate-300',
+    color: 'text-slate-700',
     bgColor: 'bg-slate-50 border-slate-200',
     badge: '🥈',
     benefits: ['1.25x points', 'Birthday offer', 'Priority support', 'Free shipping'],
@@ -49,7 +49,7 @@ const LOYALTY_TIERS: LoyaltyTier[] = [
     name: 'Gold',
     minValue: 25000,
     maxValue: 50000,
-    color: 'text-yellow-400',
+    color: 'text-yellow-600',
     bgColor: 'bg-yellow-50 border-yellow-200',
     badge: '🥇',
     benefits: ['1.5x points', 'Exclusive sales', '10% loyalty discount', 'VIP support'],
@@ -61,7 +61,7 @@ const LOYALTY_TIERS: LoyaltyTier[] = [
     name: 'Platinum',
     minValue: 50000,
     maxValue: 100000,
-    color: 'text-blue-400',
+    color: 'text-blue-600',
     bgColor: 'bg-blue-50 border-blue-200',
     badge: '💎',
     benefits: ['2x points', '15% loyalty discount', 'Personal account manager', 'Event invites'],
@@ -73,7 +73,7 @@ const LOYALTY_TIERS: LoyaltyTier[] = [
     name: 'Diamond',
     minValue: 100000,
     maxValue: Infinity,
-    color: 'text-purple-400',
+    color: 'text-purple-600',
     bgColor: 'bg-purple-50 border-purple-200',
     badge: '👑',
     benefits: ['3x points', '20% loyalty discount', 'Concierge service', 'Exclusive products'],
@@ -118,15 +118,15 @@ export function LoyaltyProgram() {
         </div>
         <div className="bg-white border border-gray-200 rounded-lg p-4">
           <p className="text-gray-500 text-sm mb-1">Points Issued</p>
-          <p className="text-2xl font-bold text-green-400">2.4M</p>
+          <p className="text-2xl font-bold text-green-600">2.4M</p>
         </div>
         <div className="bg-white border border-gray-200 rounded-lg p-4">
           <p className="text-gray-500 text-sm mb-1">Points Redeemed</p>
-          <p className="text-2xl font-bold text-orange-400">680K</p>
+          <p className="text-2xl font-bold text-orange-600">680K</p>
         </div>
         <div className="bg-white border border-gray-200 rounded-lg p-4">
           <p className="text-gray-500 text-sm mb-1">Redemption Rate</p>
-          <p className="text-2xl font-bold text-blue-400">28%</p>
+          <p className="text-2xl font-bold text-blue-600">28%</p>
         </div>
       </div>
 
@@ -139,7 +139,7 @@ export function LoyaltyProgram() {
             className={clsx(
               'px-4 py-3 font-medium border-b-2 transition-colors',
               activeTab === tab
-                ? 'border-blue-500 text-blue-400'
+                ? 'border-blue-500 text-blue-600'
                 : 'border-transparent text-gray-500 hover:text-gray-600'
             )}
           >
@@ -191,11 +191,11 @@ export function LoyaltyProgram() {
               </div>
               <div className="flex items-center justify-between pb-3 border-b border-gray-200">
                 <span className="text-gray-500">Active Points Balance</span>
-                <span className="text-green-400 font-semibold">1.72M</span>
+                <span className="text-green-600 font-semibold">1.72M</span>
               </div>
               <div className="flex items-center justify-between">
                 <span className="text-gray-500">Avg Points/Member</span>
-                <span className="text-blue-400 font-semibold">14,200</span>
+                <span className="text-blue-600 font-semibold">14,200</span>
               </div>
             </div>
           </div>
@@ -225,7 +225,7 @@ export function LoyaltyProgram() {
                 </div>
                 <div className="flex items-center justify-between text-xs">
                   <span className="text-gray-500">Points 3x</span>
-                  <span className="text-green-400 font-semibold">{tier.pointsMultiplier}x</span>
+                  <span className="text-green-600 font-semibold">{tier.pointsMultiplier}x</span>
                 </div>
               </div>
             </div>
@@ -247,11 +247,11 @@ export function LoyaltyProgram() {
               <div key={reward.id} className="bg-white border border-gray-200 rounded-lg p-4 hover:border-gray-300 cursor-pointer">
                 <div className="flex items-start justify-between mb-3">
                   <h4 className="text-gray-900 font-semibold">{reward.name}</h4>
-                  <Gift className="w-5 h-5 text-yellow-400" />
+                  <Gift className="w-5 h-5 text-yellow-600" />
                 </div>
                 <p className="text-gray-500 text-sm mb-4">{reward.discount}</p>
                 <div className="flex items-center justify-between">
-                  <span className="text-2xl font-bold text-green-400">{reward.pointsCost}</span>
+                  <span className="text-2xl font-bold text-green-600">{reward.pointsCost}</span>
                   <span className="text-xs text-gray-500">points</span>
                 </div>
               </div>

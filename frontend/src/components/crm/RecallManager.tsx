@@ -285,7 +285,7 @@ export function RecallManager() {
       <div className="bg-white rounded-lg border border-gray-200 p-3">
         <div className="flex flex-wrap gap-3 items-center">
           <div className="relative flex-1 min-w-[200px]">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-500" />
             <input
               type="text"
               value={searchQuery}
@@ -295,7 +295,7 @@ export function RecallManager() {
             />
           </div>
           <div className="flex items-center gap-2">
-            <Filter className="w-4 h-4 text-gray-400" />
+            <Filter className="w-4 h-4 text-gray-500" />
             <select
               value={typeFilter}
               onChange={e => setTypeFilter(e.target.value as RecallType | 'ALL')}
@@ -382,9 +382,9 @@ export function RecallManager() {
         </div>
       ) : filtered.length === 0 ? (
         <div className="text-center py-16 bg-white rounded-lg border border-gray-200">
-          <Bell className="w-12 h-12 text-gray-400 mx-auto mb-3" />
+          <Bell className="w-12 h-12 text-gray-500 mx-auto mb-3" />
           <p className="text-gray-500">No recalls found</p>
-          <p className="text-sm text-gray-400 mt-1">All customers are up to date!</p>
+          <p className="text-sm text-gray-500 mt-1">All customers are up to date!</p>
         </div>
       ) : (
         <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
@@ -428,7 +428,7 @@ export function RecallManager() {
                   <div>
                     <p className="font-medium text-gray-900">{recall.customerName}</p>
                     <p className="text-xs text-gray-500">{recall.customerPhone}</p>
-                    <p className="text-xs text-gray-400 mt-0.5 line-clamp-1">{recall.reason}</p>
+                    <p className="text-xs text-gray-500 mt-0.5 line-clamp-1">{recall.reason}</p>
                   </div>
                   <div>
                     <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${typeConf.bgColor} ${typeConf.color}`}>
@@ -479,7 +479,7 @@ export function RecallManager() {
                         </button>
                         <button
                           onClick={() => handleMarkStatus(recall.id, 'DISMISSED')}
-                          className="p-1.5 hover:bg-gray-100 rounded text-gray-400"
+                          className="p-1.5 hover:bg-gray-100 rounded text-gray-500"
                           title="Dismiss"
                         >
                           <XCircle className="w-4 h-4" />

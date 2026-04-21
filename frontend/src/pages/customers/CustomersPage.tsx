@@ -440,10 +440,10 @@ export function CustomersPage() {
                         {customer.patients?.length || 0} patient{(customer.patients?.length || 0) !== 1 ? 's' : ''}
                       </p>
                       {customer.customerType === 'B2B' && customer.gstNumber && (
-                        <p className="text-xs text-gray-400">GST: {customer.gstNumber}</p>
+                        <p className="text-xs text-gray-500">GST: {customer.gstNumber}</p>
                       )}
                     </div>
-                    <ChevronRight className="w-5 h-5 text-gray-400" />
+                    <ChevronRight className="w-5 h-5 text-gray-500" />
                   </div>
                 </button>
               ))}
@@ -593,25 +593,25 @@ export function CustomersPage() {
           <h2 className="font-semibold text-gray-900 mb-4">Customer Details</h2>
           <div className="space-y-3">
             <div className="flex items-center gap-2 text-sm">
-              <Phone className="w-4 h-4 text-gray-400" />
+              <Phone className="w-4 h-4 text-gray-500" />
               <span>{selectedCustomer?.phone}</span>
             </div>
             {selectedCustomer?.email && (
               <div className="flex items-center gap-2 text-sm">
-                <Mail className="w-4 h-4 text-gray-400" />
+                <Mail className="w-4 h-4 text-gray-500" />
                 <span>{selectedCustomer.email}</span>
               </div>
             )}
             {selectedCustomer?.address && (
               <div className="flex items-start gap-2 text-sm">
-                <MapPin className="w-4 h-4 text-gray-400 mt-0.5" />
+                <MapPin className="w-4 h-4 text-gray-500 mt-0.5" />
                 <span>
                   {selectedCustomer.address}, {selectedCustomer.city}, {selectedCustomer.state} - {selectedCustomer.pincode}
                 </span>
               </div>
             )}
             <div className="flex items-center gap-2 text-sm">
-              <Calendar className="w-4 h-4 text-gray-400" />
+              <Calendar className="w-4 h-4 text-gray-500" />
               <span>Customer since {formatDate(selectedCustomer?.createdAt || '')}</span>
             </div>
 
@@ -678,7 +678,7 @@ export function CustomersPage() {
 
             {selectedCustomer?.customerType === 'B2B' && selectedCustomer.gstNumber && (
               <div className="flex items-center gap-2 text-sm">
-                <Building2 className="w-4 h-4 text-gray-400" />
+                <Building2 className="w-4 h-4 text-gray-500" />
                 <span>GST: {selectedCustomer.gstNumber}</span>
               </div>
             )}
@@ -845,7 +845,7 @@ export function CustomersPage() {
                       <span className={`text-xs font-medium px-1.5 py-0.5 rounded ${config.bg} ${config.color}`}>
                         {entry.type}
                       </span>
-                      <span className="text-xs text-gray-400">{formatDate(entry.date)}</span>
+                      <span className="text-xs text-gray-500">{formatDate(entry.date)}</span>
                     </div>
                     <p className="text-sm text-gray-700 mt-0.5">{entry.message}</p>
                   </div>

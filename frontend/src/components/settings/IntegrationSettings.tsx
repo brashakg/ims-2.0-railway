@@ -119,8 +119,8 @@ export function IntegrationSettings() {
             className={clsx(
               'p-6 rounded-lg border-2 transition',
               integration.connected
-                ? 'bg-gray-800 border-green-600 border-opacity-30'
-                : 'bg-gray-800 border-gray-700'
+                ? 'bg-white border-green-600 border-opacity-30'
+                : 'bg-white border-gray-200'
             )}
           >
             {/* Header with icon and name */}
@@ -128,15 +128,15 @@ export function IntegrationSettings() {
               <div className="flex items-start gap-3">
                 <span className="text-3xl">{integration.icon}</span>
                 <div>
-                  <h3 className="font-semibold text-white">{integration.name}</h3>
-                  <p className="text-sm text-gray-400">{integration.description}</p>
+                  <h3 className="font-semibold text-gray-900">{integration.name}</h3>
+                  <p className="text-sm text-gray-500">{integration.description}</p>
                 </div>
               </div>
               <span className={clsx(
                 'px-3 py-1 rounded-full text-xs font-medium',
                 integration.connected
-                  ? 'bg-green-900 text-green-200'
-                  : 'bg-gray-700 text-gray-300'
+                  ? 'bg-green-50 text-green-200'
+                  : 'bg-gray-100 text-gray-700'
               )}>
                 {integration.connected ? 'Connected' : 'Not Connected'}
               </span>
@@ -145,17 +145,17 @@ export function IntegrationSettings() {
             {/* API Key Field (if connected) */}
             {integration.apiKeyField && (
               <div className="mb-4">
-                <label className="block text-xs font-medium text-gray-400 mb-2">API Key</label>
+                <label className="block text-xs font-medium text-gray-500 mb-2">API Key</label>
                 <div className="flex gap-2">
                   <input
                     type={showApiKey[integration.id] ? 'text' : 'password'}
                     value={integration.apiKeyField}
                     readOnly
-                    className="flex-1 px-3 py-2 bg-gray-700 border border-gray-600 rounded text-sm text-gray-300 font-mono"
+                    className="flex-1 px-3 py-2 bg-gray-100 border border-gray-300 rounded text-sm text-gray-700 font-mono"
                   />
                   <button
                     onClick={() => setShowApiKey(prev => ({ ...prev, [integration.id]: !prev[integration.id] }))}
-                    className="p-2 bg-gray-700 hover:bg-gray-600 rounded text-gray-400 transition"
+                    className="p-2 bg-gray-100 hover:bg-gray-200 rounded text-gray-500 transition"
                   >
                     {showApiKey[integration.id] ? (
                       <EyeOff className="w-4 h-4" />
@@ -165,7 +165,7 @@ export function IntegrationSettings() {
                   </button>
                   <button
                     onClick={() => handleCopyApiKey(integration.id, integration.apiKeyField)}
-                    className="p-2 bg-gray-700 hover:bg-gray-600 rounded text-gray-400 transition"
+                    className="p-2 bg-gray-100 hover:bg-gray-200 rounded text-gray-500 transition"
                   >
                     {copiedId === integration.id ? (
                       <Check className="w-4 h-4 text-green-500" />
@@ -179,7 +179,7 @@ export function IntegrationSettings() {
 
             {/* Last Sync Info */}
             {integration.lastSync && (
-              <div className="mb-4 flex items-center gap-2 text-xs text-gray-400">
+              <div className="mb-4 flex items-center gap-2 text-xs text-gray-500">
                 <Calendar className="w-3 h-3" />
                 <span>Last sync: {formatLastSync(integration.lastSync)}</span>
               </div>
@@ -194,8 +194,8 @@ export function IntegrationSettings() {
                   className={clsx(
                     'flex-1 flex items-center justify-center gap-2 px-3 py-2 rounded text-sm font-medium transition',
                     testingId === integration.id
-                      ? 'bg-gray-700 text-gray-500 cursor-not-allowed'
-                      : 'bg-gray-700 hover:bg-gray-600 text-gray-300'
+                      ? 'bg-gray-100 text-gray-500 cursor-not-allowed'
+                      : 'bg-gray-100 hover:bg-gray-200 text-gray-700'
                   )}
                 >
                   {testingId === integration.id ? (
@@ -215,7 +215,7 @@ export function IntegrationSettings() {
       </div>
 
       {/* Info box */}
-      <div className="p-4 bg-blue-900 border border-blue-700 rounded-lg text-sm text-blue-200">
+      <div className="p-4 bg-blue-50 border border-blue-700 rounded-lg text-sm text-blue-200">
         <p>
           <strong>API Keys:</strong> Keep your API keys secure. Never share them publicly. Contact support if you need to rotate your keys.
         </p>

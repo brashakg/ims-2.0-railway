@@ -47,23 +47,23 @@ interface Job {
 }
 
 const STATUS_CONFIG: Record<JobStatus, { label: string; class: string; step: number }> = {
-  PENDING: { label: 'Pending', class: 'bg-gray-700 text-gray-300', step: 1 },
-  PROCESSING: { label: 'Fitting', class: 'bg-yellow-900 text-yellow-300', step: 2 },
-  COMPLETED: { label: 'Completed', class: 'bg-blue-900 text-blue-300', step: 3 },
-  QC_FAILED: { label: 'QC Failed', class: 'bg-red-900 text-red-300', step: 2 },
-  READY: { label: 'Ready for Pickup', class: 'bg-green-900 text-green-300', step: 4 },
-  DELIVERED: { label: 'Delivered', class: 'bg-emerald-900 text-emerald-300', step: 5 },
+  PENDING: { label: 'Pending', class: 'bg-gray-100 text-gray-700', step: 1 },
+  PROCESSING: { label: 'Fitting', class: 'bg-yellow-50 text-yellow-700', step: 2 },
+  COMPLETED: { label: 'Completed', class: 'bg-blue-50 text-blue-700', step: 3 },
+  QC_FAILED: { label: 'QC Failed', class: 'bg-red-50 text-red-700', step: 2 },
+  READY: { label: 'Ready for Pickup', class: 'bg-green-50 text-green-700', step: 4 },
+  DELIVERED: { label: 'Delivered', class: 'bg-emerald-50 text-emerald-700', step: 5 },
   // Fallback for legacy statuses
-  CREATED: { label: 'Created', class: 'bg-gray-700 text-gray-400', step: 1 },
-  LENS_ORDERED: { label: 'Lens Ordered', class: 'bg-blue-900 text-blue-300', step: 2 },
-  LENS_RECEIVED: { label: 'Lens Received', class: 'bg-indigo-900 text-indigo-300', step: 3 },
-  QC_PENDING: { label: 'QC Pending', class: 'bg-orange-900 text-orange-300', step: 3 },
-  QC_PASSED: { label: 'QC Passed', class: 'bg-teal-900 text-teal-300', step: 4 },
-  CANCELLED: { label: 'Cancelled', class: 'bg-red-900 text-red-300', step: 0 },
+  CREATED: { label: 'Created', class: 'bg-gray-100 text-gray-500', step: 1 },
+  LENS_ORDERED: { label: 'Lens Ordered', class: 'bg-blue-50 text-blue-700', step: 2 },
+  LENS_RECEIVED: { label: 'Lens Received', class: 'bg-indigo-50 text-indigo-700', step: 3 },
+  QC_PENDING: { label: 'QC Pending', class: 'bg-orange-50 text-orange-700', step: 3 },
+  QC_PASSED: { label: 'QC Passed', class: 'bg-teal-50 text-teal-700', step: 4 },
+  CANCELLED: { label: 'Cancelled', class: 'bg-red-50 text-red-700', step: 0 },
 };
 
 const PRIORITY_CONFIG: Record<JobPriority, { label: string; class: string; icon: React.ComponentType<{ className?: string }> }> = {
-  NORMAL: { label: 'Normal', class: 'text-gray-400', icon: Clock },
+  NORMAL: { label: 'Normal', class: 'text-gray-500', icon: Clock },
   EXPRESS: { label: 'Express', class: 'text-orange-500', icon: Timer },
   URGENT: { label: 'Urgent', class: 'text-red-500', icon: Zap },
 };
@@ -270,7 +270,7 @@ const loadJobs = async () => {
 
       {/* Error State */}
       {error && (
-        <div className="card bg-red-900 border-red-700">
+        <div className="card bg-red-50 border-red-700">
           <div className="flex items-center gap-3 text-red-200">
             <AlertTriangle className="w-5 h-5" />
             <p>{error}</p>
@@ -285,8 +285,8 @@ const loadJobs = async () => {
       <div className="grid grid-cols-2 tablet:grid-cols-4 gap-4">
         <div className="card">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 bg-blue-900 rounded-lg flex items-center justify-center">
-              <Wrench className="w-5 h-5 text-blue-400" />
+            <div className="w-10 h-10 bg-blue-50 rounded-lg flex items-center justify-center">
+              <Wrench className="w-5 h-5 text-blue-600" />
             </div>
             <div>
               <p className="text-sm text-gray-500">Active Jobs</p>
@@ -299,12 +299,12 @@ const loadJobs = async () => {
         </div>
         <div className="card">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 bg-red-900 rounded-lg flex items-center justify-center">
-              <Zap className="w-5 h-5 text-red-400" />
+            <div className="w-10 h-10 bg-red-50 rounded-lg flex items-center justify-center">
+              <Zap className="w-5 h-5 text-red-600" />
             </div>
             <div>
               <p className="text-sm text-gray-500">Urgent</p>
-              <p className="text-2xl font-bold text-red-400">{urgentJobs.length}</p>
+              <p className="text-2xl font-bold text-red-600">{urgentJobs.length}</p>
               {kpis?.qc_failed ? (
                 <p className="text-xs text-red-500">{kpis.qc_failed} in QC rework</p>
               ) : null}
@@ -313,12 +313,12 @@ const loadJobs = async () => {
         </div>
         <div className="card">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 bg-green-900 rounded-lg flex items-center justify-center">
-              <CheckCircle className="w-5 h-5 text-green-400" />
+            <div className="w-10 h-10 bg-green-50 rounded-lg flex items-center justify-center">
+              <CheckCircle className="w-5 h-5 text-green-600" />
             </div>
             <div>
               <p className="text-sm text-gray-500">Ready for Pickup</p>
-              <p className="text-2xl font-bold text-green-400">{kpis?.ready_for_pickup ?? readyJobs.length}</p>
+              <p className="text-2xl font-bold text-green-600">{kpis?.ready_for_pickup ?? readyJobs.length}</p>
               {kpis?.avg_turnaround_days != null && (
                 <p className="text-xs text-gray-500">Avg {kpis.avg_turnaround_days}d turnaround</p>
               )}
@@ -327,12 +327,12 @@ const loadJobs = async () => {
         </div>
         <div className="card">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 bg-orange-900 rounded-lg flex items-center justify-center">
-              <AlertTriangle className="w-5 h-5 text-orange-400" />
+            <div className="w-10 h-10 bg-orange-50 rounded-lg flex items-center justify-center">
+              <AlertTriangle className="w-5 h-5 text-orange-600" />
             </div>
             <div>
               <p className="text-sm text-gray-500">Overdue</p>
-              <p className="text-2xl font-bold text-orange-400">{kpis?.overdue ?? overdueJobs.length}</p>
+              <p className="text-2xl font-bold text-orange-600">{kpis?.overdue ?? overdueJobs.length}</p>
             </div>
           </div>
         </div>
@@ -342,7 +342,7 @@ const loadJobs = async () => {
       <div className="card">
         <div className="flex flex-col tablet:flex-row gap-4">
           <div className="relative flex-1">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" />
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-500" />
             <input
               type="text"
               value={searchQuery}
@@ -384,7 +384,7 @@ const loadJobs = async () => {
             <Loader2 className="w-8 h-8 animate-spin text-bv-red-600" />
           </div>
         ) : filteredJobs.length === 0 ? (
-          <div className="card text-center py-12 text-gray-400">
+          <div className="card text-center py-12 text-gray-500">
             <Wrench className="w-12 h-12 mx-auto mb-2 opacity-50" />
             <p>{searchQuery || statusFilter !== 'ACTIVE' || priorityFilter !== 'ALL' ? 'No jobs found matching your filters' : 'No workshop jobs'}</p>
           </div>
@@ -400,8 +400,8 @@ const loadJobs = async () => {
                 key={job.id}
                 className={clsx(
                   'card',
-                  job.priority === 'URGENT' && 'border-red-700 bg-red-900/20',
-                  overdue && job.priority !== 'URGENT' && 'border-orange-700 bg-orange-900/20'
+                  job.priority === 'URGENT' && 'border-red-700 bg-red-50/20',
+                  overdue && job.priority !== 'URGENT' && 'border-orange-700 bg-orange-50/20'
                 )}
               >
                 <div className="flex items-start justify-between gap-4">
@@ -426,25 +426,25 @@ const loadJobs = async () => {
 
                     <div className="grid grid-cols-2 gap-4 text-sm">
                       <div>
-                        <p className="text-gray-400">Customer</p>
+                        <p className="text-gray-500">Customer</p>
                         <p className="font-medium flex items-center gap-1">
                           <User className="w-3 h-3" />
                           {job.customerName}
                         </p>
-                        <p className="text-gray-400 flex items-center gap-1">
+                        <p className="text-gray-500 flex items-center gap-1">
                           <Phone className="w-3 h-3" />
                           {job.customerPhone}
                         </p>
                       </div>
                       <div>
-                        <p className="text-gray-400">Frame & Lens</p>
+                        <p className="text-gray-500">Frame & Lens</p>
                         <p className="font-medium">{job.frameName}</p>
-                        <p className="text-gray-400">{job.lensType}</p>
+                        <p className="text-gray-500">{job.lensType}</p>
                       </div>
                     </div>
 
                     {job.notes && (
-                      <p className="mt-2 text-sm text-yellow-200 bg-yellow-900/30 px-2 py-1 rounded">
+                      <p className="mt-2 text-sm text-yellow-200 bg-yellow-50/30 px-2 py-1 rounded">
                         Note: {job.notes}
                       </p>
                     )}
@@ -453,16 +453,16 @@ const loadJobs = async () => {
                   {/* Dates & Actions */}
                   <div className="text-right">
                     <div className="mb-3">
-                      <p className="text-xs text-gray-400">Promise Date</p>
+                      <p className="text-xs text-gray-500">Promise Date</p>
                       <p className={clsx(
                         'font-medium',
-                        overdue ? 'text-red-600' : 'text-white'
+                        overdue ? 'text-red-600' : 'text-gray-900'
                       )}>
                         {formatDate(job.promisedDate)}
                       </p>
                     </div>
                     {job.assignedTo && (
-                      <p className="text-xs text-gray-400 mb-3">
+                      <p className="text-xs text-gray-500 mb-3">
                         Assigned: {job.assignedTo}
                       </p>
                     )}
@@ -479,8 +479,8 @@ const loadJobs = async () => {
                 {/* Progress Bar */}
                 <div className="mt-4 pt-4 border-t border-gray-200">
                   <div className="flex items-center justify-between text-xs mb-2">
-                    <span className="text-gray-400">Progress</span>
-                    <span className="text-gray-400">{statusConfig.label}</span>
+                    <span className="text-gray-500">Progress</span>
+                    <span className="text-gray-500">{statusConfig.label}</span>
                   </div>
                   <div className="h-2 bg-gray-200 rounded-full overflow-hidden">
                     <div
@@ -509,7 +509,7 @@ const loadJobs = async () => {
                 </h2>
                 <button
                   onClick={() => setSelectedJob(null)}
-                  className="p-2 hover:bg-gray-100 rounded-lg text-gray-400"
+                  className="p-2 hover:bg-gray-100 rounded-lg text-gray-500"
                 >
                   ×
                 </button>
@@ -525,7 +525,7 @@ const loadJobs = async () => {
                     {selectedJob.priority}
                   </span>
                   {isOverdue(selectedJob.promisedDate) && !['READY', 'DELIVERED', 'CANCELLED'].includes(selectedJob.status) && (
-                    <span className="px-2 py-1 bg-red-900 text-red-300 text-xs rounded-full font-medium">Overdue</span>
+                    <span className="px-2 py-1 bg-red-50 text-red-700 text-xs rounded-full font-medium">Overdue</span>
                   )}
                 </div>
 
@@ -535,7 +535,7 @@ const loadJobs = async () => {
                   <p className="font-medium text-gray-900 flex items-center gap-2">
                     <User className="w-4 h-4" /> {selectedJob.customerName}
                   </p>
-                  <p className="text-sm text-gray-400 flex items-center gap-2">
+                  <p className="text-sm text-gray-500 flex items-center gap-2">
                     <Phone className="w-4 h-4" /> {selectedJob.customerPhone}
                   </p>
                 </div>
@@ -543,20 +543,20 @@ const loadJobs = async () => {
                 {/* Job Details */}
                 <div className="grid grid-cols-2 gap-4">
                   <div>
-                    <p className="text-sm text-gray-400">Order Number</p>
+                    <p className="text-sm text-gray-500">Order Number</p>
                     <p className="font-medium">{selectedJob.orderNumber}</p>
                   </div>
                   <div>
-                    <p className="text-sm text-gray-400">Frame</p>
+                    <p className="text-sm text-gray-500">Frame</p>
                     <p className="font-medium">{selectedJob.frameName}</p>
                   </div>
                   <div>
-                    <p className="text-sm text-gray-400">Lens Type</p>
+                    <p className="text-sm text-gray-500">Lens Type</p>
                     <p className="font-medium">{selectedJob.lensType}</p>
                   </div>
                   {selectedJob.frameBarcode && (
                     <div>
-                      <p className="text-sm text-gray-400">Frame Barcode</p>
+                      <p className="text-sm text-gray-500">Frame Barcode</p>
                       <p className="font-medium font-mono text-sm">{selectedJob.frameBarcode}</p>
                     </div>
                   )}
@@ -565,24 +565,24 @@ const loadJobs = async () => {
                 {/* Dates */}
                 <div className="grid grid-cols-2 gap-4 bg-gray-50 border border-gray-200 rounded-lg p-4">
                   <div>
-                    <p className="text-sm text-gray-400">Created</p>
+                    <p className="text-sm text-gray-500">Created</p>
                     <p className="font-medium">{formatDate(selectedJob.createdAt)}</p>
                   </div>
                   <div>
-                    <p className="text-sm text-gray-400">Promised Date</p>
+                    <p className="text-sm text-gray-500">Promised Date</p>
                     <p className={clsx('font-medium', isOverdue(selectedJob.promisedDate) && 'text-red-600')}>
                       {formatDate(selectedJob.promisedDate)}
                     </p>
                   </div>
                   {selectedJob.assignedTo && (
                     <div>
-                      <p className="text-sm text-gray-400">Assigned To</p>
+                      <p className="text-sm text-gray-500">Assigned To</p>
                       <p className="font-medium">{selectedJob.assignedTo}</p>
                     </div>
                   )}
                   {selectedJob.completedAt && (
                     <div>
-                      <p className="text-sm text-gray-400">Completed</p>
+                      <p className="text-sm text-gray-500">Completed</p>
                       <p className="font-medium">{formatDate(selectedJob.completedAt)}</p>
                     </div>
                   )}
@@ -590,15 +590,15 @@ const loadJobs = async () => {
 
                 {/* Notes */}
                 {selectedJob.notes && (
-                  <div className="bg-yellow-900/20 border border-yellow-700 rounded-lg p-3">
-                    <p className="text-sm font-medium text-yellow-300">Notes</p>
+                  <div className="bg-yellow-50/20 border border-yellow-700 rounded-lg p-3">
+                    <p className="text-sm font-medium text-yellow-700">Notes</p>
                     <p className="text-sm text-yellow-200 mt-1">{selectedJob.notes}</p>
                   </div>
                 )}
 
                 {/* Progress */}
                 <div>
-                  <p className="text-sm text-gray-400 mb-2">Progress: {STATUS_CONFIG[selectedJob.status].label}</p>
+                  <p className="text-sm text-gray-500 mb-2">Progress: {STATUS_CONFIG[selectedJob.status].label}</p>
                   <div className="h-3 bg-gray-200 rounded-full overflow-hidden">
                     <div
                       className={clsx(
@@ -685,7 +685,7 @@ const loadJobs = async () => {
           <div className="bg-white rounded-xl shadow-2xl w-full max-w-lg max-h-[85vh] overflow-y-auto">
             <div className="p-5 border-b border-gray-200 flex items-center justify-between">
               <h3 className="font-semibold text-gray-900">Create Workshop Job from Order</h3>
-              <button onClick={() => { setShowCreateJob(false); setCreateSelectedOrder(null); setCreateOrders([]); }} className="p-1 hover:bg-gray-100 rounded text-gray-400 hover:text-gray-700">
+              <button onClick={() => { setShowCreateJob(false); setCreateSelectedOrder(null); setCreateOrders([]); }} className="p-1 hover:bg-gray-100 rounded text-gray-500 hover:text-gray-700">
                 ×
               </button>
             </div>
@@ -694,13 +694,13 @@ const loadJobs = async () => {
                 <>
                   <div className="flex gap-2">
                     <div className="relative flex-1">
-                      <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+                      <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-500" />
                       <input value={createOrderSearch} onChange={e => setCreateOrderSearch(e.target.value)}
                         onKeyDown={e => e.key === 'Enter' && searchOrdersForJob()}
                         placeholder="Search order number or customer..."
                         className="w-full pl-9 pr-4 py-2.5 border border-gray-300 bg-white text-gray-900 rounded-lg text-sm placeholder-gray-500" />
                     </div>
-                    <button onClick={searchOrdersForJob} className="px-4 py-2 bg-bv-gold-500 text-white rounded-lg text-sm font-semibold hover:bg-bv-gold-600">Search</button>
+                    <button onClick={searchOrdersForJob} className="px-4 py-2 bg-bv-red-600 text-white rounded-lg text-sm font-semibold hover:bg-bv-red-700">Search</button>
                   </div>
                   {createOrders.length > 0 && (
                     <div className="space-y-1.5 max-h-60 overflow-y-auto">
@@ -709,7 +709,7 @@ const loadJobs = async () => {
                           className="w-full flex items-center justify-between p-3 rounded-lg border border-gray-300 hover:border-bv-gold-400 hover:bg-gray-100 text-left text-gray-900 transition-colors">
                           <div>
                             <p className="text-sm font-medium">{o.orderNumber}</p>
-                            <p className="text-xs text-gray-400">{o.customerName} · {(o.items || []).length} items</p>
+                            <p className="text-xs text-gray-500">{o.customerName} · {(o.items || []).length} items</p>
                           </div>
                           <span className="text-sm font-bold text-bv-gold-300">₹{Math.round(o.grandTotal || 0).toLocaleString('en-IN')}</span>
                         </button>
@@ -723,30 +723,30 @@ const loadJobs = async () => {
                     <div className="flex items-center justify-between">
                       <div>
                         <p className="font-medium text-sm">{createSelectedOrder.orderNumber}</p>
-                        <p className="text-xs text-gray-400">{createSelectedOrder.customerName}</p>
+                        <p className="text-xs text-gray-500">{createSelectedOrder.customerName}</p>
                       </div>
-                      <button onClick={() => setCreateSelectedOrder(null)} className="text-xs text-bv-gold-600 hover:underline">Change</button>
+                      <button onClick={() => setCreateSelectedOrder(null)} className="text-xs text-bv-red-600 hover:underline">Change</button>
                     </div>
                     <div className="mt-2 space-y-1">
                       {(createSelectedOrder.items || []).map((item: any, i: number) => (
                         <div key={i} className="flex items-center justify-between text-xs">
                           <span className="text-gray-900">{item.productName || item.product_name || item.name}</span>
-                          <span className="text-gray-400 text-xs">{item.category}</span>
+                          <span className="text-gray-500 text-xs">{item.category}</span>
                         </div>
                       ))}
                     </div>
                   </div>
 
                   <div>
-                    <label className="text-xs text-gray-400 block mb-1">Priority</label>
+                    <label className="text-xs text-gray-500 block mb-1">Priority</label>
                     <div className="flex gap-2">
                       {(['NORMAL', 'EXPRESS', 'URGENT'] as const).map(p => (
                         <button key={p} onClick={() => setCreatePriority(p)}
                           className={clsx('flex-1 py-2 rounded-lg text-xs font-medium border-2 transition-all',
                             createPriority === p
-                              ? p === 'URGENT' ? 'border-red-500 bg-red-900 text-red-300'
-                                : p === 'EXPRESS' ? 'border-amber-500 bg-amber-900 text-amber-300'
-                                  : 'border-bv-gold-500 bg-bv-gold-900 text-bv-gold-300'
+                              ? p === 'URGENT' ? 'border-red-500 bg-red-50 text-red-700'
+                                : p === 'EXPRESS' ? 'border-amber-500 bg-amber-50 text-amber-700'
+                                  : 'border-bv-red-600 bg-bv-gold-900 text-bv-gold-300'
                               : 'border-gray-300 text-gray-600 bg-white')}>
                           {p}
                         </button>
@@ -755,21 +755,21 @@ const loadJobs = async () => {
                   </div>
 
                   <div>
-                    <label className="text-xs text-gray-400 block mb-1">Expected Delivery Date</label>
+                    <label className="text-xs text-gray-500 block mb-1">Expected Delivery Date</label>
                     <input type="date" value={createExpectedDate} onChange={e => setCreateExpectedDate(e.target.value)}
                       min={new Date().toISOString().split('T')[0]}
                       className="w-full px-3 py-2 border border-gray-300 bg-white text-gray-900 rounded-lg text-sm" />
                   </div>
 
                   <div>
-                    <label className="text-xs text-gray-400 block mb-1">Fitting Instructions</label>
+                    <label className="text-xs text-gray-500 block mb-1">Fitting Instructions</label>
                     <textarea value={createFitting} onChange={e => setCreateFitting(e.target.value)}
                       placeholder="PD, segment height, tilt, wrap angle, frame adjustments..."
                       className="w-full px-3 py-2 border border-gray-300 bg-white text-gray-900 rounded-lg text-sm h-16 resize-none placeholder-gray-500" />
                   </div>
 
                   <div>
-                    <label className="text-xs text-gray-400 block mb-1">Special Notes for Workshop</label>
+                    <label className="text-xs text-gray-500 block mb-1">Special Notes for Workshop</label>
                     <textarea value={createNotes} onChange={e => setCreateNotes(e.target.value)}
                       placeholder="Tint, drill mount, special coating, customer preferences..."
                       className="w-full px-3 py-2 border border-gray-300 bg-white text-gray-900 rounded-lg text-sm h-16 resize-none placeholder-gray-500" />
@@ -782,7 +782,7 @@ const loadJobs = async () => {
                 <button onClick={() => { setShowCreateJob(false); setCreateSelectedOrder(null); }}
                   className="flex-1 px-4 py-2.5 border border-gray-300 text-gray-600 rounded-lg text-sm hover:bg-gray-100">Cancel</button>
                 <button onClick={handleCreateJob} disabled={createLoading}
-                  className="flex-1 px-4 py-2.5 bg-bv-gold-500 text-white rounded-lg text-sm font-semibold hover:bg-bv-gold-600 disabled:opacity-50">
+                  className="flex-1 px-4 py-2.5 bg-bv-red-600 text-white rounded-lg text-sm font-semibold hover:bg-bv-red-700 disabled:opacity-50">
                   {createLoading ? 'Creating...' : 'Create Job'}
                 </button>
               </div>

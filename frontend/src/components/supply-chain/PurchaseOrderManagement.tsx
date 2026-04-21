@@ -137,15 +137,15 @@ export function PurchaseOrderManagement({
   };
 
   return (
-    <div className="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800">
+    <div className="bg-white dark:bg-white rounded-lg border border-gray-200 dark:border-gray-800">
       {/* Header */}
       <div className="p-6 border-b border-gray-200 dark:border-gray-800 flex items-center justify-between">
         <div>
-          <h2 className="text-lg font-bold text-gray-900 dark:text-white flex items-center gap-2">
+          <h2 className="text-lg font-bold text-gray-900 dark:text-gray-900 flex items-center gap-2">
             <FileText className="w-5 h-5" />
             Purchase Orders
           </h2>
-          <p className="text-sm text-gray-600 dark:text-gray-400 mt-1">
+          <p className="text-sm text-gray-600 dark:text-gray-500 mt-1">
             {filteredOrders.length} of {orders.length} purchase orders
           </p>
         </div>
@@ -165,13 +165,13 @@ export function PurchaseOrderManagement({
       {/* Search */}
       <div className="p-4 border-b border-gray-200 dark:border-gray-800">
         <div className="relative">
-          <Search className="absolute left-3 top-3 w-4 h-4 text-gray-400" />
+          <Search className="absolute left-3 top-3 w-4 h-4 text-gray-500" />
           <input
             type="text"
             placeholder="Search by PO number or vendor..."
             value={searchTerm}
             onChange={e => setSearchTerm(e.target.value)}
-            className="w-full pl-10 pr-4 py-2 border border-gray-300 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-white"
+            className="w-full pl-10 pr-4 py-2 border border-gray-300 dark:border-gray-200 rounded-lg bg-white dark:bg-white text-gray-900 dark:text-gray-900"
           />
         </div>
       </div>
@@ -179,38 +179,38 @@ export function PurchaseOrderManagement({
       {/* Orders List */}
       <div className="divide-y divide-gray-200 dark:divide-gray-800">
         {loading ? (
-          <div className="p-8 text-center text-gray-500 dark:text-gray-400">
+          <div className="p-8 text-center text-gray-500 dark:text-gray-500">
             <p>Loading purchase orders...</p>
           </div>
         ) : filteredOrders.length === 0 ? (
-          <div className="p-8 text-center text-gray-500 dark:text-gray-400">
+          <div className="p-8 text-center text-gray-500 dark:text-gray-500">
             <FileText className="w-12 h-12 mx-auto mb-3 opacity-50" />
             <p>No purchase orders found</p>
           </div>
         ) : (
           filteredOrders.map(order => (
-            <div key={order.id} className="p-4 hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors">
+            <div key={order.id} className="p-4 hover:bg-gray-50 dark:hover:bg-white transition-colors">
               <div className="flex items-start justify-between gap-4 mb-3">
                 <div className="flex-1">
                   <div className="flex items-center gap-2 mb-1">
-                    <h3 className="font-semibold text-gray-900 dark:text-white">{order.poNumber}</h3>
+                    <h3 className="font-semibold text-gray-900 dark:text-gray-900">{order.poNumber}</h3>
                     <span className={clsx('inline-flex items-center gap-1 px-2 py-1 rounded text-xs font-medium', getStatusColor(order.status))}>
                       {getStatusIcon(order.status)}
                       {order.status}
                     </span>
                   </div>
-                  <p className="text-sm text-gray-600 dark:text-gray-400">Vendor: {order.vendorName}</p>
+                  <p className="text-sm text-gray-600 dark:text-gray-500">Vendor: {order.vendorName}</p>
                 </div>
                 <div className="text-right">
-                  <p className="font-semibold text-gray-900 dark:text-white">${order.total.toFixed(2)}</p>
-                  <p className="text-xs text-gray-500 dark:text-gray-400">
+                  <p className="font-semibold text-gray-900 dark:text-gray-900">${order.total.toFixed(2)}</p>
+                  <p className="text-xs text-gray-500 dark:text-gray-500">
                     Expected: {new Date(order.expectedDelivery).toLocaleDateString()}
                   </p>
                 </div>
               </div>
 
               {/* Items Summary */}
-              <div className="text-sm text-gray-600 dark:text-gray-400 mb-3">
+              <div className="text-sm text-gray-600 dark:text-gray-500 mb-3">
                 <p>{order.items.length} item(s)</p>
               </div>
 
@@ -246,7 +246,7 @@ export function PurchaseOrderManagement({
                     setEditingId(order.id);
                     setShowCreateModal(true);
                   }}
-                  className="p-2 hover:bg-amber-100 dark:hover:bg-amber-900/20 rounded-lg text-amber-600 dark:text-amber-400"
+                  className="p-2 hover:bg-amber-100 dark:hover:bg-amber-50/20 rounded-lg text-amber-600 dark:text-amber-600"
                   title="Edit"
                 >
                   <Edit2 className="w-4 h-4" />
@@ -257,7 +257,7 @@ export function PurchaseOrderManagement({
                       onDeleteOrder(order.id);
                     }
                   }}
-                  className="p-2 hover:bg-red-100 dark:hover:bg-red-900/20 rounded-lg text-red-600 dark:text-red-400"
+                  className="p-2 hover:bg-red-100 dark:hover:bg-red-50/20 rounded-lg text-red-600 dark:text-red-600"
                   title="Delete"
                 >
                   <Trash2 className="w-4 h-4" />
@@ -271,8 +271,8 @@ export function PurchaseOrderManagement({
       {/* Create/Edit Modal */}
       {showCreateModal && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50" onClick={() => setShowCreateModal(false)}>
-          <div className="bg-white dark:bg-gray-900 rounded-lg shadow-lg p-6 max-w-2xl w-full max-h-96 overflow-y-auto" onClick={e => e.stopPropagation()}>
-            <h2 className="text-lg font-bold text-gray-900 dark:text-white mb-4">
+          <div className="bg-white dark:bg-white rounded-lg shadow-lg p-6 max-w-2xl w-full max-h-96 overflow-y-auto" onClick={e => e.stopPropagation()}>
+            <h2 className="text-lg font-bold text-gray-900 dark:text-gray-900 mb-4">
               {editingId ? 'Edit Purchase Order' : 'Create New Purchase Order'}
             </h2>
 
@@ -284,7 +284,7 @@ export function PurchaseOrderManagement({
                   value={formData.poNumber || ''}
                   onChange={e => setFormData({ ...formData, poNumber: e.target.value })}
                   disabled={editingId !== null}
-                  className="px-3 py-2 border border-gray-300 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-white disabled:opacity-50"
+                  className="px-3 py-2 border border-gray-300 dark:border-gray-200 rounded-lg bg-white dark:bg-white text-gray-900 dark:text-gray-900 disabled:opacity-50"
                 />
                 <select
                   value={formData.vendorId || ''}
@@ -296,7 +296,7 @@ export function PurchaseOrderManagement({
                       vendorName: vendor?.name || '',
                     });
                   }}
-                  className="px-3 py-2 border border-gray-300 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-white"
+                  className="px-3 py-2 border border-gray-300 dark:border-gray-200 rounded-lg bg-white dark:bg-white text-gray-900 dark:text-gray-900"
                 >
                   <option value="">Select Vendor *</option>
                   {vendors.map(vendor => (
@@ -310,14 +310,14 @@ export function PurchaseOrderManagement({
                   placeholder="Order Date"
                   value={formData.orderDate || ''}
                   onChange={e => setFormData({ ...formData, orderDate: e.target.value })}
-                  className="px-3 py-2 border border-gray-300 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-white"
+                  className="px-3 py-2 border border-gray-300 dark:border-gray-200 rounded-lg bg-white dark:bg-white text-gray-900 dark:text-gray-900"
                 />
                 <input
                   type="date"
                   placeholder="Expected Delivery"
                   value={formData.expectedDelivery || ''}
                   onChange={e => setFormData({ ...formData, expectedDelivery: e.target.value })}
-                  className="px-3 py-2 border border-gray-300 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-white"
+                  className="px-3 py-2 border border-gray-300 dark:border-gray-200 rounded-lg bg-white dark:bg-white text-gray-900 dark:text-gray-900"
                 />
               </div>
 
@@ -325,14 +325,14 @@ export function PurchaseOrderManagement({
                 placeholder="Notes"
                 value={formData.notes || ''}
                 onChange={e => setFormData({ ...formData, notes: e.target.value })}
-                className="w-full px-3 py-2 border border-gray-300 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-white"
+                className="w-full px-3 py-2 border border-gray-300 dark:border-gray-200 rounded-lg bg-white dark:bg-white text-gray-900 dark:text-gray-900"
                 rows={3}
               />
 
               <div className="flex gap-2">
                 <button
                   onClick={() => setShowCreateModal(false)}
-                  className="flex-1 px-4 py-2 border border-gray-300 dark:border-gray-700 rounded-lg text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800"
+                  className="flex-1 px-4 py-2 border border-gray-300 dark:border-gray-200 rounded-lg text-gray-700 dark:text-gray-700 hover:bg-gray-50 dark:hover:bg-white"
                 >
                   Cancel
                 </button>

@@ -163,13 +163,13 @@ export function GRNPrint({ grn, store, onClose }: GRNPrintProps) {
             <h3 className="font-bold text-gray-900 mb-2 uppercase">Items Received</h3>
             <table className="w-full border-collapse">
               <thead>
-                <tr className="bg-gray-800 text-white">
-                  <th className="border border-gray-600 px-3 py-2 text-left font-semibold">Sr.</th>
-                  <th className="border border-gray-600 px-3 py-2 text-left font-semibold">Product Name</th>
-                  <th className="border border-gray-600 px-3 py-2 text-center font-semibold">Ordered</th>
-                  <th className="border border-gray-600 px-3 py-2 text-center font-semibold">Received</th>
-                  <th className="border border-gray-600 px-3 py-2 text-center font-semibold">Variance</th>
-                  <th className="border border-gray-600 px-3 py-2 text-left font-semibold">Remarks</th>
+                <tr className="bg-white text-gray-900">
+                  <th className="border border-gray-300 px-3 py-2 text-left font-semibold">Sr.</th>
+                  <th className="border border-gray-300 px-3 py-2 text-left font-semibold">Product Name</th>
+                  <th className="border border-gray-300 px-3 py-2 text-center font-semibold">Ordered</th>
+                  <th className="border border-gray-300 px-3 py-2 text-center font-semibold">Received</th>
+                  <th className="border border-gray-300 px-3 py-2 text-center font-semibold">Variance</th>
+                  <th className="border border-gray-300 px-3 py-2 text-left font-semibold">Remarks</th>
                 </tr>
               </thead>
               <tbody>
@@ -235,7 +235,7 @@ export function GRNPrint({ grn, store, onClose }: GRNPrintProps) {
 
           {/* Footer */}
           <div className="mt-4 pt-2 border-t border-gray-200 text-center">
-            <p className="text-[10px] text-gray-400">
+            <p className="text-[10px] text-gray-500">
               {store.storeName} &middot; {store.city}, {store.state} &middot; {grn.grn_number}
             </p>
           </div>

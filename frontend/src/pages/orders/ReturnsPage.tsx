@@ -123,9 +123,9 @@ export default function ReturnsPage() {
         ]).map(t => (
           <button key={t.id} onClick={() => setReturnType(t.id)}
             className={clsx('flex-1 p-3 rounded-xl border-2 text-left transition-all',
-              returnType === t.id ? 'border-bv-gold-500 bg-bv-gold-50' : 'border-gray-200 hover:border-gray-300')}>
+              returnType === t.id ? 'border-bv-red-600 bg-bv-gold-50' : 'border-gray-200 hover:border-gray-300')}>
             <div className="flex items-center gap-2">
-              <t.icon className={clsx('w-5 h-5', returnType === t.id ? 'text-bv-gold-600' : 'text-gray-500')} />
+              <t.icon className={clsx('w-5 h-5', returnType === t.id ? 'text-bv-red-600' : 'text-gray-500')} />
               <span className={clsx('text-sm font-medium', returnType === t.id ? 'text-bv-gold-700' : 'text-gray-700')}>{t.label}</span>
             </div>
             <p className="text-xs text-gray-500 mt-1 ml-7">{t.desc}</p>
@@ -153,7 +153,7 @@ export default function ReturnsPage() {
                 className="w-full pl-10 pr-4 py-2.5 border border-gray-300 rounded-lg text-sm" />
             </div>
             <button onClick={searchOrders} disabled={isLoading}
-              className="px-6 py-2.5 bg-bv-gold-500 text-white rounded-lg text-sm font-semibold hover:bg-bv-gold-600 disabled:opacity-50">
+              className="px-6 py-2.5 bg-bv-red-600 text-white rounded-lg text-sm font-semibold hover:bg-bv-red-700 disabled:opacity-50">
               {isLoading ? 'Searching...' : 'Search'}
             </button>
           </div>
@@ -162,7 +162,7 @@ export default function ReturnsPage() {
             <div className="mt-4 space-y-2">
               {orders.map(order => (
                 <button key={order.id} onClick={() => selectOrder(order)}
-                  className="w-full flex items-center justify-between p-3 rounded-lg border border-gray-200 hover:border-bv-gold-300 hover:bg-bv-gold-50 text-left transition-all">
+                  className="w-full flex items-center justify-between p-3 rounded-lg border border-gray-200 hover:border-bv-red-300 hover:bg-bv-gold-50 text-left transition-all">
                   <div>
                     <p className="font-medium text-sm text-gray-900">{order.orderNumber}</p>
                     <p className="text-xs text-gray-500">{order.customerName} · {new Date(order.createdAt).toLocaleDateString('en-IN')}</p>
@@ -193,7 +193,7 @@ export default function ReturnsPage() {
           <div className="space-y-3">
             {returnItems.map((item, i) => (
               <div key={i} className={clsx('border rounded-lg p-4 transition-all',
-                item.returnQty > 0 ? 'border-bv-gold-300 bg-bv-gold-50' : 'border-gray-200')}>
+                item.returnQty > 0 ? 'border-bv-red-300 bg-bv-gold-50' : 'border-gray-200')}>
                 <div className="flex items-start justify-between gap-4">
                   <div className="flex-1">
                     <p className="font-medium text-sm">{item.productName}</p>
@@ -253,7 +253,7 @@ export default function ReturnsPage() {
                 <button onClick={() => { setStep('search'); setSelectedOrder(null); }}
                   className="px-4 py-2.5 border border-gray-300 rounded-lg text-sm">Cancel</button>
                 <button onClick={handleSubmit}
-                  className="flex-1 py-2.5 bg-bv-gold-500 text-white rounded-lg text-sm font-semibold hover:bg-bv-gold-600">
+                  className="flex-1 py-2.5 bg-bv-red-600 text-white rounded-lg text-sm font-semibold hover:bg-bv-red-700">
                   Submit {returnType === 'EXCHANGE' ? 'Exchange' : returnType === 'CREDIT_NOTE' ? 'Credit Note' : 'Return'} ({activeReturns.length} items)
                 </button>
               </div>
@@ -270,7 +270,7 @@ export default function ReturnsPage() {
             {returnType === 'EXCHANGE' ? 'Exchange Processed' : returnType === 'CREDIT_NOTE' ? 'Credit Note Issued' : 'Return Processed'}
           </h3>
           <p className="text-gray-500 mt-2">Reference: {resultId}</p>
-          <p className="text-2xl font-bold text-bv-gold-600 mt-3">{fc(totalRefund)}</p>
+          <p className="text-2xl font-bold text-bv-red-600 mt-3">{fc(totalRefund)}</p>
           <p className="text-sm text-gray-500 mt-1">
             {returnType === 'CREDIT_NOTE' ? 'Store credit added to customer account' :
               returnType === 'EXCHANGE' ? 'Customer can select replacement product' :
@@ -278,7 +278,7 @@ export default function ReturnsPage() {
           </p>
           <div className="flex gap-3 justify-center mt-6">
             <button onClick={() => { setStep('search'); setSelectedOrder(null); setReturnItems([]); setResultId(null); }}
-              className="px-6 py-2.5 bg-bv-gold-500 text-white rounded-lg text-sm font-semibold">New Return</button>
+              className="px-6 py-2.5 bg-bv-red-600 text-white rounded-lg text-sm font-semibold">New Return</button>
           </div>
         </div>
       )}

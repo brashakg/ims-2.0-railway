@@ -132,7 +132,7 @@ export function ToastProvider({ children }: ToastProviderProps) {
             <span className="flex-1 text-sm">{toast.message}</span>
             <button
               onClick={() => dismiss(toast.id)}
-              className="text-white/80 hover:text-white"
+              className="text-gray-900/80 hover:text-gray-900"
             >
               ×
             </button>

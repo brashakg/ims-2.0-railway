@@ -60,13 +60,13 @@ const RETURN_REASONS = [
 ];
 
 const STATUS_COLORS: Record<string, string> = {
-  created: 'bg-blue-900 text-blue-300',
-  approved: 'bg-cyan-900 text-cyan-300',
-  shipped: 'bg-purple-900 text-purple-300',
-  received_by_vendor: 'bg-orange-900 text-orange-300',
-  credit_issued: 'bg-green-900 text-green-300',
-  replaced: 'bg-green-900 text-green-300',
-  cancelled: 'bg-red-900 text-red-300',
+  created: 'bg-blue-50 text-blue-700',
+  approved: 'bg-cyan-50 text-cyan-700',
+  shipped: 'bg-purple-50 text-purple-700',
+  received_by_vendor: 'bg-orange-50 text-orange-700',
+  credit_issued: 'bg-green-50 text-green-700',
+  replaced: 'bg-green-50 text-green-700',
+  cancelled: 'bg-red-50 text-red-700',
 };
 
 const STATUS_LABELS: Record<string, string> = {
@@ -228,7 +228,7 @@ export function VendorReturns() {
             <p className="text-gray-500 text-sm">Pending Credits</p>
             <Clock className="w-5 h-5 text-yellow-500" />
           </div>
-          <p className="text-2xl font-bold text-yellow-400">
+          <p className="text-2xl font-bold text-yellow-600">
             {returns.filter(r => r.status === 'received_by_vendor' || r.status === 'approved').length}
           </p>
         </div>
@@ -237,7 +237,7 @@ export function VendorReturns() {
             <p className="text-gray-500 text-sm">Credit Value</p>
             <DollarSign className="w-5 h-5 text-green-500" />
           </div>
-          <p className="text-2xl font-bold text-green-400">
+          <p className="text-2xl font-bold text-green-600">
             ₹{returns.reduce((sum, r) => sum + (r.credit_note_amount || 0), 0).toLocaleString()}
           </p>
         </div>
@@ -246,7 +246,7 @@ export function VendorReturns() {
             <p className="text-gray-500 text-sm">This Month</p>
             <Calendar className="w-5 h-5 text-blue-500" />
           </div>
-          <p className="text-2xl font-bold text-blue-400">
+          <p className="text-2xl font-bold text-blue-600">
             {returns.filter(r => new Date(r.created_at).getMonth() === new Date().getMonth()).length}
           </p>
         </div>
@@ -261,8 +261,8 @@ export function VendorReturns() {
             className={clsx(
               'px-4 py-3 font-medium border-b-2 transition-colors',
               activeTab === tab
-                ? 'border-blue-500 text-blue-400'
-                : 'border-transparent text-gray-400 hover:text-gray-700'
+                ? 'border-blue-500 text-blue-600'
+                : 'border-transparent text-gray-500 hover:text-gray-700'
             )}
           >
             {tab === 'active' ? 'Active Returns' : 'History'}
@@ -273,9 +273,9 @@ export function VendorReturns() {
       {/* Returns List */}
       <div className="space-y-4">
         {isLoading ? (
-          <div className="text-center py-8 text-gray-400">Loading returns...</div>
+          <div className="text-center py-8 text-gray-500">Loading returns...</div>
         ) : displayReturns.length === 0 ? (
-          <div className="text-center py-8 text-gray-400">
+          <div className="text-center py-8 text-gray-500">
             {activeTab === 'active' ? 'No active returns' : 'No history'}
           </div>
         ) : (
@@ -301,7 +301,7 @@ export function VendorReturns() {
                       </span>
                       <span className={clsx(
                         'px-2 py-1 rounded text-xs font-semibold',
-                        ret.return_type === 'credit_note' ? 'bg-blue-900 text-blue-300' : 'bg-purple-900 text-purple-300'
+                        ret.return_type === 'credit_note' ? 'bg-blue-50 text-blue-700' : 'bg-purple-50 text-purple-700'
                       )}>
                         {ret.return_type === 'credit_note' ? 'Credit Note' : 'Replacement'}
                       </span>
@@ -315,7 +315,7 @@ export function VendorReturns() {
                 </div>
                 <ChevronDown
                   className={clsx(
-                    'w-5 h-5 text-gray-400 transition-transform',
+                    'w-5 h-5 text-gray-500 transition-transform',
                     expandedReturn === ret.return_id && 'rotate-180'
                   )}
                 />
@@ -354,7 +354,7 @@ export function VendorReturns() {
                     {ret.credit_note_number && (
                       <div>
                         <p className="text-gray-500 text-sm mb-1">Credit Note</p>
-                        <p className="text-green-400 font-semibold">{ret.credit_note_number}</p>
+                        <p className="text-green-600 font-semibold">{ret.credit_note_number}</p>
                       </div>
                     )}
                   </div>
@@ -381,7 +381,7 @@ export function VendorReturns() {
                       {ret.status === 'shipped' && (
                         <button
                           onClick={() => handleUpdateStatus(ret.return_id, 'received_by_vendor')}
-                          className="flex-1 bg-purple-600 hover:bg-purple-700 text-white px-3 py-2 rounded text-sm font-medium transition"
+                          className="flex-1 bg-purple-600 hover:bg-purple-700 text-gray-900 px-3 py-2 rounded text-sm font-medium transition"
                         >
                           Received by Vendor
                         </button>
@@ -420,7 +420,7 @@ export function VendorReturns() {
               <h2 className="text-xl font-bold text-gray-900">Create Vendor Return</h2>
               <button
                 onClick={() => setShowModal(false)}
-                className="text-gray-400 hover:text-gray-700 transition"
+                className="text-gray-500 hover:text-gray-700 transition"
               >
                 <XIcon className="w-6 h-6" />
               </button>
@@ -478,7 +478,7 @@ export function VendorReturns() {
                   <label className="block text-sm font-medium text-gray-900">Items *</label>
                   <button
                     onClick={handleAddItem}
-                    className="text-blue-400 hover:text-blue-300 text-sm font-medium"
+                    className="text-blue-600 hover:text-blue-700 text-sm font-medium"
                   >
                     + Add Item
                   </button>
@@ -537,7 +537,7 @@ export function VendorReturns() {
                       {items.length > 1 && (
                         <button
                           onClick={() => handleRemoveItem(idx)}
-                          className="text-red-400 hover:text-red-300 text-sm font-medium"
+                          className="text-red-600 hover:text-red-700 text-sm font-medium"
                         >
                           Remove Item
                         </button>

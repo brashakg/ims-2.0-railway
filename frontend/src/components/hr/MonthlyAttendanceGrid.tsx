@@ -25,7 +25,7 @@ const ATTENDANCE_COLORS: Record<AttendanceCode, { bg: string; text: string; labe
   L: { bg: 'bg-blue-100', text: 'text-blue-700', label: 'Leave' },
   H: { bg: 'bg-yellow-100', text: 'text-yellow-700', label: 'Half Day' },
   WO: { bg: 'bg-gray-100', text: 'text-gray-700', label: 'Week Off' },
-  '-': { bg: 'bg-white', text: 'text-gray-400', label: '-' },
+  '-': { bg: 'bg-white', text: 'text-gray-500', label: '-' },
 };
 
 export function MonthlyAttendanceGrid() {
@@ -98,8 +98,8 @@ export function MonthlyAttendanceGrid() {
       {/* Header with Navigation */}
       <div className="flex items-center justify-between">
         <div>
-          <h2 className="text-xl font-bold text-white">{monthName}</h2>
-          <p className="text-sm text-gray-400">Monthly Attendance View</p>
+          <h2 className="text-xl font-bold text-gray-900">{monthName}</h2>
+          <p className="text-sm text-gray-500">Monthly Attendance View</p>
         </div>
         <div className="flex gap-2">
           <button onClick={prevMonth} className="btn-outline p-2">
@@ -112,14 +112,14 @@ export function MonthlyAttendanceGrid() {
       </div>
 
       {/* Legend */}
-      <div className="flex flex-wrap gap-3 p-3 bg-gray-100 dark:bg-gray-900 rounded-lg">
+      <div className="flex flex-wrap gap-3 p-3 bg-gray-100 dark:bg-white rounded-lg">
         {Object.entries(ATTENDANCE_COLORS).map(([code, { bg, label }]) => (
           code !== '-' && (
             <div key={code} className="flex items-center gap-2 text-sm">
               <div className={`w-6 h-6 rounded ${bg} flex items-center justify-center`}>
                 <span className="text-xs font-bold">{code}</span>
               </div>
-              <span className="text-gray-600 dark:text-gray-300">{label}</span>
+              <span className="text-gray-600 dark:text-gray-700">{label}</span>
             </div>
           )
         ))}
@@ -131,15 +131,15 @@ export function MonthlyAttendanceGrid() {
           <Loader2 className="w-8 h-8 animate-spin text-bv-red-600" />
         </div>
       ) : employees.length === 0 ? (
-        <div className="card text-center py-12 text-gray-400">
+        <div className="card text-center py-12 text-gray-500">
           <p>No attendance records for this month</p>
         </div>
       ) : (
         <div className="overflow-x-auto card">
           <table className="w-full text-sm">
-            <thead className="bg-gray-100 dark:bg-gray-900 border-b border-gray-200 dark:border-gray-700 sticky top-0">
+            <thead className="bg-gray-100 dark:bg-white border-b border-gray-200 dark:border-gray-200 sticky top-0">
               <tr>
-                <th className="px-3 py-2 text-left text-xs font-bold text-gray-400 min-w-max">Employee</th>
+                <th className="px-3 py-2 text-left text-xs font-bold text-gray-500 min-w-max">Employee</th>
                 {Array.from({ length: daysInMonth }, (_, i) => i + 1).map(day => {
                   const date = new Date(currentDate.getFullYear(), currentDate.getMonth(), day);
                   const isWeekend = date.getDay() === 0 || date.getDay() === 6;
@@ -148,7 +148,7 @@ export function MonthlyAttendanceGrid() {
                       key={day} 
                       className={clsx(
                         'px-1 py-2 text-center text-xs font-bold min-w-10',
-                        isWeekend ? 'bg-gray-800 text-gray-500' : 'text-gray-400'
+                        isWeekend ? 'bg-white text-gray-500' : 'text-gray-500'
                       )}
                     >
                       <div className="text-xs">{day}</div>
@@ -162,8 +162,8 @@ export function MonthlyAttendanceGrid() {
             </thead>
             <tbody className="divide-y divide-gray-700">
               {employees.map(emp => (
-                <tr key={emp.userId} className="hover:bg-gray-800/50">
-                  <td className="px-3 py-2 font-medium text-white min-w-max">{emp.name}</td>
+                <tr key={emp.userId} className="hover:bg-white/50">
+                  <td className="px-3 py-2 font-medium text-gray-900 min-w-max">{emp.name}</td>
                   {Array.from({ length: daysInMonth }, (_, i) => i + 1).map(day => {
                     const code = emp.attendance[day] || '-';
                     const color = ATTENDANCE_COLORS[code];
@@ -175,7 +175,7 @@ export function MonthlyAttendanceGrid() {
                         key={day}
                         className={clsx(
                           'px-1 py-2 text-center',
-                          isWeekend ? 'bg-gray-900/50' : ''
+                          isWeekend ? 'bg-white/50' : ''
                         )}
                       >
                         <button 

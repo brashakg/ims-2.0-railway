@@ -236,7 +236,7 @@ export function ResponsiveImage({
  */
 export function BreakpointIndicator() {
   return (
-    <div className="fixed bottom-4 right-4 z-50 text-xs font-bold text-white bg-gray-900 rounded px-2 py-1 opacity-75">
+    <div className="fixed bottom-4 right-4 z-50 text-xs font-bold text-gray-900 bg-white rounded px-2 py-1 opacity-75">
       <span className="sm:hidden">Mobile</span>
       <span className="hidden sm:inline md:hidden">SM</span>
       <span className="hidden md:inline lg:hidden">MD</span>

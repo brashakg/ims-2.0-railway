@@ -293,7 +293,7 @@ function PendingApprovalCard({
           <div className="flex items-center gap-2 shrink-0">
             <button
               onClick={() => setExpanded(!expanded)}
-              className="p-1.5 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-md transition-colors"
+              className="p-1.5 text-gray-500 hover:text-gray-600 hover:bg-gray-100 rounded-md transition-colors"
               title={expanded ? 'Collapse' : 'View details'}
             >
               {expanded ? (
@@ -376,7 +376,7 @@ function WorkflowCard({
             className={`mt-0.5 p-2.5 rounded-lg shrink-0 ${
               workflow.isEnabled
                 ? 'bg-indigo-50 text-indigo-600'
-                : 'bg-gray-100 text-gray-400'
+                : 'bg-gray-100 text-gray-500'
             }`}
           >
             <Icon className="w-5 h-5" />
@@ -427,7 +427,7 @@ function WorkflowCard({
               {workflow.isEnabled ? (
                 <ToggleRight className="w-7 h-7 text-green-600" />
               ) : (
-                <ToggleLeft className="w-7 h-7 text-gray-400" />
+                <ToggleLeft className="w-7 h-7 text-gray-500" />
               )}
             </button>
             <button
@@ -435,7 +435,7 @@ function WorkflowCard({
                 setExpanded(!expanded);
                 if (!expanded) setEditing(workflow);
               }}
-              className="p-1.5 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-md transition-colors"
+              className="p-1.5 text-gray-500 hover:text-gray-600 hover:bg-gray-100 rounded-md transition-colors"
               title={expanded ? 'Collapse' : 'Configure'}
             >
               {expanded ? (
@@ -476,7 +476,7 @@ function WorkflowCard({
               {editing.thresholdType !== 'ALWAYS' && (
                 <div className="relative">
                   {editing.thresholdType === 'AMOUNT' && (
-                    <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm text-gray-400">
+                    <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm text-gray-500">
                       \u20B9
                     </span>
                   )}
@@ -495,7 +495,7 @@ function WorkflowCard({
                     }`}
                   />
                   {editing.thresholdType === 'PERCENTAGE' && (
-                    <span className="absolute right-3 top-1/2 -translate-y-1/2 text-sm text-gray-400">
+                    <span className="absolute right-3 top-1/2 -translate-y-1/2 text-sm text-gray-500">
                       %
                     </span>
                   )}
@@ -597,7 +597,7 @@ function WorkflowCard({
                   className="w-4 h-4 text-indigo-600 border-gray-300 rounded focus:ring-indigo-500"
                 />
                 <span className="text-sm text-gray-700 inline-flex items-center gap-1">
-                  <Bell className="w-3.5 h-3.5 text-gray-400" />
+                  <Bell className="w-3.5 h-3.5 text-gray-500" />
                   Notify on new request
                 </span>
               </label>
@@ -615,9 +615,9 @@ function WorkflowCard({
                 />
                 <span className="text-sm text-gray-700 inline-flex items-center gap-1">
                   {editing.notifyOnApproval ? (
-                    <Bell className="w-3.5 h-3.5 text-gray-400" />
+                    <Bell className="w-3.5 h-3.5 text-gray-500" />
                   ) : (
-                    <BellOff className="w-3.5 h-3.5 text-gray-400" />
+                    <BellOff className="w-3.5 h-3.5 text-gray-500" />
                   )}
                   Notify on approval/rejection
                 </span>
@@ -806,7 +806,7 @@ export function ApprovalWorkflows() {
           </h2>
         </div>
         {loadingWorkflows ? (
-          <div className="flex items-center justify-center py-10 text-gray-400">
+          <div className="flex items-center justify-center py-10 text-gray-500">
             <Loader2 className="w-5 h-5 animate-spin mr-2" />
             <span className="text-sm">Loading workflow rules...</span>
           </div>

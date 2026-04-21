@@ -405,7 +405,7 @@ export function InventoryPage() {
       <div className="card">
         <div className="flex flex-col tablet:flex-row gap-4 mb-4">
           <div className="relative flex-1">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" />
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-500" />
             <input
               type="text"
               value={searchQuery}
@@ -516,7 +516,7 @@ export function InventoryPage() {
                               {(item as any).barcode}
                             </span>
                           ) : (
-                            <span className="text-xs text-gray-400">Not set</span>
+                            <span className="text-xs text-gray-500">Not set</span>
                           )}
                         </td>
                         <td className="px-4 py-3">
@@ -546,7 +546,7 @@ export function InventoryPage() {
                             {canManageBarcode && (
                               <button
                                 onClick={() => openBarcodeModal(item)}
-                                className="p-2 text-gray-400 hover:text-blue-600 transition-colors"
+                                className="p-2 text-gray-500 hover:text-blue-600 transition-colors"
                                 title="Manage Barcode"
                               >
                                 <Barcode className="w-4 h-4" />
@@ -554,7 +554,7 @@ export function InventoryPage() {
                             )}
                             <button
                               onClick={() => toast.info(`View details for ${item.name}`)}
-                              className="p-2 text-gray-400 hover:text-bv-red-600 transition-colors"
+                              className="p-2 text-gray-500 hover:text-bv-red-600 transition-colors"
                               title="View Details"
                             >
                               <Eye className="w-4 h-4" />
@@ -692,7 +692,7 @@ export function InventoryPage() {
             {/* Filters */}
             <div className="flex flex-wrap gap-3 items-center">
               <div className="relative flex-1 min-w-[200px]">
-                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-500" />
                 <input
                   type="text"
                   value={movementSearch}
@@ -764,7 +764,7 @@ export function InventoryPage() {
                             {tc.prefix}{movement.quantity}
                           </div>
                           <div className="text-xs text-gray-600">{movement.createdBy}</div>
-                          <div className="text-xs text-gray-400">
+                          <div className="text-xs text-gray-500">
                             {new Date(movement.createdAt).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}
                             <br />
                             {new Date(movement.createdAt).toLocaleDateString('en-IN', { day: '2-digit', month: 'short' })}
@@ -916,7 +916,7 @@ export function InventoryPage() {
                   }}
                 />
                 <label htmlFor="csv-upload" className="cursor-pointer">
-                  <Upload className="w-8 h-8 text-gray-400 mx-auto mb-2" />
+                  <Upload className="w-8 h-8 text-gray-500 mx-auto mb-2" />
                   <p className="text-sm text-gray-600">{csvFile ? csvFile.name : 'Click to select CSV file'}</p>
                   <p className="text-xs text-gray-500 mt-1">Supports .csv and .tsv files</p>
                 </label>

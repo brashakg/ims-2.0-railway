@@ -186,7 +186,7 @@ function AgentCard({
                 'p-1.5 rounded-lg transition',
                 agent.enabled
                   ? 'hover:bg-blue-50 text-blue-600 cursor-pointer'
-                  : 'text-gray-300 cursor-not-allowed',
+                  : 'text-gray-700 cursor-not-allowed',
               )}
             >
               {running ? <Loader2 className="w-4 h-4 animate-spin" /> : <PlayCircle className="w-4 h-4" />}
@@ -252,7 +252,7 @@ function AgentCard({
         {/* Expand/collapse */}
         <button
           onClick={() => onExpand(agent.agent_id)}
-          className="mt-2 flex items-center gap-1 text-xs text-gray-400 hover:text-gray-600 transition"
+          className="mt-2 flex items-center gap-1 text-xs text-gray-500 hover:text-gray-600 transition"
         >
           {isExpanded ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
           {isExpanded ? 'Hide logs' : 'Show logs'}
@@ -263,17 +263,17 @@ function AgentCard({
           <div className="mt-3 border-t pt-3">
             <h4 className="text-xs font-medium text-gray-600 mb-2">Recent Activity</h4>
             {logsLoading ? (
-              <div className="flex justify-center py-4"><Loader2 className="w-5 h-5 animate-spin text-gray-400" /></div>
+              <div className="flex justify-center py-4"><Loader2 className="w-5 h-5 animate-spin text-gray-500" /></div>
             ) : logs.length === 0 ? (
-              <p className="text-xs text-gray-400 text-center py-3">No activity yet</p>
+              <p className="text-xs text-gray-500 text-center py-3">No activity yet</p>
             ) : (
               <div className="space-y-1.5 max-h-48 overflow-y-auto">
                 {logs.map((log, i) => (
                   <div key={i} className="flex items-start gap-2 text-xs">
-                    <span className="text-gray-400 flex-shrink-0 w-20">{formatTimestamp(log.timestamp)}</span>
+                    <span className="text-gray-500 flex-shrink-0 w-20">{formatTimestamp(log.timestamp)}</span>
                     <span className="font-medium text-gray-700">{log.action}</span>
                     {log.details && (
-                      <span className="text-gray-400 truncate">
+                      <span className="text-gray-500 truncate">
                         {typeof log.details === 'object' ? JSON.stringify(log.details).slice(0, 80) : String(log.details)}
                       </span>
                     )}
@@ -406,7 +406,7 @@ export function AgentControlPanel() {
 
   if (loading) {
     return (
-      <div className="flex flex-col items-center justify-center py-16 text-gray-400">
+      <div className="flex flex-col items-center justify-center py-16 text-gray-500">
         <Loader2 className="w-8 h-8 animate-spin mb-3" />
         <p className="text-sm">Loading agent control panel...</p>
       </div>
@@ -419,7 +419,7 @@ export function AgentControlPanel() {
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
           <div className="p-2 bg-gradient-to-br from-purple-500 to-indigo-600 rounded-xl shadow-sm">
-            <Bot className="w-5 h-5 text-white" />
+            <Bot className="w-5 h-5 text-gray-900" />
           </div>
           <div>
             <h2 className="text-lg font-semibold text-gray-900">JARVIS Agent Control</h2>
@@ -447,26 +447,26 @@ export function AgentControlPanel() {
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
         <div className="px-4 py-3 bg-white border rounded-xl">
           <p className="text-xs text-gray-500">Agents</p>
-          <p className="text-xl font-bold text-gray-900">{enabledCount}<span className="text-sm font-normal text-gray-400">/{agents.length}</span></p>
-          <p className="text-xs text-gray-400">active</p>
+          <p className="text-xl font-bold text-gray-900">{enabledCount}<span className="text-sm font-normal text-gray-500">/{agents.length}</span></p>
+          <p className="text-xs text-gray-500">active</p>
         </div>
         <div className="px-4 py-3 bg-white border rounded-xl">
           <p className="text-xs text-gray-500">Health</p>
           <div className="flex items-center gap-2">
-            <Heart className={clsx('w-5 h-5', healthScore !== null && healthScore >= 80 ? 'text-green-500' : healthScore !== null && healthScore >= 50 ? 'text-amber-500' : 'text-gray-300')} />
+            <Heart className={clsx('w-5 h-5', healthScore !== null && healthScore >= 80 ? 'text-green-500' : healthScore !== null && healthScore >= 50 ? 'text-amber-500' : 'text-gray-700')} />
             <p className="text-xl font-bold text-gray-900">{healthScore !== null ? `${healthScore}` : '—'}</p>
           </div>
-          <p className="text-xs text-gray-400">{healthyCount} healthy</p>
+          <p className="text-xs text-gray-500">{healthyCount} healthy</p>
         </div>
         <div className="px-4 py-3 bg-white border rounded-xl">
           <p className="text-xs text-gray-500">Total Runs</p>
           <p className="text-xl font-bold text-gray-900">{totalRuns.toLocaleString()}</p>
-          <p className="text-xs text-gray-400">background ticks</p>
+          <p className="text-xs text-gray-500">background ticks</p>
         </div>
         <div className="px-4 py-3 bg-white border rounded-xl">
           <p className="text-xs text-gray-500">Errors</p>
           <p className={clsx('text-xl font-bold', totalErrors > 0 ? 'text-red-600' : 'text-gray-900')}>{totalErrors}</p>
-          <p className="text-xs text-gray-400">{totalErrors === 0 ? 'clean' : 'needs attention'}</p>
+          <p className="text-xs text-gray-500">{totalErrors === 0 ? 'clean' : 'needs attention'}</p>
         </div>
       </div>
 
@@ -485,7 +485,7 @@ export function AgentControlPanel() {
           />
         ))}
         {agents.length === 0 && !error && (
-          <div className="text-center py-12 text-gray-400">
+          <div className="text-center py-12 text-gray-500">
             <Bot className="w-10 h-10 mx-auto mb-3 opacity-40" />
             <p className="text-sm">No agents registered yet</p>
             <p className="text-xs mt-1">Agents will appear here once the system initializes</p>
@@ -502,7 +502,7 @@ export function AgentControlPanel() {
           <span className="flex items-center gap-2">
             <Activity className="w-4 h-4" />
             Activity Timeline
-            <span className="text-xs text-gray-400">({timeline.length} events)</span>
+            <span className="text-xs text-gray-500">({timeline.length} events)</span>
           </span>
           {showTimeline ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
         </button>
@@ -510,19 +510,19 @@ export function AgentControlPanel() {
         {showTimeline && (
           <div className="border-t px-4 py-3 max-h-64 overflow-y-auto">
             {timeline.length === 0 ? (
-              <p className="text-xs text-gray-400 text-center py-4">No activity recorded yet</p>
+              <p className="text-xs text-gray-500 text-center py-4">No activity recorded yet</p>
             ) : (
               <div className="space-y-2">
                 {timeline.map((entry, i) => {
                   const meta = getHeroMeta(entry.agent_id);
                   return (
                     <div key={i} className="flex items-start gap-3 text-xs">
-                      <span className="text-gray-400 flex-shrink-0 w-20">{formatTimestamp(entry.timestamp)}</span>
+                      <span className="text-gray-500 flex-shrink-0 w-20">{formatTimestamp(entry.timestamp)}</span>
                       <span>{meta.emoji}</span>
                       <span className="font-medium text-gray-700">{entry.agent_id}</span>
                       <span className="text-gray-500">{entry.action}</span>
                       {entry.details && (
-                        <span className="text-gray-400 truncate max-w-xs">
+                        <span className="text-gray-500 truncate max-w-xs">
                           {JSON.stringify(entry.details).slice(0, 60)}
                         </span>
                       )}

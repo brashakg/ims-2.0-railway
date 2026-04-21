@@ -62,14 +62,14 @@ export function ScheduledTasks({
   };
 
   return (
-    <div className="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800">
+    <div className="bg-white dark:bg-white rounded-lg border border-gray-200 dark:border-gray-800">
       {/* Header */}
       <div className="p-6 border-b border-gray-200 dark:border-gray-800 flex items-center justify-between">
         <div className="flex items-center gap-3">
-          <Clock className="w-5 h-5 text-gray-600 dark:text-gray-400" />
+          <Clock className="w-5 h-5 text-gray-600 dark:text-gray-500" />
           <div>
-            <h3 className="font-bold text-gray-900 dark:text-white">Scheduled Tasks</h3>
-            <p className="text-sm text-gray-600 dark:text-gray-400">Automate exports, reports, and cleanup</p>
+            <h3 className="font-bold text-gray-900 dark:text-gray-900">Scheduled Tasks</h3>
+            <p className="text-sm text-gray-600 dark:text-gray-500">Automate exports, reports, and cleanup</p>
           </div>
         </div>
         <button
@@ -84,27 +84,27 @@ export function ScheduledTasks({
       {/* Tasks List */}
       <div className="divide-y divide-gray-200 dark:divide-gray-800">
         {tasks.length === 0 ? (
-          <div className="p-8 text-center text-gray-500 dark:text-gray-400">
+          <div className="p-8 text-center text-gray-500 dark:text-gray-500">
             <Clock className="w-12 h-12 mx-auto mb-3 opacity-50" />
             <p>No scheduled tasks yet</p>
           </div>
         ) : (
           tasks.map(task => (
-            <div key={task.id} className="p-4 hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors">
+            <div key={task.id} className="p-4 hover:bg-gray-50 dark:hover:bg-white transition-colors">
               <div className="flex items-center justify-between gap-4">
                 <div className="flex-1">
                   <div className="flex items-center gap-2">
-                    <h4 className="font-medium text-gray-900 dark:text-white">
+                    <h4 className="font-medium text-gray-900 dark:text-gray-900">
                       {task.name}
                     </h4>
                     <span className={clsx('text-xs px-2 py-1 rounded', {
-                      'bg-green-100 text-green-700 dark:bg-green-900/20 dark:text-green-400': task.enabled,
-                      'bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-400': !task.enabled,
+                      'bg-green-100 text-green-700 dark:bg-green-50/20 dark:text-green-600': task.enabled,
+                      'bg-gray-100 text-gray-700 dark:bg-white dark:text-gray-500': !task.enabled,
                     })}>
                       {task.enabled ? 'Active' : 'Disabled'}
                     </span>
                   </div>
-                  <p className="text-xs text-gray-600 dark:text-gray-400 mt-1">
+                  <p className="text-xs text-gray-600 dark:text-gray-500 mt-1">
                     {task.schedule.frequency} • {task.type}
                   </p>
                   {task.nextRun && (
@@ -116,25 +116,25 @@ export function ScheduledTasks({
                 <div className="flex items-center gap-1">
                   <button
                     onClick={() => onToggleTask(task.id, !task.enabled)}
-                    className="p-2 hover:bg-gray-200 dark:hover:bg-gray-700 rounded-lg transition-colors"
+                    className="p-2 hover:bg-gray-200 dark:hover:bg-gray-100 rounded-lg transition-colors"
                     title={task.enabled ? 'Disable' : 'Enable'}
                   >
                     {task.enabled ? (
                       <Pause className="w-4 h-4 text-amber-600" />
                     ) : (
-                      <Play className="w-4 h-4 text-gray-600 dark:text-gray-400" />
+                      <Play className="w-4 h-4 text-gray-600 dark:text-gray-500" />
                     )}
                   </button>
                   <button
                     onClick={() => onRunNow(task.id)}
-                    className="p-2 hover:bg-blue-100 dark:hover:bg-blue-900/20 rounded-lg text-blue-600 dark:text-blue-400"
+                    className="p-2 hover:bg-blue-100 dark:hover:bg-blue-50/20 rounded-lg text-blue-600 dark:text-blue-600"
                     title="Run now"
                   >
                     <Play className="w-4 h-4" />
                   </button>
                   <button
                     onClick={() => onDeleteTask(task.id)}
-                    className="p-2 hover:bg-red-100 dark:hover:bg-red-900/20 rounded-lg text-red-600 dark:text-red-400"
+                    className="p-2 hover:bg-red-100 dark:hover:bg-red-50/20 rounded-lg text-red-600 dark:text-red-600"
                     title="Delete"
                   >
                     <Trash2 className="w-4 h-4" />
@@ -149,20 +149,20 @@ export function ScheduledTasks({
       {/* Create Modal */}
       {showModal && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50" onClick={() => setShowModal(false)}>
-          <div className="bg-white dark:bg-gray-900 rounded-lg shadow-lg p-6 max-w-sm w-full" onClick={e => e.stopPropagation()}>
-            <h2 className="text-lg font-bold text-gray-900 dark:text-white mb-4">Schedule Task</h2>
+          <div className="bg-white dark:bg-white rounded-lg shadow-lg p-6 max-w-sm w-full" onClick={e => e.stopPropagation()}>
+            <h2 className="text-lg font-bold text-gray-900 dark:text-gray-900 mb-4">Schedule Task</h2>
             <div className="space-y-4">
               <input
                 type="text"
                 value={taskName}
                 onChange={e => setTaskName(e.target.value)}
                 placeholder="Task name"
-                className="w-full px-3 py-2 border border-gray-300 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-white"
+                className="w-full px-3 py-2 border border-gray-300 dark:border-gray-200 rounded-lg bg-white dark:bg-white text-gray-900 dark:text-gray-900"
               />
               <select
                 value={taskType}
                 onChange={e => setTaskType(e.target.value as any)}
-                className="w-full px-3 py-2 border border-gray-300 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-white"
+                className="w-full px-3 py-2 border border-gray-300 dark:border-gray-200 rounded-lg bg-white dark:bg-white text-gray-900 dark:text-gray-900"
               >
                 <option value="export">Export</option>
                 <option value="report">Report</option>
@@ -172,7 +172,7 @@ export function ScheduledTasks({
               <select
                 value={frequency}
                 onChange={e => setFrequency(e.target.value as any)}
-                className="w-full px-3 py-2 border border-gray-300 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-white"
+                className="w-full px-3 py-2 border border-gray-300 dark:border-gray-200 rounded-lg bg-white dark:bg-white text-gray-900 dark:text-gray-900"
               >
                 <option value="hourly">Hourly</option>
                 <option value="daily">Daily</option>
@@ -181,7 +181,7 @@ export function ScheduledTasks({
               </select>
             </div>
             <div className="flex gap-2 mt-6">
-              <button onClick={() => setShowModal(false)} className="flex-1 px-4 py-2 border border-gray-300 dark:border-gray-700 rounded-lg">Cancel</button>
+              <button onClick={() => setShowModal(false)} className="flex-1 px-4 py-2 border border-gray-300 dark:border-gray-200 rounded-lg">Cancel</button>
               <button onClick={handleCreate} className="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700">Create</button>
             </div>
           </div>
@@ -235,13 +235,13 @@ export function APIKeysManager({
   };
 
   return (
-    <div className="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800">
+    <div className="bg-white dark:bg-white rounded-lg border border-gray-200 dark:border-gray-800">
       <div className="p-6 border-b border-gray-200 dark:border-gray-800 flex items-center justify-between">
         <div className="flex items-center gap-3">
-          <Key className="w-5 h-5 text-gray-600 dark:text-gray-400" />
+          <Key className="w-5 h-5 text-gray-600 dark:text-gray-500" />
           <div>
-            <h3 className="font-bold text-gray-900 dark:text-white">API Keys</h3>
-            <p className="text-sm text-gray-600 dark:text-gray-400">Manage third-party integrations</p>
+            <h3 className="font-bold text-gray-900 dark:text-gray-900">API Keys</h3>
+            <p className="text-sm text-gray-600 dark:text-gray-500">Manage third-party integrations</p>
           </div>
         </div>
         <button
@@ -255,24 +255,24 @@ export function APIKeysManager({
 
       <div className="divide-y divide-gray-200 dark:divide-gray-800">
         {keys.length === 0 ? (
-          <div className="p-8 text-center text-gray-500 dark:text-gray-400">
+          <div className="p-8 text-center text-gray-500 dark:text-gray-500">
             <Key className="w-12 h-12 mx-auto mb-3 opacity-50" />
             <p>No API keys yet</p>
           </div>
         ) : (
           keys.map(key => (
-            <div key={key.id} className="p-4 hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors">
+            <div key={key.id} className="p-4 hover:bg-gray-50 dark:hover:bg-white transition-colors">
               <div className="flex items-start justify-between gap-4">
                 <div className="flex-1">
-                  <h4 className="font-medium text-gray-900 dark:text-white">
+                  <h4 className="font-medium text-gray-900 dark:text-gray-900">
                     {key.name}
                   </h4>
-                  <p className="font-mono text-xs text-gray-600 dark:text-gray-400 mt-1">
+                  <p className="font-mono text-xs text-gray-600 dark:text-gray-500 mt-1">
                     {key.maskedKey}
                   </p>
                   <div className="flex items-center gap-2 mt-2">
                     {key.permissions.map(perm => (
-                      <span key={perm} className="text-xs px-2 py-1 bg-gray-100 dark:bg-gray-800 rounded text-gray-700 dark:text-gray-300">
+                      <span key={perm} className="text-xs px-2 py-1 bg-gray-100 dark:bg-white rounded text-gray-700 dark:text-gray-700">
                         {perm}
                       </span>
                     ))}
@@ -286,21 +286,21 @@ export function APIKeysManager({
                 <div className="flex items-center gap-1">
                   <button
                     onClick={() => navigator.clipboard.writeText(key.maskedKey)}
-                    className="p-2 hover:bg-blue-100 dark:hover:bg-blue-900/20 rounded-lg text-blue-600 dark:text-blue-400"
+                    className="p-2 hover:bg-blue-100 dark:hover:bg-blue-50/20 rounded-lg text-blue-600 dark:text-blue-600"
                     title="Copy"
                   >
                     <Copy className="w-4 h-4" />
                   </button>
                   <button
                     onClick={() => onRegenerate(key.id)}
-                    className="p-2 hover:bg-amber-100 dark:hover:bg-amber-900/20 rounded-lg text-amber-600 dark:text-amber-400"
+                    className="p-2 hover:bg-amber-100 dark:hover:bg-amber-50/20 rounded-lg text-amber-600 dark:text-amber-600"
                     title="Regenerate"
                   >
                     <Edit2 className="w-4 h-4" />
                   </button>
                   <button
                     onClick={() => onRevokeKey(key.id)}
-                    className="p-2 hover:bg-red-100 dark:hover:bg-red-900/20 rounded-lg text-red-600 dark:text-red-400"
+                    className="p-2 hover:bg-red-100 dark:hover:bg-red-50/20 rounded-lg text-red-600 dark:text-red-600"
                     title="Revoke"
                   >
                     <Trash2 className="w-4 h-4" />
@@ -314,18 +314,18 @@ export function APIKeysManager({
 
       {showModal && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50" onClick={() => setShowModal(false)}>
-          <div className="bg-white dark:bg-gray-900 rounded-lg shadow-lg p-6 max-w-sm w-full" onClick={e => e.stopPropagation()}>
-            <h2 className="text-lg font-bold text-gray-900 dark:text-white mb-4">Create API Key</h2>
+          <div className="bg-white dark:bg-white rounded-lg shadow-lg p-6 max-w-sm w-full" onClick={e => e.stopPropagation()}>
+            <h2 className="text-lg font-bold text-gray-900 dark:text-gray-900 mb-4">Create API Key</h2>
             <div className="space-y-4">
               <input
                 type="text"
                 value={keyName}
                 onChange={e => setKeyName(e.target.value)}
                 placeholder="Key name"
-                className="w-full px-3 py-2 border border-gray-300 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-white"
+                className="w-full px-3 py-2 border border-gray-300 dark:border-gray-200 rounded-lg bg-white dark:bg-white text-gray-900 dark:text-gray-900"
               />
               <div>
-                <p className="text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Permissions</p>
+                <p className="text-sm font-medium text-gray-700 dark:text-gray-700 mb-2">Permissions</p>
                 <div className="space-y-2">
                   {permissions.map(perm => (
                     <label key={perm} className="flex items-center gap-2 cursor-pointer">
@@ -341,7 +341,7 @@ export function APIKeysManager({
                         }}
                         className="w-4 h-4 rounded"
                       />
-                      <span className="text-sm text-gray-700 dark:text-gray-300 capitalize">
+                      <span className="text-sm text-gray-700 dark:text-gray-700 capitalize">
                         {perm}
                       </span>
                     </label>
@@ -350,7 +350,7 @@ export function APIKeysManager({
               </div>
             </div>
             <div className="flex gap-2 mt-6">
-              <button onClick={() => setShowModal(false)} className="flex-1 px-4 py-2 border border-gray-300 dark:border-gray-700 rounded-lg">Cancel</button>
+              <button onClick={() => setShowModal(false)} className="flex-1 px-4 py-2 border border-gray-300 dark:border-gray-200 rounded-lg">Cancel</button>
               <button onClick={handleCreate} className="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700">Create</button>
             </div>
           </div>
@@ -410,13 +410,13 @@ export function WebhooksManager({
   };
 
   return (
-    <div className="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800">
+    <div className="bg-white dark:bg-white rounded-lg border border-gray-200 dark:border-gray-800">
       <div className="p-6 border-b border-gray-200 dark:border-gray-800 flex items-center justify-between">
         <div className="flex items-center gap-3">
-          <Zap className="w-5 h-5 text-gray-600 dark:text-gray-400" />
+          <Zap className="w-5 h-5 text-gray-600 dark:text-gray-500" />
           <div>
-            <h3 className="font-bold text-gray-900 dark:text-white">Webhooks</h3>
-            <p className="text-sm text-gray-600 dark:text-gray-400">Real-time data synchronization</p>
+            <h3 className="font-bold text-gray-900 dark:text-gray-900">Webhooks</h3>
+            <p className="text-sm text-gray-600 dark:text-gray-500">Real-time data synchronization</p>
           </div>
         </div>
         <button
@@ -430,24 +430,24 @@ export function WebhooksManager({
 
       <div className="divide-y divide-gray-200 dark:divide-gray-800">
         {webhooks.length === 0 ? (
-          <div className="p-8 text-center text-gray-500 dark:text-gray-400">
+          <div className="p-8 text-center text-gray-500 dark:text-gray-500">
             <Zap className="w-12 h-12 mx-auto mb-3 opacity-50" />
             <p>No webhooks yet</p>
           </div>
         ) : (
           webhooks.map(webhook => (
-            <div key={webhook.id} className="p-4 hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors">
+            <div key={webhook.id} className="p-4 hover:bg-gray-50 dark:hover:bg-white transition-colors">
               <div className="flex items-start justify-between gap-4">
                 <div className="flex-1">
-                  <h4 className="font-medium text-gray-900 dark:text-white">
+                  <h4 className="font-medium text-gray-900 dark:text-gray-900">
                     {webhook.name}
                   </h4>
-                  <p className="text-xs text-gray-600 dark:text-gray-400 mt-1 break-all">
+                  <p className="text-xs text-gray-600 dark:text-gray-500 mt-1 break-all">
                     {webhook.url}
                   </p>
                   <div className="flex items-center gap-1 mt-2 flex-wrap">
                     {webhook.events.map(event => (
-                      <span key={event} className="text-xs px-2 py-1 bg-gray-100 dark:bg-gray-800 rounded text-gray-700 dark:text-gray-300">
+                      <span key={event} className="text-xs px-2 py-1 bg-gray-100 dark:bg-white rounded text-gray-700 dark:text-gray-700">
                         {event}
                       </span>
                     ))}
@@ -456,14 +456,14 @@ export function WebhooksManager({
                 <div className="flex items-center gap-1">
                   <button
                     onClick={() => onTest(webhook.id)}
-                    className="p-2 hover:bg-green-100 dark:hover:bg-green-900/20 rounded-lg text-green-600 dark:text-green-400"
+                    className="p-2 hover:bg-green-100 dark:hover:bg-green-50/20 rounded-lg text-green-600 dark:text-green-600"
                     title="Test webhook"
                   >
                     <Zap className="w-4 h-4" />
                   </button>
                   <button
                     onClick={() => onDeleteWebhook(webhook.id)}
-                    className="p-2 hover:bg-red-100 dark:hover:bg-red-900/20 rounded-lg text-red-600 dark:text-red-400"
+                    className="p-2 hover:bg-red-100 dark:hover:bg-red-50/20 rounded-lg text-red-600 dark:text-red-600"
                     title="Delete"
                   >
                     <Trash2 className="w-4 h-4" />
@@ -477,25 +477,25 @@ export function WebhooksManager({
 
       {showModal && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50" onClick={() => setShowModal(false)}>
-          <div className="bg-white dark:bg-gray-900 rounded-lg shadow-lg p-6 max-w-sm w-full max-h-96 overflow-y-auto" onClick={e => e.stopPropagation()}>
-            <h2 className="text-lg font-bold text-gray-900 dark:text-white mb-4">Create Webhook</h2>
+          <div className="bg-white dark:bg-white rounded-lg shadow-lg p-6 max-w-sm w-full max-h-96 overflow-y-auto" onClick={e => e.stopPropagation()}>
+            <h2 className="text-lg font-bold text-gray-900 dark:text-gray-900 mb-4">Create Webhook</h2>
             <div className="space-y-4">
               <input
                 type="text"
                 value={webhookName}
                 onChange={e => setWebhookName(e.target.value)}
                 placeholder="Webhook name"
-                className="w-full px-3 py-2 border border-gray-300 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-white"
+                className="w-full px-3 py-2 border border-gray-300 dark:border-gray-200 rounded-lg bg-white dark:bg-white text-gray-900 dark:text-gray-900"
               />
               <input
                 type="url"
                 value={webhookUrl}
                 onChange={e => setWebhookUrl(e.target.value)}
                 placeholder="https://example.com/webhook"
-                className="w-full px-3 py-2 border border-gray-300 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-white"
+                className="w-full px-3 py-2 border border-gray-300 dark:border-gray-200 rounded-lg bg-white dark:bg-white text-gray-900 dark:text-gray-900"
               />
               <div>
-                <p className="text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Events</p>
+                <p className="text-sm font-medium text-gray-700 dark:text-gray-700 mb-2">Events</p>
                 <div className="space-y-2 max-h-32 overflow-y-auto">
                   {availableEvents.map(event => (
                     <label key={event} className="flex items-center gap-2 cursor-pointer">
@@ -511,7 +511,7 @@ export function WebhooksManager({
                         }}
                         className="w-4 h-4 rounded"
                       />
-                      <span className="text-sm text-gray-700 dark:text-gray-300">
+                      <span className="text-sm text-gray-700 dark:text-gray-700">
                         {event}
                       </span>
                     </label>
@@ -520,7 +520,7 @@ export function WebhooksManager({
               </div>
             </div>
             <div className="flex gap-2 mt-6">
-              <button onClick={() => setShowModal(false)} className="flex-1 px-4 py-2 border border-gray-300 dark:border-gray-700 rounded-lg">Cancel</button>
+              <button onClick={() => setShowModal(false)} className="flex-1 px-4 py-2 border border-gray-300 dark:border-gray-200 rounded-lg">Cancel</button>
               <button onClick={handleCreate} className="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700">Create</button>
             </div>
           </div>

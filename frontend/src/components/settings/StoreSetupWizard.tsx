@@ -129,7 +129,7 @@ export function StoreSetupWizard() {
                     ? 'bg-green-600 text-white'
                     : idx === currentStepIndex
                     ? 'bg-blue-600 text-white'
-                    : 'bg-gray-200 text-gray-400'
+                    : 'bg-gray-200 text-gray-500'
                 )}
               >
                 {idx < currentStepIndex ? <Check className="w-5 h-5" /> : idx + 1}
@@ -290,7 +290,7 @@ export function StoreSetupWizard() {
           className={clsx(
             'flex items-center gap-2 px-6 py-2 rounded-lg font-medium transition',
             currentStepIndex === 0
-              ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
+              ? 'bg-gray-100 text-gray-500 cursor-not-allowed'
               : 'bg-gray-100 text-gray-600 hover:bg-gray-200 border border-gray-300'
           )}
         >
@@ -305,7 +305,7 @@ export function StoreSetupWizard() {
             className={clsx(
               'flex items-center gap-2 px-6 py-2 rounded-lg font-medium transition',
               isLoading
-                ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
+                ? 'bg-gray-100 text-gray-500 cursor-not-allowed'
                 : 'bg-green-600 text-white hover:bg-green-700'
             )}
           >

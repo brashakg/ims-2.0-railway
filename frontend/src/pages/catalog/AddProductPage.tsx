@@ -233,7 +233,7 @@ export function AddProductPage() {
     return (
       <div className="flex items-center justify-center min-h-[400px]">
         <div className="text-center">
-          <AlertCircle className="w-16 h-16 mx-auto text-gray-300 mb-4" />
+          <AlertCircle className="w-16 h-16 mx-auto text-gray-700 mb-4" />
           <h2 className="text-xl font-semibold text-gray-700">Access Denied</h2>
           <p className="text-gray-500">You don't have permission to add products.</p>
         </div>
@@ -351,7 +351,7 @@ export function AddProductPage() {
             className={clsx(
               'p-6 rounded-xl border-2 transition-all text-center hover:shadow-md',
               selectedCategory === category.code
-                ? 'border-bv-gold-500 bg-bv-gold-50'
+                ? 'border-bv-red-600 bg-bv-gold-50'
                 : 'border-gray-200 hover:border-gray-300'
             )}
           >
@@ -666,7 +666,7 @@ export function AddProductPage() {
             Product Images
           </label>
           <div className="border-2 border-dashed border-gray-300 rounded-lg p-8 text-center">
-            <ImageIcon className="w-12 h-12 mx-auto text-gray-400 mb-2" />
+            <ImageIcon className="w-12 h-12 mx-auto text-gray-500 mb-2" />
             <p className="text-gray-500">Drag and drop images here, or click to browse</p>
             <button className="btn-outline mt-4">
               <Upload className="w-4 h-4 mr-2" />
@@ -698,7 +698,7 @@ export function AddProductPage() {
               onChange={(e) => setSyncToShopify(e.target.checked)}
               className="sr-only peer"
             />
-            <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-bv-gold-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-bv-gold-500"></div>
+            <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-bv-gold-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-bv-red-600"></div>
           </label>
         </div>
 
@@ -881,7 +881,7 @@ export function AddProductPage() {
                     ? 'bg-bv-gold-100 text-bv-gold-700'
                     : index < currentStepIndex
                     ? 'text-green-600 hover:bg-green-50'
-                    : 'text-gray-400'
+                    : 'text-gray-500'
                 )}
                 disabled={index > currentStepIndex}
               >
@@ -893,7 +893,7 @@ export function AddProductPage() {
                 <span className="hidden tablet:inline font-medium">{step.label}</span>
               </button>
               {index < steps.length - 1 && (
-                <ChevronRight className="w-4 h-4 text-gray-300 mx-2" />
+                <ChevronRight className="w-4 h-4 text-gray-700 mx-2" />
               )}
             </div>
           ))}

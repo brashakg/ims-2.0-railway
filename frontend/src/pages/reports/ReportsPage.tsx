@@ -893,19 +893,19 @@ export function ReportsPage() {
             <div className="grid grid-cols-2 tablet:grid-cols-4 gap-3">
               <div className="bg-white rounded p-3">
                 <p className="text-xs text-gray-500">New Customers</p>
-                <p className="text-xl font-bold text-green-400 mt-1">{customerAcquisition.new_customers}</p>
+                <p className="text-xl font-bold text-green-600 mt-1">{customerAcquisition.new_customers}</p>
               </div>
               <div className="bg-white rounded p-3">
                 <p className="text-xs text-gray-500">Returning</p>
-                <p className="text-xl font-bold text-blue-400 mt-1">{customerAcquisition.returning_customers}</p>
+                <p className="text-xl font-bold text-blue-600 mt-1">{customerAcquisition.returning_customers}</p>
               </div>
               <div className="bg-white rounded p-3">
                 <p className="text-xs text-gray-500">Retention Rate</p>
-                <p className="text-xl font-bold text-purple-400 mt-1">{customerAcquisition.retention_percent}%</p>
+                <p className="text-xl font-bold text-purple-600 mt-1">{customerAcquisition.retention_percent}%</p>
               </div>
               <div className="bg-white rounded p-3">
                 <p className="text-xs text-gray-500">Total Customers</p>
-                <p className="text-xl font-bold text-orange-400 mt-1">{customerAcquisition.total_customers}</p>
+                <p className="text-xl font-bold text-orange-600 mt-1">{customerAcquisition.total_customers}</p>
               </div>
             </div>
           ) : (
@@ -964,7 +964,7 @@ export function ReportsPage() {
                 </div>
                 <div className="bg-white rounded p-3">
                   <p className="text-xs text-gray-500">Discount %</p>
-                  <p className="text-lg font-bold text-orange-400">{discountAnalysis.summary?.discount_percent || 0}%</p>
+                  <p className="text-lg font-bold text-orange-600">{discountAnalysis.summary?.discount_percent || 0}%</p>
                 </div>
               </div>
               <div className="space-y-2">
@@ -998,19 +998,19 @@ export function ReportsPage() {
               <div className="grid grid-cols-2 tablet:grid-cols-4 gap-3">
                 <div className="bg-white rounded p-3">
                   <p className="text-xs text-gray-500">Revenue</p>
-                  <p className="text-lg font-bold text-green-400">₹{((expenseVsRevenue.revenue || 0) / 100000).toFixed(2)}L</p>
+                  <p className="text-lg font-bold text-green-600">₹{((expenseVsRevenue.revenue || 0) / 100000).toFixed(2)}L</p>
                 </div>
                 <div className="bg-white rounded p-3">
                   <p className="text-xs text-gray-500">Cost</p>
-                  <p className="text-lg font-bold text-red-400">₹{((expenseVsRevenue.cost || 0) / 100000).toFixed(2)}L</p>
+                  <p className="text-lg font-bold text-red-600">₹{((expenseVsRevenue.cost || 0) / 100000).toFixed(2)}L</p>
                 </div>
                 <div className="bg-white rounded p-3">
                   <p className="text-xs text-gray-500">Profit</p>
-                  <p className="text-lg font-bold text-blue-400">₹{((expenseVsRevenue.profit || 0) / 100000).toFixed(2)}L</p>
+                  <p className="text-lg font-bold text-blue-600">₹{((expenseVsRevenue.profit || 0) / 100000).toFixed(2)}L</p>
                 </div>
                 <div className="bg-white rounded p-3">
                   <p className="text-xs text-gray-500">Margin</p>
-                  <p className="text-lg font-bold text-purple-400">{expenseVsRevenue.margin_percent || 0}%</p>
+                  <p className="text-lg font-bold text-purple-600">{expenseVsRevenue.margin_percent || 0}%</p>
                 </div>
               </div>
             </div>

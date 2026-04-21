@@ -59,11 +59,11 @@ const defaultActions: BulkActionConfig[] = [
 ];
 
 const colorClasses = {
-  red: 'text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20',
-  blue: 'text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-900/20',
-  green: 'text-green-600 hover:bg-green-50 dark:hover:bg-green-900/20',
-  amber: 'text-amber-600 hover:bg-amber-50 dark:hover:bg-amber-900/20',
-  gray: 'text-gray-600 hover:bg-gray-50 dark:hover:bg-gray-900/20',
+  red: 'text-red-600 hover:bg-red-50 dark:hover:bg-red-50/20',
+  blue: 'text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-50/20',
+  green: 'text-green-600 hover:bg-green-50 dark:hover:bg-green-50/20',
+  amber: 'text-amber-600 hover:bg-amber-50 dark:hover:bg-amber-50/20',
+  gray: 'text-gray-600 hover:bg-gray-50 dark:hover:bg-white/20',
 };
 
 export function BulkActionsToolbar({
@@ -122,13 +122,13 @@ export function BulkActionsToolbar({
   return (
     <>
       {/* Toolbar */}
-      <div className="sticky bottom-0 left-0 right-0 bg-blue-50 dark:bg-blue-900/20 border-t-2 border-blue-200 dark:border-blue-800 p-4 shadow-lg z-40">
+      <div className="sticky bottom-0 left-0 right-0 bg-blue-50 dark:bg-blue-50/20 border-t-2 border-blue-200 dark:border-blue-800 p-4 shadow-lg z-40">
         <div className="flex items-center justify-between gap-4">
           {/* Selection Info */}
           <div className="flex items-center gap-3">
             <button
               onClick={handleToggleSelectAll}
-              className="p-2 hover:bg-blue-100 dark:hover:bg-blue-900/40 rounded-lg transition-colors"
+              className="p-2 hover:bg-blue-100 dark:hover:bg-blue-50/40 rounded-lg transition-colors"
               title={isAllSelected ? 'Deselect all' : 'Select all'}
               aria-label={isAllSelected ? 'Deselect all' : 'Select all'}
             >
@@ -139,10 +139,10 @@ export function BulkActionsToolbar({
               )}
             </button>
             <div>
-              <p className="text-sm font-bold text-gray-900 dark:text-white">
+              <p className="text-sm font-bold text-gray-900 dark:text-gray-900">
                 {selectedIds.length} selected
               </p>
-              <p className="text-xs text-gray-600 dark:text-gray-400">
+              <p className="text-xs text-gray-600 dark:text-gray-500">
                 {isAllSelected && totalItems > selectedIds.length
                   ? `All ${totalItems} items selected`
                   : `of ${totalItems} total`}
@@ -172,7 +172,7 @@ export function BulkActionsToolbar({
 
             <button
               onClick={onDeselectAll}
-              className="p-2 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-lg transition-colors text-gray-600 dark:text-gray-400"
+              className="p-2 hover:bg-gray-100 dark:hover:bg-white rounded-lg transition-colors text-gray-600 dark:text-gray-500"
               title="Clear selection"
               aria-label="Clear selection"
             >
@@ -189,20 +189,20 @@ export function BulkActionsToolbar({
           onClick={() => setShowConfirm(null)}
         >
           <div
-            className="bg-white dark:bg-gray-900 rounded-lg shadow-lg p-6 max-w-sm w-full"
+            className="bg-white dark:bg-white rounded-lg shadow-lg p-6 max-w-sm w-full"
             onClick={e => e.stopPropagation()}
             role="alertdialog"
           >
-            <h2 className="text-lg font-bold text-gray-900 dark:text-white mb-2">
+            <h2 className="text-lg font-bold text-gray-900 dark:text-gray-900 mb-2">
               Confirm Action
             </h2>
-            <p className="text-gray-700 dark:text-gray-300 mb-6">
+            <p className="text-gray-700 dark:text-gray-700 mb-6">
               {actions.find(a => a.type === showConfirm)?.confirmText}
             </p>
             <div className="flex gap-3">
               <button
                 onClick={() => setShowConfirm(null)}
-                className="flex-1 px-4 py-2 border border-gray-300 dark:border-gray-700 rounded-lg text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors font-medium"
+                className="flex-1 px-4 py-2 border border-gray-300 dark:border-gray-200 rounded-lg text-gray-700 dark:text-gray-700 hover:bg-gray-50 dark:hover:bg-white transition-colors font-medium"
               >
                 Cancel
               </button>

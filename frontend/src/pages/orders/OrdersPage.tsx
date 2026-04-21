@@ -419,7 +419,7 @@ export function OrdersPage() {
                         <StatusIcon className={clsx('w-5 h-5', statusConfig?.color || 'text-gray-600')} />
                       </div>
                       <div>
-                        <p className="font-medium text-white">{order.orderNumber}</p>
+                        <p className="font-medium text-gray-900">{order.orderNumber}</p>
                         <div className="flex items-center gap-2 text-sm text-gray-500">
                           <User className="w-3 h-3" />
                           <span>{order.customerName}</span>
@@ -435,7 +435,7 @@ export function OrdersPage() {
 
                     {/* Status & Amount */}
                     <div className="text-right">
-                      <p className="font-bold text-white">{formatCurrency(order.grandTotal)}</p>
+                      <p className="font-bold text-gray-900">{formatCurrency(order.grandTotal)}</p>
                       <div className="flex items-center gap-2 mt-1">
                         <span className={clsx(
                           'text-xs px-2 py-0.5 rounded-full',
@@ -712,7 +712,7 @@ export function OrdersPage() {
                       className={clsx(
                         'p-2 text-xs rounded-lg border transition-colors',
                         paymentMethod === method
-                          ? 'border-bv-gold-600 bg-bv-gold-50 text-bv-gold-700'
+                          ? 'border-bv-red-600 bg-bv-gold-50 text-bv-gold-700'
                           : 'border-gray-200 hover:border-gray-300'
                       )}
                     >

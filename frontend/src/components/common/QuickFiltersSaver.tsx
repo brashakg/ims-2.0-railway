@@ -140,7 +140,7 @@ export function QuickFiltersSaver({
         className={clsx(
           'inline-flex items-center gap-2 px-3 py-2 rounded-lg font-medium transition-colors',
           disabled || !hasActiveFilters
-            ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
+            ? 'bg-gray-100 text-gray-500 cursor-not-allowed'
             : 'bg-amber-50 text-amber-700 hover:bg-amber-100 active:bg-amber-200'
         )}
         title="Save current filters as a preset"
@@ -157,7 +157,7 @@ export function QuickFiltersSaver({
         className={clsx(
           'ml-2 inline-flex items-center gap-2 px-3 py-2 rounded-lg font-medium transition-colors',
           disabled || presets.length === 0
-            ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
+            ? 'bg-gray-100 text-gray-500 cursor-not-allowed'
             : 'bg-purple-50 text-purple-700 hover:bg-purple-100 active:bg-purple-200'
         )}
         title={`${presets.length} saved presets`}
@@ -192,7 +192,7 @@ export function QuickFiltersSaver({
                 className="p-1 hover:bg-gray-100 rounded-lg transition-colors"
                 aria-label="Close"
               >
-                <X className="w-5 h-5 text-gray-400" />
+                <X className="w-5 h-5 text-gray-500" />
               </button>
             </div>
 
@@ -284,7 +284,7 @@ export function QuickFiltersSaver({
                       <Star
                         className={clsx(
                           'w-4 h-4',
-                          preset.isFavorite ? 'fill-yellow-400 text-yellow-400' : 'text-gray-400'
+                          preset.isFavorite ? 'fill-yellow-400 text-yellow-600' : 'text-gray-500'
                         )}
                       />
                     </button>

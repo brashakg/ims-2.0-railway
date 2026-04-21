@@ -26,35 +26,35 @@ export default function ReconciliationPanel({
     <div className="space-y-6">
       {/* Summary */}
       <div className="grid grid-cols-1 sm:grid-cols-4 gap-4">
-        <div className="bg-slate-800 border border-slate-700 rounded-lg p-4">
-          <p className="text-sm text-slate-400">Total Entries</p>
-          <p className="text-2xl font-bold text-white mt-1">{reconciliation.length}</p>
+        <div className="bg-white border border-slate-700 rounded-lg p-4">
+          <p className="text-sm text-slate-600">Total Entries</p>
+          <p className="text-2xl font-bold text-gray-900 mt-1">{reconciliation.length}</p>
         </div>
-        <div className="bg-slate-800 border border-slate-700 rounded-lg p-4">
+        <div className="bg-white border border-slate-700 rounded-lg p-4">
           <div className="flex items-center gap-2">
-            <CheckCircle className="w-4 h-4 text-green-400" />
-            <p className="text-sm text-slate-400">Matched</p>
+            <CheckCircle className="w-4 h-4 text-green-600" />
+            <p className="text-sm text-slate-600">Matched</p>
           </div>
-          <p className="text-2xl font-bold text-green-400 mt-1">{matched}</p>
+          <p className="text-2xl font-bold text-green-600 mt-1">{matched}</p>
         </div>
-        <div className="bg-slate-800 border border-slate-700 rounded-lg p-4">
+        <div className="bg-white border border-slate-700 rounded-lg p-4">
           <div className="flex items-center gap-2">
-            <Loader2 className="w-4 h-4 text-amber-400" />
-            <p className="text-sm text-slate-400">Pending</p>
+            <Loader2 className="w-4 h-4 text-amber-600" />
+            <p className="text-sm text-slate-600">Pending</p>
           </div>
-          <p className="text-2xl font-bold text-amber-400 mt-1">{pending}</p>
+          <p className="text-2xl font-bold text-amber-600 mt-1">{pending}</p>
         </div>
-        <div className="bg-slate-800 border border-slate-700 rounded-lg p-4">
+        <div className="bg-white border border-slate-700 rounded-lg p-4">
           <div className="flex items-center gap-2">
-            <AlertTriangle className="w-4 h-4 text-red-400" />
-            <p className="text-sm text-slate-400">Discrepancies</p>
+            <AlertTriangle className="w-4 h-4 text-red-600" />
+            <p className="text-sm text-slate-600">Discrepancies</p>
           </div>
-          <p className="text-2xl font-bold text-red-400 mt-1">{discrepancies}</p>
+          <p className="text-2xl font-bold text-red-600 mt-1">{discrepancies}</p>
         </div>
       </div>
 
       <div className="flex justify-between items-center">
-        <h3 className="text-lg font-semibold text-white">Bank vs System Reconciliation</h3>
+        <h3 className="text-lg font-semibold text-gray-900">Bank vs System Reconciliation</h3>
         <button
           onClick={onImportStatement}
           className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700"
@@ -65,7 +65,7 @@ export default function ReconciliationPanel({
 
       <div className="overflow-x-auto">
         <table className="w-full text-sm">
-          <thead className="bg-slate-900 text-slate-400 text-left">
+          <thead className="bg-slate-50 text-slate-600 text-left">
             <tr>
               <th className="px-4 py-3">Date</th>
               <th className="px-4 py-3 text-right">Bank Amount</th>
@@ -77,7 +77,7 @@ export default function ReconciliationPanel({
           </thead>
           <tbody className="divide-y divide-slate-700">
             {reconciliation.map((r) => (
-              <tr key={r.id} className="text-white">
+              <tr key={r.id} className="text-gray-900">
                 <td className="px-4 py-3">
                   {new Date(r.date).toLocaleDateString('en-IN', {
                     day: 'numeric',
@@ -90,7 +90,7 @@ export default function ReconciliationPanel({
                 <td
                   className={clsx(
                     'px-4 py-3 text-right font-medium',
-                    r.difference === 0 ? 'text-green-400' : 'text-red-400'
+                    r.difference === 0 ? 'text-green-600' : 'text-red-600'
                   )}
                 >
                   {r.difference === 0 ? '--' : formatCurrency(r.difference)}
@@ -100,10 +100,10 @@ export default function ReconciliationPanel({
                     className={clsx(
                       'px-2 py-1 rounded text-xs font-medium',
                       r.status === 'matched'
-                        ? 'bg-green-900/50 text-green-400'
+                        ? 'bg-green-50/50 text-green-600'
                         : r.status === 'discrepancy'
-                          ? 'bg-red-900/50 text-red-400'
-                          : 'bg-amber-900/50 text-amber-400'
+                          ? 'bg-red-50/50 text-red-600'
+                          : 'bg-amber-50/50 text-amber-600'
                     )}
                   >
                     {r.status.charAt(0).toUpperCase() + r.status.slice(1)}

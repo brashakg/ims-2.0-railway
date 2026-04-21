@@ -35,21 +35,21 @@ interface Vendor {
 
 
 const getRatingColor = (rating: number) => {
-  if (rating >= 4.5) return 'text-green-400';
-  if (rating >= 3.5) return 'text-yellow-400';
-  return 'text-orange-400';
+  if (rating >= 4.5) return 'text-green-600';
+  if (rating >= 3.5) return 'text-yellow-600';
+  return 'text-orange-600';
 };
 
 const getContractStatusColor = (status: string) => {
   switch (status) {
     case 'active':
-      return 'bg-green-900 text-green-300';
+      return 'bg-green-50 text-green-700';
     case 'expiring_soon':
-      return 'bg-yellow-900 text-yellow-300';
+      return 'bg-yellow-50 text-yellow-700';
     case 'expired':
-      return 'bg-red-900 text-red-300';
+      return 'bg-red-50 text-red-700';
     default:
-      return 'bg-gray-700 text-gray-300';
+      return 'bg-gray-100 text-gray-700';
   }
 };
 
@@ -132,15 +132,15 @@ export function VendorManagement() {
         </div>
         <div className="bg-white border border-gray-200 rounded-lg p-4">
           <p className="text-gray-500 text-sm mb-1">Avg Delivery Reliability</p>
-          <p className="text-2xl font-bold text-blue-400">{avgDeliveryReliability}/5.0</p>
+          <p className="text-2xl font-bold text-blue-600">{avgDeliveryReliability}/5.0</p>
         </div>
         <div className="bg-white border border-gray-200 rounded-lg p-4">
           <p className="text-gray-500 text-sm mb-1">Avg Quality Rating</p>
-          <p className="text-2xl font-bold text-green-400">{avgQualityRating}/5.0</p>
+          <p className="text-2xl font-bold text-green-600">{avgQualityRating}/5.0</p>
         </div>
         <div className="bg-white border border-gray-200 rounded-lg p-4">
           <p className="text-gray-500 text-sm mb-1">Active Contracts</p>
-          <p className="text-2xl font-bold text-purple-400">
+          <p className="text-2xl font-bold text-purple-600">
             {vendors.filter(v => v.contract_status === 'active').length}/{vendors.length}
           </p>
         </div>
@@ -155,8 +155,8 @@ export function VendorManagement() {
             className={clsx(
               'px-4 py-3 font-medium border-b-2 transition-colors',
               activeTab === tab
-                ? 'border-blue-500 text-blue-400'
-                : 'border-transparent text-gray-400 hover:text-gray-700'
+                ? 'border-blue-500 text-blue-600'
+                : 'border-transparent text-gray-500 hover:text-gray-700'
             )}
           >
             {tab === 'directory' ? 'Directory' : tab === 'performance' ? 'Performance' : 'Contracts'}
@@ -169,7 +169,7 @@ export function VendorManagement() {
         <div className="space-y-4">
           {/* Filter */}
           <div className="flex items-center gap-3">
-            <Filter className="w-5 h-5 text-gray-400" />
+            <Filter className="w-5 h-5 text-gray-500" />
             <select
               value={filterRating}
               onChange={(e) => setFilterRating(e.target.value)}
@@ -198,11 +198,11 @@ export function VendorManagement() {
 
                 <div className="flex items-center gap-4 mb-4 pb-4 border-b border-gray-300">
                   <div className="flex items-center gap-1">
-                    <Phone className="w-4 h-4 text-gray-400" />
+                    <Phone className="w-4 h-4 text-gray-500" />
                     <a href={`tel:${vendor.phone}`} className="text-gray-500 hover:text-gray-700 text-sm">{vendor.phone}</a>
                   </div>
                   <div className="flex items-center gap-1">
-                    <Mail className="w-4 h-4 text-gray-400" />
+                    <Mail className="w-4 h-4 text-gray-500" />
                     <a href={`mailto:${vendor.contact}`} className="text-gray-500 hover:text-gray-700 text-sm truncate">{vendor.contact}</a>
                   </div>
                 </div>
@@ -293,15 +293,15 @@ export function VendorManagement() {
                 <div className="pt-3 border-t border-gray-300 space-y-2">
                   <div className="flex items-center justify-between">
                     <span className="text-gray-500 text-sm">On-Time Delivery</span>
-                    <span className="text-green-400 font-semibold">{vendor.performance.on_time_delivery_percentage}%</span>
+                    <span className="text-green-600 font-semibold">{vendor.performance.on_time_delivery_percentage}%</span>
                   </div>
                   <div className="flex items-center justify-between">
                     <span className="text-gray-500 text-sm">Defect Rate</span>
-                    <span className="text-orange-400 font-semibold">{vendor.performance.defect_rate}%</span>
+                    <span className="text-orange-600 font-semibold">{vendor.performance.defect_rate}%</span>
                   </div>
                   <div className="flex items-center justify-between">
                     <span className="text-gray-500 text-sm">Avg Lead Days</span>
-                    <span className="text-blue-400 font-semibold">{vendor.performance.average_lead_days} days</span>
+                    <span className="text-blue-600 font-semibold">{vendor.performance.average_lead_days} days</span>
                   </div>
                   <div className="flex items-center justify-between">
                     <span className="text-gray-500 text-sm">Total POs</span>

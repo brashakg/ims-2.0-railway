@@ -148,12 +148,12 @@ export function POPrint({ po, store, onClose }: POPrintProps) {
             <h3 className="font-bold text-gray-900 mb-2 uppercase">Items Ordered</h3>
             <table className="w-full border-collapse">
               <thead>
-                <tr className="bg-gray-800 text-white">
-                  <th className="border border-gray-600 px-3 py-2 text-left font-semibold">Sr.</th>
-                  <th className="border border-gray-600 px-3 py-2 text-left font-semibold">Product Name</th>
-                  <th className="border border-gray-600 px-3 py-2 text-center font-semibold">Quantity</th>
-                  <th className="border border-gray-600 px-3 py-2 text-right font-semibold">Unit Price</th>
-                  <th className="border border-gray-600 px-3 py-2 text-right font-semibold">Total</th>
+                <tr className="bg-white text-gray-900">
+                  <th className="border border-gray-300 px-3 py-2 text-left font-semibold">Sr.</th>
+                  <th className="border border-gray-300 px-3 py-2 text-left font-semibold">Product Name</th>
+                  <th className="border border-gray-300 px-3 py-2 text-center font-semibold">Quantity</th>
+                  <th className="border border-gray-300 px-3 py-2 text-right font-semibold">Unit Price</th>
+                  <th className="border border-gray-300 px-3 py-2 text-right font-semibold">Total</th>
                 </tr>
               </thead>
               <tbody>
@@ -192,7 +192,7 @@ export function POPrint({ po, store, onClose }: POPrintProps) {
                     {formatCurrency(po.tax_amount)}
                   </td>
                 </tr>
-                <tr className="border-t-2 border-gray-800 bg-gray-800 text-white">
+                <tr className="border-t-2 border-gray-800 bg-white text-gray-900">
                   <td className="px-4 py-2 font-bold uppercase">Grand Total</td>
                   <td className="px-4 py-2 font-mono text-right font-bold text-lg">
                     {formatCurrency(po.grand_total)}
@@ -224,7 +224,7 @@ export function POPrint({ po, store, onClose }: POPrintProps) {
 
           {/* Footer */}
           <div className="mt-4 pt-2 border-t border-gray-200 text-center">
-            <p className="text-[10px] text-gray-400">
+            <p className="text-[10px] text-gray-500">
               {store.storeName} &middot; {store.city}, {store.state} &middot; {po.po_number}
             </p>
           </div>

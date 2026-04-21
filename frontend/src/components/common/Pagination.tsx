@@ -55,7 +55,7 @@ export function Pagination({ currentPage, totalItems, pageSize, onPageChange }: 
 
   return (
     <div className="flex flex-col sm:flex-row items-center justify-between gap-3 pt-4 border-t border-gray-200">
-      <p className="text-sm text-gray-400">
+      <p className="text-sm text-gray-500">
         Showing {startItem}-{endItem} of {totalItems} items
       </p>
 

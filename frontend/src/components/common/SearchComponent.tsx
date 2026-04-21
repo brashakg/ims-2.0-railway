@@ -172,16 +172,16 @@ export function SearchComponent<T extends SearchItem>({
     >
       {/* Search Input */}
       <div className="relative">
-        <SearchIcon className="absolute left-3 top-3 w-4 h-4 text-gray-400" />
+        <SearchIcon className="absolute left-3 top-3 w-4 h-4 text-gray-500" />
         <input
           type="text"
           placeholder={placeholder}
           value={searchQuery}
           onChange={handleInputChange}
           className={clsx(
-            'w-full pl-10 pr-10 py-2 border border-gray-300 dark:border-gray-700',
-            'rounded-lg bg-white dark:bg-gray-800',
-            'text-gray-900 dark:text-white',
+            'w-full pl-10 pr-10 py-2 border border-gray-300 dark:border-gray-200',
+            'rounded-lg bg-white dark:bg-white',
+            'text-gray-900 dark:text-gray-900',
             'focus:outline-none focus:ring-2 focus:ring-blue-500',
             inputClassName
           )}
@@ -189,10 +189,10 @@ export function SearchComponent<T extends SearchItem>({
         {searchQuery && (
           <button
             onClick={handleClear}
-            className="absolute right-3 top-3 p-1 hover:bg-gray-100 dark:hover:bg-gray-700 rounded"
+            className="absolute right-3 top-3 p-1 hover:bg-gray-100 dark:hover:bg-gray-100 rounded"
             title="Clear search"
           >
-            <X className="w-4 h-4 text-gray-400" />
+            <X className="w-4 h-4 text-gray-500" />
           </button>
         )}
       </div>
@@ -207,8 +207,8 @@ export function SearchComponent<T extends SearchItem>({
             className={clsx(
               'px-3 py-1 rounded-full text-sm font-medium transition-colors',
               !selectedFilter
-                ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400'
-                : 'bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-300 hover:bg-gray-200'
+                ? 'bg-blue-100 text-blue-700 dark:bg-blue-50 dark:text-blue-600'
+                : 'bg-gray-100 text-gray-700 dark:bg-white dark:text-gray-700 hover:bg-gray-200'
             )}
           >
             All
@@ -220,8 +220,8 @@ export function SearchComponent<T extends SearchItem>({
               className={clsx(
                 'px-3 py-1 rounded-full text-sm font-medium transition-colors flex items-center gap-1',
                 selectedFilter === filter.value
-                  ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400'
-                  : 'bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-300 hover:bg-gray-200'
+                  ? 'bg-blue-100 text-blue-700 dark:bg-blue-50 dark:text-blue-600'
+                  : 'bg-gray-100 text-gray-700 dark:bg-white dark:text-gray-700 hover:bg-gray-200'
               )}
             >
               {filter.label}
@@ -243,7 +243,7 @@ export function SearchComponent<T extends SearchItem>({
         {isLoading && (
           <div className="flex items-center justify-center py-8">
             <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-blue-600" />
-            <span className="ml-2 text-gray-600 dark:text-gray-400 text-sm">
+            <span className="ml-2 text-gray-600 dark:text-gray-500 text-sm">
               {loadingMessage}
             </span>
           </div>
@@ -251,10 +251,10 @@ export function SearchComponent<T extends SearchItem>({
 
         {showError && (
           <div className="text-center py-8">
-            <p className="text-red-600 dark:text-red-400 text-sm">{error}</p>
+            <p className="text-red-600 dark:text-red-600 text-sm">{error}</p>
             <button
               onClick={() => handleSearch(searchQuery)}
-              className="mt-2 text-blue-600 dark:text-blue-400 text-sm hover:underline"
+              className="mt-2 text-blue-600 dark:text-blue-600 text-sm hover:underline"
             >
               Try again
             </button>
@@ -264,7 +264,7 @@ export function SearchComponent<T extends SearchItem>({
         {showEmpty && (
           <div className="text-center py-8">
             {EmptyIcon && <EmptyIcon className="w-12 h-12 mx-auto mb-3 opacity-50" />}
-            <p className="text-gray-500 dark:text-gray-400 text-sm">
+            <p className="text-gray-500 dark:text-gray-500 text-sm">
               {emptyMessage}
             </p>
           </div>
@@ -276,8 +276,8 @@ export function SearchComponent<T extends SearchItem>({
               key={item.id}
               onClick={() => onSelect?.(item)}
               className={clsx(
-                'p-3 border border-gray-200 dark:border-gray-700 rounded-lg',
-                'hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors',
+                'p-3 border border-gray-200 dark:border-gray-200 rounded-lg',
+                'hover:bg-gray-50 dark:hover:bg-white transition-colors',
                 onSelect && 'cursor-pointer'
               )}
             >
@@ -286,7 +286,7 @@ export function SearchComponent<T extends SearchItem>({
           ))}
 
         {displayResults && results.length >= maxResults && (
-          <div className="text-center text-xs text-gray-500 dark:text-gray-400 py-2">
+          <div className="text-center text-xs text-gray-500 dark:text-gray-500 py-2">
             Showing {results.length} of possibly more results
           </div>
         )}

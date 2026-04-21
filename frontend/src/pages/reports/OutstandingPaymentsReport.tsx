@@ -187,7 +187,7 @@ export default function OutstandingPaymentsReport() {
       {/* Search + Sort */}
       <div className="flex gap-3 print:hidden">
         <div className="relative flex-1">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-500" />
           <input value={searchQuery} onChange={e => setSearchQuery(e.target.value)}
             placeholder="Search customer, phone, or order number..."
             className="w-full pl-9 pr-4 py-2.5 border border-gray-300 rounded-lg text-sm" />
@@ -200,7 +200,7 @@ export default function OutstandingPaymentsReport() {
           ]).map(s => (
             <button key={s.id} onClick={() => toggleSort(s.id)}
               className={clsx('px-3 py-2 rounded-lg text-xs font-medium border transition-all flex items-center gap-1',
-                sortBy === s.id ? 'bg-bv-gold-50 border-bv-gold-300 text-bv-gold-700' : 'border-gray-200 text-gray-500')}>
+                sortBy === s.id ? 'bg-bv-gold-50 border-bv-red-300 text-bv-gold-700' : 'border-gray-200 text-gray-500')}>
               {s.label}
               {sortBy === s.id && (sortDir === 'desc' ? <ChevronDown className="w-3 h-3" /> : <ChevronUp className="w-3 h-3" />)}
             </button>
@@ -212,7 +212,7 @@ export default function OutstandingPaymentsReport() {
       {isLoading ? (
         <div className="text-center py-12"><div className="w-8 h-8 border-2 border-gray-200 border-t-bv-gold-500 rounded-full animate-spin mx-auto" /></div>
       ) : filtered.length === 0 ? (
-        <div className="text-center py-12 text-gray-400">
+        <div className="text-center py-12 text-gray-500">
           <IndianRupee className="w-12 h-12 mx-auto mb-2 opacity-50" />
           <p>{searchQuery || selectedBucket !== 'ALL' ? 'No matching orders' : 'No outstanding payments!'}</p>
         </div>
@@ -236,7 +236,7 @@ export default function OutstandingPaymentsReport() {
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2">
                     <p className="font-medium text-sm text-gray-900 truncate">{order.customerName}</p>
-                    <span className="text-[10px] text-gray-400">{order.orderNumber}</span>
+                    <span className="text-[10px] text-gray-500">{order.orderNumber}</span>
                   </div>
                   <div className="flex items-center gap-3 text-xs text-gray-500 mt-0.5">
                     {order.customerPhone && <span className="flex items-center gap-1"><Phone className="w-3 h-3" />{order.customerPhone}</span>}
@@ -254,7 +254,7 @@ export default function OutstandingPaymentsReport() {
                 </div>
 
                 {/* Action */}
-                <a href={`tel:${order.customerPhone}`} className="p-2 text-gray-400 hover:text-bv-gold-600 hover:bg-bv-gold-50 rounded-lg flex-shrink-0 print:hidden">
+                <a href={`tel:${order.customerPhone}`} className="p-2 text-gray-500 hover:text-bv-red-600 hover:bg-bv-gold-50 rounded-lg flex-shrink-0 print:hidden">
                   <Phone className="w-5 h-5" />
                 </a>
               </div>

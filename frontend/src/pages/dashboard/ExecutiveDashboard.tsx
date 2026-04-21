@@ -188,7 +188,7 @@ export function ExecutiveDashboard() {
   if (error && !metrics) {
     return (
       <div className="flex flex-col items-center justify-center h-96 text-center">
-        <AlertTriangle className="w-12 h-12 text-red-400 mb-4" />
+        <AlertTriangle className="w-12 h-12 text-red-600 mb-4" />
         <p className="text-gray-700 mb-4">{error}</p>
         <button onClick={loadDashboardData} className="btn-primary">
           Retry

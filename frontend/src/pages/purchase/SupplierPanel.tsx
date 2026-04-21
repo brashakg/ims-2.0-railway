@@ -33,7 +33,7 @@ export function SupplierPanel({ suppliers }: SupplierPanelProps) {
                 {[...Array(5)].map((_, i) => (
                   <svg
                     key={i}
-                    className={`w-4 h-4 ${i < Math.floor(supplier.rating) ? 'text-yellow-400' : 'text-gray-300'}`}
+                    className={`w-4 h-4 ${i < Math.floor(supplier.rating) ? 'text-yellow-600' : 'text-gray-700'}`}
                     fill="currentColor"
                     viewBox="0 0 20 20"
                   >
@@ -52,19 +52,19 @@ export function SupplierPanel({ suppliers }: SupplierPanelProps) {
 
           <div className="space-y-2 mb-4">
             <div className="flex items-center gap-2 text-sm">
-              <User className="w-4 h-4 text-gray-400" />
+              <User className="w-4 h-4 text-gray-500" />
               <span className="text-gray-700">{supplier.contactPerson}</span>
             </div>
             <div className="flex items-center gap-2 text-sm">
-              <Phone className="w-4 h-4 text-gray-400" />
+              <Phone className="w-4 h-4 text-gray-500" />
               <span className="text-gray-700">{supplier.phone}</span>
             </div>
             <div className="flex items-center gap-2 text-sm">
-              <Mail className="w-4 h-4 text-gray-400" />
+              <Mail className="w-4 h-4 text-gray-500" />
               <span className="text-gray-700">{supplier.email}</span>
             </div>
             <div className="flex items-center gap-2 text-sm">
-              <MapPin className="w-4 h-4 text-gray-400" />
+              <MapPin className="w-4 h-4 text-gray-500" />
               <span className="text-gray-700">{supplier.city}, {supplier.state}</span>
             </div>
           </div>
@@ -101,7 +101,7 @@ export function SupplierPanel({ suppliers }: SupplierPanelProps) {
 
       {suppliers.length === 0 && (
         <div className="col-span-2 text-center py-12">
-          <Truck className="w-12 h-12 text-gray-400 mx-auto mb-3" />
+          <Truck className="w-12 h-12 text-gray-500 mx-auto mb-3" />
           <p className="text-gray-500">No suppliers found</p>
         </div>
       )}

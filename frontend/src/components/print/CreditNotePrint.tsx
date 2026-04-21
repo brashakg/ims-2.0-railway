@@ -164,16 +164,16 @@ export function CreditNotePrint({
             <h3 className="font-bold text-gray-900 mb-2 uppercase text-sm">Items Returned</h3>
             <table className="w-full border-collapse">
               <thead>
-                <tr className="bg-gray-800 text-white">
-                  <th className="border border-gray-600 px-3 py-2 text-left font-semibold">Sr.</th>
-                  <th className="border border-gray-600 px-3 py-2 text-left font-semibold">
+                <tr className="bg-white text-gray-900">
+                  <th className="border border-gray-300 px-3 py-2 text-left font-semibold">Sr.</th>
+                  <th className="border border-gray-300 px-3 py-2 text-left font-semibold">
                     Description
                   </th>
-                  <th className="border border-gray-600 px-3 py-2 text-center font-semibold">Qty</th>
-                  <th className="border border-gray-600 px-3 py-2 text-right font-semibold">
+                  <th className="border border-gray-300 px-3 py-2 text-center font-semibold">Qty</th>
+                  <th className="border border-gray-300 px-3 py-2 text-right font-semibold">
                     Unit Price
                   </th>
-                  <th className="border border-gray-600 px-3 py-2 text-right font-semibold">Amount</th>
+                  <th className="border border-gray-300 px-3 py-2 text-right font-semibold">Amount</th>
                 </tr>
               </thead>
               <tbody>
@@ -241,7 +241,7 @@ export function CreditNotePrint({
 
           {/* Footer */}
           <div className="mt-4 pt-2 border-t border-gray-200 text-center">
-            <p className="text-[10px] text-gray-400">
+            <p className="text-[10px] text-gray-500">
               {store.storeName} • {creditNote.creditNoteNumber} • {formatDate(creditNote.date)}
             </p>
           </div>

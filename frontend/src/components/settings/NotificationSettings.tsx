@@ -149,7 +149,7 @@ export function NotificationSettings() {
     return (
       <div className="flex items-center justify-center min-h-[400px]">
         <div className="text-center">
-          <AlertCircle className="w-16 h-16 mx-auto text-gray-300 mb-4" />
+          <AlertCircle className="w-16 h-16 mx-auto text-gray-700 mb-4" />
           <h2 className="text-xl font-semibold text-gray-700">Access Denied</h2>
           <p className="text-gray-500">You don't have permission to manage notification settings.</p>
         </div>

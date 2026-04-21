@@ -55,7 +55,7 @@ export function ProfileSection() {
         <div className="space-y-4">
           <div className="flex items-center gap-4 p-4 bg-gray-50 rounded-lg">
             <div className="w-16 h-16 rounded-full bg-bv-gold-100 flex items-center justify-center">
-              <User className="w-8 h-8 text-bv-gold-600" />
+              <User className="w-8 h-8 text-bv-red-600" />
             </div>
             <div>
               <h3 className="font-semibold text-gray-900">{user?.name || 'User'}</h3>
@@ -203,12 +203,12 @@ export function BusinessSection() {
         <h2 className="text-lg font-semibold text-gray-900 mb-4">Company Profile</h2>
         <div className="space-y-4">
           <div className="flex items-center gap-4 p-4 bg-gray-50 rounded-lg">
-            <div className="w-20 h-20 rounded-lg bg-white border-2 border-dashed border-gray-300 flex items-center justify-center cursor-pointer hover:border-bv-gold-500">
+            <div className="w-20 h-20 rounded-lg bg-white border-2 border-dashed border-gray-300 flex items-center justify-center cursor-pointer hover:border-bv-red-600">
               <Building2 className="w-8 h-8 text-gray-500" />
             </div>
             <div>
               <p className="text-sm text-gray-500">Company Logo</p>
-              <button className="text-sm text-bv-gold-600 hover:underline">Upload new logo</button>
+              <button className="text-sm text-bv-red-600 hover:underline">Upload new logo</button>
             </div>
           </div>
 

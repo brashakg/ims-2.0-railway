@@ -105,15 +105,15 @@ export function BarcodeManagement({
   };
 
   return (
-    <div className="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800">
+    <div className="bg-white dark:bg-white rounded-lg border border-gray-200 dark:border-gray-800">
       {/* Header */}
       <div className="p-6 border-b border-gray-200 dark:border-gray-800 flex items-center justify-between">
         <div>
-          <h2 className="text-lg font-bold text-gray-900 dark:text-white flex items-center gap-2">
+          <h2 className="text-lg font-bold text-gray-900 dark:text-gray-900 flex items-center gap-2">
             <QrCode className="w-5 h-5" />
             Barcode Management
           </h2>
-          <p className="text-sm text-gray-600 dark:text-gray-400 mt-1">
+          <p className="text-sm text-gray-600 dark:text-gray-500 mt-1">
             {filteredBarcodes.length} of {barcodes.length} barcodes
           </p>
         </div>
@@ -133,19 +133,19 @@ export function BarcodeManagement({
       {/* Search and Bulk Actions */}
       <div className="p-4 border-b border-gray-200 dark:border-gray-800 space-y-3">
         <div className="relative">
-          <Search className="absolute left-3 top-3 w-4 h-4 text-gray-400" />
+          <Search className="absolute left-3 top-3 w-4 h-4 text-gray-500" />
           <input
             type="text"
             placeholder="Search by barcode, product name, or SKU..."
             value={searchTerm}
             onChange={e => setSearchTerm(e.target.value)}
-            className="w-full pl-10 pr-4 py-2 border border-gray-300 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-white"
+            className="w-full pl-10 pr-4 py-2 border border-gray-300 dark:border-gray-200 rounded-lg bg-white dark:bg-white text-gray-900 dark:text-gray-900"
           />
         </div>
 
         {selectedBarcodes.size > 0 && (
-          <div className="flex items-center gap-2 p-3 bg-blue-50 dark:bg-blue-900/20 rounded-lg">
-            <span className="text-sm font-medium text-gray-700 dark:text-gray-300">
+          <div className="flex items-center gap-2 p-3 bg-blue-50 dark:bg-blue-50/20 rounded-lg">
+            <span className="text-sm font-medium text-gray-700 dark:text-gray-700">
               {selectedBarcodes.size} selected
             </span>
             <button
@@ -157,7 +157,7 @@ export function BarcodeManagement({
             </button>
             <button
               onClick={() => setSelectedBarcodes(new Set())}
-              className="px-3 py-1 bg-gray-300 dark:bg-gray-700 text-gray-700 dark:text-gray-300 rounded text-sm hover:bg-gray-400 dark:hover:bg-gray-600"
+              className="px-3 py-1 bg-gray-300 dark:bg-gray-100 text-gray-700 dark:text-gray-700 rounded text-sm hover:bg-gray-400 dark:hover:bg-gray-200"
             >
               Clear
             </button>
@@ -168,18 +168,18 @@ export function BarcodeManagement({
       {/* Barcodes List */}
       <div className="divide-y divide-gray-200 dark:divide-gray-800">
         {loading ? (
-          <div className="p-8 text-center text-gray-500 dark:text-gray-400">
+          <div className="p-8 text-center text-gray-500 dark:text-gray-500">
             <p>Loading barcodes...</p>
           </div>
         ) : filteredBarcodes.length === 0 ? (
-          <div className="p-8 text-center text-gray-500 dark:text-gray-400">
+          <div className="p-8 text-center text-gray-500 dark:text-gray-500">
             <QrCode className="w-12 h-12 mx-auto mb-3 opacity-50" />
             <p>No barcodes found</p>
           </div>
         ) : (
           <>
             {/* Header Row */}
-            <div className="p-4 bg-gray-50 dark:bg-gray-800 text-sm font-medium text-gray-700 dark:text-gray-300 grid grid-cols-8 gap-2 items-center">
+            <div className="p-4 bg-gray-50 dark:bg-white text-sm font-medium text-gray-700 dark:text-gray-700 grid grid-cols-8 gap-2 items-center">
               <input
                 type="checkbox"
                 checked={selectedBarcodes.size === filteredBarcodes.length && filteredBarcodes.length > 0}
@@ -197,28 +197,28 @@ export function BarcodeManagement({
 
             {/* Barcode Rows */}
             {filteredBarcodes.map(barcode => (
-              <div key={barcode.id} className="p-4 hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors grid grid-cols-8 gap-2 items-center">
+              <div key={barcode.id} className="p-4 hover:bg-gray-50 dark:hover:bg-white transition-colors grid grid-cols-8 gap-2 items-center">
                 <input
                   type="checkbox"
                   checked={selectedBarcodes.has(barcode.id)}
                   onChange={() => handleSelectBarcode(barcode.id)}
                   className="w-4 h-4 rounded text-blue-600"
                 />
-                <div className="text-sm font-mono text-gray-900 dark:text-white truncate">
+                <div className="text-sm font-mono text-gray-900 dark:text-gray-900 truncate">
                   {barcode.code}
                 </div>
-                <div className="text-sm text-gray-600 dark:text-gray-400">
-                  <span className="px-2 py-1 bg-gray-200 dark:bg-gray-700 rounded text-xs font-medium">
+                <div className="text-sm text-gray-600 dark:text-gray-500">
+                  <span className="px-2 py-1 bg-gray-200 dark:bg-gray-100 rounded text-xs font-medium">
                     {barcode.format}
                   </span>
                 </div>
-                <div className="text-sm text-gray-900 dark:text-white truncate">
+                <div className="text-sm text-gray-900 dark:text-gray-900 truncate">
                   {barcode.productName}
                 </div>
-                <div className="text-sm text-gray-600 dark:text-gray-400 font-mono">
+                <div className="text-sm text-gray-600 dark:text-gray-500 font-mono">
                   {barcode.productSKU}
                 </div>
-                <div className="text-sm text-right text-gray-600 dark:text-gray-400">
+                <div className="text-sm text-right text-gray-600 dark:text-gray-500">
                   <span className={clsx(
                     'px-2 py-1 rounded text-xs font-medium',
                     barcode.scanCount > 0 ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-700'
@@ -226,13 +226,13 @@ export function BarcodeManagement({
                     {barcode.scanCount}
                   </span>
                 </div>
-                <div className="text-sm text-right font-semibold text-gray-900 dark:text-white">
+                <div className="text-sm text-right font-semibold text-gray-900 dark:text-gray-900">
                   ${barcode.price.toFixed(2)}
                 </div>
                 <div className="flex items-center gap-1 justify-end">
                   <button
                     onClick={() => handleCopyCode(barcode.code)}
-                    className="p-1 hover:bg-blue-100 dark:hover:bg-blue-900/20 rounded text-blue-600 dark:text-blue-400"
+                    className="p-1 hover:bg-blue-100 dark:hover:bg-blue-50/20 rounded text-blue-600 dark:text-blue-600"
                     title={copySuccess === barcode.code ? 'Copied!' : 'Copy code'}
                   >
                     <Copy className="w-4 h-4" />
@@ -243,7 +243,7 @@ export function BarcodeManagement({
                       setEditingId(barcode.id);
                       setShowCreateModal(true);
                     }}
-                    className="p-1 hover:bg-amber-100 dark:hover:bg-amber-900/20 rounded text-amber-600 dark:text-amber-400"
+                    className="p-1 hover:bg-amber-100 dark:hover:bg-amber-50/20 rounded text-amber-600 dark:text-amber-600"
                     title="Edit"
                   >
                     <Edit2 className="w-4 h-4" />
@@ -254,7 +254,7 @@ export function BarcodeManagement({
                         onDeleteBarcode(barcode.id);
                       }
                     }}
-                    className="p-1 hover:bg-red-100 dark:hover:bg-red-900/20 rounded text-red-600 dark:text-red-400"
+                    className="p-1 hover:bg-red-100 dark:hover:bg-red-50/20 rounded text-red-600 dark:text-red-600"
                     title="Delete"
                   >
                     <Trash2 className="w-4 h-4" />
@@ -269,8 +269,8 @@ export function BarcodeManagement({
       {/* Create/Edit Modal */}
       {showCreateModal && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50" onClick={() => setShowCreateModal(false)}>
-          <div className="bg-white dark:bg-gray-900 rounded-lg shadow-lg p-6 max-w-md w-full" onClick={e => e.stopPropagation()}>
-            <h2 className="text-lg font-bold text-gray-900 dark:text-white mb-4">
+          <div className="bg-white dark:bg-white rounded-lg shadow-lg p-6 max-w-md w-full" onClick={e => e.stopPropagation()}>
+            <h2 className="text-lg font-bold text-gray-900 dark:text-gray-900 mb-4">
               {editingId ? 'Edit Barcode' : 'Create New Barcode'}
             </h2>
 
@@ -280,13 +280,13 @@ export function BarcodeManagement({
                 placeholder="Barcode Code *"
                 value={formData.code || ''}
                 onChange={e => setFormData({ ...formData, code: e.target.value })}
-                className="w-full px-3 py-2 border border-gray-300 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-white"
+                className="w-full px-3 py-2 border border-gray-300 dark:border-gray-200 rounded-lg bg-white dark:bg-white text-gray-900 dark:text-gray-900"
               />
 
               <select
                 value={formData.format || 'CODE128'}
                 onChange={e => setFormData({ ...formData, format: e.target.value as any })}
-                className="w-full px-3 py-2 border border-gray-300 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-white"
+                className="w-full px-3 py-2 border border-gray-300 dark:border-gray-200 rounded-lg bg-white dark:bg-white text-gray-900 dark:text-gray-900"
               >
                 <option value="CODE128">CODE128</option>
                 <option value="EAN13">EAN13</option>
@@ -299,7 +299,7 @@ export function BarcodeManagement({
                 placeholder="Product ID *"
                 value={formData.productId || ''}
                 onChange={e => setFormData({ ...formData, productId: e.target.value })}
-                className="w-full px-3 py-2 border border-gray-300 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-white"
+                className="w-full px-3 py-2 border border-gray-300 dark:border-gray-200 rounded-lg bg-white dark:bg-white text-gray-900 dark:text-gray-900"
               />
 
               <input
@@ -307,7 +307,7 @@ export function BarcodeManagement({
                 placeholder="Product Name"
                 value={formData.productName || ''}
                 onChange={e => setFormData({ ...formData, productName: e.target.value })}
-                className="w-full px-3 py-2 border border-gray-300 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-white"
+                className="w-full px-3 py-2 border border-gray-300 dark:border-gray-200 rounded-lg bg-white dark:bg-white text-gray-900 dark:text-gray-900"
               />
 
               <input
@@ -315,7 +315,7 @@ export function BarcodeManagement({
                 placeholder="Product SKU"
                 value={formData.productSKU || ''}
                 onChange={e => setFormData({ ...formData, productSKU: e.target.value })}
-                className="w-full px-3 py-2 border border-gray-300 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-white"
+                className="w-full px-3 py-2 border border-gray-300 dark:border-gray-200 rounded-lg bg-white dark:bg-white text-gray-900 dark:text-gray-900"
               />
 
               <div className="grid grid-cols-2 gap-2">
@@ -324,7 +324,7 @@ export function BarcodeManagement({
                   placeholder="Quantity"
                   value={formData.quantity || 0}
                   onChange={e => setFormData({ ...formData, quantity: parseInt(e.target.value) })}
-                  className="px-3 py-2 border border-gray-300 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-white"
+                  className="px-3 py-2 border border-gray-300 dark:border-gray-200 rounded-lg bg-white dark:bg-white text-gray-900 dark:text-gray-900"
                 />
                 <input
                   type="number"
@@ -332,7 +332,7 @@ export function BarcodeManagement({
                   placeholder="Price"
                   value={formData.price || 0}
                   onChange={e => setFormData({ ...formData, price: parseFloat(e.target.value) })}
-                  className="px-3 py-2 border border-gray-300 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-white"
+                  className="px-3 py-2 border border-gray-300 dark:border-gray-200 rounded-lg bg-white dark:bg-white text-gray-900 dark:text-gray-900"
                 />
               </div>
 
@@ -343,13 +343,13 @@ export function BarcodeManagement({
                   onChange={e => setFormData({ ...formData, active: e.target.checked })}
                   className="w-4 h-4 rounded text-blue-600"
                 />
-                <span className="text-sm text-gray-700 dark:text-gray-300">Active</span>
+                <span className="text-sm text-gray-700 dark:text-gray-700">Active</span>
               </label>
 
               <div className="flex gap-2">
                 <button
                   onClick={() => setShowCreateModal(false)}
-                  className="flex-1 px-4 py-2 border border-gray-300 dark:border-gray-700 rounded-lg text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800"
+                  className="flex-1 px-4 py-2 border border-gray-300 dark:border-gray-200 rounded-lg text-gray-700 dark:text-gray-700 hover:bg-gray-50 dark:hover:bg-white"
                 >
                   Cancel
                 </button>

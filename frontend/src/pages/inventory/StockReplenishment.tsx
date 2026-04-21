@@ -29,28 +29,28 @@ interface ReplenishmentItem {
 const getStockStatusColor = (status: string) => {
   switch (status) {
     case 'critical':
-      return 'bg-red-900 text-red-300';
+      return 'bg-red-50 text-red-700';
     case 'low':
-      return 'bg-orange-900 text-orange-300';
+      return 'bg-orange-50 text-orange-700';
     case 'normal':
-      return 'bg-green-900 text-green-300';
+      return 'bg-green-50 text-green-700';
     case 'excess':
-      return 'bg-blue-900 text-blue-300';
+      return 'bg-blue-50 text-blue-700';
     default:
-      return 'bg-gray-700 text-gray-300';
+      return 'bg-gray-100 text-gray-700';
   }
 };
 
 const getCategoryColor = (category: string) => {
   switch (category) {
     case 'A':
-      return 'text-red-400';
+      return 'text-red-600';
     case 'B':
-      return 'text-yellow-400';
+      return 'text-yellow-600';
     case 'C':
-      return 'text-green-400';
+      return 'text-green-600';
     default:
-      return 'text-gray-400';
+      return 'text-gray-500';
   }
 };
 
@@ -114,7 +114,7 @@ export function StockReplenishment() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-3xl font-bold">Stock Replenishment</h1>
-          <p className="text-gray-400">Auto-replenishment suggestions and inventory optimization</p>
+          <p className="text-gray-500">Auto-replenishment suggestions and inventory optimization</p>
         </div>
         {selectedItems.length > 0 && (
           <button className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-semibold flex items-center gap-2">
@@ -126,26 +126,26 @@ export function StockReplenishment() {
 
       {/* Summary Stats */}
       <div className="grid grid-cols-4 gap-4">
-        <div className="bg-gray-800 rounded-lg p-4">
-          <p className="text-gray-400 text-sm mb-1">Critical Items</p>
-          <p className="text-2xl font-bold text-red-400">{criticalItems.length}</p>
+        <div className="bg-white rounded-lg p-4">
+          <p className="text-gray-500 text-sm mb-1">Critical Items</p>
+          <p className="text-2xl font-bold text-red-600">{criticalItems.length}</p>
         </div>
-        <div className="bg-gray-800 rounded-lg p-4">
-          <p className="text-gray-400 text-sm mb-1">Low Stock Items</p>
-          <p className="text-2xl font-bold text-orange-400">{lowItems.length}</p>
+        <div className="bg-white rounded-lg p-4">
+          <p className="text-gray-500 text-sm mb-1">Low Stock Items</p>
+          <p className="text-2xl font-bold text-orange-600">{lowItems.length}</p>
         </div>
-        <div className="bg-gray-800 rounded-lg p-4">
-          <p className="text-gray-400 text-sm mb-1">Dead Stock Items</p>
-          <p className="text-2xl font-bold text-purple-400">{deadStock.length}</p>
+        <div className="bg-white rounded-lg p-4">
+          <p className="text-gray-500 text-sm mb-1">Dead Stock Items</p>
+          <p className="text-2xl font-bold text-purple-600">{deadStock.length}</p>
         </div>
-        <div className="bg-gray-800 rounded-lg p-4">
-          <p className="text-gray-400 text-sm mb-1">Est. Replenish Cost</p>
-          <p className="text-2xl font-bold text-green-400">₹{(totalEstimatedCost / 100000).toFixed(1)}L</p>
+        <div className="bg-white rounded-lg p-4">
+          <p className="text-gray-500 text-sm mb-1">Est. Replenish Cost</p>
+          <p className="text-2xl font-bold text-green-600">₹{(totalEstimatedCost / 100000).toFixed(1)}L</p>
         </div>
       </div>
 
       {/* Tabs */}
-      <div className="flex gap-2 border-b border-gray-700">
+      <div className="flex gap-2 border-b border-gray-200">
         {(['suggestions', 'abc-analysis', 'dead-stock', 'eoq'] as const).map((tab) => (
           <button
             key={tab}
@@ -153,8 +153,8 @@ export function StockReplenishment() {
             className={clsx(
               'px-4 py-3 font-medium border-b-2 transition-colors',
               activeTab === tab
-                ? 'border-blue-500 text-blue-400'
-                : 'border-transparent text-gray-400 hover:text-gray-300'
+                ? 'border-blue-500 text-blue-600'
+                : 'border-transparent text-gray-500 hover:text-gray-700'
             )}
           >
             {tab === 'suggestions' ? 'Suggestions' : tab === 'abc-analysis' ? 'ABC/XYZ Analysis' : tab === 'dead-stock' ? 'Dead Stock' : 'EOQ Calculation'}
@@ -166,11 +166,11 @@ export function StockReplenishment() {
       {activeTab === 'suggestions' && (
         <div className="space-y-4">
           {criticalItems.length > 0 && (
-            <div className="bg-red-900/30 border border-red-700 rounded-lg p-4 flex items-start gap-3">
-              <AlertTriangle className="w-5 h-5 text-red-400 flex-shrink-0 mt-0.5" />
+            <div className="bg-red-50 border border-red-700 rounded-lg p-4 flex items-start gap-3">
+              <AlertTriangle className="w-5 h-5 text-red-600 flex-shrink-0 mt-0.5" />
               <div>
-                <p className="text-red-300 font-semibold">{criticalItems.length} Critical Items</p>
-                <p className="text-red-300 text-sm">These items are below critical stock level and require immediate replenishment.</p>
+                <p className="text-red-700 font-semibold">{criticalItems.length} Critical Items</p>
+                <p className="text-red-700 text-sm">These items are below critical stock level and require immediate replenishment.</p>
               </div>
             </div>
           )}
@@ -182,8 +182,8 @@ export function StockReplenishment() {
                 className={clsx(
                   'rounded-lg p-4 border transition-colors cursor-pointer',
                   selectedItems.includes(item.product_id)
-                    ? 'bg-blue-900/30 border-blue-600'
-                    : 'bg-gray-800 border-gray-700 hover:border-gray-600'
+                    ? 'bg-blue-50 border-blue-600'
+                    : 'bg-white border-gray-200 hover:border-gray-300'
                 )}
                 onClick={() => toggleSelection(item.product_id)}
               >
@@ -198,42 +198,42 @@ export function StockReplenishment() {
                   <div className="flex-1">
                     <div className="flex items-start justify-between mb-3">
                       <div>
-                        <p className="text-white font-semibold">{item.product_name}</p>
-                        <p className="text-gray-400 text-sm">Product ID: {item.product_id}</p>
+                        <p className="text-gray-900 font-semibold">{item.product_name}</p>
+                        <p className="text-gray-500 text-sm">Product ID: {item.product_id}</p>
                       </div>
                       <span className={clsx('px-2 py-1 rounded text-xs font-semibold', getStockStatusColor(item.stock_status))}>
                         {item.stock_status.charAt(0).toUpperCase() + item.stock_status.slice(1)}
                       </span>
                     </div>
 
-                    <div className="grid grid-cols-2 lg:grid-cols-5 gap-4 mb-3 pb-3 border-b border-gray-700">
+                    <div className="grid grid-cols-2 lg:grid-cols-5 gap-4 mb-3 pb-3 border-b border-gray-200">
                       <div>
-                        <p className="text-gray-400 text-xs mb-1">Current Stock</p>
-                        <p className="text-white font-semibold">{item.current_stock}</p>
+                        <p className="text-gray-500 text-xs mb-1">Current Stock</p>
+                        <p className="text-gray-900 font-semibold">{item.current_stock}</p>
                       </div>
                       <div>
-                        <p className="text-gray-400 text-xs mb-1">Reorder Level</p>
-                        <p className="text-white font-semibold">{item.reorder_level}</p>
+                        <p className="text-gray-500 text-xs mb-1">Reorder Level</p>
+                        <p className="text-gray-900 font-semibold">{item.reorder_level}</p>
                       </div>
                       <div>
-                        <p className="text-gray-400 text-xs mb-1">EOQ</p>
-                        <p className="text-white font-semibold">{item.eoq}</p>
+                        <p className="text-gray-500 text-xs mb-1">EOQ</p>
+                        <p className="text-gray-900 font-semibold">{item.eoq}</p>
                       </div>
                       <div>
-                        <p className="text-gray-400 text-xs mb-1">Category</p>
+                        <p className="text-gray-500 text-xs mb-1">Category</p>
                         <p className={clsx('font-semibold', getCategoryColor(item.abc_category))}>
                           {item.abc_category}-{item.xyz_category}
                         </p>
                       </div>
                       <div>
-                        <p className="text-gray-400 text-xs mb-1">Est. Cost</p>
-                        <p className="text-green-400 font-semibold">₹{(item.estimated_cost / 1000).toFixed(0)}K</p>
+                        <p className="text-gray-500 text-xs mb-1">Est. Cost</p>
+                        <p className="text-green-600 font-semibold">₹{(item.estimated_cost / 1000).toFixed(0)}K</p>
                       </div>
                     </div>
 
                     <div className="flex items-center justify-between">
                       <div>
-                        <p className="text-gray-400 text-sm">{item.preferred_vendor_name}</p>
+                        <p className="text-gray-500 text-sm">{item.preferred_vendor_name}</p>
                         <p className="text-gray-500 text-xs">Last price: ₹{item.last_purchase_price}</p>
                       </div>
                       <button
@@ -257,16 +257,16 @@ export function StockReplenishment() {
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           {/* ABC Analysis */}
           <div className="lg:col-span-2 space-y-4">
-            <h3 className="text-lg font-semibold text-white mb-4">ABC Classification</h3>
+            <h3 className="text-lg font-semibold text-gray-900 mb-4">ABC Classification</h3>
             {[
-              { category: 'A', color: 'text-red-400', bgColor: 'bg-red-900/30', desc: 'High-value items (80% value, 20% items)' },
-              { category: 'B', color: 'text-yellow-400', bgColor: 'bg-yellow-900/30', desc: 'Medium-value items (15% value, 30% items)' },
-              { category: 'C', color: 'text-green-400', bgColor: 'bg-green-900/30', desc: 'Low-value items (5% value, 50% items)' },
+              { category: 'A', color: 'text-red-600', bgColor: 'bg-red-50', desc: 'High-value items (80% value, 20% items)' },
+              { category: 'B', color: 'text-yellow-600', bgColor: 'bg-yellow-50/30', desc: 'Medium-value items (15% value, 30% items)' },
+              { category: 'C', color: 'text-green-600', bgColor: 'bg-green-50', desc: 'Low-value items (5% value, 50% items)' },
             ].map((cat) => (
-              <div key={cat.category} className={clsx('rounded-lg p-4 border', cat.bgColor, cat.bgColor === 'bg-red-900/30' ? 'border-red-700' : cat.bgColor === 'bg-yellow-900/30' ? 'border-yellow-700' : 'border-green-700')}>
+              <div key={cat.category} className={clsx('rounded-lg p-4 border', cat.bgColor, cat.bgColor === 'bg-red-50' ? 'border-red-700' : cat.bgColor === 'bg-yellow-50/30' ? 'border-yellow-700' : 'border-green-700')}>
                 <p className={clsx('font-semibold mb-1', cat.color)}>Category {cat.category}</p>
-                <p className="text-gray-400 text-sm">{cat.desc}</p>
-                <p className="text-white font-semibold mt-2">
+                <p className="text-gray-500 text-sm">{cat.desc}</p>
+                <p className="text-gray-900 font-semibold mt-2">
                   {suggestions.filter(s => s.abc_category === cat.category).length} items
                 </p>
               </div>
@@ -275,15 +275,15 @@ export function StockReplenishment() {
 
           {/* XYZ Analysis */}
           <div className="space-y-4">
-            <h3 className="text-lg font-semibold text-white mb-4">XYZ Classification</h3>
+            <h3 className="text-lg font-semibold text-gray-900 mb-4">XYZ Classification</h3>
             {[
               { category: 'X', label: 'Predictable', desc: 'Stable demand' },
               { category: 'Y', label: 'Moderate', desc: 'Variable demand' },
               { category: 'Z', label: 'Unpredictable', desc: 'Uncertain demand' },
             ].map((cat) => (
-              <div key={cat.category} className="bg-gray-800 rounded-lg p-4 border border-gray-700">
-                <p className="text-white font-semibold">{cat.category} - {cat.label}</p>
-                <p className="text-gray-400 text-xs mt-1">{cat.desc}</p>
+              <div key={cat.category} className="bg-white rounded-lg p-4 border border-gray-200">
+                <p className="text-gray-900 font-semibold">{cat.category} - {cat.label}</p>
+                <p className="text-gray-500 text-xs mt-1">{cat.desc}</p>
               </div>
             ))}
           </div>
@@ -292,39 +292,39 @@ export function StockReplenishment() {
 
       {activeTab === 'dead-stock' && (
         <div className="space-y-4">
-          <div className="bg-purple-900/30 border border-purple-700 rounded-lg p-4 flex items-start gap-3">
-            <TrendingDown className="w-5 h-5 text-purple-400 flex-shrink-0 mt-0.5" />
+          <div className="bg-purple-50/30 border border-purple-700 rounded-lg p-4 flex items-start gap-3">
+            <TrendingDown className="w-5 h-5 text-purple-600 flex-shrink-0 mt-0.5" />
             <div>
-              <p className="text-purple-300 font-semibold">Dead Stock Identification</p>
-              <p className="text-purple-300 text-sm">Items with no sales activity for 6+ months</p>
+              <p className="text-purple-700 font-semibold">Dead Stock Identification</p>
+              <p className="text-purple-700 text-sm">Items with no sales activity for 6+ months</p>
             </div>
           </div>
 
           <div className="space-y-3">
             {deadStock.map((item) => (
-              <div key={item.product_id} className="bg-gray-800 rounded-lg p-4 border border-gray-700">
+              <div key={item.product_id} className="bg-white rounded-lg p-4 border border-gray-200">
                 <div className="flex items-start justify-between mb-3">
                   <div>
-                    <p className="text-white font-semibold">{item.product_name}</p>
-                    <p className="text-gray-400 text-sm">Product ID: {item.product_id}</p>
+                    <p className="text-gray-900 font-semibold">{item.product_name}</p>
+                    <p className="text-gray-500 text-sm">Product ID: {item.product_id}</p>
                   </div>
-                  <span className="px-3 py-1 bg-purple-900 text-purple-300 rounded text-xs font-semibold">
+                  <span className="px-3 py-1 bg-purple-50 text-purple-700 rounded text-xs font-semibold">
                     {item.days_inactive} days inactive
                   </span>
                 </div>
 
-                <div className="grid grid-cols-3 gap-4 mb-3 pb-3 border-b border-gray-700">
+                <div className="grid grid-cols-3 gap-4 mb-3 pb-3 border-b border-gray-200">
                   <div>
-                    <p className="text-gray-400 text-xs mb-1">Current Stock</p>
-                    <p className="text-white font-semibold">{item.current_stock}</p>
+                    <p className="text-gray-500 text-xs mb-1">Current Stock</p>
+                    <p className="text-gray-900 font-semibold">{item.current_stock}</p>
                   </div>
                   <div>
-                    <p className="text-gray-400 text-xs mb-1">Last Sold</p>
-                    <p className="text-white font-semibold">{new Date(item.last_sold).toLocaleDateString()}</p>
+                    <p className="text-gray-500 text-xs mb-1">Last Sold</p>
+                    <p className="text-gray-900 font-semibold">{new Date(item.last_sold).toLocaleDateString()}</p>
                   </div>
                   <div>
-                    <p className="text-gray-400 text-xs mb-1">Estimated Value</p>
-                    <p className="text-orange-400 font-semibold">₹{item.estimated_value.toLocaleString('en-IN')}</p>
+                    <p className="text-gray-500 text-xs mb-1">Estimated Value</p>
+                    <p className="text-orange-600 font-semibold">₹{item.estimated_value.toLocaleString('en-IN')}</p>
                   </div>
                 </div>
 
@@ -344,21 +344,21 @@ export function StockReplenishment() {
 
       {activeTab === 'eoq' && (
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          <div className="bg-gray-800 rounded-lg p-6 border border-gray-700">
-            <h3 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+          <div className="bg-white rounded-lg p-6 border border-gray-200">
+            <h3 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
               <Zap className="w-5 h-5" />
               Economic Order Quantity (EOQ)
             </h3>
             <div className="space-y-4">
-              <p className="text-gray-400 text-sm">
+              <p className="text-gray-500 text-sm">
                 EOQ = √(2DS/H) where:
               </p>
-              <ul className="text-gray-300 text-sm space-y-2">
-                <li><span className="text-blue-400">D</span> = Annual demand</li>
-                <li><span className="text-blue-400">S</span> = Ordering cost per order</li>
-                <li><span className="text-blue-400">H</span> = Holding cost per unit</li>
+              <ul className="text-gray-700 text-sm space-y-2">
+                <li><span className="text-blue-600">D</span> = Annual demand</li>
+                <li><span className="text-blue-600">S</span> = Ordering cost per order</li>
+                <li><span className="text-blue-600">H</span> = Holding cost per unit</li>
               </ul>
-              <p className="text-gray-400 text-sm pt-4 border-t border-gray-700">
+              <p className="text-gray-500 text-sm pt-4 border-t border-gray-200">
                 EOQ helps minimize the total cost of inventory by balancing ordering costs and holding costs.
               </p>
             </div>
@@ -366,16 +366,16 @@ export function StockReplenishment() {
 
           <div className="space-y-4">
             {suggestions.map((item) => (
-              <div key={item.product_id} className="bg-gray-800 rounded-lg p-4 border border-gray-700">
-                <p className="text-white font-semibold mb-2">{item.product_name}</p>
+              <div key={item.product_id} className="bg-white rounded-lg p-4 border border-gray-200">
+                <p className="text-gray-900 font-semibold mb-2">{item.product_name}</p>
                 <div className="grid grid-cols-2 gap-2 text-sm">
                   <div>
-                    <p className="text-gray-400">EOQ Quantity</p>
-                    <p className="text-green-400 font-semibold">{item.eoq} units</p>
+                    <p className="text-gray-500">EOQ Quantity</p>
+                    <p className="text-green-600 font-semibold">{item.eoq} units</p>
                   </div>
                   <div>
-                    <p className="text-gray-400">Cost/Order</p>
-                    <p className="text-blue-400 font-semibold">₹{(item.estimated_cost / 1000).toFixed(0)}K</p>
+                    <p className="text-gray-500">Cost/Order</p>
+                    <p className="text-blue-600 font-semibold">₹{(item.estimated_cost / 1000).toFixed(0)}K</p>
                   </div>
                 </div>
               </div>

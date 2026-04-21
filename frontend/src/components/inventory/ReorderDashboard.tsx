@@ -389,7 +389,7 @@ export function ReorderDashboard() {
             <button onClick={selectAll} className="text-sm text-purple-600 hover:text-purple-700">
               Select All
             </button>
-            <span className="text-gray-300">|</span>
+            <span className="text-gray-700">|</span>
             <button onClick={deselectAll} className="text-sm text-gray-600 hover:text-gray-700">
               Deselect All
             </button>
@@ -468,7 +468,7 @@ export function ReorderDashboard() {
                         <div>
                           <p className="font-medium text-gray-900">{product.name}</p>
                           <p className="text-sm text-gray-500">SKU: {product.sku}</p>
-                          <p className="text-xs text-gray-400">{product.brand}</p>
+                          <p className="text-xs text-gray-500">{product.brand}</p>
                         </div>
                       </td>
                       <td className="px-4 py-3 text-sm text-gray-600">{product.category}</td>
@@ -520,7 +520,7 @@ export function ReorderDashboard() {
                       </td>
                       <td className="px-4 py-3">
                         <div>
-                          <p className="text-sm text-gray-900">{product.supplierName ?? <span className="text-gray-400 italic">None assigned</span>}</p>
+                          <p className="text-sm text-gray-900">{product.supplierName ?? <span className="text-gray-500 italic">None assigned</span>}</p>
                           <p className="text-xs text-gray-500">
                             Lead: {product.leadTimeDays}d
                           </p>

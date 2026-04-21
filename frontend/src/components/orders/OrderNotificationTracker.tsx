@@ -266,9 +266,9 @@ export function OrderNotificationTracker({
               break;
             default:
               dotClasses =
-                'bg-white text-gray-400 border-gray-300';
+                'bg-white text-gray-500 border-gray-300';
               lineClasses = 'bg-gray-200';
-              labelClasses = 'text-gray-400';
+              labelClasses = 'text-gray-500';
               break;
           }
 
@@ -302,7 +302,7 @@ export function OrderNotificationTracker({
                       <button
                         type="button"
                         onClick={() => toggleExpand(stepStatus)}
-                        className="text-gray-400 hover:text-gray-600 p-0.5"
+                        className="text-gray-500 hover:text-gray-600 p-0.5"
                         aria-label={
                           isExpanded
                             ? 'Collapse notification details'
@@ -423,7 +423,7 @@ export function OrderNotificationTracker({
 
       {/* Footer with order created timestamp */}
       <div className="mt-2 pt-3 border-t border-gray-100">
-        <p className="text-xs text-gray-400">
+        <p className="text-xs text-gray-500">
           Order created {formatTimestamp(createdAt)}
         </p>
       </div>
