@@ -106,7 +106,7 @@ export async function generateSeoForProduct(
 
   const body = {
     model: MODEL,
-    max_tokens: 350,
+    max_tokens: 400,
     system: [
       {
         type: "text",
@@ -115,9 +115,12 @@ export async function generateSeoForProduct(
       },
     ],
     messages: [
-      { role: "user", content: userPrompt },
-      // Prefill assistant turn so Claude is forced to continue a JSON object.
-      { role: "assistant", content: '{"seoTitle":' },
+      {
+        role: "user",
+        content:
+          userPrompt +
+          "\n\nRespond with a single JSON object only, no markdown or commentary.",
+      },
     ],
   };
 
@@ -149,17 +152,31 @@ export async function generateSeoForProduct(
     .map((b) => b.text as string)
     .join("");
 
-  // Reconstruct full JSON (we prefilled `{"seoTitle":`).
-  const raw = `{"seoTitle":${textOut}`.trim();
-  const lastBrace = raw.lastIndexOf("}");
-  const jsonText = lastBrace >= 0 ? raw.slice(0, lastBrace + 1) : raw;
+  // Extract the first JSON object from the response, tolerating:
+  //   - markdown code fences (```json ... ``` or ``` ... ```)
+  //   - leading/trailing whitespace and prose
+  //   - zero-width spaces between punctuation and values
+  let jsonText = textOut.trim();
+
+  // Strip code fences
+  jsonText = jsonText.replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/i, "");
+
+  // Remove zero-width / non-breaking spaces that Claude sometimes emits
+  jsonText = jsonText.replace(/[\u200B-\u200D\uFEFF\u00A0]/g, "");
+
+  // Grab from first "{" to the matching last "}" — discards any preamble/postamble.
+  const firstBrace = jsonText.indexOf("{");
+  const lastBrace = jsonText.lastIndexOf("}");
+  if (firstBrace >= 0 && lastBrace > firstBrace) {
+    jsonText = jsonText.slice(firstBrace, lastBrace + 1);
+  }
 
   let parsed: { seoTitle?: unknown; seoDescription?: unknown };
   try {
     parsed = JSON.parse(jsonText);
   } catch {
     throw new Error(
-      `Model did not return valid JSON: ${jsonText.slice(0, 300)}`
+      `Model did not return valid JSON. Raw: ${textOut.slice(0, 300)}`
     );
   }
 
