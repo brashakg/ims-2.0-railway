@@ -17,13 +17,17 @@ export interface CategoryDef {
 }
 
 export const CATEGORIES: CategoryDef[] = [
-  { key: "SPECTACLES", label: "Spectacles", seoNoun: "Eyeglasses" },
-  { key: "CLIP_ON_FRAMES", label: "Clip-On Frames", seoNoun: "Clip-On Frames" },
-  { key: "SUNGLASSES", label: "Sunglasses", seoNoun: "Sunglasses" },
-  { key: "CONTACT_LENSES", label: "Contact Lenses", seoNoun: "Contact Lenses" },
-  { key: "WATCHES", label: "Watches", seoNoun: "Watch" },
-  { key: "SMARTGLASSES", label: "Smartglasses", seoNoun: "Smartglasses" },
-  { key: "SMARTWATCHES", label: "Smartwatches", seoNoun: "Smartwatch" },
+  { key: "SPECTACLES",       label: "Spectacles",       seoNoun: "Eyeglasses" },
+  { key: "CLIP_ON_FRAMES",   label: "Clip-On Frames",   seoNoun: "Clip-On Frames" },
+  { key: "SUNGLASSES",       label: "Sunglasses",       seoNoun: "Sunglasses" },
+  { key: "READING_GLASSES",  label: "Reading Glasses",  seoNoun: "Reading Glasses" },
+  { key: "COMPUTER_GLASSES", label: "Computer Glasses", seoNoun: "Computer Glasses" },
+  { key: "SAFETY_GLASSES",   label: "Safety Glasses",   seoNoun: "Safety Glasses" },
+  { key: "CONTACT_LENSES",   label: "Contact Lenses",   seoNoun: "Contact Lenses" },
+  { key: "SMARTGLASSES",     label: "Smartglasses",     seoNoun: "Smartglasses" },
+  { key: "WATCHES",          label: "Watches",          seoNoun: "Watch" },
+  { key: "SMARTWATCHES",     label: "Smartwatches",     seoNoun: "Smartwatch" },
+  { key: "ACCESSORIES",      label: "Accessories",      seoNoun: "Accessory" },
 ];
 
 export const CATEGORY_KEYS = CATEGORIES.map((c) => c.key);
@@ -33,7 +37,7 @@ export type CategoryKey = (typeof CATEGORY_KEYS)[number];
  * be treated as equivalent to a canonical key — helpful for the pull route
  * when Shopify returns non-canonical productType values. */
 export const CATEGORY_ALIASES: Record<string, string> = {
-  // Legacy / Shopify productType spellings
+  // Legacy / Shopify productType spellings — all uppercased before lookup.
   WATCH: "WATCHES",
   SUNGLASS: "SUNGLASSES",
   "CONTACT LENS": "CONTACT_LENSES",
@@ -41,8 +45,14 @@ export const CATEGORY_ALIASES: Record<string, string> = {
   "CLIP-ON": "CLIP_ON_FRAMES",
   "CLIP-ON FRAMES": "CLIP_ON_FRAMES",
   "SMART GLASSES": "SMARTGLASSES",
+  SMARTGLASS: "SMARTGLASSES",
   "SMART WATCH": "SMARTWATCHES",
   "SMART WATCHES": "SMARTWATCHES",
+  SMARTWATCH: "SMARTWATCHES",
+  "READING GLASSES": "READING_GLASSES",
+  "COMPUTER GLASSES": "COMPUTER_GLASSES",
+  "SAFETY GLASS": "SAFETY_GLASSES",
+  "SAFETY GLASSES": "SAFETY_GLASSES",
   SOLUTIONS: "CONTACT_LENSES", // legacy: "SOLUTIONS" meant contact-lens care
 };
 
