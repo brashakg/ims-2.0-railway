@@ -145,7 +145,7 @@ function SuggestionCard({
       <div className="flex items-center gap-1 text-sm font-medium text-gray-900 mb-2">
         <IndianRupee className="h-3.5 w-3.5 text-gray-500" />
         <span>{formatINR(suggestion.priceRange.min)}</span>
-        <span className="text-gray-400">-</span>
+        <span className="text-gray-500">-</span>
         <span>{formatINR(suggestion.priceRange.max)}</span>
       </div>
 
@@ -163,7 +163,7 @@ function SuggestionCard({
             ? 'bg-green-600 text-white hover:bg-green-700'
             : suggestion.priority === 'UPGRADE'
               ? 'bg-blue-600 text-white hover:bg-blue-700'
-              : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+              : 'bg-gray-200 text-gray-700 hover:bg-gray-200'
         }`}
       >
         Select

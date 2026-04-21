@@ -115,7 +115,7 @@ export function BarcodeScanner({
           <Scan
             className={clsx(
               'w-5 h-5 transition-colors',
-              isScanning ? 'text-blue-600 animate-pulse' : 'text-gray-400'
+              isScanning ? 'text-blue-600 animate-pulse' : 'text-gray-500'
             )}
           />
         </div>
@@ -141,7 +141,7 @@ export function BarcodeScanner({
           {value && (
             <button
               onClick={handleClear}
-              className="p-1.5 text-gray-400 hover:text-gray-600 rounded transition-colors"
+              className="p-1.5 text-gray-500 hover:text-gray-600 rounded transition-colors"
               title="Clear"
             >
               <X className="w-4 h-4" />
@@ -151,7 +151,7 @@ export function BarcodeScanner({
           {onManualSearch && (
             <button
               onClick={handleSubmit}
-              className="p-1.5 text-gray-400 hover:text-bv-red-600 rounded transition-colors"
+              className="p-1.5 text-gray-500 hover:text-bv-red-600 rounded transition-colors"
               title="Search"
             >
               <Search className="w-4 h-4" />

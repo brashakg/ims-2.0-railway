@@ -3,6 +3,10 @@
 // ============================================================================
 // Extracted from POSLayout.tsx — payment collection step with split payments,
 // EMI, cash change calculator, voucher/credit billing options.
+//
+// Phase 6.6: Visual cleanup — replaced dark-theme remnants
+// (bg-white/900, text-gray-700/400, *-900/30 alpha overlays) with the
+// app's light-theme tokens. Pure visual change, no logic touched.
 
 import { useState } from 'react';
 import {
@@ -16,7 +20,7 @@ import { VoucherRedemption } from './VoucherRedemption';
 /** Safe currency format */
 function fc(amount: number | undefined | null): string {
   const val = Math.round((amount || 0) * 100) / 100;
-  return `\u20B9${val.toLocaleString('en-IN', { minimumFractionDigits: 0, maximumFractionDigits: 2 })}`;
+  return `₹${val.toLocaleString('en-IN', { minimumFractionDigits: 0, maximumFractionDigits: 2 })}`;
 }
 
 // ============================================================================
@@ -34,23 +38,23 @@ function CashChangeCalculator({ grandTotal }: { grandTotal: number; totalPaid: n
   ].filter((v, i, a) => v >= grandTotal && a.indexOf(v) === i).slice(0, 3);
 
   return (
-    <div className="bg-gray-800 border border-gray-700 rounded-xl p-4 space-y-3">
-      <p className="text-sm font-medium text-gray-300">Cash Tendered</p>
+    <div className="bg-white border border-gray-200 rounded-xl p-4 space-y-3">
+      <p className="text-sm font-medium text-gray-700">Cash Tendered</p>
       <div className="flex gap-2 items-center">
-        <span className="text-gray-400 text-lg">{'\u20B9'}</span>
+        <span className="text-gray-500 text-lg">{'₹'}</span>
         <input type="number" value={cashTendered} onChange={(e) => setCashTendered(e.target.value)}
           onFocus={(e) => e.target.select()} placeholder={String(Math.round(grandTotal))}
-          className="flex-1 px-3 py-2 border border-gray-600 rounded-lg text-lg font-semibold text-center" />
+          className="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-lg font-semibold text-center text-gray-900" />
       </div>
       <div className="flex gap-2">
         {quickAmounts.map(amt => (
           <button key={amt} onClick={() => setCashTendered(String(amt))}
-            className="px-3 py-1 bg-gray-800 border border-gray-700 rounded-lg text-xs font-medium hover:bg-gray-700">{fc(amt)}</button>
+            className="px-3 py-1 bg-gray-50 border border-gray-200 rounded-lg text-xs font-medium text-gray-700 hover:bg-gray-100">{fc(amt)}</button>
         ))}
       </div>
       {tendered > 0 && (
-        <div className={`text-center py-2 rounded-lg font-bold text-lg ${change >= 0 ? 'bg-green-900/30 text-green-700' : 'bg-red-900/30 text-red-600'}`}>
-          {change >= 0 ? `Change: \u20B9${Math.round(change).toLocaleString('en-IN')}` : `Short: \u20B9${Math.round(Math.abs(change)).toLocaleString('en-IN')}`}
+        <div className={`text-center py-2 rounded-lg font-bold text-lg ${change >= 0 ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-700'}`}>
+          {change >= 0 ? `Change: ₹${Math.round(change).toLocaleString('en-IN')}` : `Short: ₹${Math.round(Math.abs(change)).toLocaleString('en-IN')}`}
         </div>
       )}
     </div>
@@ -114,13 +118,13 @@ export function StepPayment() {
   ];
 
   return (
-    <div className="max-w-xl mx-auto space-y-4">
-      <div className="bg-gray-800 border border-gray-700 rounded-xl p-6 text-center">
+    <div className="w-full max-w-2xl mx-auto space-y-4">
+      <div className="bg-white border border-gray-200 rounded-xl p-6 text-center">
         <p className="text-sm text-gray-500 mb-1">{store.is_advance_payment ? 'Advance Due' : 'Total Due (incl. GST)'}</p>
-        <p className="text-4xl font-bold text-white">{'\u20B9'}{Math.round(total).toLocaleString('en-IN')}</p>
+        <p className="text-4xl font-bold text-gray-900">{'₹'}{Math.round(total).toLocaleString('en-IN')}</p>
         {paid > 0 && <div className="mt-3 flex justify-center gap-6 text-sm">
-          <span className="text-green-600">Paid: {'\u20B9'}{Math.round(paid).toLocaleString('en-IN')}</span>
-          <span className={balance > 0 ? 'text-red-600 font-semibold' : 'text-green-600 font-semibold'}>Balance: {'\u20B9'}{Math.round(Math.max(0, balance)).toLocaleString('en-IN')}</span>
+          <span className="text-green-600">Paid: {'₹'}{Math.round(paid).toLocaleString('en-IN')}</span>
+          <span className={balance > 0 ? 'text-red-600 font-semibold' : 'text-green-600 font-semibold'}>Balance: {'₹'}{Math.round(Math.max(0, balance)).toLocaleString('en-IN')}</span>
         </div>}
       </div>
 
@@ -145,24 +149,24 @@ export function StepPayment() {
               setPayRef('');
             }
           }} disabled={balance <= 0}
-            className={`flex flex-col items-center gap-1 p-3 rounded-xl border-2 transition-all ${balance <= 0 ? 'opacity-40 border-gray-700' : 'border-gray-700 hover:border-bv-gold-300 hover:bg-bv-gold-900/30'}`}>
-            <m.icon className="w-6 h-6 text-gray-300" /><span className="text-xs font-medium">{m.id === 'CASH' ? 'Full Cash' : m.id === 'EMI' ? 'EMI' : `${m.label} \u2192`}</span>
+            className={`flex flex-col items-center gap-1 p-3 rounded-xl border-2 transition-all ${balance <= 0 ? 'opacity-40 border-gray-200 text-gray-500' : 'border-gray-200 text-gray-700 hover:border-bv-red-300 hover:bg-bv-red-50'}`}>
+            <m.icon className="w-6 h-6" /><span className="text-xs font-medium">{m.id === 'CASH' ? 'Full Cash' : m.id === 'EMI' ? 'EMI' : `${m.label} →`}</span>
           </button>
         ))}
       </div>
 
       {balance > 0 && (
-        <div className="bg-gray-800 border border-gray-700 rounded-xl p-4 space-y-3">
-          <p className="text-sm font-medium text-gray-300">Split payment</p>
+        <div className="bg-white border border-gray-200 rounded-xl p-4 space-y-3">
+          <p className="text-sm font-medium text-gray-700">Split payment</p>
           <div className="flex gap-2">
-            {methods.map(m => <button key={m.id} onClick={() => setPayMethod(m.id)} className={`px-3 py-1.5 rounded-lg text-xs font-medium ${payMethod === m.id ? 'bg-bv-gold-500 text-white' : 'bg-gray-700 text-gray-300'}`}>{m.label}</button>)}
+            {methods.map(m => <button key={m.id} onClick={() => setPayMethod(m.id)} className={`px-3 py-1.5 rounded-lg text-xs font-medium ${payMethod === m.id ? 'bg-bv-red-600 text-gray-900' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'}`}>{m.label}</button>)}
           </div>
           <div className="flex gap-2">
             <input type="number" min="1" max={balance} step="0.01" value={payAmount}
               onChange={(e) => setPayAmount(e.target.value)}
               onFocus={(e) => e.target.select()}
-              placeholder={`Amount (max \u20B9${Math.round(balance).toLocaleString('en-IN')})`} className="flex-1 px-3 py-2 border border-gray-600 rounded-lg text-sm" />
-            {payMethod !== 'CASH' && <input value={payRef} onChange={(e) => setPayRef(e.target.value)} placeholder={payMethod === 'UPI' ? 'UPI Txn ID *' : payMethod === 'CARD' ? 'Approval code' : 'Reference'} className="flex-1 px-3 py-2 border border-gray-600 rounded-lg text-sm" />}
+              placeholder={`Amount (max ₹${Math.round(balance).toLocaleString('en-IN')})`} className="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm text-gray-900" />
+            {payMethod !== 'CASH' && <input value={payRef} onChange={(e) => setPayRef(e.target.value)} placeholder={payMethod === 'UPI' ? 'UPI Txn ID *' : payMethod === 'CARD' ? 'Approval code' : 'Reference'} className="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm text-gray-900" />}
             <button onClick={() => {
               const a = parseFloat(payAmount);
               if (!a || a <= 0) return;
@@ -174,7 +178,7 @@ export function StepPayment() {
               disabled={!payAmount || parseFloat(payAmount) <= 0 || (payMethod !== 'CASH' && !payRef.trim())}
               className={`px-4 py-2 rounded-lg text-sm font-semibold ${
                 !payAmount || parseFloat(payAmount) <= 0 || (payMethod !== 'CASH' && !payRef.trim())
-                  ? 'bg-gray-700 text-gray-400 cursor-not-allowed' : 'bg-bv-gold-500 text-white hover:bg-bv-gold-600'
+                  ? 'bg-gray-200 text-gray-500 cursor-not-allowed' : 'bg-bv-red-600 text-gray-900 hover:bg-bv-red-700'
               }`}>Add</button>
           </div>
           {payMethod !== 'CASH' && !payRef.trim() && payAmount && <p className="text-xs text-amber-600">Reference/Txn ID required for {payMethod}</p>}
@@ -182,38 +186,38 @@ export function StepPayment() {
       )}
 
       {showEMIForm && balance > 0 && (
-        <div className="bg-gray-800 border border-gray-700 rounded-xl p-4 space-y-3">
-          <p className="text-sm font-medium text-gray-300">EMI Details</p>
+        <div className="bg-white border border-gray-200 rounded-xl p-4 space-y-3">
+          <p className="text-sm font-medium text-gray-700">EMI Details</p>
           <div className="space-y-3">
             <div>
-              <label className="text-xs font-medium text-gray-300">EMI Provider</label>
-              <select value={emiProvider} onChange={(e) => setEmiProvider(e.target.value)} className="w-full mt-1 px-3 py-2 border border-gray-600 rounded-lg text-sm">
+              <label className="text-xs font-medium text-gray-700">EMI Provider</label>
+              <select value={emiProvider} onChange={(e) => setEmiProvider(e.target.value)} className="w-full mt-1 px-3 py-2 border border-gray-300 rounded-lg text-sm text-gray-900">
                 {emiProviders.map(p => <option key={p} value={p}>{p}</option>)}
               </select>
             </div>
             <div>
-              <label className="text-xs font-medium text-gray-300">Tenure (months)</label>
-              <select value={emiTenure} onChange={(e) => setEmiTenure(Number(e.target.value))} className="w-full mt-1 px-3 py-2 border border-gray-600 rounded-lg text-sm">
+              <label className="text-xs font-medium text-gray-700">Tenure (months)</label>
+              <select value={emiTenure} onChange={(e) => setEmiTenure(Number(e.target.value))} className="w-full mt-1 px-3 py-2 border border-gray-300 rounded-lg text-sm text-gray-900">
                 {emiTenures.map(t => <option key={t} value={t}>{t} months</option>)}
               </select>
             </div>
             <div>
-              <label className="text-xs font-medium text-gray-300">Down Payment</label>
-              <input type="number" min="0" max={balance - 0.01} step="100" value={emiDownPayment} onChange={(e) => setEmiDownPayment(e.target.value)} placeholder={`Max \u20B9${Math.round(balance).toLocaleString('en-IN')}`} className="w-full mt-1 px-3 py-2 border border-gray-600 rounded-lg text-sm" onFocus={(e) => e.target.select()} />
+              <label className="text-xs font-medium text-gray-700">Down Payment</label>
+              <input type="number" min="0" max={balance - 0.01} step="100" value={emiDownPayment} onChange={(e) => setEmiDownPayment(e.target.value)} placeholder={`Max ₹${Math.round(balance).toLocaleString('en-IN')}`} className="w-full mt-1 px-3 py-2 border border-gray-300 rounded-lg text-sm text-gray-900" onFocus={(e) => e.target.select()} />
             </div>
             {emiDownPayment && (
-              <div className="bg-blue-900/30 border border-blue-200 rounded-lg p-3 space-y-2 text-sm">
-                <div className="flex justify-between"><span className="text-gray-300">Loan Amount:</span><span className="font-semibold">{'\u20B9'}{Math.round((balance - (parseFloat(emiDownPayment) || 0)) * 100) / 100}</span></div>
-                <div className="flex justify-between"><span className="text-gray-300">Processing Fee (2%):</span><span className="font-semibold">{'\u20B9'}{Math.round(((balance - (parseFloat(emiDownPayment) || 0)) * 0.02) * 100) / 100}</span></div>
-                <div className="flex justify-between"><span className="text-gray-300">Monthly EMI ({emiTenure}m):</span><span className="font-bold text-blue-700">{'\u20B9'}{Math.round(calculateEMI(balance - (parseFloat(emiDownPayment) || 0), 0.01, emiTenure) * 100) / 100}</span></div>
+              <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 space-y-2 text-sm">
+                <div className="flex justify-between"><span className="text-gray-700">Loan Amount:</span><span className="font-semibold text-gray-900">{'₹'}{Math.round((balance - (parseFloat(emiDownPayment) || 0)) * 100) / 100}</span></div>
+                <div className="flex justify-between"><span className="text-gray-700">Processing Fee (2%):</span><span className="font-semibold text-gray-900">{'₹'}{Math.round(((balance - (parseFloat(emiDownPayment) || 0)) * 0.02) * 100) / 100}</span></div>
+                <div className="flex justify-between"><span className="text-gray-700">Monthly EMI ({emiTenure}m):</span><span className="font-bold text-blue-700">{'₹'}{Math.round(calculateEMI(balance - (parseFloat(emiDownPayment) || 0), 0.01, emiTenure) * 100) / 100}</span></div>
               </div>
             )}
             <div className="flex gap-2">
               <button onClick={() => {
                 setShowEMIForm(false);
                 setEmiDownPayment('');
-              }} className="flex-1 px-4 py-2 rounded-lg text-sm font-semibold bg-gray-700 text-gray-300 hover:bg-gray-300">Cancel</button>
-              <button onClick={handleEMISubmit} disabled={!emiDownPayment || parseFloat(emiDownPayment) < 0 || parseFloat(emiDownPayment) >= balance} className={`flex-1 px-4 py-2 rounded-lg text-sm font-semibold ${!emiDownPayment || parseFloat(emiDownPayment) < 0 || parseFloat(emiDownPayment) >= balance ? 'bg-gray-700 text-gray-400 cursor-not-allowed' : 'bg-bv-gold-500 text-white hover:bg-bv-gold-600'}`}>Add EMI</button>
+              }} className="flex-1 px-4 py-2 rounded-lg text-sm font-semibold bg-gray-100 text-gray-700 hover:bg-gray-200">Cancel</button>
+              <button onClick={handleEMISubmit} disabled={!emiDownPayment || parseFloat(emiDownPayment) < 0 || parseFloat(emiDownPayment) >= balance} className={`flex-1 px-4 py-2 rounded-lg text-sm font-semibold ${!emiDownPayment || parseFloat(emiDownPayment) < 0 || parseFloat(emiDownPayment) >= balance ? 'bg-gray-200 text-gray-500 cursor-not-allowed' : 'bg-bv-red-600 text-gray-900 hover:bg-bv-red-700'}`}>Add EMI</button>
             </div>
           </div>
         </div>
@@ -221,9 +225,9 @@ export function StepPayment() {
 
       {(store.payments || []).length > 0 && <div className="space-y-2">
         {(store.payments || []).map((p, i) => (
-          <div key={i} className="flex items-center justify-between bg-green-900/30 border border-green-200 rounded-lg px-4 py-2 text-sm">
-            <div className="flex items-center gap-2"><CheckCircle className="w-4 h-4 text-green-500" /><span className="font-medium">{p.method}</span>{p.reference && <span className="text-gray-500">({p.reference})</span>}</div>
-            <div className="flex items-center gap-2"><span className="font-semibold">{'\u20B9'}{Math.round(p.amount * 100 / 100).toLocaleString('en-IN')}</span><button onClick={() => store.removePayment(i)} className="text-gray-400 hover:text-red-500"><X className="w-4 h-4" /></button></div>
+          <div key={i} className="flex items-center justify-between bg-green-50 border border-green-200 rounded-lg px-4 py-2 text-sm">
+            <div className="flex items-center gap-2"><CheckCircle className="w-4 h-4 text-green-600" /><span className="font-medium text-gray-900">{p.method}</span>{p.reference && <span className="text-gray-500">({p.reference})</span>}</div>
+            <div className="flex items-center gap-2"><span className="font-semibold text-gray-900">{'₹'}{Math.round(p.amount * 100 / 100).toLocaleString('en-IN')}</span><button onClick={() => store.removePayment(i)} className="text-gray-500 hover:text-red-500"><X className="w-4 h-4" /></button></div>
           </div>
         ))}
       </div>}
@@ -233,7 +237,7 @@ export function StepPayment() {
         <CashChangeCalculator grandTotal={total} totalPaid={paid} />
       )}
 
-      {balance <= 0 && <div className="bg-green-900/30 border border-green-200 rounded-lg p-4 text-center text-green-700 font-semibold">Payment complete — click "Complete Order" to finalize</div>}
+      {balance <= 0 && <div className="bg-green-50 border border-green-200 rounded-lg p-4 text-center text-green-700 font-semibold">Payment complete — click "Complete Order" to finalize</div>}
     </div>
   );
 }

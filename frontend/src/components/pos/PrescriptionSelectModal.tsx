@@ -110,7 +110,7 @@ export function PrescriptionSelectModal({
         {/* Content */}
         <div className="flex-1 overflow-y-auto p-4">
           {!patient ? (
-            <div className="flex flex-col items-center justify-center h-48 text-gray-400">
+            <div className="flex flex-col items-center justify-center h-48 text-gray-500">
               <User className="w-12 h-12 mb-3 opacity-50" />
               <p>No patient selected</p>
               <p className="text-sm">Please select a patient first</p>
@@ -125,7 +125,7 @@ export function PrescriptionSelectModal({
               <p>{errorMsg}</p>
             </div>
           ) : prescriptions.length === 0 ? (
-            <div className="flex flex-col items-center justify-center h-48 text-gray-400">
+            <div className="flex flex-col items-center justify-center h-48 text-gray-500">
               <FileText className="w-12 h-12 mb-3 opacity-50" />
               <p>No prescriptions found</p>
               <p className="text-sm mb-4">Create a new prescription for this patient</p>
@@ -176,7 +176,7 @@ export function PrescriptionSelectModal({
                     {/* Header */}
                     <div className="flex items-start justify-between mb-3">
                       <div className="flex items-center gap-2">
-                        <Calendar className="w-4 h-4 text-gray-400" />
+                        <Calendar className="w-4 h-4 text-gray-500" />
                         <span className="font-medium text-gray-900">{formatDate(prescription.testDate)}</span>
                         {prescription.isExternal ? (
                           <span className="px-2 py-0.5 text-xs bg-purple-100 text-purple-700 rounded">External</span>
@@ -211,20 +211,20 @@ export function PrescriptionSelectModal({
                         <p className="text-xs text-gray-500 mb-1">Right Eye (OD)</p>
                         <div className="flex gap-3 text-sm">
                           <div>
-                            <span className="text-gray-400 text-xs">SPH</span>
+                            <span className="text-gray-500 text-xs">SPH</span>
                             <p className="font-medium">{formatPower(prescription.rightEye.sphere)}</p>
                           </div>
                           <div>
-                            <span className="text-gray-400 text-xs">CYL</span>
+                            <span className="text-gray-500 text-xs">CYL</span>
                             <p className="font-medium">{formatPower(prescription.rightEye.cylinder)}</p>
                           </div>
                           <div>
-                            <span className="text-gray-400 text-xs">AXIS</span>
+                            <span className="text-gray-500 text-xs">AXIS</span>
                             <p className="font-medium">{prescription.rightEye.axis || '-'}</p>
                           </div>
                           {prescription.rightEye.add && (
                             <div>
-                              <span className="text-gray-400 text-xs">ADD</span>
+                              <span className="text-gray-500 text-xs">ADD</span>
                               <p className="font-medium">{formatPower(prescription.rightEye.add)}</p>
                             </div>
                           )}
@@ -236,20 +236,20 @@ export function PrescriptionSelectModal({
                         <p className="text-xs text-gray-500 mb-1">Left Eye (OS)</p>
                         <div className="flex gap-3 text-sm">
                           <div>
-                            <span className="text-gray-400 text-xs">SPH</span>
+                            <span className="text-gray-500 text-xs">SPH</span>
                             <p className="font-medium">{formatPower(prescription.leftEye.sphere)}</p>
                           </div>
                           <div>
-                            <span className="text-gray-400 text-xs">CYL</span>
+                            <span className="text-gray-500 text-xs">CYL</span>
                             <p className="font-medium">{formatPower(prescription.leftEye.cylinder)}</p>
                           </div>
                           <div>
-                            <span className="text-gray-400 text-xs">AXIS</span>
+                            <span className="text-gray-500 text-xs">AXIS</span>
                             <p className="font-medium">{prescription.leftEye.axis || '-'}</p>
                           </div>
                           {prescription.leftEye.add && (
                             <div>
-                              <span className="text-gray-400 text-xs">ADD</span>
+                              <span className="text-gray-500 text-xs">ADD</span>
                               <p className="font-medium">{formatPower(prescription.leftEye.add)}</p>
                             </div>
                           )}
