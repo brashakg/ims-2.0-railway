@@ -49,23 +49,24 @@ export async function GET(request: NextRequest) {
     });
     if (existing.length > 0) matchMode = "exact";
 
-    // Stage 2: if nothing matched, fall back to a normalized (punctuation-
-    // and-spacing-insensitive) comparison. Narrow the candidate set using a
-    // prefix-letter contains-filter to keep the pull bounded.
+    // Stage 2: normalized CONTAINS match. Many products in this catalog
+    // have modelNo = full product title (pull fallback when the Shopify
+    // model_no metafield is empty), so a strict equality check fails even
+    // when the user's short model number ("RB3025") appears inside the
+    // stored value ("Ray Ban RB 3025 002/32 58 Black Sunglass Eyewear").
+    //
+    // Strategy: normalize both sides (strip non-alphanumerics, lowercase),
+    // then require the stored brand normalized to equal the query brand
+    // normalized, AND the stored modelNo OR title normalized to CONTAIN
+    // the query modelNo normalized.
     if (existing.length === 0) {
       const normBrand = normalize(brand);
       const normModel = normalize(modelNo);
       if (normBrand && normModel) {
         const brandHead = normBrand.slice(0, Math.min(3, normBrand.length));
-        const modelHead = normModel.slice(0, Math.min(2, normModel.length));
         const candidates = await prisma.product.findMany({
           where: {
-            AND: [
-              // Tolerant prefix-contains on both fields to keep the DB scan
-              // manageable; final filter is the normalized equality below.
-              { brand: { contains: brandHead, mode: "insensitive" } },
-              { modelNo: { contains: modelHead, mode: "insensitive" } },
-            ],
+            brand: { contains: brandHead, mode: "insensitive" },
           },
           include: {
             variants: {
@@ -77,13 +78,14 @@ export async function GET(request: NextRequest) {
             },
             images: { orderBy: { position: "asc" }, take: 1 },
           },
-          take: 200,
+          take: 500,
         });
-        existing = candidates.filter(
-          (p) =>
-            normalize(p.brand || "") === normBrand &&
-            normalize(p.modelNo || "") === normModel
-        );
+        existing = candidates.filter((p) => {
+          if (normalize(p.brand || "") !== normBrand) return false;
+          const m = normalize(p.modelNo || "");
+          const t = normalize(p.title || "");
+          return m.includes(normModel) || t.includes(normModel);
+        });
         if (existing.length > 0) matchMode = "normalized";
       }
     }
