@@ -622,7 +622,7 @@ function PrinterSection({
                 type="checkbox"
                 checked={printerSettings?.auto_print_receipt}
                 onChange={e => setPrinterSettings((prev: any) => prev ? { ...prev, auto_print_receipt: e.target.checked } : null)}
-                className="rounded border-gray-300 text-bv-gold-600"
+                className="rounded border-gray-300 text-bv-red-600"
               />
               <span className="text-sm">Auto-print receipt after payment</span>
             </label>
@@ -631,7 +631,7 @@ function PrinterSection({
                 type="checkbox"
                 checked={printerSettings?.auto_print_job_card}
                 onChange={e => setPrinterSettings((prev: any) => prev ? { ...prev, auto_print_job_card: e.target.checked } : null)}
-                className="rounded border-gray-300 text-bv-gold-600"
+                className="rounded border-gray-300 text-bv-red-600"
               />
               <span className="text-sm">Auto-print job card for workshop orders</span>
             </label>
@@ -760,21 +760,21 @@ function AuditLogSection({
           </div>
           <div className="card p-4">
             <div className="flex items-center gap-2 mb-1">
-              <LogOut className="w-4 h-4 text-green-400" />
+              <LogOut className="w-4 h-4 text-green-600" />
               <p className="text-sm text-gray-500">Logins</p>
             </div>
             <p className="text-2xl font-bold text-green-600">{auditSummary.today.logins}</p>
           </div>
           <div className="card p-4">
             <div className="flex items-center gap-2 mb-1">
-              <Plus className="w-4 h-4 text-blue-400" />
+              <Plus className="w-4 h-4 text-blue-600" />
               <p className="text-sm text-gray-500">Orders Created</p>
             </div>
             <p className="text-2xl font-bold text-blue-600">{auditSummary.today.orders_created}</p>
           </div>
           <div className="card p-4">
             <div className="flex items-center gap-2 mb-1">
-              <AlertCircle className="w-4 h-4 text-green-400" />
+              <AlertCircle className="w-4 h-4 text-green-600" />
               <p className="text-sm text-gray-500">System Health</p>
             </div>
             <p className="text-2xl font-bold text-green-600">Good</p>

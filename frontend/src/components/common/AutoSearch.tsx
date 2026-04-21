@@ -185,7 +185,7 @@ export function AutoSearch<T>({
   return (
     <div className={`relative ${className}`}>
       <div className="relative">
-        <div className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400">
+        <div className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500">
           {isLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : (icon || <Search className="w-4 h-4" />)}
         </div>
         <input
@@ -197,10 +197,10 @@ export function AutoSearch<T>({
           onFocus={() => { if (results.length > 0 && query.length >= minChars) setIsOpen(true); }}
           placeholder={placeholder}
           autoFocus={autoFocus}
-          className="w-full pl-10 pr-8 py-2.5 bg-gray-800 border border-gray-600 rounded-lg text-sm text-white placeholder:text-gray-400 focus:ring-2 focus:ring-bv-gold-500 focus:border-bv-gold-500 transition-colors"
+          className="w-full pl-10 pr-8 py-2.5 bg-white border border-gray-300 rounded-lg text-sm text-gray-900 placeholder:text-gray-500 focus:ring-2 focus:ring-bv-gold-500 focus:border-bv-red-600 transition-colors"
         />
         {query && (
-          <button onClick={handleClear} className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600">
+          <button onClick={handleClear} className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-600">
             <X className="w-4 h-4" />
           </button>
         )}
@@ -209,17 +209,17 @@ export function AutoSearch<T>({
       {/* Dropdown */}
       {isOpen && (
         <div ref={dropdownRef}
-          className="absolute z-50 w-full mt-1 bg-gray-800 border border-gray-600 rounded-xl shadow-lg overflow-hidden max-h-80 overflow-y-auto">
+          className="absolute z-50 w-full mt-1 bg-white border border-gray-300 rounded-xl shadow-lg overflow-hidden max-h-80 overflow-y-auto">
           {results.length === 0 ? (
-            <div className="px-4 py-6 text-center text-sm text-gray-400">{emptyMessage}</div>
+            <div className="px-4 py-6 text-center text-sm text-gray-500">{emptyMessage}</div>
           ) : (
             results.map((item, idx) => (
               <button
                 key={getKey(item)}
                 onClick={() => handleSelect(item)}
                 onMouseEnter={() => setHighlightIndex(idx)}
-                className={`w-full text-left px-3 py-2.5 transition-colors border-b border-gray-700 last:border-0 ${
-                  idx === highlightIndex ? 'bg-bv-gold-900/30' : 'hover:bg-gray-700'
+                className={`w-full text-left px-3 py-2.5 transition-colors border-b border-gray-200 last:border-0 ${
+                  idx === highlightIndex ? 'bg-bv-red-50' : 'hover:bg-gray-100'
                 }`}
               >
                 {renderItem(item, idx === highlightIndex)}

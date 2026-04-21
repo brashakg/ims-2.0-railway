@@ -27,7 +27,7 @@ const SEGMENTS: Segment[] = [
   {
     id: 'champions',
     name: 'Champions',
-    color: 'text-green-400',
+    color: 'text-green-600',
     bgColor: 'bg-green-50 border-green-200',
     customerCount: 145,
     avgLifetimeValue: 85000,
@@ -43,7 +43,7 @@ const SEGMENTS: Segment[] = [
   {
     id: 'loyal',
     name: 'Loyal Customers',
-    color: 'text-blue-400',
+    color: 'text-blue-600',
     bgColor: 'bg-blue-50 border-blue-200',
     customerCount: 312,
     avgLifetimeValue: 42000,
@@ -59,7 +59,7 @@ const SEGMENTS: Segment[] = [
   {
     id: 'big_spenders',
     name: 'Big Spenders',
-    color: 'text-yellow-400',
+    color: 'text-yellow-600',
     bgColor: 'bg-yellow-50 border-yellow-200',
     customerCount: 89,
     avgLifetimeValue: 125000,
@@ -75,7 +75,7 @@ const SEGMENTS: Segment[] = [
   {
     id: 'at_risk',
     name: 'At Risk',
-    color: 'text-orange-400',
+    color: 'text-orange-600',
     bgColor: 'bg-orange-50 border-orange-200',
     customerCount: 234,
     avgLifetimeValue: 18000,
@@ -91,7 +91,7 @@ const SEGMENTS: Segment[] = [
   {
     id: 'lost',
     name: 'Lost Customers',
-    color: 'text-red-400',
+    color: 'text-red-600',
     bgColor: 'bg-red-50 border-red-200',
     customerCount: 156,
     avgLifetimeValue: 5200,
@@ -132,11 +132,11 @@ export function CustomerSegmentation() {
         </div>
         <div className="bg-white border border-gray-200 rounded-lg p-4">
           <p className="text-gray-500 text-sm mb-1">Total Value</p>
-          <p className="text-2xl font-bold text-green-400">₹{(totalValue / 100000).toFixed(1)}L</p>
+          <p className="text-2xl font-bold text-green-600">₹{(totalValue / 100000).toFixed(1)}L</p>
         </div>
         <div className="bg-white border border-gray-200 rounded-lg p-4">
           <p className="text-gray-500 text-sm mb-1">Avg Customer LTV</p>
-          <p className="text-2xl font-bold text-blue-400">₹{(totalValue / totalCustomers).toLocaleString('en-IN', { maximumFractionDigits: 0 })}</p>
+          <p className="text-2xl font-bold text-blue-600">₹{(totalValue / totalCustomers).toLocaleString('en-IN', { maximumFractionDigits: 0 })}</p>
         </div>
       </div>
 
@@ -188,7 +188,7 @@ export function CustomerSegmentation() {
               </div>
               <div>
                 <p className="text-gray-500 text-xs mb-1">Avg LTV</p>
-                <p className="text-2xl font-bold text-green-400">₹{(segment.avgLifetimeValue / 1000).toFixed(0)}K</p>
+                <p className="text-2xl font-bold text-green-600">₹{(segment.avgLifetimeValue / 1000).toFixed(0)}K</p>
                 <p className="text-xs text-gray-500">per customer</p>
               </div>
             </div>
@@ -210,8 +210,8 @@ export function CustomerSegmentation() {
                   'w-full py-2 rounded text-sm font-semibold flex items-center justify-center gap-2 transition-colors',
                   segment.id === 'champions' ? 'bg-green-600 hover:bg-green-700 text-white' :
                   segment.id === 'loyal' ? 'bg-blue-600 hover:bg-blue-700 text-white' :
-                  segment.id === 'big_spenders' ? 'bg-yellow-600 hover:bg-yellow-700 text-white' :
-                  segment.id === 'at_risk' ? 'bg-orange-600 hover:bg-orange-700 text-white' :
+                  segment.id === 'big_spenders' ? 'bg-yellow-600 hover:bg-yellow-700 text-gray-900' :
+                  segment.id === 'at_risk' ? 'bg-orange-600 hover:bg-orange-700 text-gray-900' :
                   'bg-red-600 hover:bg-red-700 text-white'
                 )}>
                   <Target className="w-4 h-4" />

@@ -259,7 +259,7 @@ export function StorefrontPage() {
       </header>
 
       {/* Hero Banner */}
-      <div className="bg-gradient-to-r from-purple-600 to-blue-600 text-white py-12">
+      <div className="bg-gradient-to-r from-purple-600 to-blue-600 text-gray-900 py-12">
         <div className="max-w-7xl mx-auto px-4">
           <h2 className="text-4xl font-bold mb-2">Winter Sale - Up to 30% Off!</h2>
           <p className="text-xl mb-6">Premium eyewear from top brands at unbeatable prices</p>
@@ -391,7 +391,7 @@ export function StorefrontPage() {
 
                   {/* Rating */}
                   <div className="flex items-center gap-1 mb-2">
-                    <Star className="w-4 h-4 fill-yellow-400 text-yellow-400" />
+                    <Star className="w-4 h-4 fill-yellow-400 text-yellow-600" />
                     <span className="text-sm font-medium text-gray-900">{product.rating}</span>
                     <span className="text-sm text-gray-500">({product.reviewCount})</span>
                   </div>
@@ -413,7 +413,7 @@ export function StorefrontPage() {
                     <button
                       onClick={() => addToCart(product)}
                       disabled={!product.inStock}
-                      className="flex-1 bg-purple-600 hover:bg-purple-700 disabled:bg-gray-300 disabled:cursor-not-allowed text-white py-2 px-4 rounded-lg font-medium transition-colors flex items-center justify-center gap-2"
+                      className="flex-1 bg-purple-600 hover:bg-purple-700 disabled:bg-gray-300 disabled:cursor-not-allowed text-gray-900 py-2 px-4 rounded-lg font-medium transition-colors flex items-center justify-center gap-2"
                     >
                       <ShoppingCart className="w-4 h-4" />
                       Add to Cart

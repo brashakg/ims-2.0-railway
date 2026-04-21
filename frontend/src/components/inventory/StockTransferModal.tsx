@@ -366,7 +366,7 @@ export function StockTransferModal({ isOpen, onClose, onTransferCreated }: Stock
                 </label>
                 <div className="flex gap-2">
                   <div className="flex-1 relative">
-                    <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-gray-400" />
+                    <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-gray-500" />
                     <input
                       type="text"
                       value={searchQuery}
@@ -442,7 +442,7 @@ export function StockTransferModal({ isOpen, onClose, onTransferCreated }: Stock
                         <div className="flex-1">
                           <p className="font-medium text-gray-900">{item.productName}</p>
                           <p className="text-sm text-gray-500">SKU: {item.sku}</p>
-                          <p className="text-xs text-gray-400 mt-1">
+                          <p className="text-xs text-gray-500 mt-1">
                             Available: {item.availableQuantity} units
                           </p>
                         </div>

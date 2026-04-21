@@ -112,7 +112,7 @@ export function AdvancedSearch({
         {/* Main Search Bar */}
         <div className="relative">
           <div className="relative flex items-center">
-            <Search className="absolute left-3 w-5 h-5 text-gray-400" />
+            <Search className="absolute left-3 w-5 h-5 text-gray-500" />
             <input
               type="text"
               value={query}
@@ -242,10 +242,10 @@ export function AdvancedSearch({
                           {result.description && (
                             <p className="text-sm text-gray-500 mt-1">{result.description}</p>
                           )}
-                          <p className="text-xs text-gray-400 mt-1">{result.category}</p>
+                          <p className="text-xs text-gray-500 mt-1">{result.category}</p>
                         </div>
                         {result.score < 100 && (
-                          <span className="text-xs text-gray-400 ml-2">
+                          <span className="text-xs text-gray-500 ml-2">
                             {Math.round(result.score)}%
                           </span>
                         )}

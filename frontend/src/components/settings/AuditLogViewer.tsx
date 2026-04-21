@@ -24,12 +24,12 @@ interface AuditLogViewerProps {
 
 
 const ACTION_COLORS: Record<string, string> = {
-  CREATE: 'bg-green-900 text-green-200',
-  UPDATE: 'bg-blue-900 text-blue-200',
-  DELETE: 'bg-red-900 text-red-200',
-  LOGIN: 'bg-purple-900 text-purple-200',
-  LOGOUT: 'bg-purple-900 text-purple-200',
-  EXPORT: 'bg-orange-900 text-orange-200',
+  CREATE: 'bg-green-50 text-green-200',
+  UPDATE: 'bg-blue-50 text-blue-200',
+  DELETE: 'bg-red-50 text-red-200',
+  LOGIN: 'bg-purple-50 text-purple-200',
+  LOGOUT: 'bg-purple-50 text-purple-200',
+  EXPORT: 'bg-orange-50 text-orange-200',
 };
 
 export function AuditLogViewer({ logs = [] }: AuditLogViewerProps) {
@@ -164,7 +164,7 @@ export function AuditLogViewer({ logs = [] }: AuditLogViewerProps) {
       </div>
 
       {/* Results count */}
-      <div className="text-sm text-gray-400">
+      <div className="text-sm text-gray-500">
         Showing {filteredLogs.length} of {logs.length} logs
       </div>
 
@@ -185,12 +185,12 @@ export function AuditLogViewer({ logs = [] }: AuditLogViewerProps) {
             {isLoading ? (
               <tr>
                 <td colSpan={6} className="px-4 py-8 text-center">
-                  <Loader2 className="w-5 h-5 animate-spin mx-auto text-gray-400" />
+                  <Loader2 className="w-5 h-5 animate-spin mx-auto text-gray-500" />
                 </td>
               </tr>
             ) : filteredLogs.length === 0 ? (
               <tr>
-                <td colSpan={6} className="px-4 py-8 text-center text-gray-400">
+                <td colSpan={6} className="px-4 py-8 text-center text-gray-500">
                   No audit logs found
                 </td>
               </tr>

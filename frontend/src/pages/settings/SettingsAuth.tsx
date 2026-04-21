@@ -208,7 +208,7 @@ export function UserManagementSection() {
             <tbody className="divide-y divide-gray-200">
               {filteredUsers.length === 0 ? (
                 <tr>
-                  <td colSpan={6} className="px-4 py-12 text-center text-gray-400">
+                  <td colSpan={6} className="px-4 py-12 text-center text-gray-500">
                     {user?.activeRole === 'STORE_MANAGER'
                       ? 'No staff members found. Click "Add User" to create store staff.'
                       : 'No users found. Click "Add User" to create one.'}
@@ -247,7 +247,7 @@ export function UserManagementSection() {
                             {u.accessibleStores.slice(0, 3).map(sId => {
                               const storeObj = stores.find(s => s.id === sId);
                               return (
-                                <span key={sId} className="text-xs bg-blue-900/30 text-blue-400 px-2 py-0.5 rounded" title={storeObj?.storeName || sId}>
+                                <span key={sId} className="text-xs bg-blue-50 text-blue-600 px-2 py-0.5 rounded" title={storeObj?.storeName || sId}>
                                   {storeObj?.storeCode || sId}
                                 </span>
                               );
@@ -278,7 +278,7 @@ export function UserManagementSection() {
                                 setEditingUser(u);
                                 setShowAddUserModal(true);
                               }}
-                              className="text-gray-400 hover:text-bv-red-600"
+                              className="text-gray-500 hover:text-bv-red-600"
                               title="Edit user"
                             >
                               <Edit2 className="w-4 h-4" />
@@ -291,7 +291,7 @@ export function UserManagementSection() {
                           {canDelete ? (
                             <button
                               onClick={() => handleDeleteUser(u.id)}
-                              className="text-gray-400 hover:text-red-600"
+                              className="text-gray-500 hover:text-red-600"
                               title="Delete user"
                             >
                               <Trash2 className="w-4 h-4" />
@@ -390,7 +390,7 @@ function UserModal({
             {user ? 'Edit User' : 'Add New User'}
           </h2>
           <button onClick={onClose} className="p-2 hover:bg-gray-100 rounded-lg">
-            <X className="w-5 h-5 text-gray-400" />
+            <X className="w-5 h-5 text-gray-500" />
           </button>
         </div>
 

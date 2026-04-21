@@ -138,7 +138,7 @@ export function StoreManagementSection() {
   };
 
   if (isLoading) {
-    return <div className="flex items-center justify-center h-48"><div className="text-gray-400">Loading...</div></div>;
+    return <div className="flex items-center justify-center h-48"><div className="text-gray-500">Loading...</div></div>;
   }
 
   return (
@@ -146,7 +146,7 @@ export function StoreManagementSection() {
       <div className="space-y-4">
         <div className="card">
           <div className="flex items-center justify-between mb-6">
-            <h2 className="text-lg font-semibold text-white">Store Management</h2>
+            <h2 className="text-lg font-semibold text-gray-900">Store Management</h2>
             <button
               onClick={() => setShowAddStoreModal(true)}
               className="btn-primary flex items-center gap-2"
@@ -157,7 +157,7 @@ export function StoreManagementSection() {
           </div>
 
           {stores.length === 0 ? (
-            <div className="text-center py-12 text-gray-400">
+            <div className="text-center py-12 text-gray-500">
               <Store className="w-12 h-12 mx-auto mb-3 opacity-50" />
               <p>No stores created yet</p>
               <p className="text-sm">Click "Add Store" to create your first store</p>
@@ -167,21 +167,21 @@ export function StoreManagementSection() {
               {stores.map(store => (
                 <div
                   key={store.id}
-                  className="p-4 border border-gray-700 rounded-lg hover:border-bv-red-200 transition-colors"
+                  className="p-4 border border-gray-200 rounded-lg hover:border-bv-red-200 transition-colors"
                 >
                   <div className="flex items-start justify-between">
                     <div>
                       <div className="flex items-center gap-2">
-                        <h3 className="font-semibold text-white">{store.storeName}</h3>
-                        <span className="text-xs bg-gray-700 px-2 py-0.5 rounded">{store.storeCode}</span>
+                        <h3 className="font-semibold text-gray-900">{store.storeName}</h3>
+                        <span className="text-xs bg-gray-100 px-2 py-0.5 rounded">{store.storeCode}</span>
                         {store.isActive ? (
                           <span className="badge-success">Active</span>
                         ) : (
                           <span className="badge-error">Inactive</span>
                         )}
                       </div>
-                      <p className="text-sm text-gray-400 mt-1">{store.address}, {store.city}</p>
-                      <div className="flex items-center gap-4 mt-2 text-xs text-gray-400">
+                      <p className="text-sm text-gray-500 mt-1">{store.address}, {store.city}</p>
+                      <div className="flex items-center gap-4 mt-2 text-xs text-gray-500">
                         <span>GSTIN: {store.gstin || 'Not set'}</span>
                         <span>Hours: {store.openingTime} - {store.closingTime}</span>
                         <span>Geo-fence: {store.geoFenceRadius}m</span>
@@ -193,14 +193,14 @@ export function StoreManagementSection() {
                           setEditingStore(store);
                           setShowAddStoreModal(true);
                         }}
-                        className="p-2 text-gray-400 hover:text-bv-red-600 hover:bg-gray-700 rounded"
+                        className="p-2 text-gray-500 hover:text-bv-red-600 hover:bg-gray-100 rounded"
                         title="Edit store"
                       >
                         <Edit2 className="w-4 h-4" />
                       </button>
                       <button
                         onClick={() => handleDeleteStore(store.id)}
-                        className="p-2 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded"
+                        className="p-2 text-gray-500 hover:text-red-600 hover:bg-red-50 rounded"
                         title="Delete store"
                       >
                         <Trash2 className="w-4 h-4" />
@@ -241,8 +241,8 @@ export function CategorySection() {
     <div className="card">
       <div className="flex items-center justify-between mb-6">
         <div>
-          <h2 className="text-lg font-semibold text-white">Category Master</h2>
-          <p className="text-sm text-gray-400">Product categories with HSN codes and attributes</p>
+          <h2 className="text-lg font-semibold text-gray-900">Category Master</h2>
+          <p className="text-sm text-gray-500">Product categories with HSN codes and attributes</p>
         </div>
       </div>
 
@@ -250,22 +250,22 @@ export function CategorySection() {
         {categories.map(cat => (
           <div
             key={cat.code}
-            className="p-4 border border-gray-700 rounded-lg"
+            className="p-4 border border-gray-200 rounded-lg"
           >
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-3">
                 <div className={clsx(
                   'w-10 h-10 rounded-lg flex items-center justify-center',
-                  cat.isActive ? 'bg-blue-50' : 'bg-gray-700'
+                  cat.isActive ? 'bg-blue-50' : 'bg-gray-100'
                 )}>
-                  <Tag className={clsx('w-5 h-5', cat.isActive ? 'text-blue-600' : 'text-gray-400')} />
+                  <Tag className={clsx('w-5 h-5', cat.isActive ? 'text-blue-600' : 'text-gray-500')} />
                 </div>
                 <div>
                   <div className="flex items-center gap-2">
-                    <h3 className="font-medium text-white">{cat.name}</h3>
-                    <span className="text-xs bg-gray-700 px-2 py-0.5 rounded font-mono">{cat.code}</span>
+                    <h3 className="font-medium text-gray-900">{cat.name}</h3>
+                    <span className="text-xs bg-gray-100 px-2 py-0.5 rounded font-mono">{cat.code}</span>
                   </div>
-                  <p className="text-xs text-gray-400">
+                  <p className="text-xs text-gray-500">
                     HSN: {cat.hsnCode} | GST: {cat.gstRate}%
                   </p>
                 </div>
@@ -274,17 +274,17 @@ export function CategorySection() {
                 {cat.isActive ? (
                   <ToggleRight className="w-6 h-6 text-green-600 cursor-pointer" />
                 ) : (
-                  <ToggleLeft className="w-6 h-6 text-gray-400 cursor-pointer" />
+                  <ToggleLeft className="w-6 h-6 text-gray-500 cursor-pointer" />
                 )}
-                <button className="text-gray-400 hover:text-bv-red-600">
+                <button className="text-gray-500 hover:text-bv-red-600">
                   <Edit2 className="w-4 h-4" />
                 </button>
               </div>
             </div>
 
             {/* Attributes */}
-            <div className="mt-3 pt-3 border-t border-gray-700">
-              <p className="text-xs text-gray-400 mb-2">Required Attributes:</p>
+            <div className="mt-3 pt-3 border-t border-gray-200">
+              <p className="text-xs text-gray-500 mb-2">Required Attributes:</p>
               <div className="flex flex-wrap gap-1">
                 {cat.attributes.map(attr => (
                   <span key={attr} className="text-xs bg-blue-50 text-blue-700 px-2 py-0.5 rounded">
@@ -371,7 +371,7 @@ export function BrandSection() {
   };
 
   if (isLoading) {
-    return <div className="flex items-center justify-center h-48"><div className="text-gray-400">Loading...</div></div>;
+    return <div className="flex items-center justify-center h-48"><div className="text-gray-500">Loading...</div></div>;
   }
 
   return (
@@ -379,8 +379,8 @@ export function BrandSection() {
       <div className="card">
         <div className="flex items-center justify-between mb-6">
           <div>
-            <h2 className="text-lg font-semibold text-white">Brand Master</h2>
-            <p className="text-sm text-gray-400">Manage brands and subbrands with tier classification</p>
+            <h2 className="text-lg font-semibold text-gray-900">Brand Master</h2>
+            <p className="text-sm text-gray-500">Manage brands and subbrands with tier classification</p>
           </div>
           <button
             onClick={() => setShowAddBrandModal(true)}
@@ -392,7 +392,7 @@ export function BrandSection() {
         </div>
 
         {brands.length === 0 ? (
-          <div className="text-center py-12 text-gray-400">
+          <div className="text-center py-12 text-gray-500">
             <Boxes className="w-12 h-12 mx-auto mb-3 opacity-50" />
             <p>No brands created yet</p>
             <p className="text-sm">Click "Add Brand" to add your first brand</p>
@@ -402,23 +402,23 @@ export function BrandSection() {
             {brands.map(brand => (
               <div
                 key={brand.id}
-                className="p-4 border border-gray-700 rounded-lg"
+                className="p-4 border border-gray-200 rounded-lg"
               >
                 <div className="flex items-center justify-between">
                   <div>
                     <div className="flex items-center gap-2">
-                      <h3 className="font-medium text-white">{brand.brandName}</h3>
-                      <span className="text-xs bg-gray-700 px-2 py-0.5 rounded font-mono">{brand.brandCode}</span>
+                      <h3 className="font-medium text-gray-900">{brand.brandName}</h3>
+                      <span className="text-xs bg-gray-100 px-2 py-0.5 rounded font-mono">{brand.brandCode}</span>
                       <span className={clsx(
                         'text-xs px-2 py-0.5 rounded',
                         brand.tier === 'LUXURY' ? 'bg-purple-100 text-purple-700' :
                         brand.tier === 'PREMIUM' ? 'bg-blue-100 text-blue-700' :
-                        'bg-gray-700 text-gray-300'
+                        'bg-gray-100 text-gray-700'
                       )}>
                         {brand.tier}
                       </span>
                     </div>
-                    <p className="text-xs text-gray-400 mt-1">
+                    <p className="text-xs text-gray-500 mt-1">
                       Categories: {brand.categories.join(', ')}
                     </p>
                   </div>
@@ -428,14 +428,14 @@ export function BrandSection() {
                         setEditingBrand(brand);
                         setShowAddBrandModal(true);
                       }}
-                      className="text-gray-400 hover:text-bv-red-600"
+                      className="text-gray-500 hover:text-bv-red-600"
                       title="Edit brand"
                     >
                       <Edit2 className="w-4 h-4" />
                     </button>
                     <button
                       onClick={() => handleDeleteBrand(brand.id)}
-                      className="text-gray-400 hover:text-red-600"
+                      className="text-gray-500 hover:text-red-600"
                       title="Delete brand"
                     >
                       <Trash2 className="w-4 h-4" />
@@ -445,11 +445,11 @@ export function BrandSection() {
 
                 {/* Subbrands */}
                 {brand.subbrands && brand.subbrands.length > 0 && (
-                  <div className="mt-3 pt-3 border-t border-gray-700">
-                    <p className="text-xs text-gray-400 mb-2">Subbrands:</p>
+                  <div className="mt-3 pt-3 border-t border-gray-200">
+                    <p className="text-xs text-gray-500 mb-2">Subbrands:</p>
                     <div className="flex flex-wrap gap-2">
                       {brand.subbrands.map(sb => (
-                        <span key={sb.id} className="text-xs bg-gray-900 px-2 py-1 rounded border">
+                        <span key={sb.id} className="text-xs bg-white px-2 py-1 rounded border">
                           {sb.name}
                         </span>
                       ))}
@@ -538,8 +538,8 @@ export function DiscountSection() {
     <div className="card">
       <div className="flex items-center justify-between mb-6">
         <div>
-          <h2 className="text-lg font-semibold text-white">Discount Rules</h2>
-          <p className="text-sm text-gray-400">Maximum discount by role and brand tier</p>
+          <h2 className="text-lg font-semibold text-gray-900">Discount Rules</h2>
+          <p className="text-sm text-gray-500">Maximum discount by role and brand tier</p>
         </div>
         <button
           onClick={handleSaveRules}
@@ -553,12 +553,12 @@ export function DiscountSection() {
 
       <div className="overflow-x-auto">
         <table className="w-full">
-          <thead className="bg-gray-900 border-b border-gray-700">
+          <thead className="bg-white border-b border-gray-200">
             <tr>
-              <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">Role</th>
-              <th className="px-4 py-3 text-center text-xs font-medium text-gray-400 uppercase">Mass</th>
-              <th className="px-4 py-3 text-center text-xs font-medium text-gray-400 uppercase">Premium</th>
-              <th className="px-4 py-3 text-center text-xs font-medium text-gray-400 uppercase">Luxury</th>
+              <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Role</th>
+              <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Mass</th>
+              <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Premium</th>
+              <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Luxury</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-200">
@@ -575,7 +575,7 @@ export function DiscountSection() {
                     }}
                     min="0"
                     max="100"
-                    className="w-16 px-2 py-1 text-center border border-gray-700 rounded"
+                    className="w-16 px-2 py-1 text-center border border-gray-200 rounded"
                   />
                   %
                 </td>
@@ -589,7 +589,7 @@ export function DiscountSection() {
                     }}
                     min="0"
                     max="100"
-                    className="w-16 px-2 py-1 text-center border border-gray-700 rounded"
+                    className="w-16 px-2 py-1 text-center border border-gray-200 rounded"
                   />
                   %
                 </td>
@@ -603,7 +603,7 @@ export function DiscountSection() {
                     }}
                     min="0"
                     max="100"
-                    className="w-16 px-2 py-1 text-center border border-gray-700 rounded"
+                    className="w-16 px-2 py-1 text-center border border-gray-200 rounded"
                   />
                   %
                 </td>
@@ -613,9 +613,9 @@ export function DiscountSection() {
         </table>
       </div>
 
-      <div className="mt-6 pt-6 border-t border-gray-700">
-        <h3 className="text-sm font-medium text-gray-300 mb-3">MRP Rules (per SYSTEM_INTENT)</h3>
-        <ul className="space-y-2 text-sm text-gray-400">
+      <div className="mt-6 pt-6 border-t border-gray-200">
+        <h3 className="text-sm font-medium text-gray-700 mb-3">MRP Rules (per SYSTEM_INTENT)</h3>
+        <ul className="space-y-2 text-sm text-gray-500">
           <li className="flex items-center gap-2">
             <Check className="w-4 h-4 text-green-600" />
             If Offer Price = MRP -&gt; Store can apply discount up to role cap
@@ -675,147 +675,147 @@ function StoreModal({
 
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-      <div className="bg-gray-800 rounded-xl w-full max-w-2xl max-h-[90vh] overflow-hidden flex flex-col">
-        <div className="flex items-center justify-between p-4 border-b border-gray-700">
-          <h2 className="text-lg font-semibold text-white">
+      <div className="bg-white rounded-xl w-full max-w-2xl max-h-[90vh] overflow-hidden flex flex-col">
+        <div className="flex items-center justify-between p-4 border-b border-gray-200">
+          <h2 className="text-lg font-semibold text-gray-900">
             {store ? 'Edit Store' : 'Add New Store'}
           </h2>
-          <button onClick={onClose} className="p-2 hover:bg-gray-700 rounded-lg">
-            <X className="w-5 h-5 text-gray-400" />
+          <button onClick={onClose} className="p-2 hover:bg-gray-100 rounded-lg">
+            <X className="w-5 h-5 text-gray-500" />
           </button>
         </div>
 
         <div className="flex-1 overflow-y-auto p-4 space-y-4">
           <div className="grid grid-cols-2 gap-4">
             <div>
-              <label className="block text-sm font-medium text-gray-300 mb-1">Store Code *</label>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Store Code *</label>
               <input
                 type="text"
                 value={formData.storeCode || ''}
                 onChange={e => handleChange('storeCode', e.target.value)}
                 placeholder="STORE-XXX-01"
-                className="w-full px-3 py-2 border border-gray-700 rounded-lg focus:border-bv-red-500 focus:outline-none"
+                className="w-full px-3 py-2 border border-gray-200 rounded-lg focus:border-bv-red-500 focus:outline-none"
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-gray-300 mb-1">Store Name *</label>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Store Name *</label>
               <input
                 type="text"
                 value={formData.storeName || ''}
                 onChange={e => handleChange('storeName', e.target.value)}
                 placeholder="Better Vision - Park Street"
-                className="w-full px-3 py-2 border border-gray-700 rounded-lg focus:border-bv-red-500 focus:outline-none"
+                className="w-full px-3 py-2 border border-gray-200 rounded-lg focus:border-bv-red-500 focus:outline-none"
               />
             </div>
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-gray-300 mb-1">GSTIN</label>
+            <label className="block text-sm font-medium text-gray-700 mb-1">GSTIN</label>
             <input
               type="text"
               value={formData.gstin || ''}
               onChange={e => handleChange('gstin', e.target.value.toUpperCase())}
               placeholder="19ABCDE1234F1Z5"
-              className="w-full px-3 py-2 border border-gray-700 rounded-lg focus:border-bv-red-500 focus:outline-none"
+              className="w-full px-3 py-2 border border-gray-200 rounded-lg focus:border-bv-red-500 focus:outline-none"
             />
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-gray-300 mb-1">Address *</label>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Address *</label>
             <textarea
               value={formData.address || ''}
               onChange={e => handleChange('address', e.target.value)}
               rows={2}
-              className="w-full px-3 py-2 border border-gray-700 rounded-lg focus:border-bv-red-500 focus:outline-none"
+              className="w-full px-3 py-2 border border-gray-200 rounded-lg focus:border-bv-red-500 focus:outline-none"
             />
           </div>
 
           <div className="grid grid-cols-3 gap-4">
             <div>
-              <label className="block text-sm font-medium text-gray-300 mb-1">City *</label>
+              <label className="block text-sm font-medium text-gray-700 mb-1">City *</label>
               <input
                 type="text"
                 value={formData.city || ''}
                 onChange={e => handleChange('city', e.target.value)}
-                className="w-full px-3 py-2 border border-gray-700 rounded-lg focus:border-bv-red-500 focus:outline-none"
+                className="w-full px-3 py-2 border border-gray-200 rounded-lg focus:border-bv-red-500 focus:outline-none"
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-gray-300 mb-1">State *</label>
+              <label className="block text-sm font-medium text-gray-700 mb-1">State *</label>
               <input
                 type="text"
                 value={formData.state || ''}
                 onChange={e => handleChange('state', e.target.value)}
-                className="w-full px-3 py-2 border border-gray-700 rounded-lg focus:border-bv-red-500 focus:outline-none"
+                className="w-full px-3 py-2 border border-gray-200 rounded-lg focus:border-bv-red-500 focus:outline-none"
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-gray-300 mb-1">Pincode *</label>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Pincode *</label>
               <input
                 type="text"
                 value={formData.pincode || ''}
                 onChange={e => handleChange('pincode', e.target.value)}
-                className="w-full px-3 py-2 border border-gray-700 rounded-lg focus:border-bv-red-500 focus:outline-none"
+                className="w-full px-3 py-2 border border-gray-200 rounded-lg focus:border-bv-red-500 focus:outline-none"
               />
             </div>
           </div>
 
           <div className="grid grid-cols-2 gap-4">
             <div>
-              <label className="block text-sm font-medium text-gray-300 mb-1">Phone</label>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Phone</label>
               <input
                 type="tel"
                 value={formData.phone || ''}
                 onChange={e => handleChange('phone', e.target.value)}
-                className="w-full px-3 py-2 border border-gray-700 rounded-lg focus:border-bv-red-500 focus:outline-none"
+                className="w-full px-3 py-2 border border-gray-200 rounded-lg focus:border-bv-red-500 focus:outline-none"
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-gray-300 mb-1">Email</label>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Email</label>
               <input
                 type="email"
                 value={formData.email || ''}
                 onChange={e => handleChange('email', e.target.value)}
-                className="w-full px-3 py-2 border border-gray-700 rounded-lg focus:border-bv-red-500 focus:outline-none"
+                className="w-full px-3 py-2 border border-gray-200 rounded-lg focus:border-bv-red-500 focus:outline-none"
               />
             </div>
           </div>
 
           <div className="grid grid-cols-3 gap-4">
             <div>
-              <label className="block text-sm font-medium text-gray-300 mb-1">Opening Time</label>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Opening Time</label>
               <input
                 type="time"
                 value={formData.openingTime || '10:00'}
                 onChange={e => handleChange('openingTime', e.target.value)}
-                className="w-full px-3 py-2 border border-gray-700 rounded-lg focus:border-bv-red-500 focus:outline-none"
+                className="w-full px-3 py-2 border border-gray-200 rounded-lg focus:border-bv-red-500 focus:outline-none"
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-gray-300 mb-1">Closing Time</label>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Closing Time</label>
               <input
                 type="time"
                 value={formData.closingTime || '20:00'}
                 onChange={e => handleChange('closingTime', e.target.value)}
-                className="w-full px-3 py-2 border border-gray-700 rounded-lg focus:border-bv-red-500 focus:outline-none"
+                className="w-full px-3 py-2 border border-gray-200 rounded-lg focus:border-bv-red-500 focus:outline-none"
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-gray-300 mb-1">Geo-fence (meters)</label>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Geo-fence (meters)</label>
               <input
                 type="number"
                 value={formData.geoFenceRadius || 100}
                 onChange={e => handleChange('geoFenceRadius', parseInt(e.target.value))}
-                className="w-full px-3 py-2 border border-gray-700 rounded-lg focus:border-bv-red-500 focus:outline-none"
+                className="w-full px-3 py-2 border border-gray-200 rounded-lg focus:border-bv-red-500 focus:outline-none"
               />
             </div>
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-gray-300 mb-2">Enabled Categories</label>
+            <label className="block text-sm font-medium text-gray-700 mb-2">Enabled Categories</label>
             <div className="grid grid-cols-3 gap-2">
               {categories.map(cat => (
-                <label key={cat.code} className="flex items-center gap-2 p-2 bg-gray-900 rounded cursor-pointer hover:bg-gray-700">
+                <label key={cat.code} className="flex items-center gap-2 p-2 bg-white rounded cursor-pointer hover:bg-gray-100">
                   <input
                     type="checkbox"
                     checked={formData.enabledCategories?.includes(cat.code) || false}
@@ -836,7 +836,7 @@ function StoreModal({
           </div>
         </div>
 
-        <div className="p-4 border-t border-gray-700 flex justify-end gap-3">
+        <div className="p-4 border-t border-gray-200 flex justify-end gap-3">
           <button onClick={onClose} className="btn-outline">
             Cancel
           </button>
@@ -877,46 +877,46 @@ function BrandModal({
 
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-      <div className="bg-gray-800 rounded-xl w-full max-w-xl max-h-[90vh] overflow-hidden flex flex-col">
-        <div className="flex items-center justify-between p-4 border-b border-gray-700">
-          <h2 className="text-lg font-semibold text-white">
+      <div className="bg-white rounded-xl w-full max-w-xl max-h-[90vh] overflow-hidden flex flex-col">
+        <div className="flex items-center justify-between p-4 border-b border-gray-200">
+          <h2 className="text-lg font-semibold text-gray-900">
             {brand ? 'Edit Brand' : 'Add New Brand'}
           </h2>
-          <button onClick={onClose} className="p-2 hover:bg-gray-700 rounded-lg">
-            <X className="w-5 h-5 text-gray-400" />
+          <button onClick={onClose} className="p-2 hover:bg-gray-100 rounded-lg">
+            <X className="w-5 h-5 text-gray-500" />
           </button>
         </div>
 
         <div className="flex-1 overflow-y-auto p-4 space-y-4">
           <div className="grid grid-cols-2 gap-4">
             <div>
-              <label className="block text-sm font-medium text-gray-300 mb-1">Brand Name *</label>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Brand Name *</label>
               <input
                 type="text"
                 value={formData.brandName || ''}
                 onChange={e => setFormData(prev => ({ ...prev, brandName: e.target.value }))}
                 placeholder="Ray-Ban"
-                className="w-full px-3 py-2 border border-gray-700 rounded-lg focus:border-bv-red-500 focus:outline-none"
+                className="w-full px-3 py-2 border border-gray-200 rounded-lg focus:border-bv-red-500 focus:outline-none"
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-gray-300 mb-1">Brand Code *</label>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Brand Code *</label>
               <input
                 type="text"
                 value={formData.brandCode || ''}
                 onChange={e => setFormData(prev => ({ ...prev, brandCode: e.target.value.toUpperCase() }))}
                 placeholder="RAYBAN"
-                className="w-full px-3 py-2 border border-gray-700 rounded-lg focus:border-bv-red-500 focus:outline-none"
+                className="w-full px-3 py-2 border border-gray-200 rounded-lg focus:border-bv-red-500 focus:outline-none"
               />
             </div>
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-gray-300 mb-1">Tier *</label>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Tier *</label>
             <select
               value={formData.tier || 'MASS'}
               onChange={e => setFormData(prev => ({ ...prev, tier: e.target.value as Brand['tier'] }))}
-              className="w-full px-3 py-2 border border-gray-700 rounded-lg focus:border-bv-red-500 focus:outline-none"
+              className="w-full px-3 py-2 border border-gray-200 rounded-lg focus:border-bv-red-500 focus:outline-none"
             >
               <option value="MASS">Mass</option>
               <option value="PREMIUM">Premium</option>
@@ -925,10 +925,10 @@ function BrandModal({
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-gray-300 mb-2">Categories *</label>
+            <label className="block text-sm font-medium text-gray-700 mb-2">Categories *</label>
             <div className="grid grid-cols-3 gap-2">
               {categories.map(cat => (
-                <label key={cat.code} className="flex items-center gap-2 p-2 bg-gray-900 rounded cursor-pointer hover:bg-gray-700">
+                <label key={cat.code} className="flex items-center gap-2 p-2 bg-white rounded cursor-pointer hover:bg-gray-100">
                   <input
                     type="checkbox"
                     checked={formData.categories?.includes(cat.code) || false}
@@ -949,7 +949,7 @@ function BrandModal({
           </div>
         </div>
 
-        <div className="p-4 border-t border-gray-700 flex justify-end gap-3">
+        <div className="p-4 border-t border-gray-200 flex justify-end gap-3">
           <button onClick={onClose} className="btn-outline">
             Cancel
           </button>

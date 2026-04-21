@@ -129,7 +129,7 @@ export function Customer360Dashboard() {
           <p className="text-gray-600 mb-6">Search for a customer to view their complete profile</p>
           <div className="flex gap-2 mb-6">
             <div className="relative flex-1">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-500" />
               <input
                 type="text"
                 placeholder="Search by name, phone, or email..."
@@ -354,8 +354,8 @@ export function Customer360Dashboard() {
             className={clsx(
               'px-4 py-3 font-medium whitespace-nowrap border-b-2 transition-colors',
               activeTab === tab
-                ? 'border-blue-500 text-blue-400'
-                : 'border-transparent text-gray-400 hover:text-gray-700'
+                ? 'border-blue-500 text-blue-600'
+                : 'border-transparent text-gray-500 hover:text-gray-700'
             )}
           >
             {tab.charAt(0).toUpperCase() + tab.slice(1)}
@@ -389,11 +389,11 @@ interface CustomerHeaderCardProps {
 function CustomerHeaderCard({ customer, stats, loyaltyData }: CustomerHeaderCardProps) {
   const getTierColor = (tier: LoyaltyTier): string => {
     const colors = {
-      Bronze: 'bg-amber-900 text-amber-300',
-      Silver: 'bg-slate-700 text-slate-300',
-      Gold: 'bg-yellow-700 text-yellow-300',
-      Platinum: 'bg-blue-700 text-blue-300',
-      Diamond: 'bg-purple-700 text-purple-300',
+      Bronze: 'bg-amber-50 text-amber-700',
+      Silver: 'bg-gray-100 text-slate-700',
+      Gold: 'bg-yellow-700 text-yellow-700',
+      Platinum: 'bg-blue-700 text-blue-700',
+      Diamond: 'bg-purple-700 text-purple-700',
     };
     return colors[tier];
   };
@@ -404,7 +404,7 @@ function CustomerHeaderCard({ customer, stats, loyaltyData }: CustomerHeaderCard
         <div className="flex items-start gap-4">
           {/* Avatar */}
           <div className="w-20 h-20 rounded-full bg-gradient-to-br from-blue-500 to-purple-500 flex items-center justify-center">
-            <User className="w-10 h-10 text-white" />
+            <User className="w-10 h-10 text-gray-900" />
           </div>
 
           {/* Customer Info */}
@@ -562,7 +562,7 @@ function PrescriptionsTab({ prescriptions }: PrescriptionsTabProps) {
           <div className="flex items-start justify-between">
             <div className="space-y-2">
               <div className="flex items-center gap-2">
-                <Eye className="w-5 h-5 text-blue-400" />
+                <Eye className="w-5 h-5 text-blue-600" />
                 <span className="font-semibold text-gray-900">Prescription #{rx.id?.slice(-6) || 'N/A'}</span>
               </div>
               <p className="text-gray-500 text-sm">Date: {new Date(rx.testDate).toLocaleDateString()}</p>
@@ -575,10 +575,10 @@ function PrescriptionsTab({ prescriptions }: PrescriptionsTabProps) {
                 className={clsx(
                   'px-3 py-1 rounded-full text-xs font-semibold flex items-center gap-1',
                   rx.renewalStatus === 'current'
-                    ? 'bg-green-900 text-green-300'
+                    ? 'bg-green-50 text-green-700'
                     : rx.renewalStatus === 'upcoming'
-                      ? 'bg-yellow-900 text-yellow-300'
-                      : 'bg-red-900 text-red-300'
+                      ? 'bg-yellow-50 text-yellow-700'
+                      : 'bg-red-50 text-red-700'
                 )}
               >
                 {rx.renewalStatus === 'current' && <CheckCircle className="w-4 h-4" />}
@@ -728,9 +728,9 @@ function LoyaltyTab({ loyaltyData }: LoyaltyTabProps) {
       <div className="bg-gray-50 rounded-lg p-6 space-y-4">
         <div className="flex items-center justify-between">
           <h3 className="text-lg font-semibold text-gray-900">Current Tier</h3>
-          <Award className="w-6 h-6 text-yellow-400" />
+          <Award className="w-6 h-6 text-yellow-600" />
         </div>
-        <p className="text-4xl font-bold text-yellow-400">{loyaltyData.tier}</p>
+        <p className="text-4xl font-bold text-yellow-600">{loyaltyData.tier}</p>
         <p className="text-gray-500">Member since {new Date(loyaltyData.memberSince).toLocaleDateString()}</p>
       </div>
 
@@ -767,7 +767,7 @@ function LoyaltyTab({ loyaltyData }: LoyaltyTabProps) {
         </div>
         <div className="bg-gray-50 rounded-lg p-4">
           <p className="text-gray-500 text-sm mb-2">Total Earned</p>
-          <p className="text-2xl font-bold text-green-400">{loyaltyData.totalPointsEarned}</p>
+          <p className="text-2xl font-bold text-green-600">{loyaltyData.totalPointsEarned}</p>
         </div>
       </div>
     </div>
@@ -799,7 +799,7 @@ function PreferencesTab() {
         </h3>
         <div className="flex flex-wrap gap-2">
           {['Spectacles', 'Sunglasses', 'Contact Lenses', 'Lens Coatings'].map((interest) => (
-            <span key={interest} className="px-3 py-1 bg-blue-900 text-blue-300 rounded-full text-sm">
+            <span key={interest} className="px-3 py-1 bg-blue-50 text-blue-700 rounded-full text-sm">
               {interest}
             </span>
           ))}

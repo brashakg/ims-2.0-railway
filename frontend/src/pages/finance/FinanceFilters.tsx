@@ -55,23 +55,23 @@ export default function FinanceFilters({
       <div className="mb-8">
         <div className="flex items-center justify-between mb-6">
           <div>
-            <h1 className="text-3xl font-bold text-white flex items-center gap-3">
-              <BarChart3 className="w-8 h-8 text-blue-400" />
+            <h1 className="text-3xl font-bold text-gray-900 flex items-center gap-3">
+              <BarChart3 className="w-8 h-8 text-blue-600" />
               Finance & Accounting
             </h1>
-            <p className="text-slate-400 mt-2">Financial year 2025-26 | Indian Accounting Standards</p>
+            <p className="text-slate-600 mt-2">Financial year 2025-26 | Indian Accounting Standards</p>
           </div>
           <div className="flex gap-3">
             <select
               value={selectedYear}
               onChange={(e) => onYearChange(e.target.value)}
-              className="bg-slate-900 border border-slate-700 text-white rounded px-4 py-2 text-sm focus:outline-none focus:border-blue-500"
+              className="bg-slate-50 border border-slate-700 text-gray-900 rounded px-4 py-2 text-sm focus:outline-none focus:border-blue-500"
             >
               <option>2025-2026</option>
               <option>2024-2025</option>
               <option>2023-2024</option>
             </select>
-            <button className="flex items-center gap-2 px-4 py-2 bg-blue-900 hover:bg-blue-800 text-blue-100 rounded border border-blue-700 transition-colors font-medium text-sm">
+            <button className="flex items-center gap-2 px-4 py-2 bg-blue-50 hover:bg-blue-800 text-blue-100 rounded border border-blue-700 transition-colors font-medium text-sm">
               <Download className="w-4 h-4" />
               Export
             </button>
@@ -85,13 +85,13 @@ export default function FinanceFilters({
               type="date"
               value={dateFrom}
               onChange={(e) => onDateFromChange(e.target.value)}
-              className="bg-slate-900 border border-slate-700 text-white rounded px-3 py-2 text-sm focus:outline-none focus:border-blue-500"
+              className="bg-slate-50 border border-slate-700 text-gray-900 rounded px-3 py-2 text-sm focus:outline-none focus:border-blue-500"
             />
             <input
               type="date"
               value={dateTo}
               onChange={(e) => onDateToChange(e.target.value)}
-              className="bg-slate-900 border border-slate-700 text-white rounded px-3 py-2 text-sm focus:outline-none focus:border-blue-500"
+              className="bg-slate-50 border border-slate-700 text-gray-900 rounded px-3 py-2 text-sm focus:outline-none focus:border-blue-500"
             />
           </div>
         </div>
@@ -106,8 +106,8 @@ export default function FinanceFilters({
             className={clsx(
               'flex items-center gap-2 px-4 py-3 font-medium text-sm border-b-2 transition-colors',
               activeTab === id
-                ? 'text-blue-400 border-blue-400'
-                : 'text-slate-400 border-transparent hover:text-slate-300'
+                ? 'text-blue-600 border-blue-400'
+                : 'text-slate-600 border-transparent hover:text-slate-700'
             )}
           >
             <Icon className="w-4 h-4" />

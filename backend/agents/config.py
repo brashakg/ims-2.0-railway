@@ -15,6 +15,17 @@ logger = logging.getLogger(__name__)
 # Default agent configurations
 DEFAULT_AGENT_CONFIGS = [
     {
+        "agent_id": "jarvis",
+        "agent_name": "JARVIS",
+        "enabled": True,
+        "toggleable": False,
+        "schedule_type": "event",
+        "schedule_value": "on_query",
+        "description": "NLP & conversation core — the voice users talk to",
+        "hero": "Iron Man's J.A.R.V.I.S.",
+        "config_overrides": {},
+    },
+    {
         "agent_id": "cortex",
         "agent_name": "CORTEX",
         "enabled": True,

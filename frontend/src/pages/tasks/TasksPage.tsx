@@ -286,7 +286,7 @@ export function TasksPage() {
           className={clsx(
             'flex items-center gap-2 px-4 py-3 text-sm font-medium border-b-2 transition-colors',
             activeTab === 'tasks'
-              ? 'border-bv-gold-600 text-bv-gold-600'
+              ? 'border-bv-red-600 text-bv-red-600'
               : 'border-transparent text-gray-500 hover:text-gray-700'
           )}
         >
@@ -303,7 +303,7 @@ export function TasksPage() {
           className={clsx(
             'flex items-center gap-2 px-4 py-3 text-sm font-medium border-b-2 transition-colors',
             activeTab === 'sop'
-              ? 'border-bv-gold-600 text-bv-gold-600'
+              ? 'border-bv-red-600 text-bv-red-600'
               : 'border-transparent text-gray-500 hover:text-gray-700'
           )}
         >
@@ -366,7 +366,7 @@ export function TasksPage() {
                     className={clsx(
                       'px-4 py-2 rounded-lg text-sm font-medium transition-colors capitalize',
                       filter === f
-                        ? 'bg-bv-gold-600 text-white'
+                        ? 'bg-bv-red-700 text-white'
                         : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
                     )}
                   >
@@ -401,7 +401,7 @@ export function TasksPage() {
           {/* Loading State */}
           {isLoading ? (
             <div className="card text-center py-12">
-              <Loader2 className="w-8 h-8 mx-auto mb-2 animate-spin text-bv-gold-600" />
+              <Loader2 className="w-8 h-8 mx-auto mb-2 animate-spin text-bv-red-600" />
               <p className="text-gray-500">Loading tasks...</p>
             </div>
           ) : (
@@ -437,11 +437,11 @@ export function TasksPage() {
                           className="mt-1"
                         >
                           {updating ? (
-                            <Loader2 className="w-5 h-5 text-gray-400 animate-spin" />
+                            <Loader2 className="w-5 h-5 text-gray-500 animate-spin" />
                           ) : task.status === 'COMPLETED' ? (
                             <CheckSquare className="w-5 h-5 text-green-600" />
                           ) : (
-                            <Square className="w-5 h-5 text-gray-400 hover:text-bv-gold-600" />
+                            <Square className="w-5 h-5 text-gray-500 hover:text-bv-red-600" />
                           )}
                         </button>
 
@@ -491,7 +491,7 @@ export function TasksPage() {
                                 {task.customer_phone}
                               </span>
                             )}
-                            <span className="text-xs text-gray-400">
+                            <span className="text-xs text-gray-500">
                               #{task.task_number}
                             </span>
                           </div>
@@ -507,7 +507,7 @@ export function TasksPage() {
                             {formatDate(task.due_at)}
                           </div>
                           {task.completed_at && (
-                            <p className="text-xs text-gray-400">
+                            <p className="text-xs text-gray-500">
                               Completed {formatDate(task.completed_at)}
                             </p>
                           )}
@@ -515,7 +515,7 @@ export function TasksPage() {
                             <button
                               onClick={() => handleStartTask(task)}
                               disabled={updating}
-                              className="text-xs text-bv-gold-600 hover:underline"
+                              className="text-xs text-bv-red-600 hover:underline"
                             >
                               Start Task
                             </button>
@@ -540,7 +540,7 @@ export function TasksPage() {
                 <h2 className="text-xl font-bold text-gray-900">New Task</h2>
                 <button
                   onClick={() => setShowNewTaskModal(false)}
-                  className="p-2 text-gray-400 hover:text-gray-600 rounded-lg"
+                  className="p-2 text-gray-500 hover:text-gray-600 rounded-lg"
                 >
                   <span className="sr-only">Close</span>
                   ×

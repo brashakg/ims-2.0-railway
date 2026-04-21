@@ -287,10 +287,10 @@ export function SOPChecklist() {
               <Icon className="w-4 h-4" />
               {template.title.replace(' Checklist', '')}
               {checklist.status === 'COMPLETED' && (
-                <CheckCircle className="w-4 h-4 text-green-300" />
+                <CheckCircle className="w-4 h-4 text-green-700" />
               )}
               {checklist.status === 'IN_PROGRESS' && (
-                <Clock className="w-4 h-4 text-yellow-300" />
+                <Clock className="w-4 h-4 text-yellow-700" />
               )}
             </button>
           );
@@ -310,7 +310,7 @@ export function SOPChecklist() {
               <div className="flex items-center gap-2 mt-1">
                 {getStatusBadge(currentChecklist.status)}
                 {currentChecklist.startedAt && (
-                  <span className="text-xs text-gray-400">
+                  <span className="text-xs text-gray-500">
                     Started: {currentChecklist.startedAt}
                   </span>
                 )}
@@ -377,7 +377,7 @@ export function SOPChecklist() {
 
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2">
-                      <span className="text-sm text-gray-400 font-mono">{String(index + 1).padStart(2, '0')}.</span>
+                      <span className="text-sm text-gray-500 font-mono">{String(index + 1).padStart(2, '0')}.</span>
                       <span className={clsx(
                         'text-sm',
                         item.completed ? 'text-gray-500 line-through' : 'text-gray-900'
@@ -386,7 +386,7 @@ export function SOPChecklist() {
                       </span>
                     </div>
                     {item.completed && item.completedAt && (
-                      <div className="flex items-center gap-2 mt-1 text-xs text-gray-400">
+                      <div className="flex items-center gap-2 mt-1 text-xs text-gray-500">
                         <User className="w-3 h-3" />
                         {item.completedBy} at {item.completedAt}
                       </div>
@@ -406,9 +406,9 @@ export function SOPChecklist() {
                     )}
                     {hasExtra && (
                       isExpanded ? (
-                        <ChevronUp className="w-4 h-4 text-gray-400" />
+                        <ChevronUp className="w-4 h-4 text-gray-500" />
                       ) : (
-                        <ChevronDown className="w-4 h-4 text-gray-400" />
+                        <ChevronDown className="w-4 h-4 text-gray-500" />
                       )
                     )}
                   </div>
@@ -489,7 +489,7 @@ export function SOPChecklist() {
                 <Icon className={clsx(
                   'w-5 h-5 mx-auto mb-1',
                   checklist.status === 'COMPLETED' ? 'text-green-500' :
-                  checklist.status === 'IN_PROGRESS' ? 'text-yellow-500' : 'text-gray-400'
+                  checklist.status === 'IN_PROGRESS' ? 'text-yellow-500' : 'text-gray-500'
                 )} />
                 <p className="text-xs text-gray-500 truncate">{template.title.replace(' Checklist', '')}</p>
                 <p className="text-sm font-medium">{completed}/{total}</p>

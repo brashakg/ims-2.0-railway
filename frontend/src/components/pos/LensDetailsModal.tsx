@@ -311,7 +311,7 @@ export function LensDetailsModal({ onClose, onSave }: LensDetailsModalProps) {
                           onClick={() => setLensCategory(type.id as any)}
                           className={`px-4 py-2 rounded-lg text-sm ${
                             lensCategory === type.id
-                              ? 'bg-bv-red-600 text-white'
+                              ? 'bg-bv-red-600 text-gray-900'
                               : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
                           }`}
                         >
@@ -429,7 +429,7 @@ export function LensDetailsModal({ onClose, onSave }: LensDetailsModalProps) {
                             <div className={`w-5 h-5 rounded border-2 flex items-center justify-center ${
                               isSelected ? 'bg-bv-red-600 border-bv-red-600' : 'border-gray-300'
                             }`}>
-                              {isSelected && <Check className="w-3 h-3 text-white" />}
+                              {isSelected && <Check className="w-3 h-3 text-gray-900" />}
                             </div>
                           </button>
                         );

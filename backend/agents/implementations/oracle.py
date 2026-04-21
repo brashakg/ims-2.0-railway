@@ -245,14 +245,51 @@ class OracleAgent(JarvisAgent):
             logger.warning(f"[ORACLE] Failed to record anomalies: {e}")
 
     async def _emit_for_severe(self, anomalies: List[Dict[str, Any]]):
-        """Emit anomaly.detected events for HIGH severity items."""
+        """
+        Emit anomaly.detected events for HIGH/CRITICAL items, and ping
+        Slack for anything at or above the SLACK_ALERT_SEVERITY threshold
+        (default CRITICAL). Slack is configured via SLACK_WEBHOOK_URL; if
+        unset, the call silently no-ops.
+        """
         from ..registry import dispatch_event
+
+        # Optional import so ORACLE still runs in slim builds without the
+        # observability module.
+        try:
+            from observability import notify_slack
+        except Exception:  # pragma: no cover
+            notify_slack = None
+
         for a in anomalies:
-            if a.get("severity") in ("HIGH", "CRITICAL"):
+            severity = a.get("severity") or ""
+            if severity not in ("HIGH", "CRITICAL"):
+                continue
+
+            try:
+                await dispatch_event("anomaly.detected", a, source=self.agent_id)
+            except Exception as e:
+                logger.warning(f"[ORACLE] Event dispatch failed: {e}")
+
+            # Slack alert — only the most severe rise to human attention.
+            if notify_slack is not None:
                 try:
-                    await dispatch_event("anomaly.detected", a, source=self.agent_id)
+                    metadata = {
+                        "Kind": a.get("kind"),
+                        "Severity": severity,
+                    }
+                    # Pull a few kind-specific fields into metadata for context
+                    for k in ("today_total", "baseline_avg", "delta_pct",
+                              "staff", "count", "prescription_id", "eye", "sph"):
+                        if k in a and a[k] is not None:
+                            metadata[k] = a[k]
+                    await notify_slack(
+                        severity=severity,
+                        title=a.get("kind", "anomaly").replace("_", " ").title(),
+                        body=a.get("narrative") or a.get("summary") or "No summary",
+                        metadata=metadata,
+                    )
                 except Exception as e:
-                    logger.warning(f"[ORACLE] Event dispatch failed: {e}")
+                    logger.warning(f"[ORACLE] Slack notify failed: {e}")
 
     # ------------------------------------------------------------------
     # Claude integration

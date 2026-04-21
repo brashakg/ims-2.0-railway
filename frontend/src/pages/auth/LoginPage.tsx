@@ -104,7 +104,7 @@ export function LoginPage() {
         {/* Logo */}
         <div className="text-center mb-8">
           <div className="inline-flex items-center justify-center w-16 h-16 bg-bv-red-600 rounded-2xl mb-4">
-            <Store className="w-8 h-8 text-white" />
+            <Store className="w-8 h-8 text-gray-900" />
           </div>
           <h1 className="text-2xl font-bold text-gray-900">IMS 2.0</h1>
           <p className="text-gray-500 mt-1">Retail Operating System</p>
@@ -168,7 +168,7 @@ export function LoginPage() {
                 <button
                   type="button"
                   onClick={() => setShowPassword(!showPassword)}
-                  className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 focus:outline-none focus:ring-2 focus:ring-bv-red-600 rounded"
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-600 focus:outline-none focus:ring-2 focus:ring-bv-red-600 rounded"
                   aria-label={showPassword ? 'Hide password' : 'Show password'}
                   aria-pressed={showPassword}
                 >
@@ -221,7 +221,7 @@ export function LoginPage() {
           {/* Clear cache button for troubleshooting */}
           <button
             onClick={handleClearCache}
-            className="text-xs text-gray-400 hover:text-gray-600 flex items-center gap-1 mx-auto"
+            className="text-xs text-gray-500 hover:text-gray-600 flex items-center gap-1 mx-auto"
           >
             <RefreshCw className="w-3 h-3" />
             Clear Cache

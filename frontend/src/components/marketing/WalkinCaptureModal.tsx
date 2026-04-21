@@ -65,11 +65,11 @@ export function WalkinCaptureModal({ isOpen, onClose }: WalkinCaptureModalProps)
       <div className="bg-white rounded-xl shadow-xl w-full max-w-md mx-4" onClick={e => e.stopPropagation()}>
         <div className="flex items-center justify-between p-4 border-b">
           <div className="flex items-center gap-2">
-            <UserPlus className="w-5 h-5 text-bv-gold-600" />
+            <UserPlus className="w-5 h-5 text-bv-red-600" />
             <h2 className="text-lg font-semibold">Register Walk-in</h2>
           </div>
           <button onClick={onClose} className="p-1 hover:bg-gray-100 rounded-lg">
-            <X className="w-5 h-5 text-gray-400" />
+            <X className="w-5 h-5 text-gray-500" />
           </button>
         </div>
 

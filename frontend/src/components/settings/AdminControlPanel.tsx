@@ -219,14 +219,14 @@ export function AdminControlPanel() {
   return (
     <div className="space-y-6">
       {/* Tab Bar */}
-      <div className="flex flex-wrap gap-2 border-b border-gray-700 pb-1">
+      <div className="flex flex-wrap gap-2 border-b border-gray-200 pb-1">
         {TABS.map(tab => (
           <button
             key={tab.id}
             onClick={() => setActiveTab(tab.id)}
             className={clsx(
               'flex items-center gap-2 px-4 py-2.5 text-sm font-medium rounded-t-lg transition-colors',
-              activeTab === tab.id ? 'bg-gray-700 text-white' : 'text-gray-400 hover:text-gray-300'
+              activeTab === tab.id ? 'bg-gray-100 text-gray-900' : 'text-gray-500 hover:text-gray-700'
             )}
           >
             <tab.icon className="w-4 h-4" />
@@ -240,12 +240,12 @@ export function AdminControlPanel() {
       {/* ============================================================= */}
       {activeTab === 'modules' && (
         <div className="space-y-4">
-          <p className="text-sm text-gray-400">Control which modules are available at each store location.</p>
+          <p className="text-sm text-gray-500">Control which modules are available at each store location.</p>
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
-              <thead className="bg-gray-900 text-gray-400 text-left">
+              <thead className="bg-white text-gray-500 text-left">
                 <tr>
-                  <th className="px-4 py-3 sticky left-0 bg-gray-900 z-10">Store</th>
+                  <th className="px-4 py-3 sticky left-0 bg-white z-10">Store</th>
                   {MODULES.map(m => (
                     <th key={m.id} className="px-3 py-3 text-center whitespace-nowrap">
                       <div className="flex flex-col items-center gap-1">
@@ -258,13 +258,13 @@ export function AdminControlPanel() {
               </thead>
               <tbody className="divide-y divide-gray-700">
                 {storeModules.map(store => (
-                  <tr key={store.storeId} className="text-white">
-                    <td className="px-4 py-3 font-medium sticky left-0 bg-gray-800 z-10 whitespace-nowrap">{store.storeName}</td>
+                  <tr key={store.storeId} className="text-gray-900">
+                    <td className="px-4 py-3 font-medium sticky left-0 bg-white z-10 whitespace-nowrap">{store.storeName}</td>
                     {MODULES.map(m => (
                       <td key={m.id} className="px-3 py-3 text-center">
                         <button
                           onClick={() => toggleStoreModule(store.storeId, m.id)}
-                          className={clsx('p-1 rounded', store.modules[m.id] ? 'text-green-400' : 'text-gray-600')}
+                          className={clsx('p-1 rounded', store.modules[m.id] ? 'text-green-600' : 'text-gray-600')}
                         >
                           {store.modules[m.id] ? <Eye className="w-5 h-5" /> : <EyeOff className="w-5 h-5" />}
                         </button>
@@ -283,12 +283,12 @@ export function AdminControlPanel() {
       {/* ============================================================= */}
       {activeTab === 'permissions' && (
         <div className="space-y-4">
-          <p className="text-sm text-gray-400">Fine-grained permission control for each role across all modules.</p>
+          <p className="text-sm text-gray-500">Fine-grained permission control for each role across all modules.</p>
           <div className="overflow-x-auto">
             <table className="w-full text-xs">
-              <thead className="bg-gray-900 text-gray-400 text-left">
+              <thead className="bg-white text-gray-500 text-left">
                 <tr>
-                  <th className="px-3 py-2 sticky left-0 bg-gray-900 z-10">Permission</th>
+                  <th className="px-3 py-2 sticky left-0 bg-white z-10">Permission</th>
                   {ROLES.map(role => (
                     <th key={role.id} className="px-2 py-2 text-center whitespace-nowrap">{role.name}</th>
                   ))}
@@ -296,8 +296,8 @@ export function AdminControlPanel() {
               </thead>
               <tbody className="divide-y divide-gray-700">
                 {PERMISSIONS.map(perm => (
-                  <tr key={perm} className="text-white">
-                    <td className="px-3 py-2 font-medium sticky left-0 bg-gray-800 z-10 whitespace-nowrap capitalize">
+                  <tr key={perm} className="text-gray-900">
+                    <td className="px-3 py-2 font-medium sticky left-0 bg-white z-10 whitespace-nowrap capitalize">
                       {perm.replace(/_/g, ' ')}
                     </td>
                     {rolePermissions.map(role => (
@@ -334,17 +334,17 @@ export function AdminControlPanel() {
       {/* ============================================================= */}
       {activeTab === 'discounts' && (
         <div className="space-y-4">
-          <p className="text-sm text-gray-400">Set maximum discount percentages and approval requirements per role.</p>
+          <p className="text-sm text-gray-500">Set maximum discount percentages and approval requirements per role.</p>
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
             {discountLimits.map(dl => (
-              <div key={dl.roleId} className="bg-gray-800 border border-gray-700 rounded-lg p-4">
+              <div key={dl.roleId} className="bg-white border border-gray-200 rounded-lg p-4">
                 <div className="flex items-center gap-2 mb-3">
-                  <Shield className="w-4 h-4 text-gray-400" />
-                  <h4 className="font-medium text-white">{dl.roleName}</h4>
+                  <Shield className="w-4 h-4 text-gray-500" />
+                  <h4 className="font-medium text-gray-900">{dl.roleName}</h4>
                 </div>
                 <div className="space-y-3">
                   <div>
-                    <label className="text-xs text-gray-400">Max Discount %</label>
+                    <label className="text-xs text-gray-500">Max Discount %</label>
                     <input
                       type="number"
                       min={0}
@@ -353,7 +353,7 @@ export function AdminControlPanel() {
                       onChange={(e) => setDiscountLimits(prev => prev.map(d =>
                         d.roleId === dl.roleId ? { ...d, maxDiscountPercent: Number(e.target.value) } : d
                       ))}
-                      className="w-full mt-1 bg-gray-900 border border-gray-600 text-white rounded px-3 py-1.5 text-sm"
+                      className="w-full mt-1 bg-white border border-gray-300 text-gray-900 rounded px-3 py-1.5 text-sm"
                     />
                   </div>
                   <div className="flex items-center gap-2">
@@ -363,13 +363,13 @@ export function AdminControlPanel() {
                       onChange={() => setDiscountLimits(prev => prev.map(d =>
                         d.roleId === dl.roleId ? { ...d, requiresApproval: !d.requiresApproval } : d
                       ))}
-                      className="rounded border-gray-600"
+                      className="rounded border-gray-300"
                     />
-                    <label className="text-xs text-gray-300">Requires approval above threshold</label>
+                    <label className="text-xs text-gray-700">Requires approval above threshold</label>
                   </div>
                   {dl.requiresApproval && (
                     <div>
-                      <label className="text-xs text-gray-400">Approval Threshold %</label>
+                      <label className="text-xs text-gray-500">Approval Threshold %</label>
                       <input
                         type="number"
                         min={0}
@@ -378,7 +378,7 @@ export function AdminControlPanel() {
                         onChange={(e) => setDiscountLimits(prev => prev.map(d =>
                           d.roleId === dl.roleId ? { ...d, approvalThreshold: Number(e.target.value) } : d
                         ))}
-                        className="w-full mt-1 bg-gray-900 border border-gray-600 text-white rounded px-3 py-1.5 text-sm"
+                        className="w-full mt-1 bg-white border border-gray-300 text-gray-900 rounded px-3 py-1.5 text-sm"
                       />
                     </div>
                   )}
@@ -398,15 +398,15 @@ export function AdminControlPanel() {
             const categoryRules = rules.filter(r => r.category === category);
             return (
               <div key={category}>
-                <h3 className="text-sm font-semibold text-gray-300 uppercase tracking-wider mb-3 border-b border-gray-700 pb-2">
+                <h3 className="text-sm font-semibold text-gray-700 uppercase tracking-wider mb-3 border-b border-gray-200 pb-2">
                   {category.charAt(0).toUpperCase() + category.slice(1)} Rules
                 </h3>
                 <div className="space-y-3">
                   {categoryRules.map(rule => (
-                    <div key={rule.id} className="flex items-center justify-between p-3 bg-gray-800 border border-gray-700 rounded-lg">
+                    <div key={rule.id} className="flex items-center justify-between p-3 bg-white border border-gray-200 rounded-lg">
                       <div className="flex-1 min-w-0 mr-4">
-                        <p className="text-sm font-medium text-white">{rule.label}</p>
-                        <p className="text-xs text-gray-400 mt-0.5">{rule.description}</p>
+                        <p className="text-sm font-medium text-gray-900">{rule.label}</p>
+                        <p className="text-xs text-gray-500 mt-0.5">{rule.description}</p>
                       </div>
                       <div className="flex-shrink-0">
                         {rule.type === 'toggle' && (
@@ -432,7 +432,7 @@ export function AdminControlPanel() {
                             onChange={(e) => setRules(prev => prev.map(r =>
                               r.id === rule.id ? { ...r, value: Number(e.target.value) } : r
                             ))}
-                            className="w-24 bg-gray-900 border border-gray-600 text-white rounded px-2 py-1 text-sm text-right"
+                            className="w-24 bg-white border border-gray-300 text-gray-900 rounded px-2 py-1 text-sm text-right"
                           />
                         )}
                         {rule.type === 'select' && rule.options && (
@@ -441,7 +441,7 @@ export function AdminControlPanel() {
                             onChange={(e) => setRules(prev => prev.map(r =>
                               r.id === rule.id ? { ...r, value: e.target.value } : r
                             ))}
-                            className="bg-gray-900 border border-gray-600 text-white rounded px-2 py-1 text-sm"
+                            className="bg-white border border-gray-300 text-gray-900 rounded px-2 py-1 text-sm"
                           >
                             {rule.options.map(opt => (
                               <option key={opt} value={opt}>{opt}</option>
@@ -459,7 +459,7 @@ export function AdminControlPanel() {
       )}
 
       {/* Save Button */}
-      <div className="flex justify-end pt-4 border-t border-gray-700">
+      <div className="flex justify-end pt-4 border-t border-gray-200">
         <button
           onClick={handleSave}
           disabled={isSaving}

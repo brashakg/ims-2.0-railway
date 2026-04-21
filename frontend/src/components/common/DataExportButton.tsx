@@ -80,7 +80,7 @@ export function DataExportButton({
         className={clsx(
           'inline-flex items-center gap-2 px-3 py-2 rounded-lg font-medium transition-colors',
           disabled || data.length === 0
-            ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
+            ? 'bg-gray-100 text-gray-500 cursor-not-allowed'
             : 'bg-blue-50 text-blue-700 hover:bg-blue-100 active:bg-blue-200'
         )}
         aria-label="Export data"

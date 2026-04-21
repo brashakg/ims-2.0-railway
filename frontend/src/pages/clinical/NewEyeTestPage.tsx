@@ -40,7 +40,7 @@ export function NewEyeTestPage() {
             Go to Patient Queue
           </button>
         </div>
-        <p className="text-sm text-gray-400">Redirecting automatically...</p>
+        <p className="text-sm text-gray-500">Redirecting automatically...</p>
       </div>
     </div>
   );

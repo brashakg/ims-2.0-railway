@@ -400,7 +400,7 @@ export function TaskManagementPage() {
       {activeTab !== 'analytics' && (
         <div className="flex items-center gap-4">
           <div className="flex-1 relative">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" />
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-500" />
             <input
               type="text"
               placeholder={activeTab === 'sop' ? 'Search SOPs...' : 'Search tasks...'}
@@ -513,7 +513,7 @@ export function TaskManagementPage() {
 
           {filteredSOPs.length === 0 && (
             <div className="col-span-2 text-center py-12">
-              <ListChecks className="w-12 h-12 text-gray-400 mx-auto mb-3" />
+              <ListChecks className="w-12 h-12 text-gray-500 mx-auto mb-3" />
               <p className="text-gray-500">No SOPs found</p>
             </div>
           )}
@@ -601,7 +601,7 @@ export function TaskManagementPage() {
                           {[...Array(5)].map((_, i) => (
                             <svg
                               key={i}
-                              className={`w-4 h-4 ${i < Math.floor(emp.rating) ? 'text-yellow-400' : 'text-gray-300'}`}
+                              className={`w-4 h-4 ${i < Math.floor(emp.rating) ? 'text-yellow-600' : 'text-gray-700'}`}
                               fill="currentColor"
                               viewBox="0 0 20 20"
                             >
@@ -687,7 +687,7 @@ export function TaskManagementPage() {
                         {item.completed ? (
                           <CheckCircle className="w-4 h-4 text-green-600" />
                         ) : (
-                          <XCircle className="w-4 h-4 text-gray-400" />
+                          <XCircle className="w-4 h-4 text-gray-500" />
                         )}
                         <span className={item.completed ? 'text-gray-500 line-through' : 'text-gray-700'}>
                           {item.text}
@@ -721,7 +721,7 @@ export function TaskManagementPage() {
 
           {filteredTasks.length === 0 && (
             <div className="text-center py-12">
-              <CheckSquare className="w-12 h-12 text-gray-400 mx-auto mb-3" />
+              <CheckSquare className="w-12 h-12 text-gray-500 mx-auto mb-3" />
               <p className="text-gray-500">No tasks found</p>
             </div>
           )}

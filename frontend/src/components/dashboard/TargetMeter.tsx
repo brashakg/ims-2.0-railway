@@ -53,28 +53,28 @@ export function TargetMeter({
 
   if (loading) {
     return (
-      <div className="bg-gray-800 rounded-lg p-4 border border-gray-700 shadow-sm">
-        <div className="mb-3 h-4 bg-gray-700 rounded animate-pulse w-1/3" />
-        <div className="h-8 bg-gray-700 rounded animate-pulse mb-3" />
-        <div className="h-3 bg-gray-700 rounded animate-pulse" />
+      <div className="bg-white rounded-lg p-4 border border-gray-200 shadow-sm">
+        <div className="mb-3 h-4 bg-gray-100 rounded animate-pulse w-1/3" />
+        <div className="h-8 bg-gray-100 rounded animate-pulse mb-3" />
+        <div className="h-3 bg-gray-100 rounded animate-pulse" />
       </div>
     );
   }
 
   if (error) {
     return (
-      <div className="bg-gray-800 rounded-lg p-4 border border-red-500 shadow-sm">
+      <div className="bg-white rounded-lg p-4 border border-red-500 shadow-sm">
         <p className="text-xs text-red-600 font-medium">Error loading target data</p>
       </div>
     );
   }
 
   return (
-    <div className="bg-gray-800 rounded-lg p-4 border border-gray-700 shadow-sm">
+    <div className="bg-white rounded-lg p-4 border border-gray-200 shadow-sm">
       {/* Header */}
       <div className="flex items-start justify-between mb-3">
         <div>
-          <p className="text-xs text-gray-400 font-medium uppercase tracking-wide">
+          <p className="text-xs text-gray-500 font-medium uppercase tracking-wide">
             {label}
           </p>
           <p className="text-xs text-gray-500 mt-1">
@@ -94,10 +94,10 @@ export function TargetMeter({
       {/* Amount Display */}
       <div className="mb-3">
         <div className="flex items-baseline gap-1 mb-1">
-          <span className="text-xl font-bold text-white">
+          <span className="text-xl font-bold text-gray-900">
             {formatCurrency(actual)}
           </span>
-          <span className="text-xs text-gray-400">
+          <span className="text-xs text-gray-500">
             / {formatCurrency(target)}
           </span>
         </div>
@@ -105,7 +105,7 @@ export function TargetMeter({
 
       {/* Progress Bar */}
       <div className="mb-3">
-        <div className="w-full h-2 bg-gray-700 rounded-full overflow-hidden">
+        <div className="w-full h-2 bg-gray-100 rounded-full overflow-hidden">
           <div
             className={clsx('h-full rounded-full transition-all duration-300', color.bg)}
             style={{ width: `${displayPercentage}%` }}
@@ -119,7 +119,7 @@ export function TargetMeter({
           <span className={clsx('text-lg font-bold', color.text)}>
             {percentage.toFixed(1)}%
           </span>
-          <span className="text-xs text-gray-400">
+          <span className="text-xs text-gray-500">
             {percentage < 50 && 'Below Target'}
             {percentage >= 50 && percentage < 80 && 'On Track'}
             {percentage >= 80 && percentage < 100 && 'Almost There'}
@@ -130,8 +130,8 @@ export function TargetMeter({
 
       {/* Gap Information */}
       {percentage < 100 && (
-        <div className="mt-2 pt-2 border-t border-gray-700">
-          <p className="text-xs text-gray-400">
+        <div className="mt-2 pt-2 border-t border-gray-200">
+          <p className="text-xs text-gray-500">
             <span className="text-red-600 font-medium">
               ₹{formatCurrency(Math.max(0, target - actual))}
             </span>

@@ -38,16 +38,16 @@ export function NonMovingStockWidget() {
   };
 
   return (
-    <div className="bg-gray-800 rounded-lg border border-gray-700 shadow-sm overflow-hidden">
-      <div className="p-4 border-b border-gray-700 flex items-center justify-between">
+    <div className="bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden">
+      <div className="p-4 border-b border-gray-200 flex items-center justify-between">
         <div className="flex items-center gap-2">
-          <TrendingDown className="w-5 h-5 text-orange-400" />
-          <h3 className="font-semibold text-white">Non-Moving Stock</h3>
+          <TrendingDown className="w-5 h-5 text-orange-600" />
+          <h3 className="font-semibold text-gray-900">Non-Moving Stock</h3>
         </div>
         <select
           value={days}
           onChange={(e) => setDays(Number(e.target.value))}
-          className="px-2 py-1 bg-gray-700 border border-gray-600 rounded text-sm text-gray-300"
+          className="px-2 py-1 bg-gray-100 border border-gray-300 rounded text-sm text-gray-700"
         >
           <option value={30}>Last 30 days</option>
           <option value={60}>Last 60 days</option>
@@ -58,22 +58,22 @@ export function NonMovingStockWidget() {
 
       <div className="max-h-96 overflow-y-auto">
         {loading ? (
-          <div className="p-4 text-center text-gray-400">Loading...</div>
+          <div className="p-4 text-center text-gray-500">Loading...</div>
         ) : products.length === 0 ? (
-          <div className="p-4 text-center text-gray-400">
+          <div className="p-4 text-center text-gray-500">
             No non-moving products found
           </div>
         ) : (
           <table className="w-full text-sm">
-            <thead className="bg-gray-900 border-b border-gray-700 sticky top-0">
+            <thead className="bg-white border-b border-gray-200 sticky top-0">
               <tr>
-                <th className="px-4 py-2 text-left text-xs font-semibold text-gray-400">
+                <th className="px-4 py-2 text-left text-xs font-semibold text-gray-500">
                   Product
                 </th>
-                <th className="px-4 py-2 text-right text-xs font-semibold text-gray-400">
+                <th className="px-4 py-2 text-right text-xs font-semibold text-gray-500">
                   Stock
                 </th>
-                <th className="px-4 py-2 text-left text-xs font-semibold text-gray-400">
+                <th className="px-4 py-2 text-left text-xs font-semibold text-gray-500">
                   Last Sold
                 </th>
               </tr>
@@ -82,18 +82,18 @@ export function NonMovingStockWidget() {
               {products.map((product) => (
                 <tr
                   key={product.product_id}
-                  className="border-b border-gray-700 hover:bg-gray-900"
+                  className="border-b border-gray-200 hover:bg-white"
                 >
                   <td className="px-4 py-2">
                     <div>
-                      <p className="font-medium text-white">{product.name}</p>
+                      <p className="font-medium text-gray-900">{product.name}</p>
                       <p className="text-xs text-gray-500">{product.sku}</p>
                     </div>
                   </td>
-                  <td className="px-4 py-2 text-right text-orange-400 font-semibold">
+                  <td className="px-4 py-2 text-right text-orange-600 font-semibold">
                     {product.current_stock}
                   </td>
-                  <td className="px-4 py-2 text-xs text-gray-400">
+                  <td className="px-4 py-2 text-xs text-gray-500">
                     {product.last_sold_date
                       ? new Date(product.last_sold_date).toLocaleDateString()
                       : 'Never'}

@@ -42,6 +42,47 @@ export const reportsApi = {
     });
     return response.data;
   },
+
+  // Phase 6.3 — cash-tied-up-in-shelves report
+  getNonMovingStock: async (
+    storeId?: string,
+    days: number = 90,
+    limit: number = 200,
+  ) => {
+    const response = await api.get('/reports/inventory/non-moving-stock', {
+      params: { days, limit, ...(storeId ? { store_id: storeId } : {}) },
+    });
+    return response.data as {
+      data: Array<{
+        product_id: string | null;
+        sku: string | null;
+        brand: string | null;
+        model: string | null;
+        category: string | null;
+        mrp: number;
+        last_sold_at: string | null;
+        days_since_sold: number | null;
+        never_sold: boolean;
+        total_sold_all_time: number;
+      }>;
+      count: number;
+      as_of: string;
+      days_threshold: number;
+      store_id: string | null;
+    };
+  },
+
+  // Phase 6.3 — MoM / YoY growth (endpoint already existed, surfacing it)
+  getSalesGrowth: async (storeId: string | undefined, year: number, month: number) => {
+    const response = await api.get('/reports/sales/growth', {
+      params: { year, month, ...(storeId ? { store_id: storeId } : {}) },
+    });
+    return response.data as {
+      current_month: { sales: number; orders: number };
+      mom_growth: { percent: number; previous_month_sales: number };
+      yoy_growth: { percent: number; previous_year_sales: number };
+    };
+  },
 };
 
 // ============================================================================

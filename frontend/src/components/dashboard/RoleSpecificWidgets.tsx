@@ -41,7 +41,7 @@ export function PendingDeliveriesWidget() {
     <div className="bg-white rounded-lg p-4 border border-gray-200 shadow-sm">
       <div className="flex items-center justify-between mb-2">
         <div className="flex items-center gap-2">
-          <Package className="w-4 h-4 text-blue-400" />
+          <Package className="w-4 h-4 text-blue-600" />
           <p className="text-xs text-gray-500">Pending Deliveries</p>
         </div>
       </div>
@@ -80,7 +80,7 @@ export function RemindersWidget() {
     <div className="bg-white rounded-lg p-4 border border-gray-200 shadow-sm">
       <div className="flex items-center justify-between mb-2">
         <div className="flex items-center gap-2">
-          <Clock className="w-4 h-4 text-orange-400" />
+          <Clock className="w-4 h-4 text-orange-600" />
           <p className="text-xs text-gray-500">Due Today</p>
         </div>
       </div>
@@ -134,7 +134,7 @@ export function StockCountStatusWidget() {
           </p>
           <div className="w-full bg-gray-100 rounded-full h-2">
             <div
-              className="bg-bv-gold-500 h-2 rounded-full transition-all"
+              className="bg-bv-red-600 h-2 rounded-full transition-all"
               style={{ width: `${status.percent}%` }}
             />
           </div>
@@ -207,7 +207,7 @@ export function EyeTestCountWidget() {
     <div className="bg-white rounded-lg p-4 border border-gray-200 shadow-sm">
       <div className="flex items-center justify-between mb-2">
         <div className="flex items-center gap-2">
-          <Eye className="w-4 h-4 text-purple-400" />
+          <Eye className="w-4 h-4 text-purple-600" />
           <p className="text-xs text-gray-500">Eye Tests Today</p>
         </div>
       </div>
@@ -274,7 +274,7 @@ export function StoreVsTargetWidget() {
             <div
               className={clsx(
                 'h-2 rounded-full transition-all',
-                data.percent >= 100 ? 'bg-green-500' : 'bg-bv-gold-500'
+                data.percent >= 100 ? 'bg-green-500' : 'bg-bv-red-600'
               )}
               style={{ width: `${Math.min(data.percent, 100)}%` }}
             />
@@ -368,7 +368,7 @@ export function EscalationsWidget() {
     <div className="bg-white rounded-lg p-4 border border-gray-200 shadow-sm">
       <div className="flex items-center justify-between mb-2">
         <div className="flex items-center gap-2">
-          <AlertCircle className="w-4 h-4 text-red-400" />
+          <AlertCircle className="w-4 h-4 text-red-600" />
           <p className="text-xs text-gray-500">Escalations</p>
         </div>
       </div>
@@ -463,15 +463,15 @@ export function HRSummaryWidget() {
         <div className="space-y-1 text-sm">
           <div className="flex justify-between">
             <span className="text-gray-600">Present:</span>
-            <span className="font-semibold text-green-400">{data.present}</span>
+            <span className="font-semibold text-green-600">{data.present}</span>
           </div>
           <div className="flex justify-between">
             <span className="text-gray-600">On Leave:</span>
-            <span className="font-semibold text-orange-400">{data.leave}</span>
+            <span className="font-semibold text-orange-600">{data.leave}</span>
           </div>
           <div className="flex justify-between">
             <span className="text-gray-600">Pending Leaves:</span>
-            <span className="font-semibold text-blue-400">{data.pending}</span>
+            <span className="font-semibold text-blue-600">{data.pending}</span>
           </div>
         </div>
       )}
@@ -515,7 +515,7 @@ export function SystemHealthWidget() {
   }, []);
 
   const getStatusColor = (status: string) => {
-    return status === 'healthy' ? 'text-green-400' : 'text-red-400';
+    return status === 'healthy' ? 'text-green-600' : 'text-red-600';
   };
 
   return (
@@ -543,7 +543,7 @@ export function SystemHealthWidget() {
           </div>
           <div className="flex items-center justify-between">
             <span className="text-gray-600">Last Backup:</span>
-            <span className="font-semibold text-blue-400">{health.lastBackup}</span>
+            <span className="font-semibold text-blue-600">{health.lastBackup}</span>
           </div>
         </div>
       )}
@@ -604,19 +604,19 @@ export function FinancialSummaryWidget() {
         <div className="space-y-2 text-xs">
           <div className="flex justify-between">
             <span className="text-gray-600">Revenue:</span>
-            <span className="font-semibold text-green-400">{formatCurrency(data.revenue)}</span>
+            <span className="font-semibold text-green-600">{formatCurrency(data.revenue)}</span>
           </div>
           <div className="flex justify-between">
             <span className="text-gray-600">Expenses:</span>
-            <span className="font-semibold text-red-400">{formatCurrency(data.expenses)}</span>
+            <span className="font-semibold text-red-600">{formatCurrency(data.expenses)}</span>
           </div>
           <div className="flex justify-between">
             <span className="text-gray-600">GST Collected:</span>
-            <span className="font-semibold text-blue-400">{formatCurrency(data.gstCollected)}</span>
+            <span className="font-semibold text-blue-600">{formatCurrency(data.gstCollected)}</span>
           </div>
           <div className="flex justify-between">
             <span className="text-gray-600">GST Paid:</span>
-            <span className="font-semibold text-orange-400">{formatCurrency(data.gstPaid)}</span>
+            <span className="font-semibold text-orange-600">{formatCurrency(data.gstPaid)}</span>
           </div>
         </div>
       )}
@@ -688,7 +688,7 @@ export function PendingReconciliationsWidget() {
     <div className="bg-white rounded-lg p-4 border border-gray-200 shadow-sm">
       <div className="flex items-center justify-between mb-2">
         <div className="flex items-center gap-2">
-          <FileText className="w-4 h-4 text-yellow-400" />
+          <FileText className="w-4 h-4 text-yellow-600" />
           <p className="text-xs text-gray-500">Reconciliations</p>
         </div>
       </div>
@@ -829,11 +829,11 @@ export function CatalogSKUCountWidget() {
           </div>
           <div className="flex justify-between">
             <span className="text-gray-600">Active:</span>
-            <span className="font-semibold text-green-400">{data.active}</span>
+            <span className="font-semibold text-green-600">{data.active}</span>
           </div>
           <div className="flex justify-between">
             <span className="text-gray-600">Pending:</span>
-            <span className="font-semibold text-orange-400">{data.pending}</span>
+            <span className="font-semibold text-orange-600">{data.pending}</span>
           </div>
         </div>
       )}
@@ -867,7 +867,7 @@ export function PriceChangeRequestsWidget() {
     <div className="bg-white rounded-lg p-4 border border-gray-200 shadow-sm">
       <div className="flex items-center justify-between mb-2">
         <div className="flex items-center gap-2">
-          <DollarSign className="w-4 h-4 text-green-400" />
+          <DollarSign className="w-4 h-4 text-green-600" />
           <p className="text-xs text-gray-500">Price Changes</p>
         </div>
       </div>

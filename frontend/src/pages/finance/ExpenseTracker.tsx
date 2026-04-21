@@ -262,15 +262,15 @@ export default function ExpenseTracker() {
             </div>
             <div className="bg-white border border-gray-200 rounded-lg p-6">
               <p className="text-gray-500 text-sm mb-1">Pending Approval</p>
-              <p className="text-3xl font-bold text-yellow-400">{summary.pending_count}</p>
+              <p className="text-3xl font-bold text-yellow-600">{summary.pending_count}</p>
             </div>
             <div className="bg-white border border-gray-200 rounded-lg p-6">
               <p className="text-gray-500 text-sm mb-1">Approved</p>
-              <p className="text-3xl font-bold text-green-400">{summary.approved_count}</p>
+              <p className="text-3xl font-bold text-green-600">{summary.approved_count}</p>
             </div>
             <div className="bg-white border border-gray-200 rounded-lg p-6">
               <p className="text-gray-500 text-sm mb-1">Average Daily</p>
-              <p className="text-3xl font-bold text-blue-400">₹{summary.average_daily.toLocaleString()}</p>
+              <p className="text-3xl font-bold text-blue-600">₹{summary.average_daily.toLocaleString()}</p>
             </div>
           </div>
         )}
@@ -285,7 +285,7 @@ export default function ExpenseTracker() {
             className={clsx(
               'px-4 py-3 font-medium transition-colors border-b-2',
               activeTab === tab
-                ? 'text-blue-400 border-blue-400'
+                ? 'text-blue-600 border-blue-400'
                 : 'text-gray-500 border-transparent hover:text-gray-700'
             )}
           >
@@ -408,7 +408,7 @@ export default function ExpenseTracker() {
                     <td className="px-6 py-4 text-sm">
                       <button
                         onClick={() => setSelectedExpense(expense)}
-                        className="text-blue-400 hover:text-blue-300 transition-colors"
+                        className="text-blue-600 hover:text-blue-700 transition-colors"
                         title="View details"
                       >
                         <Eye className="w-4 h-4" />
@@ -438,7 +438,7 @@ export default function ExpenseTracker() {
                     <p className="font-semibold text-gray-900">{expense.description}</p>
                     <p className="text-sm text-gray-500">{expense.expense_id}</p>
                   </div>
-                  <span className="text-2xl font-bold text-blue-400">₹{expense.amount.toLocaleString()}</span>
+                  <span className="text-2xl font-bold text-blue-600">₹{expense.amount.toLocaleString()}</span>
                 </div>
                 <div className="flex gap-4">
                   <button
@@ -511,15 +511,15 @@ export default function ExpenseTracker() {
               </div>
               <div className="flex justify-between items-center pb-4 border-b border-gray-200">
                 <span className="text-gray-500">Pending Approval</span>
-                <span className="text-2xl font-bold text-yellow-400">{summary.pending_count}</span>
+                <span className="text-2xl font-bold text-yellow-600">{summary.pending_count}</span>
               </div>
               <div className="flex justify-between items-center pb-4 border-b border-gray-200">
                 <span className="text-gray-500">Approved</span>
-                <span className="text-2xl font-bold text-green-400">{summary.approved_count}</span>
+                <span className="text-2xl font-bold text-green-600">{summary.approved_count}</span>
               </div>
               <div className="flex justify-between items-center">
                 <span className="text-gray-500">Daily Average</span>
-                <span className="text-2xl font-bold text-blue-400">₹{summary.average_daily.toLocaleString()}</span>
+                <span className="text-2xl font-bold text-blue-600">₹{summary.average_daily.toLocaleString()}</span>
               </div>
             </div>
           </div>

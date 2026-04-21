@@ -20,25 +20,25 @@ export default function VendorPayments({ vendorPayments, onPayVendor }: VendorPa
     <div className="space-y-6">
       {/* Summary */}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-        <div className="bg-slate-800 border border-slate-700 rounded-lg p-4">
-          <p className="text-sm text-slate-400">Total Payable</p>
-          <p className="text-2xl font-bold text-white mt-1">{formatCurrency(totalDue)}</p>
+        <div className="bg-white border border-slate-700 rounded-lg p-4">
+          <p className="text-sm text-slate-600">Total Payable</p>
+          <p className="text-2xl font-bold text-gray-900 mt-1">{formatCurrency(totalDue)}</p>
         </div>
-        <div className="bg-slate-800 border border-slate-700 rounded-lg p-4">
-          <p className="text-sm text-slate-400">Vendors with Dues</p>
-          <p className="text-2xl font-bold text-amber-400 mt-1">{vendorPayments.length}</p>
+        <div className="bg-white border border-slate-700 rounded-lg p-4">
+          <p className="text-sm text-slate-600">Vendors with Dues</p>
+          <p className="text-2xl font-bold text-amber-600 mt-1">{vendorPayments.length}</p>
         </div>
-        <div className="bg-slate-800 border border-slate-700 rounded-lg p-4">
-          <p className="text-sm text-slate-400">Overdue</p>
-          <p className="text-2xl font-bold text-red-400 mt-1">{overdueCount}</p>
+        <div className="bg-white border border-slate-700 rounded-lg p-4">
+          <p className="text-sm text-slate-600">Overdue</p>
+          <p className="text-2xl font-bold text-red-600 mt-1">{overdueCount}</p>
         </div>
       </div>
 
-      <h3 className="text-lg font-semibold text-white">Vendor Payment Schedule</h3>
+      <h3 className="text-lg font-semibold text-gray-900">Vendor Payment Schedule</h3>
 
       <div className="overflow-x-auto">
         <table className="w-full text-sm">
-          <thead className="bg-slate-900 text-slate-400 text-left">
+          <thead className="bg-slate-50 text-slate-600 text-left">
             <tr>
               <th className="px-4 py-3">Vendor</th>
               <th className="px-4 py-3 text-right">Amount Due</th>
@@ -50,12 +50,12 @@ export default function VendorPayments({ vendorPayments, onPayVendor }: VendorPa
           </thead>
           <tbody className="divide-y divide-slate-700">
             {vendorPayments.map((v) => (
-              <tr key={v.id} className="text-white">
+              <tr key={v.id} className="text-gray-900">
                 <td className="px-4 py-3 font-medium">{v.vendor_name}</td>
                 <td className="px-4 py-3 text-right font-semibold">
                   {formatCurrency(v.amount_due)}
                 </td>
-                <td className="px-4 py-3 text-slate-300">
+                <td className="px-4 py-3 text-slate-700">
                   {new Date(v.due_date).toLocaleDateString('en-IN', {
                     day: 'numeric',
                     month: 'short',
@@ -67,10 +67,10 @@ export default function VendorPayments({ vendorPayments, onPayVendor }: VendorPa
                     className={clsx(
                       'px-2 py-1 rounded text-xs font-medium',
                       v.status === 'paid'
-                        ? 'bg-green-900/50 text-green-400'
+                        ? 'bg-green-50/50 text-green-600'
                         : v.status === 'partial'
-                          ? 'bg-amber-900/50 text-amber-400'
-                          : 'bg-slate-700 text-slate-300'
+                          ? 'bg-amber-50/50 text-amber-600'
+                          : 'bg-gray-100 text-slate-700'
                     )}
                   >
                     {v.status.charAt(0).toUpperCase() + v.status.slice(1)}
@@ -79,7 +79,7 @@ export default function VendorPayments({ vendorPayments, onPayVendor }: VendorPa
                 <td
                   className={clsx(
                     'px-4 py-3 text-right',
-                    v.days_overdue > 0 ? 'text-red-400 font-medium' : 'text-slate-400'
+                    v.days_overdue > 0 ? 'text-red-600 font-medium' : 'text-slate-600'
                   )}
                 >
                   {v.days_overdue > 0 ? `${v.days_overdue} days` : '--'}

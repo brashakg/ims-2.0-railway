@@ -1111,34 +1111,128 @@ async def pending_workshop_jobs(
     store_id: Optional[str] = Query(None),
     current_user: dict = Depends(get_current_user),
 ):
-    """Pending workshop jobs report"""
+    """
+    Pending workshop jobs report — Phase 6.4.
+
+    Rewritten to query the `workshop_jobs` collection via WorkshopJobRepository
+    (the previous implementation used the generic `tasks` collection with
+    task_type='workshop_job', which the real workshop flow never populates).
+
+    Response shape:
+        {
+            "data": [  # one row per pending job, sorted by age desc
+                { "job_id", "job_number", "order_id", "status",
+                  "technician_id", "expected_date", "created_at",
+                  "age_days", "aging_bucket" } ],
+            "summary": {
+                "total_pending": int,
+                "overdue": int,
+                "by_aging_bucket": {"0-3d": n, "3-7d": n, "7+d": n},
+                "by_technician": [ {"technician_id", "count"} ],
+            },
+        }
+
+    Aging buckets are computed from created_at. `age_days` is the number of
+    days the job has been sitting in PENDING or IN_PROGRESS. A job whose
+    `expected_date` has passed is counted as overdue regardless of age.
+    """
+    from database.repositories.workshop_repository import WorkshopJobRepository  # lazy
+    from ..dependencies import get_db as _get_db
+
     active_store = store_id or current_user.get("active_store_id")
-    task_repo = get_task_repository()
+    db = _get_db()
+    if db is None or not getattr(db, "is_connected", True):
+        return {
+            "data": [],
+            "summary": {
+                "total_pending": 0,
+                "overdue": 0,
+                "by_aging_bucket": {"0-3d": 0, "3-7d": 0, "7+d": 0},
+                "by_technician": [],
+            },
+        }
 
-    if task_repo is None:
-        return {"data": [], "total_pending": 0}
+    repo = WorkshopJobRepository(db.get_collection("workshop_jobs"))
+    jobs = repo.find_pending(active_store)  # PENDING + IN_PROGRESS, sorted by expected_date
 
-    pending_tasks = task_repo.find_many({
-        "store_id": active_store,
-        "task_type": "workshop_job",
-        "status": {"$in": ["OPEN", "IN_PROGRESS"]},
-    })
-
+    now = datetime.now()
     data = []
-    for task in pending_tasks:
+    bucket_counts = {"0-3d": 0, "3-7d": 0, "7+d": 0}
+    tech_counts = {}
+    overdue_count = 0
+
+    for job in jobs:
+        created = job.get("created_at")
+        expected = job.get("expected_date")
+
+        # Age in days from created_at. Defensive parse for str or datetime.
+        age_days = None
+        if created:
+            try:
+                cr_dt = created if isinstance(created, datetime) else datetime.fromisoformat(str(created).replace("Z", "+00:00"))
+                # Normalize tz — the stored timestamps are naive in dev but
+                # may be tz-aware in prod Mongo. Strip tz for the subtraction.
+                if cr_dt.tzinfo is not None:
+                    cr_dt = cr_dt.replace(tzinfo=None)
+                age_days = max(0, (now - cr_dt).days)
+            except (ValueError, TypeError):
+                age_days = None
+
+        if age_days is None:
+            bucket = "0-3d"  # unknown age — treat as fresh so we don't panic-escalate
+        elif age_days < 3:
+            bucket = "0-3d"
+        elif age_days < 7:
+            bucket = "3-7d"
+        else:
+            bucket = "7+d"
+        bucket_counts[bucket] += 1
+
+        # Overdue check — expected_date is in the past
+        is_overdue = False
+        if expected:
+            try:
+                exp_dt = expected if isinstance(expected, datetime) else datetime.fromisoformat(str(expected).replace("Z", "+00:00"))
+                if exp_dt.tzinfo is not None:
+                    exp_dt = exp_dt.replace(tzinfo=None)
+                if exp_dt < now:
+                    is_overdue = True
+                    overdue_count += 1
+            except (ValueError, TypeError):
+                pass
+
+        tech = job.get("technician_id") or "unassigned"
+        tech_counts[tech] = tech_counts.get(tech, 0) + 1
+
         data.append({
-            "job_id": task.get("task_id"),
-            "description": task.get("title"),
-            "status": task.get("status"),
-            "priority": task.get("priority"),
-            "assigned_to": task.get("assigned_to_name"),
-            "due_date": task.get("due_date"),
-            "created_at": task.get("created_at"),
+            "job_id": job.get("job_id") or str(job.get("_id", "")),
+            "job_number": job.get("job_number"),
+            "order_id": job.get("order_id"),
+            "status": job.get("status"),
+            "technician_id": job.get("technician_id"),
+            "expected_date": expected.isoformat() if isinstance(expected, datetime) else expected,
+            "created_at": created.isoformat() if isinstance(created, datetime) else created,
+            "age_days": age_days,
+            "aging_bucket": bucket,
+            "is_overdue": is_overdue,
         })
+
+    # Sort: oldest first, with overdue jumping to the top regardless of age.
+    data.sort(key=lambda r: (not r["is_overdue"], -(r["age_days"] or 0)))
+
+    by_technician = sorted(
+        [{"technician_id": t, "count": c} for t, c in tech_counts.items()],
+        key=lambda r: -r["count"],
+    )
 
     return {
         "data": data,
-        "total_pending": len(pending_tasks),
+        "summary": {
+            "total_pending": len(data),
+            "overdue": overdue_count,
+            "by_aging_bucket": bucket_counts,
+            "by_technician": by_technician,
+        },
     }
 
 
@@ -1770,4 +1864,153 @@ async def gstr3b_report(
             "cess": 0.0,
         },
         "lateFee": 0.0,
+    }
+
+
+# ============================================================================
+# NON-MOVING STOCK REPORT (Phase 6.3)
+# ============================================================================
+# "Which SKUs are tying up cash without turning over?" — core question for
+# an optical retailer doing monthly clearance decisions. Anything that
+# hasn't sold in 90+ days is a candidate for discount, transfer, or return.
+# Finance dashboards traditionally pull this as "dead stock" aging.
+
+
+@router.get("/inventory/non-moving-stock")
+async def non_moving_stock(
+    store_id: Optional[str] = Query(None),
+    days: int = Query(90, ge=1, le=365, description="Products with no sale in the last N days"),
+    limit: int = Query(200, ge=1, le=1000),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Products that haven't sold in the last N days (default 90).
+
+    Returns one row per stale product, sorted by most stale first. A
+    product that has NEVER sold is surfaced at the top with
+    `never_sold: true` and `days_since_sold: null`. `last_sold_at` is the
+    ISO timestamp of the most recent non-cancelled order containing the
+    product.
+
+    Response shape:
+        {
+            "data": [ {product_id, sku, brand, model, category, mrp,
+                        last_sold_at, days_since_sold, never_sold,
+                        total_sold_all_time} ... ],
+            "count": int,
+            "as_of": ISO timestamp,
+            "days_threshold": int,
+            "store_id": str,
+        }
+
+    Edge cases:
+      - DB unavailable -> returns empty data + 0 count. Does not raise.
+      - Product has sale timestamp in a format we can't parse -> treated
+        as never_sold (conservative: surface it rather than hide it).
+      - `days=1` gives you yesterday's dead pile; `days=365` gives you
+        the full year of no-movement.
+    """
+    from datetime import timezone  # local import, keeps module-top imports minimal
+    active_store = store_id or current_user.get("active_store_id")
+    db = get_db()
+
+    if db is None or not getattr(db, "is_connected", True):
+        return {
+            "data": [],
+            "count": 0,
+            "as_of": datetime.now(timezone.utc).isoformat(),
+            "days_threshold": days,
+            "store_id": active_store,
+        }
+
+    # 1. Build per-product sales summary (last_sold_at + total units sold)
+    # from the orders collection using a single aggregation.
+    sales_map = {}
+    try:
+        orders_coll = db.get_collection("orders")
+        pipeline = [
+            {"$match": {
+                "store_id": active_store,
+                "status": {"$nin": ["CANCELLED", "DRAFT"]},
+            }},
+            {"$unwind": "$items"},
+            {"$group": {
+                "_id": "$items.product_id",
+                "last_sold_at": {"$max": "$created_at"},
+                "total_sold": {"$sum": {"$ifNull": ["$items.quantity", 1]}},
+            }},
+        ]
+        for doc in orders_coll.aggregate(pipeline):
+            pid = doc.get("_id")
+            if pid:
+                sales_map[str(pid)] = {
+                    "last_sold_at": doc.get("last_sold_at"),
+                    "total_sold": doc.get("total_sold") or 0,
+                }
+    except Exception:
+        # If aggregation fails (e.g., no orders collection yet), treat
+        # sales_map as empty and every product falls into "never_sold".
+        sales_map = {}
+
+    # 2. Walk active products, classify each as "stale" or not.
+    try:
+        products_coll = db.get_collection("products")
+        products = list(products_coll.find({"is_active": True}))
+    except Exception:
+        products = []
+
+    now = datetime.now(timezone.utc)
+    results = []
+    for p in products:
+        pid = str(p.get("product_id") or p.get("_id") or "")
+        s = sales_map.get(pid, {})
+        last_sold_at = s.get("last_sold_at")
+        total_sold = s.get("total_sold", 0)
+
+        days_since = None
+        never_sold = last_sold_at is None
+        if last_sold_at is not None:
+            try:
+                # Mongo may return a datetime or an ISO string depending on
+                # how the order was inserted. Handle both.
+                if isinstance(last_sold_at, datetime):
+                    last_dt = last_sold_at
+                else:
+                    last_dt = datetime.fromisoformat(str(last_sold_at).replace("Z", "+00:00"))
+                if last_dt.tzinfo is None:
+                    last_dt = last_dt.replace(tzinfo=timezone.utc)
+                days_since = (now - last_dt).days
+            except (ValueError, TypeError):
+                days_since = None
+                never_sold = True
+
+        if never_sold or (days_since is not None and days_since >= days):
+            results.append({
+                "product_id": pid or None,
+                "sku": p.get("sku"),
+                "brand": p.get("brand"),
+                "model": p.get("model"),
+                "category": p.get("category"),
+                "mrp": p.get("mrp") or 0,
+                "last_sold_at": last_sold_at if isinstance(last_sold_at, str) else (
+                    last_sold_at.isoformat() if isinstance(last_sold_at, datetime) else None
+                ),
+                "days_since_sold": days_since,
+                "never_sold": never_sold,
+                "total_sold_all_time": total_sold,
+            })
+
+    # 3. Sort — never-sold first (infinite staleness), then by days desc.
+    results.sort(key=lambda r: (
+        0 if r["never_sold"] else 1,
+        -(r["days_since_sold"] or 0),
+    ))
+    results = results[:limit]
+
+    return {
+        "data": results,
+        "count": len(results),
+        "as_of": now.isoformat(),
+        "days_threshold": days,
+        "store_id": active_store,
     }

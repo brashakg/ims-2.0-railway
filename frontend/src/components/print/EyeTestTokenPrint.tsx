@@ -85,9 +85,9 @@ export function EyeTestTokenPrint({ token, store, onClose }: EyeTestTokenPrintPr
           {/* Token Section */}
           <div className="text-center mb-4">
             <p className="text-gray-600 text-xs font-semibold mb-1">YOUR TOKEN</p>
-            <div className="bg-gray-800 text-white rounded-lg py-4 mb-3">
-              <p className="text-4xl font-bold text-white">{token.tokenNumber}</p>
-              <p className="text-xs text-gray-300 mt-1">Token Number</p>
+            <div className="bg-white text-gray-900 rounded-lg py-4 mb-3">
+              <p className="text-4xl font-bold text-gray-900">{token.tokenNumber}</p>
+              <p className="text-xs text-gray-700 mt-1">Token Number</p>
             </div>
           </div>
 
@@ -122,7 +122,7 @@ export function EyeTestTokenPrint({ token, store, onClose }: EyeTestTokenPrintPr
 
           {/* Footer Line */}
           <div className="mt-4 pt-2 border-t border-gray-200 text-center">
-            <p className="text-[10px] text-gray-400">
+            <p className="text-[10px] text-gray-500">
               {store.storeName} • {new Date().toLocaleDateString('en-IN')}
             </p>
           </div>

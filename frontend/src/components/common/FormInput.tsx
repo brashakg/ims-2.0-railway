@@ -120,16 +120,16 @@ export function FormInput({
 
   const baseInputClasses = clsx(
     'w-full border rounded-lg transition-colors',
-    'dark:border-gray-700 dark:bg-gray-800 dark:text-white dark:placeholder-gray-500',
+    'dark:border-gray-200 dark:bg-white dark:text-gray-900 dark:placeholder-gray-500',
     'focus:outline-none focus:ring-2 focus:ring-offset-0',
     sizeClasses[size],
     disabled && 'opacity-50 cursor-not-allowed',
-    readOnly && 'bg-gray-50 dark:bg-gray-900/50 cursor-default',
+    readOnly && 'bg-gray-50 dark:bg-white/50 cursor-default',
     displayError
-      ? 'border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-900/20 text-gray-900 dark:text-white placeholder-red-300 dark:placeholder-red-500 focus:ring-red-500 dark:focus:ring-red-600'
+      ? 'border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-50/20 text-gray-900 dark:text-gray-900 placeholder-red-300 dark:placeholder-red-500 focus:ring-red-500 dark:focus:ring-red-600'
       : isValid && showSuccess
-        ? 'border-green-300 dark:border-green-700 bg-green-50 dark:bg-green-900/20 text-gray-900 dark:text-white placeholder-gray-400 dark:placeholder-gray-500 focus:ring-green-500 dark:focus:ring-green-600'
-        : 'border-gray-300 bg-white text-gray-900 dark:text-white placeholder-gray-400 dark:placeholder-gray-500 focus:ring-blue-500 dark:focus:ring-blue-600'
+        ? 'border-green-300 dark:border-green-700 bg-green-50 dark:bg-green-50/20 text-gray-900 dark:text-gray-900 placeholder-gray-400 dark:placeholder-gray-500 focus:ring-green-500 dark:focus:ring-green-600'
+        : 'border-gray-300 bg-white text-gray-900 dark:text-gray-900 placeholder-gray-400 dark:placeholder-gray-500 focus:ring-blue-500 dark:focus:ring-blue-600'
   );
 
   return (
@@ -138,18 +138,18 @@ export function FormInput({
         <label
           htmlFor={inputId}
           className={clsx(
-            'block text-sm font-medium text-gray-700 dark:text-gray-300',
+            'block text-sm font-medium text-gray-700 dark:text-gray-700',
             labelClassName
           )}
         >
           {label}
-          {required && <span className="text-red-500 dark:text-red-400 ml-1" aria-label="required">*</span>}
+          {required && <span className="text-red-500 dark:text-red-600 ml-1" aria-label="required">*</span>}
         </label>
       )}
 
       <div className="relative group">
         {Icon && (
-          <div className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 dark:text-gray-500 pointer-events-none">
+          <div className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500 dark:text-gray-500 pointer-events-none">
             <Icon className="w-4 h-4" />
           </div>
         )}
@@ -183,7 +183,7 @@ export function FormInput({
             <button
               type="button"
               onClick={() => setIsPasswordVisible(!isPasswordVisible)}
-              className="text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-400 transition-colors"
+              className="text-gray-500 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-500 transition-colors"
               aria-label={isPasswordVisible ? 'Hide password' : 'Show password'}
               aria-pressed={isPasswordVisible}
             >
@@ -191,10 +191,10 @@ export function FormInput({
             </button>
           )}
           {isValid && showSuccess && !type.includes('password') && (
-            <Check className="w-4 h-4 text-green-600 dark:text-green-400" />
+            <Check className="w-4 h-4 text-green-600 dark:text-green-600" />
           )}
           {TrailingIcon && type !== 'password' && (
-            <TrailingIcon className="w-4 h-4 text-gray-400 dark:text-gray-500 pointer-events-none" />
+            <TrailingIcon className="w-4 h-4 text-gray-500 dark:text-gray-500 pointer-events-none" />
           )}
         </div>
       </div>
@@ -204,7 +204,7 @@ export function FormInput({
         {displayError && (
           <div
             id={`${inputId}-error`}
-            className="flex items-center gap-1 text-red-600 dark:text-red-400"
+            className="flex items-center gap-1 text-red-600 dark:text-red-600"
             role="alert"
             aria-live="polite"
           >
@@ -213,18 +213,18 @@ export function FormInput({
           </div>
         )}
         {!displayError && hint && (
-          <p id={`${inputId}-hint`} className="text-gray-500 dark:text-gray-400">
+          <p id={`${inputId}-hint`} className="text-gray-500 dark:text-gray-500">
             {hint}
           </p>
         )}
         {helperText && !displayError && (
-          <p className="text-gray-600 dark:text-gray-400">{helperText}</p>
+          <p className="text-gray-600 dark:text-gray-500">{helperText}</p>
         )}
       </div>
 
       {/* Character Counter */}
       {showCharCount && maxChars && (
-        <div className="flex justify-end text-xs text-gray-500 dark:text-gray-400">
+        <div className="flex justify-end text-xs text-gray-500 dark:text-gray-500">
           {charCount} / {maxChars}
         </div>
       )}
@@ -277,14 +277,14 @@ export function FormSelect({
   return (
     <div className={clsx('space-y-2', containerClassName)}>
       {label && (
-        <label htmlFor={inputId} className={clsx('block text-sm font-medium text-gray-700 dark:text-gray-300', labelClassName)}>
+        <label htmlFor={inputId} className={clsx('block text-sm font-medium text-gray-700 dark:text-gray-700', labelClassName)}>
           {label}
-          {required && <span className="text-red-500 dark:text-red-400 ml-1">*</span>}
+          {required && <span className="text-red-500 dark:text-red-600 ml-1">*</span>}
         </label>
       )}
 
       <div className="relative">
-        {Icon && <div className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 dark:text-gray-500 pointer-events-none">
+        {Icon && <div className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500 dark:text-gray-500 pointer-events-none">
           <Icon className="w-4 h-4" />
         </div>}
 
@@ -293,10 +293,10 @@ export function FormSelect({
           disabled={disabled}
           className={clsx(
             'w-full border rounded-lg transition-colors appearance-none',
-            'dark:border-gray-700 dark:bg-gray-800 dark:text-white',
+            'dark:border-gray-200 dark:bg-white dark:text-gray-900',
             'focus:outline-none focus:ring-2 focus:ring-blue-500 dark:focus:ring-blue-600',
             sizeClasses[size],
-            error ? 'border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-900/20 text-red-900 dark:text-red-100' : 'border-gray-300 bg-white dark:bg-gray-800 text-gray-900 dark:text-white',
+            error ? 'border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-50/20 text-red-900 dark:text-red-100' : 'border-gray-300 bg-white dark:bg-white text-gray-900 dark:text-gray-900',
             Icon && 'pl-9',
             'pr-9',
             selectClassName,
@@ -315,7 +315,7 @@ export function FormSelect({
           ))}
         </select>
 
-        <div className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 dark:text-gray-500 pointer-events-none">
+        <div className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500 dark:text-gray-500 pointer-events-none">
           <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
             <path fillRule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clipRule="evenodd" />
           </svg>
@@ -323,12 +323,12 @@ export function FormSelect({
       </div>
 
       {error && (
-        <div className="flex items-center gap-1 text-sm text-red-600 dark:text-red-400">
+        <div className="flex items-center gap-1 text-sm text-red-600 dark:text-red-600">
           <AlertCircle className="w-4 h-4" />
           <span>{error}</span>
         </div>
       )}
-      {!error && hint && <p className="text-xs text-gray-500 dark:text-gray-400">{hint}</p>}
+      {!error && hint && <p className="text-xs text-gray-500 dark:text-gray-500">{hint}</p>}
     </div>
   );
 }
@@ -379,9 +379,9 @@ export function FormTextarea({
   return (
     <div className={clsx('space-y-2', containerClassName)}>
       {label && (
-        <label htmlFor={inputId} className={clsx('block text-sm font-medium text-gray-700 dark:text-gray-300', labelClassName)}>
+        <label htmlFor={inputId} className={clsx('block text-sm font-medium text-gray-700 dark:text-gray-700', labelClassName)}>
           {label}
-          {required && <span className="text-red-500 dark:text-red-400 ml-1">*</span>}
+          {required && <span className="text-red-500 dark:text-red-600 ml-1">*</span>}
         </label>
       )}
 
@@ -393,11 +393,11 @@ export function FormTextarea({
         onChange={handleChange}
         className={clsx(
           'w-full px-3 py-2 border rounded-lg transition-colors resize-none',
-          'dark:border-gray-700 dark:bg-gray-800 dark:text-white dark:placeholder-gray-500',
+          'dark:border-gray-200 dark:bg-white dark:text-gray-900 dark:placeholder-gray-500',
           'focus:outline-none focus:ring-2',
           error
-            ? 'border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-900/20 text-red-900 dark:text-red-100 focus:ring-red-500 dark:focus:ring-red-600'
-            : 'border-gray-300 bg-white dark:bg-gray-800 text-gray-900 dark:text-white focus:ring-blue-500 dark:focus:ring-blue-600',
+            ? 'border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-50/20 text-red-900 dark:text-red-100 focus:ring-red-500 dark:focus:ring-red-600'
+            : 'border-gray-300 bg-white dark:bg-white text-gray-900 dark:text-gray-900 focus:ring-blue-500 dark:focus:ring-blue-600',
           textareaClassName,
           className
         )}
@@ -408,14 +408,14 @@ export function FormTextarea({
       />
 
       {error && (
-        <div className="flex items-center gap-1 text-sm text-red-600 dark:text-red-400">
+        <div className="flex items-center gap-1 text-sm text-red-600 dark:text-red-600">
           <AlertCircle className="w-4 h-4" />
           <span>{error}</span>
         </div>
       )}
-      {!error && hint && <p className="text-xs text-gray-500 dark:text-gray-400">{hint}</p>}
+      {!error && hint && <p className="text-xs text-gray-500 dark:text-gray-500">{hint}</p>}
       {showCharCount && maxLength && (
-        <div className="flex justify-end text-xs text-gray-500 dark:text-gray-400">
+        <div className="flex justify-end text-xs text-gray-500 dark:text-gray-500">
           {charCount} / {maxLength}
         </div>
       )}

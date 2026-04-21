@@ -553,7 +553,7 @@ export function ClinicalPage() {
                           storeName: storeInfo?.storeName || 'Better Vision Optics',
                           storePhone: storeInfo?.phone || '',
                         })}
-                        className="p-2 text-gray-400 hover:text-green-500 transition-colors"
+                        className="p-2 text-gray-500 hover:text-green-500 transition-colors"
                         title="Print Rx Card"
                       >
                         <FileText className="w-5 h-5" />

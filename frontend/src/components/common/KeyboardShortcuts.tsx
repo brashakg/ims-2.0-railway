@@ -113,25 +113,25 @@ export function KeyboardShortcutsModal() {
       onClick={() => setShowModal(false)}
     >
       <div
-        className="bg-white dark:bg-gray-900 rounded-lg shadow-xl max-w-2xl w-full max-h-96 overflow-y-auto"
+        className="bg-white dark:bg-white rounded-lg shadow-xl max-w-2xl w-full max-h-96 overflow-y-auto"
         onClick={e => e.stopPropagation()}
         role="dialog"
         aria-labelledby="shortcuts-title"
       >
         {/* Header */}
-        <div className="sticky top-0 flex items-center justify-between p-4 border-b border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900">
+        <div className="sticky top-0 flex items-center justify-between p-4 border-b border-gray-200 dark:border-gray-800 bg-white dark:bg-white">
           <div className="flex items-center gap-2">
-            <Command className="w-5 h-5 text-gray-600 dark:text-gray-400" />
-            <h2 id="shortcuts-title" className="text-lg font-bold text-gray-900 dark:text-white">
+            <Command className="w-5 h-5 text-gray-600 dark:text-gray-500" />
+            <h2 id="shortcuts-title" className="text-lg font-bold text-gray-900 dark:text-gray-900">
               Keyboard Shortcuts
             </h2>
           </div>
           <button
             onClick={() => setShowModal(false)}
-            className="p-2 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-lg transition-colors"
+            className="p-2 hover:bg-gray-100 dark:hover:bg-white rounded-lg transition-colors"
             aria-label="Close"
           >
-            <X className="w-5 h-5 text-gray-400" />
+            <X className="w-5 h-5 text-gray-500" />
           </button>
         </div>
 
@@ -139,29 +139,29 @@ export function KeyboardShortcutsModal() {
         <div className="p-4 space-y-6">
           {Object.entries(groupedShortcuts).map(([category, shortcuts]) => (
             <div key={category}>
-              <h3 className="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-3 uppercase tracking-wide">
+              <h3 className="text-sm font-semibold text-gray-700 dark:text-gray-700 mb-3 uppercase tracking-wide">
                 {category}
               </h3>
               <div className="space-y-2">
                 {shortcuts.map((shortcut, i) => (
                   <div
                     key={i}
-                    className="flex items-center justify-between p-3 rounded-lg bg-gray-50 dark:bg-gray-800 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors cursor-pointer"
+                    className="flex items-center justify-between p-3 rounded-lg bg-gray-50 dark:bg-white hover:bg-gray-100 dark:hover:bg-gray-100 transition-colors cursor-pointer"
                     onClick={() => {
                       shortcut.callback();
                       setShowModal(false);
                     }}
                   >
                     <div>
-                      <p className="text-sm font-medium text-gray-900 dark:text-white">
+                      <p className="text-sm font-medium text-gray-900 dark:text-gray-900">
                         {shortcut.description}
                       </p>
                     </div>
                     <div className="flex items-center gap-1">
                       {shortcut.key.split('+').map((key, j) => (
                         <div key={j} className="flex items-center gap-1">
-                          {j > 0 && <span className="text-gray-400 text-xs">+</span>}
-                          <kbd className="px-2 py-1 text-xs font-semibold text-gray-900 dark:text-white bg-white dark:bg-gray-700 border border-gray-200 dark:border-gray-600 rounded">
+                          {j > 0 && <span className="text-gray-500 text-xs">+</span>}
+                          <kbd className="px-2 py-1 text-xs font-semibold text-gray-900 dark:text-gray-900 bg-white dark:bg-gray-100 border border-gray-200 dark:border-gray-300 rounded">
                             {key.charAt(0).toUpperCase() + key.slice(1)}
                           </kbd>
                         </div>
@@ -175,9 +175,9 @@ export function KeyboardShortcutsModal() {
         </div>
 
         {/* Footer */}
-        <div className="sticky bottom-0 p-4 border-t border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900">
-          <p className="text-xs text-gray-500 dark:text-gray-400">
-            Press <kbd className="px-1.5 py-0.5 bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded text-xs">Escape</kbd> to close
+        <div className="sticky bottom-0 p-4 border-t border-gray-200 dark:border-gray-800 bg-white dark:bg-white">
+          <p className="text-xs text-gray-500 dark:text-gray-500">
+            Press <kbd className="px-1.5 py-0.5 bg-gray-100 dark:bg-white border border-gray-300 dark:border-gray-200 rounded text-xs">Escape</kbd> to close
           </p>
         </div>
       </div>

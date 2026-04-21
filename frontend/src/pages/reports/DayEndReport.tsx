@@ -161,7 +161,7 @@ export default function DayEndReport() {
               { label: 'Total Sales', value: fc(summary.totalSales), icon: TrendingUp, color: 'text-green-600 bg-green-50' },
               { label: 'Orders', value: String(summary.totalOrders), icon: Package, color: 'text-blue-600 bg-blue-50' },
               { label: 'Items Sold', value: String(summary.totalItems), icon: Package, color: 'text-purple-600 bg-purple-50' },
-              { label: 'Avg Bill Value', value: fc(summary.avgBillValue), icon: IndianRupee, color: 'text-bv-gold-600 bg-bv-gold-50' },
+              { label: 'Avg Bill Value', value: fc(summary.avgBillValue), icon: IndianRupee, color: 'text-bv-red-600 bg-bv-gold-50' },
             ].map(card => (
               <div key={card.label} className="bg-white border border-gray-200 rounded-xl p-4">
                 <div className="flex items-center justify-between mb-2">
@@ -184,7 +184,7 @@ export default function DayEndReport() {
                 { label: 'UPI', amount: summary.upiCollected, icon: Phone, color: 'text-purple-600' },
                 { label: 'Card', amount: summary.cardCollected, icon: CreditCard, color: 'text-blue-600' },
                 { label: 'Bank Transfer', amount: summary.bankTransfer, icon: FileText, color: 'text-gray-600' },
-                { label: 'Total Collected', amount: summary.totalCollected, icon: TrendingUp, color: 'text-bv-gold-600' },
+                { label: 'Total Collected', amount: summary.totalCollected, icon: TrendingUp, color: 'text-bv-red-600' },
               ].map(pm => (
                 <div key={pm.label} className="text-center">
                   <pm.icon className={clsx('w-5 h-5 mx-auto mb-1', pm.color)} />
@@ -262,7 +262,7 @@ export default function DayEndReport() {
             <div className="bg-white border border-gray-200 rounded-xl p-5">
               <button onClick={() => setShowDetails(!showDetails)} className="flex items-center justify-between w-full">
                 <h3 className="font-semibold text-gray-900">Top Products Sold</h3>
-                {showDetails ? <ChevronUp className="w-5 h-5 text-gray-400" /> : <ChevronDown className="w-5 h-5 text-gray-400" />}
+                {showDetails ? <ChevronUp className="w-5 h-5 text-gray-500" /> : <ChevronDown className="w-5 h-5 text-gray-500" />}
               </button>
               {showDetails && (
                 <div className="mt-3 space-y-1.5">
@@ -288,7 +288,7 @@ export default function DayEndReport() {
                 placeholder="Add any notes about today's shift (optional)..."
                 className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm h-20 resize-none mb-3" />
               <button onClick={handleCloseDay}
-                className="w-full py-3 bg-bv-gold-500 text-white rounded-lg font-semibold hover:bg-bv-gold-600 flex items-center justify-center gap-2">
+                className="w-full py-3 bg-bv-red-600 text-white rounded-lg font-semibold hover:bg-bv-red-700 flex items-center justify-center gap-2">
                 <CheckCircle className="w-5 h-5" /> Confirm Day Closing
               </button>
             </div>

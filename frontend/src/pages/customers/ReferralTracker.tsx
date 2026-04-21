@@ -121,21 +121,21 @@ export function ReferralTracker() {
 
       {/* Summary Stats */}
       <div className="grid grid-cols-4 gap-4">
-        <div className="bg-gray-800 rounded-lg p-4">
+        <div className="bg-white rounded-lg p-4">
           <p className="text-gray-500 text-sm mb-1">Total Referrals</p>
-          <p className="text-2xl font-bold text-white">{totalReferrals}</p>
+          <p className="text-2xl font-bold text-gray-900">{totalReferrals}</p>
         </div>
-        <div className="bg-gray-800 rounded-lg p-4">
+        <div className="bg-white rounded-lg p-4">
           <p className="text-gray-500 text-sm mb-1">Active Referrers</p>
-          <p className="text-2xl font-bold text-blue-400">{REFERRERS.length}</p>
+          <p className="text-2xl font-bold text-blue-600">{REFERRERS.length}</p>
         </div>
-        <div className="bg-gray-800 rounded-lg p-4">
+        <div className="bg-white rounded-lg p-4">
           <p className="text-gray-500 text-sm mb-1">Total Rewards Given</p>
-          <p className="text-2xl font-bold text-green-400">₹{totalEarnings.toLocaleString('en-IN')}</p>
+          <p className="text-2xl font-bold text-green-600">₹{totalEarnings.toLocaleString('en-IN')}</p>
         </div>
-        <div className="bg-gray-800 rounded-lg p-4">
+        <div className="bg-white rounded-lg p-4">
           <p className="text-gray-500 text-sm mb-1">Conversion Rate</p>
-          <p className="text-2xl font-bold text-purple-400">34%</p>
+          <p className="text-2xl font-bold text-purple-600">34%</p>
         </div>
       </div>
 
@@ -148,7 +148,7 @@ export function ReferralTracker() {
             className={clsx(
               'px-4 py-3 font-medium border-b-2 transition-colors',
               activeTab === tab
-                ? 'border-blue-500 text-blue-400'
+                ? 'border-blue-500 text-blue-600'
                 : 'border-transparent text-gray-500 hover:text-gray-700'
             )}
           >
@@ -161,22 +161,22 @@ export function ReferralTracker() {
       {activeTab === 'overview' && (
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
           {/* Share Your Code */}
-          <div className="bg-gray-800 rounded-lg p-6 border border-gray-200">
-            <h3 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+          <div className="bg-white rounded-lg p-6 border border-gray-200">
+            <h3 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
               <Share2 className="w-5 h-5" />
               Share Your Referral Code
             </h3>
             <p className="text-gray-500 text-sm mb-4">
               Share your unique code with friends and family to earn rewards on their purchases.
             </p>
-            <div className="bg-gray-700 rounded p-4 mb-4">
+            <div className="bg-gray-100 rounded p-4 mb-4">
               <p className="text-gray-500 text-xs mb-2">Your Referral Code</p>
               <div className="flex items-center gap-2">
                 <input
                   type="text"
                   value="RAJ2024"
                   readOnly
-                  className="flex-1 bg-gray-600 border border-gray-500 rounded px-3 py-2 text-white font-mono"
+                  className="flex-1 bg-gray-600 border border-gray-500 rounded px-3 py-2 text-gray-900 font-mono"
                 />
                 <button
                   onClick={() => copyCode('RAJ2024')}
@@ -193,8 +193,8 @@ export function ReferralTracker() {
           </div>
 
           {/* Top Rewards */}
-          <div className="bg-gray-800 rounded-lg p-6 border border-gray-200">
-            <h3 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+          <div className="bg-white rounded-lg p-6 border border-gray-200">
+            <h3 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
               <Gift className="w-5 h-5" />
               Reward Tiers
             </h3>
@@ -205,12 +205,12 @@ export function ReferralTracker() {
                 { level: 'Gold', referrals: '20+', reward: '₹3,000' },
                 { level: 'Platinum', referrals: '30+', reward: '₹6,000+' },
               ].map((tier) => (
-                <div key={tier.level} className="flex items-center justify-between p-3 bg-gray-700 rounded">
+                <div key={tier.level} className="flex items-center justify-between p-3 bg-gray-100 rounded">
                   <div>
-                    <p className="text-white font-semibold">{tier.level}</p>
+                    <p className="text-gray-900 font-semibold">{tier.level}</p>
                     <p className="text-gray-500 text-xs">{tier.referrals} referrals</p>
                   </div>
-                  <p className="text-green-400 font-bold">{tier.reward}</p>
+                  <p className="text-green-600 font-bold">{tier.reward}</p>
                 </div>
               ))}
             </div>
@@ -219,30 +219,30 @@ export function ReferralTracker() {
       )}
 
       {activeTab === 'leaderboard' && (
-        <div className="bg-gray-800 rounded-lg p-6 border border-gray-200">
-          <h3 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+        <div className="bg-white rounded-lg p-6 border border-gray-200">
+          <h3 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
             <Trophy className="w-5 h-5" />
             Top Referrers
           </h3>
           <div className="space-y-3">
             {REFERRERS.map((referrer, idx) => (
-              <div key={referrer.id} className="flex items-center gap-4 p-4 bg-gray-700 rounded-lg hover:bg-gray-600 transition-colors">
+              <div key={referrer.id} className="flex items-center gap-4 p-4 bg-gray-100 rounded-lg hover:bg-gray-200 transition-colors">
                 <div className={clsx(
-                  'w-10 h-10 rounded-full flex items-center justify-center font-bold text-white',
-                  idx === 0 ? 'bg-yellow-600' : idx === 1 ? 'bg-gray-500' : idx === 2 ? 'bg-orange-600' : 'bg-gray-700 border border-gray-200'
+                  'w-10 h-10 rounded-full flex items-center justify-center font-bold text-gray-900',
+                  idx === 0 ? 'bg-yellow-600' : idx === 1 ? 'bg-gray-500' : idx === 2 ? 'bg-orange-600' : 'bg-gray-100 border border-gray-200'
                 )}>
                   {idx === 0 ? '🥇' : idx === 1 ? '🥈' : idx === 2 ? '🥉' : idx + 1}
                 </div>
                 <div className="flex-1">
-                  <p className="text-white font-semibold">{referrer.name}</p>
+                  <p className="text-gray-900 font-semibold">{referrer.name}</p>
                   <p className="text-gray-500 text-xs">Code: {referrer.code}</p>
                 </div>
                 <div className="text-right">
-                  <p className="text-white font-bold">{referrer.referrals}</p>
+                  <p className="text-gray-900 font-bold">{referrer.referrals}</p>
                   <p className="text-gray-500 text-xs">referrals</p>
                 </div>
                 <div className="text-right min-w-fit">
-                  <p className="text-green-400 font-bold">₹{referrer.earnings}</p>
+                  <p className="text-green-600 font-bold">₹{referrer.earnings}</p>
                   <p className="text-gray-500 text-xs">earned</p>
                 </div>
               </div>
@@ -252,23 +252,23 @@ export function ReferralTracker() {
       )}
 
       {activeTab === 'history' && (
-        <div className="bg-gray-800 rounded-lg p-6 border border-gray-200">
-          <h3 className="text-lg font-semibold text-white mb-4">Referral History</h3>
+        <div className="bg-white rounded-lg p-6 border border-gray-200">
+          <h3 className="text-lg font-semibold text-gray-900 mb-4">Referral History</h3>
           <div className="space-y-3">
             {REFERRAL_HISTORY.map((referral) => (
-              <div key={referral.id} className="flex items-center justify-between p-4 bg-gray-700 rounded-lg">
+              <div key={referral.id} className="flex items-center justify-between p-4 bg-gray-100 rounded-lg">
                 <div>
-                  <p className="text-white font-semibold">{referral.referrer} → {referral.referred}</p>
+                  <p className="text-gray-900 font-semibold">{referral.referrer} → {referral.referred}</p>
                   <p className="text-gray-500 text-xs">{new Date(referral.date).toLocaleDateString()}</p>
                 </div>
                 <div className="flex items-center gap-3">
                   <span className={clsx(
                     'px-2 py-1 rounded text-xs font-semibold',
-                    referral.status === 'confirmed' ? 'bg-green-900 text-green-300' : 'bg-yellow-900 text-yellow-300'
+                    referral.status === 'confirmed' ? 'bg-green-50 text-green-700' : 'bg-yellow-50 text-yellow-700'
                   )}>
                     {referral.status === 'confirmed' ? 'Confirmed' : 'Pending'}
                   </span>
-                  <p className="text-green-400 font-bold min-w-fit">+₹{referral.reward}</p>
+                  <p className="text-green-600 font-bold min-w-fit">+₹{referral.reward}</p>
                 </div>
               </div>
             ))}
@@ -278,8 +278,8 @@ export function ReferralTracker() {
 
       {activeTab === 'rewards' && (
         <div className="space-y-4">
-          <div className="bg-blue-900/30 border border-blue-700 rounded-lg p-4">
-            <p className="text-blue-300 text-sm flex items-center gap-2">
+          <div className="bg-blue-50 border border-blue-700 rounded-lg p-4">
+            <p className="text-blue-700 text-sm flex items-center gap-2">
               <Award className="w-4 h-4" />
               Reward structure: ₹500 per confirmed referral + tier bonuses
             </p>
@@ -291,9 +291,9 @@ export function ReferralTracker() {
               { name: 'Silver Tier Bonus', value: '₹2,000' },
               { name: 'Gold Tier Bonus', value: '₹5,000' },
             ].map((reward) => (
-              <div key={reward.name} className="bg-gray-800 rounded-lg p-4 border border-gray-200">
+              <div key={reward.name} className="bg-white rounded-lg p-4 border border-gray-200">
                 <p className="text-gray-500 text-sm mb-1">{reward.name}</p>
-                <p className="text-2xl font-bold text-green-400">{reward.value}</p>
+                <p className="text-2xl font-bold text-green-600">{reward.value}</p>
               </div>
             ))}
           </div>

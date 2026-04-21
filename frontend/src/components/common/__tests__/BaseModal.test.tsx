@@ -215,7 +215,7 @@ describe('BaseModal', () => {
       );
 
       const dialog = container.querySelector('[role="dialog"]');
-      expect(dialog).toHaveClass('dark:bg-gray-900');
+      expect(dialog).toHaveClass('dark:bg-white');
     });
   });
 });

@@ -6,6 +6,7 @@
 import { useRef } from 'react';
 import { Printer, Download } from 'lucide-react';
 import { calculateGST, calculateIGST, getGSTRateByCategory, getHSNByCategory } from '../../constants/gst';
+import { describeForReceipt } from '../../utils/receiptFormat';
 
 // Generate GST-compliant invoice serial number from order number
 // Format: BV/FY25-26/BOK01/0001 (Brand/FinancialYear/Store/Sequence)
@@ -82,7 +83,14 @@ export function GSTInvoice({ order, store, onPrint }: GSTInvoiceProps) {
     }
 
     return {
-      productName: item.productName,
+      // Customer-facing description: "Brand Category" (e.g. "Ray-Ban Sunglass").
+      // The HSN + GST math below still identifies the item for tax purposes.
+      productName: describeForReceipt({
+        brand: (item as any).brand,
+        subbrand: (item as any).subbrand,
+        category: (item as any).category || (item as any).itemType,
+        name: item.productName,
+      }),
       hsnCode: hsnCode,
       quantity: item.quantity,
       unitPrice: item.unitPrice,

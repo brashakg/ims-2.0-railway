@@ -32,7 +32,7 @@ export function SessionExpiryWarning() {
             </div>
             <button
               onClick={extendSession}
-              className="w-full bg-yellow-600 hover:bg-yellow-700 text-white font-medium py-2 px-3 rounded-lg transition-colors text-sm"
+              className="w-full bg-yellow-600 hover:bg-yellow-700 text-gray-900 font-medium py-2 px-3 rounded-lg transition-colors text-sm"
             >
               Extend Session
             </button>

@@ -151,7 +151,7 @@ export function StockAudit() {
           </button>
           <button
             onClick={() => setShowNewAuditModal(true)}
-            className="px-4 py-2 bg-bv-gold-500 hover:bg-bv-gold-600 text-white rounded-lg font-semibold flex items-center gap-2"
+            className="px-4 py-2 bg-bv-red-600 hover:bg-bv-red-700 text-white rounded-lg font-semibold flex items-center gap-2"
           >
             <Plus className="w-5 h-5" />
             New Stock Count
@@ -189,9 +189,9 @@ export function StockAudit() {
       {/* Empty state */}
       {!isLoading && audits.length === 0 && (
         <div className="card text-center py-12">
-          <BarChart3 className="w-12 h-12 mx-auto mb-3 text-gray-300" />
+          <BarChart3 className="w-12 h-12 mx-auto mb-3 text-gray-700" />
           <p className="text-gray-500 font-medium">No stock counts yet</p>
-          <p className="text-sm text-gray-400 mt-1">Start a new physical stock count to track inventory accuracy</p>
+          <p className="text-sm text-gray-500 mt-1">Start a new physical stock count to track inventory accuracy</p>
         </div>
       )}
 
@@ -273,7 +273,7 @@ export function StockAudit() {
                               <div key={v.product_id || i} className="flex items-center justify-between text-sm bg-gray-50 rounded px-3 py-2">
                                 <div>
                                   <span className="font-medium text-gray-900">{v.product_name || v.sku}</span>
-                                  <span className="text-gray-400 ml-2 text-xs">Sys: {v.system_quantity} | Count: {v.physical_quantity}</span>
+                                  <span className="text-gray-500 ml-2 text-xs">Sys: {v.system_quantity} | Count: {v.physical_quantity}</span>
                                 </div>
                                 <span className={clsx('font-semibold', v.variance < 0 ? 'text-red-600' : 'text-green-600')}>
                                   {v.variance > 0 ? '+' : ''}{v.variance}
@@ -281,7 +281,7 @@ export function StockAudit() {
                               </div>
                             ))}
                             {audit.variances.filter((v: any) => v.variance !== 0).length === 0 && (
-                              <p className="text-sm text-gray-400 italic">No variances found — perfect match!</p>
+                              <p className="text-sm text-gray-500 italic">No variances found — perfect match!</p>
                             )}
                           </div>
                         </div>
@@ -347,7 +347,7 @@ export function StockAudit() {
                 <button
                   onClick={handleStartAudit}
                   disabled={starting}
-                  className="flex-1 px-4 py-2 bg-bv-gold-500 hover:bg-bv-gold-600 text-white rounded-lg font-semibold flex items-center justify-center gap-2"
+                  className="flex-1 px-4 py-2 bg-bv-red-600 hover:bg-bv-red-700 text-white rounded-lg font-semibold flex items-center justify-center gap-2"
                 >
                   {starting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
                   Start Count

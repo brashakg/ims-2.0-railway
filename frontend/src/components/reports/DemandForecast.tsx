@@ -527,7 +527,7 @@ export function DemandForecast() {
                   }`}
                 >
                   <td className="px-4 py-3 text-sm font-medium text-gray-900 flex items-center gap-2">
-                    <Package className="w-4 h-4 text-gray-400" />
+                    <Package className="w-4 h-4 text-gray-500" />
                     {item.category}
                     {willStockOut && (
                       <AlertTriangle className="w-4 h-4 text-red-500" />
@@ -812,7 +812,7 @@ export function DemandForecast() {
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <Calendar className="w-4 h-4 text-gray-400" />
+          <Calendar className="w-4 h-4 text-gray-500" />
           <span className="text-sm text-gray-600">
             {now.toLocaleDateString('en-IN', { day: 'numeric', month: 'long', year: 'numeric' })}
           </span>
@@ -866,7 +866,7 @@ export function DemandForecast() {
             <p className={`text-sm ${urgentReorders > 0 ? 'text-amber-600' : 'text-gray-600'}`}>
               Urgent Reorders
             </p>
-            <RefreshCw className={`w-4 h-4 ${urgentReorders > 0 ? 'text-amber-500' : 'text-gray-400'}`} />
+            <RefreshCw className={`w-4 h-4 ${urgentReorders > 0 ? 'text-amber-500' : 'text-gray-500'}`} />
           </div>
           <p className={`text-2xl font-bold ${urgentReorders > 0 ? 'text-amber-900' : 'text-gray-900'}`}>
             {urgentReorders}
@@ -953,7 +953,7 @@ export function DemandForecast() {
       {/* Methodology Note */}
       <div className="card bg-gray-50 border-gray-200">
         <div className="flex gap-3">
-          <BarChart3 className="w-5 h-5 text-gray-400 flex-shrink-0 mt-0.5" />
+          <BarChart3 className="w-5 h-5 text-gray-500 flex-shrink-0 mt-0.5" />
           <div className="text-sm text-gray-600">
             <p className="font-medium text-gray-700 mb-1">Forecasting Methodology</p>
             <ul className="list-disc list-inside space-y-1 text-gray-500">

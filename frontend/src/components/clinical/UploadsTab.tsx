@@ -29,9 +29,9 @@ export function UploadsTab({ uploads, onUpload, onRemove }: UploadsTabProps) {
             htmlFor="file-upload"
             className="cursor-pointer flex flex-col items-center gap-3"
           >
-            <Camera className="w-12 h-12 text-gray-400" />
+            <Camera className="w-12 h-12 text-gray-500" />
             <span className="text-gray-600 font-medium">Click to upload files</span>
-            <span className="text-sm text-gray-400">PNG, JPG, PDF up to 10MB</span>
+            <span className="text-sm text-gray-500">PNG, JPG, PDF up to 10MB</span>
           </label>
         </div>
 
@@ -45,7 +45,7 @@ export function UploadsTab({ uploads, onUpload, onRemove }: UploadsTabProps) {
                   className="flex items-center justify-between p-3 bg-gray-50 rounded-lg border border-gray-200"
                 >
                   <div className="flex items-center gap-3">
-                    <FileText className="w-5 h-5 text-gray-400" />
+                    <FileText className="w-5 h-5 text-gray-500" />
                     <div>
                       <p className="text-sm font-medium text-gray-900 truncate max-w-[150px]">{file.name}</p>
                       <p className="text-xs text-gray-500">
@@ -55,7 +55,7 @@ export function UploadsTab({ uploads, onUpload, onRemove }: UploadsTabProps) {
                   </div>
                   <button
                     onClick={() => onRemove(file.id)}
-                    className="p-1 text-gray-400 hover:text-red-600 transition-colors"
+                    className="p-1 text-gray-500 hover:text-red-600 transition-colors"
                   >
                     <Trash2 className="w-4 h-4" />
                   </button>

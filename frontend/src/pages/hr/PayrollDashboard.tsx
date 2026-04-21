@@ -242,7 +242,7 @@ export function PayrollDashboard() {
 
       {/* Error Alert */}
       {error && (
-        <div className="bg-red-900/20 border border-red-600 text-red-400 px-4 py-3 rounded-lg flex items-center gap-2">
+        <div className="bg-red-50/20 border border-red-600 text-red-600 px-4 py-3 rounded-lg flex items-center gap-2">
           <AlertCircle className="w-5 h-5" />
           {error}
         </div>
@@ -255,7 +255,7 @@ export function PayrollDashboard() {
           className={clsx(
             'px-4 py-2 font-medium transition-colors',
             activeTab === 'sheet'
-              ? 'text-blue-400 border-b-2 border-blue-400'
+              ? 'text-blue-600 border-b-2 border-blue-400'
               : 'text-gray-500 hover:text-gray-700'
           )}
         >
@@ -267,7 +267,7 @@ export function PayrollDashboard() {
           className={clsx(
             'px-4 py-2 font-medium transition-colors',
             activeTab === 'advances'
-              ? 'text-blue-400 border-b-2 border-blue-400'
+              ? 'text-blue-600 border-b-2 border-blue-400'
               : 'text-gray-500 hover:text-gray-700'
           )}
         >
@@ -279,7 +279,7 @@ export function PayrollDashboard() {
           className={clsx(
             'px-4 py-2 font-medium transition-colors',
             activeTab === 'payslips'
-              ? 'text-blue-400 border-b-2 border-blue-400'
+              ? 'text-blue-600 border-b-2 border-blue-400'
               : 'text-gray-500 hover:text-gray-700'
           )}
         >
@@ -332,7 +332,7 @@ export function PayrollDashboard() {
           {/* Table */}
           {isLoading ? (
             <div className="flex justify-center items-center py-8">
-              <Loader2 className="w-8 h-8 text-blue-400 animate-spin" />
+              <Loader2 className="w-8 h-8 text-blue-600 animate-spin" />
             </div>
           ) : salarySheet.length === 0 ? (
             <div className="text-center py-8 text-gray-500">
@@ -372,7 +372,7 @@ export function PayrollDashboard() {
                         <td className="text-right px-4 py-2 text-gray-600">₹{b.basic.toLocaleString()}</td>
                         <td className="text-right px-4 py-2 text-gray-600">₹{b.hra.toLocaleString()}</td>
                         <td className="text-right px-4 py-2 text-gray-600">₹{allowances.toLocaleString()}</td>
-                        <td className="text-right px-4 py-2 text-green-400 font-medium">
+                        <td className="text-right px-4 py-2 text-green-600 font-medium">
                           ₹{b.gross_salary.toLocaleString()}
                         </td>
                         <td className="text-right px-4 py-2 text-gray-600">₹{b.pf_employee.toLocaleString()}</td>
@@ -381,7 +381,7 @@ export function PayrollDashboard() {
                         <td className="text-right px-4 py-2 text-gray-600">₹{b.tds.toLocaleString()}</td>
                         <td className="text-right px-4 py-2 text-gray-600">₹{b.lwp_deduction.toLocaleString()}</td>
                         <td className="text-right px-4 py-2 text-gray-600">₹{b.advance_deduction.toLocaleString()}</td>
-                        <td className="text-right px-4 py-2 text-yellow-400 font-bold">
+                        <td className="text-right px-4 py-2 text-yellow-600 font-bold">
                           ₹{b.net_pay.toLocaleString()}
                         </td>
                       </tr>
@@ -466,7 +466,7 @@ export function PayrollDashboard() {
           {selectedEmployee && (
             isLoading ? (
               <div className="flex justify-center py-8">
-                <Loader2 className="w-8 h-8 text-blue-400 animate-spin" />
+                <Loader2 className="w-8 h-8 text-blue-600 animate-spin" />
               </div>
             ) : advances.length === 0 ? (
               <div className="text-center py-8 text-gray-500">No advances recorded</div>
@@ -483,17 +483,17 @@ export function PayrollDashboard() {
                     </div>
                     <div className="flex items-center gap-2">
                       {adv.status === 'pending' && (
-                        <span className="flex items-center gap-1 text-yellow-400 text-sm">
+                        <span className="flex items-center gap-1 text-yellow-600 text-sm">
                           <Clock className="w-4 h-4" /> Pending
                         </span>
                       )}
                       {adv.status === 'approved' && (
-                        <span className="flex items-center gap-1 text-green-400 text-sm">
+                        <span className="flex items-center gap-1 text-green-600 text-sm">
                           <Check className="w-4 h-4" /> Approved
                         </span>
                       )}
                       {adv.status === 'settled' && (
-                        <span className="flex items-center gap-1 text-blue-400 text-sm">
+                        <span className="flex items-center gap-1 text-blue-600 text-sm">
                           <Check className="w-4 h-4" /> Settled
                         </span>
                       )}
@@ -565,7 +565,7 @@ export function PayrollDashboard() {
           {selectedEmployee && (
             isLoading ? (
               <div className="flex justify-center py-8">
-                <Loader2 className="w-8 h-8 text-blue-400 animate-spin" />
+                <Loader2 className="w-8 h-8 text-blue-600 animate-spin" />
               </div>
             ) : payslip ? (
               <div className="bg-white border border-gray-200 p-8 rounded-lg space-y-4">
@@ -599,7 +599,7 @@ export function PayrollDashboard() {
                       </div>
                       <div className="flex justify-between border-t border-gray-200 pt-2 mt-2">
                         <span className="text-gray-600 font-medium">Gross Salary</span>
-                        <span className="text-green-400 font-bold">
+                        <span className="text-green-600 font-bold">
                           ₹{payslip.breakdown.gross_salary.toLocaleString()}
                         </span>
                       </div>
@@ -635,7 +635,7 @@ export function PayrollDashboard() {
                       </div>
                       <div className="flex justify-between border-t border-gray-200 pt-2 mt-2">
                         <span className="text-gray-600 font-medium">Net Pay</span>
-                        <span className="text-yellow-400 font-bold">
+                        <span className="text-yellow-600 font-bold">
                           ₹{payslip.breakdown.net_pay.toLocaleString()}
                         </span>
                       </div>

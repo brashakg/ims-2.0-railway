@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { Printer, Mail, Share2, Download, FileText, Receipt } from 'lucide-react';
+import { describeForReceipt } from '../../utils/receiptFormat';
 
 interface ReceiptPreviewProps {
   billData: any;
@@ -50,10 +51,10 @@ export function ReceiptPreview({
 
   return (
     <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
-      <div className="bg-gray-800 rounded-lg max-w-2xl w-full max-h-screen overflow-y-auto">
+      <div className="bg-white rounded-lg max-w-2xl w-full max-h-screen overflow-y-auto">
         {/* Header */}
-        <div className="bg-gray-900 border-b border-gray-700 px-6 py-4 sticky top-0">
-          <h2 className="text-xl font-bold text-white mb-4">Receipt Preview</h2>
+        <div className="bg-white border-b border-gray-200 px-6 py-4 sticky top-0">
+          <h2 className="text-xl font-bold text-gray-900 mb-4">Receipt Preview</h2>
 
           {/* Format Selector */}
           <div className="flex gap-4">
@@ -62,7 +63,7 @@ export function ReceiptPreview({
               className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-colors ${
                 format === 'thermal'
                   ? 'bg-blue-600 text-white'
-                  : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+                  : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
               }`}
             >
               <Receipt className="w-4 h-4" />
@@ -73,7 +74,7 @@ export function ReceiptPreview({
               className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-colors ${
                 format === 'a4'
                   ? 'bg-blue-600 text-white'
-                  : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+                  : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
               }`}
             >
               <FileText className="w-4 h-4" />
@@ -126,7 +127,7 @@ export function ReceiptPreview({
                 {cartItems.map((item, idx) => (
                   <div key={idx} className="text-xs space-y-1">
                     <div className="flex justify-between">
-                      <span className="flex-1">{item.name}</span>
+                      <span className="flex-1">{describeForReceipt(item)}</span>
                       <span className="w-12 text-right">{item.quantity}</span>
                       <span className="w-16 text-right">₹{(item.unit_price * item.quantity).toFixed(2)}</span>
                     </div>
@@ -222,8 +223,7 @@ export function ReceiptPreview({
                     {cartItems.map((item, idx) => (
                       <tr key={idx} className="border-b border-gray-300">
                         <td className="py-2">
-                          <p className="font-semibold">{item.name}</p>
-                          <p className="text-xs text-gray-600">{item.sku} • {item.brand}</p>
+                          <p className="font-semibold">{describeForReceipt(item)}</p>
                         </td>
                         <td className="text-center py-2">{item.quantity}</td>
                         <td className="text-right py-2">₹{item.unit_price.toLocaleString('en-IN')}</td>
@@ -291,10 +291,10 @@ export function ReceiptPreview({
         </div>
 
         {/* Action Buttons */}
-        <div className="bg-gray-900 border-t border-gray-700 px-6 py-4 flex gap-4 flex-wrap">
+        <div className="bg-white border-t border-gray-200 px-6 py-4 flex gap-4 flex-wrap">
           <button
             onClick={handlePrint}
-            className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors"
+            className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-gray-900 rounded-lg transition-colors"
           >
             <Printer className="w-5 h-5" />
             Print
@@ -302,7 +302,7 @@ export function ReceiptPreview({
           {selectedCustomer?.phone && (
             <button
               onClick={handleWhatsAppShare}
-              className="flex items-center gap-2 px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg transition-colors"
+              className="flex items-center gap-2 px-4 py-2 bg-green-600 hover:bg-green-700 text-gray-900 rounded-lg transition-colors"
             >
               <Share2 className="w-5 h-5" />
               WhatsApp
@@ -311,7 +311,7 @@ export function ReceiptPreview({
           {selectedCustomer?.email && (
             <button
               onClick={handleEmailShare}
-              className="flex items-center gap-2 px-4 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded-lg transition-colors"
+              className="flex items-center gap-2 px-4 py-2 bg-purple-600 hover:bg-purple-700 text-gray-900 rounded-lg transition-colors"
             >
               <Mail className="w-5 h-5" />
               Email
@@ -326,7 +326,7 @@ export function ReceiptPreview({
           </button>
           <button
             onClick={onClose}
-            className="flex-1 px-4 py-2 bg-gray-700 hover:bg-gray-600 text-white rounded-lg transition-colors"
+            className="flex-1 px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-900 rounded-lg transition-colors"
           >
             Close
           </button>

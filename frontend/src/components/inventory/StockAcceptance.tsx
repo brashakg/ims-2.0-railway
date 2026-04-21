@@ -219,17 +219,17 @@ export function StockAcceptance() {
             <div className="w-6 h-6 bg-bv-red-600 text-white rounded-full flex items-center justify-center text-xs">1</div>
             <span>Verify Count</span>
           </div>
-          <ChevronRight className="w-4 h-4 text-gray-400" />
+          <ChevronRight className="w-4 h-4 text-gray-500" />
           <div className="flex items-center gap-2">
             <div className="w-6 h-6 bg-bv-red-600 text-white rounded-full flex items-center justify-center text-xs">2</div>
             <span>Assign Location</span>
           </div>
-          <ChevronRight className="w-4 h-4 text-gray-400" />
+          <ChevronRight className="w-4 h-4 text-gray-500" />
           <div className="flex items-center gap-2">
             <div className="w-6 h-6 bg-bv-red-600 text-white rounded-full flex items-center justify-center text-xs">3</div>
             <span>Print Barcode</span>
           </div>
-          <ChevronRight className="w-4 h-4 text-gray-400" />
+          <ChevronRight className="w-4 h-4 text-gray-500" />
           <div className="flex items-center gap-2">
             <div className="w-6 h-6 bg-bv-red-600 text-white rounded-full flex items-center justify-center text-xs">4</div>
             <span>Accept</span>
@@ -239,15 +239,15 @@ export function StockAcceptance() {
 
       {/* Loading State */}
       {isLoading ? (
-        <div className="flex flex-col items-center justify-center py-12 text-gray-400">
+        <div className="flex flex-col items-center justify-center py-12 text-gray-500">
           <Loader2 className="w-8 h-8 mb-2 animate-spin" />
           <p>Loading pending stock...</p>
         </div>
       ) : error ? (
-        <div className="flex flex-col items-center justify-center py-12 text-gray-400">
+        <div className="flex flex-col items-center justify-center py-12 text-gray-500">
           <Package className="w-12 h-12 mb-2" />
           <p>{error}</p>
-          <button onClick={loadPendingStock} className="text-bv-gold-600 text-sm mt-2 hover:underline">
+          <button onClick={loadPendingStock} className="text-bv-red-600 text-sm mt-2 hover:underline">
             Try again
           </button>
         </div>
@@ -290,7 +290,7 @@ export function StockAcceptance() {
                       <p className="text-sm text-gray-500">
                         {item.sku} • {item.brand} • {item.category}
                       </p>
-                      <p className="text-xs text-gray-400 mt-1">
+                      <p className="text-xs text-gray-500 mt-1">
                         Source: {item.source} ({item.sourceRef})
                       </p>
                     </div>

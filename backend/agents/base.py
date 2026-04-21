@@ -171,8 +171,22 @@ class JarvisAgent(ABC):
         Called by APScheduler on the agent's schedule.
         Checks if agent is enabled before executing.
         DO NOT override this — override _do_background_work() instead.
+
+        Wrapped in an observability span so each run becomes its own Sentry
+        transaction (op=agent.tick, tagged with agent.id). Exceptions are
+        surfaced to Sentry tagged by agent_id so the "which agent is on
+        fire" question is answerable in one filter.
         """
         import time
+
+        # observability module is optional at import time — if the user
+        # strips it out for some slim build, the agent still ticks.
+        try:
+            from observability import agent_tick_span, capture_agent_error
+        except Exception:  # pragma: no cover
+            agent_tick_span = None
+            capture_agent_error = None
+
         start = time.time()
 
         # Check if agent is enabled
@@ -182,9 +196,23 @@ class JarvisAgent(ABC):
             return  # Agent is toggled OFF — skip
 
         self._status = AgentStatus.RUNNING
+
+        # If observability is available, wrap in a span context manager.
+        # Otherwise run the work directly — same semantics, no span.
+        if agent_tick_span is not None:
+            async with agent_tick_span(self.agent_id, "background"):
+                await self._run_inner(start, capture_agent_error)
+        else:
+            await self._run_inner(start, None)
+
+    async def _run_inner(self, start: float, capture_fn):
+        """Inner body of background_tick — split out so agent_tick_span can
+        wrap it cleanly. `start` is the wall-clock start, `capture_fn` is
+        observability.capture_agent_error or None."""
+        import time as _time
         try:
             await self._do_background_work()
-            elapsed = (time.time() - start) * 1000
+            elapsed = (_time.time() - start) * 1000
             self._run_count += 1
             self._last_run = datetime.now(timezone.utc)
             self._last_error = None
@@ -194,11 +222,17 @@ class JarvisAgent(ABC):
             await self._update_run_stats("success", elapsed)
 
         except Exception as e:
-            elapsed = (time.time() - start) * 1000
+            elapsed = (_time.time() - start) * 1000
             self._error_count += 1
             self._last_error = str(e)
             self._status = AgentStatus.ERROR
             logger.error(f"[{self.agent_id}] background_tick failed: {e}\n{traceback.format_exc()}")
+
+            if capture_fn is not None:
+                try:
+                    capture_fn(self.agent_id, e, extra={"elapsed_ms": elapsed})
+                except Exception:
+                    pass
 
             await self._update_run_stats("error", elapsed, error=str(e))
 

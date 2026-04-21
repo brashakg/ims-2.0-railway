@@ -148,10 +148,10 @@ export function IncentiveDashboard() {
   };
 
   const getSlab = (percentage: number) => {
-    if (percentage >= 120) return { label: '1.5% rate', color: 'text-yellow-400' };
-    if (percentage >= 100) return { label: '1% rate', color: 'text-green-400' };
-    if (percentage >= 80) return { label: '0.8% rate', color: 'text-blue-400' };
-    return { label: 'Below 80%', color: 'text-red-400' };
+    if (percentage >= 120) return { label: '1.5% rate', color: 'text-yellow-600' };
+    if (percentage >= 100) return { label: '1% rate', color: 'text-green-600' };
+    if (percentage >= 80) return { label: '0.8% rate', color: 'text-blue-600' };
+    return { label: 'Below 80%', color: 'text-red-600' };
   };
 
   const monthName = MONTHS[selectedMonth - 1];
@@ -191,9 +191,9 @@ export function IncentiveDashboard() {
       </div>
 
       {error && (
-        <div className="bg-red-900/20 border border-red-700 rounded-lg p-4 flex items-start gap-3">
-          <AlertCircle className="w-5 h-5 text-red-400 mt-0.5 flex-shrink-0" />
-          <p className="text-red-400">{error}</p>
+        <div className="bg-red-50/20 border border-red-700 rounded-lg p-4 flex items-start gap-3">
+          <AlertCircle className="w-5 h-5 text-red-600 mt-0.5 flex-shrink-0" />
+          <p className="text-red-600">{error}</p>
         </div>
       )}
 
@@ -214,7 +214,7 @@ export function IncentiveDashboard() {
             <div className="bg-white rounded-lg p-6 border border-gray-200">
               <div className="flex items-center justify-between mb-4">
                 <span className="text-gray-500 text-sm font-medium">Achievement %</span>
-                <Target className="w-5 h-5 text-blue-400" />
+                <Target className="w-5 h-5 text-blue-600" />
               </div>
               <div className="text-3xl font-bold text-gray-900 mb-2">
                 {data.achievement_percentage.toFixed(1)}%
@@ -240,7 +240,7 @@ export function IncentiveDashboard() {
             <div className="bg-white rounded-lg p-6 border border-gray-200">
               <div className="flex items-center justify-between mb-4">
                 <span className="text-gray-500 text-sm font-medium">Base Incentive</span>
-                <Gift className="w-5 h-5 text-green-400" />
+                <Gift className="w-5 h-5 text-green-600" />
               </div>
               <div className="text-3xl font-bold text-gray-900 mb-2">
                 ₹{data.base_incentive.toLocaleString()}
@@ -254,7 +254,7 @@ export function IncentiveDashboard() {
             <div className="bg-white rounded-lg p-6 border border-gray-200">
               <div className="flex items-center justify-between mb-4">
                 <span className="text-gray-500 text-sm font-medium">Kicker Bonus</span>
-                <Zap className="w-5 h-5 text-yellow-400" />
+                <Zap className="w-5 h-5 text-yellow-600" />
               </div>
               <div className="text-3xl font-bold text-gray-900 mb-2">
                 ₹{data.kicker_bonus.toLocaleString()}
@@ -268,16 +268,16 @@ export function IncentiveDashboard() {
             <div className="bg-gradient-to-br from-yellow-900/30 to-gray-900 rounded-lg p-6 border border-yellow-700/50">
               <div className="flex items-center justify-between mb-4">
                 <span className="text-gray-500 text-sm font-medium">Total Incentive</span>
-                <Award className="w-5 h-5 text-yellow-400" />
+                <Award className="w-5 h-5 text-yellow-600" />
               </div>
-              <div className="text-3xl font-bold text-yellow-400 mb-2">
+              <div className="text-3xl font-bold text-yellow-600 mb-2">
                 ₹{data.total_incentive.toLocaleString()}
               </div>
               <div className={clsx(
                 'text-xs font-medium px-2 py-1 rounded w-fit',
-                data.status === 'Below Target' ? 'bg-red-900/30 text-red-300' :
-                data.status === 'Qualified' ? 'bg-blue-900/30 text-blue-300' :
-                'bg-green-900/30 text-green-300'
+                data.status === 'Below Target' ? 'bg-red-50 text-red-700' :
+                data.status === 'Qualified' ? 'bg-blue-50 text-blue-700' :
+                'bg-green-50 text-green-700'
               )}>
                 {data.status}
               </div>
@@ -287,7 +287,7 @@ export function IncentiveDashboard() {
           {/* Sales Target Progress Bar with Slabs */}
           <div className="bg-white rounded-lg p-6 border border-gray-200">
             <h3 className="text-gray-900 font-semibold mb-4 flex items-center gap-2">
-              <Target className="w-5 h-5 text-blue-400" />
+              <Target className="w-5 h-5 text-blue-600" />
               Sales Target Progress
             </h3>
 
@@ -305,17 +305,17 @@ export function IncentiveDashboard() {
                 <div className="flex justify-between text-xs font-medium mt-2 px-1">
                   <div className="text-center">
                     <div className="h-1 w-px bg-blue-400 mx-auto mb-1" />
-                    <span className="text-blue-400">80%</span>
+                    <span className="text-blue-600">80%</span>
                     <div className="text-gray-500 text-[10px]">0.8%</div>
                   </div>
                   <div className="text-center">
                     <div className="h-1 w-px bg-green-400 mx-auto mb-1" />
-                    <span className="text-green-400">100%</span>
+                    <span className="text-green-600">100%</span>
                     <div className="text-gray-500 text-[10px]">1%</div>
                   </div>
                   <div className="text-center">
                     <div className="h-1 w-px bg-yellow-400 mx-auto mb-1" />
-                    <span className="text-yellow-400">120%</span>
+                    <span className="text-yellow-600">120%</span>
                     <div className="text-gray-500 text-[10px]">1.5%</div>
                   </div>
                 </div>
@@ -325,7 +325,7 @@ export function IncentiveDashboard() {
               {data.next_slab && (
                 <div className="bg-gray-50 border border-gray-200 rounded p-3 text-sm">
                   <div className="text-gray-500 mb-1">Current: {data.next_slab.current_slab}</div>
-                  <div className="text-yellow-400 font-medium">Next: {data.next_slab.next_milestone}</div>
+                  <div className="text-yellow-600 font-medium">Next: {data.next_slab.next_milestone}</div>
                 </div>
               )}
             </div>
@@ -335,7 +335,7 @@ export function IncentiveDashboard() {
           {kickerData && (
             <div className="bg-white rounded-lg p-6 border border-gray-200">
               <h3 className="text-gray-900 font-semibold mb-4 flex items-center gap-2">
-                <Zap className="w-5 h-5 text-yellow-400" />
+                <Zap className="w-5 h-5 text-yellow-600" />
                 Kicker Sales ({monthName} {selectedYear})
               </h3>
 
@@ -343,17 +343,17 @@ export function IncentiveDashboard() {
                 {/* Kicker Summary */}
                 <div className="grid grid-cols-3 gap-3 mb-4">
                   <div className="bg-gray-50 border border-gray-200 rounded p-3 text-center">
-                    <div className="text-2xl font-bold text-yellow-400">{kickerData.total_kickers}</div>
+                    <div className="text-2xl font-bold text-yellow-600">{kickerData.total_kickers}</div>
                     <div className="text-xs text-gray-500">Total Kickers</div>
                   </div>
                   <div className="bg-gray-50 border border-gray-200 rounded p-3 text-center">
-                    <div className="text-2xl font-bold text-green-400">
+                    <div className="text-2xl font-bold text-green-600">
                       {kickerData.total_kickers >= 3 ? '✓' : kickerData.total_kickers}
                     </div>
                     <div className="text-xs text-gray-500">Status</div>
                   </div>
                   <div className="bg-gray-50 border border-gray-200 rounded p-3 text-center">
-                    <div className="text-xl font-bold text-blue-400">₹{kickerData.kicker_bonus}</div>
+                    <div className="text-xl font-bold text-blue-600">₹{kickerData.kicker_bonus}</div>
                     <div className="text-xs text-gray-500">Bonus</div>
                   </div>
                 </div>
@@ -366,7 +366,7 @@ export function IncentiveDashboard() {
                       {Object.entries(kickerData.brand_summary).map(([brand, count]) => (
                         <div key={brand} className="flex items-center justify-between text-sm bg-gray-50 border border-gray-200 rounded p-2">
                           <span className="text-gray-600">{brand}</span>
-                          <span className="text-yellow-400 font-semibold">{count}</span>
+                          <span className="text-yellow-600 font-semibold">{count}</span>
                         </div>
                       ))}
                     </div>
@@ -390,7 +390,7 @@ export function IncentiveDashboard() {
                           {kickerData.kickers.slice(0, 5).map((k) => (
                             <tr key={k.kicker_id} className="border-b border-gray-200 hover:bg-gray-50">
                               <td className="py-2 px-2 text-gray-600 text-xs">{k.brand}</td>
-                              <td className="py-2 px-2 text-right text-yellow-400 font-semibold">₹{k.sale_amount}</td>
+                              <td className="py-2 px-2 text-right text-yellow-600 font-semibold">₹{k.sale_amount}</td>
                               <td className="py-2 px-2 text-right text-gray-500 text-xs">
                                 {new Date(k.sale_date).toLocaleDateString()}
                               </td>
@@ -408,7 +408,7 @@ export function IncentiveDashboard() {
           {/* Incentive Breakdown */}
           <div className="bg-white rounded-lg p-6 border border-gray-200">
             <h3 className="text-gray-900 font-semibold mb-4 flex items-center gap-2">
-              <Medal className="w-5 h-5 text-indigo-400" />
+              <Medal className="w-5 h-5 text-indigo-600" />
               Incentive Calculation Breakdown
             </h3>
 
@@ -422,7 +422,7 @@ export function IncentiveDashboard() {
                       ₹{data.actual_sales.toLocaleString()} × {getSlab(data.achievement_percentage).label.split(' ')[0]}
                     </div>
                   </div>
-                  <div className="text-lg font-bold text-green-400">₹{data.base_incentive.toLocaleString()}</div>
+                  <div className="text-lg font-bold text-green-600">₹{data.base_incentive.toLocaleString()}</div>
                 </div>
               </div>
 
@@ -435,7 +435,7 @@ export function IncentiveDashboard() {
                       {data.kicker_count} × ₹200 {data.kicker_count < 3 && '(need 3+ to qualify)'}
                     </div>
                   </div>
-                  <div className="text-lg font-bold text-yellow-400">₹{data.kicker_bonus.toLocaleString()}</div>
+                  <div className="text-lg font-bold text-yellow-600">₹{data.kicker_bonus.toLocaleString()}</div>
                 </div>
               </div>
 
@@ -449,16 +449,16 @@ export function IncentiveDashboard() {
                         {data.google_reviews} reviews @ ₹25-50 each
                       </div>
                     </div>
-                    <div className="text-lg font-bold text-blue-400">₹{data.google_review_bonus.toLocaleString()}</div>
+                    <div className="text-lg font-bold text-blue-600">₹{data.google_review_bonus.toLocaleString()}</div>
                   </div>
                 </div>
               )}
 
               {/* Total */}
-              <div className="bg-yellow-900/30 border border-yellow-700/50 rounded p-4">
+              <div className="bg-yellow-50/30 border border-yellow-700/50 rounded p-4">
                 <div className="flex justify-between items-center">
                   <div className="text-gray-900 font-semibold">Total Incentive</div>
-                  <div className="text-2xl font-bold text-yellow-400">₹{data.total_incentive.toLocaleString()}</div>
+                  <div className="text-2xl font-bold text-yellow-600">₹{data.total_incentive.toLocaleString()}</div>
                 </div>
               </div>
             </div>
@@ -468,7 +468,7 @@ export function IncentiveDashboard() {
           {leaderboard.length > 0 && (
             <div className="bg-white rounded-lg p-6 border border-gray-200">
               <h3 className="text-gray-900 font-semibold mb-4 flex items-center gap-2">
-                <Medal className="w-5 h-5 text-yellow-400" />
+                <Medal className="w-5 h-5 text-yellow-600" />
                 Staff Leaderboard ({monthName} {selectedYear})
               </h3>
 
@@ -489,7 +489,7 @@ export function IncentiveDashboard() {
                         key={entry.staff_id}
                         className={clsx(
                           'border-b border-gray-200 hover:bg-gray-50/50 transition-colors',
-                          idx === 0 ? 'bg-yellow-900/20' : idx === 1 ? 'bg-gray-100' : idx === 2 ? 'bg-orange-900/20' : ''
+                          idx === 0 ? 'bg-yellow-50/20' : idx === 1 ? 'bg-gray-100' : idx === 2 ? 'bg-orange-50/20' : ''
                         )}
                       >
                         <td className="py-3 px-4">
@@ -505,9 +505,9 @@ export function IncentiveDashboard() {
                           <div className="flex flex-col items-end gap-1">
                             <span className={clsx(
                               'font-bold',
-                              entry.achievement_percentage >= 120 ? 'text-yellow-400' :
-                              entry.achievement_percentage >= 100 ? 'text-green-400' :
-                              'text-blue-400'
+                              entry.achievement_percentage >= 120 ? 'text-yellow-600' :
+                              entry.achievement_percentage >= 100 ? 'text-green-600' :
+                              'text-blue-600'
                             )}>
                               {entry.achievement_percentage.toFixed(1)}%
                             </span>
@@ -520,7 +520,7 @@ export function IncentiveDashboard() {
                           ₹{(entry.actual_sales / 100000).toFixed(1)}L
                         </td>
                         <td className="py-3 px-4 text-right">
-                          <span className="font-bold text-yellow-400">
+                          <span className="font-bold text-yellow-600">
                             ₹{(entry.total_incentive / 1000).toFixed(0)}K
                           </span>
                         </td>

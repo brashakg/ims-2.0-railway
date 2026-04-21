@@ -123,7 +123,7 @@ export function FeatureToggles({ storeId }: FeatureToggleProps) {
             className={clsx(
               'flex items-center gap-2 px-6 py-2 rounded-lg font-medium transition',
               isLoading
-                ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
+                ? 'bg-gray-100 text-gray-500 cursor-not-allowed'
                 : 'bg-blue-600 text-white hover:bg-blue-700'
             )}
           >

@@ -96,8 +96,8 @@ export function EmployeeSelfService() {
     <div className="space-y-6">
       {/* Header */}
       <div>
-        <h1 className="text-2xl font-bold text-white">My Dashboard</h1>
-        <p className="text-gray-400">Your attendance, salary, and leave information</p>
+        <h1 className="text-2xl font-bold text-gray-900">My Dashboard</h1>
+        <p className="text-gray-500">Your attendance, salary, and leave information</p>
       </div>
 
       {/* Attendance This Month */}
@@ -109,7 +109,7 @@ export function EmployeeSelfService() {
                 <Clock className="w-5 h-5 text-green-600" />
               </div>
               <div>
-                <p className="text-sm text-gray-400">Present</p>
+                <p className="text-sm text-gray-500">Present</p>
                 <p className="text-2xl font-bold text-green-600">{attendance.present}</p>
               </div>
             </div>
@@ -121,7 +121,7 @@ export function EmployeeSelfService() {
                 <Clock className="w-5 h-5 text-red-600" />
               </div>
               <div>
-                <p className="text-sm text-gray-400">Absent</p>
+                <p className="text-sm text-gray-500">Absent</p>
                 <p className="text-2xl font-bold text-red-600">{attendance.absent}</p>
               </div>
             </div>
@@ -133,7 +133,7 @@ export function EmployeeSelfService() {
                 <Calendar className="w-5 h-5 text-blue-600" />
               </div>
               <div>
-                <p className="text-sm text-gray-400">Leaves</p>
+                <p className="text-sm text-gray-500">Leaves</p>
                 <p className="text-2xl font-bold text-blue-600">{attendance.leaves}</p>
               </div>
             </div>
@@ -145,7 +145,7 @@ export function EmployeeSelfService() {
                 <TrendingUp className="w-5 h-5 text-yellow-600" />
               </div>
               <div>
-                <p className="text-sm text-gray-400">Half Days</p>
+                <p className="text-sm text-gray-500">Half Days</p>
                 <p className="text-2xl font-bold text-yellow-600">{attendance.halfDays}</p>
               </div>
             </div>
@@ -156,15 +156,15 @@ export function EmployeeSelfService() {
       {/* Leave Balance */}
       {leaves && (
         <div className="card">
-          <h2 className="text-lg font-bold text-white mb-4">Leave Balance</h2>
+          <h2 className="text-lg font-bold text-gray-900 mb-4">Leave Balance</h2>
           <div className="grid grid-cols-3 gap-4">
             {[
               { type: 'Casual Leave', balance: leaves.casual, color: 'text-blue-500' },
               { type: 'Sick Leave', balance: leaves.sick, color: 'text-red-500' },
               { type: 'Annual Leave', balance: leaves.annual, color: 'text-green-500' },
             ].map(leave => (
-              <div key={leave.type} className="bg-gray-800 rounded-lg p-4 border border-gray-700">
-                <p className="text-sm text-gray-400 mb-2">{leave.type}</p>
+              <div key={leave.type} className="bg-white rounded-lg p-4 border border-gray-200">
+                <p className="text-sm text-gray-500 mb-2">{leave.type}</p>
                 <p className={`text-3xl font-bold ${leave.color}`}>{leave.balance}</p>
                 <p className="text-xs text-gray-500 mt-2">days available</p>
               </div>
@@ -175,23 +175,23 @@ export function EmployeeSelfService() {
 
       {/* Salary Slips */}
       <div className="card">
-        <h2 className="text-lg font-bold text-white mb-4 flex items-center gap-2">
+        <h2 className="text-lg font-bold text-gray-900 mb-4 flex items-center gap-2">
           <FileText className="w-5 h-5" />
           Recent Salary Slips
         </h2>
         <div className="space-y-3">
           {salarySlips.map(slip => (
-            <div key={slip.id} className="bg-gray-800 rounded-lg p-4 border border-gray-700 hover:border-bv-gold-500 transition-colors">
+            <div key={slip.id} className="bg-white rounded-lg p-4 border border-gray-200 hover:border-bv-red-600 transition-colors">
               <div className="flex items-center justify-between">
                 <div>
-                  <p className="font-medium text-white">{slip.month}</p>
-                  <p className="text-sm text-gray-400 mt-1">
+                  <p className="font-medium text-gray-900">{slip.month}</p>
+                  <p className="text-sm text-gray-500 mt-1">
                     Gross: ₹{slip.salary.toLocaleString('en-IN')} | 
                     Deductions: ₹{slip.deductions.toLocaleString('en-IN')}
                   </p>
                 </div>
                 <div className="text-right">
-                  <p className="text-sm text-gray-400">Net Amount</p>
+                  <p className="text-sm text-gray-500">Net Amount</p>
                   <p className="text-xl font-bold text-green-500">₹{slip.netAmount.toLocaleString('en-IN')}</p>
                 </div>
               </div>
@@ -202,19 +202,19 @@ export function EmployeeSelfService() {
 
       {/* Incentive Progress (Mock) */}
       <div className="card">
-        <h2 className="text-lg font-bold text-white mb-4 flex items-center gap-2">
+        <h2 className="text-lg font-bold text-gray-900 mb-4 flex items-center gap-2">
           <TrendingUp className="w-5 h-5" />
           Incentive Progress
         </h2>
-        <div className="bg-gray-800 rounded-lg p-4 border border-gray-700">
+        <div className="bg-white rounded-lg p-4 border border-gray-200">
           <div className="flex items-center justify-between mb-3">
-            <p className="text-gray-300">March 2026 Target</p>
-            <p className="text-sm text-gray-400">₹5,000 of ₹10,000</p>
+            <p className="text-gray-700">March 2026 Target</p>
+            <p className="text-sm text-gray-500">₹5,000 of ₹10,000</p>
           </div>
-          <div className="w-full bg-gray-700 rounded-full h-2">
-            <div className="bg-bv-gold-500 h-2 rounded-full" style={{ width: '50%' }}></div>
+          <div className="w-full bg-gray-100 rounded-full h-2">
+            <div className="bg-bv-red-600 h-2 rounded-full" style={{ width: '50%' }}></div>
           </div>
-          <p className="text-xs text-gray-400 mt-2">50% of target achieved</p>
+          <p className="text-xs text-gray-500 mt-2">50% of target achieved</p>
         </div>
       </div>
     </div>

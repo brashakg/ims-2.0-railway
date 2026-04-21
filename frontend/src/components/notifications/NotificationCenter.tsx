@@ -35,35 +35,35 @@ interface NotificationCenterProps {
 const typeConfig = {
   success: {
     icon: CheckCircle2,
-    bgColor: 'bg-green-50 dark:bg-green-900/20',
+    bgColor: 'bg-green-50 dark:bg-green-50/20',
     borderColor: 'border-green-200 dark:border-green-800',
-    titleColor: 'text-green-900 dark:text-green-300',
+    titleColor: 'text-green-900 dark:text-green-700',
     messageColor: 'text-green-700 dark:text-green-200',
-    iconColor: 'text-green-600 dark:text-green-400',
+    iconColor: 'text-green-600 dark:text-green-600',
   },
   error: {
     icon: AlertCircle,
-    bgColor: 'bg-red-50 dark:bg-red-900/20',
+    bgColor: 'bg-red-50 dark:bg-red-50/20',
     borderColor: 'border-red-200 dark:border-red-800',
-    titleColor: 'text-red-900 dark:text-red-300',
+    titleColor: 'text-red-900 dark:text-red-700',
     messageColor: 'text-red-700 dark:text-red-200',
-    iconColor: 'text-red-600 dark:text-red-400',
+    iconColor: 'text-red-600 dark:text-red-600',
   },
   warning: {
     icon: AlertTriangle,
-    bgColor: 'bg-amber-50 dark:bg-amber-900/20',
+    bgColor: 'bg-amber-50 dark:bg-amber-50/20',
     borderColor: 'border-amber-200 dark:border-amber-800',
-    titleColor: 'text-amber-900 dark:text-amber-300',
+    titleColor: 'text-amber-900 dark:text-amber-700',
     messageColor: 'text-amber-700 dark:text-amber-200',
-    iconColor: 'text-amber-600 dark:text-amber-400',
+    iconColor: 'text-amber-600 dark:text-amber-600',
   },
   info: {
     icon: Info,
-    bgColor: 'bg-blue-50 dark:bg-blue-900/20',
+    bgColor: 'bg-blue-50 dark:bg-blue-50/20',
     borderColor: 'border-blue-200 dark:border-blue-800',
-    titleColor: 'text-blue-900 dark:text-blue-300',
+    titleColor: 'text-blue-900 dark:text-blue-700',
     messageColor: 'text-blue-700 dark:text-blue-200',
-    iconColor: 'text-blue-600 dark:text-blue-400',
+    iconColor: 'text-blue-600 dark:text-blue-600',
   },
 };
 
@@ -154,10 +154,10 @@ export function NotificationPanel({
   return (
     <div className="max-w-md w-full">
       {/* Header */}
-      <div className="flex items-center justify-between p-4 border-b border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 rounded-t-lg">
+      <div className="flex items-center justify-between p-4 border-b border-gray-200 dark:border-gray-800 bg-white dark:bg-white rounded-t-lg">
         <div className="flex items-center gap-2">
-          <Bell className="w-5 h-5 text-gray-600 dark:text-gray-400" />
-          <h2 className="font-bold text-gray-900 dark:text-white">
+          <Bell className="w-5 h-5 text-gray-600 dark:text-gray-500" />
+          <h2 className="font-bold text-gray-900 dark:text-gray-900">
             Notifications
             {unreadCount > 0 && (
               <span className="ml-2 bg-red-600 text-white text-xs rounded-full px-2 py-0.5">
@@ -169,7 +169,7 @@ export function NotificationPanel({
         {notifications.length > 0 && (
           <button
             onClick={onClearAll}
-            className="text-xs text-blue-600 dark:text-blue-400 hover:underline"
+            className="text-xs text-blue-600 dark:text-blue-600 hover:underline"
           >
             Clear all
           </button>
@@ -177,9 +177,9 @@ export function NotificationPanel({
       </div>
 
       {/* Notifications List */}
-      <div className="max-h-96 overflow-y-auto bg-white dark:bg-gray-900">
+      <div className="max-h-96 overflow-y-auto bg-white dark:bg-white">
         {prioritizedNotifications.length === 0 ? (
-          <div className="p-8 text-center text-gray-500 dark:text-gray-400">
+          <div className="p-8 text-center text-gray-500 dark:text-gray-500">
             <Bell className="w-8 h-8 mx-auto mb-2 opacity-50" />
             <p className="text-sm">No notifications</p>
           </div>
@@ -194,7 +194,7 @@ export function NotificationPanel({
                   key={notification.id}
                   onClick={() => onMarkAsRead(notification.id)}
                   className={clsx(
-                    'w-full text-left p-4 hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors border-l-4',
+                    'w-full text-left p-4 hover:bg-gray-50 dark:hover:bg-white transition-colors border-l-4',
                     notification.read
                       ? 'border-transparent opacity-75'
                       : clsx('border-l-4', {
@@ -212,7 +212,7 @@ export function NotificationPanel({
                         <h3 className={clsx('font-semibold text-sm', config.titleColor)}>
                           {notification.title}
                         </h3>
-                        <span className="text-xs text-gray-500 dark:text-gray-400 flex-shrink-0">
+                        <span className="text-xs text-gray-500 dark:text-gray-500 flex-shrink-0">
                           {formatTime(notification.timestamp)}
                         </span>
                       </div>
@@ -238,7 +238,7 @@ export function NotificationPanel({
                             e.stopPropagation();
                             onDismiss(notification.id);
                           }}
-                          className="p-1 hover:bg-gray-200 dark:hover:bg-gray-700 rounded text-gray-400 transition-colors"
+                          className="p-1 hover:bg-gray-200 dark:hover:bg-gray-100 rounded text-gray-500 transition-colors"
                           aria-label="Dismiss"
                         >
                           <X className="w-4 h-4" />
@@ -255,7 +255,7 @@ export function NotificationPanel({
 
       {/* Footer */}
       {prioritizedNotifications.length > 0 && (
-        <div className="px-4 py-3 border-t border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-gray-800/50 rounded-b-lg text-xs text-gray-600 dark:text-gray-400">
+        <div className="px-4 py-3 border-t border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-white/50 rounded-b-lg text-xs text-gray-600 dark:text-gray-500">
           {prioritizedNotifications.length} notification{prioritizedNotifications.length !== 1 ? 's' : ''}
         </div>
       )}

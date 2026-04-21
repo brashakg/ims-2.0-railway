@@ -126,6 +126,84 @@ export const workshopApi = {
     const response = await api.post('/workshop/jobs', data);
     return response.data;
   },
+
+  // Phase 6.4 — single-call workshop KPIs for the dashboard header.
+  // Replaces 4 client-side list calls + local counting with one small payload.
+  getDashboardKpis: async (storeId?: string) => {
+    const response = await api.get('/workshop/dashboard-kpis', {
+      params: storeId ? { store_id: storeId } : {},
+    });
+    return response.data as {
+      pending: number;
+      in_progress: number;
+      qc_failed: number;
+      ready_for_pickup: number;
+      overdue: number;
+      completed_today: number;
+      delivered_today: number;
+      avg_turnaround_days: number | null;
+      store_id: string | null;
+      as_of: string;
+    };
+  },
+
+  // Phase 6.8 — attach / update lens fitting details on a workshop job.
+  // Called from the POS LensFittingFormModal right after an Rx order is
+  // created, so the workshop tech sees the full fitting measurements
+  // + sales confirmation when they pick up the job.
+  updateFittingDetails: async (
+    jobId: string,
+    fittingDetails: {
+      dia?: string;
+      fh?: string;
+      b_size?: string;
+      dbl?: string;
+      tint?: string;
+      base_curve?: string;
+      coating?: string;
+      other?: string;
+      vendor_order_id?: string;
+      order_date?: string;
+      order_time?: string;
+      ordered_by?: string;
+      ordered_by_name?: string;
+      expected_lens_receive_date?: string;
+      confirmed_by_sales: boolean;
+      confirmed_at?: string;
+    },
+  ) => {
+    const response = await api.patch(`/workshop/jobs/${jobId}/fitting-details`, {
+      fitting_details: fittingDetails,
+    });
+    return response.data;
+  },
+
+  // Phase 6.4 — pending jobs report with aging buckets + per-tech breakdown.
+  getPendingJobsReport: async (storeId?: string) => {
+    const response = await api.get('/reports/workshop/pending-jobs', {
+      params: storeId ? { store_id: storeId } : {},
+    });
+    return response.data as {
+      data: Array<{
+        job_id: string;
+        job_number: string | null;
+        order_id: string | null;
+        status: string;
+        technician_id: string | null;
+        expected_date: string | null;
+        created_at: string | null;
+        age_days: number | null;
+        aging_bucket: '0-3d' | '3-7d' | '7+d';
+        is_overdue: boolean;
+      }>;
+      summary: {
+        total_pending: number;
+        overdue: number;
+        by_aging_bucket: Record<'0-3d' | '3-7d' | '7+d', number>;
+        by_technician: Array<{ technician_id: string; count: number }>;
+      };
+    };
+  },
 };
 
 // ============================================================================

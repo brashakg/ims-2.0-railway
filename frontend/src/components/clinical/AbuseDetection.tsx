@@ -58,7 +58,7 @@ export function AbuseDetection({ alerts = [] }: AbuseDetectionProps) {
 
   return (
     <div className="space-y-4">
-      <div className="text-sm text-yellow-400 bg-yellow-900 bg-opacity-30 border border-yellow-700 rounded-lg p-4">
+      <div className="text-sm text-yellow-600 bg-yellow-50 bg-opacity-30 border border-yellow-700 rounded-lg p-4">
         <p className="flex items-center gap-2">
           <AlertTriangle className="w-4 h-4" />
           <strong>{alerts.length} clinical issue(s) detected requiring review</strong>
@@ -72,16 +72,16 @@ export function AbuseDetection({ alerts = [] }: AbuseDetectionProps) {
             key={alert.id}
             className={`p-4 rounded-lg border-2 ${
               alert.severity === 'critical'
-                ? 'bg-red-900 bg-opacity-20 border-red-600'
-                : 'bg-yellow-900 bg-opacity-20 border-yellow-600'
+                ? 'bg-red-50 bg-opacity-20 border-red-600'
+                : 'bg-yellow-50 bg-opacity-20 border-yellow-600'
             }`}
           >
             <div className="flex items-start gap-4">
               <div className={`p-3 rounded-full ${
-                alert.severity === 'critical' ? 'bg-red-900' : 'bg-yellow-900'
+                alert.severity === 'critical' ? 'bg-red-50' : 'bg-yellow-50'
               }`}>
                 <Icon className={`w-5 h-5 ${
-                  alert.severity === 'critical' ? 'text-red-400' : 'text-yellow-400'
+                  alert.severity === 'critical' ? 'text-red-600' : 'text-yellow-600'
                 }`} />
               </div>
 
@@ -90,8 +90,8 @@ export function AbuseDetection({ alerts = [] }: AbuseDetectionProps) {
                   <h3 className="font-semibold text-gray-900">{getAlertTitle(alert.type)}</h3>
                   <span className={`text-xs font-medium px-2 py-1 rounded ${
                     alert.severity === 'critical'
-                      ? 'bg-red-900 text-red-200'
-                      : 'bg-yellow-900 text-yellow-200'
+                      ? 'bg-red-50 text-red-200'
+                      : 'bg-yellow-50 text-yellow-200'
                   }`}>
                     {alert.severity === 'critical' ? 'CRITICAL' : 'WARNING'}
                   </span>

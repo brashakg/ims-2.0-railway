@@ -132,15 +132,15 @@ export function ReturnManagement({
   };
 
   return (
-    <div className="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800">
+    <div className="bg-white dark:bg-white rounded-lg border border-gray-200 dark:border-gray-800">
       {/* Header */}
       <div className="p-6 border-b border-gray-200 dark:border-gray-800 flex items-center justify-between">
         <div>
-          <h2 className="text-lg font-bold text-gray-900 dark:text-white flex items-center gap-2">
+          <h2 className="text-lg font-bold text-gray-900 dark:text-gray-900 flex items-center gap-2">
             <FileText className="w-5 h-5" />
             Returns Management
           </h2>
-          <p className="text-sm text-gray-600 dark:text-gray-400 mt-1">
+          <p className="text-sm text-gray-600 dark:text-gray-500 mt-1">
             {filteredReturns.length} of {returns.length} RMAs
           </p>
         </div>
@@ -160,13 +160,13 @@ export function ReturnManagement({
       {/* Search */}
       <div className="p-4 border-b border-gray-200 dark:border-gray-800">
         <div className="relative">
-          <Search className="absolute left-3 top-3 w-4 h-4 text-gray-400" />
+          <Search className="absolute left-3 top-3 w-4 h-4 text-gray-500" />
           <input
             type="text"
             placeholder="Search by RMA number or customer..."
             value={searchTerm}
             onChange={e => setSearchTerm(e.target.value)}
-            className="w-full pl-10 pr-4 py-2 border border-gray-300 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-white"
+            className="w-full pl-10 pr-4 py-2 border border-gray-300 dark:border-gray-200 rounded-lg bg-white dark:bg-white text-gray-900 dark:text-gray-900"
           />
         </div>
       </div>
@@ -174,11 +174,11 @@ export function ReturnManagement({
       {/* Returns List */}
       <div className="divide-y divide-gray-200 dark:divide-gray-800">
         {loading ? (
-          <div className="p-8 text-center text-gray-500 dark:text-gray-400">
+          <div className="p-8 text-center text-gray-500 dark:text-gray-500">
             <p>Loading returns...</p>
           </div>
         ) : filteredReturns.length === 0 ? (
-          <div className="p-8 text-center text-gray-500 dark:text-gray-400">
+          <div className="p-8 text-center text-gray-500 dark:text-gray-500">
             <FileText className="w-12 h-12 mx-auto mb-3 opacity-50" />
             <p>No returns found</p>
           </div>
@@ -186,31 +186,31 @@ export function ReturnManagement({
           filteredReturns.map(rma => {
             const refundAmount = calculateTotalRefund(rma);
             return (
-              <div key={rma.id} className="p-4 hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors">
+              <div key={rma.id} className="p-4 hover:bg-gray-50 dark:hover:bg-white transition-colors">
                 <div className="flex items-start justify-between gap-4 mb-3">
                   <div className="flex-1">
                     <div className="flex items-center gap-2 mb-1">
-                      <h3 className="font-semibold text-gray-900 dark:text-white">{rma.rmaNumber}</h3>
+                      <h3 className="font-semibold text-gray-900 dark:text-gray-900">{rma.rmaNumber}</h3>
                       <span className={clsx('inline-flex items-center gap-1 px-2 py-1 rounded text-xs font-medium', getStatusColor(rma.status))}>
                         {getStatusIcon(rma.status)}
                         {rma.status}
                       </span>
                     </div>
-                    <p className="text-sm text-gray-600 dark:text-gray-400">Customer: {rma.customerName}</p>
+                    <p className="text-sm text-gray-600 dark:text-gray-500">Customer: {rma.customerName}</p>
                   </div>
                   <div className="text-right">
-                    <p className="flex items-center gap-1 font-semibold text-gray-900 dark:text-white">
+                    <p className="flex items-center gap-1 font-semibold text-gray-900 dark:text-gray-900">
                       <DollarSign className="w-4 h-4" />
                       ${refundAmount.toFixed(2)}
                     </p>
-                    <p className="text-xs text-gray-500 dark:text-gray-400">
+                    <p className="text-xs text-gray-500 dark:text-gray-500">
                       {rma.items.length} item(s)
                     </p>
                   </div>
                 </div>
 
                 {/* Items */}
-                <div className="text-sm text-gray-600 dark:text-gray-400 mb-3 pl-4 border-l-2 border-gray-200 dark:border-gray-700">
+                <div className="text-sm text-gray-600 dark:text-gray-500 mb-3 pl-4 border-l-2 border-gray-200 dark:border-gray-200">
                   {rma.items.slice(0, 2).map((item, idx) => (
                     <p key={idx}>Invoice {item.invoiceNumber}: ×{item.quantity} @ ${item.originalPrice.toFixed(2)}</p>
                   ))}
@@ -252,7 +252,7 @@ export function ReturnManagement({
                       setEditingId(rma.id);
                       setShowCreateModal(true);
                     }}
-                    className="p-2 hover:bg-amber-100 dark:hover:bg-amber-900/20 rounded-lg text-amber-600 dark:text-amber-400"
+                    className="p-2 hover:bg-amber-100 dark:hover:bg-amber-50/20 rounded-lg text-amber-600 dark:text-amber-600"
                     title="Edit"
                   >
                     <Edit2 className="w-4 h-4" />
@@ -263,7 +263,7 @@ export function ReturnManagement({
                         onDeleteReturn(rma.id);
                       }
                     }}
-                    className="p-2 hover:bg-red-100 dark:hover:bg-red-900/20 rounded-lg text-red-600 dark:text-red-400"
+                    className="p-2 hover:bg-red-100 dark:hover:bg-red-50/20 rounded-lg text-red-600 dark:text-red-600"
                     title="Delete"
                   >
                     <Trash2 className="w-4 h-4" />
@@ -278,8 +278,8 @@ export function ReturnManagement({
       {/* Create/Edit Modal */}
       {showCreateModal && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50" onClick={() => setShowCreateModal(false)}>
-          <div className="bg-white dark:bg-gray-900 rounded-lg shadow-lg p-6 max-w-2xl w-full max-h-96 overflow-y-auto" onClick={e => e.stopPropagation()}>
-            <h2 className="text-lg font-bold text-gray-900 dark:text-white mb-4">
+          <div className="bg-white dark:bg-white rounded-lg shadow-lg p-6 max-w-2xl w-full max-h-96 overflow-y-auto" onClick={e => e.stopPropagation()}>
+            <h2 className="text-lg font-bold text-gray-900 dark:text-gray-900 mb-4">
               {editingId ? 'Edit Return' : 'Create New Return'}
             </h2>
 
@@ -291,28 +291,28 @@ export function ReturnManagement({
                   value={formData.rmaNumber || ''}
                   onChange={e => setFormData({ ...formData, rmaNumber: e.target.value })}
                   disabled={editingId !== null}
-                  className="px-3 py-2 border border-gray-300 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-white disabled:opacity-50"
+                  className="px-3 py-2 border border-gray-300 dark:border-gray-200 rounded-lg bg-white dark:bg-white text-gray-900 dark:text-gray-900 disabled:opacity-50"
                 />
                 <input
                   type="text"
                   placeholder="Customer Name *"
                   value={formData.customerName || ''}
                   onChange={e => setFormData({ ...formData, customerName: e.target.value })}
-                  className="px-3 py-2 border border-gray-300 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-white"
+                  className="px-3 py-2 border border-gray-300 dark:border-gray-200 rounded-lg bg-white dark:bg-white text-gray-900 dark:text-gray-900"
                 />
                 <input
                   type="text"
                   placeholder="Customer ID"
                   value={formData.customerId || ''}
                   onChange={e => setFormData({ ...formData, customerId: e.target.value })}
-                  className="px-3 py-2 border border-gray-300 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-white"
+                  className="px-3 py-2 border border-gray-300 dark:border-gray-200 rounded-lg bg-white dark:bg-white text-gray-900 dark:text-gray-900"
                 />
                 <input
                   type="date"
                   placeholder="Return Date"
                   value={formData.createdDate || ''}
                   onChange={e => setFormData({ ...formData, createdDate: e.target.value })}
-                  className="px-3 py-2 border border-gray-300 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-white"
+                  className="px-3 py-2 border border-gray-300 dark:border-gray-200 rounded-lg bg-white dark:bg-white text-gray-900 dark:text-gray-900"
                 />
               </div>
 
@@ -320,14 +320,14 @@ export function ReturnManagement({
                 placeholder="Reason for return"
                 value={formData.inspectionNotes || ''}
                 onChange={e => setFormData({ ...formData, inspectionNotes: e.target.value })}
-                className="w-full px-3 py-2 border border-gray-300 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-white"
+                className="w-full px-3 py-2 border border-gray-300 dark:border-gray-200 rounded-lg bg-white dark:bg-white text-gray-900 dark:text-gray-900"
                 rows={3}
               />
 
               <div className="flex gap-2">
                 <button
                   onClick={() => setShowCreateModal(false)}
-                  className="flex-1 px-4 py-2 border border-gray-300 dark:border-gray-700 rounded-lg text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800"
+                  className="flex-1 px-4 py-2 border border-gray-300 dark:border-gray-200 rounded-lg text-gray-700 dark:text-gray-700 hover:bg-gray-50 dark:hover:bg-white"
                 >
                   Cancel
                 </button>
@@ -346,28 +346,28 @@ export function ReturnManagement({
       {/* Refund Modal */}
       {showRefundModal && selectedForRefund && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50" onClick={() => setShowRefundModal(false)}>
-          <div className="bg-white dark:bg-gray-900 rounded-lg shadow-lg p-6 max-w-md w-full" onClick={e => e.stopPropagation()}>
-            <h2 className="text-lg font-bold text-gray-900 dark:text-white mb-4 flex items-center gap-2">
+          <div className="bg-white dark:bg-white rounded-lg shadow-lg p-6 max-w-md w-full" onClick={e => e.stopPropagation()}>
+            <h2 className="text-lg font-bold text-gray-900 dark:text-gray-900 mb-4 flex items-center gap-2">
               <DollarSign className="w-5 h-5" />
               Process Refund
             </h2>
 
             <div className="space-y-4">
-              <div className="p-3 bg-blue-50 dark:bg-blue-900/20 rounded-lg">
-                <p className="text-sm text-gray-700 dark:text-gray-300">Refund Amount:</p>
-                <p className="text-2xl font-bold text-blue-600 dark:text-blue-400">
+              <div className="p-3 bg-blue-50 dark:bg-blue-50/20 rounded-lg">
+                <p className="text-sm text-gray-700 dark:text-gray-700">Refund Amount:</p>
+                <p className="text-2xl font-bold text-blue-600 dark:text-blue-600">
                   ${calculateTotalRefund(selectedForRefund).toFixed(2)}
                 </p>
               </div>
 
               <div>
-                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-700 mb-2">
                   Refund Method *
                 </label>
                 <select
                   value={refundMethod}
                   onChange={e => setRefundMethod(e.target.value as any)}
-                  className="w-full px-3 py-2 border border-gray-300 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-white"
+                  className="w-full px-3 py-2 border border-gray-300 dark:border-gray-200 rounded-lg bg-white dark:bg-white text-gray-900 dark:text-gray-900"
                 >
                   <option value="credit-card">Credit Card Refund</option>
                   <option value="store-credit">Store Credit</option>
@@ -378,7 +378,7 @@ export function ReturnManagement({
               <div className="flex gap-2">
                 <button
                   onClick={() => setShowRefundModal(false)}
-                  className="flex-1 px-4 py-2 border border-gray-300 dark:border-gray-700 rounded-lg text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800"
+                  className="flex-1 px-4 py-2 border border-gray-300 dark:border-gray-200 rounded-lg text-gray-700 dark:text-gray-700 hover:bg-gray-50 dark:hover:bg-white"
                 >
                   Cancel
                 </button>

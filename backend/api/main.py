@@ -18,18 +18,42 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ── Sentry APM — error tracking & performance monitoring ────────────────
+# Fail-soft: if SENTRY_DSN is unset we skip init entirely. With the DSN set,
+# we register FastAPI + Starlette integrations explicitly so every HTTP
+# request becomes a transaction, errors get tagged with route, and the
+# per-agent transactions created in `observability.agent_tick_span` nest
+# cleanly under the outer HTTP span when agents are triggered via API.
 _sentry_dsn = os.getenv("SENTRY_DSN")
 if _sentry_dsn:
     try:
         import sentry_sdk
+        from sentry_sdk.integrations.fastapi import FastApiIntegration
+        from sentry_sdk.integrations.starlette import StarletteIntegration
+
+        def _sentry_traces_sampler(sampling_context):
+            """Drop noisy endpoints (health + docs + OPTIONS) from tracing."""
+            req = sampling_context.get("asgi_scope") or {}
+            path = req.get("path", "") if isinstance(req, dict) else ""
+            method = req.get("method", "") if isinstance(req, dict) else ""
+            if path in ("/health", "/docs", "/redoc", "/openapi.json"):
+                return 0.0
+            if method == "OPTIONS":
+                return 0.0
+            return float(os.getenv("SENTRY_TRACES_RATE", "0.2"))
+
         sentry_sdk.init(
             dsn=_sentry_dsn,
             environment=os.getenv("NODE_ENV", "development"),
-            traces_sample_rate=float(os.getenv("SENTRY_TRACES_RATE", "0.2")),
+            release=os.getenv("SENTRY_RELEASE") or os.getenv("RAILWAY_DEPLOYMENT_ID") or "ims-2.0@dev",
+            traces_sampler=_sentry_traces_sampler,
             profiles_sample_rate=float(os.getenv("SENTRY_PROFILES_RATE", "0.1")),
             send_default_pii=False,  # don't send user IPs/emails to Sentry
+            integrations=[
+                FastApiIntegration(transaction_style="endpoint"),
+                StarletteIntegration(transaction_style="endpoint"),
+            ],
         )
-        logger.info("[APM] Sentry initialized")
+        logger.info("[APM] Sentry initialized with FastAPI integration")
     except Exception as e:
         logger.warning(f"[APM] Sentry init failed: {e}")
 
@@ -127,10 +151,12 @@ async def lifespan(app: FastAPI):
 
     # Initialize Agent System (JARVIS Agents)
     _scheduler = None
+    _event_bus = None
     try:
         from agents.config import AgentConfigManager
         from agents.registry import initialize_registry, AGENT_REGISTRY
         from agents.scheduler import AgentScheduler
+        from agents.event_bus import get_event_bus
 
         if DATABASE_AVAILABLE:
             from database.connection import get_seeded_db
@@ -146,6 +172,15 @@ async def lifespan(app: FastAPI):
         # Initialize agent registry (creates CORTEX + SENTINEL instances)
         initialize_registry(db=db)
         logger.info(f"[AGENTS] Registry initialized — {len(AGENT_REGISTRY)} agents")
+
+        # Start the cross-worker event bus (Redis pub/sub when REDIS_URL is
+        # set; in-process fallback otherwise). Must start AFTER registry so
+        # subscribers are already registered before any handler fires.
+        _event_bus = get_event_bus(db=db)
+        await _event_bus.start()
+        logger.info(
+            f"[AGENTS] Event bus started ({'DISTRIBUTED' if _event_bus.is_distributed else 'IN-PROCESS'})"
+        )
 
         # Start the background scheduler
         _scheduler = AgentScheduler(db=db)
@@ -171,6 +206,14 @@ async def lifespan(app: FastAPI):
             logger.info("[AGENTS] Scheduler shutdown")
         except Exception as e:
             logger.warning(f"[AGENTS] Scheduler shutdown error: {e}")
+
+    # Shutdown Event Bus (cancel listener task, close Redis conn)
+    if _event_bus:
+        try:
+            await _event_bus.stop()
+            logger.info("[AGENTS] Event bus stopped")
+        except Exception as e:
+            logger.warning(f"[AGENTS] Event bus shutdown error: {e}")
 
     if DATABASE_AVAILABLE:
         close_db()

@@ -314,7 +314,7 @@ export function SerialNumberTracker() {
         <div className="flex flex-col tablet:flex-row gap-4">
           {/* Search */}
           <div className="flex-1 relative">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" />
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-500" />
             <input
               type="text"
               value={searchQuery}
@@ -409,7 +409,7 @@ export function SerialNumberTracker() {
                       ) : item.soldToCustomer ? (
                         <div className="text-sm text-gray-900">{item.soldToCustomer}</div>
                       ) : (
-                        <span className="text-sm text-gray-400">-</span>
+                        <span className="text-sm text-gray-500">-</span>
                       )}
                     </td>
                     <td className="px-4 py-3 text-center">
@@ -427,7 +427,7 @@ export function SerialNumberTracker() {
                           Expired
                         </span>
                       ) : (
-                        <span className="text-sm text-gray-400">-</span>
+                        <span className="text-sm text-gray-500">-</span>
                       )}
                     </td>
                     <td className="px-4 py-3">

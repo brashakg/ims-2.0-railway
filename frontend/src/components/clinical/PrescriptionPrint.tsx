@@ -395,7 +395,7 @@ export function PrescriptionPrint({ prescription, store, onClose }: Prescription
 
           {/* Footer */}
           <div className="mt-4 pt-2 border-t border-gray-200 text-center">
-            <p className="text-[10px] text-gray-400">
+            <p className="text-[10px] text-gray-500">
               {store.storeName} &middot; {store.city}, {store.state} &middot; {rxNumber}
             </p>
           </div>

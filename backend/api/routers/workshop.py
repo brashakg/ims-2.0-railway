@@ -35,6 +35,34 @@ router = APIRouter()
 # ============================================================================
 
 
+class FittingDetails(BaseModel):
+    """Phase 6.8 — physical measurements the sales staff hands over to
+    the workshop technician for lens cutting / fitting. All fields are
+    optional individually, but `confirmed_by_sales` must be True for
+    the workshop to accept the job (sales explicitly confirming that
+    power + product details are correct).
+    """
+    dia: Optional[str] = None            # Lens diameter (e.g. "65", "70")
+    fh: Optional[str] = None             # Fitting height (for progressive/bifocal)
+    b_size: Optional[str] = None         # Lens vertical measurement
+    dbl: Optional[str] = None            # Distance between lenses (bridge width)
+    tint: Optional[str] = None           # Tint colour / percentage
+    base_curve: Optional[str] = None     # Base curve (e.g. "6", "8")
+    coating: Optional[str] = None        # Coating name (redundant with lens_details.coating but captured here for sales confirmation)
+    other: Optional[str] = None          # Free-text notes
+    order_date: Optional[str] = None     # ISO date (auto-filled on save)
+    order_time: Optional[str] = None     # HH:MM (auto-filled on save)
+    ordered_by: Optional[str] = None     # User id of sales staff
+    ordered_by_name: Optional[str] = None
+    expected_lens_receive_date: Optional[date] = None
+    # Phase 6.8 — vendor (lens supplier) PO reference. Sales enters the ID
+    # issued when the lens was ordered from Zeiss / Essilor / etc; workshop
+    # + finance use it to reconcile incoming lens stock.
+    vendor_order_id: Optional[str] = None
+    confirmed_by_sales: bool = False     # Must be True to submit
+    confirmed_at: Optional[str] = None   # ISO timestamp
+
+
 class WorkshopJobCreate(BaseModel):
     order_id: str
     frame_details: dict
@@ -43,12 +71,20 @@ class WorkshopJobCreate(BaseModel):
     fitting_instructions: Optional[str] = None
     special_notes: Optional[str] = None
     expected_date: date
+    # Phase 6.8 — optional at create time; sales fills via a modal
+    # right after order confirmation (PATCH /jobs/{id}/fitting-details)
+    fitting_details: Optional[FittingDetails] = None
 
 
 class WorkshopJobUpdate(BaseModel):
     fitting_instructions: Optional[str] = None
     special_notes: Optional[str] = None
     expected_date: Optional[date] = None
+
+
+class FittingDetailsUpdate(BaseModel):
+    """Payload for PATCH /workshop/jobs/{id}/fitting-details."""
+    fitting_details: FittingDetails
 
 
 # ============================================================================
@@ -196,6 +232,157 @@ async def get_technician_workload(
     return {"workload": []}
 
 
+# ---------------------------------------------------------------------------
+# Phase 6.4 — single-shot KPIs for the workshop dashboard header.
+# The frontend currently computes Active / Urgent / Ready / Overdue on the
+# client from the full job list. That works at small scale but means every
+# workshop page load pulls every job in the store. This endpoint lets the
+# client drop 4 HTTP calls and ~a few hundred KB of JSON in favour of one
+# small summary call — and as a bonus exposes `avg_turnaround_days` and
+# `completed_today` which the client couldn't cheaply compute before.
+# ---------------------------------------------------------------------------
+
+
+@router.get("/dashboard-kpis")
+async def get_dashboard_kpis(
+    store_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Aggregated workshop KPIs for the dashboard header.
+
+    Returns:
+        pending            — PENDING + IN_PROGRESS (i.e. "Active Jobs")
+        in_progress        — IN_PROGRESS only
+        qc_failed          — jobs sent back for rework
+        ready_for_pickup   — READY status
+        overdue            — pending/in_progress past expected_date
+        completed_today    — COMPLETED or READY with completed_at == today
+        delivered_today    — DELIVERED with status_updated_at == today
+        avg_turnaround_days — mean (completed_at - created_at) across the
+                              last 100 closed jobs. `None` if fewer than 5
+                              samples exist (avoids noisy averages).
+
+    Fail-soft: repo absent → returns zeros with null turnaround, never raises.
+    """
+    repo = get_workshop_repository()
+    active_store = store_id or current_user.get("active_store_id")
+
+    empty = {
+        "pending": 0,
+        "in_progress": 0,
+        "qc_failed": 0,
+        "ready_for_pickup": 0,
+        "overdue": 0,
+        "completed_today": 0,
+        "delivered_today": 0,
+        "avg_turnaround_days": None,
+        "store_id": active_store,
+        "as_of": datetime.now().isoformat(),
+    }
+
+    if repo is None or not active_store:
+        return empty
+
+    try:
+        # One pass over the store's jobs so we don't hit Mongo five times
+        # for what is effectively a group-by-status.
+        all_jobs = repo.find_by_store(active_store)
+    except Exception:
+        return empty
+
+    now = datetime.now()
+    today_str = now.date().isoformat()
+
+    pending = 0
+    in_progress = 0
+    qc_failed = 0
+    ready = 0
+    overdue = 0
+    completed_today = 0
+    delivered_today = 0
+    turnaround_samples = []
+
+    for job in all_jobs:
+        status = job.get("status", "")
+
+        if status == "PENDING":
+            pending += 1
+        elif status == "IN_PROGRESS":
+            in_progress += 1
+            pending += 1  # "Active" is PENDING + IN_PROGRESS in the UI
+        elif status == "QC_FAILED":
+            qc_failed += 1
+        elif status == "READY":
+            ready += 1
+
+        # Overdue = open-ish job whose expected_date is in the past
+        if status in ("PENDING", "IN_PROGRESS"):
+            expected = job.get("expected_date")
+            if expected:
+                try:
+                    if isinstance(expected, str):
+                        exp_dt = datetime.fromisoformat(expected.replace("Z", "+00:00"))
+                    elif isinstance(expected, datetime):
+                        exp_dt = expected
+                    else:
+                        exp_dt = None
+                    if exp_dt is not None and exp_dt < now:
+                        overdue += 1
+                except (ValueError, TypeError):
+                    pass
+
+        # Today counts — both by completed_at and by status_updated_at for
+        # DELIVERED, so the "what shipped today" number is always live.
+        completed_at = job.get("completed_at")
+        if completed_at:
+            ca_str = completed_at if isinstance(completed_at, str) else completed_at.isoformat()
+            if ca_str.startswith(today_str):
+                completed_today += 1
+
+        if status == "DELIVERED":
+            sua = job.get("status_updated_at")
+            if sua:
+                sua_str = sua if isinstance(sua, str) else sua.isoformat()
+                if sua_str.startswith(today_str):
+                    delivered_today += 1
+
+        # Turnaround sample — only include finished jobs with both ts.
+        if status in ("COMPLETED", "READY", "DELIVERED"):
+            ca = job.get("completed_at")
+            cr = job.get("created_at")
+            if ca and cr:
+                try:
+                    ca_dt = ca if isinstance(ca, datetime) else datetime.fromisoformat(str(ca).replace("Z", "+00:00"))
+                    cr_dt = cr if isinstance(cr, datetime) else datetime.fromisoformat(str(cr).replace("Z", "+00:00"))
+                    days = (ca_dt - cr_dt).total_seconds() / 86400.0
+                    if days >= 0:
+                        turnaround_samples.append(days)
+                except (ValueError, TypeError):
+                    pass
+
+    # Cap sample size — latest 100 closed jobs are plenty and we've already
+    # walked them; take the tail for a rolling view rather than all-time.
+    if len(turnaround_samples) >= 5:
+        recent = turnaround_samples[-100:]
+        avg_turnaround = round(sum(recent) / len(recent), 2)
+    else:
+        avg_turnaround = None
+
+    return {
+        "pending": pending,                   # PENDING + IN_PROGRESS
+        "in_progress": in_progress,
+        "qc_failed": qc_failed,
+        "ready_for_pickup": ready,
+        "overdue": overdue,
+        "completed_today": completed_today,
+        "delivered_today": delivered_today,
+        "avg_turnaround_days": avg_turnaround,
+        "store_id": active_store,
+        "as_of": now.isoformat(),
+    }
+
+
 @router.get("/jobs")
 async def list_jobs(
     status: Optional[str] = Query(None),
@@ -252,6 +439,9 @@ async def create_job(
             "fitting_instructions": job.fitting_instructions,
             "special_notes": job.special_notes,
             "expected_date": job.expected_date.isoformat(),
+            "fitting_details": (
+                job.fitting_details.model_dump(mode="json") if job.fitting_details else None
+            ),
             "status": "PENDING",
             "created_by": current_user.get("user_id"),
         }
@@ -271,6 +461,43 @@ async def create_job(
         "jobNumber": generate_job_number(),
         "message": "Workshop job created",
     }
+
+
+@router.patch("/jobs/{job_id}/fitting-details")
+async def update_fitting_details(
+    job_id: str,
+    payload: FittingDetailsUpdate,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Phase 6.8 — attach / update the lens-fitting measurements the sales
+    staff fill after creating a prescription order. The sales staff
+    confirms the power + product details are correct via the
+    `confirmed_by_sales` checkbox before the workshop can accept the job.
+    """
+    repo = get_workshop_repository()
+    if repo is None:
+        raise HTTPException(status_code=503, detail="Workshop repository unavailable")
+
+    job = repo.find_by_id(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Workshop job not found")
+
+    # Stamp metadata we want server-controlled rather than trusting the client.
+    fd = payload.fitting_details.model_dump(mode="json")
+    now = datetime.now()
+    fd["order_date"] = fd.get("order_date") or now.date().isoformat()
+    fd["order_time"] = fd.get("order_time") or now.strftime("%H:%M")
+    fd["ordered_by"] = fd.get("ordered_by") or current_user.get("user_id")
+    fd["ordered_by_name"] = fd.get("ordered_by_name") or current_user.get("username")
+    if fd.get("confirmed_by_sales"):
+        fd["confirmed_at"] = fd.get("confirmed_at") or now.isoformat()
+
+    ok = repo.update(job_id, {"fitting_details": fd})
+    if not ok:
+        raise HTTPException(status_code=500, detail="Failed to save fitting details")
+
+    return {"job_id": job_id, "fitting_details": fd, "message": "Fitting details saved"}
 
 
 @router.get("/jobs/{job_id}")

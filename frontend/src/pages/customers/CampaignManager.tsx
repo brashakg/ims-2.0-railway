@@ -112,7 +112,7 @@ export function CampaignManager() {
             className={clsx(
               'px-4 py-3 font-medium border-b-2 transition-colors',
               activeTab === tab
-                ? 'border-blue-500 text-blue-400'
+                ? 'border-blue-500 text-blue-600'
                 : 'border-transparent text-gray-500 hover:text-gray-700'
             )}
           >
@@ -127,7 +127,7 @@ export function CampaignManager() {
           <div className="grid grid-cols-4 gap-4">
             <div className="bg-white border border-gray-200 rounded-lg p-4">
               <p className="text-gray-500 text-sm mb-1">Active</p>
-              <p className="text-2xl font-bold text-blue-400">2</p>
+              <p className="text-2xl font-bold text-blue-600">2</p>
             </div>
             <div className="bg-white border border-gray-200 rounded-lg p-4">
               <p className="text-gray-500 text-sm mb-1">Total Sent</p>
@@ -135,11 +135,11 @@ export function CampaignManager() {
             </div>
             <div className="bg-white border border-gray-200 rounded-lg p-4">
               <p className="text-gray-500 text-sm mb-1">Open Rate</p>
-              <p className="text-2xl font-bold text-green-400">54%</p>
+              <p className="text-2xl font-bold text-green-600">54%</p>
             </div>
             <div className="bg-white border border-gray-200 rounded-lg p-4">
               <p className="text-gray-500 text-sm mb-1">Conversion</p>
-              <p className="text-2xl font-bold text-purple-400">7.2%</p>
+              <p className="text-2xl font-bold text-purple-600">7.2%</p>
             </div>
           </div>
 
@@ -183,13 +183,13 @@ export function CampaignManager() {
                   </div>
                   <div className="text-center">
                     <p className="text-gray-500 text-xs mb-1">Open Rate</p>
-                    <p className="text-blue-400 font-semibold">
+                    <p className="text-blue-600 font-semibold">
                       {campaign.stats.sent > 0 ? ((campaign.stats.opened / campaign.stats.sent) * 100).toFixed(0) : '—'}%
                     </p>
                   </div>
                   <div className="text-center">
                     <p className="text-gray-500 text-xs mb-1">Converted</p>
-                    <p className="text-green-400 font-semibold">{campaign.stats.converted}</p>
+                    <p className="text-green-600 font-semibold">{campaign.stats.converted}</p>
                   </div>
                 </div>
 

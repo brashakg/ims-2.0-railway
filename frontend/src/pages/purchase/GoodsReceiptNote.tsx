@@ -43,13 +43,13 @@ const INSPECTION_CHECKLIST = [
 const getQualityStatusColor = (status: string) => {
   switch (status) {
     case 'passed':
-      return 'bg-green-900 text-green-300';
+      return 'bg-green-50 text-green-700';
     case 'failed':
-      return 'bg-red-900 text-red-300';
+      return 'bg-red-50 text-red-700';
     case 'conditional':
-      return 'bg-yellow-900 text-yellow-300';
+      return 'bg-yellow-50 text-yellow-700';
     default:
-      return 'bg-gray-700 text-gray-300';
+      return 'bg-gray-100 text-gray-700';
   }
 };
 
@@ -124,19 +124,19 @@ export function GoodsReceiptNote() {
         </div>
         <div className="bg-white border border-gray-200 rounded-lg p-4">
           <p className="text-gray-500 text-sm mb-1">Quality Passed</p>
-          <p className="text-2xl font-bold text-green-400">
+          <p className="text-2xl font-bold text-green-600">
             {grns.filter(g => g.quality_status === 'passed').length}
           </p>
         </div>
         <div className="bg-white border border-gray-200 rounded-lg p-4">
           <p className="text-gray-500 text-sm mb-1">Conditional Receipts</p>
-          <p className="text-2xl font-bold text-yellow-400">
+          <p className="text-2xl font-bold text-yellow-600">
             {grns.filter(g => g.quality_status === 'conditional').length}
           </p>
         </div>
         <div className="bg-white border border-gray-200 rounded-lg p-4">
           <p className="text-gray-500 text-sm mb-1">Failed Quality</p>
-          <p className="text-2xl font-bold text-red-400">
+          <p className="text-2xl font-bold text-red-600">
             {grns.filter(g => g.quality_status === 'failed').length}
           </p>
         </div>
@@ -151,8 +151,8 @@ export function GoodsReceiptNote() {
             className={clsx(
               'px-4 py-3 font-medium border-b-2 transition-colors',
               activeTab === tab
-                ? 'border-blue-500 text-blue-400'
-                : 'border-transparent text-gray-400 hover:text-gray-700'
+                ? 'border-blue-500 text-blue-600'
+                : 'border-transparent text-gray-500 hover:text-gray-700'
             )}
           >
             {tab === 'create' ? 'Create GRN' : tab === 'history' ? 'History' : 'Discrepancies'}
@@ -193,9 +193,9 @@ export function GoodsReceiptNote() {
                     </div>
                     <span className={clsx(
                       'px-2 py-1 rounded text-xs font-semibold',
-                      item.inspection_status === 'passed' ? 'bg-green-900 text-green-300' :
-                      item.inspection_status === 'failed' ? 'bg-red-900 text-red-300' :
-                      'bg-yellow-900 text-yellow-300'
+                      item.inspection_status === 'passed' ? 'bg-green-50 text-green-700' :
+                      item.inspection_status === 'failed' ? 'bg-red-50 text-red-700' :
+                      'bg-yellow-50 text-yellow-700'
                     )}>
                       {item.inspection_status === 'passed' ? 'Passed' : item.inspection_status === 'failed' ? 'Failed' : 'Pending'}
                     </span>
@@ -225,7 +225,7 @@ export function GoodsReceiptNote() {
                       <p className="text-gray-500 text-xs mb-2">Variance</p>
                       <p className={clsx(
                         'text-sm font-semibold',
-                        item.received_qty === item.po_qty ? 'text-green-400' : 'text-orange-400'
+                        item.received_qty === item.po_qty ? 'text-green-600' : 'text-orange-600'
                       )}>
                         {item.received_qty - item.po_qty > 0 ? '+' : ''}{item.received_qty - item.po_qty}
                       </p>
@@ -281,15 +281,15 @@ export function GoodsReceiptNote() {
 
             <div className={clsx(
               'p-4 rounded-lg',
-              qualityStatus === 'passed' ? 'bg-green-900/30 border border-green-700' :
-              qualityStatus === 'failed' ? 'bg-red-900/30 border border-red-700' :
-              'bg-yellow-900/30 border border-yellow-700'
+              qualityStatus === 'passed' ? 'bg-green-50 border border-green-700' :
+              qualityStatus === 'failed' ? 'bg-red-50 border border-red-700' :
+              'bg-yellow-50/30 border border-yellow-700'
             )}>
               <p className={clsx(
                 'text-sm font-semibold flex items-center gap-2',
-                qualityStatus === 'passed' ? 'text-green-300' :
-                qualityStatus === 'failed' ? 'text-red-300' :
-                'text-yellow-300'
+                qualityStatus === 'passed' ? 'text-green-700' :
+                qualityStatus === 'failed' ? 'text-red-700' :
+                'text-yellow-700'
               )}>
                 <Check className="w-4 h-4" />
                 Quality Status: {qualityStatus.charAt(0).toUpperCase() + qualityStatus.slice(1)}
@@ -387,41 +387,41 @@ export function GoodsReceiptNote() {
 
       {activeTab === 'discrepancies' && (
         <div className="space-y-4">
-          <div className="bg-blue-900/30 border border-blue-700 rounded-lg p-4 flex items-start gap-3">
-            <AlertCircle className="w-5 h-5 text-blue-400 flex-shrink-0 mt-0.5" />
+          <div className="bg-blue-50 border border-blue-700 rounded-lg p-4 flex items-start gap-3">
+            <AlertCircle className="w-5 h-5 text-blue-600 flex-shrink-0 mt-0.5" />
             <div>
-              <p className="text-blue-300 font-semibold">Discrepancy Report</p>
-              <p className="text-blue-300 text-sm mt-1">
+              <p className="text-blue-700 font-semibold">Discrepancy Report</p>
+              <p className="text-blue-700 text-sm mt-1">
                 Items with variance between PO quantity and received quantity, or quality inspection failures.
               </p>
             </div>
           </div>
 
           <div className="space-y-3">
-            <div className="bg-orange-900/30 border border-orange-700 rounded-lg p-4">
+            <div className="bg-orange-50/30 border border-orange-700 rounded-lg p-4">
               <div className="flex items-start justify-between mb-2">
                 <div>
-                  <p className="text-orange-300 font-semibold">GRN-2024-002 - Frame Model A</p>
+                  <p className="text-orange-700 font-semibold">GRN-2024-002 - Frame Model A</p>
                   <p className="text-gray-500 text-sm">Against PO-2024-001</p>
                 </div>
-                <span className="px-2 py-1 bg-orange-900 text-orange-300 rounded text-xs font-semibold">
+                <span className="px-2 py-1 bg-orange-50 text-orange-700 rounded text-xs font-semibold">
                   Quantity Variance
                 </span>
               </div>
-              <p className="text-orange-300 text-sm">Expected: 100 units | Received: 95 units | Variance: -5 units</p>
+              <p className="text-orange-700 text-sm">Expected: 100 units | Received: 95 units | Variance: -5 units</p>
             </div>
 
-            <div className="bg-red-900/30 border border-red-700 rounded-lg p-4">
+            <div className="bg-red-50 border border-red-700 rounded-lg p-4">
               <div className="flex items-start justify-between mb-2">
                 <div>
-                  <p className="text-red-300 font-semibold">GRN-2024-003 - Lens Coating</p>
+                  <p className="text-red-700 font-semibold">GRN-2024-003 - Lens Coating</p>
                   <p className="text-gray-500 text-sm">Against PO-2024-002</p>
                 </div>
-                <span className="px-2 py-1 bg-red-900 text-red-300 rounded text-xs font-semibold">
+                <span className="px-2 py-1 bg-red-50 text-red-700 rounded text-xs font-semibold">
                   Quality Failure
                 </span>
               </div>
-              <p className="text-red-300 text-sm">Defect: Packaging damaged, 12 units affected, return authorization issued.</p>
+              <p className="text-red-700 text-sm">Defect: Packaging damaged, 12 units affected, return authorization issued.</p>
             </div>
           </div>
         </div>

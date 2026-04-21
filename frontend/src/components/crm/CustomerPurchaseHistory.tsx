@@ -98,7 +98,7 @@ export function CustomerPurchaseHistory({ customerId }: CustomerPurchaseHistoryP
   return (
     <div className="card border-2 border-bv-gold-200 bg-bv-gold-50">
       <h3 className="text-lg font-bold text-gray-900 mb-4 flex items-center gap-2">
-        <ShoppingBag className="w-5 h-5 text-bv-gold-600" />
+        <ShoppingBag className="w-5 h-5 text-bv-red-600" />
         Purchase History
       </h3>
 
@@ -106,7 +106,7 @@ export function CustomerPurchaseHistory({ customerId }: CustomerPurchaseHistoryP
         {/* Total Spend */}
         <div className="bg-white rounded-lg p-3 border border-bv-gold-100">
           <p className="text-xs text-gray-600 uppercase font-semibold">Total Spend</p>
-          <p className="text-2xl font-bold text-bv-gold-600">₹{data.totalSpend.toLocaleString('en-IN')}</p>
+          <p className="text-2xl font-bold text-bv-red-600">₹{data.totalSpend.toLocaleString('en-IN')}</p>
         </div>
 
         {/* Order Count */}

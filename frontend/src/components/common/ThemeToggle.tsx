@@ -17,7 +17,7 @@ export function ThemeToggle() {
   ];
 
   return (
-    <div className="flex items-center gap-1 p-1 bg-gray-100 dark:bg-gray-800 rounded-lg">
+    <div className="flex items-center gap-1 p-1 bg-gray-100 dark:bg-white rounded-lg">
       {themes.map(theme => (
         <button
           key={theme.mode}
@@ -25,8 +25,8 @@ export function ThemeToggle() {
           className={clsx(
             'flex items-center gap-1 px-3 py-1.5 rounded transition-colors',
             mode === theme.mode
-              ? 'bg-white dark:bg-gray-700 text-gray-900 dark:text-white shadow-sm'
-              : 'text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white'
+              ? 'bg-white dark:bg-gray-100 text-gray-900 dark:text-gray-900 shadow-sm'
+              : 'text-gray-600 dark:text-gray-500 hover:text-gray-900 dark:hover:text-gray-900'
           )}
           title={`Switch to ${theme.label} mode`}
           aria-label={`Switch to ${theme.label} theme`}
@@ -52,7 +52,7 @@ export function SimpleThemeToggle() {
       className={clsx(
         'p-2 rounded-lg transition-colors',
         isDark
-          ? 'bg-gray-800 text-yellow-400 hover:bg-gray-700'
+          ? 'bg-white text-yellow-600 hover:bg-gray-100'
           : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
       )}
       title={`Switch to ${isDark ? 'light' : 'dark'} mode`}

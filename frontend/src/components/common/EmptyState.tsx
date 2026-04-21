@@ -21,7 +21,7 @@ export function EmptyState({ icon: Icon, title, description, action, fullHeight 
       <div className="text-center max-w-sm">
         {Icon && (
           <div className="mb-4">
-            <Icon className="w-12 h-12 text-gray-400 mx-auto" />
+            <Icon className="w-12 h-12 text-gray-500 mx-auto" />
           </div>
         )}
         <h3 className="text-lg font-semibold text-gray-900 mb-2">{title}</h3>

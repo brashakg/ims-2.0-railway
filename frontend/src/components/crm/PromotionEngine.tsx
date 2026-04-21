@@ -347,7 +347,7 @@ export function PromotionEngine() {
       {/* Filters */}
       <div className="flex flex-wrap gap-3 items-center">
         <div className="relative flex-1 min-w-[200px]">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-500" />
           <input
             type="text"
             value={searchQuery}
@@ -357,7 +357,7 @@ export function PromotionEngine() {
           />
         </div>
         <div className="flex items-center gap-2">
-          <Filter className="w-4 h-4 text-gray-400" />
+          <Filter className="w-4 h-4 text-gray-500" />
           <select
             value={statusFilter}
             onChange={e => setStatusFilter(e.target.value as CampaignStatus | 'ALL')}
@@ -455,7 +455,7 @@ export function PromotionEngine() {
                   </code>
                   <button
                     onClick={() => handleCopyCode(campaign.couponCode!)}
-                    className="p-1 hover:bg-gray-100 rounded text-gray-400"
+                    className="p-1 hover:bg-gray-100 rounded text-gray-500"
                     title="Copy code"
                   >
                     <Copy className="w-4 h-4" />
@@ -480,7 +480,7 @@ export function PromotionEngine() {
                   <span key={cat} className="px-2 py-0.5 bg-gray-100 rounded text-xs text-gray-600">{cat}</span>
                 ))}
                 {campaign.minPurchase > 0 && (
-                  <span className="text-xs text-gray-400">Min: {formatCurrency(campaign.minPurchase)}</span>
+                  <span className="text-xs text-gray-500">Min: {formatCurrency(campaign.minPurchase)}</span>
                 )}
               </div>
             </div>
@@ -489,7 +489,7 @@ export function PromotionEngine() {
 
         {filtered.length === 0 && (
           <div className="text-center py-16 bg-white rounded-lg border border-gray-200">
-            <Gift className="w-12 h-12 text-gray-400 mx-auto mb-3" />
+            <Gift className="w-12 h-12 text-gray-500 mx-auto mb-3" />
             <p className="text-gray-500">No campaigns found</p>
           </div>
         )}
@@ -545,7 +545,7 @@ export function PromotionEngine() {
                         }`}
                       >
                         <div className="flex items-center gap-2 mb-1">
-                          <ct.icon className={`w-4 h-4 ${form.type === ct.type ? 'text-pink-600' : 'text-gray-400'}`} />
+                          <ct.icon className={`w-4 h-4 ${form.type === ct.type ? 'text-pink-600' : 'text-gray-500'}`} />
                           <span className="text-sm font-medium">{ct.label}</span>
                         </div>
                         <p className="text-xs text-gray-500">{ct.description}</p>
@@ -654,7 +654,7 @@ export function PromotionEngine() {
                         }}
                         className={`px-3 py-1 rounded-full text-xs font-medium transition-all ${
                           form.targetCategories.includes(cat)
-                            ? 'bg-pink-600 text-white'
+                            ? 'bg-pink-600 text-gray-900'
                             : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
                         }`}
                       >
@@ -782,7 +782,7 @@ export function PromotionEngine() {
                       </button>
                     </div>
                   </div>
-                  <p className="text-xs text-gray-400 mt-2">
+                  <p className="text-xs text-gray-500 mt-2">
                     {selectedCampaign.totalCouponsGenerated} codes generated
                   </p>
                 </div>

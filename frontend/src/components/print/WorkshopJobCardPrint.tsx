@@ -267,7 +267,7 @@ export function WorkshopJobCardPrint({
 
           {/* Footer */}
           <div className="mt-2 pt-1 border-t border-gray-200 text-center">
-            <p className="text-[8px] text-gray-400">
+            <p className="text-[8px] text-gray-500">
               {store.storeName} • {job.jobNumber}
             </p>
           </div>

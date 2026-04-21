@@ -305,7 +305,7 @@ export function PurchaseManagementPage() {
       {/* Search & Filters */}
       <div className="flex items-center gap-4">
         <div className="flex-1 relative">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" />
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-500" />
           <input
             type="text"
             placeholder={activeTab === 'purchase-orders' ? 'Search by PO number or supplier...' : 'Search suppliers...'}

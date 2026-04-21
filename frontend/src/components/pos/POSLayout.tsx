@@ -48,6 +48,8 @@ import { PrescriptionForm } from './PrescriptionForm';
 import { PrescriptionPanel } from './PrescriptionPanel';
 import { PrescriptionSelectModal } from './PrescriptionSelectModal';
 import { LensDetailsModal } from './LensDetailsModal';
+import { LensFittingFormModal } from './LensFittingFormModal';
+import type { LensFittingFormValue } from './LensFittingFormModal';
 import { LensSuggestionPanel } from './LensSuggestionPanel';
 import { DiscountModal } from './DiscountModal';
 import { DayEndReport } from './DayEndReport';
@@ -106,11 +108,11 @@ export function POSLayout() {
   const activeStoreId = user?.activeStoreId || user?.storeIds?.[0] || '';
   if (!activeStoreId || activeStoreId === 'No store') {
     return (
-      <div className="min-h-screen min-h-[100dvh] bg-gray-900 flex items-center justify-center p-4">
-        <div className="bg-gray-800 border border-amber-700 rounded-2xl p-8 max-w-md text-center">
+      <div className="min-h-screen min-h-[100dvh] bg-white flex items-center justify-center p-4">
+        <div className="bg-white border border-amber-300 rounded-2xl p-8 max-w-md text-center">
           <AlertTriangle className="w-12 h-12 text-amber-500 mx-auto mb-4" />
-          <h2 className="text-xl font-bold text-white mb-2">No Store Selected</h2>
-          <p className="text-sm text-gray-400 mb-4">
+          <h2 className="text-xl font-bold text-gray-900 mb-2">No Store Selected</h2>
+          <p className="text-sm text-gray-500 mb-4">
             POS requires an active store to process transactions. Please select a store from the header dropdown before accessing Point of Sale.
           </p>
           <p className="text-xs text-gray-500">
@@ -131,6 +133,12 @@ export function POSLayout() {
   const [showDayEnd, setShowDayEnd] = useState(false);
   const [showNewConfirm, setShowNewConfirm] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  // Phase 6.8 — workshop handoff modal. When an Rx order spawns a workshop
+  // job, we hold the jobId here and open LensFittingFormModal so sales can
+  // attach the physical fitting measurements before the Complete step.
+  const [fittingJobId, setFittingJobId] = useState<string | null>(null);
+  const [fittingSaving, setFittingSaving] = useState(false);
+  const [fittingCoating, setFittingCoating] = useState<string>('');
 
   // Held bills from localStorage — cached to avoid repeated JSON.parse in render
   const [heldBillsCache, setHeldBillsCache] = useState<Array<{ id: string; customer: string; items: number; total: number; heldAt: string; state: any }>>([]);
@@ -293,6 +301,14 @@ export function POSLayout() {
           item_note: (item as any).item_note || undefined,
         })),
         notes: store.cart_note || undefined,
+        // Phase 6.7 — pass delivery + cart-discount fields through to backend
+        delivery_date: store.delivery_date || undefined,
+        delivery_time_slot: store.delivery_time_slot || undefined,
+        delivery_priority: store.delivery_priority || 'NORMAL',
+        cart_discount_percent: store.cart_discount_percent || 0,
+        cart_discount_amount: store.cart_discount_amount || 0,
+        cart_discount_reason: store.cart_discount_reason || undefined,
+        cart_discount_approved_by: store.cart_discount_approved_by || undefined,
       } as any);
       if (result?.order_id) {
         for (const p of (store.payments || [])) {
@@ -304,15 +320,23 @@ export function POSLayout() {
         }
         store.setOrderResult(result.order_id, result.order_number);
 
-        // Auto-create workshop job for prescription orders
-        if (store.sale_type === 'prescription_order' && store.prescription) {
+        // Phase 6.8 — auto-create workshop job + prompt sales to fill
+        // fitting details. Only fires for Rx orders that actually ship a
+        // lens. Earlier code matched category==='RX_LENSES' which never
+        // matched the real catalog (categories are OPTICAL_LENS /
+        // SPECTACLE_LENS). We also no longer silently swallow errors.
+        const LENS_CATS = ['OPTICAL_LENS', 'OPTICAL_LENSES', 'SPECTACLE_LENS', 'SPECTACLE_LENSES', 'RX_LENSES', 'LENS', 'LENSES'];
+        const FRAME_CATS = ['FRAMES', 'FRAME', 'SUNGLASSES', 'SUNGLASS', 'SPECTACLE_FRAME'];
+        const cartItems = store.cart || [];
+        const frameItem = cartItems.find(i => FRAME_CATS.includes((i.category || '').toUpperCase()));
+        const lensItem = cartItems.find(
+          i => LENS_CATS.includes((i.category || '').toUpperCase()) || !!i.lens_details,
+        );
+        if (store.sale_type === 'prescription_order' && store.prescription && (frameItem || lensItem)) {
           try {
-            const frameItem = (store.cart || []).find(i => i.category === 'FRAMES' || i.category === 'SUNGLASSES');
-            const lensItem = (store.cart || []).find(i => i.category === 'RX_LENSES' || i.lens_details);
             const expectedDate = new Date();
             expectedDate.setDate(expectedDate.getDate() + 5);
-
-            await workshopApi.createJob({
+            const jobResp = await workshopApi.createJob({
               order_id: result.order_id,
               frame_details: frameItem ? {
                 product_id: frameItem.product_id,
@@ -325,11 +349,33 @@ export function POSLayout() {
                 name: lensItem?.name,
               },
               prescription_id: store.prescription.id || '',
-              fitting_instructions: (store.cart || []).filter(i => i.notes).map(i => `${i.name}: ${i.notes}`).join('; ') || undefined,
+              fitting_instructions: cartItems
+                .filter(i => i.notes)
+                .map(i => `${i.name}: ${i.notes}`)
+                .join('; ') || undefined,
               special_notes: store.cart_note || undefined,
               expected_date: expectedDate.toISOString().split('T')[0],
             });
-          } catch {
+            // Open fitting-details modal with the new jobId — Complete step
+            // is advanced from the modal's onSave / onBack handlers.
+            if (jobResp?.job_id) {
+              setFittingJobId(jobResp.job_id);
+              setFittingCoating(
+                (lensItem?.lens_details?.coatings || []).join(', ') || '',
+              );
+              // Keep the POS in its current step; the modal overlays above
+              // and advances to 'complete' when resolved. Processing flag
+              // already turned off in `finally` below.
+              return;
+            }
+          } catch (e) {
+            // Non-fatal — the order IS created. Surface a warning so staff
+            // can manually create the workshop job / call IT if necessary.
+            // eslint-disable-next-line no-console
+            console.warn('[POS] Workshop job auto-create failed:', e);
+            setErrorMsg(
+              'Order saved, but workshop job auto-create failed — please add it manually from the Workshop page.',
+            );
           }
         }
 
@@ -535,8 +581,11 @@ export function POSLayout() {
             </div>
           )}
 
-          {/* Step content (unchanged components) */}
-          <div style={{ flex: 1, minHeight: 0 }}>
+          {/* Step content (unchanged components).
+              Audit 2026-04-21 flagged sticky-footer overlapping row-3
+              products on Step 2 at 900px viewport. paddingBottom below
+              gives the last row scroll clearance past the footer. */}
+          <div style={{ flex: 1, minHeight: 0, paddingBottom: '80px', overflowY: 'auto' }}>
             {store.current_step === 'customer' && <StepCustomer />}
             {store.current_step === 'prescription' && (
               <StepPrescription
@@ -643,13 +692,13 @@ export function POSLayout() {
       )}
       {showNewPrescription && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-gray-800 rounded-xl shadow-2xl w-full max-w-2xl max-h-[90vh] overflow-y-auto">
-            <div className="p-4 border-b border-gray-700 flex items-center justify-between">
-              <h3 className="font-semibold text-white">New Prescription</h3>
-              <button onClick={() => { setShowNewPrescription(false); setErrorMsg(null); }} className="p-1 hover:bg-gray-700 rounded"><X className="w-5 h-5" /></button>
+          <div className="bg-white rounded-xl shadow-2xl w-full max-w-2xl max-h-[90vh] overflow-y-auto">
+            <div className="p-4 border-b border-gray-200 flex items-center justify-between">
+              <h3 className="font-semibold text-gray-900">New Prescription</h3>
+              <button onClick={() => { setShowNewPrescription(false); setErrorMsg(null); }} className="p-1 hover:bg-gray-100 rounded"><X className="w-5 h-5" /></button>
             </div>
             {errorMsg && (
-              <div className="mx-4 mt-4 p-3 bg-red-900/30 border border-red-200 rounded-lg text-sm text-red-700 flex items-start gap-2">
+              <div className="mx-4 mt-4 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700 flex items-start gap-2">
                 <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />
                 <div><p className="font-medium">Failed to save prescription</p><p className="text-xs mt-0.5">{errorMsg}</p></div>
                 <button onClick={() => setErrorMsg(null)} className="ml-auto text-red-400 hover:text-red-600"><X className="w-4 h-4" /></button>
@@ -719,14 +768,49 @@ export function POSLayout() {
           onClose={() => setDiscountItem(null)} />
       )}
       {showReceipt && <POSReceipt onClose={() => setShowReceipt(false)} />}
+
+      {/* Phase 6.8 — Sales→Workshop fitting handoff. Opens right after an
+          Rx order spawns a workshop job; advances POS to Complete on save
+          or back. Either way the order is already created. */}
+      {fittingJobId && (
+        <LensFittingFormModal
+          prefilledCoating={fittingCoating}
+          isSaving={fittingSaving}
+          onSave={async (v: LensFittingFormValue) => {
+            setFittingSaving(true);
+            try {
+              await workshopApi.updateFittingDetails(fittingJobId, v);
+              setFittingJobId(null);
+              setFittingCoating('');
+              store.setStep('complete');
+            } catch (e) {
+              // Keep the modal open so sales can retry; surface the error.
+              // Rest of the order is already persisted — no revenue at risk.
+              // eslint-disable-next-line no-console
+              console.error('[POS] Save fitting details failed:', e);
+              setErrorMsg('Could not save fitting details — please try again or skip for now.');
+            } finally {
+              setFittingSaving(false);
+            }
+          }}
+          onBack={() => {
+            // "Back" dismisses the modal but still advances to Complete —
+            // the order + workshop job are already created; fitting details
+            // can be filled later from the Workshop page.
+            setFittingJobId(null);
+            setFittingCoating('');
+            store.setStep('complete');
+          }}
+        />
+      )}
       {holdConfirm && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="bg-gray-800 rounded-xl p-6 max-w-sm">
-            <h3 className="font-semibold text-white mb-2">Hold this bill?</h3>
+          <div className="bg-white rounded-xl p-6 max-w-sm">
+            <h3 className="font-semibold text-gray-900 mb-2">Hold this bill?</h3>
             <p className="text-sm text-gray-500 mb-1">{store.customer?.name || 'Walk-in'} {'\u00B7'} {(store.cart || []).length} items {'\u00B7'} {'\u20B9'}{Math.round(store.getGrandTotal()).toLocaleString('en-IN')}</p>
-            <p className="text-xs text-gray-400 mb-4">Cart will be saved and can be recalled later.</p>
+            <p className="text-xs text-gray-500 mb-4">Cart will be saved and can be recalled later.</p>
             <div className="flex gap-2">
-              <button onClick={() => setHoldConfirm(false)} className="flex-1 px-4 py-2 border border-gray-600 rounded-lg text-sm">Cancel</button>
+              <button onClick={() => setHoldConfirm(false)} className="flex-1 px-4 py-2 border border-gray-300 rounded-lg text-sm">Cancel</button>
               <button onClick={holdCurrentBill} className="flex-1 px-4 py-2 bg-amber-500 text-white rounded-lg text-sm font-semibold">Hold Bill</button>
             </div>
           </div>
@@ -734,11 +818,11 @@ export function POSLayout() {
       )}
       {showNewConfirm && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="bg-gray-800 rounded-xl p-6 max-w-sm border border-gray-700">
-            <h3 className="font-semibold text-white mb-2">Start new transaction?</h3>
-            <p className="text-sm text-gray-400 mb-4">Current cart ({(store.cart || []).length} items, {'\u20B9'}{Math.round(store.getGrandTotal()).toLocaleString('en-IN')}) will be cleared. Consider holding the bill first.</p>
+          <div className="bg-white rounded-xl p-6 max-w-sm border border-gray-200">
+            <h3 className="font-semibold text-gray-900 mb-2">Start new transaction?</h3>
+            <p className="text-sm text-gray-500 mb-4">Current cart ({(store.cart || []).length} items, {'\u20B9'}{Math.round(store.getGrandTotal()).toLocaleString('en-IN')}) will be cleared. Consider holding the bill first.</p>
             <div className="flex gap-2">
-              <button onClick={() => setShowNewConfirm(false)} className="flex-1 px-4 py-2 border border-gray-600 text-gray-300 rounded-lg text-sm hover:bg-gray-700">Cancel</button>
+              <button onClick={() => setShowNewConfirm(false)} className="flex-1 px-4 py-2 border border-gray-300 text-gray-700 rounded-lg text-sm hover:bg-gray-100">Cancel</button>
               <button onClick={() => { holdCurrentBill(); setShowNewConfirm(false); }} className="flex-1 px-4 py-2 bg-amber-600 text-white rounded-lg text-sm font-semibold hover:bg-amber-700">Hold & New</button>
               <button onClick={() => { handleFullReset(); setShowNewConfirm(false); }} className="flex-1 px-4 py-2 bg-red-600 text-white rounded-lg text-sm font-semibold hover:bg-red-700">Discard & New</button>
             </div>
@@ -747,26 +831,26 @@ export function POSLayout() {
       )}
       {showRecallPanel && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-gray-800 rounded-xl shadow-2xl w-full max-w-md max-h-[70vh] overflow-y-auto">
-            <div className="p-4 border-b border-gray-700 flex items-center justify-between">
-              <h3 className="font-semibold text-white">Held Bills ({getHeldBills().length})</h3>
-              <button onClick={() => setShowRecallPanel(false)} className="p-1 hover:bg-gray-700 rounded"><X className="w-5 h-5" /></button>
+          <div className="bg-white rounded-xl shadow-2xl w-full max-w-md max-h-[70vh] overflow-y-auto">
+            <div className="p-4 border-b border-gray-200 flex items-center justify-between">
+              <h3 className="font-semibold text-gray-900">Held Bills ({getHeldBills().length})</h3>
+              <button onClick={() => setShowRecallPanel(false)} className="p-1 hover:bg-gray-100 rounded"><X className="w-5 h-5" /></button>
             </div>
             <div className="p-4 space-y-2">
               {getHeldBills().length === 0 ? (
                 <p className="text-sm text-gray-500 text-center py-8">No held bills</p>
               ) : getHeldBills().map(bill => (
-                <div key={bill.id} className="bg-amber-900/30 border border-amber-700 rounded-lg p-3 flex items-center justify-between">
+                <div key={bill.id} className="bg-amber-50 border border-amber-300 rounded-lg p-3 flex items-center justify-between">
                   <div>
-                    <p className="font-medium text-sm text-white">{bill.customer}</p>
+                    <p className="font-medium text-sm text-gray-900">{bill.customer}</p>
                     <p className="text-xs text-gray-500">{bill.items} items {'\u00B7'} {'\u20B9'}{Math.round(bill.total).toLocaleString('en-IN')}</p>
-                    <p className="text-[10px] text-gray-400">{new Date(bill.heldAt).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}</p>
+                    <p className="text-[10px] text-gray-500">{new Date(bill.heldAt).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}</p>
                   </div>
                   <div className="flex gap-2">
                     <button onClick={() => { deleteHeldBill(bill.id); setShowRecallPanel(false); setTimeout(() => setShowRecallPanel(true), 50); }}
                       className="text-xs text-red-500 hover:text-red-700 px-2 py-1">Delete</button>
                     <button onClick={() => recallBill(bill.id)}
-                      className="text-xs bg-bv-gold-500 text-white px-3 py-1 rounded font-semibold hover:bg-bv-gold-600">Recall</button>
+                      className="text-xs bg-bv-red-600 text-white px-3 py-1 rounded font-semibold hover:bg-bv-red-700">Recall</button>
                   </div>
                 </div>
               ))}
@@ -858,7 +942,7 @@ function RxAvailableBadge({ customerId }: { customerId: string; customerName?: s
   };
 
   return (
-    <div className="mt-2 bg-blue-900/30 border border-blue-200 rounded-lg p-3">
+    <div className="mt-2 bg-blue-50 border border-blue-200 rounded-lg p-3">
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
           <div className="w-7 h-7 rounded-full bg-blue-500 text-white flex items-center justify-center">
@@ -881,7 +965,7 @@ function RxAvailableBadge({ customerId }: { customerId: string; customerName?: s
         {store.sale_type !== 'prescription_order' && (
           <button
             onClick={handleSwitchToRx}
-            className="text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 px-3 py-1.5 rounded-lg transition-colors"
+            className="text-xs font-semibold text-gray-900 bg-blue-600 hover:bg-blue-700 px-3 py-1.5 rounded-lg transition-colors"
           >
             Use Rx {'\u2192'} Prescription Order
           </button>
@@ -915,10 +999,10 @@ function CustomerHistory({ customerId }: { customerId: string }) {
   }, [customerId]);
 
   if (loading) return null;
-  if (orders.length === 0) return <p className="text-xs text-gray-400 mt-2 italic">No previous orders found</p>;
+  if (orders.length === 0) return <p className="text-xs text-gray-500 mt-2 italic">No previous orders found</p>;
 
   return (
-    <div className="mt-2 bg-gray-800 border border-gray-700 rounded-lg p-3">
+    <div className="mt-2 bg-white border border-gray-200 rounded-lg p-3">
       <p className="text-[10px] font-medium text-gray-500 uppercase tracking-wide mb-1.5">Recent Purchases</p>
       <div className="space-y-1">
         {orders.map((o: any, i: number) => {
@@ -927,8 +1011,8 @@ function CustomerHistory({ customerId }: { customerId: string }) {
           const items = o.items?.map((item: any) => item.productName || item.product_name || item.name).filter(Boolean).join(', ') || '';
           return (
             <div key={o.order_id || o._id || i} className="flex items-center gap-2 text-xs">
-              <span className="text-gray-400 w-16 flex-shrink-0">{ago}</span>
-              <span className="text-gray-300 truncate flex-1">{items || o.orderNumber || 'Order'}</span>
+              <span className="text-gray-500 w-16 flex-shrink-0">{ago}</span>
+              <span className="text-gray-700 truncate flex-1">{items || o.orderNumber || 'Order'}</span>
               <span className="text-gray-500 flex-shrink-0 font-medium">{'\u20B9'}{Math.round(o.grandTotal || o.grand_total || 0).toLocaleString('en-IN')}</span>
             </div>
           );
@@ -1001,9 +1085,9 @@ function StepCustomer() {
   }, [isWalkin]);
 
   return (
-    <div className="max-w-3xl mx-auto space-y-6">
+    <div className="w-full max-w-5xl mx-auto space-y-6">
       <div>
-        <label className="block text-sm font-medium text-gray-300 mb-2">Sale Type</label>
+        <label className="block text-sm font-medium text-gray-700 mb-2">Sale Type</label>
         <div className="grid grid-cols-2 gap-3">
           {([
             { id: 'quick_sale' as SaleType, label: 'Quick Sale', desc: 'Frames, sunglasses, accessories -- immediate delivery', icon: Zap, blocked: false },
@@ -1012,15 +1096,15 @@ function StepCustomer() {
             <button key={opt.id} onClick={() => { if (!opt.blocked) store.setSaleType(opt.id); }}
               title={opt.blocked ? 'Select a registered customer for prescription orders' : ''}
               className={`flex items-start gap-3 p-4 rounded-xl border-2 text-left transition-all ${
-                opt.blocked ? 'border-gray-700 bg-gray-800 opacity-50 cursor-not-allowed' :
-                store.sale_type === opt.id ? 'border-bv-gold-500 bg-bv-gold-900/30' : 'border-gray-700 hover:border-gray-600'}`}>
+                opt.blocked ? 'border-gray-200 bg-white opacity-50 cursor-not-allowed' :
+                store.sale_type === opt.id ? 'border-bv-red-600 bg-bv-red-50' : 'border-gray-200 hover:border-gray-300'}`}>
               <div className={`w-10 h-10 rounded-lg flex items-center justify-center flex-shrink-0 ${
-                opt.blocked ? 'bg-gray-700 text-gray-400' :
-                store.sale_type === opt.id ? 'bg-bv-gold-500 text-white' : 'bg-gray-700 text-gray-500'}`}>
+                opt.blocked ? 'bg-gray-100 text-gray-500' :
+                store.sale_type === opt.id ? 'bg-bv-red-600 text-white' : 'bg-gray-100 text-gray-500'}`}>
                 <opt.icon className="w-5 h-5" />
               </div>
               <div>
-                <p className={`font-semibold ${opt.blocked ? 'text-gray-400' : 'text-white'}`}>{opt.label}</p>
+                <p className={`font-semibold ${opt.blocked ? 'text-gray-500' : 'text-gray-900'}`}>{opt.label}</p>
                 <p className={`text-xs mt-0.5 ${opt.blocked ? 'text-red-400' : 'text-gray-500'}`}>{opt.desc}</p>
               </div>
             </button>
@@ -1029,20 +1113,20 @@ function StepCustomer() {
       </div>
 
       <div>
-        <label className="block text-sm font-medium text-gray-300 mb-2">Customer</label>
+        <label className="block text-sm font-medium text-gray-700 mb-2">Customer</label>
         {store.customer ? (
           <>
-          <div className={`${isWalkin ? 'bg-gray-800 border-gray-700' : 'bg-bv-gold-900/30 border-bv-gold-600'} border rounded-xl p-4 flex items-center justify-between`}>
+          <div className={`${isWalkin ? 'bg-white border-gray-200' : 'bg-bv-red-50 border-bv-red-600'} border rounded-xl p-4 flex items-center justify-between`}>
             <div className="flex items-center gap-3">
-              <div className={`w-10 h-10 rounded-full ${isWalkin ? 'bg-gray-500' : 'bg-bv-gold-600'} text-white flex items-center justify-center font-semibold`}>{store.customer.name?.charAt(0)?.toUpperCase() || 'W'}</div>
+              <div className={`w-10 h-10 rounded-full ${isWalkin ? 'bg-gray-500' : 'bg-bv-red-700'} text-gray-900 flex items-center justify-center font-semibold`}>{store.customer.name?.charAt(0)?.toUpperCase() || 'W'}</div>
               <div>
-                <p className="font-semibold text-white">{store.customer.name}</p>
+                <p className="font-semibold text-gray-900">{store.customer.name}</p>
                 <p className="text-sm text-gray-500">{store.customer.phone || 'No phone'}</p>
                 {isWalkin && <p className="text-xs text-amber-600 mt-0.5">Walk-in -- Quick Sale only</p>}
-                {store.patient && <p className="text-xs text-bv-gold-600 mt-0.5">Patient: {store.patient.name}</p>}
+                {store.patient && <p className="text-xs text-bv-red-600 mt-0.5">Patient: {store.patient.name}</p>}
               </div>
             </div>
-            <button onClick={() => startTransition(() => store.setCustomer(null))} className="text-sm text-gray-500 hover:text-gray-300 px-3 py-1 border border-gray-700 rounded-lg">Change</button>
+            <button onClick={() => startTransition(() => store.setCustomer(null))} className="text-sm text-gray-500 hover:text-gray-700 px-3 py-1 border border-gray-200 rounded-lg">Change</button>
           </div>
           {!isWalkin && <CustomerCardWithLoyalty />}
           {!isWalkin && <RxAvailableBadge customerId={store.customer.id} customerName={store.customer.name} />}
@@ -1062,10 +1146,10 @@ function StepCustomer() {
                 const custPhone = cust.phone || cust.mobile || '';
                 return (
                   <div className="flex items-center gap-3">
-                    <div className="w-8 h-8 rounded-full bg-bv-gold-600 flex items-center justify-center text-sm font-bold text-white">{custName.charAt(0).toUpperCase()}</div>
+                    <div className="w-8 h-8 rounded-full bg-bv-red-700 flex items-center justify-center text-sm font-bold text-gray-900">{custName.charAt(0).toUpperCase()}</div>
                     <div className="flex-1 min-w-0">
-                      <p className="text-sm font-medium text-white truncate">{custName}</p>
-                      <p className="text-xs text-gray-400">{custPhone} {cust.city && `\u00B7 ${cust.city}`}</p>
+                      <p className="text-sm font-medium text-gray-900 truncate">{custName}</p>
+                      <p className="text-xs text-gray-500">{custPhone} {cust.city && `\u00B7 ${cust.city}`}</p>
                     </div>
                   </div>
                 );
@@ -1087,7 +1171,7 @@ function StepCustomer() {
               emptyMessage="No customers found"
             />
             <div className="mt-3 flex gap-4">
-              <button onClick={() => setShowAddCustomerModal(true)} className="flex items-center gap-2 text-sm text-bv-gold-600 hover:text-bv-gold-700 font-medium"><Plus className="w-4 h-4" /> Create new customer</button>
+              <button onClick={() => setShowAddCustomerModal(true)} className="flex items-center gap-2 text-sm text-bv-red-600 hover:text-bv-gold-700 font-medium"><Plus className="w-4 h-4" /> Create new customer</button>
               <button onClick={async () => {
                 try {
                   const r = await customerApi.createCustomer({ name: 'Walk-in Customer', mobile: '0000000000', customer_type: 'B2C' } as any);
@@ -1097,7 +1181,7 @@ function StepCustomer() {
                 }
                 store.setSaleType('quick_sale');
               }}
-                className="flex items-center gap-2 text-sm text-gray-500 hover:text-gray-300"><User className="w-4 h-4" /> Walk-in (Quick Sale only)</button>
+                className="flex items-center gap-2 text-sm text-gray-500 hover:text-gray-700"><User className="w-4 h-4" /> Walk-in (Quick Sale only)</button>
             </div>
           </>
         )}
@@ -1189,24 +1273,24 @@ function StepPrescription({ onShowModal, onShowNew }: { onShowModal: () => void;
 
   if (store.prescription) {
     return (
-      <div className="max-w-3xl mx-auto space-y-4">
+      <div className="w-full max-w-5xl mx-auto space-y-4">
         <div className="flex items-center justify-between">
-          <h3 className="font-semibold text-white">Selected Prescription</h3>
-          <button onClick={onShowModal} className="text-sm text-bv-gold-600 hover:text-bv-gold-700 font-medium">Change</button>
+          <h3 className="font-semibold text-gray-900">Selected Prescription</h3>
+          <button onClick={onShowModal} className="text-sm text-bv-red-600 hover:text-bv-gold-700 font-medium">Change</button>
         </div>
         <PrescriptionPanel prescription={store.prescription} patientName={store.patient?.name || store.customer?.name} readOnly />
-        <div className="bg-green-900/30 border border-green-200 rounded-lg p-3 flex items-center gap-2 text-sm text-green-700">
+        <div className="bg-green-50 border border-green-200 rounded-lg p-3 flex items-center gap-2 text-sm text-green-700">
           <CheckCircle className="w-4 h-4" /> Prescription attached -- you can now select lenses
         </div>
       </div>
     );
   }
   return (
-    <div className="max-w-3xl mx-auto space-y-6">
-      <div><h3 className="font-semibold text-white mb-1">Prescription Required</h3><p className="text-sm text-gray-500">Select existing or enter a new prescription.</p></div>
+    <div className="w-full max-w-5xl mx-auto space-y-6">
+      <div><h3 className="font-semibold text-gray-900 mb-1">Prescription Required</h3><p className="text-sm text-gray-500">Select existing or enter a new prescription.</p></div>
 
       {rxLoading && (
-        <div className="text-sm text-gray-400 animate-pulse">Checking for prescriptions...</div>
+        <div className="text-sm text-gray-500 animate-pulse">Checking for prescriptions...</div>
       )}
       {!rxLoading && recentRx.length > 0 && (
         <div className="space-y-2">
@@ -1217,12 +1301,12 @@ function StepPrescription({ onShowModal, onShowNew }: { onShowModal: () => void;
             const testDate = rx.testDate || rx.test_date;
             return (
               <div key={rx.prescriptionId || rx.prescription_id || rx._id || i}
-                className="flex items-center gap-4 p-3 bg-blue-900/30 border border-blue-200 rounded-lg hover:bg-blue-100 transition-colors">
+                className="flex items-center gap-4 p-3 bg-blue-50 border border-blue-200 rounded-lg hover:bg-blue-100 transition-colors">
                 <div className="w-8 h-8 rounded-full bg-blue-500 text-white flex items-center justify-center flex-shrink-0">
                   <Eye className="w-4 h-4" />
                 </div>
                 <div className="flex-1 min-w-0">
-                  <p className="text-sm font-medium text-white">
+                  <p className="text-sm font-medium text-gray-900">
                     R: {fmtPower(re.sph || re.sphere)}/{fmtPower(re.cyl || re.cylinder)}{'\u00D7'}{re.axis || 180}
                     {' \u00B7 '}
                     L: {fmtPower(le.sph || le.sphere)}/{fmtPower(le.cyl || le.cylinder)}{'\u00D7'}{le.axis || 180}
@@ -1234,7 +1318,7 @@ function StepPrescription({ onShowModal, onShowNew }: { onShowModal: () => void;
                   </p>
                 </div>
                 <button onClick={() => attachRx(rx)}
-                  className="text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 px-3 py-1.5 rounded-lg transition-colors flex-shrink-0">
+                  className="text-xs font-semibold text-gray-900 bg-blue-600 hover:bg-blue-700 px-3 py-1.5 rounded-lg transition-colors flex-shrink-0">
                   Attach
                 </button>
               </div>
@@ -1244,17 +1328,17 @@ function StepPrescription({ onShowModal, onShowNew }: { onShowModal: () => void;
       )}
 
       <div className="grid grid-cols-1 tablet:grid-cols-2 gap-4">
-        <button onClick={onShowModal} className="flex items-start gap-3 p-4 rounded-xl border-2 border-gray-700 hover:border-bv-gold-300 text-left">
-          <div className="w-10 h-10 rounded-lg bg-blue-900/30 text-blue-600 flex items-center justify-center"><FileText className="w-5 h-5" /></div>
-          <div><p className="font-semibold text-white">Browse All Prescriptions</p><p className="text-xs text-gray-500 mt-0.5">View full prescription history</p></div>
+        <button onClick={onShowModal} className="flex items-start gap-3 p-4 rounded-xl border-2 border-gray-200 hover:border-bv-red-300 text-left">
+          <div className="w-10 h-10 rounded-lg bg-blue-50 text-blue-600 flex items-center justify-center"><FileText className="w-5 h-5" /></div>
+          <div><p className="font-semibold text-gray-900">Browse All Prescriptions</p><p className="text-xs text-gray-500 mt-0.5">View full prescription history</p></div>
         </button>
-        <button onClick={onShowNew} className="flex items-start gap-3 p-4 rounded-xl border-2 border-gray-700 hover:border-bv-gold-300 text-left">
-          <div className="w-10 h-10 rounded-lg bg-green-900/30 text-green-600 flex items-center justify-center"><Plus className="w-5 h-5" /></div>
-          <div><p className="font-semibold text-white">New Prescription</p><p className="text-xs text-gray-500 mt-0.5">Enter a new Rx manually</p></div>
+        <button onClick={onShowNew} className="flex items-start gap-3 p-4 rounded-xl border-2 border-gray-200 hover:border-bv-red-300 text-left">
+          <div className="w-10 h-10 rounded-lg bg-green-50 text-green-600 flex items-center justify-center"><Plus className="w-5 h-5" /></div>
+          <div><p className="font-semibold text-gray-900">New Prescription</p><p className="text-xs text-gray-500 mt-0.5">Enter a new Rx manually</p></div>
         </button>
       </div>
       {recentRx.length === 0 && !rxLoading && (
-        <div className="bg-amber-900/30 border border-amber-700 rounded-lg p-3 flex items-center gap-2 text-sm text-amber-700">
+        <div className="bg-amber-50 border border-amber-300 rounded-lg p-3 flex items-center gap-2 text-sm text-amber-700">
           <AlertTriangle className="w-4 h-4 flex-shrink-0" /> No prescriptions found. Enter manually or send customer for an eye test first.
         </div>
       )}
@@ -1327,7 +1411,7 @@ function StepProducts({ onOpenLensModal }: { onOpenLensModal: () => void }) {
   return (
     <div className="space-y-4">
       {blockMsg && (
-        <div className="bg-red-900/30 border border-red-200 rounded-lg p-3 flex items-center gap-2 text-sm text-red-700">
+        <div className="bg-red-50 border border-red-200 rounded-lg p-3 flex items-center gap-2 text-sm text-red-700">
           <AlertTriangle className="w-4 h-4 flex-shrink-0" />
           <span className="flex-1">{blockMsg}</span>
           <button onClick={() => setBlockMsg(null)} className="text-red-400 hover:text-red-600"><X className="w-3.5 h-3.5" /></button>
@@ -1349,9 +1433,9 @@ function StepProducts({ onOpenLensModal }: { onOpenLensModal: () => void }) {
           <div className="flex items-center justify-between mb-2">
             <div className="flex items-center gap-2 text-sm font-medium text-purple-700">
               <Sparkles className="w-4 h-4" /> Recommended Lenses (based on Rx)
-              <span className="text-xs text-gray-400 font-normal">-- suggestions only, staff can override</span>
+              <span className="text-xs text-gray-500 font-normal">-- suggestions only, staff can override</span>
             </div>
-            <button onClick={() => setShowSuggestions(false)} className="text-xs text-gray-400 hover:text-gray-300 px-2 py-1">Dismiss</button>
+            <button onClick={() => setShowSuggestions(false)} className="text-xs text-gray-500 hover:text-gray-700 px-2 py-1">Dismiss</button>
           </div>
           <LensSuggestionPanel
             prescriptionInput={rxInput}
@@ -1378,18 +1462,18 @@ function StepProducts({ onOpenLensModal }: { onOpenLensModal: () => void }) {
       )}
 
       <div className="flex gap-2 overflow-x-auto pb-1 items-center">
-        <button onClick={() => setCategoryFilter('')} className={`px-3 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap ${!categoryFilter ? 'bg-bv-gold-500 text-white' : 'bg-gray-700 text-gray-300 hover:bg-gray-600'}`}>All</button>
+        <button onClick={() => setCategoryFilter('')} className={`px-3 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap ${!categoryFilter ? 'bg-bv-red-600 text-white' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'}`}>All</button>
         {categories.map(cat => (
           <button key={cat} onClick={() => setCategoryFilter(cat === categoryFilter ? '' : cat)}
-            className={`px-3 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap ${categoryFilter === cat ? 'bg-bv-gold-500 text-white' : 'bg-gray-700 text-gray-300 hover:bg-gray-600'}`}>
+            className={`px-3 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap ${categoryFilter === cat ? 'bg-bv-red-600 text-white' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'}`}>
             {cat.replace(/_/g, ' ')}
           </button>
         ))}
-        <div className="ml-auto flex gap-0.5 bg-gray-700 rounded-lg p-0.5">
-          <button onClick={() => setViewMode('grid')} className={`p-1.5 rounded ${viewMode === 'grid' ? 'bg-gray-800 shadow-sm' : 'text-gray-400 hover:text-gray-300'}`} title="Grid view">
+        <div className="ml-auto flex gap-0.5 bg-gray-100 rounded-lg p-0.5">
+          <button onClick={() => setViewMode('grid')} className={`p-1.5 rounded ${viewMode === 'grid' ? 'bg-white shadow-sm' : 'text-gray-500 hover:text-gray-700'}`} title="Grid view">
             <Package className="w-3.5 h-3.5" />
           </button>
-          <button onClick={() => setViewMode('list')} className={`p-1.5 rounded ${viewMode === 'list' ? 'bg-gray-800 shadow-sm' : 'text-gray-400 hover:text-gray-300'}`} title="List view">
+          <button onClick={() => setViewMode('list')} className={`p-1.5 rounded ${viewMode === 'list' ? 'bg-white shadow-sm' : 'text-gray-500 hover:text-gray-700'}`} title="List view">
             <FileText className="w-3.5 h-3.5" />
           </button>
         </div>
@@ -1405,11 +1489,11 @@ function StepProducts({ onOpenLensModal }: { onOpenLensModal: () => void }) {
 
       {isLoading ? (
         <div className="grid grid-cols-2 tablet:grid-cols-3 laptop:grid-cols-4 gap-3">
-          {[...Array(8)].map((_, i) => <div key={i} className="bg-gray-800 rounded-xl border border-gray-700 p-3 animate-pulse"><div className="h-20 bg-gray-700 rounded-lg mb-2" /><div className="h-4 bg-gray-700 rounded w-3/4 mb-1" /><div className="h-3 bg-gray-700 rounded w-1/2" /></div>)}
+          {[...Array(8)].map((_, i) => <div key={i} className="bg-white rounded-xl border border-gray-200 p-3 animate-pulse"><div className="h-20 bg-gray-100 rounded-lg mb-2" /><div className="h-4 bg-gray-100 rounded w-3/4 mb-1" /><div className="h-3 bg-gray-100 rounded w-1/2" /></div>)}
         </div>
       ) : viewMode === 'list' ? (
         /* COMPACT LIST VIEW */
-        <div className="bg-gray-800 border border-gray-700 rounded-xl overflow-hidden">
+        <div className="bg-white border border-gray-200 rounded-xl overflow-hidden">
           <div className="divide-y divide-gray-100 max-h-[60vh] overflow-y-auto">
             {(products as any[]).map((product: any) => {
               const mrp = product.mrp || 0; const offer = product.offer_price || mrp; const hasDiscount = offer < mrp;
@@ -1419,24 +1503,24 @@ function StepProducts({ onOpenLensModal }: { onOpenLensModal: () => void }) {
               const isLowStock = stock !== null && stock > 0 && stock <= 3;
               return (
                 <button key={product.product_id || product._id} onClick={() => handleAddProduct(product)} disabled={inCart || isOutOfStock}
-                  className={`w-full flex items-center gap-3 px-3 py-2 text-left hover:bg-gray-700 transition-colors ${
-                    isOutOfStock ? 'opacity-50 cursor-not-allowed bg-red-900/30/20' : inCart ? 'bg-green-900/30/50' : ''}`}>
-                  <div className="w-10 h-10 bg-gray-800 rounded flex items-center justify-center flex-shrink-0">
+                  className={`w-full flex items-center gap-3 px-3 py-2 text-left hover:bg-gray-100 transition-colors ${
+                    isOutOfStock ? 'opacity-50 cursor-not-allowed bg-red-50' : inCart ? 'bg-green-50' : ''}`}>
+                  <div className="w-10 h-10 bg-white rounded flex items-center justify-center flex-shrink-0">
                     {product.image_url ? <img src={product.image_url} alt="" className="h-8 w-auto object-contain" /> :
-                    <Package className="w-4 h-4 text-gray-300" />}
+                    <Package className="w-4 h-4 text-gray-700" />}
                   </div>
                   <div className="flex-1 min-w-0">
-                    <p className="text-sm font-medium text-white truncate">{product.name}</p>
+                    <p className="text-sm font-medium text-gray-900 truncate">{product.name}</p>
                     <p className="text-[10px] text-gray-500">{product.brand} {'\u00B7'} {product.sku}</p>
                   </div>
                   {stock !== null && (
                     <span className={`text-[10px] px-1.5 py-0.5 rounded flex-shrink-0 ${
-                      isOutOfStock ? 'bg-red-100 text-red-600' : isLowStock ? 'bg-amber-100 text-amber-700' : 'text-gray-400'
+                      isOutOfStock ? 'bg-red-100 text-red-600' : isLowStock ? 'bg-amber-100 text-amber-700' : 'text-gray-500'
                     }`}>{isOutOfStock ? 'Out' : isLowStock ? `${stock} left` : `\u00D7${stock}`}</span>
                   )}
                   <div className="text-right flex-shrink-0">
-                    <span className="text-sm font-bold text-white">{fc(offer)}</span>
-                    {hasDiscount && <span className="text-[9px] text-gray-400 line-through ml-1">{fc(mrp)}</span>}
+                    <span className="text-sm font-bold text-gray-900">{fc(offer)}</span>
+                    {hasDiscount && <span className="text-[9px] text-gray-500 line-through ml-1">{fc(mrp)}</span>}
                   </div>
                   {inCart && <span className="text-[9px] px-1 py-0.5 bg-green-100 text-green-700 rounded flex-shrink-0">{'\u2713'}</span>}
                 </button>
@@ -1455,24 +1539,24 @@ function StepProducts({ onOpenLensModal }: { onOpenLensModal: () => void }) {
             const isOutOfStock = stock !== null && stock <= 0;
             return (
               <button key={product.product_id || product._id} onClick={() => handleAddProduct(product)} disabled={inCart || isOutOfStock}
-                className={`bg-gray-800 rounded-xl border text-left p-3 transition-all hover:shadow-md ${
-                  isOutOfStock ? 'border-red-200 bg-red-900/30/30 opacity-60 cursor-not-allowed' :
-                  inCart ? 'border-green-300 bg-green-900/30 opacity-70' : 'border-gray-700 hover:border-bv-gold-300'}`}>
-                <div className="h-16 bg-gray-800 rounded-lg mb-2 flex items-center justify-center relative">
+                className={`bg-white rounded-xl border text-left p-3 transition-all hover:shadow-md ${
+                  isOutOfStock ? 'border-red-200 bg-red-50 opacity-60 cursor-not-allowed' :
+                  inCart ? 'border-green-300 bg-green-50 opacity-70' : 'border-gray-200 hover:border-bv-red-300'}`}>
+                <div className="h-16 bg-white rounded-lg mb-2 flex items-center justify-center relative">
                   {product.image_url ? <img src={product.image_url} alt="" className="h-14 w-auto object-contain" /> :
-                  product.category === 'FRAMES' || product.category === 'SUNGLASSES' ? <Glasses className="w-8 h-8 text-gray-300" />
-                  : product.category?.includes('WATCH') ? <Watch className="w-8 h-8 text-gray-300" /> : <Package className="w-8 h-8 text-gray-300" />}
+                  product.category === 'FRAMES' || product.category === 'SUNGLASSES' ? <Glasses className="w-8 h-8 text-gray-700" />
+                  : product.category?.includes('WATCH') ? <Watch className="w-8 h-8 text-gray-700" /> : <Package className="w-8 h-8 text-gray-700" />}
                   {stock !== null && (
                     <span className={`absolute top-1 right-1 text-[9px] px-1 py-0.5 rounded font-medium ${
-                      isOutOfStock ? 'bg-red-100 text-red-600' : isLowStock ? 'bg-amber-100 text-amber-700' : 'bg-green-900/30 text-green-600'
+                      isOutOfStock ? 'bg-red-100 text-red-600' : isLowStock ? 'bg-amber-100 text-amber-700' : 'bg-green-50 text-green-600'
                     }`}>{isOutOfStock ? 'Out' : isLowStock ? `${stock} left` : `${stock}`}</span>
                   )}
                 </div>
-                <p className="text-xs font-semibold text-white truncate">{product.name}</p>
+                <p className="text-xs font-semibold text-gray-900 truncate">{product.name}</p>
                 <p className="text-[10px] text-gray-500 truncate">{product.brand} {'\u00B7'} {product.sku}</p>
                 <div className="mt-1.5 flex items-baseline gap-1.5">
-                  <span className="text-sm font-bold text-white">{fc(offer)}</span>
-                  {hasDiscount && <span className="text-[10px] text-gray-400 line-through">{fc(mrp)}</span>}
+                  <span className="text-sm font-bold text-gray-900">{fc(offer)}</span>
+                  {hasDiscount && <span className="text-[10px] text-gray-500 line-through">{fc(mrp)}</span>}
                 </div>
                 {inCart && <span className="inline-block mt-1 text-[10px] px-1.5 py-0.5 bg-green-100 text-green-700 rounded font-medium">In cart</span>}
                 {isOutOfStock && <span className="inline-block mt-1 text-[10px] px-1.5 py-0.5 bg-red-100 text-red-600 rounded font-medium">Out of stock</span>}
@@ -1482,10 +1566,10 @@ function StepProducts({ onOpenLensModal }: { onOpenLensModal: () => void }) {
         </div>
       )}
       {!isLoading && (products as any[]).length === 0 && (
-        <div className="text-center py-12 text-gray-400">
+        <div className="text-center py-12 text-gray-500">
           <Package className="w-12 h-12 mx-auto mb-2 opacity-50" />
           <p className="text-sm">No products found</p>
-          {categoryFilter && debouncedSearch && <p className="text-xs mt-1">Search is filtered to <span className="font-medium">{categoryFilter.replace(/_/g, ' ')}</span>. <button onClick={() => setCategoryFilter('')} className="text-bv-gold-600 hover:underline">Search all categories</button></p>}
+          {categoryFilter && debouncedSearch && <p className="text-xs mt-1">Search is filtered to <span className="font-medium">{categoryFilter.replace(/_/g, ' ')}</span>. <button onClick={() => setCategoryFilter('')} className="text-bv-red-600 hover:underline">Search all categories</button></p>}
         </div>
       )}
     </div>
@@ -1497,6 +1581,7 @@ function StepProducts({ onOpenLensModal }: { onOpenLensModal: () => void }) {
 // ============================================================================
 function StepReview({ onOpenDiscount }: { onOpenDiscount: (item: CartLineItem) => void }) {
   const store = usePOSStore();
+  const { user } = useAuth();
   const subtotal = store.getSubtotal(); const discount = store.getTotalDiscount();
 
   const taxBreakdown = useMemo(() => {
@@ -1515,58 +1600,58 @@ function StepReview({ onOpenDiscount }: { onOpenDiscount: (item: CartLineItem) =
   const total = store.getGrandTotal();
 
   return (
-    <div className="max-w-3xl mx-auto space-y-4">
-      <h3 className="font-semibold text-white">Order Review</h3>
+    <div className="w-full max-w-5xl mx-auto space-y-4">
+      <h3 className="font-semibold text-gray-900">Order Review</h3>
       {store.customer && (
-        <div className="bg-gray-800 rounded-lg p-3 flex items-center gap-3 text-sm">
-          <User className="w-4 h-4 text-gray-400" /><span className="font-medium">{store.customer.name}</span><span className="text-gray-500">{store.customer.phone}</span>
+        <div className="bg-white rounded-lg p-3 flex items-center gap-3 text-sm">
+          <User className="w-4 h-4 text-gray-500" /><span className="font-medium">{store.customer.name}</span><span className="text-gray-500">{store.customer.phone}</span>
           {store.sale_type === 'prescription_order' && <span className="ml-auto px-2 py-0.5 bg-purple-900/30 text-purple-600 rounded text-xs font-medium">Prescription Order</span>}
         </div>
       )}
 
-      <div className="bg-gray-800 border border-gray-700 rounded-xl overflow-hidden">
+      <div className="bg-white border border-gray-200 rounded-xl overflow-hidden">
         <table className="w-full text-sm">
-          <thead className="bg-gray-800 text-xs text-gray-500 uppercase">
+          <thead className="bg-white text-xs text-gray-500 uppercase">
             <tr><th className="text-left px-4 py-2">Item</th><th className="text-center px-2 py-2">Qty</th><th className="text-right px-2 py-2">MRP</th><th className="text-right px-2 py-2">Price</th><th className="text-right px-2 py-2">Disc</th><th className="text-center px-2 py-2">GST</th><th className="text-right px-4 py-2">Total</th><th className="w-8"></th></tr>
           </thead>
           <tbody>
             {(store.cart || []).map(item => {
               const gstRate = getGSTRateByCategory(item.category);
               return (
-              <tr key={item.id} className="border-t border-gray-700">
+              <tr key={item.id} className="border-t border-gray-200">
                 <td className="px-4 py-3">
-                  <p className="font-medium text-white">{item.name}</p>
+                  <p className="font-medium text-gray-900">{item.name}</p>
                   <p className="text-xs text-gray-500">{item.brand} {'\u00B7'} {item.sku}</p>
                   {item.lens_details && <p className="text-xs text-purple-500 mt-0.5">{item.lens_details.type} {'\u00B7'} {item.lens_details.coatings.join(', ')}</p>}
                   <input
                     placeholder="Item notes (PD, fitting, tint, coating...)"
                     defaultValue={(item as any).item_note || ''}
                     onBlur={(e) => store.setItemNote?.(item.id, e.target.value)}
-                    className="mt-1 w-full text-[11px] px-2 py-1 bg-gray-800 border border-gray-700 rounded text-gray-300 placeholder:text-gray-300 focus:border-bv-gold-300 focus:bg-gray-800"
+                    className="mt-1 w-full text-[11px] px-2 py-1 bg-white border border-gray-200 rounded text-gray-700 placeholder:text-gray-400 focus:border-bv-red-300 focus:bg-white"
                   />
                 </td>
                 <td className="text-center px-2">
                   <div className="flex items-center justify-center gap-1">
-                    <button onClick={() => store.updateQuantity(item.id, item.quantity - 1)} className="w-6 h-6 rounded bg-gray-700 text-xs hover:bg-gray-600">-</button>
+                    <button onClick={() => store.updateQuantity(item.id, item.quantity - 1)} className="w-6 h-6 rounded bg-gray-100 text-xs hover:bg-gray-200">-</button>
                     <span className="w-6 text-center font-medium">{item.quantity}</span>
-                    <button onClick={() => store.updateQuantity(item.id, item.quantity + 1)} className="w-6 h-6 rounded bg-gray-700 text-xs hover:bg-gray-600">+</button>
+                    <button onClick={() => store.updateQuantity(item.id, item.quantity + 1)} className="w-6 h-6 rounded bg-gray-100 text-xs hover:bg-gray-200">+</button>
                   </div>
                 </td>
                 <td className="text-right px-2 text-gray-500">{fc(item.mrp)}</td>
                 <td className="text-right px-2">{fc(item.unit_price)}</td>
                 <td className="text-right px-2">
                   {item.offer_price && item.offer_price < item.mrp ? (
-                    <span className="px-2 py-0.5 rounded text-xs bg-gray-700 text-gray-400 cursor-not-allowed" title="MRP > Offer Price: No further discount allowed">N/A</span>
+                    <span className="px-2 py-0.5 rounded text-xs bg-gray-100 text-gray-500 cursor-not-allowed" title="MRP > Offer Price: No further discount allowed">N/A</span>
                   ) : (
                     <button onClick={() => onOpenDiscount(item)}
-                      className={`px-2 py-0.5 rounded text-xs ${item.discount_percent > 0 ? 'bg-green-900/30 text-green-700 font-medium' : 'bg-gray-800 text-gray-500 hover:bg-gray-700'}`}>
+                      className={`px-2 py-0.5 rounded text-xs ${item.discount_percent > 0 ? 'bg-green-50 text-green-700 font-medium' : 'bg-white text-gray-500 hover:bg-gray-100'}`}>
                       {item.discount_percent > 0 ? `${item.discount_percent}%` : 'Add'}
                     </button>
                   )}
                 </td>
                 <td className="text-center px-2 text-xs text-gray-500">{gstRate}%</td>
                 <td className="text-right px-4 font-semibold">{fc(item.line_total)}</td>
-                <td><button onClick={() => store.removeFromCart(item.id)} className="p-1 text-gray-400 hover:text-red-500"><X className="w-4 h-4" /></button></td>
+                <td><button onClick={() => store.removeFromCart(item.id)} className="p-1 text-gray-500 hover:text-red-500"><X className="w-4 h-4" /></button></td>
               </tr>
               );
             })}
@@ -1574,9 +1659,104 @@ function StepReview({ onOpenDiscount }: { onOpenDiscount: (item: CartLineItem) =
         </table>
       </div>
 
-      <textarea value={store.cart_note} onChange={(e) => store.setCartNote(e.target.value)} placeholder="Order notes, fitting instructions..." className="w-full px-3 py-2 border border-gray-600 rounded-lg text-sm h-16 resize-none" />
+      <textarea value={store.cart_note} onChange={(e) => store.setCartNote(e.target.value)} placeholder="Order notes, fitting instructions..." className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm h-16 resize-none" />
 
-      <div className="bg-gray-800 border border-gray-700 rounded-xl p-4 space-y-2 text-sm">
+      {/* Phase 6.7 — Order-level discount. Stacks on top of per-item
+          discounts. Capped at the user's role discount cap. */}
+      <div className="bg-white border border-gray-200 rounded-xl p-4 space-y-2 text-sm">
+        <div className="flex items-center justify-between">
+          <div>
+            <label className="font-medium text-gray-900">Overall Discount</label>
+            <p className="text-xs text-gray-500">Applied to subtotal (after per-item discounts)</p>
+          </div>
+          <div className="flex items-center gap-2">
+            <input
+              type="number"
+              min={0}
+              max={user?.discountCap ?? 10}
+              step={0.5}
+              value={store.cart_discount_percent || 0}
+              onChange={(e) => {
+                const pct = Math.max(0, Math.min(user?.discountCap ?? 10, parseFloat(e.target.value) || 0));
+                store.setCartDiscount(pct);
+              }}
+              onFocus={(e) => e.target.select()}
+              className="w-20 px-2 py-1 border border-gray-300 rounded text-sm text-right text-gray-900"
+              placeholder="0"
+            />
+            <span className="text-sm text-gray-500">%</span>
+          </div>
+        </div>
+        {store.cart_discount_percent > 0 && (
+          <div className="pt-2 space-y-2 border-t border-gray-200">
+            <input
+              type="text"
+              value={store.cart_discount_reason || ''}
+              onChange={(e) => store.setCartDiscount(store.cart_discount_percent, e.target.value, store.cart_discount_approved_by || undefined)}
+              placeholder="Reason (loyal customer, damaged box, festival offer...)"
+              className="w-full px-2 py-1 border border-gray-300 rounded text-xs text-gray-900"
+            />
+            <div className="flex items-center justify-between text-xs">
+              <span className="text-gray-500">Max allowed: {user?.discountCap ?? 10}% (role cap)</span>
+              <span className="text-green-600 font-medium">-{fc(store.cart_discount_amount || 0)}</span>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Phase 6.7 — Delivery scheduling (all sale types, not just Rx orders).
+          Stores collect pickup/delivery prefs at order time so Workshop + the
+          Orders list can sort by priority. */}
+      <div className="bg-white border border-gray-200 rounded-xl p-4 space-y-3 text-sm">
+        <div>
+          <label className="font-medium text-gray-900">Delivery / Collection</label>
+          <p className="text-xs text-gray-500">Date, time window, and priority. Required for prescription orders.</p>
+        </div>
+        <div className="grid grid-cols-1 tablet:grid-cols-3 gap-3">
+          <div>
+            <label className="text-xs text-gray-500 block mb-1">Date</label>
+            <input
+              type="date"
+              value={store.delivery_date || ''}
+              onChange={(e) => store.setDeliveryDate(e.target.value || null)}
+              className="w-full px-2 py-1.5 border border-gray-300 rounded text-sm text-gray-900"
+            />
+          </div>
+          <div>
+            <label className="text-xs text-gray-500 block mb-1">Time slot</label>
+            <select
+              value={store.delivery_time_slot || ''}
+              onChange={(e) => store.setDeliveryTimeSlot(e.target.value || null)}
+              className="w-full px-2 py-1.5 border border-gray-300 rounded text-sm text-gray-900"
+            >
+              <option value="">Any time</option>
+              <option value="10:00-12:00">10:00 – 12:00</option>
+              <option value="12:00-14:00">12:00 – 14:00</option>
+              <option value="14:00-16:00">14:00 – 16:00</option>
+              <option value="16:00-18:00">16:00 – 18:00</option>
+              <option value="18:00-20:00">18:00 – 20:00</option>
+            </select>
+          </div>
+          <div>
+            <label className="text-xs text-gray-500 block mb-1">Priority</label>
+            <select
+              value={store.delivery_priority || 'NORMAL'}
+              onChange={(e) => store.setDeliveryPriority(e.target.value as 'NORMAL' | 'EXPRESS' | 'URGENT')}
+              className={`w-full px-2 py-1.5 border rounded text-sm font-medium ${
+                store.delivery_priority === 'URGENT' ? 'border-red-300 text-red-700 bg-red-50' :
+                store.delivery_priority === 'EXPRESS' ? 'border-orange-300 text-orange-700 bg-orange-50' :
+                'border-gray-300 text-gray-700'
+              }`}
+            >
+              <option value="NORMAL">Normal</option>
+              <option value="EXPRESS">Express (+surcharge)</option>
+              <option value="URGENT">Urgent (same day)</option>
+            </select>
+          </div>
+        </div>
+      </div>
+
+      <div className="bg-white border border-gray-200 rounded-xl p-4 space-y-2 text-sm">
         <div className="flex justify-between"><span className="text-gray-500">Subtotal</span><span>{fc(subtotal)}</span></div>
         {discount > 0 && <div className="flex justify-between text-green-600"><span>Discount</span><span>-{fc(discount)}</span></div>}
         {Object.entries(taxBreakdown.rates).map(([rate, taxable]) => {
@@ -1592,20 +1772,15 @@ function StepReview({ onOpenDiscount }: { onOpenDiscount: (item: CartLineItem) =
             </div>
           );
         })}
-        <div className="border-t border-gray-700 pt-2 flex justify-between font-bold text-lg"><span>Grand Total</span><span className="text-bv-gold-600">{fc(total)}</span></div>
+        <div className="border-t border-gray-200 pt-2 flex justify-between font-bold text-lg"><span>Grand Total</span><span className="text-bv-red-600">{fc(total)}</span></div>
       </div>
 
       {store.sale_type === 'prescription_order' && (
-        <div className="bg-blue-900/30 border border-blue-200 rounded-lg p-3">
+        <div className="bg-blue-50 border border-blue-200 rounded-lg p-3">
           <label className="flex items-center gap-2 text-sm">
-            <input type="checkbox" checked={store.is_advance_payment} onChange={(e) => store.setAdvancePayment(e.target.checked)} className="rounded border-gray-600" />
+            <input type="checkbox" checked={store.is_advance_payment} onChange={(e) => store.setAdvancePayment(e.target.checked)} className="rounded border-gray-300" />
             <span className="font-medium text-blue-700">Advance payment only</span><span className="text-blue-500 text-xs">(Balance on delivery)</span>
           </label>
-          {store.is_advance_payment && (
-            <div className="mt-2 flex items-center gap-2"><label className="text-xs text-blue-600">Delivery date:</label>
-              <input type="date" value={store.delivery_date || ''} onChange={(e) => store.setDeliveryDate(e.target.value)} className="px-2 py-1 border border-blue-200 rounded text-sm" />
-            </div>
-          )}
         </div>
       )}
     </div>

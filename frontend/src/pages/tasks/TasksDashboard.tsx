@@ -44,11 +44,11 @@ interface ChecklistItem {
 
 // Priority colors (non-customizable per spec)
 const PRIORITY_COLORS: Record<string, { border: string; bg: string; text: string }> = {
-  P0: { border: '#991B1B', bg: 'bg-red-950', text: 'text-red-100' },  // dark red
-  P1: { border: '#DC2626', bg: 'bg-red-600', text: 'text-white' },    // red
-  P2: { border: '#EA580C', bg: 'bg-orange-600', text: 'text-white' }, // orange
-  P3: { border: '#CA8A04', bg: 'bg-yellow-600', text: 'text-white' }, // yellow
-  P4: { border: '#2563EB', bg: 'bg-blue-600', text: 'text-white' },   // blue
+  P0: { border: '#991B1B', bg: 'bg-red-950', text: 'text-white' },       // dark red — critical
+  P1: { border: '#DC2626', bg: 'bg-red-600', text: 'text-white' },       // red
+  P2: { border: '#EA580C', bg: 'bg-orange-600', text: 'text-white' },    // orange
+  P3: { border: '#CA8A04', bg: 'bg-yellow-500', text: 'text-gray-900' }, // yellow — dark text for contrast
+  P4: { border: '#2563EB', bg: 'bg-blue-600', text: 'text-white' },      // blue
 };
 
 const DEFAULT_CHECKLISTS: Record<ChecklistType, ChecklistItem[]> = {
@@ -231,10 +231,10 @@ export function TasksDashboard() {
 
         {/* Alert: Overdue/Escalated */}
         {(summary.overdue > 0 || summary.escalated > 0) && (
-          <div className="mb-6 bg-red-900 bg-opacity-30 border border-red-500 rounded-lg p-4 flex items-center gap-3">
-            <AlertTriangle className="w-5 h-5 text-red-400" />
+          <div className="mb-6 bg-red-50 bg-opacity-30 border border-red-500 rounded-lg p-4 flex items-center gap-3">
+            <AlertTriangle className="w-5 h-5 text-red-600" />
             <div>
-              <p className="font-semibold text-red-300">
+              <p className="font-semibold text-red-700">
                 {summary.overdue} overdue task{summary.overdue !== 1 ? 's' : ''} {summary.escalated > 0 && `• ${summary.escalated} escalated`}
               </p>
               <p className="text-sm text-red-200">Action required immediately</p>
@@ -250,7 +250,7 @@ export function TasksDashboard() {
                 <p className="text-gray-500 text-sm">Total Tasks</p>
                 <p className="text-2xl font-bold text-gray-900">{summary.total}</p>
               </div>
-              <ListChecks className="w-8 h-8 text-blue-400" />
+              <ListChecks className="w-8 h-8 text-blue-600" />
             </div>
           </div>
 
@@ -258,9 +258,9 @@ export function TasksDashboard() {
             <div className="flex items-center justify-between">
               <div>
                 <p className="text-gray-500 text-sm">Open/In Progress</p>
-                <p className="text-2xl font-bold text-yellow-400">{summary.open}</p>
+                <p className="text-2xl font-bold text-yellow-600">{summary.open}</p>
               </div>
-              <Clock className="w-8 h-8 text-yellow-400" />
+              <Clock className="w-8 h-8 text-yellow-600" />
             </div>
           </div>
 
@@ -268,9 +268,9 @@ export function TasksDashboard() {
             <div className="flex items-center justify-between">
               <div>
                 <p className="text-gray-500 text-sm">Overdue</p>
-                <p className="text-2xl font-bold text-red-400">{summary.overdue}</p>
+                <p className="text-2xl font-bold text-red-600">{summary.overdue}</p>
               </div>
-              <AlertCircle className="w-8 h-8 text-red-400" />
+              <AlertCircle className="w-8 h-8 text-red-600" />
             </div>
           </div>
 
@@ -278,9 +278,9 @@ export function TasksDashboard() {
             <div className="flex items-center justify-between">
               <div>
                 <p className="text-gray-500 text-sm">Completed</p>
-                <p className="text-2xl font-bold text-green-400">{summary.completed}</p>
+                <p className="text-2xl font-bold text-green-600">{summary.completed}</p>
               </div>
-              <CheckCircle className="w-8 h-8 text-green-400" />
+              <CheckCircle className="w-8 h-8 text-green-600" />
             </div>
           </div>
         </div>
@@ -292,7 +292,7 @@ export function TasksDashboard() {
             className={clsx(
               'px-4 py-3 font-medium border-b-2 transition-colors',
               activeTab === 'my-tasks'
-                ? 'border-blue-500 text-blue-400'
+                ? 'border-blue-500 text-blue-600'
                 : 'border-transparent text-gray-500 hover:text-gray-700'
             )}
           >
@@ -304,7 +304,7 @@ export function TasksDashboard() {
             className={clsx(
               'px-4 py-3 font-medium border-b-2 transition-colors',
               activeTab === 'checklists'
-                ? 'border-blue-500 text-blue-400'
+                ? 'border-blue-500 text-blue-600'
                 : 'border-transparent text-gray-500 hover:text-gray-700'
             )}
           >
@@ -317,7 +317,7 @@ export function TasksDashboard() {
               className={clsx(
                 'px-4 py-3 font-medium border-b-2 transition-colors',
                 activeTab === 'team-tasks'
-                  ? 'border-blue-500 text-blue-400'
+                  ? 'border-blue-500 text-blue-600'
                   : 'border-transparent text-gray-500 hover:text-gray-700'
               )}
             >
@@ -329,7 +329,7 @@ export function TasksDashboard() {
         {/* Content */}
         {isLoading ? (
           <div className="flex items-center justify-center h-64">
-            <Loader2 className="w-8 h-8 text-blue-400 animate-spin" />
+            <Loader2 className="w-8 h-8 text-blue-600 animate-spin" />
           </div>
         ) : activeTab === 'my-tasks' ? (
           <div>
@@ -387,7 +387,7 @@ export function TasksDashboard() {
                         {task.status === 'open' && (
                           <button
                             onClick={() => handleAcknowledgeTask(task.task_id)}
-                            className="px-3 py-1 bg-blue-600 hover:bg-blue-700 text-sm text-white rounded transition-colors"
+                            className="px-3 py-1 bg-blue-600 hover:bg-blue-700 text-sm text-gray-900 rounded transition-colors"
                           >
                             Acknowledge
                           </button>
@@ -395,7 +395,7 @@ export function TasksDashboard() {
                         {task.status !== 'completed' && (
                           <button
                             onClick={() => handleCompleteTask(task.task_id)}
-                            className="px-3 py-1 bg-green-600 hover:bg-green-700 text-sm text-white rounded transition-colors"
+                            className="px-3 py-1 bg-green-600 hover:bg-green-700 text-sm text-gray-900 rounded transition-colors"
                           >
                             Complete
                           </button>
@@ -455,7 +455,7 @@ export function TasksDashboard() {
                   />
                   <span className={clsx(
                     'text-sm flex-1',
-                    item.completed ? 'line-through text-gray-400' : 'text-gray-600'
+                    item.completed ? 'line-through text-gray-500' : 'text-gray-600'
                   )}>
                     {item.text}
                   </span>
@@ -498,7 +498,7 @@ export function TasksDashboard() {
 
             {isLoadingTeam ? (
               <div className="flex items-center justify-center h-48">
-                <Loader2 className="w-8 h-8 text-blue-400 animate-spin" />
+                <Loader2 className="w-8 h-8 text-blue-600 animate-spin" />
               </div>
             ) : teamTasks.length === 0 ? (
               <div className="text-center py-12 bg-white rounded-lg border border-gray-200">
@@ -546,14 +546,14 @@ export function TasksDashboard() {
                           )}
                           <div className="flex items-center gap-4 text-xs text-gray-500">
                             <span>Assigned to: <span className="text-gray-600">{task.assigned_to}</span></span>
-                            <span>Due: <span className={isOverdue ? 'text-orange-400' : 'text-gray-600'}>{new Date(task.due_date).toLocaleDateString()}</span></span>
+                            <span>Due: <span className={isOverdue ? 'text-orange-600' : 'text-gray-600'}>{new Date(task.due_date).toLocaleDateString()}</span></span>
                             <span>Type: {task.type}</span>
                           </div>
                         </div>
                         {task.status !== 'completed' && (
                           <button
                             onClick={() => handleCompleteTask(task.task_id)}
-                            className="flex-shrink-0 px-3 py-1 bg-green-600 hover:bg-green-700 text-sm text-white rounded transition-colors"
+                            className="flex-shrink-0 px-3 py-1 bg-green-600 hover:bg-green-700 text-sm text-gray-900 rounded transition-colors"
                           >
                             Complete
                           </button>

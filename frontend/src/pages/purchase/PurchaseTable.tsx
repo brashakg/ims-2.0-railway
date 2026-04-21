@@ -121,7 +121,7 @@ export function PurchaseTable({ purchaseOrders, onViewPO }: PurchaseTableProps) 
 
       {purchaseOrders.length === 0 && (
         <div className="text-center py-12">
-          <Package className="w-12 h-12 text-gray-400 mx-auto mb-3" />
+          <Package className="w-12 h-12 text-gray-500 mx-auto mb-3" />
           <p className="text-gray-500">No purchase orders found</p>
         </div>
       )}

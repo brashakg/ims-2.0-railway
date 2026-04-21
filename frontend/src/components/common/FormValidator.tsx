@@ -187,7 +187,7 @@ export function FormInput({
 
   return (
     <div className="mb-4">
-      <label htmlFor={name} className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+      <label htmlFor={name} className="block text-sm font-medium text-gray-700 dark:text-gray-700 mb-2">
         {label}
         {required && <span className="text-red-600" aria-label="required">*</span>}
       </label>
@@ -206,8 +206,8 @@ export function FormInput({
           className={clsx(
             'w-full px-3 py-2 rounded-lg border transition-colors focus:outline-none focus:ring-2',
             hasError
-              ? 'border-red-300 bg-red-50 text-gray-900 focus:ring-red-500 dark:bg-red-900/20 dark:border-red-700'
-              : 'border-gray-300 bg-white text-gray-900 focus:ring-blue-500 focus:border-blue-500 dark:bg-gray-800 dark:border-gray-700 dark:text-white',
+              ? 'border-red-300 bg-red-50 text-gray-900 focus:ring-red-500 dark:bg-red-50/20 dark:border-red-700'
+              : 'border-gray-300 bg-white text-gray-900 focus:ring-blue-500 focus:border-blue-500 dark:bg-white dark:border-gray-200 dark:text-gray-900',
             disabled && 'opacity-50 cursor-not-allowed'
           )}
         />
@@ -215,12 +215,12 @@ export function FormInput({
         {touched && !error && <CheckCircle2 className="absolute right-3 top-3 w-5 h-5 text-green-600" />}
       </div>
       {hasError && (
-        <p id={`${name}-error`} className="mt-1 text-sm text-red-600 dark:text-red-400">
+        <p id={`${name}-error`} className="mt-1 text-sm text-red-600 dark:text-red-600">
           {error}
         </p>
       )}
       {helperText && !hasError && (
-        <p id={`${name}-helper`} className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+        <p id={`${name}-helper`} className="mt-1 text-xs text-gray-500 dark:text-gray-500">
           {helperText}
         </p>
       )}
@@ -240,8 +240,8 @@ export function FormErrorSummary({ errors, onErrorClick }: FormErrorSummaryProps
   if (errors.length === 0) return null;
 
   return (
-    <div className="p-4 rounded-lg bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 mb-6">
-      <h3 className="font-semibold text-red-900 dark:text-red-300 mb-3 flex items-center gap-2">
+    <div className="p-4 rounded-lg bg-red-50 dark:bg-red-50/20 border border-red-200 dark:border-red-800 mb-6">
+      <h3 className="font-semibold text-red-900 dark:text-red-700 mb-3 flex items-center gap-2">
         <AlertCircle className="w-5 h-5" />
         Please fix the following errors:
       </h3>
@@ -250,7 +250,7 @@ export function FormErrorSummary({ errors, onErrorClick }: FormErrorSummaryProps
           <li key={i}>
             <button
               onClick={() => onErrorClick?.(error.field)}
-              className="text-sm text-red-700 dark:text-red-300 hover:underline text-left"
+              className="text-sm text-red-700 dark:text-red-700 hover:underline text-left"
             >
               <strong>{error.field}:</strong> {error.message}
             </button>

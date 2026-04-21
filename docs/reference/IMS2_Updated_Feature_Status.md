@@ -2,6 +2,16 @@
 
 **Before this session:** 117 built, 12 partial, 166 not built
 **After this session:** 130 built, 8 partial, 157 not built
+**After Phase 6.3 (2026-04-20):** 132 built, 8 partial, 155 not built
+  - ✅ Non-moving stock report (90+ days) — backend + frontend + 10 tests
+  - ✅ MoM / YoY sales growth — backend endpoint pre-existed, now surfaced on the Reports page Sales Comparison card
+**After Phase 6.4 (2026-04-20):** 134 built, 8 partial, 153 not built
+  - ✅ Workshop dashboard KPIs (pending, overdue, completed today, avg turnaround) — `GET /api/v1/workshop/dashboard-kpis` + wired into WorkshopPage header
+  - ✅ Pending jobs report with aging buckets (0-3d / 3-7d / 7+d) + per-technician breakdown — rewrote `GET /api/v1/reports/workshop/pending-jobs` to use `workshop_jobs` collection (was incorrectly reading from `tasks` collection, never populated)
+**After Phase 6.7 (2026-04-21):** 137 built, 8 partial, 150 not built
+  - ✅ Simplified customer invoice — "Brand Category" (e.g. "Ray-Ban Sunglass") on thermal + A4 receipt + GST tax invoice. Helper in `frontend/src/utils/receiptFormat.ts`
+  - ✅ Delivery date + time slot + priority fields on POS orders (frontend posStore + POSLayout Review UI + backend OrderCreate schema + persistence)
+  - ✅ Overall cart discount (order-level, stacks on per-item discounts, capped at user's role discountCap) — frontend + backend, GST recomputed on post-discount taxable value
 
 ---
 
@@ -102,7 +112,7 @@
 - ❌ Family-based prescription view
 
 **Workshop (5 items)**
-- ❌ Workshop dashboard KPIs (pending, overdue, completed today)
+- ✅ Workshop dashboard KPIs (pending, overdue, completed today, avg turnaround) — Phase 6.4, `GET /api/v1/workshop/dashboard-kpis`
 - ❌ Lens order tracking (ordered → received → mounted)
 - ❌ QC checklist (power verification, fitting, cosmetic check)
 - ❌ Customer notification when job is ready
@@ -112,7 +122,7 @@
 - ❌ Daily stock count per staff member
 - ❌ Stock count barcode scanning interface
 - ❌ Auto-variance detection (system vs physical count)
-- ❌ Non-moving stock identification (90+ days)
+- ✅ Non-moving stock identification (90+ days) — `GET /api/v1/reports/inventory/non-moving-stock?days=N` + Reports page table (Phase 6.3)
 - ❌ AI-recommended inter-store transfer
 - ❌ Stock photo gallery per product
 - ❌ Sell-through % per brand group
@@ -123,13 +133,13 @@
 
 **Reports (12 items)**
 - ❌ Daily/Monthly/Yearly sales comparison
-- ❌ MoM and YoY growth reports
+- ✅ MoM and YoY growth reports — `GET /api/v1/reports/sales/growth?year=Y&month=M` + surfaced in Reports page Sales Comparison card (backend pre-existed; frontend wired Phase 6.3)
 - ❌ Profit by category and store
 - ❌ Discount average by category and store
 - ❌ Staff performance ranking
 - ❌ Daily stock count report
 - ❌ Eye test count report
-- ❌ Pending jobs report
+- ✅ Pending jobs report — Phase 6.4, `GET /api/v1/reports/workshop/pending-jobs` with aging buckets + per-tech breakdown
 - ❌ Expense vs revenue report
 - ❌ Customer acquisition/retention report
 - ❌ Brand-wise sell-through report

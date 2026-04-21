@@ -38,19 +38,19 @@ interface PurchaseOrder {
 const getStatusColor = (status: string) => {
   switch (status) {
     case 'draft':
-      return 'bg-gray-700 text-gray-100';
+      return 'bg-gray-100 text-gray-100';
     case 'approved':
-      return 'bg-blue-900 text-blue-300';
+      return 'bg-blue-50 text-blue-700';
     case 'sent':
-      return 'bg-purple-900 text-purple-300';
+      return 'bg-purple-50 text-purple-700';
     case 'partial_receipt':
-      return 'bg-yellow-900 text-yellow-300';
+      return 'bg-yellow-50 text-yellow-700';
     case 'received':
-      return 'bg-green-900 text-green-300';
+      return 'bg-green-50 text-green-700';
     case 'closed':
-      return 'bg-gray-800 text-gray-300';
+      return 'bg-white text-gray-700';
     default:
-      return 'bg-gray-700 text-gray-100';
+      return 'bg-gray-100 text-gray-100';
   }
 };
 
@@ -145,15 +145,15 @@ export function PurchaseOrderDashboard() {
         </div>
         <div className="bg-white border border-gray-200 rounded-lg p-4">
           <p className="text-gray-500 text-sm mb-1">Pending POs</p>
-          <p className="text-2xl font-bold text-yellow-400">{pendingPOs.length}</p>
+          <p className="text-2xl font-bold text-yellow-600">{pendingPOs.length}</p>
         </div>
         <div className="bg-white border border-gray-200 rounded-lg p-4">
           <p className="text-gray-500 text-sm mb-1">Total Value</p>
-          <p className="text-2xl font-bold text-green-400">₹{(totalValue / 100000).toFixed(1)}L</p>
+          <p className="text-2xl font-bold text-green-600">₹{(totalValue / 100000).toFixed(1)}L</p>
         </div>
         <div className="bg-white border border-gray-200 rounded-lg p-4">
           <p className="text-gray-500 text-sm mb-1">Pending Value</p>
-          <p className="text-2xl font-bold text-blue-400">₹{(pendingValue / 100000).toFixed(1)}L</p>
+          <p className="text-2xl font-bold text-blue-600">₹{(pendingValue / 100000).toFixed(1)}L</p>
         </div>
       </div>
 
@@ -166,8 +166,8 @@ export function PurchaseOrderDashboard() {
             className={clsx(
               'px-4 py-3 font-medium border-b-2 transition-colors',
               activeTab === tab
-                ? 'border-blue-500 text-blue-400'
-                : 'border-transparent text-gray-400 hover:text-gray-700'
+                ? 'border-blue-500 text-blue-600'
+                : 'border-transparent text-gray-500 hover:text-gray-700'
             )}
           >
             {tab === 'all' ? 'All' : tab === 'pending' ? 'Pending' : tab === 'received' ? 'Received' : 'Closed'}
@@ -178,7 +178,7 @@ export function PurchaseOrderDashboard() {
       {/* Search and Filter */}
       <div className="flex gap-4 items-center">
         <div className="flex-1 relative">
-          <Search className="absolute left-3 top-3 w-5 h-5 text-gray-400" />
+          <Search className="absolute left-3 top-3 w-5 h-5 text-gray-500" />
           <input
             type="text"
             placeholder="Search by PO number or vendor..."
@@ -228,7 +228,7 @@ export function PurchaseOrderDashboard() {
               </div>
               <div>
                 <p className="text-gray-500 text-xs mb-1">Amount</p>
-                <p className="text-green-400 font-semibold">₹{po.net_amount.toLocaleString('en-IN')}</p>
+                <p className="text-green-600 font-semibold">₹{po.net_amount.toLocaleString('en-IN')}</p>
               </div>
               <div>
                 <p className="text-gray-500 text-xs mb-1">Expected Delivery</p>
@@ -252,7 +252,7 @@ export function PurchaseOrderDashboard() {
                 </>
               )}
               {po.status === 'approved' && (
-                <button className="px-3 py-1 bg-purple-600 hover:bg-purple-700 text-white text-sm rounded font-semibold flex items-center gap-1">
+                <button className="px-3 py-1 bg-purple-600 hover:bg-purple-700 text-gray-900 text-sm rounded font-semibold flex items-center gap-1">
                   <Send className="w-4 h-4" /> Send to Vendor
                 </button>
               )}
@@ -289,7 +289,7 @@ export function PurchaseOrderDashboard() {
                             <td className="px-3 py-2 text-gray-900">{item.product_name}</td>
                             <td className="text-right px-3 py-2 text-gray-900">{item.quantity}</td>
                             <td className="text-right px-3 py-2 text-gray-900">₹{item.unit_price.toLocaleString('en-IN')}</td>
-                            <td className="text-right px-3 py-2 text-green-400 font-semibold">₹{item.total_price.toLocaleString('en-IN')}</td>
+                            <td className="text-right px-3 py-2 text-green-600 font-semibold">₹{item.total_price.toLocaleString('en-IN')}</td>
                           </tr>
                         ))}
                       </tbody>

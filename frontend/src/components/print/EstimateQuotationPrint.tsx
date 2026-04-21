@@ -157,17 +157,17 @@ export function EstimateQuotationPrint({
             <h3 className="font-bold text-gray-900 mb-2 uppercase text-sm">Items & Pricing</h3>
             <table className="w-full border-collapse">
               <thead>
-                <tr className="bg-gray-800 text-white">
-                  <th className="border border-gray-600 px-3 py-2 text-left font-semibold">Sr.</th>
-                  <th className="border border-gray-600 px-3 py-2 text-left font-semibold">
+                <tr className="bg-white text-gray-900">
+                  <th className="border border-gray-300 px-3 py-2 text-left font-semibold">Sr.</th>
+                  <th className="border border-gray-300 px-3 py-2 text-left font-semibold">
                     Description
                   </th>
-                  <th className="border border-gray-600 px-3 py-2 text-right font-semibold">MRP</th>
-                  <th className="border border-gray-600 px-3 py-2 text-right font-semibold">
+                  <th className="border border-gray-300 px-3 py-2 text-right font-semibold">MRP</th>
+                  <th className="border border-gray-300 px-3 py-2 text-right font-semibold">
                     Offer Price
                   </th>
-                  <th className="border border-gray-600 px-3 py-2 text-center font-semibold">Qty</th>
-                  <th className="border border-gray-600 px-3 py-2 text-right font-semibold">Total</th>
+                  <th className="border border-gray-300 px-3 py-2 text-center font-semibold">Qty</th>
+                  <th className="border border-gray-300 px-3 py-2 text-right font-semibold">Total</th>
                 </tr>
               </thead>
               <tbody>
@@ -223,7 +223,7 @@ export function EstimateQuotationPrint({
                     {formatCurrency(quotation.totalGst)}
                   </td>
                 </tr>
-                <tr className="border-t-2 border-gray-800 bg-gray-800 text-white">
+                <tr className="border-t-2 border-gray-800 bg-white text-gray-900">
                   <td className="px-4 py-2 font-bold uppercase">Grand Total</td>
                   <td className="px-4 py-2 font-mono text-right font-bold text-lg">
                     {formatCurrency(quotation.grandTotal)}
@@ -268,7 +268,7 @@ export function EstimateQuotationPrint({
 
           {/* Footer */}
           <div className="mt-4 pt-2 border-t border-gray-200 text-center">
-            <p className="text-[10px] text-gray-400">
+            <p className="text-[10px] text-gray-500">
               {store.storeName} • {quotation.quoteNumber}
             </p>
           </div>
