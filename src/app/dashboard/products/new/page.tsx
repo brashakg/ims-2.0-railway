@@ -6,6 +6,7 @@ import { useSession } from 'next-auth/react';
 import { Upload, X, Loader2, AlertTriangle } from 'lucide-react';
 import SearchableDropdown from '@/components/SearchableDropdown';
 import VariantManager from '@/components/VariantManager';
+import { CATEGORIES as CATEGORY_DEFS } from '@/lib/categories';
 import {
   generateTitle,
   generateSKU,
@@ -27,7 +28,7 @@ interface Location {
 }
 
 interface FormData {
-  category: 'SPECTACLES' | 'SUNGLASSES' | 'SOLUTIONS' | '';
+  category: string;
   brand: string;
   subBrand: string;
   label: string;
@@ -487,19 +488,19 @@ export default function NewProductPage() {
                 <h2 className="text-lg font-semibold text-gray-900 mb-4">
                   Product Type
                 </h2>
-                <div className="flex gap-4">
-                  {['SPECTACLES', 'SUNGLASSES', 'SOLUTIONS'].map((cat) => (
+                <div className="flex gap-2 flex-wrap">
+                  {CATEGORY_DEFS.map((cat) => (
                     <button
-                      key={cat}
+                      key={cat.key}
                       type="button"
-                      onClick={() => handleInputChange('category', cat as any)}
-                      className={`px-4 py-2 rounded-lg font-medium transition-colors ${
-                        formData.category === cat
+                      onClick={() => handleInputChange('category', cat.key)}
+                      className={`px-4 py-2 rounded-lg font-medium transition-colors text-sm ${
+                        formData.category === cat.key
                           ? 'bg-blue-600 text-white'
                           : 'bg-gray-100 text-gray-900 hover:bg-gray-200'
                       }`}
                     >
-                      {cat}
+                      {cat.label}
                     </button>
                   ))}
                 </div>

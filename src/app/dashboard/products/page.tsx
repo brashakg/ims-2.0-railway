@@ -14,6 +14,7 @@ import {
   ChevronDown,
 } from 'lucide-react';
 import SearchableDropdown from '@/components/SearchableDropdown';
+import { CATEGORIES as CATEGORY_DEFS } from '@/lib/categories';
 
 interface Product {
   id: string;
@@ -45,7 +46,7 @@ interface FiltersResponse {
   statuses: string[];
 }
 
-const CATEGORIES = ['All', 'Spectacles', 'Sunglasses', 'Solutions'];
+const CATEGORIES = ['All', ...CATEGORY_DEFS.map((c) => c.label)];
 
 const STATUS_SEGMENTS: Array<{ key: string; label: string }> = [
   { key: 'All', label: 'All' },

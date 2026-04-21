@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { CATEGORIES as CATEGORY_DEFS } from "@/lib/categories";
 
 interface AttributeOption {
   id: string;
@@ -52,6 +53,7 @@ function formatAttributeName(name: string): string {
 export default function AttributesPage() {
   const [attributeTypes, setAttributeTypes] = useState<AttributeType[]>([]);
   const [selectedType, setSelectedType] = useState<AttributeType | null>(null);
+  const [selectedCategory, setSelectedCategory] = useState<string>("SPECTACLES");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [newOptionValue, setNewOptionValue] = useState("");
@@ -169,10 +171,30 @@ export default function AttributesPage() {
             Attributes
           </h1>
           <p className="text-sm text-slate-600 mt-1">
-            Dropdown options used across product forms (brands, shapes, frame
-            materials, lens types, etc.). Edit values here to have them appear
-            in every new/edit product screen.
+            Dropdown options used across product forms. Pick a product category
+            to see the attributes relevant to it. Per-category attribute
+            mapping is pending — today all attribute types are shown for every
+            category.
           </p>
+        </div>
+
+        {/* Category tabs — one tab per product category */}
+        <div className="bg-white rounded-lg shadow-sm border border-slate-200 p-3 mb-4">
+          <div className="flex items-center gap-2 flex-wrap">
+            {CATEGORY_DEFS.map((cat) => (
+              <button
+                key={cat.key}
+                onClick={() => setSelectedCategory(cat.key)}
+                className={`px-3 py-1.5 text-sm rounded-lg border transition-colors ${
+                  selectedCategory === cat.key
+                    ? "bg-blue-600 text-white border-blue-600"
+                    : "bg-white text-slate-700 border-slate-300 hover:bg-slate-50"
+                }`}
+              >
+                {cat.label}
+              </button>
+            ))}
+          </div>
         </div>
 
         {error && (
