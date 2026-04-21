@@ -19,8 +19,16 @@ export interface AttributeMeta {
   level: "product" | "variant";
   /** When true, value is auto-generated — don't render an input. */
   autoPopulate?: boolean;
-  /** When true, include this attr's value as a `<key>_<value>` Shopify tag. */
+  /** When true, include this attr's value as a `<prefix>_<value>` Shopify tag. */
   tag?: boolean;
+  /** Tag prefix override. Defaults to key.toLowerCase(). Used so
+   * historically-emitted prefixes like "origin_" / "framesize_" stay
+   * parseable by the pull route's parseTagsToFields(). */
+  tagPrefix?: string;
+  /** Attribute name in the /dashboard/attributes page's AttributeType.name
+   * column. Defaults to key.toLowerCase() but some historic names diverge
+   * (e.g. "countryoforigin" not "countryOfOrigin"). */
+  attributeTypeName?: string;
   /** When false or absent, the value stores on Product.tags only (no DB column). */
   hasColumn?: boolean;
 }
@@ -42,7 +50,7 @@ export const ATTRIBUTES: Record<string, AttributeMeta> = {
 
   // ── Demographics / origin ──
   gender:           { key: "gender",           label: "Gender",             level: "product", tag: true,  hasColumn: true },
-  countryOfOrigin:  { key: "countryOfOrigin",  label: "Country of Origin",  level: "product", tag: true,  hasColumn: true },
+  countryOfOrigin:  { key: "countryOfOrigin",  label: "Country of Origin",  level: "product", tag: true,  tagPrefix: "origin", attributeTypeName: "countryoforigin", hasColumn: true },
   warranty:         { key: "warranty",         label: "Warranty",           level: "product", tag: true,  hasColumn: true },
 
   // ── Pricing ──
@@ -51,19 +59,19 @@ export const ATTRIBUTES: Record<string, AttributeMeta> = {
 
   // ── Frame / body attrs ──
   shape:            { key: "shape",            label: "Shape",              level: "product", tag: true,  hasColumn: true },
-  frameMaterial:    { key: "frameMaterial",    label: "Frame Material",     level: "product", tag: true,  hasColumn: true },
-  templeMaterial:   { key: "templeMaterial",   label: "Temple Material",    level: "product", tag: true,  hasColumn: true },
-  frameType:        { key: "frameType",        label: "Frame Type",         level: "product", tag: true,  hasColumn: true },
+  frameMaterial:    { key: "frameMaterial",    label: "Frame Material",     level: "product", tag: true,  attributeTypeName: "framematerial", hasColumn: true },
+  templeMaterial:   { key: "templeMaterial",   label: "Temple Material",    level: "product", tag: true,  attributeTypeName: "templematerial", hasColumn: true },
+  frameType:        { key: "frameType",        label: "Frame Type",         level: "product", tag: true,  attributeTypeName: "frametype", hasColumn: true },
   nosepadMaterial:  { key: "nosepadMaterial",  label: "Nosepad Material",   level: "product", tag: true,  hasColumn: false },
 
   // ── Lens attrs (product-level for eyewear + contact lenses) ──
-  lensMaterial:     { key: "lensMaterial",     label: "Lens Material",      level: "product", tag: true,  hasColumn: true },
-  lensColour:       { key: "lensColour",       label: "Lens Colour",        level: "product", tag: true,  hasColumn: true },
-  tint:             { key: "tint",             label: "Tint",               level: "product", tag: true,  hasColumn: true },
+  lensMaterial:     { key: "lensMaterial",     label: "Lens Material",      level: "product", tag: true,  attributeTypeName: "lensmaterial", hasColumn: true },
+  lensColour:       { key: "lensColour",       label: "Lens Colour",        level: "product", tag: true,  attributeTypeName: "lenscolour", hasColumn: true },
+  tint:             { key: "tint",             label: "Tint",               level: "product", tag: true,  attributeTypeName: "tint", hasColumn: true },
   photochromatic:   { key: "photochromatic",   label: "Photochromatic",     level: "product", tag: true,  hasColumn: false },
-  polarization:     { key: "polarization",     label: "Polarization",       level: "product", tag: true,  hasColumn: true },
-  uvProtection:     { key: "uvProtection",     label: "UV Protection",      level: "product", tag: true,  hasColumn: true },
-  lensUSP:          { key: "lensUSP",          label: "Lens USP",           level: "product", tag: false, hasColumn: true },
+  polarization:     { key: "polarization",     label: "Polarization",       level: "product", tag: true,  attributeTypeName: "polarization", hasColumn: true },
+  uvProtection:     { key: "uvProtection",     label: "UV Protection",      level: "product", tag: true,  attributeTypeName: "uvprotection", hasColumn: true },
+  lensUSP:          { key: "lensUSP",          label: "Lens USP",           level: "product", tag: false, attributeTypeName: "lensUSP", hasColumn: true },
 
   // ── Variant-level sizing (eyewear/smartglasses) ──
   colorCode:        { key: "colorCode",        label: "Color Code",         level: "variant", tag: true,  hasColumn: true },
@@ -275,17 +283,33 @@ export function tagsForProductAttributes(
 ): string[] {
   const applicable = attributesForCategory(category);
   const out: string[] = [];
+  const seen = new Set<string>();
+
+  // Always emit a category tag so the pull route can route by category.
+  if (category) {
+    const catTag = `category_${slugifyTagValue(category)}`;
+    if (!seen.has(catTag)) {
+      out.push(catTag);
+      seen.add(catTag);
+    }
+  }
+
   for (const meta of applicable) {
     if (!meta.tag) continue;
     const raw = attrs[meta.key];
     if (raw === null || raw === undefined || raw === "") continue;
-    // Booleans -> "yes" / "no"
+    const prefix = meta.tagPrefix ?? meta.key.toLowerCase();
+    let valuePart: string;
     if (typeof raw === "boolean") {
-      out.push(`${meta.key.toLowerCase()}_${raw ? "yes" : "no"}`);
-      continue;
+      valuePart = raw ? "yes" : "no";
+    } else {
+      valuePart = slugifyTagValue(raw);
     }
-    const slug = slugifyTagValue(raw);
-    if (slug) out.push(`${meta.key.toLowerCase()}_${slug}`);
+    if (!valuePart) continue;
+    const t = `${prefix}_${valuePart}`;
+    if (seen.has(t)) continue;
+    out.push(t);
+    seen.add(t);
   }
   return out;
 }

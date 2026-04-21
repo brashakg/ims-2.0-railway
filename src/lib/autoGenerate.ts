@@ -1,3 +1,5 @@
+import { tagsForProductAttributes } from "@/lib/categoryAttributes";
+
 // Use Record type for flexibility with Prisma models
 type Product = Record<string, any>;
 
@@ -138,41 +140,36 @@ export function generatePageUrl(product: Product): string {
  * - Push: product attributes → tags (prefix_value format)
  * - Pull: tags → product attributes (parsed by parseTagsToFields in pull route)
  *
+ * Driven by src/lib/categoryAttributes.ts — every attribute applicable to
+ * the product's category that has `tag: true` contributes one tag token.
+ * Back-compat with existing DB tags is preserved via tagPrefix overrides
+ * on the AttributeMeta entries (e.g. countryOfOrigin uses `origin_`).
+ *
  * IMPORTANT: Tag prefixes must match the pull route's parseTagsToFields() exactly.
  */
 export function generateTags(product: Product): string {
-  const tags: string[] = [];
+  const tags = tagsForProductAttributes(product.category || "", product);
 
-  // Core attributes (matched by pull route)
-  if (product.brand) tags.push(`brand_${product.brand.toLowerCase()}`);
-  if (product.shape) tags.push(`shape_${product.shape.toLowerCase()}`);
-  if (product.frameColor) tags.push(`framecolor_${product.frameColor.toLowerCase()}`);
-  if (product.templeColor) tags.push(`templecolor_${product.templeColor.toLowerCase()}`);
-  if (product.frameMaterial) tags.push(`framematerial_${product.frameMaterial.toLowerCase()}`);
-  if (product.templeMaterial) tags.push(`templematerial_${product.templeMaterial.toLowerCase()}`);
-  if (product.frameType) tags.push(`frametype_${product.frameType.toLowerCase()}`);
-  if (product.gender) tags.push(`gender_${product.gender.toLowerCase()}`);
-  if (product.category) tags.push(`category_${product.category.toLowerCase()}`);
-  if (product.subBrand) tags.push(`subbrand_${product.subBrand.toLowerCase()}`);
-
-  // Measurement attributes (parsed by pull route)
-  if (product.frameSize) tags.push(`framesize_${product.frameSize}`);
-  if (product.bridge) tags.push(`bridge_${product.bridge}`);
-  if (product.templeLength) tags.push(`templelength_${product.templeLength}`);
-  if (product.weight) tags.push(`weight_${product.weight}`);
-
-  // Lens attributes (parsed by pull route)
-  if (product.lensColour) tags.push(`lenscolour_${product.lensColour.toLowerCase()}`);
-  if (product.tint) tags.push(`tint_${product.tint.toLowerCase()}`);
-  if (product.polarization) tags.push(`polarization_${product.polarization.toLowerCase()}`);
-  if (product.uvProtection) tags.push(`uvprotection_${product.uvProtection.toLowerCase()}`);
-  if (product.lensMaterial) tags.push(`lensmaterial_${product.lensMaterial.toLowerCase()}`);
-  if (product.lensUSP) tags.push(`lensusp_${product.lensUSP.toLowerCase()}`);
-
-  // Other attributes
-  if (product.warranty) tags.push(`warranty_${product.warranty.toLowerCase()}`);
-  if (product.countryOfOrigin) tags.push(`origin_${product.countryOfOrigin.toLowerCase()}`);
-  if (product.productUSP) tags.push(`productusp_${product.productUSP.toLowerCase()}`);
+  // Variant-level measurement fallbacks that may live on the parent form body
+  // even though the attribute registry marks them as variant-level. Emitting
+  // them on the product's tags is needed for the pull route's tag parser to
+  // round-trip. These don't come through tagsForProductAttributes because
+  // they're level="variant"; emit manually from the product/body here.
+  const seen = new Set(tags);
+  const addVariantFallback = (prefix: string, value: unknown) => {
+    if (value === null || value === undefined || value === "") return;
+    const token = `${prefix}_${String(value).toLowerCase()}`;
+    if (!seen.has(token)) {
+      tags.push(token);
+      seen.add(token);
+    }
+  };
+  addVariantFallback("framesize",    product.frameSize);
+  addVariantFallback("bridge",       product.bridge);
+  addVariantFallback("templelength", product.templeLength);
+  addVariantFallback("weight",       product.weight);
+  addVariantFallback("framecolor",   product.frameColor);
+  addVariantFallback("templecolor",  product.templeColor);
 
   return tags.join(", ");
 }

@@ -2,6 +2,10 @@
 
 import { useEffect, useState } from "react";
 import { CATEGORIES as CATEGORY_DEFS } from "@/lib/categories";
+import {
+  attributesForCategory,
+  ATTRIBUTES,
+} from "@/lib/categoryAttributes";
 
 interface AttributeOption {
   id: string;
@@ -204,29 +208,70 @@ export default function AttributesPage() {
         )}
 
         <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
-          {/* Sidebar - Attribute Types */}
+          {/* Sidebar - Attribute Types filtered by selected category */}
           <div className="md:col-span-1">
             <div className="bg-white rounded-lg shadow">
               <div className="p-4 border-b border-slate-200">
                 <h2 className="text-lg font-semibold text-slate-900">
                   Attribute Types
                 </h2>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Showing attrs that apply to{" "}
+                  <b>
+                    {CATEGORY_DEFS.find((c) => c.key === selectedCategory)?.label ||
+                      selectedCategory}
+                  </b>
+                </p>
               </div>
               <div className="divide-y divide-slate-200">
-                {attributeTypes.map((type) => (
-                  <button
-                    key={type.id}
-                    onClick={() => setSelectedType(type)}
-                    className={`w-full text-left px-4 py-3 hover:bg-slate-50 transition ${
-                      selectedType?.id === type.id
-                        ? "bg-blue-50 border-l-4 border-blue-500"
-                        : ""
-                    }`}
-                  >
-                    <div className="font-medium text-slate-900">{formatAttributeName(type.name)}</div>
-                    <div className="text-sm text-slate-500">{type.options.length} options</div>
-                  </button>
-                ))}
+                {(() => {
+                  // Build the list of AttributeTypes applicable to the
+                  // selected category. An attribute matches if its
+                  // attributeTypeName (or key.toLowerCase()) equals the
+                  // AttributeType.name in the DB.
+                  const applicable = attributesForCategory(selectedCategory, "product");
+                  const applicableNames = new Set(
+                    applicable
+                      .filter((m) => !m.autoPopulate)
+                      .map((m) => (m.attributeTypeName || m.key).toLowerCase())
+                  );
+                  const filtered = attributeTypes.filter((t) =>
+                    applicableNames.has(t.name.toLowerCase())
+                  );
+                  if (filtered.length === 0) {
+                    return (
+                      <div className="p-4 text-sm text-slate-500">
+                        No attribute types mapped to this category yet. Check
+                        the category-to-attribute map in
+                        src/lib/categoryAttributes.ts if this seems wrong.
+                      </div>
+                    );
+                  }
+                  return filtered.map((type) => {
+                    const meta = ATTRIBUTES[type.name] ||
+                      Object.values(ATTRIBUTES).find(
+                        (m) => (m.attributeTypeName || m.key).toLowerCase() === type.name.toLowerCase()
+                      );
+                    return (
+                      <button
+                        key={type.id}
+                        onClick={() => setSelectedType(type)}
+                        className={`w-full text-left px-4 py-3 hover:bg-slate-50 transition ${
+                          selectedType?.id === type.id
+                            ? "bg-blue-50 border-l-4 border-blue-500"
+                            : ""
+                        }`}
+                      >
+                        <div className="font-medium text-slate-900">
+                          {meta?.label || formatAttributeName(type.name)}
+                        </div>
+                        <div className="text-sm text-slate-500">
+                          {type.options.length} options
+                        </div>
+                      </button>
+                    );
+                  });
+                })()}
               </div>
             </div>
           </div>
