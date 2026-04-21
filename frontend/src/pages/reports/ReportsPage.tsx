@@ -578,6 +578,11 @@ export function ReportsPage() {
       )}
 
 
+      {/* Sales Comparison + Top Performers — sales-tab-only.
+          Audit 2026-04-21 flagged these rendering on Inventory + Customers
+          tabs (tab-isolation bug). Wrapped in the same conditional as the
+          other sales widgets above. */}
+      {activeTab === 'sales' && <>
       {/* Sales Comparison Card — MoM + YoY from /reports/sales/growth */}
       <div className="card">
         <div className="flex items-center justify-between mb-4">
@@ -653,6 +658,7 @@ export function ReportsPage() {
           </div>
         )}
       </div>
+      </>}
       {/* Report Cards */}
       <div>
         <h3 className="font-semibold text-gray-900 mb-3">Available Reports</h3>

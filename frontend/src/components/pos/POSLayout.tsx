@@ -581,8 +581,11 @@ export function POSLayout() {
             </div>
           )}
 
-          {/* Step content (unchanged components) */}
-          <div style={{ flex: 1, minHeight: 0 }}>
+          {/* Step content (unchanged components).
+              Audit 2026-04-21 flagged sticky-footer overlapping row-3
+              products on Step 2 at 900px viewport. paddingBottom below
+              gives the last row scroll clearance past the footer. */}
+          <div style={{ flex: 1, minHeight: 0, paddingBottom: '80px', overflowY: 'auto' }}>
             {store.current_step === 'customer' && <StepCustomer />}
             {store.current_step === 'prescription' && (
               <StepPrescription
