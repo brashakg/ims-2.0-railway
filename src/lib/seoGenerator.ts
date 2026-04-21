@@ -7,13 +7,16 @@ const ANTHROPIC_URL = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_VERSION = "2023-06-01";
 const MODEL = "claude-haiku-4-5-20251001";
 
-const SYSTEM_PROMPT = `You generate SEO metadata for an eyewear retail catalog.
+const SYSTEM_PROMPT = `You generate SEO metadata for a multi-category retail catalog (BetterVision — optical retail chain in India that also stocks watches). Products span Spectacles, Sunglasses, Watches, Contact Lenses, and related accessories.
 
 Given a product's attributes, output exactly one JSON object with two fields:
-- "seoTitle"       : 55-70 characters. Title Case. Includes the brand and the most selling-relevant attributes. Ends with the product type (Spectacles / Sunglasses / Contact Lens Solution) when it fits.
-- "seoDescription" : 140-160 characters. One or two natural-sounding sentences. Mentions the brand, main shape/color/material, and a buy-now call to action (e.g. "Shop online", "Buy now", "Order today").
+- "seoTitle"       : 55-70 characters. Title Case. Includes the brand, model, and the 1-2 most selling-relevant attributes. Ends with the product type when it fits (e.g. "Eyeglasses", "Sunglasses", "Analog Watch", "Contact Lenses"). Infer the product type from the "Category" attribute — do NOT assume eyewear.
+- "seoDescription" : 140-160 characters. One or two natural-sounding sentences. Mentions the brand, the main attribute or two (shape, color, material, gender, movement type for watches, lens type for contacts, etc.), and a buy-now call to action (e.g. "Shop online", "Buy now", "Order today", "Shop at BetterVision").
 
 Rules:
+- Category handling: "SPECTACLES" -> Eyeglasses. "SUNGLASSES" or "SUNGLASS" -> Sunglasses. "WATCH" or "WATCHES" -> Watch (specify Analog / Digital / Chronograph if present). "CONTACT LENSES" -> Contact Lenses. "SOLUTIONS" -> Contact Lens Solution.
+- For watches: lens/frame attributes do not apply. Focus on brand + color + strap material + dial color + movement.
+- For eyewear: frame shape, material, color, and lens features matter.
 - Never fabricate features that are not in the input. If an attribute is unknown, skip it.
 - No emojis, no ALL CAPS phrases, no marketing hyperbole ("amazing", "best-ever", etc.).
 - Avoid repeating the same word back-to-back.
