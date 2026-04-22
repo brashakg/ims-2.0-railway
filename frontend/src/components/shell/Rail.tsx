@@ -53,7 +53,6 @@ const RAIL_GROUPS: NavItem[][] = [
   // Growth
   [
     { id: 'marketing', label: 'Marketing', to: '/customers/campaigns', icon: 'megaphone' },
-    { id: 'storefront', label: 'Storefront', to: '/storefront', icon: 'store' },
   ],
   // Support + Jarvis + Setup
   [

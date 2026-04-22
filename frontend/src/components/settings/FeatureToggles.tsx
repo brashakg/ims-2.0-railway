@@ -23,7 +23,6 @@ const DEFAULT_FEATURES: FeatureToggleConfig[] = [
   { id: 'split-payments', label: 'Split Payments', description: 'Allow splitting payments across methods', enabled: true },
   { id: 'credit-billing', label: 'Credit Billing', description: 'Enable credit/invoice billing', enabled: true },
   { id: 'emi-payments', label: 'EMI Payments', description: 'Enable EMI payment options', enabled: false },
-  { id: 'storefront', label: 'Storefront', description: 'Enable online storefront', enabled: false },
 ];
 
 interface FeatureToggleProps {

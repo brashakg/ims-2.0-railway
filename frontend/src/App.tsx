@@ -62,7 +62,6 @@ const StockReplenishment = lazy(() => import('./pages/inventory/StockReplenishme
 const StockAudit = lazy(() => import('./pages/inventory/StockAudit').then(m => ({ default: m.StockAudit })));
 const JarvisPage = lazy(() => import('./pages/jarvis/JarvisPage').then(m => ({ default: m.JarvisPage })));
 const AddProductPage = lazy(() => import('./pages/catalog/AddProductPage'));
-const StorefrontPage = lazy(() => import('./pages/storefront/StorefrontPage').then(m => ({ default: m.StorefrontPage })));
 const ExpenseTracker = lazy(() => import('./pages/finance/ExpenseTracker'));
 const FinanceDashboard = lazy(() => import('./pages/finance/FinanceDashboard'));
 
@@ -589,16 +588,6 @@ function App() {
                     element={
                       <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER']}>
                         <AddProductPage />
-                      </ProtectedRoute>
-                    }
-                  />
-
-                  {/* Storefront / E-commerce */}
-                  <Route
-                    path="storefront"
-                    element={
-                      <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN']}>
-                        <StorefrontPage />
                       </ProtectedRoute>
                     }
                   />

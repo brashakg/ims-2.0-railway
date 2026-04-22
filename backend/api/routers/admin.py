@@ -177,7 +177,7 @@ async def get_shopify_config(current_user: dict = Depends(get_current_user)):
     return {
         "type": "SHOPIFY",
         "name": "Shopify",
-        "description": "E-commerce platform integration",
+        "description": "Shopify POS + stock sync (inventory mirror)",
         "is_configured": bool(config.get("config")),
         "is_enabled": config.get("enabled", False),
         "config": {
@@ -702,8 +702,8 @@ async def list_all_integrations(current_user: dict = Depends(get_current_user)):
     integration_meta = {
         "shopify": {
             "name": "Shopify",
-            "description": "E-commerce platform sync",
-            "category": "E-commerce",
+            "description": "Shopify POS + stock mirror (inventory sync only)",
+            "category": "Inventory",
         },
         "shiprocket": {
             "name": "Shiprocket",

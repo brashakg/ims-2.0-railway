@@ -24,9 +24,10 @@ export interface CreateProductPayload {
   };
   images?: string[];
   shopify?: {
+    // Kept for future NEXUS agent → Shopify sync only. We don't run our
+    // own storefront, so `publish_to_online_store` was removed in 6.12.
     sync_to_shopify: boolean;
     shopify_tags?: string[];
-    publish_to_online_store?: boolean;
     publish_to_pos?: boolean;
   };
 }

@@ -768,7 +768,8 @@ class ShopifySyncInput(BaseModel):
     sync_to_shopify: bool = False
     shopify_product_type: Optional[str] = None
     shopify_tags: List[str] = []
-    publish_to_online_store: bool = True
+    # publish_to_online_store removed in Phase 6.12 — we don't run our
+    # own storefront. Kept publish_to_pos for Shopify POS sync.
     publish_to_pos: bool = True
 
 
@@ -1283,7 +1284,6 @@ async def _sync_product_to_shopify(
         "shopify_handle": product["seo"]["url_handle"],
         "last_sync": datetime.now().isoformat(),
         "published_channels": {
-            "online_store": shopify_config.publish_to_online_store,
             "pos": shopify_config.publish_to_pos,
         },
     }
