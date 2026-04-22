@@ -144,6 +144,10 @@ async def list_tasks(
     return {"tasks": tasks, "total": total}
 
 
+# Both bare and slashed paths — Phase 6.13 follow-up to 6.10. POST
+# variants were still 404/405'ing because the earlier sweep only
+# touched GET handlers.
+@router.post("", status_code=201)
 @router.post("/", status_code=201)
 async def create_task(
     task: TaskCreate,

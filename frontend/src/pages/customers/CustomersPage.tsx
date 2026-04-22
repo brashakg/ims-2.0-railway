@@ -36,6 +36,7 @@ import { RecallManager } from '../../components/crm/RecallManager';
 import { PromotionEngine } from '../../components/crm/PromotionEngine';
 import { CustomerPurchaseHistory } from '../../components/crm/CustomerPurchaseHistory';
 import { PrescriptionQRCode } from '../../components/crm/PrescriptionQRCode';
+import { PrescriptionForm } from '../../components/pos/PrescriptionForm';
 import { AutoSearch } from '../../components/common/AutoSearch';
 import { Pagination } from '../../components/common/Pagination';
 import clsx from 'clsx';
@@ -91,6 +92,9 @@ export function CustomersPage() {
   const [isLoadingPrescriptions, setIsLoadingPrescriptions] = useState(false);
   const [isLoadingHistory, setIsLoadingHistory] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Phase 6.13 — Add Prescription modal (was stubbed "coming soon")
+  const [showRxForm, setShowRxForm] = useState(false);
+  const [isSavingRx, setIsSavingRx] = useState(false);
 
   // Modal state
   const [showAddCustomerModal, setShowAddCustomerModal] = useState(false);
@@ -731,11 +735,18 @@ export function CustomersPage() {
               Prescriptions {selectedPatient && `(${selectedPatient.name})`}
             </h2>
             <button
-              onClick={() => toast.info('Eye test feature coming soon')}
-              className="text-sm text-bv-red-600 hover:text-bv-red-700 flex items-center gap-1"
+              onClick={() => {
+                if (!selectedPatient) {
+                  toast.warning('Select a patient first to add a prescription');
+                  return;
+                }
+                setShowRxForm(true);
+              }}
+              disabled={!selectedPatient}
+              className="text-sm text-bv-red-600 hover:text-bv-red-700 flex items-center gap-1 disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              <Eye className="w-4 h-4" />
-              Eye Test
+              <Plus className="w-4 h-4" />
+              Add Prescription
             </button>
           </div>
           {selectedPatient ? (
@@ -1011,6 +1022,42 @@ export function CustomersPage() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* Phase 6.13 — Add Prescription modal. Replaces the old "Eye test
+          coming soon" stub. Uses the same PrescriptionForm as POS so
+          the field shape + validation stay consistent. */}
+      {showRxForm && selectedPatient && selectedCustomer && (
+        <PrescriptionForm
+          onCancel={() => setShowRxForm(false)}
+          onSubmit={async (rxData) => {
+            if (isSavingRx) return;
+            setIsSavingRx(true);
+            try {
+              // Map form (sph_od/cyl_od style) → backend prescription
+              // creation payload. Keys are forwarded as-is; the API
+              // layer normalises them.
+              await prescriptionApi.createPrescription({
+                ...rxData,
+                patient_id: selectedPatient.id,
+                customer_id: selectedCustomer.id,
+                store_id: (selectedCustomer as any).storeId
+                  || (selectedCustomer as any).store_id
+                  || undefined,
+              } as any);
+              toast.success('Prescription saved');
+              setShowRxForm(false);
+              await loadPrescriptions(selectedPatient.id);
+            } catch (e) {
+              // eslint-disable-next-line no-console
+              console.error('[Customers] createPrescription failed:', e);
+              const msg = (e as any)?.response?.data?.detail || (e as Error)?.message || 'Could not save prescription';
+              toast.error(typeof msg === 'string' ? msg : 'Could not save prescription');
+            } finally {
+              setIsSavingRx(false);
+            }
+          }}
+        />
       )}
     </div>
   );

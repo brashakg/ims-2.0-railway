@@ -126,6 +126,7 @@ async def list_vendor_returns(
         raise HTTPException(status_code=500, detail="A database error occurred. Please try again or contact support.")
 
 
+@router.post("", status_code=201)
 @router.post("/", status_code=201)
 async def create_vendor_return(
     return_data: VendorReturnCreate,

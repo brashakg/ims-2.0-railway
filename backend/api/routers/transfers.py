@@ -234,6 +234,7 @@ async def get_transfer(
     return {"transfer": transfer}
 
 
+@router.post("")
 @router.post("/")
 async def create_transfer(
     transfer: TransferInput, current_user: dict = Depends(get_current_user)

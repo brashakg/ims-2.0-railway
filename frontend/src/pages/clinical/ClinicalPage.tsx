@@ -11,6 +11,7 @@ import {
   CheckCircle,
   Play,
   Plus,
+  Search,
   FileText,
   Phone,
   Loader2,
@@ -22,6 +23,7 @@ import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { EyeTestForm, type EyeTestData } from '../../components/clinical/EyeTestForm';
 import { AddCustomerModal, type CustomerFormData } from '../../components/customers/AddCustomerModal';
+import { QueueExistingCustomerModal } from '../../components/customers/QueueExistingCustomerModal';
 import { EyeTestTokenPrint } from '../../components/print/EyeTestTokenPrint';
 import { AbuseDetection } from '../../components/clinical/AbuseDetection';
 import { PrescriptionCard } from '../../components/clinical/PrescriptionCard';
@@ -80,6 +82,11 @@ export function ClinicalPage() {
 
   // Add customer modal state (replaces simple patient modal)
   const [showAddCustomerModal, setShowAddCustomerModal] = useState(false);
+  // Phase 6.13 — search-existing-customer flow. Opens a lookup modal
+  // first; the create-new modal stays as a fallback from inside the
+  // search modal when no match is found.
+  const [showQueueExistingModal, setShowQueueExistingModal] = useState(false);
+  const [addCustomerInitialName, setAddCustomerInitialName] = useState('');
   
   // Print and store state
   const [printToken, setPrintToken] = useState<any>(null);
@@ -309,12 +316,23 @@ export function ClinicalPage() {
             Refresh
           </button>
           {canAddPatient && (
-            <button
-              onClick={() => setShowAddCustomerModal(true)}
-              className="btn sm primary"
-            >
-              <Plus className="w-4 h-4" /> New patient
-            </button>
+            <>
+              {/* Phase 6.13 — search-existing first, new-patient second.
+                  Most walk-ins are repeat customers; this flow saves
+                  re-keying their details every visit. */}
+              <button
+                onClick={() => setShowQueueExistingModal(true)}
+                className="btn sm"
+              >
+                <Search className="w-4 h-4" /> Queue existing
+              </button>
+              <button
+                onClick={() => setShowAddCustomerModal(true)}
+                className="btn sm primary"
+              >
+                <Plus className="w-4 h-4" /> New patient
+              </button>
+            </>
           )}
         </div>
       </div>
@@ -614,8 +632,46 @@ export function ClinicalPage() {
       {/* Add Customer Modal (replaces simple patient modal) */}
       <AddCustomerModal
         isOpen={showAddCustomerModal}
-        onClose={() => setShowAddCustomerModal(false)}
+        onClose={() => {
+          setShowAddCustomerModal(false);
+          setAddCustomerInitialName('');
+        }}
         onSave={handleSaveCustomer}
+        initialName={addCustomerInitialName}
+      />
+
+      {/* Phase 6.13 — Queue existing customer. Opens first; falls
+          through to AddCustomerModal if no match. */}
+      <QueueExistingCustomerModal
+        isOpen={showQueueExistingModal}
+        onClose={() => setShowQueueExistingModal(false)}
+        storeId={user?.activeStoreId}
+        onQueue={async (customer, patient) => {
+          try {
+            await clinicalApi.addToQueue({
+              storeId: user?.activeStoreId || '',
+              patientName: patient?.name || customer.name,
+              customerPhone: customer.phone,
+              age: patient?.dateOfBirth ? calculateAge(patient.dateOfBirth) : undefined,
+              reason: 'Eye examination',
+            });
+            toast.success(`${patient?.name || customer.name} added to queue`);
+            setShowQueueExistingModal(false);
+            await loadData();
+          } catch (e) {
+            // eslint-disable-next-line no-console
+            console.error('[Clinical] addToQueue failed:', e);
+            toast.error('Could not add to queue. Try again.');
+          }
+        }}
+        onCreateNew={(initialQuery) => {
+          // User couldn't find the customer — swap to the create flow,
+          // pre-filling whatever they typed (name OR phone; the create
+          // modal decides based on whether it's numeric).
+          setShowQueueExistingModal(false);
+          setAddCustomerInitialName(initialQuery);
+          setShowAddCustomerModal(true);
+        }}
       />
     </div>
   );

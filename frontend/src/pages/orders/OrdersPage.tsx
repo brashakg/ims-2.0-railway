@@ -249,19 +249,28 @@ export function OrdersPage() {
 
     setIsProcessingPayment(true);
     try {
+      // Backend PaymentCreate expects `method`, not `mode` — frontend
+      // type was inherited from legacy Payment shape. Sending `mode` was
+      // causing a pydantic 422 → "Failed to process payment" for every
+      // collection. Send both to survive older callers.
       await orderApi.addPayment(paymentOrder.id, {
         amount,
+        // Send both for compatibility — backend accepts either (6.13)
+        method: paymentMethod,
         mode: paymentMethod,
         reference: paymentReference || undefined,
-      });
+      } as any);
 
       toast.success(`Payment of ${formatCurrency(amount)} received`);
       setShowPaymentModal(false);
       setPaymentOrder(null);
       setSelectedOrder(null);
       await loadOrders();
-    } catch {
-      toast.error('Failed to process payment');
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.error('[Orders] addPayment failed:', e);
+      const msg = (e as any)?.response?.data?.detail || (e as Error)?.message || 'Failed to process payment';
+      toast.error(typeof msg === 'string' ? msg : 'Failed to process payment');
     } finally {
       setIsProcessingPayment(false);
     }

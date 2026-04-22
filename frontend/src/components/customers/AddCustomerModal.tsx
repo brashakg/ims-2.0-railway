@@ -56,6 +56,10 @@ interface AddCustomerModalProps {
   isOpen: boolean;
   onClose: () => void;
   onSave: (customer: CustomerFormData) => Promise<void>;
+  /** Phase 6.13 — optional pre-fill when the user lands here from the
+   *  "Customer not found" fallback in the Clinical search modal. If the
+   *  string is all-digits we assume phone, otherwise name. */
+  initialName?: string;
 }
 
 // ============================================================================
@@ -80,7 +84,7 @@ const RELATIONS = [
 // Component
 // ============================================================================
 
-export function AddCustomerModal({ isOpen, onClose, onSave }: AddCustomerModalProps) {
+export function AddCustomerModal({ isOpen, onClose, onSave, initialName }: AddCustomerModalProps) {
   const [formData, setFormData] = useState<CustomerFormData>({
     customerType: 'B2C',
     fullName: '',
@@ -106,6 +110,23 @@ export function AddCustomerModal({ isOpen, onClose, onSave }: AddCustomerModalPr
   const [searchResults, setSearchResults] = useState<any[]>([]);
   const [searching, setSearching] = useState(false);
   const [showSearch, setShowSearch] = useState(true);
+
+  // Phase 6.13 — hydrate name/phone when opened with an initialName
+  // (from the Clinical "customer not found" fallback). Numeric strings
+  // land in mobile; anything else lands in full-name.
+  useEffect(() => {
+    if (!isOpen || !initialName) return;
+    const trimmed = initialName.trim();
+    if (!trimmed) return;
+    const isNumeric = /^\d{5,}$/.test(trimmed);
+    setFormData((prev) => ({
+      ...prev,
+      ...(isNumeric ? { mobileNumber: trimmed } : { fullName: trimmed }),
+    }));
+    // Skip the search step — user already searched in the previous modal
+    setShowSearch(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen, initialName]);
   const [showAddPatient, setShowAddPatient] = useState(false);
   const [newPatient, setNewPatient] = useState<PatientFormData>({
     id: '',

@@ -216,12 +216,26 @@ class OrderItemCreate(BaseModel):
 
 
 class PaymentCreate(BaseModel):
-    method: PaymentMethod
+    # Accept both `method` (canonical) and `mode` (legacy, still used by
+    # the Orders-page Collect Payment modal). pydantic aliasing means the
+    # request can send either — we canonicalize on the model.
+    method: PaymentMethod = Field(..., validation_alias="method")
     amount: float = Field(..., gt=0)
     reference: Optional[str] = None
     # EMI-specific fields (only required when method=EMI)
     emi_months: Optional[int] = Field(None, ge=3, le=24)
     emi_provider: Optional[str] = None  # e.g., "BAJAJ", "HDFC", "ICICI"
+
+    class Config:
+        # Permit both "method" (native) and "mode" (legacy alias) in JSON.
+        populate_by_name = True
+
+    def __init__(self, **data):
+        # pydantic 2 validation_alias is restrictive; accept "mode" as a
+        # fallback if "method" isn't present. Normalises legacy callers.
+        if "method" not in data and "mode" in data:
+            data["method"] = data["mode"]
+        super().__init__(**data)
 
 
 class OrderCreate(BaseModel):

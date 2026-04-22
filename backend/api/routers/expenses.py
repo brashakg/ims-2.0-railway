@@ -80,6 +80,7 @@ async def list_expenses(
     return {"expenses": expenses or [], "total": len(expenses) if expenses else 0}
 
 
+@router.post("", status_code=201)
 @router.post("/", status_code=201)
 async def create_expense(
     expense: ExpenseCreate, current_user: dict = Depends(get_current_user)
