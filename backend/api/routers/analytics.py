@@ -195,6 +195,7 @@ def calculate_metrics_for_period(
 
 
 
+@router.get("")
 @router.get("/")
 async def get_analytics_root():
     """Root endpoint for analytics dashboard summary"""

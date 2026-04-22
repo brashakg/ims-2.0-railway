@@ -40,6 +40,7 @@ class AdvanceCreate(BaseModel):
 # ============================================================================
 
 
+@router.get("")
 @router.get("/")
 async def list_expenses(
     employee_id: Optional[str] = Query(None),

@@ -149,50 +149,66 @@ async def lifespan(app: FastAPI):
     else:
         logger.info("[INFO] Running without database (stub mode)")
 
-    # Initialize Agent System (JARVIS Agents)
+    # ── Agent System startup ────────────────────────────────────────────
+    # Split into independent try/except blocks so one step's failure
+    # doesn't silently kill the rest (audit Run #2 found the whole block
+    # bailing before registry init ran → 0/8 agents on prod).
     _scheduler = None
     _event_bus = None
-    try:
-        from agents.config import AgentConfigManager
-        from agents.registry import initialize_registry, AGENT_REGISTRY
-        from agents.scheduler import AgentScheduler
-        from agents.event_bus import get_event_bus
+    AGENT_REGISTRY = None
+    db = None
 
+    try:
         if DATABASE_AVAILABLE:
             from database.connection import get_seeded_db
             db = get_seeded_db()
-        else:
-            db = None
+    except Exception as e:
+        logger.error(f"[AGENTS] get_seeded_db failed: {e}", exc_info=True)
 
-        # Seed default agent configs into MongoDB
-        config_mgr = AgentConfigManager(db=db)
-        config_mgr.seed_configs()
+    # Step 1: seed configs — never blocks registry/scheduler
+    try:
+        from agents.config import AgentConfigManager
+        AgentConfigManager(db=db).seed_configs()
         logger.info("[AGENTS] Agent configs seeded")
+    except Exception as e:
+        logger.error(f"[AGENTS] Config seed failed (non-fatal): {e}", exc_info=True)
 
-        # Initialize agent registry (creates CORTEX + SENTINEL instances)
+    # Step 2: register agents — the big one, wrapped independently
+    try:
+        from agents.registry import initialize_registry, AGENT_REGISTRY as _reg
         initialize_registry(db=db)
-        logger.info(f"[AGENTS] Registry initialized — {len(AGENT_REGISTRY)} agents")
+        AGENT_REGISTRY = _reg
+        logger.info(f"[AGENTS] Registry initialized — {len(AGENT_REGISTRY)} agents registered")
+    except Exception as e:
+        logger.error(
+            f"[AGENTS] Registry init CATASTROPHIC failure: {e}. No agents will run this worker.",
+            exc_info=True,
+        )
+        AGENT_REGISTRY = {}
 
-        # Start the cross-worker event bus (Redis pub/sub when REDIS_URL is
-        # set; in-process fallback otherwise). Must start AFTER registry so
-        # subscribers are already registered before any handler fires.
+    # Step 3: event bus — depends on registry for subscriptions, but fail-soft
+    try:
+        from agents.event_bus import get_event_bus
         _event_bus = get_event_bus(db=db)
         await _event_bus.start()
         logger.info(
             f"[AGENTS] Event bus started ({'DISTRIBUTED' if _event_bus.is_distributed else 'IN-PROCESS'})"
         )
+    except Exception as e:
+        logger.error(f"[AGENTS] Event bus start failed (non-fatal): {e}", exc_info=True)
+        _event_bus = None
 
-        # Start the background scheduler
+    # Step 4: scheduler — only meaningful if registry has agents
+    try:
+        from agents.scheduler import AgentScheduler
         _scheduler = AgentScheduler(db=db)
-        await _scheduler.start(AGENT_REGISTRY)
-        logger.info("[AGENTS] Scheduler started")
-
-        # Store scheduler globally so the toggle endpoint can pause/resume
+        await _scheduler.start(AGENT_REGISTRY or {})
+        logger.info(f"[AGENTS] Scheduler started with {len(AGENT_REGISTRY or {})} agents")
         import agents as _agents_pkg
         _agents_pkg._scheduler_instance = _scheduler
-
     except Exception as e:
-        logger.warning(f"[AGENTS] Agent system init failed (non-fatal): {e}")
+        logger.error(f"[AGENTS] Scheduler start failed (non-fatal): {e}", exc_info=True)
+        _scheduler = None
 
     yield
 

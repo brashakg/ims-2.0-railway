@@ -96,6 +96,7 @@ def _get_empty_tests() -> List[dict]:
 
 
 
+@router.get("")
 @router.get("/")
 async def get_clinical_root():
     """Root endpoint for clinical/eye test queue"""

@@ -196,6 +196,7 @@ async def get_optometrist_stats(
     return {"total": 0, "tested_at_store": 0}
 
 
+@router.get("")
 @router.get("/")
 async def list_prescriptions(
     patient_id: Optional[str] = Query(None),

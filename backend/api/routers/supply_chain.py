@@ -243,6 +243,7 @@ MOCK_STOCK_AUDIT = [
 
 
 
+@router.get("")
 @router.get("/")
 async def get_supply_chain_root():
     """Root endpoint for supply chain summary"""

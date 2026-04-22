@@ -78,6 +78,7 @@ def generate_credit_note_number() -> str:
 # ============================================================================
 
 
+@router.get("")
 @router.get("/")
 async def list_vendor_returns(
     store_id: Optional[str] = Query(None),

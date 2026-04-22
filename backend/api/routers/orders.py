@@ -20,6 +20,7 @@ from ..dependencies import (
     get_order_repository,
     get_customer_repository,
     get_stock_repository,
+    get_product_repository,
 )
 
 # Discount cap by product discount_category (mirrors billing.py caps)
@@ -453,17 +454,30 @@ async def create_order(
             detail=f"Cart exceeds maximum of {MAX_CART_ITEMS} items. Split into multiple orders."
         )
 
-    # Validate product_ids exist
-    stock_repo = get_stock_repository()
-    if stock_repo is not None:
+    # Validate product_ids exist.
+    #
+    # Audit Run #2 (2026-04-21) blocker: this used to call
+    # stock_repo.find_by_id(product_id), which looks in `stock_units`
+    # (keyed on stock_id), while the POS catalog + /inventory both
+    # serve from `products` (keyed on product_id). Every order-create
+    # failed with "Product not found: prod-fr-001". Switched to
+    # ProductRepository, and added virtual-id passthroughs for the
+    # POS lens configurator ("lens-*"), lens suggestion helper
+    # ("lens-sug-*"), and manual custom items ("custom-*").
+    product_repo = get_product_repository()
+    if product_repo is not None:
         for item in order.items:
-            if item.product_id and not item.product_id.startswith("custom-"):
-                product = stock_repo.find_by_id(item.product_id)
-                if product is None:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"Product not found: {item.product_id} ({item.product_name or 'unknown'})"
-                    )
+            pid = item.product_id or ""
+            if not pid:
+                continue
+            if pid.startswith(("custom-", "lens-", "lens-sug-")):
+                continue
+            product = product_repo.find_by_id(pid)
+            if product is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Product not found: {pid} ({item.product_name or 'unknown'})"
+                )
 
     # Validate: offer_price cannot exceed MRP
     for item in order.items:
@@ -502,13 +516,16 @@ async def create_order(
             # Enforce discount cap (admins bypass)
             effective_cap = user_discount_cap
             if not is_admin and item.discount_percent > 0:
-                # Look up category cap for this product
+                # Look up category cap for this product — read from the
+                # products collection (same fix as the existence-check
+                # above; the original code hit stock_units and always
+                # returned None, leaving effective_cap = user's full cap).
                 try:
-                    stock_repo = get_stock_repository()
-                    if stock_repo is not None:
-                        product = stock_repo.find_by_id(item.product_id)
+                    pr = get_product_repository()
+                    if pr is not None and item.product_id and not item.product_id.startswith(("custom-", "lens-", "lens-sug-")):
+                        product = pr.find_by_id(item.product_id)
                         if product:
-                            cat = product.get("discount_category", "MASS")
+                            cat = product.get("discount_category") or product.get("category") or "MASS"
                             category_cap = CATEGORY_DISCOUNT_CAPS.get(cat, 10.0)
                             effective_cap = min(user_discount_cap, category_cap)
                 except Exception:

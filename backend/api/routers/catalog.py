@@ -896,6 +896,7 @@ def generate_product_title(
 
 
 
+@router.get("")
 @router.get("/")
 async def get_catalog_root():
     """Root endpoint for product catalog overview"""

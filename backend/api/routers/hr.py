@@ -46,6 +46,7 @@ class AttendanceMarkRequest(BaseModel):
 
 
 
+@router.get("")
 @router.get("/")
 async def get_hr_root():
     """Root endpoint for HR module overview"""

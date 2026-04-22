@@ -763,6 +763,7 @@ async def get_incentive_summary(
 # ============================================================================
 
 
+@router.get("")
 @router.get("/")
 async def payroll_root():
     """Root endpoint for payroll module"""

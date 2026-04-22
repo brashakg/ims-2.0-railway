@@ -159,6 +159,7 @@ def job_to_frontend(job: dict) -> dict:
 
 # NOTE: Specific routes MUST come before /jobs/{job_id}
 
+@router.get("")
 @router.get("/")
 async def get_workshop_root():
     """Root endpoint for workshop job list"""

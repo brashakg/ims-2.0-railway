@@ -184,7 +184,11 @@ export default function HubPage() {
       eyebrow: 'Automation · Superadmin',
       desc: '8 agents (JARVIS, CORTEX, SENTINEL, PIXEL, MEGAPHONE, ORACLE, TASKMASTER, NEXUS) watching stock, pricing, escalations, Rx.',
       iconName: 'cpu',
-      meta: [['Agents', '8/8 registered'], ['Scope', 'Superadmin only']],
+      // Canonical 8 agents — the live count is fetched by the Jarvis
+      // page itself (not here) so the Hub card just states the roster
+      // size. If the Hub ever wires a live count, prefer "N/8 live"
+      // from /api/v1/jarvis/agents/diagnostic (single source of truth).
+      meta: [['Agents', '8 total'], ['Scope', 'Superadmin only']],
       badge: 'Super-admin',
       requireRoles: ['SUPERADMIN'],
     },

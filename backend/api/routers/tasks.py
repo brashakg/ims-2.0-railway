@@ -101,6 +101,11 @@ def should_escalate(task: dict) -> tuple[bool, str]:
 # ============================================================================
 
 
+# Both "" and "/" — the app uses redirect_slashes=False (to keep CORS
+# preflights simple), so both the trailing-slash and bare forms must
+# resolve to the same handler. Audit Run #2 found /tasks returning 404
+# on prod because the frontend calls api.get('/tasks') without slash.
+@router.get("")
 @router.get("/")
 async def list_tasks(
     status: Optional[str] = Query(None),
