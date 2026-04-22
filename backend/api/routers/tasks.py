@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 import uuid
 
 from .auth import get_current_user
-from ..dependencies import get_task_repository
+from ..dependencies import get_task_repository, get_db
 
 router = APIRouter()
 
@@ -652,3 +652,240 @@ async def get_task_summary(
         "escalated_count": escalated_count,
         "total": sum(summary.values())
     }
+
+
+# ============================================================================
+# SOP TEMPLATES (Phase 6.14)
+# ============================================================================
+# Persisted SOPs in the `sop_templates` collection. Replaces the static
+# DEFAULT_CHECKLISTS dict on the frontend so SUPERADMIN can edit items +
+# assign templates to roles/users/stores. Checklist completion is still
+# a per-session concern (lives on the frontend + complete-item endpoint
+# above); this is just the template source of truth.
+
+
+class SopStep(BaseModel):
+    step_number: int = Field(..., ge=1)
+    instruction: str = Field(..., min_length=1)
+    warning: Optional[str] = None
+
+
+class SopTemplateCreate(BaseModel):
+    title: str = Field(..., min_length=3)
+    description: Optional[str] = None
+    category: str = "Operations"          # Operations | Finance | Sales | Clinical | Workshop
+    frequency: str = "DAILY"              # DAILY | WEEKLY | MONTHLY | AD_HOC
+    estimated_time: int = Field(15, ge=1, le=480)  # minutes
+    steps: List[SopStep] = []
+    assigned_roles: List[str] = []
+    assigned_users: List[str] = []
+    store_id: Optional[str] = None
+
+
+class SopTemplateUpdate(BaseModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+    category: Optional[str] = None
+    frequency: Optional[str] = None
+    estimated_time: Optional[int] = None
+    steps: Optional[List[SopStep]] = None
+    assigned_roles: Optional[List[str]] = None
+    assigned_users: Optional[List[str]] = None
+    is_active: Optional[bool] = None
+
+
+def _sop_collection():
+    """Return the sop_templates collection (or None if DB unavailable)."""
+    db = get_db()
+    if db is None or not getattr(db, "is_connected", True):
+        return None
+    try:
+        return db.get_collection("sop_templates")
+    except Exception:
+        return None
+
+
+@router.get("/sop-templates")
+async def list_sop_templates(
+    category: Optional[str] = Query(None),
+    store_id: Optional[str] = Query(None),
+    active_only: bool = Query(True),
+    current_user: dict = Depends(get_current_user),
+):
+    """List SOP templates. Filter by category, store, active state."""
+    col = _sop_collection()
+    if col is None:
+        return {"templates": [], "total": 0}
+
+    filter_dict: dict = {}
+    if category:
+        filter_dict["category"] = category
+    if store_id:
+        filter_dict["store_id"] = store_id
+    if active_only:
+        filter_dict["is_active"] = {"$ne": False}
+
+    try:
+        templates = list(col.find(filter_dict, {"_id": 0}).sort("updated_at", -1))
+    except Exception as e:
+        logger = __import__("logging").getLogger(__name__)
+        logger.warning(f"[SOP] list failed: {e}")
+        templates = []
+    return {"templates": templates, "total": len(templates)}
+
+
+@router.post("/sop-templates", status_code=201)
+@router.post("/sop-templates/", status_code=201, include_in_schema=False)
+async def create_sop_template(
+    payload: SopTemplateCreate,
+    current_user: dict = Depends(get_current_user),
+):
+    """Create a new SOP template. SUPERADMIN / ADMIN / STORE_MANAGER only."""
+    # Role gate — prevents cashiers from editing SOPs
+    allowed = {"SUPERADMIN", "ADMIN", "STORE_MANAGER"}
+    if not (set(current_user.get("roles", [])) & allowed):
+        raise HTTPException(
+            status_code=403,
+            detail="Only SUPERADMIN / ADMIN / STORE_MANAGER may create SOPs",
+        )
+
+    col = _sop_collection()
+    if col is None:
+        raise HTTPException(status_code=503, detail="DB unavailable")
+
+    now = datetime.now()
+    template_id = f"SOP-{uuid.uuid4().hex[:8].upper()}"
+    doc = {
+        "template_id": template_id,
+        "title": payload.title,
+        "description": payload.description or "",
+        "category": payload.category,
+        "frequency": payload.frequency,
+        "estimated_time": payload.estimated_time,
+        "steps": [s.model_dump() for s in payload.steps],
+        "assigned_roles": payload.assigned_roles,
+        "assigned_users": payload.assigned_users,
+        "store_id": payload.store_id or current_user.get("active_store_id"),
+        "is_active": True,
+        "created_by": current_user.get("user_id"),
+        "created_at": now,
+        "updated_at": now,
+    }
+    try:
+        col.insert_one(doc)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Could not save SOP: {e}")
+    doc.pop("_id", None)
+    return {"template_id": template_id, "template": doc, "message": "SOP created"}
+
+
+@router.get("/sop-templates/{template_id}")
+async def get_sop_template(
+    template_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    col = _sop_collection()
+    if col is None:
+        raise HTTPException(status_code=503, detail="DB unavailable")
+    tpl = col.find_one({"template_id": template_id}, {"_id": 0})
+    if not tpl:
+        raise HTTPException(status_code=404, detail="SOP template not found")
+    return tpl
+
+
+@router.patch("/sop-templates/{template_id}")
+async def update_sop_template(
+    template_id: str,
+    updates: SopTemplateUpdate,
+    current_user: dict = Depends(get_current_user),
+):
+    """Patch an SOP template. Role-gated like create."""
+    allowed = {"SUPERADMIN", "ADMIN", "STORE_MANAGER"}
+    if not (set(current_user.get("roles", [])) & allowed):
+        raise HTTPException(
+            status_code=403,
+            detail="Only SUPERADMIN / ADMIN / STORE_MANAGER may edit SOPs",
+        )
+
+    col = _sop_collection()
+    if col is None:
+        raise HTTPException(status_code=503, detail="DB unavailable")
+
+    update_data = {k: v for k, v in updates.model_dump(exclude_unset=True).items() if v is not None}
+    # Serialize nested steps
+    if "steps" in update_data and update_data["steps"] is not None:
+        update_data["steps"] = [
+            s.model_dump() if hasattr(s, "model_dump") else s for s in update_data["steps"]
+        ]
+    update_data["updated_at"] = datetime.now()
+    update_data["updated_by"] = current_user.get("user_id")
+
+    result = col.update_one({"template_id": template_id}, {"$set": update_data})
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="SOP template not found")
+
+    tpl = col.find_one({"template_id": template_id}, {"_id": 0})
+    return {"template_id": template_id, "template": tpl, "message": "SOP updated"}
+
+
+@router.delete("/sop-templates/{template_id}")
+async def delete_sop_template(
+    template_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """Soft-delete (archive) an SOP template. Only SUPERADMIN/ADMIN."""
+    allowed = {"SUPERADMIN", "ADMIN"}
+    if not (set(current_user.get("roles", [])) & allowed):
+        raise HTTPException(
+            status_code=403,
+            detail="Only SUPERADMIN / ADMIN may archive SOPs",
+        )
+    col = _sop_collection()
+    if col is None:
+        raise HTTPException(status_code=503, detail="DB unavailable")
+
+    result = col.update_one(
+        {"template_id": template_id},
+        {"$set": {"is_active": False, "archived_at": datetime.now(),
+                  "archived_by": current_user.get("user_id")}},
+    )
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="SOP template not found")
+    return {"template_id": template_id, "message": "SOP archived"}
+
+
+class SopAssignmentPayload(BaseModel):
+    assigned_roles: Optional[List[str]] = None
+    assigned_users: Optional[List[str]] = None
+
+
+@router.post("/sop-templates/{template_id}/assign")
+async def assign_sop(
+    template_id: str,
+    payload: SopAssignmentPayload,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Replace the assigned_roles + assigned_users arrays on an SOP template.
+    Pass null/omit a field to leave it unchanged; pass [] to clear.
+    """
+    allowed = {"SUPERADMIN", "ADMIN", "STORE_MANAGER"}
+    if not (set(current_user.get("roles", [])) & allowed):
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    col = _sop_collection()
+    if col is None:
+        raise HTTPException(status_code=503, detail="DB unavailable")
+
+    update: dict = {"updated_at": datetime.now(), "updated_by": current_user.get("user_id")}
+    if payload.assigned_roles is not None:
+        update["assigned_roles"] = payload.assigned_roles
+    if payload.assigned_users is not None:
+        update["assigned_users"] = payload.assigned_users
+
+    result = col.update_one({"template_id": template_id}, {"$set": update})
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="SOP template not found")
+
+    tpl = col.find_one({"template_id": template_id}, {"_id": 0})
+    return {"template_id": template_id, "template": tpl, "message": "SOP assignment updated"}

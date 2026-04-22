@@ -24,6 +24,7 @@ import {
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { tasksApi } from '../../services/api';
+import { SopEditorModal, type SopTemplateForm } from '../../components/tasks/SopEditorModal';
 
 type TabType = 'my-tasks' | 'team-tasks' | 'sop' | 'analytics';
 type TaskStatus = 'PENDING' | 'IN_PROGRESS' | 'COMPLETED' | 'OVERDUE';
@@ -103,8 +104,13 @@ export function TaskManagementPage() {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [sops, setSops] = useState<SOP[]>([]);
   const [employeePerformance, setEmployeePerformance] = useState<EmployeePerformance[]>([]);
-  const [, setShowCreateTask] = useState(false);
+  // Phase 6.14 — wire the previously-broken "New Task" / "New SOP" button
+  // (state getter was discarded with `const [, setShowCreateTask]`).
+  const [showCreateTask, setShowCreateTask] = useState(false);
   const [, setSelectedTask] = useState<Task | null>(null);
+  // SOP editor state — open with null to create, with a template to edit.
+  const [sopEditorOpen, setSopEditorOpen] = useState(false);
+  const [editingSop, setEditingSop] = useState<SopTemplateForm | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -138,8 +144,37 @@ export function TaskManagementPage() {
       }));
       setTasks(apiTasks);
 
-      // Mock SOPs
-      setSops([
+      // Phase 6.14 — SOPs from the persistent sop_templates collection.
+      // Falls back to mock seed below if the API is unavailable, so the
+      // page is never empty on a fresh deploy. SUPERADMIN edits via the
+      // SopEditorModal; creates persist through /tasks/sop-templates.
+      try {
+        const sopResp = await tasksApi.getSopTemplates({
+          storeId: user?.activeStoreId,
+          activeOnly: true,
+        });
+        if (sopResp.templates.length > 0) {
+          setSops(sopResp.templates.map(t => ({
+            id: t.template_id,
+            title: t.title,
+            description: t.description,
+            category: t.category as any,
+            frequency: t.frequency as any,
+            estimatedTime: t.estimated_time,
+            assignedRoles: t.assigned_roles,
+            createdDate: t.created_at?.slice(0, 10) || '',
+            lastUpdated: t.updated_at?.slice(0, 10) || '',
+            steps: t.steps.map(s => ({
+              id: String(s.step_number),
+              stepNumber: s.step_number,
+              instruction: s.instruction,
+              warning: s.warning,
+            })),
+          })));
+          // Skip the mock-seed block below.
+          // (Empty list triggers seed fallback so new stores have something.)
+        } else {
+          setSops([
         {
           id: '1',
           title: 'Store Opening Procedure',
@@ -230,7 +265,13 @@ export function TaskManagementPage() {
             { id: '10', stepNumber: 10, instruction: 'Forward invoice to accounts team for payment processing' },
           ],
         },
-      ]);
+        ]);  // end mock-seed fallback
+        }  // end empty-templates else-branch
+      } catch (sopErr) {
+        // API unavailable — keep current sops state (may be previous page load).
+        // eslint-disable-next-line no-console
+        console.warn('[TaskManagement] SOP load failed:', sopErr);
+      }
 
       // Mock employee performance
       setEmployeePerformance([
@@ -359,7 +400,17 @@ export function TaskManagementPage() {
         </div>
         <div className="row" style={{ gap: 8 }}>
           <button
-            onClick={() => setShowCreateTask(true)}
+            onClick={() => {
+              if (activeTab === 'sop') {
+                // Phase 6.14 — open the SOP editor in "create new" mode
+                setEditingSop(null);
+                setSopEditorOpen(true);
+              } else {
+                // Task tab — legacy behaviour (wiring now functional after
+                // setShowCreateTask state getter was fixed)
+                setShowCreateTask(true);
+              }
+            }}
             className="btn sm primary"
           >
             <Plus className="w-4 h-4" /> {activeTab === 'sop' ? 'New SOP' : 'New task'}
@@ -500,10 +551,56 @@ export function TaskManagementPage() {
                   Updated: {new Date(sop.lastUpdated).toLocaleDateString()}
                 </div>
                 <div className="flex items-center gap-2">
-                  <button className="p-2 hover:bg-gray-100 rounded-lg transition-colors">
+                  <button
+                    onClick={() => {
+                      // Phase 6.14 — View opens the editor in read-aware mode
+                      // (all fields still editable since staff with permission
+                      // land here; tightening view-only can come later).
+                      setEditingSop({
+                        template_id: sop.id,
+                        title: sop.title,
+                        description: sop.description,
+                        category: sop.category as any,
+                        frequency: sop.frequency as any,
+                        estimated_time: sop.estimatedTime,
+                        steps: sop.steps.map(s => ({
+                          step_number: s.stepNumber,
+                          instruction: s.instruction,
+                          warning: (s as any).warning,
+                        })),
+                        assigned_roles: sop.assignedRoles || [],
+                        assigned_users: [],
+                      });
+                      setSopEditorOpen(true);
+                    }}
+                    className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
+                    aria-label="View SOP"
+                  >
                     <Eye className="w-4 h-4 text-gray-600" />
                   </button>
-                  <button className="p-2 hover:bg-gray-100 rounded-lg transition-colors">
+                  <button
+                    onClick={() => {
+                      // Phase 6.14 — Edit opens editor pre-filled with this SOP
+                      setEditingSop({
+                        template_id: sop.id,
+                        title: sop.title,
+                        description: sop.description,
+                        category: sop.category as any,
+                        frequency: sop.frequency as any,
+                        estimated_time: sop.estimatedTime,
+                        steps: sop.steps.map(s => ({
+                          step_number: s.stepNumber,
+                          instruction: s.instruction,
+                          warning: (s as any).warning,
+                        })),
+                        assigned_roles: sop.assignedRoles || [],
+                        assigned_users: [],
+                      });
+                      setSopEditorOpen(true);
+                    }}
+                    className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
+                    aria-label="Edit SOP"
+                  >
                     <Edit className="w-4 h-4 text-gray-600" />
                   </button>
                 </div>
@@ -725,6 +822,63 @@ export function TaskManagementPage() {
               <p className="text-gray-500">No tasks found</p>
             </div>
           )}
+        </div>
+      )}
+
+      {/* Phase 6.14 — SOP create/edit modal. Single surface for both
+          flows; `editingSop=null` means create, object means edit. */}
+      <SopEditorModal
+        isOpen={sopEditorOpen}
+        onClose={() => {
+          setSopEditorOpen(false);
+          setEditingSop(null);
+        }}
+        initial={editingSop}
+        onSaved={async () => {
+          // Reload SOPs so the list reflects the write
+          try {
+            const resp = await tasksApi.getSopTemplates({
+              storeId: user?.activeStoreId,
+              activeOnly: true,
+            });
+            setSops(resp.templates.map(t => ({
+              id: t.template_id,
+              title: t.title,
+              description: t.description,
+              category: t.category as any,
+              frequency: t.frequency as any,
+              estimatedTime: t.estimated_time,
+              assignedRoles: t.assigned_roles,
+              createdDate: t.created_at?.slice(0, 10) || '',
+              lastUpdated: t.updated_at?.slice(0, 10) || '',
+              steps: t.steps.map(s => ({
+                id: String(s.step_number),
+                stepNumber: s.step_number,
+                instruction: s.instruction,
+                warning: s.warning,
+              })),
+            })));
+          } catch (e) {
+            // eslint-disable-next-line no-console
+            console.warn('[TaskManagement] SOP reload failed:', e);
+          }
+        }}
+      />
+
+      {/* Phase 6.14 — if user clicked "New task" on a non-SOP tab,
+          show it was acknowledged (full task-creation UI is on TasksPage). */}
+      {showCreateTask && activeTab !== 'sop' && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={() => setShowCreateTask(false)}>
+          <div className="bg-white rounded-xl w-full max-w-md p-6 space-y-4" onClick={(e) => e.stopPropagation()}>
+            <h3 className="font-semibold text-gray-900">Create a task</h3>
+            <p className="text-sm text-gray-600">
+              Task creation with full fields is on the Tasks page. Click below to open it.
+            </p>
+            <div className="flex items-center justify-end gap-2">
+              <button onClick={() => setShowCreateTask(false)} className="btn sm">Cancel</button>
+              <a href="/tasks" className="btn sm primary">Open Tasks page</a>
+            </div>
+          </div>
         </div>
       )}
     </div>
