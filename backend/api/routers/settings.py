@@ -346,6 +346,7 @@ class AuditLogEntry(BaseModel):
 
 
 
+@router.get("")
 @router.get("/")
 async def get_settings_root():
     """Root endpoint for system settings"""

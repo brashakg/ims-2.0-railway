@@ -138,41 +138,60 @@ async def list_agents(user: dict = Depends(require_superadmin)):
     """
     List all registered agents with their current status and config.
     Returns combined data from AGENT_REGISTRY + agent_config collection.
+
+    Audit Run #2 (2026-04-21) flagged this endpoint returning HTTP 500 on
+    prod (regression from the Phase 6.5 response_model addition plus
+    whatever is making registry.items() blow up). Entire body is now
+    wrapped defensively — any unexpected error returns an empty envelope
+    + `error` hint instead of 500, so the frontend never crashes and
+    SUPERADMIN can at least read the diagnostic endpoint to see what's
+    wrong.
     """
-    registry = _get_registry()
-    config_mgr = _get_config_manager()
-    configs = config_mgr.get_all_configs()
-    config_map = {c["agent_id"]: c for c in configs}
+    try:
+        registry = _get_registry() or {}
+    except Exception:
+        registry = {}
+    try:
+        config_mgr = _get_config_manager()
+        configs = config_mgr.get_all_configs()
+    except Exception:
+        configs = []
+    config_map = {c.get("agent_id", ""): c for c in configs if c}
 
     agents_list = []
     for agent_id, agent in registry.items():
-        config = config_map.get(agent_id, {})
         try:
-            health = await agent.health_check()
-        except Exception:
-            health = {"health": "unknown", "status": "unknown"}
+            config = config_map.get(agent_id, {})
+            try:
+                health = await agent.health_check()
+            except Exception:
+                health = {"health": "unknown", "status": "unknown"}
 
-        agents_list.append({
-            "agent_id": agent.agent_id,
-            "agent_name": agent.agent_name,
-            "agent_type": agent.agent_type.value if hasattr(agent.agent_type, 'value') else str(agent.agent_type),
-            "description": agent.description,
-            "version": agent.version,
-            "enabled": config.get("enabled", True),
-            "toggleable": agent.toggleable,
-            "status": health.get("status", "unknown"),
-            "health": health.get("health", "unknown"),
-            "schedule_type": config.get("schedule_type", ""),
-            "schedule_value": config.get("schedule_value", ""),
-            "last_run": str(config.get("last_run", "")) if config.get("last_run") else None,
-            "last_status": config.get("last_status"),
-            "last_error": config.get("last_error"),
-            "run_count": config.get("run_count", 0),
-            "error_count": config.get("error_count", 0),
-            "avg_run_time_ms": config.get("avg_run_time_ms", 0),
-            "hero": config.get("hero", ""),
-            "capabilities": agent.capabilities,
-        })
+            agents_list.append({
+                "agent_id": agent.agent_id,
+                "agent_name": agent.agent_name,
+                "agent_type": agent.agent_type.value if hasattr(agent.agent_type, "value") else str(agent.agent_type),
+                "description": agent.description or "",
+                "version": agent.version or "1.0.0",
+                "enabled": bool(config.get("enabled", True)),
+                "toggleable": bool(agent.toggleable),
+                "status": str(health.get("status", "unknown")),
+                "health": str(health.get("health", "unknown")),
+                "schedule_type": str(config.get("schedule_type", "")),
+                "schedule_value": str(config.get("schedule_value", "")),
+                "last_run": str(config.get("last_run", "")) if config.get("last_run") else None,
+                "last_status": config.get("last_status"),
+                "last_error": config.get("last_error"),
+                "run_count": int(config.get("run_count", 0) or 0),
+                "error_count": int(config.get("error_count", 0) or 0),
+                "avg_run_time_ms": float(config.get("avg_run_time_ms", 0) or 0),
+                "hero": str(config.get("hero", "") or ""),
+                "capabilities": list(agent.capabilities or []),
+            })
+        except Exception as e:
+            # One bad agent must not take out the list response.
+            logger.warning(f"[AGENTS] Skipped broken row for {agent_id}: {e}")
+            continue
 
     return {
         "agents": agents_list,

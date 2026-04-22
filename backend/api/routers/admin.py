@@ -163,6 +163,7 @@ class ShopifyOrderSync(BaseModel):
 
 
 
+@router.get("")
 @router.get("/")
 async def get_admin_root():
     """Root endpoint for admin integrations overview"""

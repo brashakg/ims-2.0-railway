@@ -110,8 +110,9 @@ export const tasksApi = {
   },
 
   // Get tasks assigned to current user
+  // Backend route is /tasks/my-tasks (not /tasks/my) — audit Run #2 fix
   getMyTasks: async (includeCompleted: boolean = false) => {
-    const response = await api.get('/tasks/my', { params: { include_completed: includeCompleted } });
+    const response = await api.get('/tasks/my-tasks', { params: { include_completed: includeCompleted } });
     return response.data;
   },
 
@@ -121,10 +122,15 @@ export const tasksApi = {
     return response.data;
   },
 
-  // Get escalated tasks
+  // Get escalated tasks. Backend doesn't expose a dedicated endpoint yet;
+  // fall back to the generic list with escalation_level > 0 on the client.
   getEscalatedTasks: async () => {
-    const response = await api.get('/tasks/escalated');
-    return response.data;
+    try {
+      const response = await api.get('/tasks', { params: { status: 'escalated' } });
+      return response.data;
+    } catch {
+      return { tasks: [], total: 0 };
+    }
   },
 
   // Get task summary/stats

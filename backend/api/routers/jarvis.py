@@ -1554,6 +1554,7 @@ jarvis_instance = Jarvis()
 
 
 
+@router.get("")
 @router.get("/")
 async def get_jarvis_root():
     """Root endpoint for AI assistant status"""

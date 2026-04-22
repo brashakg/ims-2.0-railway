@@ -124,6 +124,7 @@ def generate_transfer_number() -> str:
 # ============================================================================
 
 
+@router.get("")
 @router.get("/")
 async def list_transfers(
     status: Optional[TransferStatus] = None,

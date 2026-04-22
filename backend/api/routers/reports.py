@@ -22,6 +22,7 @@ router = APIRouter()
 
 
 
+@router.get("")
 @router.get("/")
 async def get_reports_root():
     """Root endpoint for available reports"""

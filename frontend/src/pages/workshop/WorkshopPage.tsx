@@ -46,6 +46,11 @@ interface Job {
   notes?: string;
 }
 
+// Audit Run #2 fix: the workshop page was crashing via error boundary when
+// a job doc came back with a status value not in this map (e.g. null, "",
+// or a legacy status). The `resolveStatusConfig` / `resolvePriorityConfig`
+// helpers below guarantee a sane fallback object instead of undefined.
+const UNKNOWN_STATUS = { label: 'Unknown', class: 'bg-gray-100 text-gray-700', step: 0 };
 const STATUS_CONFIG: Record<JobStatus, { label: string; class: string; step: number }> = {
   PENDING: { label: 'Pending', class: 'bg-gray-100 text-gray-700', step: 1 },
   PROCESSING: { label: 'Fitting', class: 'bg-yellow-50 text-yellow-700', step: 2 },
@@ -62,11 +67,24 @@ const STATUS_CONFIG: Record<JobStatus, { label: string; class: string; step: num
   CANCELLED: { label: 'Cancelled', class: 'bg-red-50 text-red-700', step: 0 },
 };
 
+const UNKNOWN_PRIORITY = { label: '—', class: 'text-gray-500', icon: Clock };
 const PRIORITY_CONFIG: Record<JobPriority, { label: string; class: string; icon: React.ComponentType<{ className?: string }> }> = {
   NORMAL: { label: 'Normal', class: 'text-gray-500', icon: Clock },
   EXPRESS: { label: 'Express', class: 'text-orange-500', icon: Timer },
   URGENT: { label: 'Urgent', class: 'text-red-500', icon: Zap },
 };
+
+// Guarded lookups — audit Run #2 found unguarded accesses throwing to the
+// error boundary when the backend returned a status/priority not in the
+// maps above. Always return a valid object.
+function resolveStatusConfig(status: unknown) {
+  const key = (typeof status === 'string' ? status : '') as JobStatus;
+  return STATUS_CONFIG[key] ?? UNKNOWN_STATUS;
+}
+function resolvePriorityConfig(priority: unknown) {
+  const key = (typeof priority === 'string' ? priority : 'NORMAL') as JobPriority;
+  return PRIORITY_CONFIG[key] ?? UNKNOWN_PRIORITY;
+}
 
 export function WorkshopPage() {
   const { user } = useAuth();
@@ -121,10 +139,21 @@ const loadJobs = async () => {
         const jobsData = jobsResp.value?.jobs || jobsResp.value || [];
         setJobs(Array.isArray(jobsData) ? jobsData : []);
       } else {
-        throw jobsResp.reason;
+        // Audit Run #2: don't throw — set an inline error instead so the
+        // page still renders empty shells + user sees why. Previous
+        // behaviour threw, which set the error state but only AFTER the
+        // first render cycle, and a status-config crash could catch the
+        // throw mid-render.
+        // eslint-disable-next-line no-console
+        console.warn('[Workshop] getJobs failed:', jobsResp.reason);
+        setJobs([]);
+        setError('Workshop jobs unavailable right now. Other functionality still works.');
       }
       if (kpisResp.status === 'fulfilled') {
         setKpis(kpisResp.value);
+      } else {
+        // eslint-disable-next-line no-console
+        console.warn('[Workshop] getDashboardKpis failed (non-fatal):', kpisResp.reason);
       }
 
       // Load store info for printing
@@ -390,8 +419,8 @@ const loadJobs = async () => {
           </div>
         ) : (
           filteredJobs.map(job => {
-            const statusConfig = STATUS_CONFIG[job.status];
-            const priorityConfig = PRIORITY_CONFIG[job.priority];
+            const statusConfig = resolveStatusConfig(job.status);
+            const priorityConfig = resolvePriorityConfig(job.priority);
             const PriorityIcon = priorityConfig.icon;
             const overdue = isOverdue(job.promisedDate) && !['READY', 'DELIVERED', 'CANCELLED'].includes(job.status);
 
@@ -518,10 +547,10 @@ const loadJobs = async () => {
               <div className="space-y-4">
                 {/* Status & Priority */}
                 <div className="flex items-center gap-2">
-                  <span className={clsx('px-3 py-1 rounded-full text-sm font-medium', STATUS_CONFIG[selectedJob.status].class)}>
-                    {STATUS_CONFIG[selectedJob.status].label}
+                  <span className={clsx('px-3 py-1 rounded-full text-sm font-medium', resolveStatusConfig(selectedJob.status).class)}>
+                    {resolveStatusConfig(selectedJob.status).label}
                   </span>
-                  <span className={clsx('text-sm font-medium', PRIORITY_CONFIG[selectedJob.priority].class)}>
+                  <span className={clsx('text-sm font-medium', resolvePriorityConfig(selectedJob.priority).class)}>
                     {selectedJob.priority}
                   </span>
                   {isOverdue(selectedJob.promisedDate) && !['READY', 'DELIVERED', 'CANCELLED'].includes(selectedJob.status) && (
@@ -598,14 +627,14 @@ const loadJobs = async () => {
 
                 {/* Progress */}
                 <div>
-                  <p className="text-sm text-gray-500 mb-2">Progress: {STATUS_CONFIG[selectedJob.status].label}</p>
+                  <p className="text-sm text-gray-500 mb-2">Progress: {resolveStatusConfig(selectedJob.status).label}</p>
                   <div className="h-3 bg-gray-200 rounded-full overflow-hidden">
                     <div
                       className={clsx(
                         'h-full transition-all',
                         selectedJob.status === 'QC_FAILED' ? 'bg-red-500' : 'bg-bv-red-600'
                       )}
-                      style={{ width: `${(STATUS_CONFIG[selectedJob.status].step / 8) * 100}%` }}
+                      style={{ width: `${(resolveStatusConfig(selectedJob.status).step / 8) * 100}%` }}
                     />
                   </div>
                 </div>

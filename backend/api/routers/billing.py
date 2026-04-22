@@ -156,6 +156,7 @@ def calculate_bill(
 
 
 
+@router.get("")
 @router.get("/")
 async def get_billing_root():
     """Root endpoint for billing/invoice list"""

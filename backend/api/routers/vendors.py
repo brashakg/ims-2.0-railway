@@ -108,6 +108,10 @@ def generate_grn_number(store_id: str) -> str:
 # ============================================================================
 
 
+# Both "" and "/" — the app uses redirect_slashes=False, so bare + slashed
+# forms must both resolve. Audit Run #2: Purchase page was 404'ing because
+# the frontend calls api.get('/vendors') without trailing slash.
+@router.get("")
 @router.get("/")
 async def list_vendors(
     search: Optional[str] = Query(None),

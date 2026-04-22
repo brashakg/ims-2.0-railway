@@ -83,6 +83,7 @@ def _get_db():
 # ============================================================================
 
 
+@router.get("")
 @router.get("/")
 async def get_inventory_root():
     """Root endpoint for inventory stock list"""

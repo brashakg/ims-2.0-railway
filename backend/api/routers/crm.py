@@ -200,6 +200,7 @@ class LifecyclePhase(BaseModel):
 
 
 
+@router.get("")
 @router.get("/")
 async def get_crm_root():
     """Root endpoint for customer CRM overview"""
