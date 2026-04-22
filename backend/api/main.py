@@ -506,7 +506,11 @@ async def global_exception_handler(request: Request, exc: Exception):
 
 
 # Health check endpoint
+# Audit Run #3 noted uptime monitors pointing at /api/v1/health silently
+# 404ing. Expose the same handler at both paths so external probes work
+# regardless of which one they've been configured to hit.
 @app.get("/health", tags=["Health"])
+@app.get("/api/v1/health", tags=["Health"])
 async def health_check():
     db_status = (
         "connected" if DATABASE_AVAILABLE and get_db().is_connected else "disconnected"

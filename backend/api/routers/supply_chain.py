@@ -10,7 +10,11 @@ from pydantic import BaseModel, Field
 import random
 import string
 
-router = APIRouter(prefix="/supply-chain", tags=["supply-chain"])
+# Mount prefix is applied in api/main.py (prefix="/api/v1/supply-chain").
+# Declaring another "/supply-chain" prefix here caused the doubled path
+# /api/v1/supply-chain/supply-chain/... — Audit Run #3 finding. Kept
+# empty to mirror every other router in the project.
+router = APIRouter(tags=["supply-chain"])
 
 
 # ============================================================================
