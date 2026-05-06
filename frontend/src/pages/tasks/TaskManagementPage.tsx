@@ -373,18 +373,22 @@ export function TaskManagementPage() {
   };
 
   const myTasks = tasks.filter(task => task.assignedTo === user?.id || user?.roles?.includes('ADMIN') || user?.roles?.includes('SUPERADMIN'));
+  // Audit Run #4: /tasks crashed at the error boundary on initial render.
+  // The most common cause for this kind of crash is a row with a null/
+  // undefined string field hitting `.toLowerCase()`. We guard every
+  // string-y access so a malformed task or SOP doc renders blank
+  // instead of taking out the whole page.
+  const _q = (searchQuery || '').toLowerCase();
+  const _hits = (s: unknown) => String(s ?? '').toLowerCase().includes(_q);
   const filteredTasks = (activeTab === 'my-tasks' ? myTasks : tasks).filter(task => {
-    const matchesSearch = task.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
-                          task.description.toLowerCase().includes(searchQuery.toLowerCase());
-    const matchesStatus = statusFilter === 'ALL' || task.status === statusFilter;
-    const matchesPriority = priorityFilter === 'ALL' || task.priority === priorityFilter;
+    const matchesSearch = _hits(task?.title) || _hits(task?.description);
+    const matchesStatus = statusFilter === 'ALL' || task?.status === statusFilter;
+    const matchesPriority = priorityFilter === 'ALL' || task?.priority === priorityFilter;
     return matchesSearch && matchesStatus && matchesPriority;
   });
 
   const filteredSOPs = sops.filter(sop =>
-    sop.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    sop.description.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    sop.category.toLowerCase().includes(searchQuery.toLowerCase())
+    _hits(sop?.title) || _hits(sop?.description) || _hits(sop?.category)
   );
 
   const myOpen = myTasks.filter(t => t.status !== 'COMPLETED').length;

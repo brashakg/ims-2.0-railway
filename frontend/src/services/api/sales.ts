@@ -59,23 +59,65 @@ export const orderApi = {
 // Prescription API
 // ============================================================================
 
+// Map backend snake_case prescription doc → frontend Prescription shape.
+// Audit Run #4 found Customers prescription cards rendering as
+// `QR: undefined`, `Invalid Date`, `by Unknown`, all fields blank — the
+// frontend expected `testDate / rightEye.sphere` while the backend ships
+// `test_date / right_eye.sph`. Mapper kept beside the API call so every
+// caller gets the canonical shape.
+function mapEye(eye: any): any {
+  if (!eye || typeof eye !== 'object') return undefined;
+  return {
+    sphere: eye.sphere ?? eye.sph,
+    cylinder: eye.cylinder ?? eye.cyl,
+    axis: eye.axis,
+    pd: eye.pd,
+    add: eye.add ?? eye.add_power,
+  };
+}
+
+function mapRx(rx: any): any {
+  if (!rx || typeof rx !== 'object') return rx;
+  return {
+    ...rx,
+    id: rx.id ?? rx.prescription_id ?? rx._id,
+    testDate: rx.testDate ?? rx.test_date ?? rx.created_at,
+    expiryDate: rx.expiryDate ?? rx.expiry_date,
+    optometristId: rx.optometristId ?? rx.optometrist_id,
+    optometristName: rx.optometristName ?? rx.optometrist_name ?? rx.doctor_name,
+    customerId: rx.customerId ?? rx.customer_id,
+    patientId: rx.patientId ?? rx.patient_id,
+    storeId: rx.storeId ?? rx.store_id,
+    rightEye: mapEye(rx.rightEye ?? rx.right_eye),
+    leftEye: mapEye(rx.leftEye ?? rx.left_eye),
+    notes: rx.notes,
+  };
+}
+
 export const prescriptionApi = {
   getPrescriptions: async (patientOrCustomerId: string) => {
     // Try patient_id first; if empty, fall back to customer_id
     let response = await api.get('/prescriptions', { params: { patient_id: patientOrCustomerId } });
-    const data = response.data;
+    let data = response.data;
     const rxList = data?.prescriptions || data || [];
     if (Array.isArray(rxList) && rxList.length === 0) {
       // No results by patient_id — try as customer_id
       response = await api.get('/prescriptions', { params: { customer_id: patientOrCustomerId } });
-      return response.data;
+      data = response.data;
+    }
+    // Normalise to camelCase before handing to the page.
+    if (data?.prescriptions && Array.isArray(data.prescriptions)) {
+      return { ...data, prescriptions: data.prescriptions.map(mapRx) };
+    }
+    if (Array.isArray(data)) {
+      return data.map(mapRx);
     }
     return data;
   },
 
   getPrescription: async (prescriptionId: string) => {
     const response = await api.get(`/prescriptions/${prescriptionId}`);
-    return response.data;
+    return mapRx(response.data);
   },
 
   createPrescription: async (data: Partial<import('../../types').Prescription>) => {

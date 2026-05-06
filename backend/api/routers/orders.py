@@ -664,16 +664,53 @@ async def create_order(
             )
             subtotal += item_subtotal
 
-        # Calculate tax (18% GST default)
-        tax_rate = 18.0
-        # Phase 6.7 — apply order-level discount on top of per-item discounts.
-        # Discount comes off taxable subtotal BEFORE GST so invoice math is
-        # consistent (tax charged on what the customer actually pays).
+        # Phase 6.15 — per-category GST. Audit Run #4 caught a phantom-
+        # balance bug: frontend computed 5% on frames + lenses but the
+        # backend stamped 18% flat, so every order with a frame had the
+        # backend grand_total > what the customer paid, leaving a fake
+        # balance due. Now we mirror the frontend's per-HSN rate map.
+        # Indian GST rules: 5% for frames / spectacle lenses / contact
+        # lenses / spectacles; 18% for sunglasses / watches / accessories.
+        LOW_GST_CATEGORIES = {
+            "FRAMES", "FRAME", "EYEGLASS_FRAME", "SPECTACLE_FRAME",
+            "RX_LENSES", "LENS", "LENSES", "EYEGLASS_LENS",
+            "OPTICAL_LENS", "OPTICAL_LENSES",
+            "SPECTACLE_LENS", "SPECTACLE_LENSES",
+            "CONTACT_LENS", "CONTACT_LENSES", "COLOUR_CONTACTS",
+            "SPECTACLE", "COMPLETE_SPECTACLE",
+        }
+
+        def _gst_rate_for_category(cat: str) -> float:
+            return 5.0 if (cat or "").upper() in LOW_GST_CATEGORIES else 18.0
+
+        # Per-item taxable + tax to mirror the frontend's getGrandTotal.
+        # `items_data` was built earlier with line subtotal (after item
+        # discount). We re-aggregate here per GST rate for the totals.
         cart_discount_percent = max(0.0, min(100.0, order.cart_discount_percent or 0.0))
-        cart_discount_amount = round(subtotal * (cart_discount_percent / 100.0), 2)
-        taxable_after_cart_discount = round(subtotal - cart_discount_amount, 2)
-        tax_amount = round(taxable_after_cart_discount * (tax_rate / 100), 2)
+        cart_discount_factor = 1.0 - (cart_discount_percent / 100.0)
+
+        per_rate_taxable: dict = {}
+        per_rate_tax: dict = {}
+        for it in items_data:
+            cat = it.get("category") or it.get("item_type") or ""
+            rate = _gst_rate_for_category(cat)
+            line_taxable = round(float(it.get("subtotal", 0.0)) * cart_discount_factor, 2)
+            line_tax = round(line_taxable * (rate / 100.0), 2)
+            per_rate_taxable[rate] = round(per_rate_taxable.get(rate, 0.0) + line_taxable, 2)
+            per_rate_tax[rate] = round(per_rate_tax.get(rate, 0.0) + line_tax, 2)
+            # Stamp the per-line GST onto items_data so invoice math is
+            # auditable line-by-line later.
+            it["gst_rate"] = rate
+            it["taxable_value"] = line_taxable
+            it["tax_amount"] = line_tax
+
+        taxable_after_cart_discount = round(sum(per_rate_taxable.values()), 2)
+        tax_amount = round(sum(per_rate_tax.values()), 2)
         grand_total = round(taxable_after_cart_discount + tax_amount, 2)
+        cart_discount_amount = round(subtotal - taxable_after_cart_discount, 2) if cart_discount_percent > 0 else 0.0
+        # Pick the dominant rate as the doc-level `tax_rate` for legacy
+        # readers (the audit + invoice export both look at this field).
+        tax_rate = max(per_rate_taxable, key=per_rate_taxable.get) if per_rate_taxable else 18.0
 
         # Resolve delivery date — explicit date > expected_delivery_days
         if order.delivery_date:
