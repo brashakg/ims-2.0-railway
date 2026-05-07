@@ -1,19 +1,19 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import {
-  Plus,
-  Edit2,
-  Trash2,
-  ExternalLink,
-  Loader2,
   ChevronLeft,
   ChevronRight,
+  Edit2,
+  ExternalLink,
+  Loader2,
+  Trash2,
   Upload,
-  ChevronDown,
+  X,
 } from 'lucide-react';
 import SearchableDropdown from '@/components/SearchableDropdown';
+import Topbar from '@/components/Topbar';
 import { CATEGORIES as CATEGORY_DEFS } from '@/lib/categories';
 
 interface Product {
@@ -48,36 +48,73 @@ interface FiltersResponse {
 
 const CATEGORIES = ['All', ...CATEGORY_DEFS.map((c) => c.label)];
 
-const STATUS_SEGMENTS: Array<{ key: string; label: string }> = [
-  { key: 'All', label: 'All' },
-  { key: 'Published', label: 'Active' },
-  { key: 'Draft', label: 'Draft' },
-  { key: 'Archived', label: 'Archived' },
+interface SavedView {
+  key: string;
+  label: string;
+  filter: { status?: string; lowStock?: boolean };
+}
+
+const SAVED_VIEWS: SavedView[] = [
+  { key: 'all', label: 'All', filter: {} },
+  { key: 'active', label: 'Active', filter: { status: 'PUBLISHED' } },
+  { key: 'draft', label: 'Drafts', filter: { status: 'DRAFT' } },
+  { key: 'archived', label: 'Archived', filter: { status: 'ARCHIVED' } },
 ];
+
+// Polaris-styled status badge based on the product's lifecycle.
+function StatusBadge({ status }: { status: Product['status'] }) {
+  if (status === 'PUBLISHED') {
+    return <span className="polaris-badge polaris-badge-success">Active</span>;
+  }
+  if (status === 'DRAFT') {
+    return <span className="polaris-badge polaris-badge-warning">Draft</span>;
+  }
+  return <span className="polaris-badge">Archived</span>;
+}
+
+// Sync indicator. shopifyProductId presence is the source of truth — a
+// failed last sync log on a product that already has a shopifyProductId
+// just means the LAST attempt failed (e.g. throttle), not that the
+// product never made it.
+function SyncBadge({ product }: { product: Product }) {
+  if (product.shopifyProductId) {
+    return (
+      <span className="polaris-badge polaris-badge-success">Synced</span>
+    );
+  }
+  const lastFailed = product.syncLogs[0]?.status === 'FAILED';
+  if (lastFailed) {
+    return (
+      <span className="polaris-badge polaris-badge-critical">Failed</span>
+    );
+  }
+  return <span className="polaris-badge">Not synced</span>;
+}
 
 export default function ProductsPage() {
   const [products, setProducts] = useState<Product[]>([]);
   const [loading, setLoading] = useState(true);
   const [page, setPage] = useState(1);
-  const [limit] = useState(10);
+  const [limit] = useState(20);
   const [total, setTotal] = useState(0);
 
   // Filters
   const [category, setCategory] = useState('All');
   const [brand, setBrand] = useState('');
-  const [status, setStatus] = useState('All');
+  const [status, setStatus] = useState('All'); // matches saved-view key
   const [location, setLocation] = useState('');
   const [search, setSearch] = useState('');
   const [shape, setShape] = useState('');
   const [frameMaterial, setFrameMaterial] = useState('');
   const [gender, setGender] = useState('');
-  const [showMoreFilters, setShowMoreFilters] = useState(false);
 
+  // Filter option lists
   const [brands, setBrands] = useState<string[]>([]);
   const [shapes, setShapes] = useState<string[]>([]);
   const [frameMaterials, setFrameMaterials] = useState<string[]>([]);
   const [genders, setGenders] = useState<string[]>([]);
   const [locations, setLocations] = useState<Location[]>([]);
+
   const [selectedProducts, setSelectedProducts] = useState<Set<string>>(
     new Set()
   );
@@ -89,7 +126,7 @@ export default function ProductsPage() {
     archived: number;
   } | null>(null);
 
-  // Fetch status counts for segment tab badges
+  // Fetch status counts for the saved-view chip rail.
   useEffect(() => {
     (async () => {
       try {
@@ -109,24 +146,22 @@ export default function ProductsPage() {
     })();
   }, [page]);
 
-  // Fetch locations
+  // Locations
   useEffect(() => {
-    const fetchLocations = async () => {
+    (async () => {
       try {
         const res = await fetch('/api/locations?excludeSynthetic=true');
         const data = await res.json();
-        // Handle both array and { data: [...] } response formats
-        setLocations(Array.isArray(data) ? data : (data?.data || []));
-      } catch (error) {
-        console.error('Error fetching locations:', error);
+        setLocations(Array.isArray(data) ? data : data?.data || []);
+      } catch (err) {
+        console.error('Error fetching locations:', err);
       }
-    };
-    fetchLocations();
+    })();
   }, []);
 
-  // Fetch filter options from new /api/products/filters endpoint
+  // Filter options
   useEffect(() => {
-    const fetchFilters = async () => {
+    (async () => {
       try {
         const res = await fetch('/api/products/filters');
         const data: FiltersResponse = await res.json();
@@ -136,56 +171,62 @@ export default function ProductsPage() {
           setFrameMaterials(data.frameMaterials || []);
           setGenders(data.genders || []);
         }
-      } catch (error) {
-        console.error('Error fetching filters:', error);
+      } catch (err) {
+        console.error('Error fetching filters:', err);
       }
-    };
-    fetchFilters();
+    })();
   }, []);
 
-  // Fetch products
+  // Products list
   useEffect(() => {
-    const fetchProducts = async () => {
+    (async () => {
       setLoading(true);
       try {
         const params = new URLSearchParams({
-          page: page.toString(),
-          limit: limit.toString(),
+          page: String(page),
+          limit: String(limit),
           ...(category !== 'All' && { category }),
           ...(brand && { brand }),
-          ...(status !== 'All' && { status: status.toUpperCase() }),
+          ...(status !== 'All' && { status }),
           ...(location && { location }),
           ...(search && { search }),
           ...(shape && { shape }),
           ...(frameMaterial && { frameMaterial }),
           ...(gender && { gender }),
         });
-
         const res = await fetch(`/api/products?${params}`);
         const data = await res.json();
         setProducts(data.data || []);
         setTotal(data.pagination?.total || 0);
-      } catch (error) {
-        console.error('Error fetching products:', error);
+      } catch (err) {
+        console.error('Error fetching products:', err);
       } finally {
         setLoading(false);
       }
-    };
+    })();
+  }, [
+    page,
+    limit,
+    category,
+    brand,
+    status,
+    location,
+    search,
+    shape,
+    frameMaterial,
+    gender,
+  ]);
 
-    fetchProducts();
-  }, [page, limit, category, brand, status, location, search, shape, frameMaterial, gender]);
-
-  const handleSelectProduct = (id: string) => {
-    const newSelected = new Set(selectedProducts);
-    if (newSelected.has(id)) {
-      newSelected.delete(id);
-    } else {
-      newSelected.add(id);
-    }
-    setSelectedProducts(newSelected);
+  const toggleSelect = (id: string) => {
+    setSelectedProducts((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
   };
 
-  const handleSelectAll = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const toggleSelectAll = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.checked) {
       setSelectedProducts(new Set(products.map((p) => p.id)));
     } else {
@@ -195,7 +236,6 @@ export default function ProductsPage() {
 
   const handleSyncSelected = async () => {
     if (selectedProducts.size === 0) return;
-
     setSyncLoading(true);
     try {
       const res = await fetch('/api/shopify/sync', {
@@ -213,81 +253,30 @@ export default function ProductsPage() {
         );
       }
       setSelectedProducts(new Set());
-      // Refresh products
       setPage(1);
-    } catch (error) {
-      console.error('Error syncing products:', error);
-      alert('Sync request failed. Please try again.');
+    } catch (err) {
+      console.error(err);
+      alert('Sync request failed.');
     } finally {
       setSyncLoading(false);
     }
   };
 
-  const handleArchiveSelected = async () => {
-    if (selectedProducts.size === 0) return;
-    if (!confirm(`Archive ${selectedProducts.size} product(s)?`)) return;
-
-    try {
-      const results = await Promise.allSettled(
-        Array.from(selectedProducts).map((productId) =>
-          fetch(`/api/products/${productId}`, {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ status: 'ARCHIVED' }),
-          })
-        )
-      );
-      const failed = results.filter((r) => r.status === 'rejected').length;
-      if (failed > 0) {
-        alert(`${failed} product(s) failed to archive.`);
-      }
-      setSelectedProducts(new Set());
-      setPage(1);
-    } catch (error) {
-      console.error('Error archiving products:', error);
-      alert('Failed to archive products. Please try again.');
-    }
-  };
-
-  const handleDeleteProduct = async (id: string) => {
-    if (!confirm('Are you sure you want to delete this product?')) return;
-
-    try {
-      await fetch(`/api/products/${id}`, { method: 'DELETE' });
-      setPage(1);
-    } catch (error) {
-      console.error('Error deleting product:', error);
-    }
-  };
-
-  const handleBulkDelete = async () => {
-    if (selectedProducts.size === 0) return;
-    if (!confirm(`Permanently delete ${selectedProducts.size} product(s)? This cannot be undone.`)) return;
-
-    try {
-      const results = await Promise.allSettled(
-        Array.from(selectedProducts).map((productId) =>
-          fetch(`/api/products/${productId}`, { method: 'DELETE' })
-        )
-      );
-      const failed = results.filter((r) => r.status === 'rejected').length;
-      if (failed > 0) alert(`${failed} product(s) failed to delete.`);
-      setSelectedProducts(new Set());
-      setPage(1);
-    } catch (error) {
-      console.error('Error deleting products:', error);
-    }
-  };
-
   const handleBulkStatusChange = async (newStatus: string) => {
     if (selectedProducts.size === 0) return;
-    const label = newStatus === 'PUBLISHED' ? 'publish' : newStatus === 'DRAFT' ? 'set to draft' : newStatus.toLowerCase();
-    if (!confirm(`${label} ${selectedProducts.size} product(s)?`)) return;
-
+    const verb =
+      newStatus === 'PUBLISHED'
+        ? 'publish'
+        : newStatus === 'DRAFT'
+          ? 'set to draft'
+          : newStatus === 'ARCHIVED'
+            ? 'archive'
+            : newStatus.toLowerCase();
+    if (!confirm(`${verb} ${selectedProducts.size} product(s)?`)) return;
     try {
       const results = await Promise.allSettled(
-        Array.from(selectedProducts).map((productId) =>
-          fetch(`/api/products/${productId}`, {
+        Array.from(selectedProducts).map((id) =>
+          fetch(`/api/products/${id}`, {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ status: newStatus }),
@@ -298,105 +287,207 @@ export default function ProductsPage() {
       if (failed > 0) alert(`${failed} product(s) failed to update.`);
       setSelectedProducts(new Set());
       setPage(1);
-    } catch (error) {
-      console.error('Error updating products:', error);
+    } catch (err) {
+      console.error(err);
     }
   };
 
-  const getTotalStock = (product: Product) => {
-    return product.locations.reduce((sum, loc) => sum + loc.quantity, 0);
+  const handleBulkDelete = async () => {
+    if (selectedProducts.size === 0) return;
+    if (
+      !confirm(
+        `Permanently delete ${selectedProducts.size} product(s)? This cannot be undone.`
+      )
+    )
+      return;
+    try {
+      const results = await Promise.allSettled(
+        Array.from(selectedProducts).map((id) =>
+          fetch(`/api/products/${id}`, { method: 'DELETE' })
+        )
+      );
+      const failed = results.filter((r) => r.status === 'rejected').length;
+      if (failed > 0) alert(`${failed} product(s) failed to delete.`);
+      setSelectedProducts(new Set());
+      setPage(1);
+    } catch (err) {
+      console.error(err);
+    }
   };
 
-  const getLastSyncStatus = (product: Product) => {
-    // If product has a Shopify ID, it's synced (either pushed or pulled)
-    if (product.shopifyProductId) return '✓ Synced';
-    const lastSync = product.syncLogs[0];
-    if (!lastSync) return 'Not synced';
-    return lastSync.status === 'SUCCESS' ? '✓ Synced' : '✗ Failed';
+  const handleDeleteOne = async (id: string) => {
+    if (!confirm('Delete this product?')) return;
+    try {
+      await fetch(`/api/products/${id}`, { method: 'DELETE' });
+      setPage(1);
+    } catch (err) {
+      console.error(err);
+    }
   };
 
-  const pages = Math.ceil(total / limit);
+  const totalStock = (p: Product) =>
+    p.locations.reduce((s, l) => s + l.quantity, 0);
 
-  const hasActiveMoreFilters = shape || frameMaterial || gender;
+  const pages = Math.max(1, Math.ceil(total / limit));
+
+  const activeFilters = [
+    brand && { key: 'brand', label: `Brand: ${brand}`, clear: () => setBrand('') },
+    category !== 'All' && {
+      key: 'category',
+      label: `Category: ${category}`,
+      clear: () => setCategory('All'),
+    },
+    location && {
+      key: 'location',
+      label: `Location: ${locations.find((l) => l.id === location)?.name || ''}`,
+      clear: () => setLocation(''),
+    },
+    shape && { key: 'shape', label: `Shape: ${shape}`, clear: () => setShape('') },
+    frameMaterial && {
+      key: 'fm',
+      label: `Frame Material: ${frameMaterial}`,
+      clear: () => setFrameMaterial(''),
+    },
+    gender && {
+      key: 'gender',
+      label: `Gender: ${gender}`,
+      clear: () => setGender(''),
+    },
+  ].filter(Boolean) as Array<{
+    key: string;
+    label: string;
+    clear: () => void;
+  }>;
 
   return (
-    <div className="p-4 sm:p-6 bg-gray-50 min-h-screen">
-      <div className="max-w-7xl mx-auto">
-        {/* Header */}
-        <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 mb-6">
-          <h1 className="text-2xl sm:text-3xl font-bold text-gray-900">Products</h1>
-          <Link
-            href="/dashboard/products/new"
-            className="flex items-center gap-2 bg-blue-600 text-white px-4 py-3 min-h-[44px] rounded-lg hover:bg-blue-700 transition-colors text-sm"
-          >
-            <Plus className="w-4 h-4" />
-            Add Product
-          </Link>
+    <>
+      <Topbar
+        title="Products"
+        subtitle={total ? `${total.toLocaleString()} total` : undefined}
+        breadcrumb={[{ label: 'Home', href: '/dashboard' }, { label: 'Products' }]}
+      />
+
+      <div style={{ padding: 24, maxWidth: 1400, margin: '0 auto' }}>
+        {/* ─── Saved-views chip rail ───────────────────── */}
+        <div className="flex items-center gap-2 flex-wrap mb-3">
+          {SAVED_VIEWS.map((v) => {
+            const active = status === (v.filter.status ?? 'All');
+            const count = !statusCounts
+              ? null
+              : v.key === 'all'
+                ? statusCounts.total
+                : v.key === 'active'
+                  ? statusCounts.published
+                  : v.key === 'draft'
+                    ? statusCounts.draft
+                    : statusCounts.archived;
+            return (
+              <button
+                key={v.key}
+                type="button"
+                onClick={() => {
+                  setStatus(v.filter.status ?? 'All');
+                  setPage(1);
+                }}
+                className="polaris-btn polaris-btn-sm"
+                style={{
+                  background: active ? 'var(--text)' : 'var(--bg-surface)',
+                  color: active ? 'white' : 'var(--text)',
+                  borderColor: active
+                    ? 'var(--text)'
+                    : 'var(--border-strong)',
+                  fontWeight: active ? 600 : 500,
+                }}
+              >
+                {v.label}
+                {count !== null && (
+                  <span
+                    style={{
+                      marginLeft: 4,
+                      padding: '0 5px',
+                      fontSize: 10,
+                      borderRadius: 999,
+                      background: active
+                        ? 'rgba(255,255,255,0.2)'
+                        : 'var(--bg-surface-tertiary)',
+                      color: active ? 'rgba(255,255,255,0.9)' : 'var(--text-tertiary)',
+                    }}
+                  >
+                    {count.toLocaleString()}
+                  </span>
+                )}
+              </button>
+            );
+          })}
         </div>
 
-        {/* Status segment tabs (matches Shopify Products layout) */}
-        <div className="bg-white rounded-lg shadow p-3 mb-4">
-          <div className="flex items-center gap-2 flex-wrap">
-            {STATUS_SEGMENTS.map((s) => {
-              const count = !statusCounts
-                ? null
-                : s.key === 'All'
-                  ? statusCounts.total
-                  : s.key === 'Published'
-                    ? statusCounts.published
-                    : s.key === 'Draft'
-                      ? statusCounts.draft
-                      : statusCounts.archived;
-              return (
-                <button
-                  key={s.key}
-                  onClick={() => {
-                    setStatus(s.key);
-                    setPage(1);
-                  }}
-                  className={`inline-flex items-center gap-2 px-3 py-1.5 text-sm rounded-lg border transition-colors ${
-                    status === s.key
-                      ? 'bg-blue-600 text-white border-blue-600'
-                      : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-50'
-                  }`}
-                >
-                  <span>{s.label}</span>
-                  {count !== null && (
-                    <span
-                      className={`text-[11px] px-1.5 rounded-full ${
-                        status === s.key
-                          ? 'bg-white/20 text-white'
-                          : 'bg-slate-100 text-slate-600'
-                      }`}
-                    >
-                      {count}
-                    </span>
-                  )}
-                </button>
-              );
-            })}
-          </div>
-        </div>
-
-        {/* Filters */}
-        <div className="bg-white rounded-lg shadow p-4 mb-6">
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
-            <SearchableDropdown
-              label="Product Type"
-              options={CATEGORIES}
-              value={category}
-              onChange={setCategory}
+        {/* ─── Filter rail (search + 4 dropdowns) ──────── */}
+        <div
+          className="polaris-card mb-3"
+          style={{ padding: 12, display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'flex-end' }}
+        >
+          <div style={{ flex: '2 1 280px', minWidth: 220 }}>
+            <label
+              style={{
+                display: 'block',
+                fontSize: 11,
+                color: 'var(--text-tertiary)',
+                marginBottom: 4,
+                textTransform: 'uppercase',
+                letterSpacing: 0.4,
+              }}
+            >
+              Search
+            </label>
+            <input
+              type="text"
+              placeholder="Title, brand, model number…"
+              value={search}
+              onChange={(e) => {
+                setSearch(e.target.value);
+                setPage(1);
+              }}
+              style={{
+                width: '100%',
+                padding: '6px 10px',
+                border: '1px solid var(--border-strong)',
+                borderRadius: 8,
+                fontSize: 13,
+                height: 32,
+              }}
             />
+          </div>
+          <div style={{ flex: '1 1 160px', minWidth: 140 }}>
             <SearchableDropdown
               label="Brand"
               options={brands}
               value={brand}
-              onChange={setBrand}
+              onChange={(v) => {
+                setBrand(v);
+                setPage(1);
+              }}
             />
+          </div>
+          <div style={{ flex: '1 1 160px', minWidth: 140 }}>
+            <SearchableDropdown
+              label="Category"
+              options={CATEGORIES}
+              value={category}
+              onChange={(v) => {
+                setCategory(v);
+                setPage(1);
+              }}
+            />
+          </div>
+          <div style={{ flex: '1 1 160px', minWidth: 140 }}>
             <SearchableDropdown
               label="Location"
               options={['All', ...locations.map((l) => l.name)]}
-              value={location ? locations.find((l) => l.id === location)?.name || '' : 'All'}
+              value={
+                location
+                  ? locations.find((l) => l.id === location)?.name || ''
+                  : 'All'
+              }
               onChange={(val) => {
                 if (val === 'All') {
                   setLocation('');
@@ -404,275 +495,449 @@ export default function ProductsPage() {
                   const loc = locations.find((l) => l.name === val);
                   setLocation(loc?.id || '');
                 }
+                setPage(1);
               }}
             />
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">
-                Search
-              </label>
-              <input
-                type="text"
-                placeholder="Product name, brand..."
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                className="w-full px-3 py-3 min-h-[44px] border border-gray-300 rounded-lg focus:outline-none focus:border-blue-500"
-              />
-            </div>
           </div>
-
-          {/* More Filters Collapsible Section */}
-          <div className="mt-4 border-t pt-4">
-            <button
-              onClick={() => setShowMoreFilters(!showMoreFilters)}
-              className="flex items-center gap-2 text-sm font-medium text-gray-700 hover:text-gray-900"
-            >
-              <ChevronDown
-                className={`w-4 h-4 transition-transform ${
-                  showMoreFilters ? 'rotate-180' : ''
-                }`}
-              />
-              More Filters
-              {hasActiveMoreFilters && (
-                <span className="ml-2 px-2 py-1 bg-blue-100 text-blue-700 rounded text-xs font-semibold">
-                  {[shape, frameMaterial, gender].filter(Boolean).length} active
-                </span>
-              )}
-            </button>
-
-            {showMoreFilters && (
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-4 mt-4">
-                <SearchableDropdown
-                  label="Shape"
-                  options={shapes}
-                  value={shape}
-                  onChange={setShape}
-                />
-                <SearchableDropdown
-                  label="Frame Material"
-                  options={frameMaterials}
-                  value={frameMaterial}
-                  onChange={setFrameMaterial}
-                />
-                <SearchableDropdown
-                  label="Gender"
-                  options={genders}
-                  value={gender}
-                  onChange={setGender}
-                />
-              </div>
-            )}
+          <div style={{ flex: '1 1 140px', minWidth: 130 }}>
+            <SearchableDropdown
+              label="Shape"
+              options={shapes}
+              value={shape}
+              onChange={(v) => {
+                setShape(v);
+                setPage(1);
+              }}
+            />
+          </div>
+          <div style={{ flex: '1 1 160px', minWidth: 140 }}>
+            <SearchableDropdown
+              label="Frame material"
+              options={frameMaterials}
+              value={frameMaterial}
+              onChange={(v) => {
+                setFrameMaterial(v);
+                setPage(1);
+              }}
+            />
+          </div>
+          <div style={{ flex: '1 1 140px', minWidth: 130 }}>
+            <SearchableDropdown
+              label="Gender"
+              options={genders}
+              value={gender}
+              onChange={(v) => {
+                setGender(v);
+                setPage(1);
+              }}
+            />
           </div>
         </div>
 
-        {/* Bulk Actions */}
-        {selectedProducts.size > 0 && (
-          <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-6 flex items-center justify-between">
-            <span className="text-sm text-blue-900">
-              {selectedProducts.size} product(s) selected
-            </span>
-            <div className="flex gap-2">
+        {/* Active-filter chips (clearable) */}
+        {activeFilters.length > 0 && (
+          <div
+            className="flex items-center gap-2 flex-wrap mb-3"
+            style={{ fontSize: 12 }}
+          >
+            <span style={{ color: 'var(--text-tertiary)' }}>Filters:</span>
+            {activeFilters.map((f) => (
               <button
-                onClick={handleSyncSelected}
-                disabled={syncLoading}
-                className="flex items-center gap-2 bg-green-600 text-white px-4 py-3 min-h-[44px] rounded-lg hover:bg-green-700 transition-colors disabled:opacity-50 text-sm"
+                key={f.key}
+                type="button"
+                onClick={f.clear}
+                className="polaris-badge"
+                style={{
+                  cursor: 'pointer',
+                  height: 20,
+                  background: 'var(--brand-bg)',
+                  color: 'var(--brand-text)',
+                }}
               >
-                {syncLoading ? (
-                  <Loader2 className="w-4 h-4 animate-spin" />
-                ) : (
-                  <Upload className="w-4 h-4" />
-                )}
-                Sync to Shopify
+                {f.label}
+                <X size={10} />
               </button>
-              <button
-                onClick={() => handleBulkStatusChange('PUBLISHED')}
-                className="bg-blue-600 text-white px-4 py-3 min-h-[44px] rounded-lg hover:bg-blue-700 transition-colors text-sm"
-              >
-                Publish
-              </button>
-              <button
-                onClick={() => handleBulkStatusChange('DRAFT')}
-                className="bg-yellow-600 text-white px-4 py-3 min-h-[44px] rounded-lg hover:bg-yellow-700 transition-colors text-sm"
-              >
-                Draft
-              </button>
-              <button
-                onClick={handleArchiveSelected}
-                className="bg-gray-600 text-white px-4 py-3 min-h-[44px] rounded-lg hover:bg-gray-700 transition-colors text-sm"
-              >
-                Archive
-              </button>
-              <button
-                onClick={handleBulkDelete}
-                className="bg-red-600 text-white px-4 py-3 min-h-[44px] rounded-lg hover:bg-red-700 transition-colors text-sm"
-              >
-                Delete
-              </button>
-            </div>
+            ))}
+            <button
+              type="button"
+              onClick={() => {
+                setBrand('');
+                setCategory('All');
+                setLocation('');
+                setShape('');
+                setFrameMaterial('');
+                setGender('');
+                setPage(1);
+              }}
+              className="polaris-btn polaris-btn-plain polaris-btn-sm"
+            >
+              Clear all
+            </button>
           </div>
         )}
 
-        {/* Products Table */}
-        <div className="bg-white rounded-lg shadow overflow-hidden">
+        {/* ─── Products table ──────────────────────────── */}
+        <div className="polaris-card" style={{ overflow: 'hidden' }}>
           {loading ? (
-            <div className="p-8 text-center">
-              <Loader2 className="w-8 h-8 animate-spin mx-auto text-blue-600" />
+            <div
+              style={{
+                padding: 32,
+                textAlign: 'center',
+                color: 'var(--text-tertiary)',
+                fontSize: 13,
+              }}
+            >
+              <Loader2
+                className="animate-spin inline-block mr-2"
+                size={14}
+              />
+              Loading…
+            </div>
+          ) : products.length === 0 ? (
+            <div
+              style={{
+                padding: 32,
+                textAlign: 'center',
+                color: 'var(--text-tertiary)',
+                fontSize: 13,
+              }}
+            >
+              No products match the current filters.
             </div>
           ) : (
-            <>
-              <div className="overflow-x-auto">
-                <table className="w-full text-xs sm:text-sm lg:text-base">
-                  <thead className="bg-gray-50 border-b border-gray-200">
-                    <tr>
-                      <th className="px-2 sm:px-6 py-3 text-left">
-                        <input
-                          type="checkbox"
-                          onChange={handleSelectAll}
-                          checked={selectedProducts.size === products.length && products.length > 0}
-                          className="w-4 h-4 rounded border-gray-300"
-                        />
-                      </th>
-                      <th className="px-2 sm:px-6 py-3 text-left text-xs sm:text-sm font-semibold text-gray-700">
-                        Image
-                      </th>
-                      <th className="px-2 sm:px-6 py-3 text-left text-xs sm:text-sm font-semibold text-gray-700">
-                        Brand
-                      </th>
-                      <th className="px-2 sm:px-6 py-3 text-left text-xs sm:text-sm font-semibold text-gray-700">
-                        Title
-                      </th>
-                      <th className="px-2 sm:px-6 py-3 text-left text-xs sm:text-sm font-semibold text-gray-700">
-                        Product Type
-                      </th>
-                      <th className="px-2 sm:px-6 py-3 text-left text-xs sm:text-sm font-semibold text-gray-700">
-                        MRP
-                      </th>
-                      <th className="px-2 sm:px-6 py-3 text-left text-xs sm:text-sm font-semibold text-gray-700">
-                        Status
-                      </th>
-                      <th className="px-2 sm:px-6 py-3 text-left text-xs sm:text-sm font-semibold text-gray-700">
-                        Stock
-                      </th>
-                      <th className="px-2 sm:px-6 py-3 text-left text-xs sm:text-sm font-semibold text-gray-700">
-                        Sync
-                      </th>
-                      <th className="px-2 sm:px-6 py-3 text-left text-xs sm:text-sm font-semibold text-gray-700">
-                        Actions
-                      </th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-gray-200">
-                    {products.map((product) => (
-                      <tr key={product.id} className="hover:bg-gray-50">
-                        <td className="px-2 sm:px-6 py-4">
+            <div style={{ overflowX: 'auto' }}>
+              <table className="polaris-table">
+                <thead>
+                  <tr>
+                    <th style={{ width: 36 }}>
+                      <input
+                        type="checkbox"
+                        onChange={toggleSelectAll}
+                        checked={
+                          selectedProducts.size === products.length &&
+                          products.length > 0
+                        }
+                        style={{
+                          width: 14,
+                          height: 14,
+                          accentColor: 'var(--text)',
+                          cursor: 'pointer',
+                        }}
+                      />
+                    </th>
+                    <th style={{ width: 44 }}></th>
+                    <th>Title</th>
+                    <th>Brand</th>
+                    <th>Category</th>
+                    <th>Status</th>
+                    <th
+                      className="tabular-nums"
+                      style={{ textAlign: 'right' }}
+                    >
+                      MRP
+                    </th>
+                    <th
+                      className="tabular-nums"
+                      style={{ textAlign: 'right' }}
+                    >
+                      Stock
+                    </th>
+                    <th>Sync</th>
+                    <th style={{ textAlign: 'right' }}>Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {products.map((p) => {
+                    const stock = totalStock(p);
+                    const lowStock = stock < 5;
+                    return (
+                      <tr key={p.id}>
+                        <td>
                           <input
                             type="checkbox"
-                            checked={selectedProducts.has(product.id)}
-                            onChange={() => handleSelectProduct(product.id)}
-                            className="w-4 h-4 rounded border-gray-300"
+                            checked={selectedProducts.has(p.id)}
+                            onChange={() => toggleSelect(p.id)}
+                            style={{
+                              width: 14,
+                              height: 14,
+                              accentColor: 'var(--text)',
+                              cursor: 'pointer',
+                            }}
                           />
                         </td>
-                        <td className="px-2 sm:px-6 py-4">
-                          {product.images[0] ? (
+                        <td>
+                          {p.images[0] ? (
+                            // eslint-disable-next-line @next/next/no-img-element
                             <img
-                              src={product.images[0].url}
-                              alt={product.title}
-                              className="w-10 h-10 rounded object-cover"
+                              src={p.images[0].url}
+                              alt={p.title}
+                              style={{
+                                width: 36,
+                                height: 36,
+                                borderRadius: 4,
+                                objectFit: 'cover',
+                                border: '1px solid var(--border-subdued)',
+                              }}
                             />
                           ) : (
-                            <div className="w-10 h-10 rounded bg-gray-200" />
+                            <div
+                              style={{
+                                width: 36,
+                                height: 36,
+                                borderRadius: 4,
+                                background: 'var(--bg-surface-tertiary)',
+                              }}
+                            />
                           )}
                         </td>
-                        <td className="px-2 sm:px-6 py-4 text-xs sm:text-sm font-medium text-gray-900">
-                          {product.brand}
-                        </td>
-                        <td className="px-2 sm:px-6 py-4 text-xs sm:text-sm max-w-xs truncate">
+                        <td style={{ maxWidth: 320 }}>
                           <Link
-                            href={`/dashboard/products/edit/${product.id}`}
-                            className="text-blue-700 hover:underline font-medium"
+                            href={`/dashboard/products/edit/${p.id}`}
+                            style={{
+                              fontWeight: 500,
+                              color: 'var(--text)',
+                              textDecoration: 'none',
+                            }}
+                            className="hover:underline"
                           >
-                            {product.title}
+                            <div
+                              style={{
+                                overflow: 'hidden',
+                                textOverflow: 'ellipsis',
+                                whiteSpace: 'nowrap',
+                              }}
+                            >
+                              {p.title || '(untitled)'}
+                            </div>
                           </Link>
                         </td>
-                        <td className="px-2 sm:px-6 py-4 text-xs sm:text-sm text-gray-600">
-                          {product.category}
+                        <td style={{ color: 'var(--text-secondary)' }}>
+                          {p.brand || '—'}
                         </td>
-                        <td className="px-2 sm:px-6 py-4 text-xs sm:text-sm font-medium text-gray-900">
-                          ₹{product.mrp}
+                        <td style={{ color: 'var(--text-secondary)' }}>
+                          {p.category || '—'}
                         </td>
-                        <td className="px-2 sm:px-6 py-4 text-xs sm:text-sm">
-                          <span
-                            className={`inline-block px-2.5 py-0.5 rounded-full text-[11px] font-medium border ${
-                              product.status === 'PUBLISHED'
-                                ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
-                                : product.status === 'DRAFT'
-                                ? 'bg-amber-50 text-amber-700 border-amber-200'
-                                : 'bg-slate-100 text-slate-700 border-slate-200'
-                            }`}
-                          >
-                            {product.status === 'PUBLISHED' ? 'Active' : product.status === 'DRAFT' ? 'Draft' : 'Archived'}
-                          </span>
+                        <td>
+                          <StatusBadge status={p.status} />
                         </td>
-                        <td className="px-6 py-4 text-sm text-gray-900">
-                          {getTotalStock(product)}
+                        <td
+                          className="tabular-nums"
+                          style={{ textAlign: 'right' }}
+                        >
+                          ₹{p.mrp.toLocaleString('en-IN')}
                         </td>
-                        <td className="px-2 sm:px-6 py-4 text-xs sm:text-sm text-gray-600">
-                          {getLastSyncStatus(product)}
+                        <td
+                          className="tabular-nums"
+                          style={{
+                            textAlign: 'right',
+                            color: lowStock ? 'var(--critical)' : 'var(--text)',
+                            fontWeight: lowStock ? 600 : 500,
+                          }}
+                        >
+                          {stock}
                         </td>
-                        <td className="px-6 py-4 text-sm flex gap-2">
+                        <td>
+                          <SyncBadge product={p} />
+                        </td>
+                        <td style={{ textAlign: 'right' }}>
                           <Link
-                            href={`/dashboard/products/edit/${product.id}`}
-                            className="text-blue-600 hover:text-blue-800"
+                            href={`/dashboard/products/edit/${p.id}`}
+                            title="Edit"
+                            style={{
+                              padding: 5,
+                              display: 'inline-flex',
+                              color: 'var(--text-secondary)',
+                              marginRight: 4,
+                            }}
                           >
-                            <Edit2 className="w-4 h-4" />
+                            <Edit2 size={14} />
                           </Link>
-                          {product.status === 'PUBLISHED' && (
+                          {p.shopifyProductId && (
                             <a
                               href="#"
-                              className="text-blue-600 hover:text-blue-800"
-                              title="View on Shopify"
+                              title="Open on Shopify"
+                              style={{
+                                padding: 5,
+                                display: 'inline-flex',
+                                color: 'var(--text-secondary)',
+                                marginRight: 4,
+                              }}
                             >
-                              <ExternalLink className="w-4 h-4" />
+                              <ExternalLink size={14} />
                             </a>
                           )}
                           <button
-                            onClick={() => handleDeleteProduct(product.id)}
-                            className="text-red-600 hover:text-red-800"
+                            type="button"
+                            onClick={() => handleDeleteOne(p.id)}
+                            title="Delete"
+                            style={{
+                              padding: 5,
+                              border: 'none',
+                              background: 'transparent',
+                              color: 'var(--critical)',
+                              cursor: 'pointer',
+                            }}
                           >
-                            <Trash2 className="w-4 h-4" />
+                            <Trash2 size={14} />
                           </button>
                         </td>
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
 
-              {/* Pagination */}
-              <div className="px-6 py-4 border-t border-gray-200 flex items-center justify-between">
-                <span className="text-sm text-gray-600">
-                  Page {page} of {pages} | Total: {total} products
-                </span>
-                <div className="flex gap-2">
-                  <button
-                    onClick={() => setPage(Math.max(1, page - 1))}
-                    disabled={page === 1}
-                    className="p-2 border border-gray-300 rounded-lg hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    <ChevronLeft className="w-4 h-4" />
-                  </button>
-                  <button
-                    onClick={() => setPage(Math.min(pages, page + 1))}
-                    disabled={page === pages}
-                    className="p-2 border border-gray-300 rounded-lg hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    <ChevronRight className="w-4 h-4" />
-                  </button>
-                </div>
+          {/* Pagination */}
+          {!loading && products.length > 0 && (
+            <div
+              style={{
+                padding: '8px 16px',
+                borderTop: '1px solid var(--border-subdued)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                fontSize: 12,
+                color: 'var(--text-tertiary)',
+              }}
+            >
+              <span>
+                Page {page} of {pages} · {total.toLocaleString()} products
+              </span>
+              <div className="flex gap-1">
+                <button
+                  type="button"
+                  onClick={() => setPage(Math.max(1, page - 1))}
+                  disabled={page === 1}
+                  className="polaris-btn polaris-btn-icon"
+                >
+                  <ChevronLeft size={14} />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPage(Math.min(pages, page + 1))}
+                  disabled={page === pages}
+                  className="polaris-btn polaris-btn-icon"
+                >
+                  <ChevronRight size={14} />
+                </button>
               </div>
-            </>
+            </div>
           )}
         </div>
       </div>
-    </div>
+
+      {/* ─── Sticky bulk-action bar (black, only when selected) ── */}
+      {selectedProducts.size > 0 && (
+        <div
+          style={{
+            position: 'sticky',
+            bottom: 0,
+            zIndex: 20,
+            margin: '0 24px 16px',
+            padding: '8px 14px',
+            background: 'var(--text)',
+            color: 'white',
+            borderRadius: 10,
+            boxShadow: 'var(--shadow-lg)',
+            display: 'flex',
+            alignItems: 'center',
+            gap: 10,
+            flexWrap: 'wrap',
+          }}
+        >
+          <span style={{ fontSize: 13, fontWeight: 500 }}>
+            {selectedProducts.size} selected
+          </span>
+          <div style={{ flex: 1 }} />
+          <button
+            type="button"
+            onClick={handleSyncSelected}
+            disabled={syncLoading}
+            className="polaris-btn polaris-btn-sm"
+            style={{
+              background: 'rgba(255,255,255,0.1)',
+              color: 'white',
+              borderColor: 'rgba(255,255,255,0.2)',
+              boxShadow: 'none',
+            }}
+          >
+            {syncLoading ? (
+              <Loader2 size={12} className="animate-spin" />
+            ) : (
+              <Upload size={12} />
+            )}
+            Sync to Shopify
+          </button>
+          <button
+            type="button"
+            onClick={() => handleBulkStatusChange('PUBLISHED')}
+            className="polaris-btn polaris-btn-sm"
+            style={{
+              background: 'rgba(255,255,255,0.1)',
+              color: 'white',
+              borderColor: 'rgba(255,255,255,0.2)',
+              boxShadow: 'none',
+            }}
+          >
+            Publish
+          </button>
+          <button
+            type="button"
+            onClick={() => handleBulkStatusChange('DRAFT')}
+            className="polaris-btn polaris-btn-sm"
+            style={{
+              background: 'rgba(255,255,255,0.1)',
+              color: 'white',
+              borderColor: 'rgba(255,255,255,0.2)',
+              boxShadow: 'none',
+            }}
+          >
+            Set draft
+          </button>
+          <button
+            type="button"
+            onClick={() => handleBulkStatusChange('ARCHIVED')}
+            className="polaris-btn polaris-btn-sm"
+            style={{
+              background: 'rgba(255,255,255,0.1)',
+              color: 'white',
+              borderColor: 'rgba(255,255,255,0.2)',
+              boxShadow: 'none',
+            }}
+          >
+            Archive
+          </button>
+          <button
+            type="button"
+            onClick={handleBulkDelete}
+            className="polaris-btn polaris-btn-sm"
+            style={{
+              background: 'var(--critical)',
+              color: 'white',
+              borderColor: 'var(--critical)',
+              boxShadow: 'none',
+            }}
+          >
+            Delete
+          </button>
+          <button
+            type="button"
+            onClick={() => setSelectedProducts(new Set())}
+            className="polaris-btn polaris-btn-icon"
+            title="Clear selection"
+            style={{
+              background: 'transparent',
+              color: 'rgba(255,255,255,0.7)',
+              borderColor: 'transparent',
+              boxShadow: 'none',
+            }}
+          >
+            <X size={14} />
+          </button>
+        </div>
+      )}
+    </>
   );
 }
