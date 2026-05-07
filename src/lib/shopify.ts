@@ -189,6 +189,10 @@ export interface CreateProductInput {
   tags?: string[];
   productType?: string;
   status?: "ACTIVE" | "DRAFT" | "ARCHIVED";
+  /** Shopify "Vendor" field — should be the BRAND, not the store name.
+   *  Audit 2026-05: every existing product had vendor="Better Vision",
+   *  which broke Shopify's vendor filters and brand-collection rules. */
+  vendor?: string;
 }
 
 export interface CreateProductResult {
@@ -235,9 +239,16 @@ export async function createProduct(
   const input: Record<string, unknown> = {
     title: productData.title,
     descriptionHtml: productData.description || "",
-    tags: productData.tags || [],
+    // Drop empty tags before send. tagsForProductAttributes already
+    // skips empty values, but every push goes through ", "-joined string
+    // round-trips that can introduce stray "" entries.
+    tags: (productData.tags || []).map((t) => t.trim()).filter(Boolean),
     status: productData.status || "ACTIVE",
     productType: productData.productType || "",
+    // vendor MUST be the brand. If caller doesn't supply one, Shopify
+    // defaults to the store name which is what produced the
+    // "vendor=Better Vision on every product" mess in 4,400+ historical rows.
+    ...(productData.vendor ? { vendor: productData.vendor } : {}),
     seo: {
       title: productData.seoTitle || productData.title,
       description: productData.seoDescription || "",
@@ -323,6 +334,7 @@ export interface UpdateProductInput {
   seoDescription?: string;
   tags?: string[];
   productType?: string;
+  vendor?: string;
 }
 
 export async function updateProduct(
@@ -341,8 +353,11 @@ export async function updateProduct(
   const input: Record<string, unknown> = { id: shopifyId };
   if (productData.title) input.title = productData.title;
   if (productData.description) input.descriptionHtml = productData.description;
-  if (productData.tags) input.tags = productData.tags;
+  if (productData.tags) {
+    input.tags = productData.tags.map((t) => t.trim()).filter(Boolean);
+  }
   if (productData.productType !== undefined) input.productType = productData.productType;
+  if (productData.vendor) input.vendor = productData.vendor;
   if (productData.status) input.status = productData.status;
 
   const seo: Record<string, string> = {};
@@ -1351,16 +1366,20 @@ export async function deleteWebhook(
   return { success: true };
 }
 
-// ─── PRODUCT METAFIELDS ────────────────────────────────
+// ─── METAFIELDS ────────────────────────────────────────
+// One mutation handles BOTH product and variant metafields — Shopify
+// just looks at ownerId. Helpers below select the right resource.
 
-export async function setProductMetafields(
-  shopifyProductId: string,
-  metafields: Array<{
-    namespace: string;
-    key: string;
-    value: string;
-    type: string;
-  }>
+interface MetafieldInput {
+  namespace: string;
+  key: string;
+  value: string;
+  type: string;
+}
+
+async function setMetafieldsForOwner(
+  ownerId: string,
+  metafields: MetafieldInput[]
 ): Promise<{ success: boolean; message: string }> {
   const mutation = `
     mutation SetMetafields($metafields: [MetafieldsSetInput!]!) {
@@ -1371,7 +1390,7 @@ export async function setProductMetafields(
     }
   `;
 
-  const input = metafields.map((mf) => ({ ...mf, ownerId: shopifyProductId }));
+  const input = metafields.map((mf) => ({ ...mf, ownerId }));
 
   const result = await makeGraphQLRequest<{
     metafieldsSet: {
@@ -1388,6 +1407,20 @@ export async function setProductMetafields(
     return { success: false, message: errors.map((e) => `${e.field}: ${e.message}`).join("; ") };
   }
   return { success: true, message: "Metafields set successfully" };
+}
+
+export async function setProductMetafields(
+  shopifyProductId: string,
+  metafields: MetafieldInput[]
+): Promise<{ success: boolean; message: string }> {
+  return setMetafieldsForOwner(shopifyProductId, metafields);
+}
+
+export async function setVariantMetafields(
+  shopifyVariantId: string,
+  metafields: MetafieldInput[]
+): Promise<{ success: boolean; message: string }> {
+  return setMetafieldsForOwner(shopifyVariantId, metafields);
 }
 
 // ─── FILE UPLOAD via Shopify Staged Uploads ───────────────
