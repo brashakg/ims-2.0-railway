@@ -3,6 +3,7 @@
 // ============================================================================
 import { useState, useEffect } from 'react';
 import { useAuth } from '../../context/AuthContext';
+import { default as api } from '../../services/api/client';
 import { Clock, MapPin, LogIn, LogOut, CheckCircle, AlertTriangle } from 'lucide-react';
 
 interface AttendanceRecord {
@@ -70,23 +71,15 @@ export function AttendanceWidget() {
 
     // POST to attendance check-in API
     try {
-      const token = localStorage.getItem('ims_token');
-      await fetch('/api/v1/hr/attendance/check-in', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        },
-        body: JSON.stringify({
-          userId: user?.id,
-          storeId: user?.activeStoreId,
-          checkInTime: checkInTime,
-          location: loc || undefined,
-          late: isLate,
-        }),
+      await api.post('/hr/attendance/check-in', {
+        userId: user?.id,
+        storeId: user?.activeStoreId,
+        checkInTime: checkInTime,
+        location: loc || undefined,
+        late: isLate,
       });
     } catch (err) {
-      // silently handle error
+      // silently handle error — local state already saved
     }
 
     setIsLoading(false);
@@ -105,21 +98,13 @@ export function AttendanceWidget() {
 
     // POST to attendance check-out API
     try {
-      const token = localStorage.getItem('ims_token');
-      await fetch('/api/v1/hr/attendance/check-out', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        },
-        body: JSON.stringify({
-          userId: user?.id,
-          storeId: user?.activeStoreId,
-          checkOutTime: checkOutTime,
-        }),
+      await api.post('/hr/attendance/check-out', {
+        userId: user?.id,
+        storeId: user?.activeStoreId,
+        checkOutTime: checkOutTime,
       });
     } catch (err) {
-      // silently handle error
+      // silently handle error — local state already saved
     }
 
     setIsLoading(false);

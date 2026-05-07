@@ -5,6 +5,7 @@
 import { NavLink } from 'react-router-dom';
 import { useMemo } from 'react';
 import { useAuth } from '../../context/AuthContext';
+import { useAppearance } from '../../context/AppearanceContext';
 import { Icon, type IconName } from './Icon';
 import type { UserRole } from '../../types';
 
@@ -71,6 +72,7 @@ function hasAnyRole(userRoles: readonly UserRole[] | undefined, required: UserRo
 
 export function Rail({ brand = 'bv' }: { brand?: 'bv' | 'wizopt' }) {
   const { user } = useAuth();
+  const { railExpanded, toggleRailExpanded } = useAppearance();
   const userRoles = user?.roles;
   const activeRole = user?.activeRole;
 
@@ -95,7 +97,7 @@ export function Rail({ brand = 'bv' }: { brand?: 'bv' | 'wizopt' }) {
     .toUpperCase() || '?';
 
   return (
-    <aside className="rail">
+    <aside className={'rail' + (railExpanded ? ' expanded' : '')}>
       <div className="brand" title={brand === 'wizopt' ? 'WizOpt' : 'Better Vision'}>
         {glyph}
       </div>
@@ -119,9 +121,33 @@ export function Rail({ brand = 'bv' }: { brand?: 'bv' | 'wizopt' }) {
         </div>
       ))}
       <div className="rail-spacer" />
+      <button
+        type="button"
+        className="rail-toggle"
+        onClick={toggleRailExpanded}
+        title={railExpanded ? 'Collapse sidebar' : 'Expand sidebar (show labels)'}
+        aria-label={railExpanded ? 'Collapse sidebar' : 'Expand sidebar'}
+      >
+        <ChevronIcon flipped={railExpanded} />
+        <span className="rail-label">Collapse</span>
+      </button>
       <div className="rail-avatar" title={user?.name ? `${user.name} • ${activeRole}` : 'User'}>
         {userInitials}
       </div>
     </aside>
+  );
+}
+
+function ChevronIcon({ flipped }: { flipped: boolean }) {
+  // Right-pointing chevron when collapsed (=> expand). Left when expanded.
+  return (
+    <svg
+      viewBox="0 0 24 24" width={20} height={20}
+      fill="none" stroke="currentColor" strokeWidth={1.6}
+      strokeLinecap="round" strokeLinejoin="round"
+      style={{ transform: flipped ? 'rotate(180deg)' : 'none', transition: 'transform .15s' }}
+    >
+      <path d="M9 6l6 6-6 6" />
+    </svg>
   );
 }

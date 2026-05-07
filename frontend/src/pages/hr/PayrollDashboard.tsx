@@ -18,6 +18,7 @@ import {
   X,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
+import { default as api } from '../../services/api/client';
 import clsx from 'clsx';
 
 // Types
@@ -69,50 +70,33 @@ interface Payslip {
   generated_at: string;
 }
 
-// API helper
+// API helper — uses the shared axios client so the right baseURL +
+// auth token are applied. Raw fetch hit the Vercel domain instead of
+// the Railway backend, AND used the wrong localStorage key
+// ('token' instead of 'ims_token'), so every payroll call 404'd.
 const payrollApi = {
   getSalarySheet: async (month: number, year: number, storeId?: string) => {
-    const params = new URLSearchParams();
-    params.append('month', String(month));
-    params.append('year', String(year));
-    if (storeId) params.append('store_id', storeId);
-    const response = await fetch(`/api/v1/payroll/salary-sheet?${params}`, {
-      headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` },
+    const r = await api.get('/payroll/salary-sheet', {
+      params: { month, year, ...(storeId ? { store_id: storeId } : {}) },
     });
-    return response.json();
+    return r.data;
   },
 
   recordAdvance: async (employeeId: string, amount: number, reason?: string) => {
-    const response = await fetch('/api/v1/payroll/advances', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${localStorage.getItem('token')}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        employee_id: employeeId,
-        amount,
-        reason,
-      }),
+    const r = await api.post('/payroll/advances', {
+      employee_id: employeeId, amount, reason,
     });
-    return response.json();
+    return r.data;
   },
 
   getAdvances: async (employeeId: string) => {
-    const response = await fetch(`/api/v1/payroll/advances/${employeeId}`, {
-      headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` },
-    });
-    return response.json();
+    const r = await api.get(`/payroll/advances/${employeeId}`);
+    return r.data;
   },
 
   getPayslip: async (employeeId: string, month: number, year: number) => {
-    const response = await fetch(
-      `/api/v1/payroll/payslip/${employeeId}/${month}/${year}`,
-      {
-        headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` },
-      }
-    );
-    return response.json();
+    const r = await api.get(`/payroll/payslip/${employeeId}/${month}/${year}`);
+    return r.data;
   },
 };
 

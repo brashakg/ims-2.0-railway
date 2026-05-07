@@ -130,19 +130,29 @@ def _points_repo() -> Optional[PointsLogRepository]:
 
 
 def _month_window(year: int, month: int) -> tuple:
+    """Returns (start_dt, next_month_dt, df_str, dt_str). The datetime
+    pair drives Mongo `created_at` range matches; the str pair is for
+    legacy `date_str` fallbacks if any caller wants them."""
     from datetime import timedelta
-    df = f"{year:04d}-{month:02d}-01"
+    start_dt = datetime(year, month, 1)
     if month == 12:
-        next_first = date_type(year + 1, 1, 1)
+        next_first = datetime(year + 1, 1, 1)
     else:
-        next_first = date_type(year, month + 1, 1)
-    dt = (next_first - timedelta(days=1)).isoformat()
-    return df, dt
+        next_first = datetime(year, month + 1, 1)
+    df = start_dt.date().isoformat()
+    dt = (next_first.date() - timedelta(days=1)).isoformat()
+    return start_dt, next_first, df, dt
 
 
 def _aggregate_sales(store_id: str, year: int, month: int) -> Dict[str, float]:
-    """Sum total_revenue + total_discount for the month from the orders
-    collection. Returns {sales, discount, avg_discount_pct} (zero-safe)."""
+    """Sum grand_total + total_discount for the month from the orders
+    collection. Returns {sales, discount, avg_discount_pct} (zero-safe).
+
+    Filter on `created_at` (datetime range — orders.py stores this via
+    BaseRepository._add_timestamps); orders don't have a `date_str`
+    field. Sums `grand_total` (the order doc field — orders.py:738) and
+    `total_discount` (added in the same Phase 6.15 fix that added the
+    per-category GST helper)."""
     out = {"sales": 0.0, "discount": 0.0, "avg_discount_pct": 0.0}
     db = get_db()
     if db is None:
@@ -151,7 +161,7 @@ def _aggregate_sales(store_id: str, year: int, month: int) -> Dict[str, float]:
         orders = db.get_collection("orders")
     except Exception:
         return out
-    df, dt = _month_window(year, month)
+    start_dt, next_first, df, dt = _month_window(year, month)
     # Two paths: try $aggregate (real Mongo); fall back to find()
     docs: List[Dict] = []
     try:
@@ -159,11 +169,11 @@ def _aggregate_sales(store_id: str, year: int, month: int) -> Dict[str, float]:
             {"$match": {
                 "store_id": store_id,
                 "status": {"$nin": ["CANCELLED", "DRAFT"]},
-                "date_str": {"$gte": df, "$lte": dt},
+                "created_at": {"$gte": start_dt, "$lt": next_first},
             }},
             {"$group": {
                 "_id": None,
-                "total_revenue": {"$sum": "$total"},
+                "total_revenue": {"$sum": "$grand_total"},
                 "total_discount": {"$sum": "$total_discount"},
             }},
         ]))
@@ -174,12 +184,19 @@ def _aggregate_sales(store_id: str, year: int, month: int) -> Dict[str, float]:
     except Exception:
         try:
             for d in orders.find({"store_id": store_id}):
-                ds = d.get("date_str") or ""
-                if not (df <= ds <= dt):
+                created_at = d.get("created_at")
+                # Accept both Python datetime and ISO string formats.
+                if isinstance(created_at, datetime):
+                    if not (start_dt <= created_at < next_first):
+                        continue
+                elif isinstance(created_at, str):
+                    if not (df <= created_at[:10] <= dt):
+                        continue
+                else:
                     continue
                 if d.get("status") in ("CANCELLED", "DRAFT"):
                     continue
-                out["sales"] += float(d.get("total") or 0)
+                out["sales"] += float(d.get("grand_total") or 0)
                 out["discount"] += float(d.get("total_discount") or 0)
         except Exception:
             pass
@@ -217,7 +234,7 @@ def _build_mtd_data(store_id: str, year: int, month: int) -> Dict[str, Dict]:
     repo = _points_repo()
     if repo is None:
         return {}
-    df, dt = _month_window(year, month)
+    _, _, df, dt = _month_window(year, month)
     rows = repo.list_for_mtd(store_id, df, dt)
     by_staff = aggregate_mtd(rows)
     out: Dict[str, Dict] = {}

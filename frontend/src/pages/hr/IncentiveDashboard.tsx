@@ -13,38 +13,42 @@ import {
   Gift,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
+import { default as api } from '../../services/api/client';
 import clsx from 'clsx';
 
-// API endpoint structure (will implement in api.ts)
+// API endpoint structure — uses the shared axios client so baseURL +
+// auth token are applied. Raw fetch hit the Vercel domain instead of
+// Railway, and the wrong localStorage key ('token' vs 'ims_token'),
+// so every dashboard load 404'd in production.
 const incentivesApi = {
   getDashboard: async (month?: number, year?: number) => {
-    const params = new URLSearchParams();
-    if (month) params.append('month', String(month));
-    if (year) params.append('year', String(year));
-    const response = await fetch(`/api/v1/incentives/dashboard?${params}`, {
-      headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` },
+    const r = await api.get('/incentives/dashboard', {
+      params: {
+        ...(month ? { month } : {}),
+        ...(year ? { year } : {}),
+      },
     });
-    return response.json();
+    return r.data;
   },
-  
+
   getLeaderboard: async (month?: number, year?: number) => {
-    const params = new URLSearchParams();
-    if (month) params.append('month', String(month));
-    if (year) params.append('year', String(year));
-    const response = await fetch(`/api/v1/incentives/leaderboard?${params}`, {
-      headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` },
+    const r = await api.get('/incentives/leaderboard', {
+      params: {
+        ...(month ? { month } : {}),
+        ...(year ? { year } : {}),
+      },
     });
-    return response.json();
+    return r.data;
   },
 
   getKickers: async (staffId: string, month?: number, year?: number) => {
-    const params = new URLSearchParams();
-    if (month) params.append('month', String(month));
-    if (year) params.append('year', String(year));
-    const response = await fetch(`/api/v1/incentives/kickers/${staffId}?${params}`, {
-      headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` },
+    const r = await api.get(`/incentives/kickers/${staffId}`, {
+      params: {
+        ...(month ? { month } : {}),
+        ...(year ? { year } : {}),
+      },
     });
-    return response.json();
+    return r.data;
   },
 };
 
