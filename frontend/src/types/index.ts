@@ -584,6 +584,125 @@ export interface FUStatusResponse {
   fu2: Record<string, number>;
 }
 
+// ============================================================================
+// Pune Incentive Module (ii) — Daily Points
+// ============================================================================
+
+export type PointCategory =
+  | 'attendance' | 'conversion' | 'task' | 'visufit'
+  | 'punctuality' | 'behaviour' | 'kicker_1' | 'kicker_2' | 'reviews';
+
+export interface DailyScores {
+  attendance: number;
+  conversion: number | null;
+  task: number;
+  visufit: number;
+  punctuality: number;
+  behaviour: number;
+  kicker_1: number;
+  kicker_2: number;
+  reviews: number;
+}
+
+export interface CreateDailyPointsRequest {
+  date: string;
+  staff_id: string;
+  scores: DailyScores;
+  visufit_usage_pct_mtd?: number | null;
+}
+
+export interface BulkDailyPointsRequest {
+  rows: CreateDailyPointsRequest[];
+}
+
+export interface EligibilityBand {
+  min: number;
+  max: number;
+  value: number;
+}
+
+export interface PointsLog {
+  log_id: string;
+  store_id: string;
+  date: string;
+  date_str: string;
+  staff_id: string;
+  staff_name: string | null;
+  attendance: number;
+  conversion: number;
+  task: number;
+  visufit: number;
+  punctuality: number;
+  behaviour: number;
+  kicker_1: number;
+  kicker_2: number;
+  reviews: number;
+  total: number;
+  eligibility: number;
+  eligibility_thresholds_used: { bands: EligibilityBand[] };
+  visufit_gate_applied: boolean;
+  visufit_usage_pct_mtd: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface BulkPointsResponse {
+  saved: PointsLog[];
+  failures: Array<{ staff_id: string; date: string; status_code: number; detail: string }>;
+  saved_count: number;
+  failed_count: number;
+}
+
+export interface DailyListResponse {
+  items: PointsLog[];
+  store_id: string;
+  date_str: string;
+}
+
+export interface MTDStaffEntry {
+  staff_id: string;
+  staff_name: string | null;
+  days_logged: number;
+  avg: {
+    attendance: number; conversion: number; task: number; visufit: number;
+    punctuality: number; behaviour: number; kicker_1: number; kicker_2: number;
+    reviews: number; total: number;
+  };
+  eligibility_avg: number;
+}
+
+export interface MTDResponse {
+  store_id: string;
+  year: number;
+  month: number;
+  date_from: string;
+  date_to: string;
+  items: MTDStaffEntry[];
+}
+
+export interface LeaderboardResponse {
+  store_id: string;
+  days: number;
+  date_from: string;
+  date_to: string;
+  items: MTDStaffEntry[];
+}
+
+export interface IncentiveSettings {
+  store_id: string;
+  staff_weightages: Record<string, number>;
+  eligibility_bands: EligibilityBand[];
+  growth_targets: Record<string, number>;
+  base_rates: Record<string, number>;
+  discount_kill_threshold: number;
+  discount_multipliers: Array<{ max_pct: number; multiplier: number }>;
+  visufit_gate_threshold: number;
+  visufit_gate_enabled: boolean;
+  supervisor_bonuses: Array<any>;
+  updated_at: string | null;
+  updated_by: string | null;
+}
+
 export interface Walkout {
   walkout_id: string;
   store_id: string;

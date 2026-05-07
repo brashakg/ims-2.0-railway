@@ -67,6 +67,9 @@ const FinanceDashboard = lazy(() => import('./pages/finance/FinanceDashboard'));
 const WalkoutsPage = lazy(() => import('./pages/walkouts/WalkoutsPage').then(m => ({ default: m.WalkoutsPage })));
 const WalkoutDetailPage = lazy(() => import('./pages/walkouts/WalkoutDetailPage').then(m => ({ default: m.WalkoutDetailPage })));
 const WalkoutsDashboardPage = lazy(() => import('./pages/walkouts/WalkoutsDashboardPage').then(m => ({ default: m.WalkoutsDashboardPage })));
+const DailyScorecardPage = lazy(() => import('./pages/incentive/DailyScorecardPage').then(m => ({ default: m.DailyScorecardPage })));
+const MTDLeaderboardPage = lazy(() => import('./pages/incentive/MTDLeaderboardPage').then(m => ({ default: m.MTDLeaderboardPage })));
+const PointsHistoryPage = lazy(() => import('./pages/incentive/PointsHistoryPage').then(m => ({ default: m.PointsHistoryPage })));
 
 // Loading fallback component
 const PageLoader = () => (
@@ -342,6 +345,38 @@ function App() {
                         allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT', 'SALES_STAFF', 'SALES_CASHIER', 'CASHIER']}
                       >
                         <WalkoutDetailPage />
+                      </ProtectedRoute>
+                    }
+                  />
+
+                  {/* Pune Incentive Module ii — Daily Points */}
+                  <Route
+                    path="incentive"
+                    element={
+                      <ProtectedRoute
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT', 'SALES_STAFF', 'SALES_CASHIER', 'CASHIER']}
+                      >
+                        <DailyScorecardPage />
+                      </ProtectedRoute>
+                    }
+                  />
+                  <Route
+                    path="incentive/leaderboard"
+                    element={
+                      <ProtectedRoute
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT']}
+                      >
+                        <MTDLeaderboardPage />
+                      </ProtectedRoute>
+                    }
+                  />
+                  <Route
+                    path="incentive/staff/:staffId"
+                    element={
+                      <ProtectedRoute
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT']}
+                      >
+                        <PointsHistoryPage />
                       </ProtectedRoute>
                     }
                   />

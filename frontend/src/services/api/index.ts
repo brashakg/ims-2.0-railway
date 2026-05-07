@@ -48,3 +48,7 @@ export { analyticsV2Api } from './analytics';
 
 // Walkouts (Pune Incentive Module i)
 export { walkoutsApi } from './walkouts';
+
+// Daily Points (Pune Incentive Module ii) — distinct from the older
+// `incentivesApi` (sales-targets/kickers domain) re-exported via ./hr.
+export { incentiveApi } from './incentive';
