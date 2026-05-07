@@ -4,6 +4,7 @@
 
 import { useState } from 'react';
 import { ChevronRight, ChevronLeft, Check, Loader2 } from 'lucide-react';
+import { default as api } from '../../services/api/client';
 import clsx from 'clsx';
 
 type WizardStep = 'basic' | 'address' | 'categories' | 'staff' | 'features' | 'inventory' | 'review';
@@ -96,18 +97,10 @@ export function StoreSetupWizard() {
   const handleComplete = async () => {
     setIsLoading(true);
     try {
-      const token = localStorage.getItem('ims_token');
-      const response = await fetch('/api/v1/stores', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        },
-        body: JSON.stringify(formData),
-      });
-      if (!response.ok) {
-        throw new Error(`Store creation failed: ${response.statusText}`);
-      }
+      // Use the shared axios client (auto-injects baseURL + auth).
+      // Raw fetch hit the Vercel domain instead of the Railway
+      // backend in production.
+      await api.post('/stores', formData);
       // Success handling
     } finally {
       setIsLoading(false);

@@ -2,10 +2,11 @@
 // IMS 2.0 - Feature Toggles Settings (Superadmin Only)
 // ============================================================================
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Save, AlertCircle, Loader2 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
+import { default as api } from '../../services/api/client';
 import clsx from 'clsx';
 
 interface FeatureToggleConfig {
@@ -49,27 +50,45 @@ export function FeatureToggles({ storeId }: FeatureToggleProps) {
     setHasChanges(true);
   };
 
+  // Load the store's existing toggle state on mount so the user
+  // sees the current setup, not the defaults each time.
+  useEffect(() => {
+    if (!storeId) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await api.get(`/settings/feature-toggles/${storeId}`);
+        const saved: Record<string, boolean> | undefined =
+          r?.data?.features || r?.data?.feature_toggles?.features;
+        if (cancelled || !saved) return;
+        setFeatures(prev =>
+          prev.map(f => (f.id in saved ? { ...f, enabled: !!saved[f.id] } : f)),
+        );
+      } catch {
+        // Fail-soft — keep defaults on first save.
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [storeId]);
+
   const handleSave = async () => {
     setIsLoading(true);
     try {
-      const token = localStorage.getItem('ims_token');
-      const togglePayload = features.reduce((acc, f) => ({ ...acc, [f.id]: f.enabled }), {} as Record<string, boolean>);
-      const response = await fetch(`/api/v1/settings/feature-toggles/${storeId}`, {
-        method: 'PATCH',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        },
-        body: JSON.stringify({ features: togglePayload }),
+      const togglePayload = features.reduce(
+        (acc, f) => ({ ...acc, [f.id]: f.enabled }),
+        {} as Record<string, boolean>,
+      );
+      // Use the shared axios client — gets baseURL + auth token from
+      // the interceptor (raw fetch hit the Vercel domain instead of
+      // the Railway backend, which is why every save 404'd).
+      await api.patch(`/settings/feature-toggles/${storeId}`, {
+        features: togglePayload,
       });
-      if (!response.ok) {
-        throw new Error(`Failed to save: ${response.statusText}`);
-      }
-      
       toast.success('Feature toggles updated successfully');
       setHasChanges(false);
-    } catch (error) {
-      toast.error('Failed to save feature toggles');
+    } catch (e: any) {
+      const detail = e?.response?.data?.detail || e?.message || 'Save failed';
+      toast.error(typeof detail === 'string' ? detail : 'Failed to save feature toggles');
     } finally {
       setIsLoading(false);
     }
