@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { useSession } from 'next-auth/react';
 import { Upload, X, Loader2, AlertTriangle, Search, Package, Plus, Edit3, ArrowRight, Store } from 'lucide-react';
@@ -143,6 +143,26 @@ export default function NewProductPage() {
   const [matchResults, setMatchResults] = useState<DuplicateProduct[]>([]);
   const [selectedMatch, setSelectedMatch] = useState<DuplicateProduct | null>(null);
   const [matchError, setMatchError] = useState<string | null>(null);
+
+  // Optional Color Code + Size on the identify step. When all four
+  // fields (brand, modelNo, colorCode, frameSize) are filled we can
+  // distinguish three outcomes:
+  //   - exact variant match → "this exact item already exists,
+  //     update its stock"
+  //   - product match but no such color+size variant → "the product
+  //     exists, add this combo as a new variant"
+  //   - no match at all → "create a new product"
+  // When colorCode + size are LEFT BLANK the match falls back to the
+  // existing brand+modelNo behavior (parent product lookup).
+  const [wizardColorCode, setWizardColorCode] = useState('');
+  const [wizardFrameSize, setWizardFrameSize] = useState('');
+  // Variant that matched the full Brand+Model+Color+Size combo.
+  // Populated by runIdentifyCheck when an exact 4-field hit lands.
+  // selectedMatch already carries the parent product; this carries the
+  // variant inside it that exactly matches.
+  const [exactVariantMatch, setExactVariantMatch] = useState<
+    { id: string; colorCode: string; frameSize: string | null } | null
+  >(null);
 
   // "Add variant" sub-form state (used when stage === 'add-variant')
   const [newVariantData, setNewVariantData] = useState({
@@ -573,6 +593,11 @@ export default function NewProductPage() {
   };
 
   // ── Wizard actions ──
+  // Match against existing catalog using up to 4 fields:
+  // brand, modelNo (required) + colorCode, frameSize (optional). The
+  // optional fields elevate a parent-product match into an exact
+  // variant match — letting us route directly to "Update stock" when
+  // staff has scanned an item that already exists.
   const runIdentifyCheck = async () => {
     if (!wizardCategory || !wizardBrand.trim() || !wizardModelNo.trim()) {
       setMatchError('Please fill in category, brand, and model no.');
@@ -580,27 +605,70 @@ export default function NewProductPage() {
     }
     setMatchError(null);
     setMatchChecking(true);
+    setExactVariantMatch(null);
     try {
-      const res = await fetch(
-        `/api/products/check-duplicate?brand=${encodeURIComponent(wizardBrand.trim())}&modelNo=${encodeURIComponent(wizardModelNo.trim())}`
-      );
+      const params = new URLSearchParams({
+        brand: wizardBrand.trim(),
+        modelNo: wizardModelNo.trim(),
+      });
+      if (wizardColorCode.trim()) params.set('colorCode', wizardColorCode.trim());
+      if (wizardFrameSize.trim()) params.set('frameSize', wizardFrameSize.trim());
+
+      const res = await fetch(`/api/products/check-duplicate?${params}`);
       const data = await res.json();
       if (!res.ok || !data.success) throw new Error(data.error || 'Check failed');
-      if (data.found && (data.products || []).length > 0) {
-        setMatchResults(data.products);
-        setSelectedMatch(null);
-        setStage('match');
-      } else {
-        // Pre-fill the full form with the wizard-collected fields and go
-        // straight to 'new-product' stage.
-        setFormData((prev) => ({
-          ...prev,
-          category: wizardCategory,
-          brand: wizardBrand.trim(),
-          modelNo: wizardModelNo.trim(),
-        }));
-        setStage('new-product');
+
+      const products = (data.products || []) as DuplicateProduct[];
+
+      // Server may include exactVariant when colorCode + frameSize matched
+      // a real variant inside one of the returned products.
+      const exact = data.exactVariant as
+        | { id: string; productId: string; colorCode: string; frameSize: string | null }
+        | null;
+
+      if (exact && products.length > 0) {
+        // Route 1: exact 4-field hit → jump straight to Update Stock for
+        // the matched variant.
+        const matched = products.find((p) => p.id === exact.productId);
+        if (matched) {
+          setSelectedMatch(matched);
+          setExactVariantMatch({
+            id: exact.id,
+            colorCode: exact.colorCode,
+            frameSize: exact.frameSize,
+          });
+          setStage('update-stock');
+          return;
+        }
       }
+
+      if (products.length > 0) {
+        // Route 2: parent product exists. Show the match screen so user
+        // can pick "Add as variant" or "Create new". Pre-fill the new
+        // variant form with the colour/size they typed (if any) so the
+        // add-variant step is one click closer to done.
+        setMatchResults(products);
+        setSelectedMatch(null);
+        setNewVariantData((prev) => ({
+          ...prev,
+          colorCode: wizardColorCode.trim(),
+          frameSize: wizardFrameSize.trim(),
+        }));
+        setStage('match');
+        return;
+      }
+
+      // Route 3: no match → continue to the full new-product form,
+      // pre-filled with the wizard-collected fields.
+      setFormData((prev) => ({
+        ...prev,
+        category: wizardCategory,
+        brand: wizardBrand.trim(),
+        modelNo: wizardModelNo.trim(),
+        ...(wizardColorCode.trim() && { colorCode: wizardColorCode.trim() }),
+        ...(wizardFrameSize.trim() && { frameSize: wizardFrameSize.trim() }),
+      }));
+      setStage('new-product');
     } catch (e) {
       setMatchError(e instanceof Error ? e.message : 'Match check failed');
     } finally {
@@ -729,12 +797,26 @@ export default function NewProductPage() {
               Add Product
             </h1>
             <p className="text-sm text-slate-600 mt-1">
-              Start by entering the category, brand and model number. We&apos;ll
-              check if this product already exists — if it does, you can add a
-              new color/size variant or update stock instead of re-entering
-              everything.
+              Enter Brand + Model No (required). Add the Colour Code and Size
+              if you have them — we&apos;ll match against existing variants
+              and route you to the right next step:
             </p>
+            <ul className="text-xs text-slate-500 mt-2 space-y-0.5 list-disc pl-4">
+              <li>
+                <strong className="text-slate-700">Exact variant exists</strong>
+                {' '}→ jump to <em>Update stock</em>
+              </li>
+              <li>
+                <strong className="text-slate-700">Product exists, this colour/size doesn&apos;t</strong>
+                {' '}→ jump to <em>Add as variant</em>
+              </li>
+              <li>
+                <strong className="text-slate-700">No match</strong>
+                {' '}→ continue to the full new-product form
+              </li>
+            </ul>
           </div>
+
           <div className="bg-white rounded-lg shadow-sm border border-slate-200 p-6 space-y-4">
             <div>
               <label className="block text-sm font-medium text-slate-700 mb-1">
@@ -788,6 +870,44 @@ export default function NewProductPage() {
                 className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm"
               />
             </div>
+
+            {/* Optional Colour Code + Size — adding either narrows the
+                match from "this product exists" to "this exact variant
+                exists" so we can route to update-stock instead of
+                add-variant. Leave blank to match at parent product level. */}
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1">
+                  Colour Code{' '}
+                  <span className="text-slate-400 font-normal text-xs">
+                    optional
+                  </span>
+                </label>
+                <input
+                  type="text"
+                  value={wizardColorCode}
+                  onChange={(e) => setWizardColorCode(e.target.value)}
+                  placeholder="e.g. 002/32"
+                  className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1">
+                  Size{' '}
+                  <span className="text-slate-400 font-normal text-xs">
+                    optional
+                  </span>
+                </label>
+                <input
+                  type="text"
+                  value={wizardFrameSize}
+                  onChange={(e) => setWizardFrameSize(e.target.value)}
+                  placeholder="e.g. 58"
+                  className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm"
+                />
+              </div>
+            </div>
+
             {matchError && (
               <div className="p-2 bg-red-50 border border-red-200 rounded text-red-800 text-sm">
                 {matchError}

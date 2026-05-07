@@ -11,8 +11,17 @@ function normalize(s: string): string {
 }
 
 // GET /api/products/check-duplicate?brand=Ray+Ban&modelNo=RB+3025
+//                                  &colorCode=002/32&frameSize=58
+//
 // Returns existing product(s) whose brand + modelNo match, tolerant of
 // punctuation / spacing differences between the query and stored values.
+//
+// When `colorCode` and/or `frameSize` are also supplied, we additionally
+// scan the matched products' variants for an exact (normalized) match
+// on those two fields. If found, the variant is returned in
+// `exactVariant` so the wizard can route directly to "Update stock" for
+// that specific item instead of the parent-product "Add as variant"
+// branch.
 export async function GET(request: NextRequest) {
   try {
     const auth = await requireAuth();
@@ -21,6 +30,8 @@ export async function GET(request: NextRequest) {
     const { searchParams } = new URL(request.url);
     const brand = searchParams.get("brand");
     const modelNo = searchParams.get("modelNo");
+    const colorCode = searchParams.get("colorCode") || "";
+    const frameSize = searchParams.get("frameSize") || "";
 
     if (!brand || !modelNo) {
       return NextResponse.json(
@@ -90,10 +101,50 @@ export async function GET(request: NextRequest) {
       }
     }
 
+    // Optional 4-field exact-variant match. We only return a hit when
+    // both colorCode AND frameSize are supplied — partial input would
+    // be ambiguous (e.g., colour matches but size is wrong).
+    let exactVariant: {
+      id: string;
+      productId: string;
+      colorCode: string;
+      frameSize: string | null;
+      sku: string | null;
+      barcode: string | null;
+    } | null = null;
+
+    if (existing.length > 0 && (colorCode || frameSize)) {
+      const normColor = normalize(colorCode);
+      const normSize = normalize(frameSize);
+      // We require both to be present for a true variant-level hit.
+      // (Just colour or just size still leaves us at parent-level.)
+      if (normColor && normSize) {
+        outer: for (const p of existing) {
+          for (const v of p.variants) {
+            if (
+              normalize(v.colorCode || "") === normColor &&
+              normalize(v.frameSize || "") === normSize
+            ) {
+              exactVariant = {
+                id: v.id,
+                productId: p.id,
+                colorCode: v.colorCode,
+                frameSize: v.frameSize,
+                sku: v.sku,
+                barcode: v.barcode,
+              };
+              break outer;
+            }
+          }
+        }
+      }
+    }
+
     return NextResponse.json({
       success: true,
       found: existing.length > 0,
       matchMode,
+      exactVariant,
       products: existing.map((p) => ({
         id: p.id,
         title: p.title,

@@ -56,3 +56,4 @@ Dockerfile
 # typescript build info
 tsconfig.tsbuildinfo
 *.tsbuildinfo
+CLAUDE.md
