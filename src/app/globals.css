@@ -5,9 +5,12 @@
 /* ============================================================
    Better Vision design tokens (Polaris-flavored)
    Source: Claude Design handoff 2026-05.
-   These power the Sidebar, Topbar, Card, Badge, Button primitives
-   used across the dashboard. Tailwind utilities still work — these
-   tokens are for components that need pixel-precise Polaris fidelity.
+
+   Tokens are global so any component can reference var(--brand) etc.
+   The Polaris RESET (body font-size 13px, system font, light gray bg)
+   only applies inside elements with the .polaris-shell class — i.e.
+   the dashboard layout. Login pages, auth flows, and any future
+   Tailwind-only screens keep the standard 16px/system bg they had.
    ============================================================ */
 :root {
   /* Surfaces */
@@ -59,10 +62,8 @@
   --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.16), 0 2px 6px rgba(0, 0, 0, 0.06);
 }
 
-* {
-  box-sizing: border-box;
-}
-
+/* Original app styling — DO NOT remove. Login page and any non-shell
+   screens depend on Tailwind defaults (16px body, slate background). */
 html,
 body {
   margin: 0;
@@ -70,19 +71,30 @@ body {
 }
 
 body {
+  @apply bg-white text-slate-900;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ─── Polaris shell — applies ONLY when an ancestor has .polaris-shell.
+       The dashboard layout sets that on its outer flex container. This
+       way Polaris-styled pages get 13px / system font / light-gray bg
+       without breaking login.tsx, register flows, or future pages. */
+.polaris-shell {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "SF Pro Text", system-ui, sans-serif;
   font-size: 13px;
   line-height: 1.45;
   color: var(--text);
   background: var(--bg);
-  -webkit-font-smoothing: antialiased;
 }
 
-button {
-  font-family: inherit;
+.polaris-shell *,
+.polaris-shell *::before,
+.polaris-shell *::after {
+  box-sizing: border-box;
 }
 
-/* ─── Polaris primitives ────────────────────────── */
+/* ─── Polaris primitives ─────────────────────────────
+   Always opt-in via class — they don't bleed onto Tailwind components. */
 .polaris-card {
   background: var(--bg-surface);
   border: 1px solid var(--border);
@@ -116,7 +128,9 @@ button {
   box-shadow: var(--shadow-xs);
   transition: background 80ms;
   white-space: nowrap;
+  /* Match Tailwind's default button (overrides our global rule). */
   min-height: auto;
+  font-family: inherit;
 }
 .polaris-btn:hover {
   background: var(--bg-surface-hover);
@@ -234,15 +248,10 @@ button {
   border-bottom: none;
 }
 
-.tabular-nums {
+.polaris-tabular-nums {
   font-variant-numeric: tabular-nums;
 }
 
-@keyframes spin {
-  to {
-    transform: rotate(360deg);
-  }
-}
 @keyframes fade-in {
   from {
     opacity: 0;
@@ -257,59 +266,108 @@ button {
   animation: fade-in 140ms ease-out;
 }
 
-/* ─── Existing Tailwind base + iPad sizing ─────────── */
+summary::-webkit-details-marker {
+  display: none;
+}
 
-/* Scrollbar styling */
+/* Polaris-shell scrollbars (replaces the slate scrollbar inside the shell) */
+.polaris-shell ::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+.polaris-shell ::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 4px;
+}
+.polaris-shell ::-webkit-scrollbar-track {
+  background: transparent;
+}
+.polaris-shell ::-webkit-scrollbar-thumb:hover {
+  background: var(--text-tertiary);
+}
+
+/* Outside .polaris-shell — keep the original app scrollbar */
 ::-webkit-scrollbar {
   width: 8px;
   height: 8px;
 }
 
 ::-webkit-scrollbar-track {
-  background: transparent;
+  background: #f1f5f9;
 }
 
 ::-webkit-scrollbar-thumb {
-  background: var(--border-strong);
+  background: #cbd5e1;
   border-radius: 4px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: var(--text-tertiary);
+  background: #94a3b8;
 }
 
-summary::-webkit-details-marker {
-  display: none;
-}
-
-/* Focus ring customization */
+/* Focus ring customization — applies everywhere */
 :focus-visible {
   @apply outline-none ring-2 ring-blue-500 ring-offset-2;
 }
 
-/* Link styling — only inside .prose contexts so Polaris components keep
-   their muted styling. */
-.prose a {
+/* Smooth color transitions */
+* {
+  @apply transition-colors duration-200;
+}
+
+/* Link styling */
+a {
   @apply text-blue-600 hover:text-blue-700 underline;
+}
+/* Polaris components opt-out of the global underlined link styling. */
+.polaris-shell a,
+.polaris-card a,
+.polaris-btn,
+.polaris-table a {
+  text-decoration: none;
+}
+.polaris-shell a:hover,
+.polaris-card a:hover,
+.polaris-table a:hover {
+  text-decoration: none;
 }
 
 button {
   @apply focus-visible:outline-none;
 }
 
-/* Form inputs in standard pages keep the iPad-friendly sizing. Polaris
-   primitives use .polaris-* classes which override these. */
-.tailwind-form input,
-.tailwind-form textarea,
-.tailwind-form select {
+/* iPad-friendly form input sizing — applies to inputs OUTSIDE the
+   Polaris shell. Login page, public flows etc. still get 44px touch
+   targets. Polaris pages use compact .polaris-* primitives instead. */
+input:not(.polaris-shell input),
+textarea:not(.polaris-shell textarea),
+select:not(.polaris-shell select) {
   @apply border border-slate-200 rounded-md px-3 py-2.5 min-h-[44px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500;
 }
 
-/* Code block styling */
+/* Touch-friendly button sizing — applies outside the Polaris shell. */
+:not(.polaris-shell) > button:not(.polaris-btn) {
+  @apply min-h-[44px] inline-flex items-center justify-center;
+}
+
+/* Code styling — exclude .polaris-kbd which has its own styling. */
 code:not(.polaris-kbd) {
   @apply bg-slate-100 px-1.5 py-0.5 rounded text-sm font-mono;
 }
 
 pre {
   @apply bg-slate-900 text-slate-100 p-4 rounded-lg overflow-auto;
+}
+
+/* iPad-first responsive typography */
+@media (max-width: 640px) {
+  html {
+    font-size: 16px;
+  }
+  :not(.polaris-shell) input,
+  :not(.polaris-shell) textarea,
+  :not(.polaris-shell) select,
+  :not(.polaris-shell) > button:not(.polaris-btn) {
+    @apply py-3;
+  }
 }

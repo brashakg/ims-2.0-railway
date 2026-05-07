@@ -255,10 +255,12 @@ export async function createProduct(
     // defaults to the store name which is what produced the
     // "vendor=Better Vision on every product" mess in 4,400+ historical rows.
     ...(productData.vendor ? { vendor: productData.vendor } : {}),
-    // Shopify standard product taxonomy. Lifts the product into Google
-    // Shopping / Shop App / Marketplace classifications automatically.
+    // Shopify standard product taxonomy. The ProductInput field is just
+    // `category` (an ID), NOT `productCategory: { productTaxonomyNodeId }`.
+    // Verified against the live schema 2026-05; the older nested shape
+    // never worked — Shopify silently dropped it.
     ...(productData.productCategory
-      ? { productCategory: { productTaxonomyNodeId: productData.productCategory } }
+      ? { category: productData.productCategory }
       : {}),
     seo: {
       title: productData.seoTitle || productData.title,
@@ -346,6 +348,8 @@ export interface UpdateProductInput {
   tags?: string[];
   productType?: string;
   vendor?: string;
+  /** Shopify standard taxonomy GID (e.g. gid://shopify/TaxonomyCategory/aa-2-27 for Sunglasses). */
+  productCategory?: string;
 }
 
 export async function updateProduct(
@@ -369,6 +373,7 @@ export async function updateProduct(
   }
   if (productData.productType !== undefined) input.productType = productData.productType;
   if (productData.vendor) input.vendor = productData.vendor;
+  if (productData.productCategory) input.category = productData.productCategory;
   if (productData.status) input.status = productData.status;
 
   const seo: Record<string, string> = {};

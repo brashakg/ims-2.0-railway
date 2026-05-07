@@ -44,11 +44,16 @@ export default function DashboardLayout({
   }
 
   return (
-    // Polaris-flavored shell. Sidebar is now sticky-positioned inside the
-    // flex row instead of fixed/absolute, so the main column flows
-    // naturally without a hardcoded margin-left.
+    // Polaris-flavored shell. The .polaris-shell class scopes the new
+    // 13px / system-font / light-gray styling to the dashboard only —
+    // login and any non-shell pages keep the original 16px / Tailwind
+    // styling so they don't suddenly look broken.
+    //
+    // Sidebar is sticky-positioned inside the flex row instead of
+    // fixed/absolute, so the main column flows naturally without a
+    // hardcoded margin-left.
     <div
-      className="flex min-h-screen"
+      className="polaris-shell flex min-h-screen"
       style={{ background: "var(--bg)" }}
     >
       <Sidebar />

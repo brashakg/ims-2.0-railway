@@ -55,48 +55,48 @@ export function buildAltText(opts: {
 
 /**
  * Map our internal category enum to Shopify's standard product taxonomy
- * GID. These IDs come from Shopify's Product Categorization (taxonomy
- * 2024-04). Setting `productCategory` on the GraphQL input puts the
- * product in the right Google-Shopping / Shop / Marketplace classification
- * automatically — much better than relying on the freeform productType
- * string for filtering.
+ * GID. Setting `category` on ProductInput puts the product in the right
+ * Google Shopping / Shop App / Marketplace classification automatically.
  *
- * GIDs sourced from
- *   https://shopify.dev/docs/api/admin-graphql/latest/queries/productCategory
- *   https://github.com/Shopify/product-taxonomy
+ * GIDs verified live against Shopify's taxonomy API on 2026-05-08:
+ *   query { taxonomy { categories(search:"...") { edges { node { id fullName } } } } }
  *
- * Eyewear (Apparel & Accessories > Clothing Accessories > Sunglasses /
- * Reading Glasses, etc.) is the closest standard taxonomy fit. If none
- * matches well (Smartglasses, Smartwatches), we return null so we don't
- * mis-tag the product.
+ * Most eyewear sub-categories (reading/computer/safety/clip-on/smart)
+ * don't have dedicated taxonomy nodes — they fall under the closest
+ * parent (Eyeglasses / Sunglasses / Smart Glasses / Safety Glasses).
  */
 export function shopifyTaxonomyGidFor(
   category: string | null | undefined
 ): string | null {
   const norm = normalizeCategory(category);
-  // Shopify Product Taxonomy node IDs. Format:
-  //   gid://shopify/TaxonomyCategory/<dotted-id>
-  // The dotted ID is the path: aa = Apparel & Accessories, etc.
-  // Verified in 2026-04 against the live taxonomy. Updates are rare.
   switch (norm) {
     case "SUNGLASSES":
     case "CLIP_ON_FRAMES":
-      return "gid://shopify/TaxonomyCategory/aa-1-13-7"; // Sunglasses
+      // Apparel & Accessories > Clothing Accessories > Sunglasses
+      return "gid://shopify/TaxonomyCategory/aa-2-27";
     case "SPECTACLES":
     case "READING_GLASSES":
     case "COMPUTER_GLASSES":
+      // Health & Beauty > Personal Care > Vision Care > Eyeglasses
+      return "gid://shopify/TaxonomyCategory/hb-3-19-4";
     case "SAFETY_GLASSES":
-      return "gid://shopify/TaxonomyCategory/aa-1-13-3"; // Eyeglasses
+      // Business & Industrial > Work Safety Protective Gear > Protective Eyewear > Safety Glasses
+      return "gid://shopify/TaxonomyCategory/bi-25-6-3";
     case "CONTACT_LENSES":
-      return "gid://shopify/TaxonomyCategory/aa-1-13-3-1"; // Contact Lenses
+      // Health & Beauty > Personal Care > Vision Care > Contact Lens Care > Contact Lenses
+      return "gid://shopify/TaxonomyCategory/hb-3-19-1-4";
     case "WATCHES":
-      return "gid://shopify/TaxonomyCategory/aa-2-7"; // Watches
+      // Apparel & Accessories > Jewelry > Watches
+      return "gid://shopify/TaxonomyCategory/aa-6-11";
     case "SMARTWATCHES":
-      return "gid://shopify/TaxonomyCategory/el-3-2-3"; // Smart Watches (electronics)
+      // Apparel & Accessories > Jewelry > Smart Watches
+      return "gid://shopify/TaxonomyCategory/aa-6-12";
     case "SMARTGLASSES":
-      return "gid://shopify/TaxonomyCategory/el-3-2-2"; // Wearable Tech
+      // Electronics > Computers > Smart Glasses
+      return "gid://shopify/TaxonomyCategory/el-6-7";
     case "ACCESSORIES":
-      return "gid://shopify/TaxonomyCategory/aa-1-1"; // Clothing Accessories
+      // Health & Beauty > Personal Care > Vision Care > Eyewear Accessories
+      return "gid://shopify/TaxonomyCategory/hb-3-19-5";
     default:
       return null;
   }
