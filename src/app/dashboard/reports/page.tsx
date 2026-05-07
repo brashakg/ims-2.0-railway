@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { LineChart, BarChart3, Package, ShoppingCart, Users, IndianRupee } from 'lucide-react';
+import Topbar from '@/components/Topbar';
 
 interface StatCardProps {
   label: string;
@@ -388,12 +389,14 @@ export default function ReportsPage() {
   );
 
   return (
-    <div className="min-h-screen bg-gray-50 p-6">
-      <div className="max-w-7xl mx-auto">
-        <div className="mb-8">
-          <h1 className="text-3xl font-bold text-gray-900 mb-2">Reports & Insights</h1>
-          <p className="text-gray-600">Real-time inventory and sales analytics</p>
-        </div>
+    <>
+      <Topbar
+        title="Reports"
+        subtitle="Real-time inventory and sales analytics"
+        breadcrumb={[{ label: 'Home', href: '/dashboard' }, { label: 'Reports' }]}
+        primaryAction={null}
+      />
+      <div style={{ padding: 24, maxWidth: 1400, margin: '0 auto' }}>
 
         <div className="flex gap-2 mb-6 border-b">
           {(['overview', 'sales', 'inventory'] as const).map((tab) => (
@@ -426,6 +429,6 @@ export default function ReportsPage() {
           </div>
         )}
       </div>
-    </div>
+    </>
   );
 }

@@ -16,6 +16,7 @@ import {
   RefreshCw,
   X,
 } from 'lucide-react';
+import Topbar from '@/components/Topbar';
 
 interface LogEntry {
   id: string;
@@ -181,36 +182,35 @@ export default function ActivityLogsPage() {
   };
 
   return (
-    <div className="p-4 sm:p-6 max-w-[1400px] mx-auto">
-      {/* Header */}
-      <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 mb-6">
-        <div>
-          <h1 className="text-2xl font-bold text-slate-900 flex items-center gap-2">
-            <ScrollText className="w-7 h-7 text-blue-600" />
-            Activity Logs
-          </h1>
-          <p className="text-sm text-slate-500 mt-1">
-            Track all changes and actions across the system
-          </p>
-        </div>
-        <div className="flex items-center gap-2">
-          <button
-            onClick={fetchLogs}
-            className="flex items-center gap-2 px-3 py-2 text-sm bg-white border border-slate-300 rounded-lg hover:bg-slate-50 transition-colors"
-          >
-            <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
-            Refresh
-          </button>
-          <button
-            onClick={exportCSV}
-            disabled={logs.length === 0}
-            className="flex items-center gap-2 px-3 py-2 text-sm bg-white border border-slate-300 rounded-lg hover:bg-slate-50 transition-colors disabled:opacity-50"
-          >
-            <Download className="w-4 h-4" />
-            Export CSV
-          </button>
-        </div>
-      </div>
+    <>
+      <Topbar
+        title="Activity Logs"
+        subtitle="Track all changes and actions"
+        breadcrumb={[{ label: 'Home', href: '/dashboard' }, { label: 'Activity Logs' }]}
+        primaryAction={null}
+        actions={
+          <>
+            <button
+              type="button"
+              onClick={fetchLogs}
+              className="polaris-btn"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
+              Refresh
+            </button>
+            <button
+              type="button"
+              onClick={exportCSV}
+              disabled={logs.length === 0}
+              className="polaris-btn"
+            >
+              <Download className="w-3.5 h-3.5" />
+              Export CSV
+            </button>
+          </>
+        }
+      />
+      <div style={{ padding: 24, maxWidth: 1400, margin: '0 auto' }}>
 
       {/* Search + Filter Toggle */}
       <div className="flex flex-col sm:flex-row gap-3 mb-4">
@@ -436,6 +436,7 @@ export default function ActivityLogsPage() {
           </button>
         </div>
       )}
-    </div>
+      </div>
+    </>
   );
 }

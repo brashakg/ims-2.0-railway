@@ -3,6 +3,7 @@
 import { useState, useEffect } from 'react';
 import { Upload, Loader2, Trash2 } from 'lucide-react';
 import SearchableDropdown from '@/components/SearchableDropdown';
+import Topbar from '@/components/Topbar';
 
 interface ProductImage {
   id: string;
@@ -132,12 +133,14 @@ export default function ImagesPage() {
   };
 
   return (
-    <div className="p-4 sm:p-6 bg-gray-50 min-h-screen">
-      <div className="max-w-7xl mx-auto">
-        {/* Header */}
-        <div className="flex justify-between items-center mb-6">
-          <h1 className="text-2xl sm:text-3xl font-bold text-gray-900">Image Management</h1>
-        </div>
+    <>
+      <Topbar
+        title="Image Management"
+        subtitle="Upload + browse product images"
+        breadcrumb={[{ label: 'Home', href: '/dashboard' }, { label: 'Images' }]}
+        primaryAction={null}
+      />
+      <div style={{ padding: 24, maxWidth: 1400, margin: '0 auto' }}>
 
         {/* Upload Section */}
         <div className="bg-white rounded-lg shadow p-6 mb-6">
@@ -348,6 +351,6 @@ export default function ImagesPage() {
           </div>
         </div>
       )}
-    </div>
+    </>
   );
 }

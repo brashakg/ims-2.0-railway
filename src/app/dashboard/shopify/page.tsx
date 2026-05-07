@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
+import Topbar from "@/components/Topbar";
 
 interface ShopifyStatus {
   configured: boolean;
@@ -310,14 +311,14 @@ export default function ShopifySettingsPage() {
   }
 
   return (
-    <div className="min-h-screen bg-slate-50 p-8">
-      <div className="max-w-6xl mx-auto">
-        <h1 className="text-3xl font-bold text-slate-900 mb-2">
-          Shopify Sync & Management
-        </h1>
-        <p className="text-slate-500 mb-8">
-          Bidirectional product sync, webhook management, and real-time updates
-        </p>
+    <>
+      <Topbar
+        title="Shopify Sync"
+        subtitle="Pull / push products, manage webhooks"
+        breadcrumb={[{ label: "Home", href: "/dashboard" }, { label: "Shopify Sync" }]}
+        primaryAction={null}
+      />
+      <div style={{ padding: 24, maxWidth: 1400, margin: "0 auto" }}>
 
         {error && (
           <div className="mb-4 p-4 bg-red-50 border border-red-200 rounded-lg text-red-700">
@@ -915,6 +916,6 @@ export default function ShopifySettingsPage() {
           </div>
         )}
       </div>
-    </div>
+    </>
   );
 }

@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { Loader2, Plus, Search, X } from 'lucide-react';
+import Topbar from '@/components/Topbar';
 
 interface Transfer {
   id: string;
@@ -240,22 +241,23 @@ export default function StockTransfersPage() {
   };
 
   return (
-    <div className="min-h-screen bg-slate-50 p-4 sm:p-8">
-      <div className="max-w-7xl mx-auto">
-        {/* Header */}
-        <div className="flex items-center justify-between mb-8">
-          <div>
-            <h1 className="text-3xl font-bold text-gray-900 mb-2">Stock Transfers</h1>
-            <p className="text-gray-600">Manage inventory transfers between locations</p>
-          </div>
+    <>
+      <Topbar
+        title="Stock Transfers"
+        subtitle="Inventory moves between locations"
+        breadcrumb={[{ label: 'Home', href: '/dashboard' }, { label: 'Stock Transfers' }]}
+        primaryAction={
           <button
+            type="button"
             onClick={() => setShowModal(true)}
-            className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition"
+            className="polaris-btn polaris-btn-primary"
           >
-            <Plus className="w-4 h-4" />
+            <Plus className="w-3.5 h-3.5" />
             New Transfer
           </button>
-        </div>
+        }
+      />
+      <div style={{ padding: 24, maxWidth: 1400, margin: '0 auto' }}>
 
         {/* Error Message */}
         {error && (
@@ -508,6 +510,6 @@ export default function StockTransfersPage() {
           </div>
         </div>
       )}
-    </div>
+    </>
   );
 }

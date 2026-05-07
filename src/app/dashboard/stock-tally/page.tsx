@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useRef } from "react";
 import { Trash2, Download, Upload, MapPin, Loader } from "lucide-react";
+import Topbar from "@/components/Topbar";
 
 interface ScannedItem {
   barcode: string;
@@ -208,12 +209,14 @@ export default function StockTallyPage() {
   const totalScanned = scannedItems.reduce((s, i) => s + i.quantity, 0);
 
   return (
-    <div className="min-h-screen bg-slate-50 p-4 sm:p-6">
-      <div className="max-w-7xl mx-auto">
-        <div className="mb-6">
-          <h1 className="text-2xl font-bold text-slate-900">Barcode Stock Tally</h1>
-          <p className="text-slate-500 text-sm mt-1">Scan product barcodes to compare physical stock with online inventory</p>
-        </div>
+    <>
+      <Topbar
+        title="Stock Tally"
+        subtitle="Scan barcodes, compare physical vs online"
+        breadcrumb={[{ label: "Home", href: "/dashboard" }, { label: "Stock Tally" }]}
+        primaryAction={null}
+      />
+      <div style={{ padding: 24, maxWidth: 1400, margin: "0 auto" }}>
 
         {/* Controls */}
         <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-5 mb-6">
@@ -480,6 +483,6 @@ export default function StockTallyPage() {
           </div>
         )}
       </div>
-    </div>
+    </>
   );
 }

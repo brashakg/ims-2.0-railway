@@ -2,6 +2,7 @@
 
 import { useState } from 'react';
 import { Loader, CheckCircle, AlertCircle, AlertTriangle, Sparkles, X } from 'lucide-react';
+import Topbar from '@/components/Topbar';
 
 interface HealthMetric {
   field: string;
@@ -229,12 +230,14 @@ export default function StoreHealthPage() {
   };
 
   return (
-    <div className="min-h-screen bg-gray-50 p-6">
-      <div className="max-w-7xl mx-auto">
-        <div className="mb-8">
-          <h1 className="text-3xl font-bold text-gray-900 mb-2">Online Store Health & AI Audit</h1>
-          <p className="text-gray-600">Analyze product data quality, SEO optimization, and content completeness</p>
-        </div>
+    <>
+      <Topbar
+        title="Store Health"
+        subtitle="AI-driven SEO + content audit"
+        breadcrumb={[{ label: 'Home', href: '/dashboard' }, { label: 'Store Health' }]}
+        primaryAction={null}
+      />
+      <div style={{ padding: 24, maxWidth: 1400, margin: '0 auto' }}>
 
         {/* Run Audit Button */}
         <div className="mb-8">
@@ -576,6 +579,6 @@ export default function StoreHealthPage() {
           </div>
         )}
       </div>
-    </div>
+    </>
   );
 }

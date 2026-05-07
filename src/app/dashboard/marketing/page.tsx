@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { Users, TrendingUp, Target, ShoppingCart, AlertCircle } from 'lucide-react';
+import Topbar from '@/components/Topbar';
 
 interface MarketingData {
   totalCustomers: number;
@@ -117,12 +118,14 @@ export default function MarketingPage() {
   ];
 
   return (
-    <div className="min-h-screen bg-gray-50 p-6">
-      <div className="max-w-7xl mx-auto">
-        <div className="mb-8">
-          <h1 className="text-3xl font-bold text-gray-900 mb-2">Marketing Insights</h1>
-          <p className="text-gray-600">Customer segments, engagement metrics, and growth opportunities</p>
-        </div>
+    <>
+      <Topbar
+        title="Marketing"
+        subtitle="Customer segments, engagement, growth"
+        breadcrumb={[{ label: 'Home', href: '/dashboard' }, { label: 'Marketing' }]}
+        primaryAction={null}
+      />
+      <div style={{ padding: 24, maxWidth: 1400, margin: '0 auto' }}>
 
         {/* Stat Cards */}
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
@@ -304,6 +307,6 @@ export default function MarketingPage() {
           </div>
         </div>
       </div>
-    </div>
+    </>
   );
 }
