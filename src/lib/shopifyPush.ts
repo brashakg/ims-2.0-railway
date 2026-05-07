@@ -3,6 +3,8 @@ import {
   createProduct,
   setProductMetafields,
   setVariantMetafields,
+  updateProduct,
+  updateVariantPrice,
   type ShopifyVariantInput,
 } from "@/lib/shopify";
 import { categoryLabel } from "@/lib/categories";
@@ -65,6 +67,16 @@ export interface PushOptions {
    * validation failures repeating) so we don't hammer the API 60+ times.
    */
   maxConsecutiveFailures?: number;
+  /**
+   * How to treat products that already have a shopifyProductId.
+   *   "skip" (default)         — orphan-push semantics: never re-touch.
+   *   "update"                  — call updateProduct + re-sync metafields,
+   *                              variant prices and images. Use this when
+   *                              an admin clicks "re-push edits to Shopify"
+   *                              for products with local changes.
+   * Unsynced products are always created regardless of this option.
+   */
+  syncedMode?: "skip" | "update";
 }
 
 export async function pushProductsToShopify(
@@ -74,6 +86,7 @@ export async function pushProductsToShopify(
   const BATCH_SIZE = options.batchSize ?? 10;
   const BATCH_DELAY_MS = options.batchDelayMs ?? 1000;
   const MAX_CONSECUTIVE_FAILURES = options.maxConsecutiveFailures ?? 5;
+  const SYNCED_MODE = options.syncedMode ?? "skip";
 
   const results: PushResult[] = [];
   let consecutiveFailures = 0;
@@ -88,11 +101,185 @@ export async function pushProductsToShopify(
     }
 
     if (product.shopifyProductId) {
-      results.push({
-        productId: product.id,
-        status: "SKIPPED",
-        message: "Product already synced to Shopify",
-      });
+      if (SYNCED_MODE === "skip") {
+        results.push({
+          productId: product.id,
+          status: "SKIPPED",
+          message: "Product already synced to Shopify",
+        });
+        continue;
+      }
+
+      // syncedMode === "update": push edits back to Shopify.
+      try {
+        const filteredTags = (product.tags || "")
+          .split(", ")
+          .map((t) => t.trim())
+          .filter(Boolean);
+
+        const updateRes = await updateProduct(product.shopifyProductId, {
+          title:
+            product.title ||
+            `${product.brand} ${product.modelNo || ""}`.trim(),
+          description: product.htmlDescription || "",
+          seoTitle: product.seoTitle || "",
+          seoDescription: product.seoDescription || "",
+          tags: filteredTags,
+          productType:
+            categoryLabel(product.category) || product.category || "",
+          vendor: product.brand || undefined,
+          status: shopifyStatusFor(product.status),
+        });
+
+        if (!updateRes.success) {
+          await prisma.syncLog.create({
+            data: {
+              productId: product.id,
+              action: "UPDATE",
+              status: "FAILED",
+              message: updateRes.message,
+            },
+          });
+          results.push({
+            productId: product.id,
+            status: "FAILED",
+            message: updateRes.message,
+          });
+          consecutiveFailures++;
+        } else {
+          // Re-push product-level metafields so attribute edits flow back.
+          const productMfs: Array<{
+            namespace: string;
+            key: string;
+            value: string;
+            type: string;
+          }> = [];
+          const pushPMf = (k: string, v: string | null | undefined) => {
+            if (v && String(v).trim()) {
+              productMfs.push({
+                namespace: "custom",
+                key: k,
+                value: String(v).trim(),
+                type: "single_line_text_field",
+              });
+            }
+          };
+          pushPMf("brand", product.brand);
+          pushPMf("sub_brand", product.subBrand);
+          pushPMf("model_no", product.modelNo);
+          pushPMf("label", product.label);
+          pushPMf("shape", product.shape);
+          pushPMf("frame_material", product.frameMaterial);
+          pushPMf("temple_material", product.templeMaterial);
+          pushPMf("frame_type", product.frameType);
+          pushPMf("lens_material", product.lensMaterial);
+          pushPMf("polarization", product.polarization);
+          pushPMf("uv_protection", product.uvProtection);
+          pushPMf("gender", product.gender);
+          pushPMf("country_of_origin", product.countryOfOrigin);
+          pushPMf("warranty", product.warranty);
+          pushPMf("product_usp", product.productUSP);
+          if (productMfs.length > 0) {
+            await setProductMetafields(
+              product.shopifyProductId,
+              productMfs
+            ).catch(() => {});
+          }
+
+          // Re-push variant prices + variant metafields.
+          let varConsecFails = 0;
+          for (const v of product.variants) {
+            if (!v.shopifyVariantId) continue;
+            const r = await updateVariantPrice(
+              v.shopifyVariantId,
+              String(v.discountedPrice || v.mrp || product.mrp || 0),
+              v.mrp ? String(v.mrp) : undefined
+            ).catch(() => ({ success: false } as { success: boolean }));
+            if (r && (r as any).success) {
+              varConsecFails = 0;
+            } else {
+              varConsecFails++;
+              if (varConsecFails >= 5) break;
+            }
+
+            const variantMfs: Array<{
+              namespace: string;
+              key: string;
+              value: string;
+              type: string;
+            }> = [];
+            const pushVMf = (k: string, val: string | null | undefined) => {
+              if (val && String(val).trim()) {
+                variantMfs.push({
+                  namespace: "custom",
+                  key: k,
+                  value: String(val).trim(),
+                  type: "single_line_text_field",
+                });
+              }
+            };
+            pushVMf("color_name", v.colorName);
+            pushVMf("frame_color", v.frameColor);
+            pushVMf("temple_color", v.templeColor);
+            pushVMf("lens_colour", v.lensColour);
+            pushVMf("tint", v.tint);
+            pushVMf("bridge", v.bridge);
+            pushVMf("temple_length", v.templeLength);
+            pushVMf("weight", v.weight);
+            if (variantMfs.length > 0) {
+              await setVariantMetafields(v.shopifyVariantId, variantMfs).catch(
+                () => {}
+              );
+            }
+          }
+
+          await prisma.syncLog.create({
+            data: {
+              productId: product.id,
+              action: "UPDATE",
+              status: "SUCCESS",
+              message: `Re-pushed to Shopify (${product.variants.length} variant(s))`,
+            },
+          });
+
+          results.push({
+            productId: product.id,
+            status: "SUCCESS",
+            shopifyProductId: product.shopifyProductId,
+            variantCount: product.variants.length,
+            message: "Re-pushed to Shopify",
+          });
+          consecutiveFailures = 0;
+        }
+      } catch (updateError) {
+        const msg =
+          updateError instanceof Error
+            ? updateError.message
+            : "Unknown update error";
+        await prisma.syncLog.create({
+          data: {
+            productId: product.id,
+            action: "UPDATE",
+            status: "FAILED",
+            message: msg,
+          },
+        });
+        results.push({
+          productId: product.id,
+          status: "FAILED",
+          message: msg,
+        });
+        consecutiveFailures++;
+      }
+
+      if (
+        MAX_CONSECUTIVE_FAILURES > 0 &&
+        consecutiveFailures >= MAX_CONSECUTIVE_FAILURES
+      ) {
+        aborted = true;
+        abortReason = `Aborted after ${consecutiveFailures} consecutive failures during update push.`;
+        break;
+      }
       continue;
     }
 

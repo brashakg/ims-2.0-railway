@@ -161,21 +161,35 @@ export default function ShopifySettingsPage() {
   };
 
   // ── Push ALL local products TO Shopify ──
-  const handlePushToShopify = async () => {
+  // syncedMode "skip" = create-only (default), "update" = also re-push edits
+  // for already-synced products.
+  const handlePushToShopify = async (
+    syncedMode: "skip" | "update" = "skip"
+  ) => {
     try {
       setPushing(true);
       setError(null);
       setSuccess(null);
 
-      // Get all unsynced products
-      const productsRes = await fetch("/api/products?limit=1000&status=DRAFT");
+      // Decide which products to push:
+      //   skip   → only DRAFT/unsynced
+      //   update → all PUBLISHED products that exist in Shopify
+      const productsRes = await fetch(
+        syncedMode === "update"
+          ? "/api/products?limit=1000&status=PUBLISHED"
+          : "/api/products?limit=1000&status=DRAFT"
+      );
       const productsData = await productsRes.json();
-      const unsyncedProducts = (productsData.data || []).filter(
-        (p: any) => !p.shopifyProductId
+      const targetProducts = (productsData.data || []).filter((p: any) =>
+        syncedMode === "update" ? !!p.shopifyProductId : !p.shopifyProductId
       );
 
-      if (unsyncedProducts.length === 0) {
-        setSuccess("All products are already synced to Shopify");
+      if (targetProducts.length === 0) {
+        setSuccess(
+          syncedMode === "update"
+            ? "No published products with Shopify links to re-push."
+            : "All products are already synced to Shopify"
+        );
         return;
       }
 
@@ -183,14 +197,16 @@ export default function ShopifySettingsPage() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          productIds: unsyncedProducts.map((p: any) => p.id),
+          productIds: targetProducts.map((p: any) => p.id),
+          syncedMode,
         }),
       });
 
       const data = await res.json();
       if (data.success) {
         const s = data.summary || {};
-        const base = `Pushed ${s.success || 0} products to Shopify (${s.failed || 0} failed, ${s.skipped || 0} skipped)`;
+        const verb = syncedMode === "update" ? "Re-pushed" : "Pushed";
+        const base = `${verb} ${s.success || 0} products to Shopify (${s.failed || 0} failed, ${s.skipped || 0} skipped)`;
         if (s.aborted) {
           setError(
             `${base}. ${s.abortReason || "Push aborted after repeated failures."}`
@@ -526,7 +542,7 @@ export default function ShopifySettingsPage() {
                 </p>
 
                 <button
-                  onClick={handlePushToShopify}
+                  onClick={() => handlePushToShopify("skip")}
                   disabled={pushing || !status?.configured || !pullStatus?.localOnly}
                   className="w-full px-4 py-3 bg-green-500 text-white rounded-lg hover:bg-green-600 disabled:bg-slate-300 transition font-medium"
                 >
@@ -556,6 +572,27 @@ export default function ShopifySettingsPage() {
                   ) : (
                     "Push Unsynced Products to Shopify"
                   )}
+                </button>
+
+                {/* Re-push edits to already-synced products. Hits the same
+                    endpoint with syncedMode="update" so updateProduct +
+                    metafields fire for every PUBLISHED product that has a
+                    Shopify ID. Confirm dialog because this touches live
+                    listings — wrong attributes here go to customers. */}
+                <button
+                  onClick={() => {
+                    if (
+                      confirm(
+                        "Re-push edits to ALL synced products? This updates titles, descriptions, tags, vendor, productType, status and all metafields on every PUBLISHED product. Continue?"
+                      )
+                    ) {
+                      handlePushToShopify("update");
+                    }
+                  }}
+                  disabled={pushing || !status?.configured}
+                  className="w-full mt-3 px-4 py-3 bg-blue-50 text-blue-700 border border-blue-300 rounded-lg hover:bg-blue-100 disabled:bg-slate-100 disabled:text-slate-400 transition font-medium"
+                >
+                  Re-push Edits to Synced Products
                 </button>
               </div>
             </div>

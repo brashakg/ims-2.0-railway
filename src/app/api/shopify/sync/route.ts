@@ -7,6 +7,15 @@ import {
 
 interface SyncRequest {
   productIds: string[];
+  /**
+   * "skip" (default) — only create new (unsynced) products. Already-synced
+   *                    products are left alone. This is the orphan-push
+   *                    semantic and the historic default.
+   * "update"         — also re-push edits to already-synced products. Use
+   *                    when staff has changed product data locally and
+   *                    wants Shopify to reflect the changes.
+   */
+  syncedMode?: "skip" | "update";
 }
 
 export async function POST(request: NextRequest) {
@@ -32,7 +41,9 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const { results, summary } = await pushProductsToShopify(products);
+    const { results, summary } = await pushProductsToShopify(products, {
+      syncedMode: body.syncedMode ?? "skip",
+    });
 
     return NextResponse.json({
       success: true,
