@@ -225,8 +225,17 @@ export function generateTags(product: Product): string {
   // they're level="variant"; emit manually from the product/body here.
   const seen = new Set(tags);
   const addVariantFallback = (prefix: string, value: unknown) => {
-    if (value === null || value === undefined || value === "") return;
-    const token = `${prefix}_${String(value).toLowerCase()}`;
+    if (value === null || value === undefined) return;
+    // Trim and slugify so whitespace-only values never produce empty tags
+    // like "lensusp_" or "productusp_". Audit found 4,400+ historical
+    // products had these empty tags from the old generator.
+    const slug = String(value)
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "");
+    if (!slug) return;
+    const token = `${prefix}_${slug}`;
     if (!seen.has(token)) {
       tags.push(token);
       seen.add(token);

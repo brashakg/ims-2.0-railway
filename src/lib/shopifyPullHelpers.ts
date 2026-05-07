@@ -8,6 +8,7 @@ import {
   fetchShopifyLocations,
   type ShopifyProductNode,
 } from "@/lib/shopify";
+import { normalizeCategory } from "@/lib/categories";
 
 function getMetafield(
   product: ShopifyProductNode,
@@ -35,25 +36,66 @@ function mapStatus(shopifyStatus: string): string {
 }
 
 // Helper: guess category from product type, tags, etc.
+//
+// Shopify productType data we've seen in the wild:
+//   "spectacles" (lowercase), "Sunglass" (singular), "Sunglasses",
+//   "Watch" (mistyped on a sunglass product), "" (empty)
+// We match on substrings to be robust to all of those, and we return
+// canonical UPPERCASE keys that match src/lib/categories.ts.
 function guessCategory(product: ShopifyProductNode): string {
   const type = (product.productType || "").toLowerCase();
   const tags = product.tags.map((t) => t.toLowerCase());
   const title = product.title.toLowerCase();
+  const haystack = `${type} ${title} ${tags.join(" ")}`;
 
+  // More specific categories first — "smartwatch" must match before
+  // generic "watch", "computer glasses" before "glasses", etc.
+  if (haystack.includes("smartglass")) return "SMARTGLASSES";
+  if (haystack.includes("smartwatch")) return "SMARTWATCHES";
+  if (haystack.includes("contact lens") || haystack.includes("contactlens"))
+    return "CONTACT_LENSES";
   if (
-    type.includes("sunglass") ||
-    tags.some((t) => t.includes("sunglass")) ||
-    title.includes("sunglass")
-  ) {
-    return "SUNGLASSES";
-  }
+    haystack.includes("solution") ||
+    haystack.includes("lens care")
+  )
+    return "CONTACT_LENSES";
   if (
-    type.includes("solution") ||
-    type.includes("lens care") ||
-    tags.some((t) => t.includes("solution"))
-  ) {
-    return "SOLUTIONS";
-  }
+    haystack.includes("safety glass") ||
+    haystack.includes("safetyglass")
+  )
+    return "SAFETY_GLASSES";
+  if (
+    haystack.includes("computer glass") ||
+    haystack.includes("computerglass") ||
+    haystack.includes("blue light")
+  )
+    return "COMPUTER_GLASSES";
+  if (
+    haystack.includes("reading glass") ||
+    haystack.includes("readingglass")
+  )
+    return "READING_GLASSES";
+  if (
+    haystack.includes("clip-on") ||
+    haystack.includes("clip on") ||
+    haystack.includes("clipon")
+  )
+    return "CLIP_ON_FRAMES";
+  if (haystack.includes("sunglass")) return "SUNGLASSES";
+  if (haystack.includes("watch")) return "WATCHES";
+  if (
+    haystack.includes("eyewear") ||
+    haystack.includes("eyeglass") ||
+    haystack.includes("spectacle") ||
+    haystack.includes("frame")
+  )
+    return "SPECTACLES";
+  if (
+    haystack.includes("accessor") ||
+    haystack.includes("case") ||
+    haystack.includes("cleaner")
+  )
+    return "ACCESSORIES";
   return "SPECTACLES";
 }
 
@@ -173,7 +215,12 @@ function parseTagsToFields(tags: string[]): {
     const [prefix, ...valueParts] = tag.split("_");
     if (!prefix || valueParts.length === 0) continue;
 
-    const value = valueParts.join("_"); // Handle cases where value contains underscore
+    const value = valueParts.join("_").trim(); // Handle cases where value contains underscore
+    // Skip empty-value tags. Historical pushes emitted "lensusp_",
+    // "productusp_", "origin_", "lensmaterial_", "product_" with no value
+    // after the underscore. Without this guard, parseTagsToFields would
+    // overwrite real attribute data with empty strings during pull.
+    if (!value) continue;
     const lowerPrefix = prefix.toLowerCase();
 
     // Parse known tag prefixes
@@ -280,8 +327,21 @@ export async function upsertShopifyProduct(
     include: { variants: true, images: true },
   });
 
-  // Use Shopify productType directly; fall back to guessing from tags/title
-  const category = sp.productType ? sp.productType.toUpperCase() : guessCategory(sp);
+  // Use Shopify productType, but normalize via the alias map so legacy
+  // values like "Sunglass" / "spectacles" / "Watch" all map to the
+  // canonical UPPERCASE keys we use locally. If it doesn't match anything,
+  // guess from tags + title.
+  const rawCategory = sp.productType
+    ? normalizeCategory(sp.productType)
+    : "";
+  const KNOWN_CATEGORIES = new Set([
+    "SPECTACLES", "CLIP_ON_FRAMES", "SUNGLASSES", "READING_GLASSES",
+    "COMPUTER_GLASSES", "SAFETY_GLASSES", "CONTACT_LENSES", "SMARTGLASSES",
+    "WATCHES", "SMARTWATCHES", "ACCESSORIES",
+  ]);
+  const category = KNOWN_CATEGORIES.has(rawCategory)
+    ? rawCategory
+    : guessCategory(sp);
   const modelNo = getMetafield(sp, "custom", "model_no") || "";
 
   // Extract first variant price as base MRP
