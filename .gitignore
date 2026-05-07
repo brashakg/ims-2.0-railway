@@ -41,6 +41,13 @@ logs/
 /frontend/dist/
 *.tsbuildinfo
 
+# Test / coverage artifacts
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.pytest_cache/
+
 # Local dev helpers
 start_backend.*
 start_frontend.*
