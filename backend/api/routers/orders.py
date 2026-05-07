@@ -32,6 +32,80 @@ CATEGORY_DISCOUNT_CAPS = {
     "NON_DISCOUNTABLE": 0.0,
 }
 
+# Per-category GST table (Phase 6.15 — Indian rules: 5% for frames /
+# spectacle lenses / contact lenses, 18% otherwise). Mirrors the
+# frontend's getGSTRateByCategory.
+LOW_GST_CATEGORIES = {
+    "FRAMES", "FRAME", "EYEGLASS_FRAME", "SPECTACLE_FRAME",
+    "RX_LENSES", "LENS", "LENSES", "EYEGLASS_LENS",
+    "OPTICAL_LENS", "OPTICAL_LENSES",
+    "SPECTACLE_LENS", "SPECTACLE_LENSES",
+    "CONTACT_LENS", "CONTACT_LENSES", "COLOUR_CONTACTS",
+    "SPECTACLE", "COMPLETE_SPECTACLE",
+}
+
+
+def _gst_rate_for_category(cat: str) -> float:
+    return 5.0 if (cat or "").upper() in LOW_GST_CATEGORIES else 18.0
+
+
+def _compute_per_category_gst(items: list, cart_discount_pct: float) -> dict:
+    """Per-category GST aggregation. Mirrors the frontend's getGrandTotal
+    so cart total = sum of taxable + sum of tax across rates.
+
+    Each item dict must carry `item_total` (line subtotal AFTER per-item
+    discount) and `category` (or `item_type` as fallback). Stamps
+    `gst_rate`, `taxable_value`, `tax_amount` onto each item in place
+    for line-by-line invoice math.
+
+    Returns a dict with:
+      subtotal              — sum of item_total before cart discount
+      taxable               — sum of taxable across rates AFTER cart discount
+      tax                   — sum of tax across rates
+      dominant_rate         — highest-revenue rate (legacy `tax_rate` field)
+      cart_discount_amount  — subtotal − taxable when cart_discount_pct > 0
+      total_discount        — cart_discount_amount + Σ item.discount_amount
+                              (used by Pune Module iii payout aggregation)
+    """
+    cart_discount_pct = max(0.0, min(100.0, cart_discount_pct or 0.0))
+    cart_factor = 1.0 - (cart_discount_pct / 100.0)
+    subtotal = 0.0
+    item_discount_sum = 0.0
+    per_rate_taxable: dict = {}
+    per_rate_tax: dict = {}
+    for it in items or []:
+        line_subtotal = float(it.get("item_total") or 0.0)
+        subtotal += line_subtotal
+        item_discount_sum += float(it.get("discount_amount") or 0.0)
+        cat = it.get("category") or it.get("item_type") or ""
+        rate = _gst_rate_for_category(cat)
+        line_taxable = round(line_subtotal * cart_factor, 2)
+        line_tax = round(line_taxable * (rate / 100.0), 2)
+        per_rate_taxable[rate] = round(per_rate_taxable.get(rate, 0.0) + line_taxable, 2)
+        per_rate_tax[rate] = round(per_rate_tax.get(rate, 0.0) + line_tax, 2)
+        it["gst_rate"] = rate
+        it["taxable_value"] = line_taxable
+        it["tax_amount"] = line_tax
+    taxable = round(sum(per_rate_taxable.values()), 2)
+    tax = round(sum(per_rate_tax.values()), 2)
+    cart_discount_amount = (
+        round(subtotal - taxable, 2) if cart_discount_pct > 0 else 0.0
+    )
+    dominant_rate = (
+        max(per_rate_taxable, key=per_rate_taxable.get)
+        if per_rate_taxable else 18.0
+    )
+    total_discount = round(item_discount_sum + cart_discount_amount, 2)
+    return {
+        "subtotal": round(subtotal, 2),
+        "taxable": taxable,
+        "tax": tax,
+        "dominant_rate": dominant_rate,
+        "cart_discount_amount": cart_discount_amount,
+        "total_discount": total_discount,
+    }
+
+
 router = APIRouter()
 
 
@@ -665,53 +739,22 @@ async def create_order(
             )
             subtotal += item_subtotal
 
-        # Phase 6.15 — per-category GST. Audit Run #4 caught a phantom-
-        # balance bug: frontend computed 5% on frames + lenses but the
-        # backend stamped 18% flat, so every order with a frame had the
-        # backend grand_total > what the customer paid, leaving a fake
-        # balance due. Now we mirror the frontend's per-HSN rate map.
-        # Indian GST rules: 5% for frames / spectacle lenses / contact
-        # lenses / spectacles; 18% for sunglasses / watches / accessories.
-        LOW_GST_CATEGORIES = {
-            "FRAMES", "FRAME", "EYEGLASS_FRAME", "SPECTACLE_FRAME",
-            "RX_LENSES", "LENS", "LENSES", "EYEGLASS_LENS",
-            "OPTICAL_LENS", "OPTICAL_LENSES",
-            "SPECTACLE_LENS", "SPECTACLE_LENSES",
-            "CONTACT_LENS", "CONTACT_LENSES", "COLOUR_CONTACTS",
-            "SPECTACLE", "COMPLETE_SPECTACLE",
-        }
-
-        def _gst_rate_for_category(cat: str) -> float:
-            return 5.0 if (cat or "").upper() in LOW_GST_CATEGORIES else 18.0
-
-        # Per-item taxable + tax to mirror the frontend's getGrandTotal.
-        # `items_data` was built earlier with line subtotal (after item
-        # discount). We re-aggregate here per GST rate for the totals.
-        cart_discount_percent = max(0.0, min(100.0, order.cart_discount_percent or 0.0))
-        cart_discount_factor = 1.0 - (cart_discount_percent / 100.0)
-
-        per_rate_taxable: dict = {}
-        per_rate_tax: dict = {}
-        for it in items_data:
-            cat = it.get("category") or it.get("item_type") or ""
-            rate = _gst_rate_for_category(cat)
-            line_taxable = round(float(it.get("subtotal", 0.0)) * cart_discount_factor, 2)
-            line_tax = round(line_taxable * (rate / 100.0), 2)
-            per_rate_taxable[rate] = round(per_rate_taxable.get(rate, 0.0) + line_taxable, 2)
-            per_rate_tax[rate] = round(per_rate_tax.get(rate, 0.0) + line_tax, 2)
-            # Stamp the per-line GST onto items_data so invoice math is
-            # auditable line-by-line later.
-            it["gst_rate"] = rate
-            it["taxable_value"] = line_taxable
-            it["tax_amount"] = line_tax
-
-        taxable_after_cart_discount = round(sum(per_rate_taxable.values()), 2)
-        tax_amount = round(sum(per_rate_tax.values()), 2)
+        # Phase 6.15 — per-category GST (Indian rules). Audit Run #4
+        # caught a phantom-balance bug; further audit (May-2026) caught
+        # the per-cat fix itself zeroing every order's tax_amount
+        # because the loop read `it.get("subtotal")` while the dict was
+        # built with key "item_total". The per-category math is now in
+        # `_compute_per_category_gst`, used by create + add + remove.
+        cart_discount_percent = max(
+            0.0, min(100.0, order.cart_discount_percent or 0.0)
+        )
+        gst = _compute_per_category_gst(items_data, cart_discount_percent)
+        taxable_after_cart_discount = gst["taxable"]
+        tax_amount = gst["tax"]
+        cart_discount_amount = gst["cart_discount_amount"]
+        total_discount = gst["total_discount"]
+        tax_rate = gst["dominant_rate"]
         grand_total = round(taxable_after_cart_discount + tax_amount, 2)
-        cart_discount_amount = round(subtotal - taxable_after_cart_discount, 2) if cart_discount_percent > 0 else 0.0
-        # Pick the dominant rate as the doc-level `tax_rate` for legacy
-        # readers (the audit + invoice export both look at this field).
-        tax_rate = max(per_rate_taxable, key=per_rate_taxable.get) if per_rate_taxable else 18.0
 
         # Resolve delivery date — explicit date > expected_delivery_days
         if order.delivery_date:
@@ -735,6 +778,7 @@ async def create_order(
             "cart_discount_approved_by": order.cart_discount_approved_by,
             "tax_rate": tax_rate,
             "tax_amount": tax_amount,
+            "total_discount": total_discount,
             "grand_total": grand_total,
             "amount_paid": 0.0,
             "balance_due": grand_total,
@@ -871,19 +915,23 @@ async def add_order_item(
             "lens_options": item.lens_options,
         }
 
-        # Add item and recalculate totals
+        # Add item and recalculate totals — preserves per-category GST
+        # (Phase 6.15 fix) instead of stamping the order's old flat
+        # tax_rate. Mirrors the frontend's getGrandTotal exactly.
         items = order.get("items", []) + [item_data]
-        subtotal = sum(i.get("item_total", 0) for i in items)
-        tax_rate = order.get("tax_rate", 18.0)
-        tax_amount = subtotal * (tax_rate / 100)
-        grand_total = subtotal + tax_amount
+        cart_discount_percent = order.get("cart_discount_percent", 0) or 0
+        gst = _compute_per_category_gst(items, cart_discount_percent)
+        grand_total = round(gst["taxable"] + gst["tax"], 2)
 
         repo.update(
             order_id,
             {
                 "items": items,
-                "subtotal": subtotal,
-                "tax_amount": tax_amount,
+                "subtotal": gst["subtotal"],
+                "cart_discount_amount": gst["cart_discount_amount"],
+                "tax_rate": gst["dominant_rate"],
+                "tax_amount": gst["tax"],
+                "total_discount": gst["total_discount"],
                 "grand_total": grand_total,
                 "balance_due": grand_total - order.get("amount_paid", 0),
             },
@@ -915,18 +963,20 @@ async def remove_order_item(
         if len(items) == len(order.get("items", [])):
             raise HTTPException(status_code=404, detail="Item not found in order")
 
-        # Recalculate totals
-        subtotal = sum(i.get("item_total", 0) for i in items)
-        tax_rate = order.get("tax_rate", 18.0)
-        tax_amount = subtotal * (tax_rate / 100)
-        grand_total = subtotal + tax_amount
+        # Recalculate totals (per-category GST, mirrors create_order).
+        cart_discount_percent = order.get("cart_discount_percent", 0) or 0
+        gst = _compute_per_category_gst(items, cart_discount_percent)
+        grand_total = round(gst["taxable"] + gst["tax"], 2)
 
         repo.update(
             order_id,
             {
                 "items": items,
-                "subtotal": subtotal,
-                "tax_amount": tax_amount,
+                "subtotal": gst["subtotal"],
+                "cart_discount_amount": gst["cart_discount_amount"],
+                "tax_rate": gst["dominant_rate"],
+                "tax_amount": gst["tax"],
+                "total_discount": gst["total_discount"],
                 "grand_total": grand_total,
                 "balance_due": grand_total - order.get("amount_paid", 0),
             },
