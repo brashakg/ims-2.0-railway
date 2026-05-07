@@ -1,0 +1,297 @@
+/* IMS 2.0 — Mobile responsiveness
+   Strategy:
+     ≥ 1024 px → Original desktop layout (unchanged)
+     768-1023  → Tablet: rail icons-only (no labels, narrower), tighter top bar
+     ≤ 767 px  → Phone: rail collapses to bottom tab bar, top bar simplifies,
+                 two-col layouts stack with master/detail navigation,
+                 modals become bottom sheets, tables scroll horizontally.
+   All overrides are scoped to media queries; no cascade impact above 1024.
+*/
+
+/* ─────────────────────────── TABLET (≤ 1023) ─────────────────────────── */
+@media (max-width: 1023px) {
+  .app { grid-template-columns: 56px 1fr; }
+  .rail { padding: 8px 0; }
+  .rail .brand { width: 36px; height: 36px; font-size: 18px; margin-bottom: 12px; }
+  .rail .rail-item { width: 44px; height: 40px; }
+  .rail .rail-item svg { width: 18px; height: 18px; }
+  .rail .rail-avatar { width: 32px; height: 32px; font-size: 11px; }
+  .rail .rail-label { display: none; } /* tooltips off — too cramped */
+
+  .topbar { padding: 0 12px; gap: 8px; }
+  .cmdk { width: 200px; }
+  .crumbs { font-size: 12.5px; }
+  .crumbs .sep, .crumbs span:not(.cur):not(:last-child) { display: none; } /* show only current */
+}
+
+/* ─────────────────────────── PHONE (≤ 767) ─────────────────────────── */
+@media (max-width: 767px) {
+  /* Rail → bottom tab bar */
+  .app {
+    grid-template-columns: 1fr;
+    grid-template-rows: 1fr auto;
+    height: 100vh; height: 100dvh;
+  }
+  .rail {
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-around;
+    padding: 0 4px;
+    height: 60px;
+    border-top: 1px solid #2a2a28;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    grid-row: 2;
+  }
+  .rail::-webkit-scrollbar { display: none; }
+  .rail .brand,
+  .rail .rail-sep,
+  .rail .rail-spacer,
+  .rail .rail-avatar { display: none; } /* avatar moves to topbar */
+  .rail .rail-item {
+    flex: 1 0 56px; min-width: 56px; height: 48px; margin: 0;
+    border-radius: 8px;
+    flex-direction: column; gap: 3px;
+  }
+  .rail .rail-item.active::before {
+    left: 50%; top: -4px; bottom: auto; transform: translateX(-50%);
+    width: 24px; height: 3px; border-radius: 0 0 2px 2px;
+  }
+  .rail .rail-item::after {
+    content: attr(title);
+    font: 500 9.5px/1 var(--font-sans);
+    color: inherit;
+    text-transform: none;
+    letter-spacing: 0;
+  }
+  /* Hide less-used items on phone — keep top 5: Hub, POS, Clinical, Tasks, Inventory */
+  .rail .rail-item[title="Reports"],
+  .rail .rail-item[title="Print"],
+  .rail .rail-item[title="Jarvis"],
+  .rail .rail-item[title="Store Setup"] {
+    display: none;
+  }
+
+  /* Main column scrolls; rail is fixed at bottom via grid */
+  .main { grid-row: 1; min-height: 0; overflow: hidden; }
+
+  /* Top bar: simplified */
+  .topbar {
+    height: 48px; padding: 0 10px; gap: 6px;
+    position: sticky; top: 0; z-index: 50;
+  }
+  .topbar .crumbs { font-size: 14px; font-weight: 500; }
+  .topbar .crumbs .cur { color: var(--ink); }
+  .topbar .cmdk { display: none; } /* search moves to a tap-icon */
+  .topbar .store-pill .name,
+  .topbar .store-pill .code,
+  .topbar .role-pill .v,
+  .topbar .role-pill .k { display: none; }
+  .topbar .store-pill {
+    padding: 0; width: 30px; justify-content: center;
+    border-color: transparent;
+  }
+  .topbar .store-pill .dot { margin: 0; }
+  .topbar .role-pill { display: none; }
+  /* Page actions wrap into compact row, drop label-only buttons that aren't critical */
+  .topbar .btn.sm { height: 32px; padding: 0 10px; font-size: 12px; }
+
+  /* Buttons: enforce 44px hit target where it counts */
+  .btn { height: 40px; padding: 0 14px; }
+  .btn.lg { height: 48px; padding: 0 18px; font-size: 14px; }
+  .btn.sm { height: 32px; padding: 0 10px; }
+  .input { height: 44px; font-size: 16px; /* prevents iOS zoom */ }
+  .input.lg { height: 48px; font-size: 16px; }
+
+  /* Cards: less internal padding */
+  .card-body { padding: 12px; }
+  .card-head { height: 40px; padding: 0 12px; }
+
+  /* Tables: horizontal scroll wrapper */
+  .tbl { font-size: 12px; }
+  .tbl thead th, .tbl tbody td { padding: 8px 10px; }
+  .tbl-scroll {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    margin: 0 -12px; padding: 0 12px;
+  }
+
+  /* Modal → bottom sheet */
+  .modal-overlay {
+    align-items: flex-end !important;
+    padding: 0 !important;
+  }
+  .modal {
+    width: 100% !important;
+    max-width: 100% !important;
+    max-height: 92vh !important;
+    border-radius: 18px 18px 0 0 !important;
+    animation: sheetUp .26s cubic-bezier(.2,.9,.3,1.1) !important;
+  }
+  @keyframes sheetUp { from { transform: translateY(100%); } to { transform: translateY(0); } }
+  .modal-head { padding: 14px 18px 12px !important; position: relative; }
+  .modal-head::before {
+    content: ''; position: absolute; top: 6px; left: 50%; transform: translateX(-50%);
+    width: 36px; height: 4px; background: var(--line-strong); border-radius: 2px;
+  }
+  .modal-head h2 { font-size: 20px !important; }
+  .modal-head .sub { font-size: 11.5px !important; }
+  .modal-body {
+    grid-template-columns: 1fr !important;
+    overflow-y: auto !important;
+    overflow-x: hidden;
+  }
+  .modal-form { padding: 16px 18px !important; }
+  .modal-preview {
+    border-left: 0 !important;
+    border-top: 1px solid var(--line);
+    padding: 16px 18px !important;
+  }
+  .modal-foot {
+    padding: 10px 14px env(safe-area-inset-bottom, 10px) !important;
+    flex-wrap: wrap;
+  }
+  .modal-foot .kbd, .modal-foot span:has(.kbd) { display: none; } /* keyboard shortcuts irrelevant on phone */
+  .modal-foot .btn { flex: 1; }
+  /* Priority chips: 5-col → scrollable strip */
+  .pri-pick {
+    display: flex !important;
+    overflow-x: auto;
+    margin: 0 -18px; padding: 0 18px;
+    gap: 8px !important;
+    scroll-snap-type: x mandatory;
+  }
+  .pri-pick::-webkit-scrollbar { display: none; }
+  .pri-chip { flex: 0 0 130px; scroll-snap-align: start; }
+  .row-2 { grid-template-columns: 1fr !important; gap: 0 !important; }
+  /* Owner picker pills wrap on their own */
+  .owner-pick { gap: 6px !important; }
+  .owner-opt { font-size: 12px; }
+
+  /* ── Page-specific ── */
+
+  /* HUB */
+  .hub-hero {
+    grid-template-columns: 1fr !important;
+    padding: 28px 18px 20px !important;
+    gap: 24px !important;
+  }
+  .hub-hero h1 { font-size: 38px !important; line-height: 1.05 !important; }
+  .hub-hero .sub { font-size: 14px !important; }
+  .hub-hero .meta-grid {
+    grid-template-columns: 1fr 1fr !important;
+    gap: 16px !important;
+    border-left: 0 !important;
+    border-top: 1px solid var(--line) !important;
+    padding: 16px 0 0 0 !important;
+  }
+  .modules {
+    grid-template-columns: 1fr !important;
+    padding: 20px 18px 80px !important;
+    gap: 10px !important;
+  }
+  .mod-card { grid-column: span 1 !important; padding: 16px !important; }
+  .news-strip { grid-template-columns: 1fr !important; }
+
+  /* POS — stack steps rail / main / cart */
+  .pos-body {
+    grid-template-columns: 1fr !important;
+    grid-template-rows: auto auto auto !important;
+    height: auto !important;
+  }
+  .steps-rail { display: none !important; } /* horizontal stepper instead — page-specific */
+  .cust-grid { grid-template-columns: 1fr !important; }
+  .rx-grid { grid-template-columns: 50px repeat(5, 1fr) !important; font-size: 11px; }
+  .pay-grid { grid-template-columns: 1fr !important; }
+  .review-grid { grid-template-columns: 1fr !important; }
+  .split-line { grid-template-columns: 1fr 80px 32px !important; }
+  .cart-item { grid-template-columns: 40px 1fr auto !important; }
+  .kv { grid-template-columns: 100px 1fr !important; }
+
+  /* TASKS — list shows by default; detail becomes drawer */
+  .t-body {
+    grid-template-columns: 1fr !important;
+    height: calc(100dvh - 48px - 60px) !important;
+  }
+  .t-list { padding: 16px 14px 80px !important; }
+  .t-head { flex-direction: column; align-items: flex-start; gap: 10px; }
+  .t-head h2 { font-size: 24px !important; }
+  .pri-strip {
+    overflow-x: auto;
+    grid-template-columns: repeat(5, 110px) !important;
+  }
+  .pri-strip::-webkit-scrollbar { display: none; }
+
+  /* Detail panel becomes a slide-in drawer when .open is set by JS */
+  .t-detail {
+    position: fixed !important; inset: 0;
+    border-left: 0 !important;
+    z-index: 80;
+    transform: translateX(100%);
+    transition: transform .22s ease-out;
+  }
+  body[data-task-open="1"] .t-detail {
+    transform: translateX(0);
+  }
+  .t-detail .d-back-btn {
+    display: inline-flex !important;
+  }
+
+  /* CLINICAL — stack columns */
+  .cl-body { grid-template-columns: 1fr !important; height: auto !important; }
+  .exam-grid { grid-template-columns: 1fr !important; }
+  .opt-grid { grid-template-columns: 1fr !important; }
+  .pretest { grid-template-columns: 1fr 1fr !important; }
+  .eyepad { font-size: 9px; }
+
+  /* INVENTORY — stat strip wraps, layout collapses */
+  .stat-strip { grid-template-columns: 1fr 1fr !important; }
+  .stat-strip > * { border-right: 0 !important; border-bottom: 1px solid var(--line); }
+  .inv-layout { grid-template-columns: 1fr !important; }
+  .transfer-strip { grid-template-columns: 1fr !important; gap: 8px !important; text-align: left; }
+
+  /* JARVIS — stack hero + agent grid */
+  .j-grid { grid-template-columns: 1fr !important; }
+  .log-row { grid-template-columns: 1fr !important; gap: 4px !important; padding: 12px 14px !important; }
+
+  /* REPORTS — KPI 2-up, charts stack */
+  .kpi-grid { grid-template-columns: 1fr 1fr !important; }
+  .chart-row, .dayend { grid-template-columns: 1fr !important; }
+  .bars { grid-template-columns: 30px 1fr !important; font-size: 11px; }
+
+  /* SETUP — nav / content / inspector stack */
+  .s-body { grid-template-columns: 1fr !important; height: auto !important; }
+  .s-nav { border-right: 0 !important; border-bottom: 1px solid var(--line) !important; max-height: 200px; }
+  .s-row { grid-template-columns: 1fr !important; gap: 6px !important; }
+
+  /* PRINT — paper preview centers, options collapse */
+  .pr-body { grid-template-columns: 1fr !important; }
+  .pr-tpl-list, .pr-options {
+    border: 0 !important;
+    border-bottom: 1px solid var(--line) !important;
+  }
+
+  /* Scrim/overlay padding for safe-area */
+  .modal-overlay { padding-bottom: env(safe-area-inset-bottom, 0); }
+
+  /* Hide tweaks panel on small */
+  .tweaks-panel { display: none !important; }
+
+  /* Density bump everywhere — phones need bigger taps */
+  body { font-size: 14px; }
+  .eyebrow { font-size: 10.5px; }
+}
+
+/* ─────────────────── Very small phones (≤ 360) ─────────────────── */
+@media (max-width: 360px) {
+  .rail .rail-item { min-width: 50px; flex: 1 0 50px; }
+  .hub-hero h1 { font-size: 32px !important; }
+  .topbar { padding: 0 8px; }
+}
+
+/* ─────────────────── Touch device improvements (any width) ─────────────────── */
+@media (hover: none) and (pointer: coarse) {
+  /* Larger tap targets when no hover */
+  .tbl tbody td { padding-top: 12px; padding-bottom: 12px; }
+  .pos-line, .t-item { min-height: 56px; }
+}
