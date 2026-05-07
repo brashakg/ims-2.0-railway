@@ -23,12 +23,12 @@ Side effects on POST:
 """
 from datetime import datetime, date as date_type
 from enum import Enum
-from typing import Optional
+from typing import Any, Dict, List, Optional
 import logging
 import re
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field, field_validator
 
 from .auth import get_current_user
@@ -171,6 +171,46 @@ class WalkoutResponse(BaseModel):
         extra = "allow"
 
 
+class UpdateWalkoutRequest(BaseModel):
+    """Phase 2 PATCH payload. All fields optional — only provided keys
+    move. store_id, walkout_id, sales_person_id (for non-managers),
+    customer_id, followups, result, soft-delete fields, and timestamps
+    are NOT editable through this endpoint (some have dedicated
+    endpoints in Phase 3+)."""
+
+    customer_name: Optional[str] = Field(None, min_length=1, max_length=120)
+    mobile: Optional[str] = None
+    age_group: Optional[AgeGroup] = None
+    gender: Optional[Gender] = None
+    product_interested: Optional[ProductCategory] = None
+    has_prescription: Optional[YesNo] = None
+    displayed_price_range: Optional[PriceRange] = None
+    required_price_range: Optional[PriceRange] = None
+    primary_walkout_reason: Optional[WalkoutReason] = None
+    secondary_walkout_reason: Optional[WalkoutReason] = None
+    brand_interest: Optional[str] = None
+    competitor_mentioned: Optional[str] = None
+    purchase_planned_in: Optional[PurchasePlan] = None
+    sales_person_id: Optional[str] = None  # SUPERADMIN/ADMIN/STORE_MANAGER only
+    action_remarks: Optional[str] = None
+
+    @field_validator("mobile")
+    @classmethod
+    def _validate_mobile(cls, v):
+        if v is None:
+            return v
+        v = (v or "").strip()
+        if not _MOBILE_RE.match(v):
+            raise ValueError("Mobile must be exactly 10 digits")
+        return v
+
+
+class DeleteWalkoutRequest(BaseModel):
+    """Soft-delete payload."""
+
+    reason: str = Field(..., min_length=1, max_length=400)
+
+
 # ============================================================================
 # RBAC
 # ============================================================================
@@ -178,15 +218,72 @@ _ALLOWED_CREATE_ROLES = {
     "SUPERADMIN", "ADMIN", "STORE_MANAGER",
     "SALES_STAFF", "SALES_CASHIER", "CASHIER",
 }
+# Roles that can edit any walkout in their store (or any store, for
+# the global ones). Sales staff can only edit walkouts they own.
+_GLOBAL_EDIT_ROLES = {"SUPERADMIN", "ADMIN"}
+_STORE_EDIT_ROLES = {"STORE_MANAGER", "AREA_MANAGER"}
+# Roles that can soft-delete a walkout — narrower than edit.
+_DELETE_ROLES = {"SUPERADMIN", "STORE_MANAGER"}
+# Roles that can attribute a walkout to a salesperson other than
+# themselves (per UX spec: managers / admin / accountant + above can
+# pick from a dropdown; everyone below is auto-locked to self).
+_REATTRIBUTE_ROLES = (
+    _GLOBAL_EDIT_ROLES | _STORE_EDIT_ROLES | {"ACCOUNTANT"}
+)
+
+
+def _user_role_set(current_user: dict) -> set:
+    return set(current_user.get("roles", []) or [])
+
+
+def _user_store_id(current_user: dict) -> Optional[str]:
+    return (
+        current_user.get("active_store_id")
+        or (current_user.get("store_ids") or [None])[0]
+    )
 
 
 def _check_create_permission(current_user: dict) -> None:
-    user_roles = set(current_user.get("roles", []) or [])
-    if not (user_roles & _ALLOWED_CREATE_ROLES):
+    if not (_user_role_set(current_user) & _ALLOWED_CREATE_ROLES):
         raise HTTPException(
             status_code=403,
             detail="You don't have permission to log walkouts",
         )
+
+
+def _check_edit_permission(walkout: Dict, current_user: dict) -> None:
+    """Edit allowed when:
+      - SUPERADMIN/ADMIN: any walkout
+      - STORE_MANAGER: walkouts in their store
+      - SALES_STAFF/SALES_CASHIER/CASHIER: only walkouts they own
+        (sales_person_id == current_user.user_id)
+    """
+    roles = _user_role_set(current_user)
+    if roles & _GLOBAL_EDIT_ROLES:
+        return
+    user_store = _user_store_id(current_user)
+    if (roles & _STORE_EDIT_ROLES) and walkout.get("store_id") == user_store:
+        return
+    # Sales staff: own-only
+    if roles & _ALLOWED_CREATE_ROLES:
+        if walkout.get("sales_person_id") == current_user.get("user_id"):
+            return
+    raise HTTPException(
+        status_code=403,
+        detail="You don't have permission to edit this walkout",
+    )
+
+
+def _check_delete_permission(walkout: Dict, current_user: dict) -> None:
+    roles = _user_role_set(current_user)
+    if roles & {"SUPERADMIN"}:
+        return
+    if (roles & _STORE_EDIT_ROLES) and walkout.get("store_id") == _user_store_id(current_user):
+        return
+    raise HTTPException(
+        status_code=403,
+        detail="Only superadmin or the walkout's store manager can delete a walkout",
+    )
 
 
 # ============================================================================
@@ -337,6 +434,34 @@ def _audit_walkout_create(
         logger.warning(f"[WALKOUT] audit-log failed (non-fatal): {e}")
 
 
+def _audit_walkout_action(
+    *,
+    action: str,
+    walkout_id: str,
+    store_id: str,
+    current_user: dict,
+    detail: Dict,
+) -> None:
+    """Generic audit emitter for Phase 2+ writes (update / delete)."""
+    audit_repo = get_audit_repository()
+    if audit_repo is None:
+        return
+    try:
+        audit_repo.create({
+            "log_id": uuid.uuid4().hex,
+            "timestamp": datetime.now(),
+            "user_id": current_user.get("user_id"),
+            "action": action,
+            "entity_type": "walkout",
+            "entity_id": walkout_id,
+            "store_id": store_id,
+            "severity": "info",
+            "detail": detail,
+        })
+    except Exception as e:
+        logger.warning(f"[WALKOUT] audit-log failed (non-fatal): {e}")
+
+
 # ============================================================================
 # ENDPOINTS
 # ============================================================================
@@ -369,6 +494,14 @@ async def create_walkout(
             status_code=400,
             detail="No active store on this session",
         )
+
+    # Salesperson attribution rule (per UX spec):
+    # SUPERADMIN / ADMIN / AREA_MANAGER / STORE_MANAGER / ACCOUNTANT may
+    # log a walkout on behalf of any sales person. Lower-tier roles
+    # (SALES_STAFF / SALES_CASHIER / CASHIER / OPTOMETRIST) are forced
+    # to themselves regardless of what the client posted.
+    if not (_user_role_set(current_user) & _REATTRIBUTE_ROLES):
+        payload.sales_person_id = current_user.get("user_id") or payload.sales_person_id
 
     sales_person_name = _resolve_sales_person_name(payload.sales_person_id)
 
@@ -428,6 +561,74 @@ async def create_walkout(
     return _serialize_walkout(saved)
 
 
+@router.get("")
+@router.get("/", include_in_schema=False)
+async def list_walkouts(
+    current_user: dict = Depends(get_current_user),
+    date_from: Optional[str] = Query(None, description="ISO date (YYYY-MM-DD), inclusive"),
+    date_to: Optional[str] = Query(None, description="ISO date (YYYY-MM-DD), inclusive"),
+    sales_person_id: Optional[str] = Query(None),
+    primary_walkout_reason: Optional[str] = Query(None),
+    result: Optional[str] = Query(
+        None, description="DUE / NEGATIVE / CONVERTED / 'none' for unset"
+    ),
+    store_id: Optional[str] = Query(
+        None,
+        description="Cross-store filter — only honored for SUPERADMIN/ADMIN; "
+                    "everyone else is scoped to their active store.",
+    ),
+    skip: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=200),
+):
+    """List walkouts with filters + pagination.
+
+    Store scoping:
+      - SUPERADMIN / ADMIN: may pass `store_id` to filter; default = all stores
+      - Everyone else: forced to their active_store_id (the `store_id`
+        query parameter is ignored).
+    """
+    repo = _walkout_repo()
+    if repo is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    roles = _user_role_set(current_user)
+    if roles & _GLOBAL_EDIT_ROLES:
+        effective_store = store_id or None  # global view
+    else:
+        effective_store = _user_store_id(current_user)
+        if not effective_store:
+            raise HTTPException(
+                status_code=400,
+                detail="No active store on this session",
+            )
+
+    items = repo.list_walkouts(
+        store_id=effective_store,
+        date_from=date_from,
+        date_to=date_to,
+        sales_person_id=sales_person_id,
+        primary_walkout_reason=primary_walkout_reason,
+        result=result,
+        skip=skip,
+        limit=limit,
+    )
+    total = repo.count_walkouts(
+        store_id=effective_store,
+        date_from=date_from,
+        date_to=date_to,
+        sales_person_id=sales_person_id,
+        primary_walkout_reason=primary_walkout_reason,
+        result=result,
+    )
+
+    return {
+        "items": [_serialize_walkout(w) for w in items],
+        "total": total,
+        "skip": skip,
+        "limit": limit,
+    }
+
+
 @router.get("/{walkout_id}")
 async def get_walkout(
     walkout_id: str,
@@ -445,6 +646,127 @@ async def get_walkout(
         raise HTTPException(status_code=404, detail="Walkout not found")
 
     return _serialize_walkout(walkout)
+
+
+@router.patch("/{walkout_id}")
+async def update_walkout(
+    walkout_id: str,
+    payload: UpdateWalkoutRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """Edit a walkout. Server enforces RBAC, computes the field-level
+    diff (old → new) for every changed key, and writes a single
+    `walkout.update` audit row with the diff in `detail.changes`.
+
+    sales_person_id is gated separately — only SUPERADMIN/ADMIN/STORE_MANAGER
+    can re-attribute. Sales staff attempting to change it get 403.
+
+    Cross-store edits are blocked for STORE_MANAGER and below; the
+    walkout's store_id is never editable.
+    """
+    repo = _walkout_repo()
+    if repo is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    existing = repo.find_by_walkout_id(walkout_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Walkout not found")
+
+    _check_edit_permission(existing, current_user)
+
+    # Build the diff — only include keys the caller actually sent.
+    incoming = payload.model_dump(exclude_unset=True)
+
+    # Re-attribution gate
+    if "sales_person_id" in incoming:
+        roles = _user_role_set(current_user)
+        if not (roles & _REATTRIBUTE_ROLES):
+            raise HTTPException(
+                status_code=403,
+                detail="You don't have permission to re-attribute walkouts",
+            )
+
+    # Coerce enum values (pydantic gives us Enum instances)
+    diff: Dict[str, Any] = {}
+    changes: Dict[str, Dict[str, Any]] = {}
+    for key, val in incoming.items():
+        new_val = val.value if isinstance(val, Enum) else val
+        old_val = existing.get(key)
+        if new_val != old_val:
+            diff[key] = new_val
+            changes[key] = {"from": old_val, "to": new_val}
+
+    # Side-effect: re-resolve sales_person_name when sales_person_id changes
+    if "sales_person_id" in diff:
+        new_name = _resolve_sales_person_name(diff["sales_person_id"])
+        if new_name != existing.get("sales_person_name"):
+            diff["sales_person_name"] = new_name
+            changes["sales_person_name"] = {
+                "from": existing.get("sales_person_name"),
+                "to": new_name,
+            }
+
+    if not diff:
+        return _serialize_walkout(existing)
+
+    updated = repo.update_walkout(
+        walkout_id, diff, updated_by=current_user.get("user_id")
+    )
+    if updated is None:
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to update walkout (DB write error)",
+        )
+
+    _audit_walkout_action(
+        action="walkout.update",
+        walkout_id=walkout_id,
+        store_id=existing.get("store_id", ""),
+        current_user=current_user,
+        detail={"changes": changes},
+    )
+
+    return _serialize_walkout(updated)
+
+
+@router.delete("/{walkout_id}", status_code=200)
+async def delete_walkout(
+    walkout_id: str,
+    payload: DeleteWalkoutRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """Soft-delete a walkout. Hides the row from list + GET-by-id but
+    keeps the doc for audit / forensics. SUPERADMIN/ADMIN any store;
+    STORE_MANAGER own store only.
+    """
+    repo = _walkout_repo()
+    if repo is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    existing = repo.find_by_walkout_id(walkout_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Walkout not found")
+
+    _check_delete_permission(existing, current_user)
+
+    ok = repo.soft_delete_walkout(
+        walkout_id,
+        deleted_by=current_user.get("user_id"),
+        reason=payload.reason,
+    )
+    if not ok:
+        raise HTTPException(
+            status_code=500, detail="Failed to delete walkout"
+        )
+
+    _audit_walkout_action(
+        action="walkout.delete",
+        walkout_id=walkout_id,
+        store_id=existing.get("store_id", ""),
+        current_user=current_user,
+        detail={"reason": payload.reason},
+    )
+    return {"walkout_id": walkout_id, "deleted": True}
 
 
 # ============================================================================

@@ -532,6 +532,43 @@ export interface CreateWalkoutRequest {
   date?: string;
 }
 
+// Phase 2 — partial update + list types
+export interface UpdateWalkoutRequest {
+  customer_name?: string;
+  mobile?: string;
+  age_group?: AgeGroup;
+  gender?: WalkoutGender;
+  product_interested?: WalkoutProductCategory;
+  has_prescription?: YesNo;
+  displayed_price_range?: WalkoutPriceRange;
+  required_price_range?: WalkoutPriceRange;
+  primary_walkout_reason?: WalkoutReason;
+  secondary_walkout_reason?: WalkoutReason | null;
+  brand_interest?: string;
+  competitor_mentioned?: string;
+  purchase_planned_in?: PurchasePlan;
+  sales_person_id?: string;
+  action_remarks?: string;
+}
+
+export interface ListWalkoutsParams {
+  date_from?: string;
+  date_to?: string;
+  sales_person_id?: string;
+  primary_walkout_reason?: WalkoutReason;
+  result?: 'DUE' | 'NEGATIVE' | 'CONVERTED' | 'none';
+  store_id?: string;
+  skip?: number;
+  limit?: number;
+}
+
+export interface ListWalkoutsResponse {
+  items: Walkout[];
+  total: number;
+  skip: number;
+  limit: number;
+}
+
 // Frozen enum option arrays — single source of truth for the
 // WalkoutIntakeModal dropdowns. Order matches the Excel sheet.
 export const WALKOUT_AGE_GROUPS: AgeGroup[] = [
