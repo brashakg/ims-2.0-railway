@@ -92,7 +92,7 @@ export async function POST(request: NextRequest) {
       action: "RECONCILE",
       entity: "STOCK_TRANSFER",
       details: `Stock reconcile: ${localUpdated} variants updated locally, ${shopifyUpdated} synced to Shopify`,
-      metadata: JSON.stringify({ locationId, totalAdjustments: adjustments.length }),
+      metadata: { locationId, totalAdjustments: adjustments.length },
     });
 
     return NextResponse.json({

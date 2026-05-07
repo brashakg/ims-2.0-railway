@@ -2,9 +2,14 @@ import { NextRequest, NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
+import { requireAuth } from "@/lib/apiAuth";
 
 export async function GET() {
   try {
+    // Audit fix: was unauthenticated. Now requires a valid session — the
+    // values aren't sensitive but a logged-out hit should not 200.
+    const auth = await requireAuth();
+    if (!auth.authorized) return auth.response!;
     const attributeTypes = await prisma.attributeType.findMany({
       include: {
         options: true,

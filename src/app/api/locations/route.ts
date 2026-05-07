@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/prisma';
 import { fetchShopifyLocations } from '@/lib/shopify';
+import { requireAuth } from '@/lib/apiAuth';
 
 export interface Location {
   id: string;
@@ -13,6 +14,11 @@ export interface Location {
 
 export async function GET(request: NextRequest) {
   try {
+    // Audit fix: was unauthenticated. Any logged-in user can read the
+    // location list (used by stock-tally, variant stock dropdowns, etc.).
+    const auth = await requireAuth();
+    if (!auth.authorized) return auth.response!;
+
     const searchParams = request.nextUrl.searchParams;
     const active = searchParams.get('active');
     // excludeSynthetic=true hides the internal "Shopify Online Store" aggregate
@@ -61,6 +67,11 @@ export async function GET(request: NextRequest) {
 
 export async function POST(request: NextRequest) {
   try {
+    // Sync from Shopify can mint Location rows and overwrite existing
+    // ones, so we lock it to ADMIN.
+    const auth = await requireAuth(['ADMIN']);
+    if (!auth.authorized) return auth.response!;
+
     const body = await request.json();
 
     // Only Shopify-sync is supported. Locations must be defined in Shopify

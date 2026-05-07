@@ -121,12 +121,12 @@ export default function ShopifySettingsPage() {
     while (!done && safetyCounter < 300) {
       safetyCounter++;
       try {
-        const res = await fetch("/api/shopify/pull/chunk", {
+        const res: Response = await fetch("/api/shopify/pull/chunk", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ cursor, maxSeconds: 60 }),
         });
-        const data = await res.json();
+        const data: any = await res.json();
         if (!res.ok || !data.success) {
           setError(data.error || `Chunk failed at cursor ${cursor}`);
           setPulling(false);

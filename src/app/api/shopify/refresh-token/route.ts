@@ -11,22 +11,16 @@ export async function POST() {
     const auth = await requireAuth(["ADMIN"]);
     if (!auth.authorized) return auth.response!;
 
-    // Reach into the shopify client's module-scoped cachedToken via
-    // a test import-time side effect. The client doesn't export a
-    // dedicated clear function today, so we flip the env-observable
-    // cache by re-importing the module with a cache-buster query.
-    // Simpler: we expose a small clearer directly on the module
-    // (see src/lib/shopify.ts — `clearCachedShopifyToken`).
-    const mod = await import("@/lib/shopify");
-    // @ts-expect-error dynamic clear helper added to shopify module
-    if (typeof mod.clearCachedShopifyToken === "function") {
-      // @ts-expect-error dynamic clear helper
-      mod.clearCachedShopifyToken();
-    }
+    // Clear the cached OAuth token so the next Shopify call mints a
+    // fresh one. clearCachedShopifyToken is a real export now — the
+    // dynamic-import escape hatches this used to need are gone.
+    const { clearCachedShopifyToken, makeGraphQLRequest } = await import(
+      "@/lib/shopify"
+    );
+    clearCachedShopifyToken();
 
-    // Also fetch a fresh scope listing so the caller can confirm the
-    // new scopes arrived.
-    const { makeGraphQLRequest } = mod;
+    // Probe Shopify with a trivial query so the caller can confirm the
+    // new credentials work.
     const probe = await makeGraphQLRequest<{ shop: { id: string } }>(
       "{ shop { id } }"
     );

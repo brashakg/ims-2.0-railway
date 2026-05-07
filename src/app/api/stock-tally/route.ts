@@ -161,13 +161,13 @@ export async function POST(request: NextRequest) {
       action: "STOCK_TALLY",
       entity: "STOCK_TRANSFER",
       details: `Stock tally: ${summary.uniqueBarcodes} barcodes scanned, ${summary.matchedVariants} matched, ${summary.unmatchedCount} unmatched, ${summary.majorDifferences} major differences`,
-      metadata: JSON.stringify({
+      metadata: {
         locationId,
         totalScanned: summary.totalScanned,
         matchedVariants: summary.matchedVariants,
         unmatchedCount: summary.unmatchedCount,
         totalVariance: summary.totalVariance,
-      }),
+      },
     });
 
     return NextResponse.json({

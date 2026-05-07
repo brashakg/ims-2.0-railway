@@ -1,8 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
+import { requireAuth } from "@/lib/apiAuth";
 
 export async function POST(request: NextRequest) {
   try {
+    // Audit fix: was completely unauthenticated. Anyone hitting this
+    // endpoint could blindly mutate inventory across all variants. Now
+    // requires admin role + the stock_import feature toggle.
+    const auth = await requireAuth({ roles: "ADMIN", feature: "stock_import" });
+    if (!auth.authorized) return auth.response!;
+
     const body = await request.json();
     const { items, locationId } = body as {
       items: Array<{ sku: string; barcode?: string; quantity: number }>;
