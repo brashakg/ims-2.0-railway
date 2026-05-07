@@ -152,8 +152,11 @@ export default function ReturnsPage() {
                 placeholder="Order number, customer name, or phone..."
                 className="w-full pl-10 pr-4 py-2.5 border border-gray-300 rounded-lg text-sm" />
             </div>
+            {/* DELTAS Critical #2: primary CTA = ink (gray-900),
+                not BV-red. BV-red is an accent reserved for the
+                rail-active indicator + ≤1 hero CTA per screen. */}
             <button onClick={searchOrders} disabled={isLoading}
-              className="px-6 py-2.5 bg-bv-red-600 text-white rounded-lg text-sm font-semibold hover:bg-bv-red-700 disabled:opacity-50">
+              className="px-6 py-2.5 bg-gray-900 text-white rounded-lg text-sm font-semibold hover:bg-gray-800 disabled:opacity-50">
               {isLoading ? 'Searching...' : 'Search'}
             </button>
           </div>
