@@ -7,7 +7,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { Plus, UserX, Filter, Loader2, RefreshCw, X } from 'lucide-react';
+import { Plus, UserX, Filter, Loader2, RefreshCw, X, BarChart3 } from 'lucide-react';
 import { useToast } from '../../context/ToastContext';
 import { walkoutsApi } from '../../services/api';
 import {
@@ -103,6 +103,13 @@ export function WalkoutsPage() {
           </p>
         </div>
         <div className="flex items-center gap-2">
+          <Link
+            to="/walkouts/dashboard"
+            className="btn-secondary inline-flex items-center gap-2"
+          >
+            <BarChart3 className="w-4 h-4" />
+            Dashboard
+          </Link>
           <button
             type="button"
             onClick={loadList}

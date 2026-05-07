@@ -530,6 +530,60 @@ export const FOLLOWUP_STATUSES: FollowUpStatus[] = [
   'PENDING', 'DONE', 'NOT REACHABLE', 'NOT REQUIRED', 'ESCALATED',
 ];
 
+// Phase 4 — walk-in counter + dashboard types
+export interface WalkinTodayResponse {
+  store_id: string;
+  date_str: string;
+  pos_auto_count: number;
+  manual_topup: number;
+  total: number;
+  per_staff: Record<string, number>;
+}
+
+export interface ManualTopupRequest {
+  delta: number;
+  reason: string;
+  sales_person_id?: string;
+}
+
+export interface PerStaffCard {
+  sales_person_id: string;
+  sales_person_name: string | null;
+  walkouts_mtd: number;
+  walkouts_today: number;
+  converted_mtd: number;
+  walk_ins_today: number;
+  walk_ins_mtd: number;
+  fu_due_today: number;
+  conversion_pct_mtd: number;
+}
+
+export interface PerStaffResponse {
+  store_id: string;
+  as_of: string;
+  items: PerStaffCard[];
+}
+
+export interface TopReasonsResponse {
+  store_id: string;
+  days: number;
+  items: { reason: string; count: number }[];
+}
+
+export interface ResultBreakdownResponse {
+  store_id: string;
+  days: number;
+  total: number;
+  buckets: { DUE: number; NEGATIVE: number; CONVERTED: number; no_result: number };
+}
+
+export interface FUStatusResponse {
+  store_id: string;
+  days: number;
+  fu1: Record<string, number>;
+  fu2: Record<string, number>;
+}
+
 export interface Walkout {
   walkout_id: string;
   store_id: string;

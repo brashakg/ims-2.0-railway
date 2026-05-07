@@ -21,6 +21,7 @@ from ..dependencies import (
     get_customer_repository,
     get_stock_repository,
     get_product_repository,
+    get_walkin_counter_repository,
 )
 
 # Discount cap by product discount_category (mirrors billing.py caps)
@@ -748,6 +749,19 @@ async def create_order(
 
         created = order_repo.create(order_data)
         if created:
+            # Pune-incentive walk-in counter (Module i, Phase 4): bump
+            # the per-store-per-day counter, dedup'd by mobile.
+            try:
+                walkin_repo = get_walkin_counter_repository()
+                if walkin_repo is not None:
+                    walkin_repo.auto_increment(
+                        store_id=store_id or "",
+                        sales_person_id=salesperson_id or "",
+                        mobile=customer_phone or None,
+                    )
+            except Exception:
+                pass  # fail-soft — counter must never block order create
+
             return {
                 "order_id": created["order_id"],
                 "order_number": created["order_number"],

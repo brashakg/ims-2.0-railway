@@ -15,6 +15,12 @@ import type {
   UpdateFollowUpRequest,
   SetWalkoutResultRequest,
   FollowUpsDueResponse,
+  WalkinTodayResponse,
+  ManualTopupRequest,
+  PerStaffResponse,
+  TopReasonsResponse,
+  ResultBreakdownResponse,
+  FUStatusResponse,
 } from '../../types';
 
 export const walkoutsApi = {
@@ -125,6 +131,54 @@ export const walkoutsApi = {
   }> => {
     const response = await api.post('/walkouts/followups/escalate-overdue');
     return response.data;
+  },
+
+  // Phase 4 — walk-in counter + dashboard
+
+  walkinsToday: async (storeId?: string): Promise<WalkinTodayResponse> => {
+    const r = await api.get('/walkouts/walkins/today', { params: storeId ? { store_id: storeId } : undefined });
+    return r.data;
+  },
+
+  walkinsManualTopup: async (
+    payload: ManualTopupRequest, storeId?: string,
+  ): Promise<WalkinTodayResponse> => {
+    const r = await api.post('/walkouts/walkins/manual-topup', payload, {
+      params: storeId ? { store_id: storeId } : undefined,
+    });
+    return r.data;
+  },
+
+  dashboardPerStaff: async (storeId?: string): Promise<PerStaffResponse> => {
+    const r = await api.get('/walkouts/dashboard/per-staff', { params: storeId ? { store_id: storeId } : undefined });
+    return r.data;
+  },
+
+  dashboardTopReasons: async (
+    days = 30, limit = 10, storeId?: string,
+  ): Promise<TopReasonsResponse> => {
+    const r = await api.get('/walkouts/dashboard/top-reasons', {
+      params: { days, limit, ...(storeId ? { store_id: storeId } : {}) },
+    });
+    return r.data;
+  },
+
+  dashboardResultBreakdown: async (
+    days = 30, storeId?: string,
+  ): Promise<ResultBreakdownResponse> => {
+    const r = await api.get('/walkouts/dashboard/result-breakdown', {
+      params: { days, ...(storeId ? { store_id: storeId } : {}) },
+    });
+    return r.data;
+  },
+
+  dashboardFuStatus: async (
+    days = 30, storeId?: string,
+  ): Promise<FUStatusResponse> => {
+    const r = await api.get('/walkouts/dashboard/fu-status', {
+      params: { days, ...(storeId ? { store_id: storeId } : {}) },
+    });
+    return r.data;
   },
 };
 

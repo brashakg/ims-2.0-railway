@@ -222,6 +222,10 @@ class DatabaseConnection:
             walkouts.create_index("mobile", background=True)
             walkouts.create_index("customer_id", background=True)
 
+            # Walk-in counters (Pune Incentive Module i — Phase 4)
+            walkins = self._db["walk_in_counters"]
+            walkins.create_index([("store_id", 1), ("date_str", -1)], background=True)
+
             print("[OK] MongoDB indexes ensured")
         except Exception as e:
             print(f"[WARN] Index creation error (non-fatal): {e}")

@@ -192,11 +192,46 @@ def patched_walkouts(monkeypatch):
     task_repo = _FakeTaskRepo()
     monkeypatch.setattr(walkouts_module, "get_task_repository", lambda: task_repo)
 
+    # Walk-in counter repo (Phase 4) — backed by FakeCollection so we
+    # can also test the orders-router auto-increment hook end-to-end.
+    from database.repositories.walkin_counter_repository import (
+        WalkInCounterRepository,
+    )
+    walkin_repo = WalkInCounterRepository(fake_db.get_collection("walk_in_counters"))
+    monkeypatch.setattr(
+        walkouts_module, "get_walkin_counter_repository", lambda: walkin_repo
+    )
+    # Also patch the orders router so the POS hook lands in our fake +
+    # orders.py finds the same customers + the order_repo writes to a
+    # real fake collection (otherwise create_order returns 503 because
+    # get_order_repository() is None without a Mongo).
+    try:
+        from api.routers import orders as orders_module
+        from database.repositories.order_repository import OrderRepository
+        order_repo = OrderRepository(fake_db.get_collection("orders"))
+        monkeypatch.setattr(
+            orders_module,
+            "get_walkin_counter_repository",
+            lambda: walkin_repo,
+        )
+        monkeypatch.setattr(
+            orders_module, "get_customer_repository", lambda: customer_repo,
+        )
+        monkeypatch.setattr(
+            orders_module, "get_order_repository", lambda: order_repo,
+        )
+        monkeypatch.setattr(
+            orders_module, "get_product_repository", lambda: None,
+        )
+    except Exception:
+        pass
+
     return {
         "db": fake_db,
         "customer_repo": customer_repo,
         "audit_repo": audit_repo,
         "task_repo": task_repo,
+        "walkin_repo": walkin_repo,
     }
 
 
@@ -980,3 +1015,292 @@ def test_followups_due_today_lists_only_pending_today(
     body = resp.json()
     assert len(body["items"]) == 1
     assert body["items"][0]["walkout_id"] == a["walkout_id"]
+
+
+# ============================================================================
+# Phase 4 — walk-in counter + dashboard
+# ============================================================================
+
+
+def test_walkin_increment_dedups_same_mobile_day(
+    client, auth_headers, patched_walkouts
+):
+    """Repo-level: auto_increment dedup'd by (mobile, day). Two
+    increments for the same mobile in one day → counter still 1."""
+    repo = patched_walkouts["walkin_repo"]
+    r1 = repo.auto_increment(
+        store_id="BV-TEST-01", sales_person_id="user-akshay", mobile="9100000001",
+    )
+    r2 = repo.auto_increment(
+        store_id="BV-TEST-01", sales_person_id="user-akshay", mobile="9100000001",
+    )
+    r3 = repo.auto_increment(
+        store_id="BV-TEST-01", sales_person_id="user-rupesh", mobile="9100000002",
+    )
+    assert r1["deduped"] is False and r1["pos_auto_count"] == 1
+    assert r2["deduped"] is True and r2["pos_auto_count"] == 1
+    assert r3["deduped"] is False and r3["pos_auto_count"] == 2
+
+    today = repo.get_today("BV-TEST-01")
+    assert today["pos_auto_count"] == 2
+    assert today["per_staff"] == {"user-akshay": 1, "user-rupesh": 1}
+
+
+def test_walkin_increment_no_mobile_does_not_dedup(
+    client, auth_headers, patched_walkouts
+):
+    repo = patched_walkouts["walkin_repo"]
+    repo.auto_increment(store_id="BV-TEST-01", sales_person_id="user-akshay")
+    repo.auto_increment(store_id="BV-TEST-01", sales_person_id="user-akshay")
+    today = repo.get_today("BV-TEST-01")
+    assert today["pos_auto_count"] == 2
+
+
+def test_manual_topup_audit_logged(client, auth_headers, patched_walkouts):
+    audit_repo = patched_walkouts["audit_repo"]
+    resp = client.post(
+        "/api/v1/walkouts/walkins/manual-topup",
+        json={"delta": 3, "reason": "Three browsers, no POS"},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    assert body["manual_topup"] == 3
+    assert body["total"] == 3
+    audit = next(
+        d for d in audit_repo.collection.docs
+        if d.get("action") == "walkin.manual_topup"
+    )
+    assert audit["detail"]["delta"] == 3
+    assert audit["detail"]["reason"] == "Three browsers, no POS"
+    assert audit["store_id"] == "BV-TEST-01"
+
+
+def test_manual_topup_blocked_for_sales_staff(
+    client, staff_headers_pune, patched_walkouts
+):
+    resp = client.post(
+        "/api/v1/walkouts/walkins/manual-topup",
+        json={"delta": 1, "reason": "browse"},
+        headers=staff_headers_pune,
+    )
+    assert resp.status_code == 403
+
+
+def test_walkins_today_endpoint_reflects_pos_hook(
+    client, auth_headers, patched_walkouts
+):
+    patched_walkouts["customer_repo"].create({
+        "customer_id": "cust-xx",
+        "name": "Test Customer",
+        "mobile": "9100000005",
+        "phone": "9100000005",
+    })
+    resp = client.post(
+        "/api/v1/orders",
+        json={
+            "customer_id": "cust-xx",
+            "items": [{
+                "product_id": "custom-test", "product_name": "Test",
+                "item_type": "FRAME",
+                "quantity": 1, "unit_price": 100.0,
+            }],
+        },
+        headers=auth_headers,
+    )
+    assert resp.status_code in (200, 201), resp.text
+
+    # Same customer, same day — dedup
+    resp = client.post(
+        "/api/v1/orders",
+        json={
+            "customer_id": "cust-xx",
+            "items": [{
+                "product_id": "custom-test", "product_name": "Test",
+                "item_type": "FRAME",
+                "quantity": 1, "unit_price": 50.0,
+            }],
+        },
+        headers=auth_headers,
+    )
+    assert resp.status_code in (200, 201), resp.text
+
+    resp = client.get("/api/v1/walkouts/walkins/today", headers=auth_headers)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["pos_auto_count"] == 1
+    assert body["total"] == 1
+
+
+def test_dashboard_per_staff_aggregation_correct(
+    client, auth_headers, patched_walkouts
+):
+    for i in range(3):
+        _create_walkout(
+            client, auth_headers,
+            mobile=f"99000{i:05d}", sales_person_id="user-akshay",
+        )
+    _create_walkout(
+        client, auth_headers, mobile="9991111111",
+        sales_person_id="user-rupesh",
+    )
+
+    walkin_repo = patched_walkouts["walkin_repo"]
+    for mob in ("9888880001", "9888880002", "9888880003"):
+        walkin_repo.auto_increment(
+            store_id="BV-TEST-01",
+            sales_person_id="user-akshay",
+            mobile=mob,
+        )
+    for mob in ("9777770001", "9777770002"):
+        walkin_repo.auto_increment(
+            store_id="BV-TEST-01",
+            sales_person_id="user-rupesh",
+            mobile=mob,
+        )
+
+    resp = client.get(
+        "/api/v1/walkouts/dashboard/per-staff", headers=auth_headers
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    items = {r["sales_person_id"]: r for r in body["items"]}
+    akshay = items["user-akshay"]
+    assert akshay["walkouts_mtd"] == 3
+    assert akshay["walkouts_today"] == 3
+    assert akshay["walk_ins_today"] == 3
+    assert akshay["conversion_pct_mtd"] == 0.0
+    rupesh = items["user-rupesh"]
+    assert rupesh["walkouts_mtd"] == 1
+    assert rupesh["walk_ins_today"] == 2
+
+
+def test_dashboard_top_reasons_sorted_desc(
+    client, auth_headers, patched_walkouts
+):
+    for mob, reason in [
+        ("9111110001", "BUDGET/PRICE"),
+        ("9111110002", "BUDGET/PRICE"),
+        ("9111110003", "BUDGET/PRICE"),
+        ("9111110004", "BRAND"),
+        ("9111110005", "BRAND"),
+        ("9111110006", "STYLE/DESIGN"),
+    ]:
+        _create_walkout(
+            client, auth_headers, mobile=mob, primary_walkout_reason=reason,
+        )
+
+    resp = client.get(
+        "/api/v1/walkouts/dashboard/top-reasons", headers=auth_headers
+    )
+    assert resp.status_code == 200
+    items = resp.json()["items"]
+    assert items[0]["reason"] == "BUDGET/PRICE" and items[0]["count"] == 3
+    assert items[1]["reason"] == "BRAND" and items[1]["count"] == 2
+    assert items[2]["reason"] == "STYLE/DESIGN" and items[2]["count"] == 1
+    counts = [i["count"] for i in items]
+    assert counts == sorted(counts, reverse=True)
+
+
+def test_dashboard_result_breakdown_buckets(
+    client, auth_headers, patched_walkouts
+):
+    patched_walkouts["db"].get_collection("orders").insert_one({
+        "order_id": "ORD-DASHBOARD-001",
+    })
+    a = _create_walkout(client, auth_headers, mobile="9000888001")
+    b = _create_walkout(client, auth_headers, mobile="9000888002")
+    c = _create_walkout(client, auth_headers, mobile="9000888003")
+    _create_walkout(client, auth_headers, mobile="9000888004")  # no_result
+
+    client.patch(
+        f"/api/v1/walkouts/{a['walkout_id']}/result",
+        json={"result": "CONVERTED", "converted_order_id": "ORD-DASHBOARD-001"},
+        headers=auth_headers,
+    )
+    client.patch(
+        f"/api/v1/walkouts/{b['walkout_id']}/result",
+        json={"result": "NEGATIVE"}, headers=auth_headers,
+    )
+    client.patch(
+        f"/api/v1/walkouts/{c['walkout_id']}/result",
+        json={"result": "DUE"}, headers=auth_headers,
+    )
+
+    resp = client.get(
+        "/api/v1/walkouts/dashboard/result-breakdown", headers=auth_headers
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["total"] == 4
+    assert body["buckets"]["CONVERTED"] == 1
+    assert body["buckets"]["NEGATIVE"] == 1
+    assert body["buckets"]["DUE"] == 1
+    assert body["buckets"]["no_result"] == 1
+
+
+def test_dashboard_fu_status_per_round(
+    client, auth_headers, patched_walkouts
+):
+    a = _create_walkout(client, auth_headers, mobile="9000777001")
+    b = _create_walkout(client, auth_headers, mobile="9000777002")
+    client.post(
+        f"/api/v1/walkouts/{a['walkout_id']}/followups",
+        json={"round": 1, "scheduled_date": _today_iso(), "mode": "CALL"},
+        headers=auth_headers,
+    )
+    client.patch(
+        f"/api/v1/walkouts/{a['walkout_id']}/followups/1",
+        json={"status": "DONE"}, headers=auth_headers,
+    )
+    client.post(
+        f"/api/v1/walkouts/{a['walkout_id']}/followups",
+        json={"round": 2, "scheduled_date": _today_iso(), "mode": "CALL"},
+        headers=auth_headers,
+    )
+    client.post(
+        f"/api/v1/walkouts/{b['walkout_id']}/followups",
+        json={"round": 1, "scheduled_date": _today_iso(), "mode": "CALL"},
+        headers=auth_headers,
+    )
+
+    resp = client.get(
+        "/api/v1/walkouts/dashboard/fu-status", headers=auth_headers
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["fu1"]["DONE"] == 1
+    assert body["fu1"]["PENDING"] == 1
+    assert body["fu2"]["PENDING"] == 1
+
+
+def test_walkins_mtd_aggregates_across_days(
+    client, auth_headers, patched_walkouts
+):
+    repo = patched_walkouts["walkin_repo"]
+    today = _today_iso()
+    yest = _yesterday_iso()
+    repo.auto_increment(
+        store_id="BV-TEST-01", sales_person_id="user-akshay",
+        mobile="9100200001", date_str=today,
+    )
+    repo.auto_increment(
+        store_id="BV-TEST-01", sales_person_id="user-akshay",
+        mobile="9100200002", date_str=today,
+    )
+    for mob in ("9100200003", "9100200004", "9100200005"):
+        repo.auto_increment(
+            store_id="BV-TEST-01", sales_person_id="user-rupesh",
+            mobile=mob, date_str=yest,
+        )
+
+    from datetime import date as _d
+    now = _d.today()
+    resp = client.get(
+        f"/api/v1/walkouts/walkins/mtd?year={now.year}&month={now.month}",
+        headers=auth_headers,
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["pos_auto_count"] >= 2
+    assert "user-akshay" in body["per_staff"]

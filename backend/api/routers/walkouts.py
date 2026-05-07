@@ -38,6 +38,7 @@ from ..dependencies import (
     get_db,
     get_task_repository,
     get_user_repository,
+    get_walkin_counter_repository,
 )
 
 logger = logging.getLogger(__name__)
@@ -831,6 +832,279 @@ async def escalate_overdue_followups(
         "created_tasks": created,
         "as_of": today,
     }
+
+
+# ----------------------------------------------------------------------------
+# Phase 4 — Walk-in counter + dashboard aggregations
+# ----------------------------------------------------------------------------
+
+
+class ManualTopupRequest(BaseModel):
+    """Phase 4 — UI-driven walk-in topup."""
+
+    delta: int = Field(..., ge=1, le=50)
+    reason: str = Field(..., min_length=1, max_length=200)
+    sales_person_id: Optional[str] = None
+
+
+def _resolve_dashboard_store(current_user: dict, store_override: Optional[str]) -> str:
+    """SUPERADMIN/ADMIN may override store; everyone else is locked to
+    their session store. Raises 400 if neither path yields one."""
+    roles = _user_role_set(current_user)
+    if roles & _GLOBAL_EDIT_ROLES and store_override:
+        return store_override
+    store = _user_store_id(current_user)
+    if not store:
+        raise HTTPException(
+            status_code=400, detail="No active store on this session"
+        )
+    return store
+
+
+@router.get("/walkins/today")
+async def walkins_today(
+    current_user: dict = Depends(get_current_user),
+    store_id: Optional[str] = Query(None),
+):
+    """Today's walk-in count + per-staff breakdown for the dashboard."""
+    store = _resolve_dashboard_store(current_user, store_id)
+    repo = get_walkin_counter_repository()
+    if repo is None:
+        return {
+            "store_id": store, "date_str": datetime.now().date().isoformat(),
+            "pos_auto_count": 0, "manual_topup": 0, "total": 0, "per_staff": {},
+        }
+    return _serialize_value(repo.get_today(store))
+
+
+@router.get("/walkins/mtd")
+async def walkins_mtd(
+    current_user: dict = Depends(get_current_user),
+    store_id: Optional[str] = Query(None),
+    year: Optional[int] = Query(None, ge=2024, le=2100),
+    month: Optional[int] = Query(None, ge=1, le=12),
+):
+    """Month-to-date walk-in totals + per-staff breakdown."""
+    store = _resolve_dashboard_store(current_user, store_id)
+    now = datetime.now()
+    yr = year or now.year
+    mo = month or now.month
+    repo = get_walkin_counter_repository()
+    if repo is None:
+        return {
+            "store_id": store, "year": yr, "month": mo,
+            "pos_auto_count": 0, "manual_topup": 0, "total": 0,
+            "per_staff": {}, "days_with_data": 0,
+        }
+    return _serialize_value(repo.get_mtd(store, yr, mo))
+
+
+@router.post("/walkins/manual-topup", status_code=201)
+async def walkins_manual_topup(
+    payload: ManualTopupRequest,
+    current_user: dict = Depends(get_current_user),
+    store_id: Optional[str] = Query(None),
+):
+    """Bump the day's counter for browse-and-leave customers. Audited."""
+    store = _resolve_dashboard_store(current_user, store_id)
+    # Only managers + admin + accountant may manually inflate the counter
+    roles = _user_role_set(current_user)
+    if not (roles & _REATTRIBUTE_ROLES):
+        raise HTTPException(
+            status_code=403,
+            detail="Only managers / admin / accountant can manually top up walk-ins",
+        )
+    repo = get_walkin_counter_repository()
+    if repo is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    result = repo.manual_topup(
+        store_id=store,
+        added_by=current_user.get("user_id") or "",
+        delta=payload.delta,
+        reason=payload.reason,
+        sales_person_id=payload.sales_person_id,
+    )
+    _audit_walkout_action(
+        action="walkin.manual_topup",
+        walkout_id=f"walkin:{store}:{datetime.now().date().isoformat()}",
+        store_id=store,
+        current_user=current_user,
+        detail={
+            "delta": payload.delta,
+            "reason": payload.reason,
+            "sales_person_id": payload.sales_person_id,
+        },
+    )
+    return _serialize_value(result)
+
+
+@router.get("/dashboard/per-staff")
+async def dashboard_per_staff(
+    current_user: dict = Depends(get_current_user),
+    store_id: Optional[str] = Query(None),
+):
+    """Per-staff dashboard cards: walkouts MTD/today + walk-ins today/MTD
+    + conversion% (CONVERTED / walkouts) + FU-due-today count."""
+    store = _resolve_dashboard_store(current_user, store_id)
+    walkout_repo = _walkout_repo()
+    walkin_repo = get_walkin_counter_repository()
+    if walkout_repo is None:
+        return {"store_id": store, "items": []}
+
+    now = datetime.now().date()
+    today = now.isoformat()
+    mtd_from = now.replace(day=1).isoformat()
+
+    # Walkouts MTD by sales_person (built from list — small N per store).
+    mtd_walkouts = walkout_repo.list_walkouts(
+        store_id=store, date_from=mtd_from, date_to=today, limit=2000,
+    )
+    today_walkouts = [w for w in mtd_walkouts if w.get("date_str") == today]
+
+    per_staff: Dict[str, Dict[str, Any]] = {}
+    def _slot(sp: str) -> Dict[str, Any]:
+        if sp not in per_staff:
+            per_staff[sp] = {
+                "sales_person_id": sp,
+                "sales_person_name": None,
+                "walkouts_mtd": 0,
+                "walkouts_today": 0,
+                "converted_mtd": 0,
+                "walk_ins_today": 0,
+                "walk_ins_mtd": 0,
+                "fu_due_today": 0,
+            }
+        return per_staff[sp]
+
+    for w in mtd_walkouts:
+        sp = w.get("sales_person_id") or ""
+        slot = _slot(sp)
+        slot["sales_person_name"] = w.get("sales_person_name") or slot["sales_person_name"]
+        slot["walkouts_mtd"] += 1
+        if w.get("result") == "CONVERTED":
+            slot["converted_mtd"] += 1
+    for w in today_walkouts:
+        sp = w.get("sales_person_id") or ""
+        _slot(sp)["walkouts_today"] += 1
+
+    if walkin_repo is not None:
+        today_doc = walkin_repo.get_today(store)
+        for sp, count in (today_doc.get("per_staff") or {}).items():
+            _slot(sp)["walk_ins_today"] = int(count)
+        mtd_doc = walkin_repo.get_mtd(store, now.year, now.month)
+        for sp, count in (mtd_doc.get("per_staff") or {}).items():
+            _slot(sp)["walk_ins_mtd"] = int(count)
+
+    # FU-due-today per staff
+    due_rows = walkout_repo.list_followups_due_today(today, store_id=store)
+    for r in due_rows:
+        sp = r.get("sales_person_id") or ""
+        _slot(sp)["fu_due_today"] += 1
+
+    # Conversion% (Module ii will use the formal scoring; this is the
+    # raw MTD ratio for the dashboard chip).
+    items = []
+    for sp, slot in per_staff.items():
+        denom = slot["walkouts_mtd"]
+        slot["conversion_pct_mtd"] = (
+            round(100.0 * slot["converted_mtd"] / denom, 1) if denom else 0.0
+        )
+        items.append(slot)
+
+    items.sort(key=lambda s: (-s["walkouts_mtd"], s["sales_person_id"]))
+    return {"store_id": store, "as_of": today, "items": items}
+
+
+@router.get("/dashboard/top-reasons")
+async def dashboard_top_reasons(
+    current_user: dict = Depends(get_current_user),
+    store_id: Optional[str] = Query(None),
+    limit: int = Query(10, ge=1, le=50),
+    days: int = Query(30, ge=1, le=365),
+):
+    """Top primary_walkout_reason values, sorted desc by count."""
+    store = _resolve_dashboard_store(current_user, store_id)
+    repo = _walkout_repo()
+    if repo is None:
+        return {"store_id": store, "items": []}
+    from datetime import timedelta
+    today = datetime.now().date()
+    date_from = (today - timedelta(days=days - 1)).isoformat()
+    walkouts = repo.list_walkouts(
+        store_id=store, date_from=date_from,
+        date_to=today.isoformat(), limit=5000,
+    )
+    counts: Dict[str, int] = {}
+    for w in walkouts:
+        r = w.get("primary_walkout_reason") or "OTHER"
+        counts[r] = counts.get(r, 0) + 1
+    items = [{"reason": k, "count": v} for k, v in counts.items()]
+    items.sort(key=lambda x: (-x["count"], x["reason"]))
+    return {
+        "store_id": store, "days": days, "items": items[:limit],
+    }
+
+
+@router.get("/dashboard/result-breakdown")
+async def dashboard_result_breakdown(
+    current_user: dict = Depends(get_current_user),
+    store_id: Optional[str] = Query(None),
+    days: int = Query(30, ge=1, le=365),
+):
+    """Counts of DUE / NEGATIVE / CONVERTED / no_result over the last N days."""
+    store = _resolve_dashboard_store(current_user, store_id)
+    repo = _walkout_repo()
+    if repo is None:
+        return {"store_id": store, "buckets": {}}
+    from datetime import timedelta
+    today = datetime.now().date()
+    date_from = (today - timedelta(days=days - 1)).isoformat()
+    walkouts = repo.list_walkouts(
+        store_id=store, date_from=date_from,
+        date_to=today.isoformat(), limit=5000,
+    )
+    buckets = {"DUE": 0, "NEGATIVE": 0, "CONVERTED": 0, "no_result": 0}
+    for w in walkouts:
+        r = w.get("result")
+        if r in buckets:
+            buckets[r] += 1
+        else:
+            buckets["no_result"] += 1
+    return {
+        "store_id": store, "days": days, "total": len(walkouts),
+        "buckets": buckets,
+    }
+
+
+@router.get("/dashboard/fu-status")
+async def dashboard_fu_status(
+    current_user: dict = Depends(get_current_user),
+    store_id: Optional[str] = Query(None),
+    days: int = Query(30, ge=1, le=365),
+):
+    """Per-round breakdown of FU statuses: { fu1: {DONE, PENDING, ...}, fu2: {...} }."""
+    store = _resolve_dashboard_store(current_user, store_id)
+    repo = _walkout_repo()
+    if repo is None:
+        return {"store_id": store, "fu1": {}, "fu2": {}}
+    from datetime import timedelta
+    today = datetime.now().date()
+    date_from = (today - timedelta(days=days - 1)).isoformat()
+    walkouts = repo.list_walkouts(
+        store_id=store, date_from=date_from,
+        date_to=today.isoformat(), limit=5000,
+    )
+    out: Dict[str, Dict[str, int]] = {"fu1": {}, "fu2": {}}
+    for w in walkouts:
+        for fu in (w.get("followups") or []):
+            key = "fu1" if fu.get("round") == 1 else (
+                "fu2" if fu.get("round") == 2 else None
+            )
+            if not key:
+                continue
+            status = fu.get("status") or "PENDING"
+            out[key][status] = out[key].get(status, 0) + 1
+    return {"store_id": store, "days": days, **out}
 
 
 # ----------------------------------------------------------------------------
