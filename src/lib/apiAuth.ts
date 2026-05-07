@@ -3,7 +3,10 @@ import { NextResponse } from "next/server";
 import { authOptions } from "@/lib/auth";
 import { effectiveFeatures, type FeatureKey } from "@/lib/features";
 
-type Role = "ADMIN" | "DESIGN_MANAGER" | "CATALOG_MANAGER" | "STAFF";
+// Three real roles. STAFF used to exist but every endpoint that referenced
+// it has been migrated; legacy DB rows with role="STAFF" fall through to
+// the not-allowed branch as expected.
+type Role = "ADMIN" | "DESIGN_MANAGER" | "CATALOG_MANAGER";
 
 interface AuthResult {
   authorized: boolean;

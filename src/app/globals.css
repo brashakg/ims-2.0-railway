@@ -248,9 +248,9 @@ body {
   border-bottom: none;
 }
 
-.polaris-tabular-nums {
-  font-variant-numeric: tabular-nums;
-}
+/* Tailwind already ships a `tabular-nums` utility (font-variant-numeric:
+   tabular-nums) so we don't redefine it here — components that need
+   tabular figures just use className="tabular-nums". */
 
 @keyframes fade-in {
   from {
