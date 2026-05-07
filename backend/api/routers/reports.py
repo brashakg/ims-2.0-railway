@@ -21,6 +21,162 @@ from ..dependencies import (
 router = APIRouter()
 
 
+# ============================================================================
+# Order aggregation helpers (shared across the sales reports)
+# ============================================================================
+# Audit pass (2026-05) caught two bugs in every /sales/* endpoint:
+#   1. Date filter was `"created_at": {"$gte": dt.isoformat()}` — a
+#      string compared against a Mongo Date field never matches, so
+#      every aggregation returned 0 rows (and 0 revenue) even when
+#      real orders existed.
+#   2. Field names: orders stamp `grand_total` / `total_discount` /
+#      `tax_amount`, but the loops summed `final_amount` / `total_amount`
+#      / `discount_amount` (legacy names that orders.py never used). So
+#      even when the date filter happened to match (e.g. with seeded
+#      mock data that had ISO-string created_at), the totals were 0.
+#
+# Items also stamped `item_total` and `unit_price`, but the
+# `/sales/by-category` loop summed `item.total` / `item.price` —
+# different bug, same root cause (drift).
+#
+# These helpers centralise the correct field names and filter shapes
+# so future endpoints can't drift.
+
+
+def _orders_in_window(
+    order_repo,
+    *,
+    store_id: Optional[str],
+    start_dt: datetime,
+    end_dt: datetime,
+) -> list:
+    """Fetch non-cancelled, non-DRAFT orders for a (store, datetime
+    window). Filter is a real Mongo Date range — passes through to
+    `order_repo.find_many` which preserves the datetime objects."""
+    flt: dict = {
+        "created_at": {"$gte": start_dt, "$lte": end_dt},
+        "status": {"$nin": ["CANCELLED", "DRAFT"]},
+    }
+    if store_id:
+        flt["store_id"] = store_id
+    try:
+        return order_repo.find_many(flt) or []
+    except Exception:
+        return []
+
+
+def _order_revenue(order: dict) -> float:
+    """Single-source-of-truth read of an order's billable amount.
+    Falls through legacy field names so older docs from before the
+    grand_total rename don't silently zero out."""
+    for k in ("grand_total", "final_amount", "total_amount", "total"):
+        v = order.get(k)
+        if v is not None:
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                continue
+    return 0.0
+
+
+def _order_discount(order: dict) -> float:
+    for k in ("total_discount", "discount_amount", "discount"):
+        v = order.get(k)
+        if v is not None:
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                continue
+    return 0.0
+
+
+def _order_tax(order: dict) -> float:
+    for k in ("tax_amount", "total_tax", "tax"):
+        v = order.get(k)
+        if v is not None:
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                continue
+    return 0.0
+
+
+def _item_revenue(item: dict) -> float:
+    """Per-line revenue (after item-level discount, before cart-level
+    discount). orders.py stamps `item_total`; legacy docs may have
+    `total` or `price * quantity`."""
+    for k in ("item_total", "total"):
+        v = item.get(k)
+        if v is not None:
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                continue
+    try:
+        unit = float(item.get("unit_price") or item.get("price") or 0)
+        qty = float(item.get("quantity") or 1)
+        return unit * qty
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _summarise_orders(orders: list) -> dict:
+    """Bog-standard summary envelope used by /sales/summary + /sales/growth."""
+    total_sales = round(sum(_order_revenue(o) for o in orders), 2)
+    total_tax = round(sum(_order_tax(o) for o in orders), 2)
+    total_discount = round(sum(_order_discount(o) for o in orders), 2)
+    n = len(orders)
+    return {
+        "total_sales": total_sales,
+        "total_orders": n,
+        "avg_order_value": round(total_sales / n, 2) if n else 0.0,
+        "total_tax": total_tax,
+        "total_discount": total_discount,
+    }
+
+
+def _daily_trend(orders: list) -> list:
+    """Group orders by date_str (or created_at[:10] fallback). Returns
+    sorted-asc list of {date, sales, orders}."""
+    by_day: dict = {}
+    for o in orders:
+        ds = o.get("date_str")
+        if not ds:
+            ca = o.get("created_at")
+            if isinstance(ca, datetime):
+                ds = ca.date().isoformat()
+            elif isinstance(ca, str) and len(ca) >= 10:
+                ds = ca[:10]
+        if not ds:
+            continue
+        slot = by_day.setdefault(ds, {"date": ds, "sales": 0.0, "orders": 0})
+        slot["sales"] += _order_revenue(o)
+        slot["orders"] += 1
+    out = list(by_day.values())
+    for s in out:
+        s["sales"] = round(s["sales"], 2)
+    return sorted(out, key=lambda x: x["date"])
+
+
+def _category_breakdown(orders: list) -> list:
+    """Sum revenue + units per category from order items."""
+    by_cat: dict = {}
+    total = 0.0
+    for o in orders:
+        for it in (o.get("items") or []):
+            cat = it.get("category") or it.get("item_type") or "Other"
+            slot = by_cat.setdefault(cat, {"category": cat, "sales": 0.0, "units": 0})
+            line_rev = _item_revenue(it)
+            slot["sales"] += line_rev
+            slot["units"] += int(it.get("quantity") or 1)
+            total += line_rev
+    out = list(by_cat.values())
+    for s in out:
+        s["sales"] = round(s["sales"], 2)
+        s["percentage"] = round(100.0 * s["sales"] / total, 2) if total else 0.0
+    return sorted(out, key=lambda x: -x["sales"])
+
+
 
 @router.get("")
 @router.get("/")
@@ -183,47 +339,31 @@ async def sales_summary(
     to_date: date = Query(...),
     current_user: dict = Depends(get_current_user),
 ):
-    """Get sales summary for date range"""
+    """Sales summary + daily trend + category breakdown for the
+    requested window. Single endpoint that the frontend Reports page
+    reads off the same response."""
     active_store = store_id or current_user.get("active_store_id")
     order_repo = get_order_repository()
-
+    empty = {
+        "summary": {
+            "total_sales": 0, "total_orders": 0, "avg_order_value": 0,
+            "total_tax": 0, "total_discount": 0,
+        },
+        "dailyTrend": [],
+        "categoryBreakdown": [],
+    }
     if order_repo is None:
-        return {
-            "summary": {
-                "total_sales": 0,
-                "total_orders": 0,
-                "avg_order_value": 0,
-                "total_tax": 0,
-                "total_discount": 0,
-            }
-        }
+        return empty
 
-    # Get orders in date range
     from_dt = datetime.combine(from_date, datetime.min.time())
     to_dt = datetime.combine(to_date, datetime.max.time())
-
-    orders = order_repo.find_many(
-        {
-            "store_id": active_store,
-            "created_at": {"$gte": from_dt.isoformat(), "$lte": to_dt.isoformat()},
-            "status": {"$nin": ["CANCELLED", "DRAFT"]},
-        }
+    orders = _orders_in_window(
+        order_repo, store_id=active_store, start_dt=from_dt, end_dt=to_dt,
     )
-
-    total_sales = sum(
-        o.get("final_amount", 0) or o.get("total_amount", 0) for o in orders
-    )
-    total_tax = sum(o.get("tax_amount", 0) for o in orders)
-    total_discount = sum(o.get("discount_amount", 0) for o in orders)
-
     return {
-        "summary": {
-            "total_sales": total_sales,
-            "total_orders": len(orders),
-            "avg_order_value": round(total_sales / len(orders), 2) if orders else 0,
-            "total_tax": total_tax,
-            "total_discount": total_discount,
-        }
+        "summary": _summarise_orders(orders),
+        "dailyTrend": _daily_trend(orders),
+        "categoryBreakdown": _category_breakdown(orders),
     }
 
 
@@ -233,41 +373,17 @@ async def daily_sales(
     days: int = Query(30),
     current_user: dict = Depends(get_current_user),
 ):
-    """Get daily sales data for chart"""
+    """Daily sales for the last N days (chart data)."""
     active_store = store_id or current_user.get("active_store_id")
     order_repo = get_order_repository()
-
     if order_repo is None:
         return {"data": []}
-
-    # Get orders for last N days
-    end_date = datetime.now()
-    start_date = end_date - timedelta(days=days)
-
-    orders = order_repo.find_many(
-        {
-            "store_id": active_store,
-            "created_at": {"$gte": start_date.isoformat()},
-            "status": {"$nin": ["CANCELLED", "DRAFT"]},
-        }
+    end_dt = datetime.now()
+    start_dt = end_dt - timedelta(days=days)
+    orders = _orders_in_window(
+        order_repo, store_id=active_store, start_dt=start_dt, end_dt=end_dt,
     )
-
-    # Group by date
-    daily_data = {}
-    for order in orders:
-        order_date = order.get("created_at", "")[:10]  # Get just the date part
-        if order_date:
-            if order_date not in daily_data:
-                daily_data[order_date] = {"date": order_date, "sales": 0, "orders": 0}
-            daily_data[order_date]["sales"] += order.get(
-                "final_amount", 0
-            ) or order.get("total_amount", 0)
-            daily_data[order_date]["orders"] += 1
-
-    # Convert to sorted list
-    data = sorted(daily_data.values(), key=lambda x: x["date"])
-
-    return {"data": data}
+    return {"data": _daily_trend(orders)}
 
 
 @router.get("/sales/by-salesperson")
@@ -322,41 +438,17 @@ async def sales_by_category(
     to_date: date = Query(...),
     current_user: dict = Depends(get_current_user),
 ):
-    """Get sales grouped by product category"""
+    """Sales grouped by product category for the requested window."""
     active_store = store_id or current_user.get("active_store_id")
     order_repo = get_order_repository()
-
     if order_repo is None:
         return {"data": []}
-
     from_dt = datetime.combine(from_date, datetime.min.time())
     to_dt = datetime.combine(to_date, datetime.max.time())
-
-    orders = order_repo.find_many(
-        {
-            "store_id": active_store,
-            "created_at": {"$gte": from_dt.isoformat(), "$lte": to_dt.isoformat()},
-            "status": {"$nin": ["CANCELLED", "DRAFT"]},
-        }
+    orders = _orders_in_window(
+        order_repo, store_id=active_store, start_dt=from_dt, end_dt=to_dt,
     )
-
-    # Aggregate by category from order items
-    by_category = {}
-    for order in orders:
-        for item in order.get("items", []):
-            category = item.get("category", "Other")
-            if category not in by_category:
-                by_category[category] = {
-                    "category": category,
-                    "sales": 0,
-                    "quantity": 0,
-                }
-            by_category[category]["sales"] += item.get("total", 0) or (
-                item.get("price", 0) * item.get("quantity", 1)
-            )
-            by_category[category]["quantity"] += item.get("quantity", 1)
-
-    return {"data": list(by_category.values())}
+    return {"data": _category_breakdown(orders)}
 
 
 # ============================================================================
@@ -799,27 +891,22 @@ async def sales_growth(
     else:
         yoy_end = datetime(year - 1, month + 1, 1) - timedelta(seconds=1)
 
-    current_orders = order_repo.find_many({
-        "store_id": active_store,
-        "created_at": {"$gte": current_start.isoformat(), "$lte": current_end.isoformat()},
-        "status": {"$nin": ["CANCELLED", "DRAFT"]},
-    })
+    current_orders = _orders_in_window(
+        order_repo, store_id=active_store,
+        start_dt=current_start, end_dt=current_end,
+    )
+    mom_orders = _orders_in_window(
+        order_repo, store_id=active_store,
+        start_dt=mom_start, end_dt=mom_end,
+    )
+    yoy_orders = _orders_in_window(
+        order_repo, store_id=active_store,
+        start_dt=yoy_start, end_dt=yoy_end,
+    )
 
-    mom_orders = order_repo.find_many({
-        "store_id": active_store,
-        "created_at": {"$gte": mom_start.isoformat(), "$lte": mom_end.isoformat()},
-        "status": {"$nin": ["CANCELLED", "DRAFT"]},
-    })
-
-    yoy_orders = order_repo.find_many({
-        "store_id": active_store,
-        "created_at": {"$gte": yoy_start.isoformat(), "$lte": yoy_end.isoformat()},
-        "status": {"$nin": ["CANCELLED", "DRAFT"]},
-    })
-
-    current_sales = sum(o.get("final_amount", 0) or o.get("total_amount", 0) for o in current_orders)
-    mom_sales = sum(o.get("final_amount", 0) or o.get("total_amount", 0) for o in mom_orders)
-    yoy_sales = sum(o.get("final_amount", 0) or o.get("total_amount", 0) for o in yoy_orders)
+    current_sales = sum(_order_revenue(o) for o in current_orders)
+    mom_sales = sum(_order_revenue(o) for o in mom_orders)
+    yoy_sales = sum(_order_revenue(o) for o in yoy_orders)
 
     mom_growth = ((current_sales - mom_sales) / mom_sales * 100) if mom_sales > 0 else 0
     yoy_growth = ((current_sales - yoy_sales) / yoy_sales * 100) if yoy_sales > 0 else 0
