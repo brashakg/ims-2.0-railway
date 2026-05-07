@@ -36,6 +36,8 @@ from .marketing import router as marketing_router
 from .analytics_v2 import router as analytics_v2_router
 from .agents import router as agents_router
 from .walkouts import router as walkouts_router
+from .points import router as points_router
+from .payout import router as payout_router
 
 __all__ = [
     "auth_router",
@@ -71,4 +73,6 @@ __all__ = [
     "analytics_v2_router",
     "agents_router",
     "walkouts_router",
+    "points_router",
+    "payout_router",
 ]

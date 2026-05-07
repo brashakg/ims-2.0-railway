@@ -45,6 +45,7 @@ const RAIL_GROUPS: NavItem[][] = [
   [
     { id: 'tasks', label: 'Tasks & SOPs', to: '/tasks', icon: 'check' },
     { id: 'hr', label: 'HR', to: '/hr', icon: 'user' },
+    { id: 'incentive', label: 'Incentive', to: '/incentive', icon: 'zap' },
   ],
   // Analysis
   [

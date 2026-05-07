@@ -226,6 +226,49 @@ class DatabaseConnection:
             walkins = self._db["walk_in_counters"]
             walkins.create_index([("store_id", 1), ("date_str", -1)], background=True)
 
+            # Points log (Pune Incentive Module ii)
+            # The unique partial index on (store, date_str, staff) where
+            # deleted_at is null is the DB-level enforcement of "refuse
+            # second save" — DELETE the existing row first, then re-POST.
+            points = self._db["points_log"]
+            points.create_index(
+                [("store_id", 1), ("date_str", -1), ("staff_id", 1)],
+                unique=True,
+                partialFilterExpression={"deleted_at": None},
+                background=True,
+            )
+            points.create_index(
+                [("store_id", 1), ("staff_id", 1), ("date_str", -1)],
+                background=True,
+            )
+            points.create_index(
+                [("store_id", 1), ("deleted_at", 1)],
+                background=True,
+            )
+            settings = self._db["incentive_settings"]
+            settings.create_index("store_id", unique=True, background=True)
+
+            # Per-store-per-month manual incentive inputs (last_year_sale, etc.)
+            inputs = self._db["incentive_inputs"]
+            inputs.create_index(
+                [("store_id", 1), ("year", 1), ("month", 1)],
+                unique=True, background=True,
+            )
+
+            # Payout snapshots (Pune Incentive Module iii)
+            # Multiple DRAFTs allowed; only one LOCKED per (store, year, month).
+            payouts = self._db["payout_snapshots"]
+            payouts.create_index(
+                [("store_id", 1), ("year", 1), ("month", 1)],
+                unique=True,
+                partialFilterExpression={"status": "LOCKED"},
+                background=True,
+            )
+            payouts.create_index(
+                [("store_id", 1), ("year", -1), ("month", -1)],
+                background=True,
+            )
+
             print("[OK] MongoDB indexes ensured")
         except Exception as e:
             print(f"[WARN] Index creation error (non-fatal): {e}")

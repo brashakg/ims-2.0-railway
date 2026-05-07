@@ -33,4 +33,6 @@ export {
   settingsApi,
   adminIntegrationApi,
   walkoutsApi,
+  incentiveApi,
+  payoutApi,
 } from './api/index';
