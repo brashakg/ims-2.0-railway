@@ -406,11 +406,14 @@
    Shell chrome — 64px Rail + 52px Topbar (ported from shell/shell.css)
    ============================================================================ */
 .app-shell {
+  --rail-width: 64px;
   display: grid;
-  grid-template-columns: 64px 1fr;
+  grid-template-columns: var(--rail-width) 1fr;
   height: 100vh;
   background: var(--bg);
+  transition: grid-template-columns .15s ease;
 }
+.app-shell.rail-expanded { --rail-width: 200px; }
 
 /* Left rail */
 .rail {
@@ -466,6 +469,58 @@
   display: grid; place-items: center;
   font-size: 12px; font-weight: 600; cursor: pointer;
 }
+
+/* Collapse / expand toggle button — sits above the avatar at the bottom. */
+.rail .rail-toggle {
+  position: relative;
+  width: 48px; height: 36px; margin: 4px auto;
+  border-radius: 10px;
+  display: grid; place-items: center;
+  background: transparent;
+  border: none;
+  color: #9a9a92;
+  cursor: pointer;
+  transition: background .12s, color .12s;
+}
+.rail .rail-toggle:hover { background: #222220; color: #fff; }
+.rail .rail-toggle:focus-visible {
+  outline: 2px solid var(--bv); outline-offset: 2px;
+}
+
+/* Expanded mode — labels render inline next to icons; rail widens to 200px. */
+.rail.expanded .brand { margin: 0 16px 16px; }
+.rail.expanded .rail-item {
+  width: auto; margin: 2px 10px;
+  display: flex; align-items: center; gap: 12px;
+  padding: 0 12px; justify-content: flex-start;
+}
+.rail.expanded .rail-item.active::before { left: -10px; }
+.rail.expanded .rail-label {
+  position: static; transform: none;
+  opacity: 1; pointer-events: auto;
+  background: transparent; color: inherit; padding: 0;
+  font-size: 13px; box-shadow: none;
+  transition: none;
+}
+.rail.expanded .rail-item:hover .rail-label { opacity: 1; }
+.rail.expanded .rail-toggle {
+  width: auto; margin: 4px 10px;
+  display: flex; align-items: center; gap: 12px;
+  padding: 0 12px; justify-content: flex-start;
+}
+.rail.expanded .rail-toggle .rail-label {
+  position: static; transform: none; opacity: 1;
+  background: transparent; color: inherit; padding: 0;
+  font-size: 13px; box-shadow: none; pointer-events: auto;
+}
+.rail:not(.expanded) .rail-toggle .rail-label {
+  /* Tooltip-only when collapsed, mirroring rail-item behavior. */
+  position: absolute; left: calc(100% + 10px); top: 50%; transform: translateY(-50%);
+  background: #141413; color: #fff; padding: 4px 8px; border-radius: 6px;
+  font-size: 11.5px; white-space: nowrap; opacity: 0; pointer-events: none;
+  transition: opacity .15s; z-index: 30; box-shadow: var(--sh-md);
+}
+.rail:not(.expanded) .rail-toggle:hover .rail-label { opacity: 1; }
 
 /* Main column */
 .app-main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }

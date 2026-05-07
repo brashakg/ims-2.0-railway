@@ -4,6 +4,7 @@
 import type { ReactNode } from 'react';
 import { Rail } from './Rail';
 import { Topbar, type Crumb } from './Topbar';
+import { useAppearance } from '../../context/AppearanceContext';
 
 interface ShellProps {
   crumbs?: Crumb[];
@@ -13,8 +14,12 @@ interface ShellProps {
 }
 
 export function Shell({ crumbs, actions, brand, children }: ShellProps) {
+  const { railExpanded } = useAppearance();
   return (
-    <div className="app-shell" data-brand={brand ?? 'bv'}>
+    <div
+      className={'app-shell' + (railExpanded ? ' rail-expanded' : '')}
+      data-brand={brand ?? 'bv'}
+    >
       <Rail brand={brand} />
       <div className="app-main">
         <Topbar crumbs={crumbs} actions={actions} />

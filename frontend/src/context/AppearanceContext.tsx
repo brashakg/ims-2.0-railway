@@ -12,14 +12,19 @@ export type Density = 'default' | 'compact';
 interface AppearanceContextType {
   brand: Brand;
   density: Density;
+  /** Sidebar rail mode — false = icon-only (64px), true = icon + label (200px). */
+  railExpanded: boolean;
   setBrand: (b: Brand) => void;
   setDensity: (d: Density) => void;
+  setRailExpanded: (v: boolean) => void;
+  toggleRailExpanded: () => void;
 }
 
 const AppearanceContext = createContext<AppearanceContextType | undefined>(undefined);
 
 const BRAND_KEY = 'ims.brand';
 const DENSITY_KEY = 'ims.density';
+const RAIL_KEY = 'ims.rail-expanded';
 
 function readBrand(): Brand {
   if (typeof localStorage === 'undefined') return 'bv';
@@ -33,9 +38,15 @@ function readDensity(): Density {
   return v === 'compact' ? 'compact' : 'default';
 }
 
+function readRailExpanded(): boolean {
+  if (typeof localStorage === 'undefined') return false;
+  return localStorage.getItem(RAIL_KEY) === '1';
+}
+
 export function AppearanceProvider({ children }: { children: ReactNode }) {
   const [brand, setBrandState] = useState<Brand>(readBrand);
   const [density, setDensityState] = useState<Density>(readDensity);
+  const [railExpanded, setRailExpandedState] = useState<boolean>(readRailExpanded);
 
   useEffect(() => {
     const root = document.documentElement;
@@ -56,9 +67,17 @@ export function AppearanceProvider({ children }: { children: ReactNode }) {
     setDensityState(d);
     try { localStorage.setItem(DENSITY_KEY, d); } catch { /* storage may be blocked */ }
   };
+  const setRailExpanded = (v: boolean) => {
+    setRailExpandedState(v);
+    try { localStorage.setItem(RAIL_KEY, v ? '1' : '0'); } catch { /* storage may be blocked */ }
+  };
+  const toggleRailExpanded = () => setRailExpanded(!railExpanded);
 
   return (
-    <AppearanceContext.Provider value={{ brand, density, setBrand, setDensity }}>
+    <AppearanceContext.Provider value={{
+      brand, density, railExpanded,
+      setBrand, setDensity, setRailExpanded, toggleRailExpanded,
+    }}>
       {children}
     </AppearanceContext.Provider>
   );
