@@ -5,6 +5,10 @@ import { usePathname } from "next/navigation";
 import { useSession, signOut } from "next-auth/react";
 import { useState } from "react";
 import {
+  effectiveFeatures,
+  type FeatureKey,
+} from "@/lib/features";
+import {
   Menu,
   X,
   LayoutDashboard,
@@ -42,6 +46,10 @@ interface NavItem {
    *  shape mirrors the design handoff so we can wire counts later. */
   badge?: string;
   badgeTone?: "default" | "critical" | "magic";
+  /** Required feature key. Item is hidden if user doesn't have this
+   *  feature enabled. Dashboard / Home items leave this undefined since
+   *  every authenticated user should see them. */
+  feature?: FeatureKey;
 }
 
 interface NavGroup {
@@ -68,63 +76,74 @@ export default function Sidebar() {
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
 
   const userRole = (session?.user as any)?.role || "USER";
-  const isAdmin = userRole === "ADMIN";
-  const isDesigner = userRole === "DESIGN_MANAGER";
-  const canSeeDesignQueue = isAdmin || isDesigner;
+  const enabledFeatures: string | null =
+    (session?.user as any)?.enabledFeatures ?? null;
+
+  // Resolve the user's feature set once. ADMIN gets all features
+  // implicitly; for others we look up role defaults or the explicit
+  // override on User.enabledFeatures.
+  const features = effectiveFeatures({ role: userRole, enabledFeatures });
+  const has = (k: FeatureKey) => features.includes(k);
 
   // Group order matches the design handoff: main (no header) → Operations
   // → Insights → Admin. Items within main appear without a section label.
-  const groups: NavGroup[] = [
+  // Each item declares its required feature; the filter below hides any
+  // item the user doesn't have access to. Dashboard is always visible.
+  const allGroups: NavGroup[] = [
     {
       id: "main",
       items: [
         { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard, exact: true },
-        { href: "/dashboard/products", label: "Products", icon: Package },
-        { href: "/dashboard/orders", label: "Orders", icon: ShoppingCart },
-        { href: "/dashboard/customers", label: "Customers", icon: Users },
-        { href: "/dashboard/collections", label: "Collections", icon: FolderOpen },
+        { href: "/dashboard/products", label: "Products", icon: Package, feature: "products" },
+        { href: "/dashboard/orders", label: "Orders", icon: ShoppingCart, feature: "orders" },
+        { href: "/dashboard/customers", label: "Customers", icon: Users, feature: "customers" },
+        { href: "/dashboard/collections", label: "Collections", icon: FolderOpen, feature: "collections" },
       ],
     },
     {
       id: "ops",
       label: "Operations",
       items: [
-        { href: "/dashboard/stock-tally", label: "Stock Tally", icon: ClipboardCheck },
-        { href: "/dashboard/stock-transfers", label: "Stock Transfers", icon: ArrowLeftRight },
-        { href: "/dashboard/stock-import", label: "Backup & Restore", icon: HardDriveDownload },
-        ...(canSeeDesignQueue
-          ? [{ href: "/dashboard/design-queue", label: "Design Queue", icon: Palette, badgeTone: "magic" as const }]
-          : []),
-        { href: "/dashboard/shopify", label: "Shopify Sync", icon: Settings },
+        { href: "/dashboard/stock-tally", label: "Stock Tally", icon: ClipboardCheck, feature: "stock_tally" },
+        { href: "/dashboard/stock-transfers", label: "Stock Transfers", icon: ArrowLeftRight, feature: "stock_transfers" },
+        { href: "/dashboard/stock-import", label: "Backup & Restore", icon: HardDriveDownload, feature: "stock_import" },
+        { href: "/dashboard/design-queue", label: "Design Queue", icon: Palette, badgeTone: "magic", feature: "design_queue" },
+        { href: "/dashboard/shopify", label: "Shopify Sync", icon: Settings, feature: "shopify_sync" },
       ],
     },
     {
       id: "insights",
       label: "Insights",
       items: [
-        { href: "/dashboard/reports", label: "Reports", icon: BarChart3 },
-        { href: "/dashboard/marketing", label: "Marketing", icon: Megaphone },
-        { href: "/dashboard/store-health", label: "Store Health", icon: Globe },
+        { href: "/dashboard/reports", label: "Reports", icon: BarChart3, feature: "reports" },
+        { href: "/dashboard/marketing", label: "Marketing", icon: Megaphone, feature: "marketing" },
+        { href: "/dashboard/store-health", label: "Store Health", icon: Globe, feature: "store_health" },
       ],
     },
-    ...(isAdmin
-      ? [
-          {
-            id: "admin",
-            label: "Admin",
-            items: [
-              { href: "/dashboard/attributes", label: "Attributes", icon: Tag },
-              { href: "/dashboard/admin/discount-rules", label: "Discount Rules", icon: Percent },
-              { href: "/dashboard/locations", label: "Locations", icon: MapPin },
-              { href: "/dashboard/users", label: "Users", icon: UserCog },
-              { href: "/dashboard/images", label: "Images", icon: ImageIcon },
-              { href: "/dashboard/activity-logs", label: "Activity Logs", icon: ScrollText },
-              { href: "/dashboard/admin/orphans", label: "Orphan Audit", icon: AlertTriangle, badgeTone: "critical" as const },
-            ] as NavItem[],
-          },
-        ]
-      : []),
+    {
+      id: "admin",
+      label: "Admin",
+      items: [
+        { href: "/dashboard/attributes", label: "Attributes", icon: Tag, feature: "attributes" },
+        { href: "/dashboard/admin/discount-rules", label: "Discount Rules", icon: Percent, feature: "discount_rules" },
+        { href: "/dashboard/locations", label: "Locations", icon: MapPin, feature: "locations" },
+        { href: "/dashboard/users", label: "Users", icon: UserCog, feature: "users" },
+        { href: "/dashboard/images", label: "Images", icon: ImageIcon, feature: "images" },
+        { href: "/dashboard/activity-logs", label: "Activity Logs", icon: ScrollText, feature: "activity_logs" },
+        { href: "/dashboard/admin/orphans", label: "Orphan Audit", icon: AlertTriangle, badgeTone: "critical", feature: "orphan_audit" },
+      ],
+    },
   ];
+
+  // Apply the per-user feature filter. A group with no surviving items
+  // is dropped entirely so we don't render an "Admin" header above an
+  // empty list.
+  const groups: NavGroup[] = allGroups
+    .map((g) => ({
+      ...g,
+      items: g.items.filter((i) => !i.feature || has(i.feature)),
+    }))
+    .filter((g) => g.items.length > 0);
 
   const isActive = (href: string, exact?: boolean) => {
     if (exact) return pathname === href;

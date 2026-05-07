@@ -13,6 +13,12 @@ model User {
   password   String
   name       String
   role       String   @default("CATALOG_MANAGER") // ADMIN, DESIGN_MANAGER, CATALOG_MANAGER
+  // Per-user feature override: comma-separated FeatureKey list (see
+  // src/lib/features.ts). NULL = "use the role's defaults". An explicit
+  // string overrides the role; admin role always has every feature
+  // regardless. Lets us toggle individual features per-user without
+  // inventing more roles.
+  enabledFeatures String?
   locationId String?
   location   Location? @relation(fields: [locationId], references: [id])
   createdAt  DateTime @default(now())
