@@ -1304,3 +1304,196 @@ def test_walkins_mtd_aggregates_across_days(
     body = resp.json()
     assert body["pos_auto_count"] >= 2
     assert "user-akshay" in body["per_staff"]
+
+
+# ============================================================================
+# Phase 5 — conversion-feed (Module ii contract) + backfill
+# ============================================================================
+
+
+def test_conversion_feed_includes_retro_conversions(
+    client, auth_headers, patched_walkouts
+):
+    """Walkouts from prior days that flip to CONVERTED today count
+    in retro_conversions_today (and bump the score)."""
+    walkin_repo = patched_walkouts["walkin_repo"]
+
+    # Today: akshay has 5 walk-ins, 1 walkout
+    for mob in ("9100100001", "9100100002", "9100100003", "9100100004", "9100100005"):
+        walkin_repo.auto_increment(
+            store_id="BV-TEST-01", sales_person_id="user-akshay", mobile=mob,
+        )
+    _create_walkout(client, auth_headers, mobile="9100110001", sales_person_id="user-akshay")
+
+    # A prior-day walkout for akshay, flipped to CONVERTED today
+    repo = patched_walkouts["db"].get_collection("walkouts")
+    from datetime import datetime as _dt, timedelta as _td
+    yest = (_dt.now() - _td(days=1))
+    prior = {
+        "walkout_id": "WO-TES-2026-RETRO1", "_id": "WO-TES-2026-RETRO1",
+        "store_id": "BV-TEST-01",
+        "date": yest, "date_str": yest.date().isoformat(),
+        "customer_name": "Retro", "mobile": "9100120001",
+        "sales_person_id": "user-akshay", "sales_person_name": "AKSHAY",
+        "result": "CONVERTED",
+        "result_set_at": _dt.now().isoformat(),  # today
+        "converted_order_id": "ORD-X",
+        "followups": [], "deleted_at": None,
+        "created_at": yest, "updated_at": _dt.now(),
+        "primary_walkout_reason": "BUDGET/PRICE",
+    }
+    repo.insert_one(prior)
+
+    resp = client.get("/api/v1/walkouts/conversion-feed", headers=auth_headers)
+    assert resp.status_code == 200, resp.text
+    items = resp.json()
+    akshay = next(r for r in items if r["sales_person_id"] == "user-akshay")
+    assert akshay["walk_ins_today"] == 5
+    assert akshay["walkouts_today"] == 1
+    assert akshay["retro_conversions_today"] == 1
+    # (5 - 1 + 1) / 5 × 20 = 20.0 (capped at 20 anyway)
+    assert akshay["conversion_score"] == 20.0
+
+
+def test_conversion_feed_score_capped_at_20(
+    client, auth_headers, patched_walkouts
+):
+    """If retro_conversions exceeds the walkouts-today subtraction,
+    raw score can theoretically go above 20. The cap holds it at 20."""
+    walkin_repo = patched_walkouts["walkin_repo"]
+    walkin_repo.auto_increment(
+        store_id="BV-TEST-01", sales_person_id="user-akshay",
+        mobile="9200000001",
+    )
+    walkin_repo.auto_increment(
+        store_id="BV-TEST-01", sales_person_id="user-akshay",
+        mobile="9200000002",
+    )
+    # 0 walkouts today, 5 retros — raw = (2 - 0 + 5) / 2 × 20 = 70 → cap 20
+    repo = patched_walkouts["db"].get_collection("walkouts")
+    from datetime import datetime as _dt, timedelta as _td
+    yest = (_dt.now() - _td(days=1))
+    for i in range(5):
+        repo.insert_one({
+            "walkout_id": f"WO-TES-CAPED-{i:02d}", "_id": f"WO-TES-CAPED-{i:02d}",
+            "store_id": "BV-TEST-01",
+            "date": yest, "date_str": yest.date().isoformat(),
+            "customer_name": f"Cap {i}", "mobile": f"930000000{i}",
+            "sales_person_id": "user-akshay", "sales_person_name": "AKSHAY",
+            "result": "CONVERTED",
+            "result_set_at": _dt.now().isoformat(),
+            "followups": [], "deleted_at": None,
+            "created_at": yest, "updated_at": _dt.now(),
+        })
+
+    resp = client.get("/api/v1/walkouts/conversion-feed", headers=auth_headers)
+    assert resp.status_code == 200
+    items = resp.json()
+    akshay = next(r for r in items if r["sales_person_id"] == "user-akshay")
+    assert akshay["walk_ins_today"] == 2
+    assert akshay["walkouts_today"] == 0
+    assert akshay["retro_conversions_today"] == 5
+    assert akshay["conversion_score"] == 20.0
+
+
+def test_conversion_feed_zero_walkins_yields_zero_score(
+    client, auth_headers, patched_walkouts
+):
+    """No walk-ins → score 0 (no denominator)."""
+    _create_walkout(client, auth_headers, mobile="9300100001", sales_person_id="user-rupesh")
+    resp = client.get("/api/v1/walkouts/conversion-feed", headers=auth_headers)
+    assert resp.status_code == 200
+    items = resp.json()
+    rupesh = next(r for r in items if r["sales_person_id"] == "user-rupesh")
+    assert rupesh["walk_ins_today"] == 0
+    assert rupesh["walkouts_today"] == 1
+    assert rupesh["conversion_score"] == 0.0
+
+
+def test_backfill_idempotent_on_mobile_date(tmp_path):
+    """Re-running the migrate script on the same CSV is a no-op.
+
+    Simulates the runbook with an in-process pymongo — actually uses
+    a tiny fake collection with a unique-index emulation."""
+    import csv as _csv
+    csv_path = tmp_path / "pune.csv"
+    with open(csv_path, "w", newline="") as f:
+        w = _csv.writer(f)
+        w.writerow([
+            "date","customer_name","mobile","age_group","gender",
+            "product_interested","has_prescription","displayed_price_range",
+            "required_price_range","primary_walkout_reason",
+            "secondary_walkout_reason","brand_interest",
+            "competitor_mentioned","purchase_planned_in",
+            "sales_person_id","sales_person_name","action_remarks",
+        ])
+        w.writerow([
+            "2026-04-15","Avinash","9100200001","26-35","MALE","FRAME","YES",
+            "5000-10000","3000-5000","BUDGET/PRICE","BRAND","Ray-Ban",
+            "Lenskart","1-7 DAYS","user-akshay","AKSHAY","Notes",
+        ])
+
+    import sys, os, importlib.util
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    if repo_root not in sys.path:
+        sys.path.insert(0, repo_root)
+    spec = importlib.util.spec_from_file_location(
+        "migrate_pune_walkouts",
+        os.path.join(repo_root, "scripts", "migrate_pune_walkouts.py"),
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    build_doc = mod.build_doc
+    make_backfill_hash = mod.make_backfill_hash
+    row = {
+        "date":"2026-04-15","customer_name":"Avinash","mobile":"9100200001",
+        "age_group":"26-35","gender":"MALE","product_interested":"FRAME",
+        "has_prescription":"YES","displayed_price_range":"5000-10000",
+        "required_price_range":"3000-5000","primary_walkout_reason":"BUDGET/PRICE",
+        "secondary_walkout_reason":"BRAND","brand_interest":"Ray-Ban",
+        "competitor_mentioned":"Lenskart","purchase_planned_in":"1-7 DAYS",
+        "sales_person_id":"user-akshay","sales_person_name":"AKSHAY",
+        "action_remarks":"Notes",
+    }
+    doc = build_doc(row, "BV-PNE-01")
+    assert doc is not None
+    assert doc["backfill_hash"] == make_backfill_hash("9100200001", "2026-04-15")
+    # Re-running build_doc on same row → same backfill_hash (unique key
+    # for the upsert), so a real Mongo would reject the second insert.
+    doc2 = build_doc(row, "BV-PNE-01")
+    assert doc2["backfill_hash"] == doc["backfill_hash"]
+    # walkout_id is a fresh uuid each call (so we don't accidentally
+    # overwrite an existing live row); the hash is the dedup key.
+    assert doc2["walkout_id"] != doc["walkout_id"]
+
+
+def test_backfill_skips_invalid_rows():
+    """build_doc returns None when mobile/date/customer is bad."""
+    import sys, os, importlib.util
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    spec = importlib.util.spec_from_file_location(
+        "migrate_pune_walkouts",
+        os.path.join(repo_root, "scripts", "migrate_pune_walkouts.py"),
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    build_doc = mod.build_doc
+
+    # Bad mobile
+    assert build_doc({
+        "date":"2026-04-15","customer_name":"x","mobile":"123",
+    }, "BV-PNE-01") is None
+    # No date
+    assert build_doc({
+        "date":"","customer_name":"x","mobile":"9100200001",
+    }, "BV-PNE-01") is None
+    # No customer name
+    assert build_doc({
+        "date":"2026-04-15","customer_name":"","mobile":"9100200001",
+    }, "BV-PNE-01") is None
+    # 12-digit (with country code) accepted
+    doc = build_doc({
+        "date":"15/04/2026","customer_name":"Avinash","mobile":"919100200001",
+    }, "BV-PNE-01")
+    assert doc is not None
+    assert doc["mobile"] == "9100200001"

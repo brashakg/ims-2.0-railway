@@ -1076,6 +1076,102 @@ async def dashboard_result_breakdown(
     }
 
 
+@router.get("/conversion-feed")
+async def conversion_feed(
+    current_user: dict = Depends(get_current_user),
+    store_id: Optional[str] = Query(None),
+    date: Optional[str] = Query(
+        None, description="ISO date (YYYY-MM-DD), defaults to today"
+    ),
+):
+    """The Module (ii) contract.
+
+    For (store, date) returns one row per salesperson active on that
+    day, with the math Module (ii) consumes:
+
+        conversion_score = MIN(20, MAX(0, (walk_ins - walkouts + retro) / walk_ins × 20))
+
+    where retro_conversions_today is "walkouts from prior days that
+    flipped to CONVERTED today" — i.e. retroactive credit. The 20-point
+    cap implicitly bounds. If walk_ins == 0 the score is 0 (no
+    denominator).
+    """
+    store = _resolve_dashboard_store(current_user, store_id)
+    repo = _walkout_repo()
+    if repo is None:
+        return []
+
+    target_date = date or datetime.now().date().isoformat()
+
+    # Walkouts logged that day
+    walkouts_today = repo.list_walkouts(
+        store_id=store, date_from=target_date, date_to=target_date, limit=5000,
+    )
+    walkouts_count: Dict[str, int] = {}
+    name_by_id: Dict[str, str] = {}
+    for w in walkouts_today:
+        sp = w.get("sales_person_id") or ""
+        walkouts_count[sp] = walkouts_count.get(sp, 0) + 1
+        if w.get("sales_person_name"):
+            name_by_id[sp] = w["sales_person_name"]
+
+    # Retroactive conversions: walkouts from prior days whose
+    # result_set_at falls on `target_date`. Pull the last 90 days as a
+    # window — the spec doesn't bound it but Phase 6 can paginate.
+    from datetime import timedelta, date as _d
+    target_d = _d.fromisoformat(target_date)
+    window_from = (target_d - timedelta(days=90)).isoformat()
+    window_to = (target_d - timedelta(days=1)).isoformat()
+    prior_window = repo.list_walkouts(
+        store_id=store, date_from=window_from, date_to=window_to, limit=5000,
+    )
+    retro_count: Dict[str, int] = {}
+    for w in prior_window:
+        if w.get("result") != "CONVERTED":
+            continue
+        rsa = w.get("result_set_at")
+        if not rsa:
+            continue
+        rsa_str = rsa[:10] if isinstance(rsa, str) else (
+            rsa.date().isoformat() if isinstance(rsa, datetime) else ""
+        )
+        if rsa_str != target_date:
+            continue
+        sp = w.get("sales_person_id") or ""
+        retro_count[sp] = retro_count.get(sp, 0) + 1
+        if w.get("sales_person_name"):
+            name_by_id.setdefault(sp, w["sales_person_name"])
+
+    # Walk-ins per staff that day
+    walkin_repo = get_walkin_counter_repository()
+    walkins_per_staff: Dict[str, int] = {}
+    if walkin_repo is not None:
+        today_doc = walkin_repo.get_today(store, date_str=target_date)
+        for sp, count in (today_doc.get("per_staff") or {}).items():
+            walkins_per_staff[sp] = int(count)
+
+    all_staff = set(walkouts_count) | set(retro_count) | set(walkins_per_staff)
+    out = []
+    for sp in sorted(all_staff):
+        walk_ins = int(walkins_per_staff.get(sp, 0))
+        walkouts = int(walkouts_count.get(sp, 0))
+        retro = int(retro_count.get(sp, 0))
+        if walk_ins > 0:
+            raw = (walk_ins - walkouts + retro) / walk_ins * 20.0
+            score = round(max(0.0, min(20.0, raw)), 2)
+        else:
+            score = 0.0
+        out.append({
+            "sales_person_id": sp,
+            "name": name_by_id.get(sp),
+            "walk_ins_today": walk_ins,
+            "walkouts_today": walkouts,
+            "retro_conversions_today": retro,
+            "conversion_score": score,
+        })
+    return out
+
+
 @router.get("/dashboard/fu-status")
 async def dashboard_fu_status(
     current_user: dict = Depends(get_current_user),
