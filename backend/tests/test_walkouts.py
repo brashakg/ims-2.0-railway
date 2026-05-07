@@ -123,7 +123,14 @@ class FakeCollection:
         for d in self.docs:
             if _doc_matches(d, filter):
                 set_block = (update or {}).get("$set", {}) or {}
+                push_block = (update or {}).get("$push", {}) or {}
                 d.update(set_block)
+                for k, v in push_block.items():
+                    arr = d.get(k)
+                    if not isinstance(arr, list):
+                        arr = []
+                    arr.append(v)
+                    d[k] = arr
                 modified += 1
                 break  # update_one updates one match
         return type("R", (), {"modified_count": modified, "matched_count": modified})()
@@ -175,7 +182,22 @@ def patched_walkouts(monkeypatch):
     audit_repo = AuditRepository(fake_db.get_collection("audit_logs"))
     monkeypatch.setattr(walkouts_module, "get_audit_repository", lambda: audit_repo)
 
-    return {"db": fake_db, "customer_repo": customer_repo, "audit_repo": audit_repo}
+    # Task repo (Phase 3 — escalate-overdue side-effect)
+    class _FakeTaskRepo:
+        def __init__(self):
+            self.tasks = []
+        def create(self, doc):
+            self.tasks.append(dict(doc))
+            return doc
+    task_repo = _FakeTaskRepo()
+    monkeypatch.setattr(walkouts_module, "get_task_repository", lambda: task_repo)
+
+    return {
+        "db": fake_db,
+        "customer_repo": customer_repo,
+        "audit_repo": audit_repo,
+        "task_repo": task_repo,
+    }
 
 
 # ============================================================================
@@ -648,3 +670,313 @@ def test_patch_no_changes_returns_existing(
         if d.get("action") == "walkout.update"
     )
     assert post_update_audits == pre_update_audits
+
+
+# ============================================================================
+# Phase 3 — embedded follow-ups + result + escalation
+# ============================================================================
+
+
+def _today_iso():
+    from datetime import date as _d
+    return _d.today().isoformat()
+
+
+def _yesterday_iso():
+    from datetime import date as _d, timedelta
+    return (_d.today() - timedelta(days=1)).isoformat()
+
+
+def test_followup_append_round_1_and_2(client, auth_headers, patched_walkouts):
+    """Both round 1 and round 2 may be appended; both reach the doc."""
+    walkout = _create_walkout(client, auth_headers)
+    wid = walkout["walkout_id"]
+
+    # Round 1
+    resp = client.post(
+        f"/api/v1/walkouts/{wid}/followups",
+        json={
+            "round": 1,
+            "scheduled_date": _today_iso(),
+            "scheduled_time": "10:30",
+            "mode": "WHATSAPP",
+            "supervisor_id": "user-sameer",
+            "notes": "Try once",
+        },
+        headers=auth_headers,
+    )
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    assert len(body["followups"]) == 1
+    assert body["followups"][0]["round"] == 1
+    assert body["followups"][0]["status"] == "PENDING"
+
+    # Round 2
+    resp = client.post(
+        f"/api/v1/walkouts/{wid}/followups",
+        json={
+            "round": 2,
+            "scheduled_date": _today_iso(),
+            "mode": "CALL",
+        },
+        headers=auth_headers,
+    )
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    rounds = sorted([fu["round"] for fu in body["followups"]])
+    assert rounds == [1, 2]
+
+
+def test_followup_round_3_rejected(client, auth_headers, patched_walkouts):
+    """Round 3+ is a 422 (Pydantic ge=1, le=2 validator)."""
+    walkout = _create_walkout(client, auth_headers)
+    resp = client.post(
+        f"/api/v1/walkouts/{walkout['walkout_id']}/followups",
+        json={"round": 3, "scheduled_date": _today_iso(), "mode": "CALL"},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 422
+
+
+def test_followup_duplicate_round_rejected(
+    client, auth_headers, patched_walkouts
+):
+    """Same round twice → 409."""
+    walkout = _create_walkout(client, auth_headers)
+    wid = walkout["walkout_id"]
+    payload = {"round": 1, "scheduled_date": _today_iso(), "mode": "CALL"}
+    resp = client.post(
+        f"/api/v1/walkouts/{wid}/followups", json=payload, headers=auth_headers
+    )
+    assert resp.status_code == 201
+    resp = client.post(
+        f"/api/v1/walkouts/{wid}/followups", json=payload, headers=auth_headers
+    )
+    assert resp.status_code == 409
+
+
+def test_followup_update_done_stamps_completed_fields(
+    client, auth_headers, patched_walkouts
+):
+    """Status flip to DONE stamps completed_at + completed_by."""
+    walkout = _create_walkout(client, auth_headers)
+    wid = walkout["walkout_id"]
+    client.post(
+        f"/api/v1/walkouts/{wid}/followups",
+        json={"round": 1, "scheduled_date": _today_iso(), "mode": "CALL"},
+        headers=auth_headers,
+    )
+    resp = client.patch(
+        f"/api/v1/walkouts/{wid}/followups/1",
+        json={"status": "DONE", "notes": "Customer interested, will visit Sat"},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    fu = next(f for f in body["followups"] if f["round"] == 1)
+    assert fu["status"] == "DONE"
+    assert fu["completed_at"]
+    assert fu["completed_by"] == "test-admin-001"
+    assert fu["notes"] == "Customer interested, will visit Sat"
+
+
+def test_overdue_fu_creates_escalation_task(
+    client, auth_headers, patched_walkouts
+):
+    """A pending FU scheduled in the past produces a Task on
+    /escalate-overdue and stamps escalation_task_id back on the FU."""
+    task_repo = patched_walkouts["task_repo"]
+    walkout = _create_walkout(client, auth_headers)
+    wid = walkout["walkout_id"]
+
+    # Round-1 follow-up scheduled YESTERDAY
+    resp = client.post(
+        f"/api/v1/walkouts/{wid}/followups",
+        json={
+            "round": 1,
+            "scheduled_date": _yesterday_iso(),
+            "mode": "WHATSAPP",
+            "supervisor_id": "user-sameer",
+        },
+        headers=auth_headers,
+    )
+    assert resp.status_code == 201, resp.text
+
+    # Trigger the cron
+    resp = client.post(
+        "/api/v1/walkouts/followups/escalate-overdue", headers=auth_headers
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["escalated"] == 1
+    created = body["created_tasks"][0]
+    assert created["round"] == 1
+    assert created["priority"] == "P2"  # round 1 → P2
+    assert created["assignee"] == "user-sameer"
+
+    # Task was actually created in the task repo
+    assert len(task_repo.tasks) == 1
+    task = task_repo.tasks[0]
+    assert task["priority"] == "P2"
+    assert task["assigned_to"] == "user-sameer"
+    assert task["source"]["type"] == "walkout_followup"
+    assert task["source"]["walkout_id"] == wid
+
+    # The FU is now stamped with the escalation_task_id
+    resp = client.get(f"/api/v1/walkouts/{wid}", headers=auth_headers)
+    fu = next(f for f in resp.json()["followups"] if f["round"] == 1)
+    assert fu["escalation_task_id"] == created["task_id"]
+    assert fu["status"] == "ESCALATED"
+
+
+def test_round2_overdue_creates_p1_task(
+    client, auth_headers, patched_walkouts
+):
+    """Round 2 escalates to P1 (higher priority than round 1)."""
+    walkout = _create_walkout(client, auth_headers)
+    wid = walkout["walkout_id"]
+    # Add round 1 (today, doesn't escalate) and round 2 (yesterday, escalates)
+    client.post(
+        f"/api/v1/walkouts/{wid}/followups",
+        json={"round": 1, "scheduled_date": _today_iso(), "mode": "CALL"},
+        headers=auth_headers,
+    )
+    client.post(
+        f"/api/v1/walkouts/{wid}/followups",
+        json={"round": 2, "scheduled_date": _yesterday_iso(), "mode": "CALL"},
+        headers=auth_headers,
+    )
+    resp = client.post(
+        "/api/v1/walkouts/followups/escalate-overdue", headers=auth_headers
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["escalated"] == 1
+    assert body["created_tasks"][0]["priority"] == "P1"
+    assert body["created_tasks"][0]["round"] == 2
+
+
+def test_escalate_overdue_blocked_for_sales_staff(
+    client, staff_headers_pune, patched_walkouts
+):
+    """Only managers/admin can run the cron (multi-user task writes)."""
+    resp = client.post(
+        "/api/v1/walkouts/followups/escalate-overdue", headers=staff_headers_pune
+    )
+    assert resp.status_code == 403
+
+
+def test_set_result_converted_validates_order_id(
+    client, auth_headers, patched_walkouts
+):
+    """CONVERTED requires converted_order_id and the order must exist
+    in the orders collection (else 422)."""
+    walkout = _create_walkout(client, auth_headers)
+    wid = walkout["walkout_id"]
+
+    # Missing converted_order_id → 422
+    resp = client.patch(
+        f"/api/v1/walkouts/{wid}/result",
+        json={"result": "CONVERTED"},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 422
+
+    # Order doesn't exist → 422
+    resp = client.patch(
+        f"/api/v1/walkouts/{wid}/result",
+        json={"result": "CONVERTED", "converted_order_id": "ORD-FAKE"},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 422
+
+    # Seed a real order, retry → 200
+    fake_db = patched_walkouts["db"]
+    fake_db.get_collection("orders").insert_one({
+        "order_id": "ORD-REAL-001",
+        "store_id": "BV-TEST-01",
+    })
+    resp = client.patch(
+        f"/api/v1/walkouts/{wid}/result",
+        json={"result": "CONVERTED", "converted_order_id": "ORD-REAL-001"},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["result"] == "CONVERTED"
+    assert body["converted_order_id"] == "ORD-REAL-001"
+    assert body["result_set_by"] == "test-admin-001"
+    assert body["result_set_at"]
+
+
+def test_set_result_negative_clears_converted_order_id(
+    client, auth_headers, patched_walkouts
+):
+    """Switching from CONVERTED to NEGATIVE/DUE clears converted_order_id."""
+    walkout = _create_walkout(client, auth_headers)
+    wid = walkout["walkout_id"]
+    patched_walkouts["db"].get_collection("orders").insert_one({
+        "order_id": "ORD-X1",
+    })
+    client.patch(
+        f"/api/v1/walkouts/{wid}/result",
+        json={"result": "CONVERTED", "converted_order_id": "ORD-X1"},
+        headers=auth_headers,
+    )
+    resp = client.patch(
+        f"/api/v1/walkouts/{wid}/result",
+        json={"result": "NEGATIVE"},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 200
+    assert resp.json()["result"] == "NEGATIVE"
+    assert resp.json()["converted_order_id"] is None
+
+
+def test_set_result_audit_logged(client, auth_headers, patched_walkouts):
+    """walkout.result.set audit row carries from→to + order id."""
+    audit_repo = patched_walkouts["audit_repo"]
+    walkout = _create_walkout(client, auth_headers)
+    wid = walkout["walkout_id"]
+    resp = client.patch(
+        f"/api/v1/walkouts/{wid}/result",
+        json={"result": "DUE"},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 200
+    audit = next(
+        d for d in audit_repo.collection.docs
+        if d.get("action") == "walkout.result.set"
+    )
+    assert audit["entity_id"] == wid
+    assert audit["detail"]["from"] is None
+    assert audit["detail"]["to"] == "DUE"
+
+
+def test_followups_due_today_lists_only_pending_today(
+    client, auth_headers, patched_walkouts
+):
+    """due-today returns the right slice and is RBAC-scoped."""
+    a = _create_walkout(client, auth_headers, mobile="9100000001")
+    b = _create_walkout(client, auth_headers, mobile="9100000002")
+
+    # a — pending FU today
+    client.post(
+        f"/api/v1/walkouts/{a['walkout_id']}/followups",
+        json={"round": 1, "scheduled_date": _today_iso(), "mode": "CALL"},
+        headers=auth_headers,
+    )
+    # b — pending FU yesterday (not today)
+    client.post(
+        f"/api/v1/walkouts/{b['walkout_id']}/followups",
+        json={"round": 1, "scheduled_date": _yesterday_iso(), "mode": "CALL"},
+        headers=auth_headers,
+    )
+
+    resp = client.get(
+        "/api/v1/walkouts/followups/due-today", headers=auth_headers
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert len(body["items"]) == 1
+    assert body["items"][0]["walkout_id"] == a["walkout_id"]

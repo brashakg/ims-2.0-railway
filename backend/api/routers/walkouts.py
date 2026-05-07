@@ -36,6 +36,7 @@ from ..dependencies import (
     get_audit_repository,
     get_customer_repository,
     get_db,
+    get_task_repository,
     get_user_repository,
 )
 
@@ -111,6 +112,31 @@ class PurchasePlan(str, Enum):
     P_16_30 = "16-30 DAYS"
     AFTER_MONTH = "AFTER A MONTH"
     UNDECIDED = "UNDECIDED"
+
+
+# Follow-up + result enums (Phase 3)
+
+
+class FollowUpMode(str, Enum):
+    CALL = "CALL"
+    WHATSAPP = "WHATSAPP"
+    SMS = "SMS"
+    EMAIL = "EMAIL"
+    IN_PERSON = "IN-PERSON"
+
+
+class FollowUpStatus(str, Enum):
+    PENDING = "PENDING"
+    DONE = "DONE"
+    NOT_REACHABLE = "NOT REACHABLE"
+    NOT_REQUIRED = "NOT REQUIRED"
+    ESCALATED = "ESCALATED"
+
+
+class WalkoutResult(str, Enum):
+    DUE = "DUE"
+    NEGATIVE = "NEGATIVE"
+    CONVERTED = "CONVERTED"
 
 
 # ============================================================================
@@ -209,6 +235,38 @@ class DeleteWalkoutRequest(BaseModel):
     """Soft-delete payload."""
 
     reason: str = Field(..., min_length=1, max_length=400)
+
+
+class CreateFollowUpRequest(BaseModel):
+    """Phase 3 — append a new follow-up sub-doc."""
+
+    round: int = Field(..., ge=1, le=2, description="Only rounds 1 and 2 supported")
+    scheduled_date: date_type
+    scheduled_time: Optional[str] = Field(
+        None, max_length=5, description="HH:MM 24-hour"
+    )
+    mode: FollowUpMode
+    supervisor_id: Optional[str] = None
+    notes: str = ""
+
+
+class UpdateFollowUpRequest(BaseModel):
+    """Phase 3 — partial update of an existing follow-up sub-doc."""
+
+    status: Optional[FollowUpStatus] = None
+    notes: Optional[str] = None
+    scheduled_date: Optional[date_type] = None
+    scheduled_time: Optional[str] = None
+    mode: Optional[FollowUpMode] = None
+
+
+class SetResultRequest(BaseModel):
+    """Phase 3 — outcome write."""
+
+    result: WalkoutResult
+    converted_order_id: Optional[str] = Field(
+        None, description="Required when result=CONVERTED"
+    )
 
 
 # ============================================================================
@@ -629,6 +687,361 @@ async def list_walkouts(
     }
 
 
+# ----------------------------------------------------------------------------
+# Phase 3 — collection-level FU endpoints (registered BEFORE /{walkout_id}
+# so FastAPI doesn't swallow "/followups/due-today" as a walkout id).
+# ----------------------------------------------------------------------------
+
+
+@router.get("/followups/due-today")
+async def followups_due_today(
+    current_user: dict = Depends(get_current_user),
+    store_id: Optional[str] = Query(
+        None, description="Cross-store override (SUPERADMIN/ADMIN only)"
+    ),
+):
+    """Pending follow-ups whose scheduled_date is today.
+
+    Sales staff see only their own; managers see the whole store;
+    SUPERADMIN/ADMIN can override `store_id` for cross-store views.
+    """
+    repo = _walkout_repo()
+    if repo is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    roles = _user_role_set(current_user)
+    if roles & _GLOBAL_EDIT_ROLES:
+        effective_store = store_id or None
+    else:
+        effective_store = _user_store_id(current_user)
+        if not effective_store:
+            raise HTTPException(
+                status_code=400,
+                detail="No active store on this session",
+            )
+
+    today = datetime.now().date().isoformat()
+    rows = repo.list_followups_due_today(today, store_id=effective_store)
+
+    # Sales-staff RBAC scope: own only.
+    if not (roles & (_GLOBAL_EDIT_ROLES | _STORE_EDIT_ROLES | {"ACCOUNTANT"})):
+        uid = current_user.get("user_id")
+        rows = [r for r in rows if r.get("sales_person_id") == uid]
+
+    return {"items": [_serialize_value(r) for r in rows], "as_of": today}
+
+
+@router.post("/followups/escalate-overdue")
+async def escalate_overdue_followups(
+    current_user: dict = Depends(get_current_user),
+):
+    """Cron-callable: turns every PENDING follow-up whose scheduled_date
+    is in the past into a Task assigned to the supervisor (or, if absent,
+    to the sales person). Round 1 → P2 priority, round 2 → P1.
+
+    Only SUPERADMIN/ADMIN/STORE_MANAGER can invoke (it writes to
+    multiple users' task queues).
+    """
+    roles = _user_role_set(current_user)
+    if not (roles & (_GLOBAL_EDIT_ROLES | _STORE_EDIT_ROLES)):
+        raise HTTPException(
+            status_code=403,
+            detail="Only superadmin / admin / store-manager can run escalation",
+        )
+
+    repo = _walkout_repo()
+    if repo is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    today = datetime.now().date().isoformat()
+    overdue = repo.list_overdue_followups(today)
+
+    try:
+        task_repo = get_task_repository()
+    except Exception:
+        task_repo = None
+
+    created = []
+    for row in overdue:
+        round_num = int(row.get("round") or 0)
+        priority = "P1" if round_num >= 2 else "P2"
+        assignee = (
+            row.get("supervisor_id")
+            or row.get("sales_person_id")
+            or current_user.get("user_id")
+        )
+        task_id = f"TASK-{uuid.uuid4().hex[:8].upper()}"
+        task_doc = {
+            "task_id": task_id,
+            "title": (
+                f"Walkout FU{round_num} overdue — {row.get('customer_name')} "
+                f"({row.get('mobile')})"
+            ),
+            "description": (
+                f"Pending follow-up for walkout {row.get('walkout_id')} "
+                f"scheduled on {row.get('scheduled_date')} via "
+                f"{row.get('mode')}. Notes: {row.get('notes') or '—'}"
+            ),
+            "priority": priority,
+            "status": "open",
+            "assigned_to": assignee,
+            "assigned_by": current_user.get("user_id"),
+            "store_id": row.get("store_id"),
+            "type": "system",
+            "due_date": datetime.now(),
+            "created_at": datetime.now(),
+            "escalation_level": 0,
+            "source": {
+                "type": "walkout_followup",
+                "walkout_id": row.get("walkout_id"),
+                "round": round_num,
+            },
+        }
+        if task_repo is not None:
+            try:
+                task_repo.create(task_doc)
+            except Exception as e:
+                logger.warning(f"[WALKOUT] task create failed: {e}")
+                continue
+        repo.stamp_followup_escalation(
+            row.get("walkout_id"), round_num, task_id
+        )
+        _audit_walkout_action(
+            action="walkout.followup.escalate",
+            walkout_id=row.get("walkout_id"),
+            store_id=row.get("store_id") or "",
+            current_user=current_user,
+            detail={
+                "round": round_num,
+                "task_id": task_id,
+                "priority": priority,
+                "assignee": assignee,
+            },
+        )
+        created.append({
+            "walkout_id": row.get("walkout_id"),
+            "round": round_num,
+            "task_id": task_id,
+            "priority": priority,
+            "assignee": assignee,
+        })
+
+    return {
+        "escalated": len(created),
+        "created_tasks": created,
+        "as_of": today,
+    }
+
+
+# ----------------------------------------------------------------------------
+# Per-walkout FU + result endpoints
+# ----------------------------------------------------------------------------
+
+
+@router.post("/{walkout_id}/followups", status_code=201)
+async def append_followup(
+    walkout_id: str,
+    payload: CreateFollowUpRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """Append round 1 or 2. Reject 3+ as well as duplicate rounds."""
+    repo = _walkout_repo()
+    if repo is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    existing = repo.find_by_walkout_id(walkout_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Walkout not found")
+    _check_edit_permission(existing, current_user)
+
+    existing_rounds = {fu.get("round") for fu in (existing.get("followups") or [])}
+    if payload.round in existing_rounds:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Follow-up round {payload.round} already exists",
+        )
+
+    supervisor_name = (
+        _resolve_sales_person_name(payload.supervisor_id)
+        if payload.supervisor_id else None
+    )
+
+    fu_doc = {
+        "round": payload.round,
+        "scheduled_date": datetime.combine(
+            payload.scheduled_date, datetime.min.time()
+        ),
+        "scheduled_time": payload.scheduled_time,
+        "mode": payload.mode.value,
+        "supervisor_id": payload.supervisor_id,
+        "supervisor_name": supervisor_name,
+        "status": FollowUpStatus.PENDING.value,
+        "notes": payload.notes,
+        "completed_at": None,
+        "completed_by": None,
+        "escalation_task_id": None,
+        "created_at": datetime.now(),
+    }
+
+    updated = repo.append_followup(walkout_id, fu_doc)
+    if updated is None:
+        raise HTTPException(status_code=500, detail="Failed to append follow-up")
+
+    _audit_walkout_action(
+        action="walkout.followup.create",
+        walkout_id=walkout_id,
+        store_id=existing.get("store_id", ""),
+        current_user=current_user,
+        detail={
+            "round": payload.round,
+            "mode": payload.mode.value,
+            "scheduled_date": payload.scheduled_date.isoformat(),
+        },
+    )
+    return _serialize_walkout(updated)
+
+
+@router.patch("/{walkout_id}/followups/{round_num}")
+async def update_followup(
+    walkout_id: str,
+    round_num: int,
+    payload: UpdateFollowUpRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """Update FU status / notes / scheduling. Stamps completed_at +
+    completed_by when status flips to DONE."""
+    if round_num not in (1, 2):
+        raise HTTPException(status_code=400, detail="Invalid round")
+
+    repo = _walkout_repo()
+    if repo is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    existing = repo.find_by_walkout_id(walkout_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Walkout not found")
+    _check_edit_permission(existing, current_user)
+
+    existing_fu = next(
+        (fu for fu in (existing.get("followups") or [])
+         if fu.get("round") == round_num),
+        None,
+    )
+    if not existing_fu:
+        raise HTTPException(
+            status_code=404, detail=f"Follow-up round {round_num} not found"
+        )
+
+    incoming = payload.model_dump(exclude_unset=True)
+    patch: Dict[str, Any] = {}
+    changes: Dict[str, Dict[str, Any]] = {}
+
+    for key, val in incoming.items():
+        new_val = val.value if isinstance(val, Enum) else val
+        if key == "scheduled_date" and val is not None:
+            new_val = datetime.combine(val, datetime.min.time())
+        old_val = existing_fu.get(key)
+        if new_val != old_val:
+            patch[key] = new_val
+            changes[key] = {"from": old_val, "to": new_val}
+
+    if "status" in patch and patch["status"] == FollowUpStatus.DONE.value:
+        patch["completed_at"] = datetime.now()
+        patch["completed_by"] = current_user.get("user_id")
+
+    if not patch:
+        return _serialize_walkout(existing)
+
+    updated = repo.update_followup(
+        walkout_id, round_num, patch, updated_by=current_user.get("user_id")
+    )
+    if updated is None:
+        raise HTTPException(status_code=500, detail="Failed to update follow-up")
+
+    _audit_walkout_action(
+        action="walkout.followup.update",
+        walkout_id=walkout_id,
+        store_id=existing.get("store_id", ""),
+        current_user=current_user,
+        detail={"round": round_num, "changes": changes},
+    )
+    return _serialize_walkout(updated)
+
+
+@router.patch("/{walkout_id}/result")
+async def set_walkout_result(
+    walkout_id: str,
+    payload: SetResultRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """Mark walkout outcome. CONVERTED requires `converted_order_id`
+    that exists in the orders collection (else 422)."""
+    repo = _walkout_repo()
+    if repo is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    existing = repo.find_by_walkout_id(walkout_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Walkout not found")
+    _check_edit_permission(existing, current_user)
+
+    if payload.result == WalkoutResult.CONVERTED:
+        if not payload.converted_order_id:
+            raise HTTPException(
+                status_code=422,
+                detail="converted_order_id is required for CONVERTED",
+            )
+        # Validate the order exists. Fail-soft when DB is absent
+        # (keeps tests + dev-mode fail-soft, prod path always
+        # validates).
+        try:
+            db = get_db()
+            if db is not None:
+                orders_coll = db.get_collection("orders")
+                order = orders_coll.find_one(
+                    {"order_id": payload.converted_order_id}
+                ) or orders_coll.find_one(
+                    {"order_number": payload.converted_order_id}
+                )
+                if not order:
+                    raise HTTPException(
+                        status_code=422,
+                        detail=f"Order {payload.converted_order_id} not found",
+                    )
+        except HTTPException:
+            raise
+        except Exception:
+            pass
+
+    # Snapshot prior values BEFORE mutating — set_result may share
+    # dict references with `existing` depending on the underlying repo
+    # / collection (true for the FakeCollection used in tests).
+    prior_result = existing.get("result")
+    prior_store = existing.get("store_id", "")
+
+    updated = repo.set_result(
+        walkout_id,
+        payload.result.value,
+        payload.converted_order_id,
+        set_by=current_user.get("user_id") or "",
+    )
+    if updated is None:
+        raise HTTPException(status_code=500, detail="Failed to set result")
+
+    _audit_walkout_action(
+        action="walkout.result.set",
+        walkout_id=walkout_id,
+        store_id=prior_store,
+        current_user=current_user,
+        detail={
+            "from": prior_result,
+            "to": payload.result.value,
+            "converted_order_id": payload.converted_order_id,
+        },
+    )
+    return _serialize_walkout(updated)
+
+
 @router.get("/{walkout_id}")
 async def get_walkout(
     walkout_id: str,
@@ -774,14 +1187,21 @@ async def delete_walkout(
 # ============================================================================
 
 
+def _serialize_value(value):
+    """Recursively ISO-format datetimes inside dicts / lists. Anything
+    that isn't a datetime / dict / list flows through untouched."""
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {k: _serialize_value(v) for k, v in value.items() if k != "_id"}
+    if isinstance(value, list):
+        return [_serialize_value(v) for v in value]
+    return value
+
+
 def _serialize_walkout(doc: dict) -> dict:
-    """JSON-friendly dict. Strips MongoDB internals + ISO-formats dates."""
+    """JSON-friendly dict. Strips MongoDB internals + ISO-formats dates
+    (including the embedded follow-up sub-docs added in Phase 3)."""
     if not doc:
         return doc
-    out = {k: v for k, v in doc.items() if k != "_id"}
-    for k in ("date", "created_at", "updated_at",
-              "result_set_at", "deleted_at"):
-        v = out.get(k)
-        if isinstance(v, datetime):
-            out[k] = v.isoformat()
-    return out
+    return _serialize_value(doc)

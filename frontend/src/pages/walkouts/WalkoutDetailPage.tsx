@@ -34,6 +34,8 @@ import {
   type Walkout,
   type UpdateWalkoutRequest,
 } from '../../types';
+import { FollowUpPanel } from './FollowUpPanel';
+import { ResultPanel, WalkoutResultBadge } from './ResultPanel';
 
 const REATTRIBUTE_ROLES = new Set([
   'SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT',
@@ -208,7 +210,10 @@ export function WalkoutDetailPage() {
 
       <div className="flex items-start justify-between mb-4">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">{walkout.customer_name}</h1>
+          <div className="flex items-center gap-2">
+            <h1 className="text-2xl font-bold text-gray-900">{walkout.customer_name}</h1>
+            <WalkoutResultBadge value={walkout.result} />
+          </div>
           <p className="text-sm text-gray-500 mt-1">
             <span className="font-mono">{walkout.walkout_id}</span> · {walkout.date_str} · {walkout.store_id}
           </p>
@@ -408,6 +413,19 @@ export function WalkoutDetailPage() {
             />
           </Field>
         </Section>
+
+        <ResultPanel
+          walkout={walkout}
+          canEdit={canEdit}
+          onChanged={(w) => { setWalkout(w); setDraft({}); }}
+        />
+
+        <FollowUpPanel
+          walkout={walkout}
+          canEdit={canEdit}
+          storeId={walkout.store_id}
+          onChanged={(w) => { setWalkout(w); setDraft({}); }}
+        />
       </div>
 
       {/* Delete confirm modal */}

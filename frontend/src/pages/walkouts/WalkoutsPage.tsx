@@ -17,6 +17,7 @@ import {
   type WalkoutReason,
 } from '../../types';
 import { WalkoutIntakeModal } from './WalkoutIntakeModal';
+import { WalkoutResultBadge } from './ResultPanel';
 
 const RESULT_OPTIONS = ['DUE', 'NEGATIVE', 'CONVERTED', 'none'] as const;
 const PAGE_SIZE = 50;
@@ -246,7 +247,7 @@ export function WalkoutsPage() {
                     </td>
                     <td className="px-4 py-3 text-gray-700">{w.sales_person_name || w.sales_person_id}</td>
                     <td className="px-4 py-3">
-                      <ResultBadge value={w.result} />
+                      <WalkoutResultBadge value={w.result} />
                     </td>
                   </tr>
                 ))}
@@ -313,19 +314,6 @@ function FilterField({ label, children }: { label: string; children: React.React
       <span className="text-xs text-gray-500 mb-1 block">{label}</span>
       {children}
     </label>
-  );
-}
-
-function ResultBadge({ value }: { value?: string | null }) {
-  if (!value) return <span className="text-xs text-gray-400">—</span>;
-  const cls =
-    value === 'CONVERTED' ? 'bg-emerald-50 text-emerald-700 border-emerald-200' :
-    value === 'NEGATIVE' ? 'bg-rose-50 text-rose-700 border-rose-200' :
-    'bg-blue-50 text-blue-700 border-blue-200';
-  return (
-    <span className={`text-xs px-2 py-0.5 rounded-full border ${cls}`}>
-      {value}
-    </span>
   );
 }
 
