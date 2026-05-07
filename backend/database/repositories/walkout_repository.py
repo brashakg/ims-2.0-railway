@@ -278,3 +278,202 @@ class WalkoutRepository(BaseRepository):
         except Exception as e:
             print(f"[WALKOUT] soft-delete failed: {e}")
             return False
+
+    # ------------------------------------------------------------------
+    # Phase 3 — embedded follow-ups + result
+    # ------------------------------------------------------------------
+    def append_followup(
+        self, walkout_id: str, followup: Dict
+    ) -> Optional[Dict]:
+        """Append a new follow-up sub-doc to the walkouts.followups array.
+
+        The router enforces the round 1/2 / "no round 3" business rule
+        before calling this. Returns the post-update doc or None.
+        """
+        try:
+            self.collection.update_one(
+                {"walkout_id": walkout_id, "deleted_at": None},
+                {
+                    "$push": {"followups": followup},
+                    "$set": {"updated_at": datetime.now()},
+                },
+            )
+        except Exception as e:
+            print(f"[WALKOUT] append_followup failed: {e}")
+            return None
+        return self.find_by_walkout_id(walkout_id)
+
+    def update_followup(
+        self,
+        walkout_id: str,
+        round_num: int,
+        patch: Dict,
+        updated_by: Optional[str] = None,
+    ) -> Optional[Dict]:
+        """Update fields on the follow-up at the given round number."""
+        existing = self.find_by_walkout_id(walkout_id)
+        if not existing:
+            return None
+        followups = list(existing.get("followups") or [])
+        idx = next(
+            (i for i, fu in enumerate(followups) if fu.get("round") == round_num),
+            None,
+        )
+        if idx is None:
+            return None
+        followups[idx] = {**followups[idx], **patch}
+        try:
+            self.collection.update_one(
+                {"walkout_id": walkout_id, "deleted_at": None},
+                {
+                    "$set": {
+                        "followups": followups,
+                        "updated_at": datetime.now(),
+                        "updated_by": updated_by,
+                    }
+                },
+            )
+        except Exception as e:
+            print(f"[WALKOUT] update_followup failed: {e}")
+            return None
+        return self.find_by_walkout_id(walkout_id)
+
+    def set_result(
+        self,
+        walkout_id: str,
+        result: str,
+        converted_order_id: Optional[str],
+        set_by: str,
+    ) -> Optional[Dict]:
+        """Stamp the outcome (DUE / NEGATIVE / CONVERTED). Includes the
+        order id when CONVERTED. Other branches don't touch
+        converted_order_id (pass None)."""
+        update_doc = {
+            "result": result,
+            "result_set_at": datetime.now(),
+            "result_set_by": set_by,
+            "updated_at": datetime.now(),
+            "updated_by": set_by,
+        }
+        if result == "CONVERTED":
+            update_doc["converted_order_id"] = converted_order_id
+        else:
+            update_doc["converted_order_id"] = None
+        try:
+            self.collection.update_one(
+                {"walkout_id": walkout_id, "deleted_at": None},
+                {"$set": update_doc},
+            )
+        except Exception as e:
+            print(f"[WALKOUT] set_result failed: {e}")
+            return None
+        return self.find_by_walkout_id(walkout_id)
+
+    def list_followups_due_today(
+        self, today_str: str, store_id: Optional[str] = None
+    ) -> List[Dict]:
+        """Return one dict per pending FU scheduled for today_str.
+
+        Each row is a flat shape suitable for the FU-due-today widget:
+        walkout_id, customer_name, mobile, sales_person_id,
+        sales_person_name, round, scheduled_date, scheduled_time,
+        mode, supervisor_id, supervisor_name, status, notes.
+        """
+        f: Dict = {"deleted_at": None}
+        if store_id:
+            f["store_id"] = store_id
+        try:
+            walkouts = list(self.collection.find(f))
+        except Exception:
+            return []
+        out = []
+        for w in walkouts:
+            for fu in (w.get("followups") or []):
+                if fu.get("status") != "PENDING":
+                    continue
+                scheduled = fu.get("scheduled_date")
+                if isinstance(scheduled, datetime):
+                    scheduled_str = scheduled.date().isoformat()
+                else:
+                    scheduled_str = str(scheduled)[:10] if scheduled else ""
+                if scheduled_str != today_str:
+                    continue
+                out.append({
+                    "walkout_id": w.get("walkout_id"),
+                    "store_id": w.get("store_id"),
+                    "customer_name": w.get("customer_name"),
+                    "mobile": w.get("mobile"),
+                    "sales_person_id": w.get("sales_person_id"),
+                    "sales_person_name": w.get("sales_person_name"),
+                    **fu,
+                    "scheduled_date": scheduled_str,
+                })
+        return out
+
+    def list_overdue_followups(self, today_str: str) -> List[Dict]:
+        """Return PENDING follow-ups whose scheduled_date < today and
+        which haven't been escalated yet (escalation_task_id is None).
+        Used by the escalate-overdue cron."""
+        try:
+            walkouts = list(self.collection.find({"deleted_at": None}))
+        except Exception:
+            return []
+        out = []
+        for w in walkouts:
+            for fu in (w.get("followups") or []):
+                if fu.get("status") != "PENDING":
+                    continue
+                if fu.get("escalation_task_id"):
+                    continue
+                scheduled = fu.get("scheduled_date")
+                if isinstance(scheduled, datetime):
+                    scheduled_str = scheduled.date().isoformat()
+                else:
+                    scheduled_str = str(scheduled)[:10] if scheduled else ""
+                if not scheduled_str or scheduled_str >= today_str:
+                    continue
+                out.append({
+                    "walkout_id": w.get("walkout_id"),
+                    "store_id": w.get("store_id"),
+                    "customer_name": w.get("customer_name"),
+                    "mobile": w.get("mobile"),
+                    "sales_person_id": w.get("sales_person_id"),
+                    "sales_person_name": w.get("sales_person_name"),
+                    **fu,
+                    "scheduled_date": scheduled_str,
+                })
+        return out
+
+    def stamp_followup_escalation(
+        self, walkout_id: str, round_num: int, task_id: str
+    ) -> bool:
+        """Record that a task was created to chase down an overdue FU."""
+        existing = self.find_by_walkout_id(walkout_id)
+        if not existing:
+            return False
+        followups = list(existing.get("followups") or [])
+        idx = next(
+            (i for i, fu in enumerate(followups) if fu.get("round") == round_num),
+            None,
+        )
+        if idx is None:
+            return False
+        followups[idx] = {
+            **followups[idx],
+            "escalation_task_id": task_id,
+            "status": "ESCALATED",
+        }
+        try:
+            self.collection.update_one(
+                {"walkout_id": walkout_id},
+                {
+                    "$set": {
+                        "followups": followups,
+                        "updated_at": datetime.now(),
+                    }
+                },
+            )
+            return True
+        except Exception as e:
+            print(f"[WALKOUT] stamp_followup_escalation failed: {e}")
+            return False

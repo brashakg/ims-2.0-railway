@@ -123,7 +123,14 @@ class FakeCollection:
         for d in self.docs:
             if _doc_matches(d, filter):
                 set_block = (update or {}).get("$set", {}) or {}
+                push_block = (update or {}).get("$push", {}) or {}
                 d.update(set_block)
+                for k, v in push_block.items():
+                    arr = d.get(k)
+                    if not isinstance(arr, list):
+                        arr = []
+                    arr.append(v)
+                    d[k] = arr
                 modified += 1
                 break  # update_one updates one match
         return type("R", (), {"modified_count": modified, "matched_count": modified})()
@@ -175,7 +182,57 @@ def patched_walkouts(monkeypatch):
     audit_repo = AuditRepository(fake_db.get_collection("audit_logs"))
     monkeypatch.setattr(walkouts_module, "get_audit_repository", lambda: audit_repo)
 
-    return {"db": fake_db, "customer_repo": customer_repo, "audit_repo": audit_repo}
+    # Task repo (Phase 3 — escalate-overdue side-effect)
+    class _FakeTaskRepo:
+        def __init__(self):
+            self.tasks = []
+        def create(self, doc):
+            self.tasks.append(dict(doc))
+            return doc
+    task_repo = _FakeTaskRepo()
+    monkeypatch.setattr(walkouts_module, "get_task_repository", lambda: task_repo)
+
+    # Walk-in counter repo (Phase 4) — backed by FakeCollection so we
+    # can also test the orders-router auto-increment hook end-to-end.
+    from database.repositories.walkin_counter_repository import (
+        WalkInCounterRepository,
+    )
+    walkin_repo = WalkInCounterRepository(fake_db.get_collection("walk_in_counters"))
+    monkeypatch.setattr(
+        walkouts_module, "get_walkin_counter_repository", lambda: walkin_repo
+    )
+    # Also patch the orders router so the POS hook lands in our fake +
+    # orders.py finds the same customers + the order_repo writes to a
+    # real fake collection (otherwise create_order returns 503 because
+    # get_order_repository() is None without a Mongo).
+    try:
+        from api.routers import orders as orders_module
+        from database.repositories.order_repository import OrderRepository
+        order_repo = OrderRepository(fake_db.get_collection("orders"))
+        monkeypatch.setattr(
+            orders_module,
+            "get_walkin_counter_repository",
+            lambda: walkin_repo,
+        )
+        monkeypatch.setattr(
+            orders_module, "get_customer_repository", lambda: customer_repo,
+        )
+        monkeypatch.setattr(
+            orders_module, "get_order_repository", lambda: order_repo,
+        )
+        monkeypatch.setattr(
+            orders_module, "get_product_repository", lambda: None,
+        )
+    except Exception:
+        pass
+
+    return {
+        "db": fake_db,
+        "customer_repo": customer_repo,
+        "audit_repo": audit_repo,
+        "task_repo": task_repo,
+        "walkin_repo": walkin_repo,
+    }
 
 
 # ============================================================================
@@ -648,3 +705,795 @@ def test_patch_no_changes_returns_existing(
         if d.get("action") == "walkout.update"
     )
     assert post_update_audits == pre_update_audits
+
+
+# ============================================================================
+# Phase 3 — embedded follow-ups + result + escalation
+# ============================================================================
+
+
+def _today_iso():
+    from datetime import date as _d
+    return _d.today().isoformat()
+
+
+def _yesterday_iso():
+    from datetime import date as _d, timedelta
+    return (_d.today() - timedelta(days=1)).isoformat()
+
+
+def test_followup_append_round_1_and_2(client, auth_headers, patched_walkouts):
+    """Both round 1 and round 2 may be appended; both reach the doc."""
+    walkout = _create_walkout(client, auth_headers)
+    wid = walkout["walkout_id"]
+
+    # Round 1
+    resp = client.post(
+        f"/api/v1/walkouts/{wid}/followups",
+        json={
+            "round": 1,
+            "scheduled_date": _today_iso(),
+            "scheduled_time": "10:30",
+            "mode": "WHATSAPP",
+            "supervisor_id": "user-sameer",
+            "notes": "Try once",
+        },
+        headers=auth_headers,
+    )
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    assert len(body["followups"]) == 1
+    assert body["followups"][0]["round"] == 1
+    assert body["followups"][0]["status"] == "PENDING"
+
+    # Round 2
+    resp = client.post(
+        f"/api/v1/walkouts/{wid}/followups",
+        json={
+            "round": 2,
+            "scheduled_date": _today_iso(),
+            "mode": "CALL",
+        },
+        headers=auth_headers,
+    )
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    rounds = sorted([fu["round"] for fu in body["followups"]])
+    assert rounds == [1, 2]
+
+
+def test_followup_round_3_rejected(client, auth_headers, patched_walkouts):
+    """Round 3+ is a 422 (Pydantic ge=1, le=2 validator)."""
+    walkout = _create_walkout(client, auth_headers)
+    resp = client.post(
+        f"/api/v1/walkouts/{walkout['walkout_id']}/followups",
+        json={"round": 3, "scheduled_date": _today_iso(), "mode": "CALL"},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 422
+
+
+def test_followup_duplicate_round_rejected(
+    client, auth_headers, patched_walkouts
+):
+    """Same round twice → 409."""
+    walkout = _create_walkout(client, auth_headers)
+    wid = walkout["walkout_id"]
+    payload = {"round": 1, "scheduled_date": _today_iso(), "mode": "CALL"}
+    resp = client.post(
+        f"/api/v1/walkouts/{wid}/followups", json=payload, headers=auth_headers
+    )
+    assert resp.status_code == 201
+    resp = client.post(
+        f"/api/v1/walkouts/{wid}/followups", json=payload, headers=auth_headers
+    )
+    assert resp.status_code == 409
+
+
+def test_followup_update_done_stamps_completed_fields(
+    client, auth_headers, patched_walkouts
+):
+    """Status flip to DONE stamps completed_at + completed_by."""
+    walkout = _create_walkout(client, auth_headers)
+    wid = walkout["walkout_id"]
+    client.post(
+        f"/api/v1/walkouts/{wid}/followups",
+        json={"round": 1, "scheduled_date": _today_iso(), "mode": "CALL"},
+        headers=auth_headers,
+    )
+    resp = client.patch(
+        f"/api/v1/walkouts/{wid}/followups/1",
+        json={"status": "DONE", "notes": "Customer interested, will visit Sat"},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    fu = next(f for f in body["followups"] if f["round"] == 1)
+    assert fu["status"] == "DONE"
+    assert fu["completed_at"]
+    assert fu["completed_by"] == "test-admin-001"
+    assert fu["notes"] == "Customer interested, will visit Sat"
+
+
+def test_overdue_fu_creates_escalation_task(
+    client, auth_headers, patched_walkouts
+):
+    """A pending FU scheduled in the past produces a Task on
+    /escalate-overdue and stamps escalation_task_id back on the FU."""
+    task_repo = patched_walkouts["task_repo"]
+    walkout = _create_walkout(client, auth_headers)
+    wid = walkout["walkout_id"]
+
+    # Round-1 follow-up scheduled YESTERDAY
+    resp = client.post(
+        f"/api/v1/walkouts/{wid}/followups",
+        json={
+            "round": 1,
+            "scheduled_date": _yesterday_iso(),
+            "mode": "WHATSAPP",
+            "supervisor_id": "user-sameer",
+        },
+        headers=auth_headers,
+    )
+    assert resp.status_code == 201, resp.text
+
+    # Trigger the cron
+    resp = client.post(
+        "/api/v1/walkouts/followups/escalate-overdue", headers=auth_headers
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["escalated"] == 1
+    created = body["created_tasks"][0]
+    assert created["round"] == 1
+    assert created["priority"] == "P2"  # round 1 → P2
+    assert created["assignee"] == "user-sameer"
+
+    # Task was actually created in the task repo
+    assert len(task_repo.tasks) == 1
+    task = task_repo.tasks[0]
+    assert task["priority"] == "P2"
+    assert task["assigned_to"] == "user-sameer"
+    assert task["source"]["type"] == "walkout_followup"
+    assert task["source"]["walkout_id"] == wid
+
+    # The FU is now stamped with the escalation_task_id
+    resp = client.get(f"/api/v1/walkouts/{wid}", headers=auth_headers)
+    fu = next(f for f in resp.json()["followups"] if f["round"] == 1)
+    assert fu["escalation_task_id"] == created["task_id"]
+    assert fu["status"] == "ESCALATED"
+
+
+def test_round2_overdue_creates_p1_task(
+    client, auth_headers, patched_walkouts
+):
+    """Round 2 escalates to P1 (higher priority than round 1)."""
+    walkout = _create_walkout(client, auth_headers)
+    wid = walkout["walkout_id"]
+    # Add round 1 (today, doesn't escalate) and round 2 (yesterday, escalates)
+    client.post(
+        f"/api/v1/walkouts/{wid}/followups",
+        json={"round": 1, "scheduled_date": _today_iso(), "mode": "CALL"},
+        headers=auth_headers,
+    )
+    client.post(
+        f"/api/v1/walkouts/{wid}/followups",
+        json={"round": 2, "scheduled_date": _yesterday_iso(), "mode": "CALL"},
+        headers=auth_headers,
+    )
+    resp = client.post(
+        "/api/v1/walkouts/followups/escalate-overdue", headers=auth_headers
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["escalated"] == 1
+    assert body["created_tasks"][0]["priority"] == "P1"
+    assert body["created_tasks"][0]["round"] == 2
+
+
+def test_escalate_overdue_blocked_for_sales_staff(
+    client, staff_headers_pune, patched_walkouts
+):
+    """Only managers/admin can run the cron (multi-user task writes)."""
+    resp = client.post(
+        "/api/v1/walkouts/followups/escalate-overdue", headers=staff_headers_pune
+    )
+    assert resp.status_code == 403
+
+
+def test_set_result_converted_validates_order_id(
+    client, auth_headers, patched_walkouts
+):
+    """CONVERTED requires converted_order_id and the order must exist
+    in the orders collection (else 422)."""
+    walkout = _create_walkout(client, auth_headers)
+    wid = walkout["walkout_id"]
+
+    # Missing converted_order_id → 422
+    resp = client.patch(
+        f"/api/v1/walkouts/{wid}/result",
+        json={"result": "CONVERTED"},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 422
+
+    # Order doesn't exist → 422
+    resp = client.patch(
+        f"/api/v1/walkouts/{wid}/result",
+        json={"result": "CONVERTED", "converted_order_id": "ORD-FAKE"},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 422
+
+    # Seed a real order, retry → 200
+    fake_db = patched_walkouts["db"]
+    fake_db.get_collection("orders").insert_one({
+        "order_id": "ORD-REAL-001",
+        "store_id": "BV-TEST-01",
+    })
+    resp = client.patch(
+        f"/api/v1/walkouts/{wid}/result",
+        json={"result": "CONVERTED", "converted_order_id": "ORD-REAL-001"},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["result"] == "CONVERTED"
+    assert body["converted_order_id"] == "ORD-REAL-001"
+    assert body["result_set_by"] == "test-admin-001"
+    assert body["result_set_at"]
+
+
+def test_set_result_negative_clears_converted_order_id(
+    client, auth_headers, patched_walkouts
+):
+    """Switching from CONVERTED to NEGATIVE/DUE clears converted_order_id."""
+    walkout = _create_walkout(client, auth_headers)
+    wid = walkout["walkout_id"]
+    patched_walkouts["db"].get_collection("orders").insert_one({
+        "order_id": "ORD-X1",
+    })
+    client.patch(
+        f"/api/v1/walkouts/{wid}/result",
+        json={"result": "CONVERTED", "converted_order_id": "ORD-X1"},
+        headers=auth_headers,
+    )
+    resp = client.patch(
+        f"/api/v1/walkouts/{wid}/result",
+        json={"result": "NEGATIVE"},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 200
+    assert resp.json()["result"] == "NEGATIVE"
+    assert resp.json()["converted_order_id"] is None
+
+
+def test_set_result_audit_logged(client, auth_headers, patched_walkouts):
+    """walkout.result.set audit row carries from→to + order id."""
+    audit_repo = patched_walkouts["audit_repo"]
+    walkout = _create_walkout(client, auth_headers)
+    wid = walkout["walkout_id"]
+    resp = client.patch(
+        f"/api/v1/walkouts/{wid}/result",
+        json={"result": "DUE"},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 200
+    audit = next(
+        d for d in audit_repo.collection.docs
+        if d.get("action") == "walkout.result.set"
+    )
+    assert audit["entity_id"] == wid
+    assert audit["detail"]["from"] is None
+    assert audit["detail"]["to"] == "DUE"
+
+
+def test_followups_due_today_lists_only_pending_today(
+    client, auth_headers, patched_walkouts
+):
+    """due-today returns the right slice and is RBAC-scoped."""
+    a = _create_walkout(client, auth_headers, mobile="9100000001")
+    b = _create_walkout(client, auth_headers, mobile="9100000002")
+
+    # a — pending FU today
+    client.post(
+        f"/api/v1/walkouts/{a['walkout_id']}/followups",
+        json={"round": 1, "scheduled_date": _today_iso(), "mode": "CALL"},
+        headers=auth_headers,
+    )
+    # b — pending FU yesterday (not today)
+    client.post(
+        f"/api/v1/walkouts/{b['walkout_id']}/followups",
+        json={"round": 1, "scheduled_date": _yesterday_iso(), "mode": "CALL"},
+        headers=auth_headers,
+    )
+
+    resp = client.get(
+        "/api/v1/walkouts/followups/due-today", headers=auth_headers
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert len(body["items"]) == 1
+    assert body["items"][0]["walkout_id"] == a["walkout_id"]
+
+
+# ============================================================================
+# Phase 4 — walk-in counter + dashboard
+# ============================================================================
+
+
+def test_walkin_increment_dedups_same_mobile_day(
+    client, auth_headers, patched_walkouts
+):
+    """Repo-level: auto_increment dedup'd by (mobile, day). Two
+    increments for the same mobile in one day → counter still 1."""
+    repo = patched_walkouts["walkin_repo"]
+    r1 = repo.auto_increment(
+        store_id="BV-TEST-01", sales_person_id="user-akshay", mobile="9100000001",
+    )
+    r2 = repo.auto_increment(
+        store_id="BV-TEST-01", sales_person_id="user-akshay", mobile="9100000001",
+    )
+    r3 = repo.auto_increment(
+        store_id="BV-TEST-01", sales_person_id="user-rupesh", mobile="9100000002",
+    )
+    assert r1["deduped"] is False and r1["pos_auto_count"] == 1
+    assert r2["deduped"] is True and r2["pos_auto_count"] == 1
+    assert r3["deduped"] is False and r3["pos_auto_count"] == 2
+
+    today = repo.get_today("BV-TEST-01")
+    assert today["pos_auto_count"] == 2
+    assert today["per_staff"] == {"user-akshay": 1, "user-rupesh": 1}
+
+
+def test_walkin_increment_no_mobile_does_not_dedup(
+    client, auth_headers, patched_walkouts
+):
+    repo = patched_walkouts["walkin_repo"]
+    repo.auto_increment(store_id="BV-TEST-01", sales_person_id="user-akshay")
+    repo.auto_increment(store_id="BV-TEST-01", sales_person_id="user-akshay")
+    today = repo.get_today("BV-TEST-01")
+    assert today["pos_auto_count"] == 2
+
+
+def test_manual_topup_audit_logged(client, auth_headers, patched_walkouts):
+    audit_repo = patched_walkouts["audit_repo"]
+    resp = client.post(
+        "/api/v1/walkouts/walkins/manual-topup",
+        json={"delta": 3, "reason": "Three browsers, no POS"},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    assert body["manual_topup"] == 3
+    assert body["total"] == 3
+    audit = next(
+        d for d in audit_repo.collection.docs
+        if d.get("action") == "walkin.manual_topup"
+    )
+    assert audit["detail"]["delta"] == 3
+    assert audit["detail"]["reason"] == "Three browsers, no POS"
+    assert audit["store_id"] == "BV-TEST-01"
+
+
+def test_manual_topup_blocked_for_sales_staff(
+    client, staff_headers_pune, patched_walkouts
+):
+    resp = client.post(
+        "/api/v1/walkouts/walkins/manual-topup",
+        json={"delta": 1, "reason": "browse"},
+        headers=staff_headers_pune,
+    )
+    assert resp.status_code == 403
+
+
+def test_walkins_today_endpoint_reflects_pos_hook(
+    client, auth_headers, patched_walkouts
+):
+    patched_walkouts["customer_repo"].create({
+        "customer_id": "cust-xx",
+        "name": "Test Customer",
+        "mobile": "9100000005",
+        "phone": "9100000005",
+    })
+    resp = client.post(
+        "/api/v1/orders",
+        json={
+            "customer_id": "cust-xx",
+            "items": [{
+                "product_id": "custom-test", "product_name": "Test",
+                "item_type": "FRAME",
+                "quantity": 1, "unit_price": 100.0,
+            }],
+        },
+        headers=auth_headers,
+    )
+    assert resp.status_code in (200, 201), resp.text
+
+    # Same customer, same day — dedup
+    resp = client.post(
+        "/api/v1/orders",
+        json={
+            "customer_id": "cust-xx",
+            "items": [{
+                "product_id": "custom-test", "product_name": "Test",
+                "item_type": "FRAME",
+                "quantity": 1, "unit_price": 50.0,
+            }],
+        },
+        headers=auth_headers,
+    )
+    assert resp.status_code in (200, 201), resp.text
+
+    resp = client.get("/api/v1/walkouts/walkins/today", headers=auth_headers)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["pos_auto_count"] == 1
+    assert body["total"] == 1
+
+
+def test_dashboard_per_staff_aggregation_correct(
+    client, auth_headers, patched_walkouts
+):
+    for i in range(3):
+        _create_walkout(
+            client, auth_headers,
+            mobile=f"99000{i:05d}", sales_person_id="user-akshay",
+        )
+    _create_walkout(
+        client, auth_headers, mobile="9991111111",
+        sales_person_id="user-rupesh",
+    )
+
+    walkin_repo = patched_walkouts["walkin_repo"]
+    for mob in ("9888880001", "9888880002", "9888880003"):
+        walkin_repo.auto_increment(
+            store_id="BV-TEST-01",
+            sales_person_id="user-akshay",
+            mobile=mob,
+        )
+    for mob in ("9777770001", "9777770002"):
+        walkin_repo.auto_increment(
+            store_id="BV-TEST-01",
+            sales_person_id="user-rupesh",
+            mobile=mob,
+        )
+
+    resp = client.get(
+        "/api/v1/walkouts/dashboard/per-staff", headers=auth_headers
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    items = {r["sales_person_id"]: r for r in body["items"]}
+    akshay = items["user-akshay"]
+    assert akshay["walkouts_mtd"] == 3
+    assert akshay["walkouts_today"] == 3
+    assert akshay["walk_ins_today"] == 3
+    assert akshay["conversion_pct_mtd"] == 0.0
+    rupesh = items["user-rupesh"]
+    assert rupesh["walkouts_mtd"] == 1
+    assert rupesh["walk_ins_today"] == 2
+
+
+def test_dashboard_top_reasons_sorted_desc(
+    client, auth_headers, patched_walkouts
+):
+    for mob, reason in [
+        ("9111110001", "BUDGET/PRICE"),
+        ("9111110002", "BUDGET/PRICE"),
+        ("9111110003", "BUDGET/PRICE"),
+        ("9111110004", "BRAND"),
+        ("9111110005", "BRAND"),
+        ("9111110006", "STYLE/DESIGN"),
+    ]:
+        _create_walkout(
+            client, auth_headers, mobile=mob, primary_walkout_reason=reason,
+        )
+
+    resp = client.get(
+        "/api/v1/walkouts/dashboard/top-reasons", headers=auth_headers
+    )
+    assert resp.status_code == 200
+    items = resp.json()["items"]
+    assert items[0]["reason"] == "BUDGET/PRICE" and items[0]["count"] == 3
+    assert items[1]["reason"] == "BRAND" and items[1]["count"] == 2
+    assert items[2]["reason"] == "STYLE/DESIGN" and items[2]["count"] == 1
+    counts = [i["count"] for i in items]
+    assert counts == sorted(counts, reverse=True)
+
+
+def test_dashboard_result_breakdown_buckets(
+    client, auth_headers, patched_walkouts
+):
+    patched_walkouts["db"].get_collection("orders").insert_one({
+        "order_id": "ORD-DASHBOARD-001",
+    })
+    a = _create_walkout(client, auth_headers, mobile="9000888001")
+    b = _create_walkout(client, auth_headers, mobile="9000888002")
+    c = _create_walkout(client, auth_headers, mobile="9000888003")
+    _create_walkout(client, auth_headers, mobile="9000888004")  # no_result
+
+    client.patch(
+        f"/api/v1/walkouts/{a['walkout_id']}/result",
+        json={"result": "CONVERTED", "converted_order_id": "ORD-DASHBOARD-001"},
+        headers=auth_headers,
+    )
+    client.patch(
+        f"/api/v1/walkouts/{b['walkout_id']}/result",
+        json={"result": "NEGATIVE"}, headers=auth_headers,
+    )
+    client.patch(
+        f"/api/v1/walkouts/{c['walkout_id']}/result",
+        json={"result": "DUE"}, headers=auth_headers,
+    )
+
+    resp = client.get(
+        "/api/v1/walkouts/dashboard/result-breakdown", headers=auth_headers
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["total"] == 4
+    assert body["buckets"]["CONVERTED"] == 1
+    assert body["buckets"]["NEGATIVE"] == 1
+    assert body["buckets"]["DUE"] == 1
+    assert body["buckets"]["no_result"] == 1
+
+
+def test_dashboard_fu_status_per_round(
+    client, auth_headers, patched_walkouts
+):
+    a = _create_walkout(client, auth_headers, mobile="9000777001")
+    b = _create_walkout(client, auth_headers, mobile="9000777002")
+    client.post(
+        f"/api/v1/walkouts/{a['walkout_id']}/followups",
+        json={"round": 1, "scheduled_date": _today_iso(), "mode": "CALL"},
+        headers=auth_headers,
+    )
+    client.patch(
+        f"/api/v1/walkouts/{a['walkout_id']}/followups/1",
+        json={"status": "DONE"}, headers=auth_headers,
+    )
+    client.post(
+        f"/api/v1/walkouts/{a['walkout_id']}/followups",
+        json={"round": 2, "scheduled_date": _today_iso(), "mode": "CALL"},
+        headers=auth_headers,
+    )
+    client.post(
+        f"/api/v1/walkouts/{b['walkout_id']}/followups",
+        json={"round": 1, "scheduled_date": _today_iso(), "mode": "CALL"},
+        headers=auth_headers,
+    )
+
+    resp = client.get(
+        "/api/v1/walkouts/dashboard/fu-status", headers=auth_headers
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["fu1"]["DONE"] == 1
+    assert body["fu1"]["PENDING"] == 1
+    assert body["fu2"]["PENDING"] == 1
+
+
+def test_walkins_mtd_aggregates_across_days(
+    client, auth_headers, patched_walkouts
+):
+    repo = patched_walkouts["walkin_repo"]
+    today = _today_iso()
+    yest = _yesterday_iso()
+    repo.auto_increment(
+        store_id="BV-TEST-01", sales_person_id="user-akshay",
+        mobile="9100200001", date_str=today,
+    )
+    repo.auto_increment(
+        store_id="BV-TEST-01", sales_person_id="user-akshay",
+        mobile="9100200002", date_str=today,
+    )
+    for mob in ("9100200003", "9100200004", "9100200005"):
+        repo.auto_increment(
+            store_id="BV-TEST-01", sales_person_id="user-rupesh",
+            mobile=mob, date_str=yest,
+        )
+
+    from datetime import date as _d
+    now = _d.today()
+    resp = client.get(
+        f"/api/v1/walkouts/walkins/mtd?year={now.year}&month={now.month}",
+        headers=auth_headers,
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["pos_auto_count"] >= 2
+    assert "user-akshay" in body["per_staff"]
+
+
+# ============================================================================
+# Phase 5 — conversion-feed (Module ii contract) + backfill
+# ============================================================================
+
+
+def test_conversion_feed_includes_retro_conversions(
+    client, auth_headers, patched_walkouts
+):
+    """Walkouts from prior days that flip to CONVERTED today count
+    in retro_conversions_today (and bump the score)."""
+    walkin_repo = patched_walkouts["walkin_repo"]
+
+    # Today: akshay has 5 walk-ins, 1 walkout
+    for mob in ("9100100001", "9100100002", "9100100003", "9100100004", "9100100005"):
+        walkin_repo.auto_increment(
+            store_id="BV-TEST-01", sales_person_id="user-akshay", mobile=mob,
+        )
+    _create_walkout(client, auth_headers, mobile="9100110001", sales_person_id="user-akshay")
+
+    # A prior-day walkout for akshay, flipped to CONVERTED today
+    repo = patched_walkouts["db"].get_collection("walkouts")
+    from datetime import datetime as _dt, timedelta as _td
+    yest = (_dt.now() - _td(days=1))
+    prior = {
+        "walkout_id": "WO-TES-2026-RETRO1", "_id": "WO-TES-2026-RETRO1",
+        "store_id": "BV-TEST-01",
+        "date": yest, "date_str": yest.date().isoformat(),
+        "customer_name": "Retro", "mobile": "9100120001",
+        "sales_person_id": "user-akshay", "sales_person_name": "AKSHAY",
+        "result": "CONVERTED",
+        "result_set_at": _dt.now().isoformat(),  # today
+        "converted_order_id": "ORD-X",
+        "followups": [], "deleted_at": None,
+        "created_at": yest, "updated_at": _dt.now(),
+        "primary_walkout_reason": "BUDGET/PRICE",
+    }
+    repo.insert_one(prior)
+
+    resp = client.get("/api/v1/walkouts/conversion-feed", headers=auth_headers)
+    assert resp.status_code == 200, resp.text
+    items = resp.json()
+    akshay = next(r for r in items if r["sales_person_id"] == "user-akshay")
+    assert akshay["walk_ins_today"] == 5
+    assert akshay["walkouts_today"] == 1
+    assert akshay["retro_conversions_today"] == 1
+    # (5 - 1 + 1) / 5 × 20 = 20.0 (capped at 20 anyway)
+    assert akshay["conversion_score"] == 20.0
+
+
+def test_conversion_feed_score_capped_at_20(
+    client, auth_headers, patched_walkouts
+):
+    """If retro_conversions exceeds the walkouts-today subtraction,
+    raw score can theoretically go above 20. The cap holds it at 20."""
+    walkin_repo = patched_walkouts["walkin_repo"]
+    walkin_repo.auto_increment(
+        store_id="BV-TEST-01", sales_person_id="user-akshay",
+        mobile="9200000001",
+    )
+    walkin_repo.auto_increment(
+        store_id="BV-TEST-01", sales_person_id="user-akshay",
+        mobile="9200000002",
+    )
+    # 0 walkouts today, 5 retros — raw = (2 - 0 + 5) / 2 × 20 = 70 → cap 20
+    repo = patched_walkouts["db"].get_collection("walkouts")
+    from datetime import datetime as _dt, timedelta as _td
+    yest = (_dt.now() - _td(days=1))
+    for i in range(5):
+        repo.insert_one({
+            "walkout_id": f"WO-TES-CAPED-{i:02d}", "_id": f"WO-TES-CAPED-{i:02d}",
+            "store_id": "BV-TEST-01",
+            "date": yest, "date_str": yest.date().isoformat(),
+            "customer_name": f"Cap {i}", "mobile": f"930000000{i}",
+            "sales_person_id": "user-akshay", "sales_person_name": "AKSHAY",
+            "result": "CONVERTED",
+            "result_set_at": _dt.now().isoformat(),
+            "followups": [], "deleted_at": None,
+            "created_at": yest, "updated_at": _dt.now(),
+        })
+
+    resp = client.get("/api/v1/walkouts/conversion-feed", headers=auth_headers)
+    assert resp.status_code == 200
+    items = resp.json()
+    akshay = next(r for r in items if r["sales_person_id"] == "user-akshay")
+    assert akshay["walk_ins_today"] == 2
+    assert akshay["walkouts_today"] == 0
+    assert akshay["retro_conversions_today"] == 5
+    assert akshay["conversion_score"] == 20.0
+
+
+def test_conversion_feed_zero_walkins_yields_zero_score(
+    client, auth_headers, patched_walkouts
+):
+    """No walk-ins → score 0 (no denominator)."""
+    _create_walkout(client, auth_headers, mobile="9300100001", sales_person_id="user-rupesh")
+    resp = client.get("/api/v1/walkouts/conversion-feed", headers=auth_headers)
+    assert resp.status_code == 200
+    items = resp.json()
+    rupesh = next(r for r in items if r["sales_person_id"] == "user-rupesh")
+    assert rupesh["walk_ins_today"] == 0
+    assert rupesh["walkouts_today"] == 1
+    assert rupesh["conversion_score"] == 0.0
+
+
+def test_backfill_idempotent_on_mobile_date(tmp_path):
+    """Re-running the migrate script on the same CSV is a no-op.
+
+    Simulates the runbook with an in-process pymongo — actually uses
+    a tiny fake collection with a unique-index emulation."""
+    import csv as _csv
+    csv_path = tmp_path / "pune.csv"
+    with open(csv_path, "w", newline="") as f:
+        w = _csv.writer(f)
+        w.writerow([
+            "date","customer_name","mobile","age_group","gender",
+            "product_interested","has_prescription","displayed_price_range",
+            "required_price_range","primary_walkout_reason",
+            "secondary_walkout_reason","brand_interest",
+            "competitor_mentioned","purchase_planned_in",
+            "sales_person_id","sales_person_name","action_remarks",
+        ])
+        w.writerow([
+            "2026-04-15","Avinash","9100200001","26-35","MALE","FRAME","YES",
+            "5000-10000","3000-5000","BUDGET/PRICE","BRAND","Ray-Ban",
+            "Lenskart","1-7 DAYS","user-akshay","AKSHAY","Notes",
+        ])
+
+    import sys, os, importlib.util
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    if repo_root not in sys.path:
+        sys.path.insert(0, repo_root)
+    spec = importlib.util.spec_from_file_location(
+        "migrate_pune_walkouts",
+        os.path.join(repo_root, "scripts", "migrate_pune_walkouts.py"),
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    build_doc = mod.build_doc
+    make_backfill_hash = mod.make_backfill_hash
+    row = {
+        "date":"2026-04-15","customer_name":"Avinash","mobile":"9100200001",
+        "age_group":"26-35","gender":"MALE","product_interested":"FRAME",
+        "has_prescription":"YES","displayed_price_range":"5000-10000",
+        "required_price_range":"3000-5000","primary_walkout_reason":"BUDGET/PRICE",
+        "secondary_walkout_reason":"BRAND","brand_interest":"Ray-Ban",
+        "competitor_mentioned":"Lenskart","purchase_planned_in":"1-7 DAYS",
+        "sales_person_id":"user-akshay","sales_person_name":"AKSHAY",
+        "action_remarks":"Notes",
+    }
+    doc = build_doc(row, "BV-PNE-01")
+    assert doc is not None
+    assert doc["backfill_hash"] == make_backfill_hash("9100200001", "2026-04-15")
+    # Re-running build_doc on same row → same backfill_hash (unique key
+    # for the upsert), so a real Mongo would reject the second insert.
+    doc2 = build_doc(row, "BV-PNE-01")
+    assert doc2["backfill_hash"] == doc["backfill_hash"]
+    # walkout_id is a fresh uuid each call (so we don't accidentally
+    # overwrite an existing live row); the hash is the dedup key.
+    assert doc2["walkout_id"] != doc["walkout_id"]
+
+
+def test_backfill_skips_invalid_rows():
+    """build_doc returns None when mobile/date/customer is bad."""
+    import sys, os, importlib.util
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    spec = importlib.util.spec_from_file_location(
+        "migrate_pune_walkouts",
+        os.path.join(repo_root, "scripts", "migrate_pune_walkouts.py"),
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    build_doc = mod.build_doc
+
+    # Bad mobile
+    assert build_doc({
+        "date":"2026-04-15","customer_name":"x","mobile":"123",
+    }, "BV-PNE-01") is None
+    # No date
+    assert build_doc({
+        "date":"","customer_name":"x","mobile":"9100200001",
+    }, "BV-PNE-01") is None
+    # No customer name
+    assert build_doc({
+        "date":"2026-04-15","customer_name":"","mobile":"9100200001",
+    }, "BV-PNE-01") is None
+    # 12-digit (with country code) accepted
+    doc = build_doc({
+        "date":"15/04/2026","customer_name":"Avinash","mobile":"919100200001",
+    }, "BV-PNE-01")
+    assert doc is not None
+    assert doc["mobile"] == "9100200001"

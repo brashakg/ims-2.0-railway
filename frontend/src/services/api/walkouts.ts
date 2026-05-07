@@ -1,5 +1,5 @@
 // ============================================================================
-// IMS 2.0 — Walkouts API client (Pune Incentive Module i, Phases 1-2)
+// IMS 2.0 — Walkouts API client (Pune Incentive Module i, Phases 1-3)
 // ============================================================================
 // Backend: backend/api/routers/walkouts.py mounted at /api/v1/walkouts
 // See docs/PUNE_INCENTIVE_BUILD_PLAN.md for the full programme spec.
@@ -11,6 +11,16 @@ import type {
   UpdateWalkoutRequest,
   ListWalkoutsParams,
   ListWalkoutsResponse,
+  CreateFollowUpRequest,
+  UpdateFollowUpRequest,
+  SetWalkoutResultRequest,
+  FollowUpsDueResponse,
+  WalkinTodayResponse,
+  ManualTopupRequest,
+  PerStaffResponse,
+  TopReasonsResponse,
+  ResultBreakdownResponse,
+  FUStatusResponse,
 } from '../../types';
 
 export const walkoutsApi = {
@@ -60,6 +70,115 @@ export const walkoutsApi = {
       data: { reason },
     });
     return response.data;
+  },
+
+  /** Phase 3 — append a follow-up sub-doc (round 1 or 2). */
+  appendFollowUp: async (
+    walkoutId: string,
+    payload: CreateFollowUpRequest,
+  ): Promise<Walkout> => {
+    const response = await api.post(
+      `/walkouts/${walkoutId}/followups`, payload,
+    );
+    return response.data;
+  },
+
+  /** Phase 3 — partial update of a follow-up. Server stamps
+   * completed_at + completed_by when status flips to DONE. */
+  updateFollowUp: async (
+    walkoutId: string,
+    round: 1 | 2,
+    patch: UpdateFollowUpRequest,
+  ): Promise<Walkout> => {
+    const response = await api.patch(
+      `/walkouts/${walkoutId}/followups/${round}`, patch,
+    );
+    return response.data;
+  },
+
+  /** Phase 3 — set walkout outcome. CONVERTED requires a real order id. */
+  setResult: async (
+    walkoutId: string,
+    payload: SetWalkoutResultRequest,
+  ): Promise<Walkout> => {
+    const response = await api.patch(
+      `/walkouts/${walkoutId}/result`, payload,
+    );
+    return response.data;
+  },
+
+  /** Phase 3 — pending follow-ups due today (for the FU dashboard widget). */
+  followupsDueToday: async (
+    storeId?: string,
+  ): Promise<FollowUpsDueResponse> => {
+    const response = await api.get('/walkouts/followups/due-today', {
+      params: storeId ? { store_id: storeId } : undefined,
+    });
+    return response.data;
+  },
+
+  /** Phase 3 — cron-callable; turns overdue FUs into Tasks. */
+  escalateOverdueFollowUps: async (): Promise<{
+    escalated: number;
+    created_tasks: Array<{
+      walkout_id: string;
+      round: number;
+      task_id: string;
+      priority: 'P1' | 'P2';
+      assignee: string;
+    }>;
+    as_of: string;
+  }> => {
+    const response = await api.post('/walkouts/followups/escalate-overdue');
+    return response.data;
+  },
+
+  // Phase 4 — walk-in counter + dashboard
+
+  walkinsToday: async (storeId?: string): Promise<WalkinTodayResponse> => {
+    const r = await api.get('/walkouts/walkins/today', { params: storeId ? { store_id: storeId } : undefined });
+    return r.data;
+  },
+
+  walkinsManualTopup: async (
+    payload: ManualTopupRequest, storeId?: string,
+  ): Promise<WalkinTodayResponse> => {
+    const r = await api.post('/walkouts/walkins/manual-topup', payload, {
+      params: storeId ? { store_id: storeId } : undefined,
+    });
+    return r.data;
+  },
+
+  dashboardPerStaff: async (storeId?: string): Promise<PerStaffResponse> => {
+    const r = await api.get('/walkouts/dashboard/per-staff', { params: storeId ? { store_id: storeId } : undefined });
+    return r.data;
+  },
+
+  dashboardTopReasons: async (
+    days = 30, limit = 10, storeId?: string,
+  ): Promise<TopReasonsResponse> => {
+    const r = await api.get('/walkouts/dashboard/top-reasons', {
+      params: { days, limit, ...(storeId ? { store_id: storeId } : {}) },
+    });
+    return r.data;
+  },
+
+  dashboardResultBreakdown: async (
+    days = 30, storeId?: string,
+  ): Promise<ResultBreakdownResponse> => {
+    const r = await api.get('/walkouts/dashboard/result-breakdown', {
+      params: { days, ...(storeId ? { store_id: storeId } : {}) },
+    });
+    return r.data;
+  },
+
+  dashboardFuStatus: async (
+    days = 30, storeId?: string,
+  ): Promise<FUStatusResponse> => {
+    const r = await api.get('/walkouts/dashboard/fu-status', {
+      params: { days, ...(storeId ? { store_id: storeId } : {}) },
+    });
+    return r.data;
   },
 };
 

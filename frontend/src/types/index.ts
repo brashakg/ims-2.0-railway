@@ -468,18 +468,120 @@ export type PurchasePlan =
   | 'NEXT DAY' | '1-7 DAYS' | '8-15 DAYS' | '16-30 DAYS'
   | 'AFTER A MONTH' | 'UNDECIDED';
 
+export type FollowUpMode = 'CALL' | 'WHATSAPP' | 'SMS' | 'EMAIL' | 'IN-PERSON';
+export type FollowUpStatus =
+  | 'PENDING' | 'DONE' | 'NOT REACHABLE' | 'NOT REQUIRED' | 'ESCALATED';
+export type WalkoutResultValue = 'DUE' | 'NEGATIVE' | 'CONVERTED';
+
 export interface WalkoutFollowUp {
   round: number;
   scheduled_date?: string;
   scheduled_time?: string;
-  mode?: 'CALL' | 'WHATSAPP' | 'SMS' | 'EMAIL' | 'IN-PERSON';
-  supervisor_id?: string;
-  supervisor_name?: string;
-  status: 'PENDING' | 'DONE' | 'NOT REACHABLE' | 'NOT REQUIRED';
+  mode?: FollowUpMode;
+  supervisor_id?: string | null;
+  supervisor_name?: string | null;
+  status: FollowUpStatus;
   notes?: string;
   completed_at?: string | null;
   completed_by?: string | null;
   escalation_task_id?: string | null;
+}
+
+export interface CreateFollowUpRequest {
+  round: 1 | 2;
+  scheduled_date: string;       // YYYY-MM-DD
+  scheduled_time?: string;      // HH:MM
+  mode: FollowUpMode;
+  supervisor_id?: string;
+  notes?: string;
+}
+
+export interface UpdateFollowUpRequest {
+  status?: FollowUpStatus;
+  notes?: string;
+  scheduled_date?: string;
+  scheduled_time?: string;
+  mode?: FollowUpMode;
+}
+
+export interface SetWalkoutResultRequest {
+  result: WalkoutResultValue;
+  converted_order_id?: string;
+}
+
+export interface FollowUpDueRow extends WalkoutFollowUp {
+  walkout_id: string;
+  store_id: string;
+  customer_name: string;
+  mobile: string;
+  sales_person_id: string;
+  sales_person_name?: string;
+}
+
+export interface FollowUpsDueResponse {
+  items: FollowUpDueRow[];
+  as_of: string;
+}
+
+export const FOLLOWUP_MODES: FollowUpMode[] = [
+  'CALL', 'WHATSAPP', 'SMS', 'EMAIL', 'IN-PERSON',
+];
+export const FOLLOWUP_STATUSES: FollowUpStatus[] = [
+  'PENDING', 'DONE', 'NOT REACHABLE', 'NOT REQUIRED', 'ESCALATED',
+];
+
+// Phase 4 — walk-in counter + dashboard types
+export interface WalkinTodayResponse {
+  store_id: string;
+  date_str: string;
+  pos_auto_count: number;
+  manual_topup: number;
+  total: number;
+  per_staff: Record<string, number>;
+}
+
+export interface ManualTopupRequest {
+  delta: number;
+  reason: string;
+  sales_person_id?: string;
+}
+
+export interface PerStaffCard {
+  sales_person_id: string;
+  sales_person_name: string | null;
+  walkouts_mtd: number;
+  walkouts_today: number;
+  converted_mtd: number;
+  walk_ins_today: number;
+  walk_ins_mtd: number;
+  fu_due_today: number;
+  conversion_pct_mtd: number;
+}
+
+export interface PerStaffResponse {
+  store_id: string;
+  as_of: string;
+  items: PerStaffCard[];
+}
+
+export interface TopReasonsResponse {
+  store_id: string;
+  days: number;
+  items: { reason: string; count: number }[];
+}
+
+export interface ResultBreakdownResponse {
+  store_id: string;
+  days: number;
+  total: number;
+  buckets: { DUE: number; NEGATIVE: number; CONVERTED: number; no_result: number };
+}
+
+export interface FUStatusResponse {
+  store_id: string;
+  days: number;
+  fu1: Record<string, number>;
+  fu2: Record<string, number>;
 }
 
 export interface Walkout {
