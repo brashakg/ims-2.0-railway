@@ -49,22 +49,49 @@ interface StaffOption {
 
 const MOBILE_RE = /^\d{10}$/;
 
+// Roles that can attribute a walkout to a salesperson other than
+// themselves. Mirrors backend `_REATTRIBUTE_ROLES`. Lower-tier roles
+// (sales staff, cashier, optometrist) are auto-locked to themselves.
+const REATTRIBUTE_ROLES = new Set([
+  'SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT',
+]);
+
+function canReattribute(roles: readonly string[] | undefined, activeRole?: string): boolean {
+  if (activeRole && REATTRIBUTE_ROLES.has(activeRole)) return true;
+  if (!roles) return false;
+  return roles.some(r => REATTRIBUTE_ROLES.has(r));
+}
+
 export function WalkoutIntakeModal({ isOpen, onClose, onSaved }: WalkoutIntakeModalProps) {
   const { user } = useAuth();
   const toast = useToast();
+
+  const userId = (user as any)?.id || (user as any)?.user_id || '';
+  const userName = (user as any)?.name || (user as any)?.full_name || userId;
+  const showSalesPersonPicker = canReattribute(
+    (user as any)?.roles,
+    (user as any)?.activeRole,
+  );
 
   const [form, setForm] = useState<CreateWalkoutRequest>(emptyForm);
   const [staffOptions, setStaffOptions] = useState<StaffOption[]>([]);
   const [isSaving, setIsSaving] = useState(false);
   const [errors, setErrors] = useState<Partial<Record<keyof CreateWalkoutRequest, string>>>({});
 
-  // Reset on open + load staff dropdown options scoped to active store
+  // Reset on open + load staff dropdown options scoped to active store.
+  // Always default sales_person_id to the logged-in user (the backend
+  // enforces this for non-elevated roles anyway).
   useEffect(() => {
     if (!isOpen) return;
-    setForm(emptyForm());
+    setForm({ ...emptyForm(), sales_person_id: userId });
     setErrors({});
     setIsSaving(false);
-    loadStaff();
+    if (showSalesPersonPicker) {
+      loadStaff();
+    } else {
+      // Lower-tier role: ensure the user themselves is the only option.
+      setStaffOptions(userId ? [{ user_id: userId, name: userName }] : []);
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen]);
 
@@ -281,16 +308,23 @@ export function WalkoutIntakeModal({ isOpen, onClose, onSaved }: WalkoutIntakeMo
           {/* SECTION 3 — Sales attribution */}
           <Section title="Attribution">
             <Field label="Sales person *" error={errors.sales_person_id}>
-              <select
-                value={form.sales_person_id}
-                onChange={e => set('sales_person_id', e.target.value)}
-                className="input"
-              >
-                <option value="">— pick —</option>
-                {staffOptions.map(s => (
-                  <option key={s.user_id} value={s.user_id}>{s.name}</option>
-                ))}
-              </select>
+              {showSalesPersonPicker ? (
+                <select
+                  value={form.sales_person_id}
+                  onChange={e => set('sales_person_id', e.target.value)}
+                  className="input"
+                >
+                  <option value="">— pick —</option>
+                  {staffOptions.map(s => (
+                    <option key={s.user_id} value={s.user_id}>{s.name}</option>
+                  ))}
+                </select>
+              ) : (
+                <div className="flex items-center gap-2 px-3 py-2 border border-gray-200 rounded bg-gray-50 text-sm text-gray-700">
+                  <span className="font-medium">{userName || '—'}</span>
+                  <span className="text-xs text-gray-400">(you)</span>
+                </div>
+              )}
             </Field>
           </Section>
 

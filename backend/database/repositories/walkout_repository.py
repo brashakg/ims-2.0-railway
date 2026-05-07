@@ -123,3 +123,158 @@ class WalkoutRepository(BaseRepository):
         Phase 4); returning None keeps the contract honest until then.
         """
         return None
+
+    # ------------------------------------------------------------------
+    # Phase 2 — list / update / soft-delete
+    # ------------------------------------------------------------------
+    def _build_list_filter(
+        self,
+        store_id: Optional[str] = None,
+        date_from: Optional[str] = None,
+        date_to: Optional[str] = None,
+        sales_person_id: Optional[str] = None,
+        primary_walkout_reason: Optional[str] = None,
+        result: Optional[str] = None,
+    ) -> Dict:
+        """Compose a Mongo filter dict from the supported list filters.
+
+        Always excludes soft-deleted rows (deleted_at=None). date_from
+        / date_to are inclusive on `date_str` (YYYY-MM-DD) so date math
+        works with ISO sort order.
+        """
+        f: Dict = {"deleted_at": None}
+        if store_id:
+            f["store_id"] = store_id
+        if sales_person_id:
+            f["sales_person_id"] = sales_person_id
+        if primary_walkout_reason:
+            f["primary_walkout_reason"] = primary_walkout_reason
+        if result is not None:
+            # Allow filtering for "no result yet" via the literal string "none"
+            f["result"] = None if result.lower() == "none" else result
+        if date_from or date_to:
+            date_filter: Dict = {}
+            if date_from:
+                date_filter["$gte"] = date_from
+            if date_to:
+                date_filter["$lte"] = date_to
+            f["date_str"] = date_filter
+        return f
+
+    def list_walkouts(
+        self,
+        *,
+        store_id: Optional[str] = None,
+        date_from: Optional[str] = None,
+        date_to: Optional[str] = None,
+        sales_person_id: Optional[str] = None,
+        primary_walkout_reason: Optional[str] = None,
+        result: Optional[str] = None,
+        skip: int = 0,
+        limit: int = 50,
+    ) -> List[Dict]:
+        """List walkouts ordered newest-first by date_str, then created_at."""
+        f = self._build_list_filter(
+            store_id=store_id,
+            date_from=date_from,
+            date_to=date_to,
+            sales_person_id=sales_person_id,
+            primary_walkout_reason=primary_walkout_reason,
+            result=result,
+        )
+        try:
+            cursor = self.collection.find(f)
+            try:
+                cursor = cursor.sort([("date_str", -1), ("created_at", -1)])
+            except Exception:
+                pass
+            try:
+                cursor = cursor.skip(int(skip or 0))
+            except Exception:
+                pass
+            try:
+                cursor = cursor.limit(int(limit or 50))
+            except Exception:
+                pass
+            return list(cursor)
+        except Exception as e:
+            print(f"[WALKOUT] list failed: {e}")
+            return []
+
+    def count_walkouts(
+        self,
+        *,
+        store_id: Optional[str] = None,
+        date_from: Optional[str] = None,
+        date_to: Optional[str] = None,
+        sales_person_id: Optional[str] = None,
+        primary_walkout_reason: Optional[str] = None,
+        result: Optional[str] = None,
+    ) -> int:
+        f = self._build_list_filter(
+            store_id=store_id,
+            date_from=date_from,
+            date_to=date_to,
+            sales_person_id=sales_person_id,
+            primary_walkout_reason=primary_walkout_reason,
+            result=result,
+        )
+        try:
+            return int(self.collection.count_documents(f))
+        except Exception:
+            # Fall back to scanning the iterable (FakeCollection in tests).
+            try:
+                return sum(1 for _ in self.collection.find(f))
+            except Exception:
+                return 0
+
+    def update_walkout(
+        self, walkout_id: str, diff: Dict, updated_by: Optional[str] = None
+    ) -> Optional[Dict]:
+        """Apply a partial update to a non-deleted walkout. Stamps
+        `updated_at`/`updated_by`. Returns the post-update doc or None."""
+        if not diff:
+            return self.find_by_walkout_id(walkout_id)
+        update_doc = dict(diff)
+        update_doc["updated_at"] = datetime.now()
+        if updated_by is not None:
+            update_doc["updated_by"] = updated_by
+        try:
+            self.collection.update_one(
+                {"walkout_id": walkout_id, "deleted_at": None},
+                {"$set": update_doc},
+            )
+        except Exception as e:
+            print(f"[WALKOUT] update failed: {e}")
+            return None
+        return self.find_by_walkout_id(walkout_id)
+
+    def soft_delete_walkout(
+        self,
+        walkout_id: str,
+        deleted_by: Optional[str] = None,
+        reason: Optional[str] = None,
+    ) -> bool:
+        """Mark a walkout as soft-deleted. Returns True if the row was
+        active prior to this call, False if it was missing or already
+        deleted."""
+        existing = self.find_by_walkout_id(walkout_id)
+        if not existing:
+            return False
+        try:
+            self.collection.update_one(
+                {"walkout_id": walkout_id},
+                {
+                    "$set": {
+                        "deleted_at": datetime.now(),
+                        "deleted_by": deleted_by,
+                        "delete_reason": reason,
+                        "updated_at": datetime.now(),
+                        "updated_by": deleted_by,
+                    }
+                },
+            )
+            return True
+        except Exception as e:
+            print(f"[WALKOUT] soft-delete failed: {e}")
+            return False

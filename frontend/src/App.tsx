@@ -65,6 +65,7 @@ const AddProductPage = lazy(() => import('./pages/catalog/AddProductPage'));
 const ExpenseTracker = lazy(() => import('./pages/finance/ExpenseTracker'));
 const FinanceDashboard = lazy(() => import('./pages/finance/FinanceDashboard'));
 const WalkoutsPage = lazy(() => import('./pages/walkouts/WalkoutsPage').then(m => ({ default: m.WalkoutsPage })));
+const WalkoutDetailPage = lazy(() => import('./pages/walkouts/WalkoutDetailPage').then(m => ({ default: m.WalkoutDetailPage })));
 
 // Loading fallback component
 const PageLoader = () => (
@@ -317,9 +318,19 @@ function App() {
                     path="walkouts"
                     element={
                       <ProtectedRoute
-                        allowedRoles={['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'SALES_STAFF', 'SALES_CASHIER', 'CASHIER']}
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT', 'SALES_STAFF', 'SALES_CASHIER', 'CASHIER']}
                       >
                         <WalkoutsPage />
+                      </ProtectedRoute>
+                    }
+                  />
+                  <Route
+                    path="walkouts/:walkoutId"
+                    element={
+                      <ProtectedRoute
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT', 'SALES_STAFF', 'SALES_CASHIER', 'CASHIER']}
+                      >
+                        <WalkoutDetailPage />
                       </ProtectedRoute>
                     }
                   />
