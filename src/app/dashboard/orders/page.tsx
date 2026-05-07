@@ -3,6 +3,7 @@
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { ChevronDown, ChevronUp, Loader2, RefreshCw, Search } from 'lucide-react';
+import Topbar from '@/components/Topbar';
 
 type Segment = 'all' | 'unfulfilled' | 'unpaid' | 'open' | 'closed' | 'cancelled';
 
@@ -160,13 +161,29 @@ export default function OrdersPage() {
   };
 
   return (
-    <div className="min-h-screen bg-slate-50 p-4 sm:p-8">
-      <div className="max-w-7xl mx-auto">
-        {/* Header */}
-        <div className="mb-8">
-          <h1 className="text-3xl font-bold text-gray-900 mb-2">Orders</h1>
-          <p className="text-gray-600">Manage and track your orders</p>
-        </div>
+    <>
+      <Topbar
+        title="Orders"
+        subtitle="Read-only sync from Shopify"
+        breadcrumb={[{ label: 'Home', href: '/dashboard' }, { label: 'Orders' }]}
+        primaryAction={null}
+        actions={
+          <button
+            type="button"
+            onClick={handleSyncOrders}
+            disabled={syncing}
+            className="polaris-btn"
+          >
+            {syncing ? (
+              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+            ) : (
+              <RefreshCw className="w-3.5 h-3.5" />
+            )}
+            Sync from Shopify
+          </button>
+        }
+      />
+      <div style={{ padding: 24, maxWidth: 1400, margin: '0 auto' }}>
 
         {/* Stats Cards */}
         {stats && (
@@ -197,23 +214,8 @@ export default function OrdersPage() {
           </div>
         )}
 
-        {/* Controls */}
+        {/* Controls — Sync button moved into Topbar actions. */}
         <div className="bg-white rounded-lg shadow p-6 mb-6">
-          <div className="flex flex-col sm:flex-row gap-4 mb-4 items-start sm:items-center">
-            <button
-              onClick={handleSyncOrders}
-              disabled={syncing}
-              className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:bg-blue-400 transition"
-            >
-              {syncing ? (
-                <Loader2 className="w-4 h-4 animate-spin" />
-              ) : (
-                <RefreshCw className="w-4 h-4" />
-              )}
-              Sync Orders from Shopify
-            </button>
-          </div>
-
           <div className="flex items-center gap-2 flex-wrap border-b border-gray-200 -mx-6 px-6 pb-3 mb-4">
             {SEGMENTS.map((s) => (
               <button
@@ -363,6 +365,6 @@ export default function OrdersPage() {
           )}
         </div>
       </div>
-    </div>
+    </>
   );
 }

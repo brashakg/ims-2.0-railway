@@ -6,6 +6,7 @@ import {
   attributesForCategory,
   ATTRIBUTES,
 } from "@/lib/categoryAttributes";
+import Topbar from "@/components/Topbar";
 
 interface AttributeOption {
   id: string;
@@ -168,19 +169,14 @@ export default function AttributesPage() {
   }
 
   return (
-    <div className="min-h-screen bg-slate-50 p-4 sm:p-8">
-      <div className="max-w-6xl mx-auto">
-        <div className="mb-6">
-          <h1 className="text-2xl sm:text-3xl font-bold text-slate-900">
-            Attributes
-          </h1>
-          <p className="text-sm text-slate-600 mt-1">
-            Dropdown options used across product forms. Pick a product category
-            to see the attributes relevant to it. Per-category attribute
-            mapping is pending — today all attribute types are shown for every
-            category.
-          </p>
-        </div>
+    <>
+      <Topbar
+        title="Attributes"
+        subtitle="Dropdown options used across product forms"
+        breadcrumb={[{ label: "Home", href: "/dashboard" }, { label: "Attributes" }]}
+        primaryAction={null}
+      />
+      <div style={{ padding: 24, maxWidth: 1400, margin: "0 auto" }}>
 
         {/* Category tabs — one tab per product category */}
         <div className="bg-white rounded-lg shadow-sm border border-slate-200 p-3 mb-4">
@@ -401,6 +397,6 @@ export default function AttributesPage() {
           </div>
         </div>
       </div>
-    </div>
+    </>
   );
 }

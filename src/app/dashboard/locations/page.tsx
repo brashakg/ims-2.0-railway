@@ -10,6 +10,7 @@ import {
   MapPin,
   Store,
 } from "lucide-react";
+import Topbar from "@/components/Topbar";
 
 interface LocationUser {
   id: string;
@@ -125,29 +126,29 @@ export default function LocationsPage() {
   const localOnly = locations.filter((l) => !l.shopifyLocationId);
 
   return (
-    <div className="min-h-screen bg-slate-50 p-4 sm:p-8">
-      <div className="max-w-6xl mx-auto">
-        {/* Header */}
-        <div className="flex justify-between items-start gap-4 flex-wrap mb-6">
-          <div>
-            <h1 className="text-3xl font-bold text-slate-900">Locations</h1>
-            <p className="text-sm text-slate-600 mt-1">
-              Physical stores and Shopify-linked inventory locations.
-            </p>
-          </div>
+    <>
+      <Topbar
+        title="Locations"
+        subtitle="Physical stores + Shopify-linked"
+        breadcrumb={[{ label: "Home", href: "/dashboard" }, { label: "Locations" }]}
+        primaryAction={null}
+        actions={
           <button
+            type="button"
             onClick={handleSyncFromShopify}
             disabled={syncing}
-            className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 text-sm"
+            className="polaris-btn"
           >
             {syncing ? (
-              <Loader2 className="w-4 h-4 animate-spin" />
+              <Loader2 className="w-3.5 h-3.5 animate-spin" />
             ) : (
-              <RefreshCw className="w-4 h-4" />
+              <RefreshCw className="w-3.5 h-3.5" />
             )}
             Sync from Shopify
           </button>
-        </div>
+        }
+      />
+      <div style={{ padding: 24, maxWidth: 1400, margin: "0 auto" }}>
 
         {banner && (
           <div
@@ -238,7 +239,7 @@ export default function LocationsPage() {
           </>
         )}
       </div>
-    </div>
+    </>
   );
 }
 

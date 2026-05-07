@@ -17,6 +17,7 @@ import {
   Eye,
   EyeOff,
 } from 'lucide-react';
+import Topbar from '@/components/Topbar';
 
 type Segment = 'all' | 'active' | 'hidden';
 
@@ -133,31 +134,33 @@ export default function CollectionsPage() {
   };
 
   return (
-    <div className="p-4 sm:p-6 bg-gray-50 min-h-screen">
-      <div className="max-w-7xl mx-auto">
-        {/* Header */}
-        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-6">
-          <div>
-            <h1 className="text-3xl font-bold text-gray-900">Collections</h1>
-            <p className="text-sm text-gray-500 mt-1">
-              Manage your Shopify collections. Sync from Shopify and edit locally.
-            </p>
-          </div>
-          {isAdmin && (
+    <>
+      <Topbar
+        title="Collections"
+        subtitle="Synced from Shopify, editable locally"
+        breadcrumb={[{ label: 'Home', href: '/dashboard' }, { label: 'Collections' }]}
+        primaryAction={null}
+        actions={
+          isAdmin ? (
             <button
+              type="button"
               onClick={handleSync}
               disabled={syncing}
-              className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white font-medium rounded-lg hover:bg-blue-700 disabled:bg-gray-400 transition-colors"
+              className="polaris-btn"
             >
               {syncing ? (
-                <Loader2 className="w-4 h-4 animate-spin" />
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
               ) : (
-                <RefreshCw className="w-4 h-4" />
+                <RefreshCw className="w-3.5 h-3.5" />
               )}
-              {syncing ? 'Syncing...' : 'Sync from Shopify'}
+              Sync from Shopify
             </button>
-          )}
-        </div>
+          ) : null
+        }
+      />
+      <div style={{ padding: 24, maxWidth: 1400, margin: '0 auto' }}>
+        {/* Header replaced by Topbar above. Sync button moved into Topbar
+            actions; the previous flex header block is gone. */}
 
         {/* Sync status message */}
         {syncMessage && (
@@ -368,6 +371,6 @@ export default function CollectionsPage() {
           </div>
         )}
       </div>
-    </div>
+    </>
   );
 }

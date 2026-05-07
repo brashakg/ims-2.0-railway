@@ -3,6 +3,7 @@
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { Loader2, Search, Check, X, RefreshCw } from 'lucide-react';
+import Topbar from '@/components/Topbar';
 
 type Segment = 'all' | 'subscribed' | 'has_orders' | 'no_orders';
 
@@ -119,26 +120,32 @@ export default function CustomersPage() {
   }, [page, search, segment]);
 
   return (
-    <div className="min-h-screen bg-slate-50 p-4 sm:p-8">
-      <div className="max-w-7xl mx-auto">
-        {/* Header */}
-        <div className="mb-8 flex items-start justify-between gap-4">
-          <div>
-            <h1 className="text-3xl font-bold text-gray-900 mb-2">Customers</h1>
-            <p className="text-gray-600">Manage your customer base and analyze purchasing patterns</p>
-          </div>
-          <div className="flex flex-col items-end gap-1">
-            <button
-              onClick={handleSyncCustomers}
-              disabled={syncing}
-              className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 transition-colors text-sm font-medium"
-            >
-              {syncing ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
-              {syncing ? 'Syncing...' : 'Sync Customers from Shopify'}
-            </button>
-            {syncMessage && <p className="text-xs text-green-700">{syncMessage}</p>}
-          </div>
-        </div>
+    <>
+      <Topbar
+        title="Customers"
+        subtitle="Synced from Shopify"
+        breadcrumb={[{ label: 'Home', href: '/dashboard' }, { label: 'Customers' }]}
+        primaryAction={null}
+        actions={
+          <button
+            type="button"
+            onClick={handleSyncCustomers}
+            disabled={syncing}
+            className="polaris-btn"
+          >
+            {syncing ? (
+              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+            ) : (
+              <RefreshCw className="w-3.5 h-3.5" />
+            )}
+            Sync from Shopify
+          </button>
+        }
+      />
+      <div style={{ padding: 24, maxWidth: 1400, margin: '0 auto' }}>
+        {syncMessage && (
+          <p className="text-xs text-green-700 mb-3">{syncMessage}</p>
+        )}
 
         {/* Stats Cards */}
         {stats && (
@@ -285,6 +292,6 @@ export default function CustomersPage() {
           )}
         </div>
       </div>
-    </div>
+    </>
   );
 }
