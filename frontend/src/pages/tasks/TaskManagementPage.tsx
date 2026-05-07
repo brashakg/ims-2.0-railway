@@ -123,6 +123,28 @@ export function TaskManagementPage() {
     try {
       // Fetch real tasks from API
       const response = await tasksApi.getTasks();
+      // Backend ships lowercase status ('open', 'in_progress',
+      // 'completed', 'escalated'); the UI uses uppercase enums. The
+      // case mismatch caused a hard crash: getStatusBadge tried to
+      // destructure config['open'] which was undefined → ErrorBoundary
+      // showed "Something went wrong" on /tasks. Normalise to upper +
+      // map the two distinct names (open→PENDING, escalated→OVERDUE).
+      const statusFor = (raw: any): TaskStatus => {
+        const s = String(raw ?? '').toUpperCase();
+        if (s === 'OPEN') return 'PENDING';
+        if (s === 'ESCALATED') return 'OVERDUE';
+        if (s === 'IN_PROGRESS') return 'IN_PROGRESS';
+        if (s === 'COMPLETED') return 'COMPLETED';
+        if (s === 'PENDING' || s === 'OVERDUE') return s as TaskStatus;
+        return 'PENDING';  // safe fallback for unknown values
+      };
+      const priorityFor = (raw: any): TaskPriority => {
+        const p = String(raw ?? '').toUpperCase();
+        if (p === 'P1' || p === 'URGENT') return 'URGENT';
+        if (p === 'P2' || p === 'HIGH') return 'HIGH';
+        if (p === 'P3' || p === 'MEDIUM') return 'MEDIUM';
+        return 'LOW';
+      };
       const apiTasks: Task[] = (response?.tasks || []).map((t: any) => ({
         id: t.id,
         title: t.title || '',
@@ -131,8 +153,8 @@ export function TaskManagementPage() {
         assignedToName: t.assigned_to_name || t.assigned_to || '',
         assignedBy: t.assigned_by || '',
         assignedByName: t.assigned_by_name || t.assigned_by || '',
-        status: (t.status === 'OPEN' ? 'PENDING' : t.status === 'ESCALATED' ? 'OVERDUE' : t.status) as TaskStatus,
-        priority: (t.priority === 'P1' ? 'URGENT' : t.priority === 'P2' ? 'HIGH' : t.priority === 'P3' ? 'MEDIUM' : 'LOW') as TaskPriority,
+        status: statusFor(t.status),
+        priority: priorityFor(t.priority),
         dueDate: t.due_at ? t.due_at.split('T')[0] : '',
         createdDate: t.created_at ? t.created_at.split('T')[0] : '',
         completedDate: t.completed_at ? t.completed_at.split('T')[0] : undefined,
@@ -338,14 +360,18 @@ export function TaskManagementPage() {
   };
 
   const getStatusBadge = (status: TaskStatus) => {
-    const config = {
+    const config: Record<string, { label: string; color: string; icon: typeof Clock }> = {
       PENDING: { label: 'Pending', color: 'bg-gray-100 text-gray-800', icon: Clock },
       IN_PROGRESS: { label: 'In Progress', color: 'bg-blue-100 text-blue-800', icon: Target },
       COMPLETED: { label: 'Completed', color: 'bg-green-100 text-green-800', icon: CheckCircle },
       OVERDUE: { label: 'Overdue', color: 'bg-red-100 text-red-800', icon: AlertTriangle },
     };
-
-    const { label, color, icon: Icon } = config[status];
+    // Defensive fallback: an unrecognised status shouldn't crash the page.
+    const { label, color, icon: Icon } = config[status] ?? {
+      label: String(status ?? 'Unknown'),
+      color: 'bg-gray-100 text-gray-700',
+      icon: Clock,
+    };
 
     return (
       <span className={`inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs font-medium ${color}`}>
@@ -356,14 +382,16 @@ export function TaskManagementPage() {
   };
 
   const getPriorityBadge = (priority: TaskPriority) => {
-    const config = {
+    const config: Record<string, { label: string; color: string }> = {
       LOW: { label: 'Low', color: 'bg-gray-100 text-gray-700' },
       MEDIUM: { label: 'Medium', color: 'bg-yellow-100 text-yellow-800' },
       HIGH: { label: 'High', color: 'bg-orange-100 text-orange-800' },
       URGENT: { label: 'Urgent', color: 'bg-red-100 text-red-800' },
     };
-
-    const { label, color } = config[priority];
+    const { label, color } = config[priority] ?? {
+      label: String(priority ?? '—'),
+      color: 'bg-gray-100 text-gray-700',
+    };
 
     return (
       <span className={`px-2 py-1 rounded text-xs font-medium ${color}`}>
