@@ -15,11 +15,19 @@ import {
 } from "lucide-react";
 import Topbar from "@/components/Topbar";
 
-interface Stats {
+interface DashboardStats {
   total: number;
   published: number;
   draft: number;
+  archived: number;
+  syncedWithShopify: number;
   lowStock: number;
+  awaitingDesign: number;
+  syncFailed: number;
+  todaysRevenue: number;
+  todaysOrders: number;
+  revenueSeries: number[];
+  seriesDays: string[];
 }
 
 interface RecentProduct {
@@ -48,6 +56,21 @@ function formatINRCompact(amount: number): string {
   if (amount >= 1000) return `₹${(amount / 1000).toFixed(1)}k`;
   return `₹${amount.toLocaleString("en-IN")}`;
 }
+
+const EMPTY_STATS: DashboardStats = {
+  total: 0,
+  published: 0,
+  draft: 0,
+  archived: 0,
+  syncedWithShopify: 0,
+  lowStock: 0,
+  awaitingDesign: 0,
+  syncFailed: 0,
+  todaysRevenue: 0,
+  todaysOrders: 0,
+  revenueSeries: new Array(30).fill(0),
+  seriesDays: [],
+};
 
 function ActionCard({ data }: { data: ActionCardData }) {
   const toneToBg = {
@@ -110,12 +133,7 @@ function ActionCard({ data }: { data: ActionCardData }) {
 
 export default function DashboardPage() {
   const { data: session } = useSession();
-  const [stats, setStats] = useState<Stats>({
-    total: 0,
-    published: 0,
-    draft: 0,
-    lowStock: 0,
-  });
+  const [stats, setStats] = useState<DashboardStats>(EMPTY_STATS);
   const [products, setProducts] = useState<RecentProduct[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -123,19 +141,17 @@ export default function DashboardPage() {
     const fetchData = async () => {
       try {
         const [statsRes, productsRes] = await Promise.all([
-          fetch("/api/products/stats"),
+          fetch("/api/dashboard/stats"),
           fetch("/api/products?limit=10"),
         ]);
         const statsJson = await statsRes.json();
         const productsJson = await productsRes.json();
 
         if (statsJson.success) {
-          setStats({
-            total: statsJson.data.total || 0,
-            published: statsJson.data.published || 0,
-            draft: statsJson.data.draft || 0,
-            lowStock: statsJson.data.lowStock || 0,
-          });
+          // Defensive merge — if a new field is added server-side and the
+          // client is stale, this preserves zero defaults instead of
+          // crashing on .toFixed() of undefined.
+          setStats({ ...EMPTY_STATS, ...statsJson.data });
         }
 
         const productsList = productsJson.data || [];
@@ -174,9 +190,9 @@ export default function DashboardPage() {
     day: "numeric",
   });
 
-  // Action cards: pull from real stats. We don't yet have separate counts
-  // for "awaiting design" or "sync failed" — those default to 0 until we
-  // wire the workers. Visible structure matches the design handoff.
+  // Action cards now pull from the real /api/dashboard/stats endpoint —
+  // awaitingDesign uses Product.imageDesignStatus = PENDING_DESIGN,
+  // syncFailed uses the latest SyncLog action per product.
   const cards: ActionCardData[] = [
     {
       key: "lowStock",
@@ -190,7 +206,7 @@ export default function DashboardPage() {
     {
       key: "awaitingDesign",
       label: "Awaiting design",
-      value: 0,
+      value: stats.awaitingDesign,
       sub: "raw images, edits pending",
       Icon: ImageIcon,
       tone: "magic",
@@ -199,7 +215,7 @@ export default function DashboardPage() {
     {
       key: "syncFailed",
       label: "Sync failed",
-      value: 0,
+      value: stats.syncFailed,
       sub: "products didn't reach Shopify",
       Icon: RotateCw,
       tone: "critical",
@@ -216,21 +232,33 @@ export default function DashboardPage() {
     },
   ];
 
-  // Mini sparkline for the greeting card. Placeholder data — replace with
-  // a /api/reports/revenue?days=30 series once that endpoint exists.
-  const revenuePoints = [12, 18, 22, 28, 24, 35, 42, 38, 45, 52, 48, 56, 62, 58, 65, 72, 68, 78];
+  // Sparkline path from the real 30-day revenue series.
+  // Returns a flat-line path when there's no data so the SVG doesn't
+  // collapse or render nothing.
   const sparklinePath = (() => {
-    const max = Math.max(...revenuePoints);
+    const series = stats.revenueSeries.length > 0 ? stats.revenueSeries : [0];
+    const max = Math.max(...series, 1); // avoid divide-by-zero
     const w = 240;
     const h = 40;
-    return revenuePoints
+    return series
       .map((v, i) => {
-        const x = (i / (revenuePoints.length - 1)) * w;
+        const x = series.length === 1 ? 0 : (i / (series.length - 1)) * w;
         const y = h - (v / max) * h;
         return `${i === 0 ? "M" : "L"} ${x.toFixed(1)} ${y.toFixed(1)}`;
       })
       .join(" ");
   })();
+  const has30DayRevenue = stats.revenueSeries.some((v) => v > 0);
+
+  // Yesterday vs today comparison for the trend pill.
+  const yesterdayRevenue =
+    stats.revenueSeries.length >= 2
+      ? stats.revenueSeries[stats.revenueSeries.length - 2]
+      : 0;
+  const revenueDeltaPct =
+    yesterdayRevenue > 0
+      ? ((stats.todaysRevenue - yesterdayRevenue) / yesterdayRevenue) * 100
+      : null;
 
   return (
     <>
@@ -270,11 +298,14 @@ export default function DashboardPage() {
                   Good day, {userFirstName}
                 </div>
                 <div style={{ fontSize: 18, fontWeight: 600 }}>
-                  {stats.lowStock + stats.draft > 0 ? (
+                  {stats.lowStock + stats.awaitingDesign + stats.syncFailed >
+                  0 ? (
                     <>
-                      You've got{" "}
+                      You&apos;ve got{" "}
                       <span style={{ color: "#7fdfb5" }}>
-                        {stats.lowStock + stats.draft}
+                        {stats.lowStock +
+                          stats.awaitingDesign +
+                          stats.syncFailed}
                       </span>{" "}
                       things to handle
                     </>
@@ -291,6 +322,56 @@ export default function DashboardPage() {
             <div className="grid grid-cols-3 gap-3">
               <div>
                 <div style={{ fontSize: 11, opacity: 0.6, marginBottom: 2 }}>
+                  Today&apos;s revenue
+                </div>
+                <div
+                  className="tabular-nums"
+                  style={{ fontSize: 22, fontWeight: 600 }}
+                >
+                  {formatINRCompact(stats.todaysRevenue)}
+                </div>
+                <div
+                  style={{
+                    fontSize: 11,
+                    color:
+                      revenueDeltaPct === null
+                        ? "rgba(255,255,255,0.5)"
+                        : revenueDeltaPct >= 0
+                          ? "#7fdfb5"
+                          : "#ff8a8a",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 3,
+                    marginTop: 2,
+                  }}
+                >
+                  {revenueDeltaPct === null ? (
+                    "no comparison"
+                  ) : (
+                    <>
+                      <TrendingUp size={11} />
+                      {revenueDeltaPct >= 0 ? "+" : ""}
+                      {revenueDeltaPct.toFixed(1)}% vs yesterday
+                    </>
+                  )}
+                </div>
+              </div>
+              <div>
+                <div style={{ fontSize: 11, opacity: 0.6, marginBottom: 2 }}>
+                  Today&apos;s orders
+                </div>
+                <div
+                  className="tabular-nums"
+                  style={{ fontSize: 22, fontWeight: 600 }}
+                >
+                  {stats.todaysOrders}
+                </div>
+                <div style={{ fontSize: 11, opacity: 0.7, marginTop: 2 }}>
+                  paid + partial
+                </div>
+              </div>
+              <div>
+                <div style={{ fontSize: 11, opacity: 0.6, marginBottom: 2 }}>
                   Total products
                 </div>
                 <div
@@ -299,53 +380,14 @@ export default function DashboardPage() {
                 >
                   {stats.total}
                 </div>
-                <div
-                  style={{
-                    fontSize: 11,
-                    color: "#7fdfb5",
-                    display: "flex",
-                    alignItems: "center",
-                    gap: 3,
-                    marginTop: 2,
-                  }}
-                >
-                  <TrendingUp size={11} color="#7fdfb5" />
-                  catalog
-                </div>
-              </div>
-              <div>
-                <div style={{ fontSize: 11, opacity: 0.6, marginBottom: 2 }}>
-                  Published
-                </div>
-                <div
-                  className="tabular-nums"
-                  style={{ fontSize: 22, fontWeight: 600 }}
-                >
-                  {stats.published}
-                </div>
-                <div
-                  style={{ fontSize: 11, opacity: 0.7, marginTop: 2 }}
-                >
-                  live on Shopify
-                </div>
-              </div>
-              <div>
-                <div style={{ fontSize: 11, opacity: 0.6, marginBottom: 2 }}>
-                  Drafts
-                </div>
-                <div
-                  className="tabular-nums"
-                  style={{ fontSize: 22, fontWeight: 600 }}
-                >
-                  {stats.draft}
-                </div>
                 <div style={{ fontSize: 11, opacity: 0.7, marginTop: 2 }}>
-                  awaiting publish
+                  {stats.published} published · {stats.draft} draft
                 </div>
               </div>
             </div>
 
-            {/* Sparkline */}
+            {/* Sparkline — 30 day revenue. Hidden if there's truly no
+                revenue data so we don't show a flat zero line. */}
             <div
               style={{
                 marginTop: 14,
@@ -353,21 +395,35 @@ export default function DashboardPage() {
                 borderTop: "1px solid rgba(255,255,255,0.1)",
               }}
             >
-              <svg
-                width="100%"
-                height="40"
-                viewBox="0 0 240 40"
-                preserveAspectRatio="none"
-              >
-                <path
-                  d={sparklinePath}
-                  fill="none"
-                  stroke="#7fdfb5"
-                  strokeWidth="1.5"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                />
-              </svg>
+              {has30DayRevenue ? (
+                <svg
+                  width="100%"
+                  height="40"
+                  viewBox="0 0 240 40"
+                  preserveAspectRatio="none"
+                >
+                  <path
+                    d={sparklinePath}
+                    fill="none"
+                    stroke="#7fdfb5"
+                    strokeWidth="1.5"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </svg>
+              ) : (
+                <div
+                  style={{
+                    fontSize: 11,
+                    color: "rgba(255,255,255,0.5)",
+                    textAlign: "center",
+                    padding: "10px 0",
+                  }}
+                >
+                  No revenue in the last 30 days. Sync orders from Shopify to
+                  populate this chart.
+                </div>
+              )}
             </div>
           </div>
 
