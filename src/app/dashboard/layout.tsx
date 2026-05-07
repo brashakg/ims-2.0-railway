@@ -21,10 +21,19 @@ export default function DashboardLayout({
 
   if (status === "loading") {
     return (
-      <div className="flex items-center justify-center h-screen bg-slate-50">
+      <div
+        className="flex items-center justify-center h-screen"
+        style={{ background: "var(--bg)" }}
+      >
         <div className="text-center">
-          <div className="w-12 h-12 border-4 border-slate-300 border-t-blue-600 rounded-full animate-spin mx-auto mb-4"></div>
-          <p className="text-slate-600">Loading...</p>
+          <div
+            className="w-12 h-12 border-4 rounded-full animate-spin mx-auto mb-4"
+            style={{
+              borderColor: "var(--border-strong)",
+              borderTopColor: "var(--brand)",
+            }}
+          />
+          <p style={{ color: "var(--text-secondary)" }}>Loading…</p>
         </div>
       </div>
     );
@@ -35,10 +44,15 @@ export default function DashboardLayout({
   }
 
   return (
-    <div className="flex h-screen bg-slate-50 overflow-hidden">
+    // Polaris-flavored shell. Sidebar is now sticky-positioned inside the
+    // flex row instead of fixed/absolute, so the main column flows
+    // naturally without a hardcoded margin-left.
+    <div
+      className="flex min-h-screen"
+      style={{ background: "var(--bg)" }}
+    >
       <Sidebar />
-      {/* Main content - responsive margin based on sidebar state */}
-      <main className="flex-1 sm:ml-64 ml-0 overflow-auto">{children}</main>
+      <main className="flex-1 min-w-0 overflow-auto">{children}</main>
     </div>
   );
 }

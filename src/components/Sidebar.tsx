@@ -10,7 +10,7 @@ import {
   LayoutDashboard,
   Package,
   FolderOpen,
-  Image,
+  Image as ImageIcon,
   ShoppingCart,
   Users,
   ArrowLeftRight,
@@ -23,54 +23,107 @@ import {
   Tag,
   UserCog,
   LogOut,
-  ChevronLeft,
-  ChevronRight,
   ScrollText,
   HardDriveDownload,
   Percent,
   AlertTriangle,
   Palette,
+  ChevronDown,
+  Search,
+  Grid3x3,
 } from "lucide-react";
 
 interface NavItem {
   href: string;
   label: string;
-  icon: React.ReactNode;
-  exact?: boolean; // true = only match exact path
+  icon: React.ElementType;
+  exact?: boolean;
+  /** Optional badge — count or pill text. Not driven by data yet, but the
+   *  shape mirrors the design handoff so we can wire counts later. */
+  badge?: string;
+  badgeTone?: "default" | "critical" | "magic";
 }
 
+interface NavGroup {
+  id: string;
+  label?: string;
+  items: NavItem[];
+}
+
+/**
+ * Polaris-flavored sidebar (design handoff 2026-05).
+ *
+ * Differences from the previous dark-slate sidebar:
+ *  - Light tertiary surface (#f1f2f3) with right border, not a dark card.
+ *  - Section labels are 10px uppercase tracked.
+ *  - Active item is white-card-on-tertiary with subtle shadow.
+ *  - Brand block at top with a green BV gradient logo + workspace dropdown.
+ *  - Search trigger row that opens the Command Palette (⌘K) — palette
+ *    itself is wired in a later step.
+ *  - User block with avatar at the bottom instead of just an email.
+ */
 export default function Sidebar() {
   const pathname = usePathname();
   const { data: session } = useSession();
-  const [isOpen, setIsOpen] = useState(true);
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
 
-  const mainLinks: NavItem[] = [
-    { href: "/dashboard", label: "Dashboard", icon: <LayoutDashboard className="w-5 h-5 flex-shrink-0" />, exact: true },
-    { href: "/dashboard/products", label: "Products", icon: <Package className="w-5 h-5 flex-shrink-0" /> },
-    { href: "/dashboard/orders", label: "Orders", icon: <ShoppingCart className="w-5 h-5 flex-shrink-0" /> },
-    { href: "/dashboard/customers", label: "Customers", icon: <Users className="w-5 h-5 flex-shrink-0" /> },
-    { href: "/dashboard/collections", label: "Collections", icon: <FolderOpen className="w-5 h-5 flex-shrink-0" /> },
-    { href: "/dashboard/stock-transfers", label: "Stock Transfers", icon: <ArrowLeftRight className="w-5 h-5 flex-shrink-0" /> },
-    { href: "/dashboard/stock-tally", label: "Stock Tally", icon: <ClipboardCheck className="w-5 h-5 flex-shrink-0" /> },
-    { href: "/dashboard/stock-import", label: "Backup & Restore", icon: <HardDriveDownload className="w-5 h-5 flex-shrink-0" /> },
-  ];
+  const userRole = (session?.user as any)?.role || "USER";
+  const isAdmin = userRole === "ADMIN";
+  const isDesigner = userRole === "DESIGN_MANAGER";
+  const canSeeDesignQueue = isAdmin || isDesigner;
 
-  const insightLinks: NavItem[] = [
-    { href: "/dashboard/reports", label: "Insights & Reports", icon: <BarChart3 className="w-5 h-5 flex-shrink-0" /> },
-    { href: "/dashboard/marketing", label: "Marketing", icon: <Megaphone className="w-5 h-5 flex-shrink-0" /> },
-    { href: "/dashboard/store-health", label: "Store Health", icon: <Globe className="w-5 h-5 flex-shrink-0" /> },
-  ];
-
-  const adminLinks: NavItem[] = [
-    { href: "/dashboard/attributes", label: "Attributes", icon: <Tag className="w-5 h-5 flex-shrink-0" /> },
-    { href: "/dashboard/users", label: "Users", icon: <UserCog className="w-5 h-5 flex-shrink-0" /> },
-    { href: "/dashboard/locations", label: "Locations", icon: <MapPin className="w-5 h-5 flex-shrink-0" /> },
-    { href: "/dashboard/activity-logs", label: "Activity Logs", icon: <ScrollText className="w-5 h-5 flex-shrink-0" /> },
-    { href: "/dashboard/images", label: "Images", icon: <Image className="w-5 h-5 flex-shrink-0" /> },
-    { href: "/dashboard/shopify", label: "Shopify Sync", icon: <Settings className="w-5 h-5 flex-shrink-0" /> },
-    { href: "/dashboard/admin/discount-rules", label: "Discount Rules", icon: <Percent className="w-5 h-5 flex-shrink-0" /> },
-    { href: "/dashboard/admin/orphans", label: "Orphan Audit", icon: <AlertTriangle className="w-5 h-5 flex-shrink-0" /> },
+  // Group order matches the design handoff: main (no header) → Operations
+  // → Insights → Admin. Items within main appear without a section label.
+  const groups: NavGroup[] = [
+    {
+      id: "main",
+      items: [
+        { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard, exact: true },
+        { href: "/dashboard/products", label: "Products", icon: Package },
+        { href: "/dashboard/orders", label: "Orders", icon: ShoppingCart },
+        { href: "/dashboard/customers", label: "Customers", icon: Users },
+        { href: "/dashboard/collections", label: "Collections", icon: FolderOpen },
+      ],
+    },
+    {
+      id: "ops",
+      label: "Operations",
+      items: [
+        { href: "/dashboard/stock-tally", label: "Stock Tally", icon: ClipboardCheck },
+        { href: "/dashboard/stock-transfers", label: "Stock Transfers", icon: ArrowLeftRight },
+        { href: "/dashboard/stock-import", label: "Backup & Restore", icon: HardDriveDownload },
+        ...(canSeeDesignQueue
+          ? [{ href: "/dashboard/design-queue", label: "Design Queue", icon: Palette, badgeTone: "magic" as const }]
+          : []),
+        { href: "/dashboard/shopify", label: "Shopify Sync", icon: Settings },
+      ],
+    },
+    {
+      id: "insights",
+      label: "Insights",
+      items: [
+        { href: "/dashboard/reports", label: "Reports", icon: BarChart3 },
+        { href: "/dashboard/marketing", label: "Marketing", icon: Megaphone },
+        { href: "/dashboard/store-health", label: "Store Health", icon: Globe },
+      ],
+    },
+    ...(isAdmin
+      ? [
+          {
+            id: "admin",
+            label: "Admin",
+            items: [
+              { href: "/dashboard/attributes", label: "Attributes", icon: Tag },
+              { href: "/dashboard/admin/discount-rules", label: "Discount Rules", icon: Percent },
+              { href: "/dashboard/locations", label: "Locations", icon: MapPin },
+              { href: "/dashboard/users", label: "Users", icon: UserCog },
+              { href: "/dashboard/images", label: "Images", icon: ImageIcon },
+              { href: "/dashboard/activity-logs", label: "Activity Logs", icon: ScrollText },
+              { href: "/dashboard/admin/orphans", label: "Orphan Audit", icon: AlertTriangle, badgeTone: "critical" as const },
+            ] as NavItem[],
+          },
+        ]
+      : []),
   ];
 
   const isActive = (href: string, exact?: boolean) => {
@@ -78,139 +131,263 @@ export default function Sidebar() {
     return pathname === href || pathname.startsWith(href + "/");
   };
 
-  const userRole = (session?.user as any)?.role || "USER";
-  const isAdmin = userRole === "ADMIN";
-  const isDesigner = userRole === "DESIGN_MANAGER";
-  const canSeeDesignQueue = isAdmin || isDesigner;
-
-  const designQueueLink: NavItem = {
-    href: "/dashboard/design-queue",
-    label: "Design Queue",
-    icon: <Palette className="w-5 h-5 flex-shrink-0" />,
-  };
-
   const closeMobile = () => setIsMobileMenuOpen(false);
 
-  const renderLink = (link: NavItem) => (
-    <Link
-      key={link.href}
-      href={link.href}
-      className={`flex items-center gap-3 px-3 py-2.5 rounded-lg transition-colors text-sm ${
-        isActive(link.href, link.exact)
-          ? "bg-blue-600 text-white font-medium"
-          : "text-slate-300 hover:bg-slate-800 hover:text-white"
-      }`}
-      onClick={closeMobile}
-      title={!isOpen ? link.label : undefined}
-    >
-      {link.icon}
-      {isOpen && <span className="truncate">{link.label}</span>}
-    </Link>
-  );
+  // User initials: first letters of name, fallback to email prefix.
+  const userName = session?.user?.name || session?.user?.email || "User";
+  const initials = userName
+    .replace(/@.*/, "")
+    .split(/[\s._-]+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((s) => s[0]?.toUpperCase() ?? "")
+    .join("") || "U";
 
-  const renderSection = (title: string, links: NavItem[]) => (
-    <div className="mt-5">
-      {isOpen && (
-        <p className="px-3 mb-2 text-[10px] font-bold text-slate-500 uppercase tracking-wider">
-          {title}
-        </p>
-      )}
-      {!isOpen && <div className="border-t border-slate-700 mx-3 mb-2" />}
-      <div className="space-y-0.5">{links.map(renderLink)}</div>
-    </div>
+  const renderItem = (item: NavItem) => {
+    const active = isActive(item.href, item.exact);
+    const Icon = item.icon;
+    return (
+      <Link
+        key={item.href}
+        href={item.href}
+        onClick={closeMobile}
+        className="flex items-center gap-2.5 w-full px-2.5 py-1.5 rounded-lg text-[13px] mb-px transition-colors"
+        style={{
+          background: active ? "var(--bg-surface)" : "transparent",
+          color: active ? "var(--text)" : "var(--text-secondary)",
+          fontWeight: active ? 600 : 500,
+          boxShadow: active ? "var(--shadow-xs)" : "none",
+        }}
+        onMouseEnter={(e) => {
+          if (!active) e.currentTarget.style.background = "rgba(0,0,0,0.04)";
+        }}
+        onMouseLeave={(e) => {
+          if (!active) e.currentTarget.style.background = "transparent";
+        }}
+      >
+        <Icon
+          size={16}
+          color={active ? "var(--text)" : "var(--text-secondary)"}
+        />
+        <span className="flex-1 text-left truncate">{item.label}</span>
+        {item.badge && (
+          <span
+            className={`polaris-badge ${
+              item.badgeTone === "critical"
+                ? "polaris-badge-critical"
+                : item.badgeTone === "magic"
+                  ? "polaris-badge-magic"
+                  : ""
+            }`}
+            style={{ padding: "0 6px", fontSize: 10, height: 16 }}
+          >
+            {item.badge}
+          </span>
+        )}
+      </Link>
+    );
+  };
+
+  const sidebarBody = (
+    <aside
+      className="flex flex-col h-screen sticky top-0 flex-shrink-0"
+      style={{
+        width: "var(--sidebar-w)",
+        background: "var(--bg-surface-tertiary)",
+        borderRight: "1px solid var(--border)",
+      }}
+    >
+      {/* Brand */}
+      <div
+        className="px-3 py-2.5"
+        style={{ borderBottom: "1px solid var(--border)" }}
+      >
+        <Link
+          href="/dashboard"
+          onClick={closeMobile}
+          className="flex items-center gap-2.5 w-full px-2 py-1.5 rounded-lg"
+          style={{ background: "transparent" }}
+        >
+          <div
+            className="flex items-center justify-center text-white font-bold text-xs flex-shrink-0"
+            style={{
+              width: 28,
+              height: 28,
+              borderRadius: 7,
+              background: "linear-gradient(135deg, #008060 0%, #00a474 100%)",
+              letterSpacing: -0.5,
+              boxShadow: "var(--shadow-sm)",
+            }}
+          >
+            BV
+          </div>
+          <div className="flex-1 min-w-0">
+            <div
+              style={{ fontWeight: 600, fontSize: 13, color: "var(--text)" }}
+              className="truncate"
+            >
+              Better Vision
+            </div>
+            <div
+              style={{ fontSize: 11, color: "var(--text-tertiary)" }}
+              className="truncate"
+            >
+              bokaro-better-vision
+            </div>
+          </div>
+          <ChevronDown size={14} color="var(--text-tertiary)" />
+        </Link>
+      </div>
+
+      {/* Search trigger / palette stub. Hooks up to Command Palette in a
+          later step — for now it's a static prompt keeping the visual
+          layout intact. */}
+      <div className="px-2 pt-2 pb-1">
+        <button
+          type="button"
+          className="flex items-center gap-2 w-full"
+          style={{
+            padding: "6px 10px",
+            border: "1px solid var(--border)",
+            background: "var(--bg-surface)",
+            borderRadius: 8,
+            cursor: "pointer",
+            color: "var(--text-tertiary)",
+            fontSize: 13,
+            minHeight: "auto",
+          }}
+        >
+          <Search size={14} />
+          <span className="flex-1 text-left">Search anything…</span>
+          <span className="polaris-kbd">⌘K</span>
+        </button>
+      </div>
+
+      {/* Nav */}
+      <nav className="flex-1 overflow-y-auto px-2 pt-1 pb-2">
+        {groups.map((g, i) => (
+          <div
+            key={g.id}
+            style={{ marginTop: g.label ? 12 : i === 0 ? 4 : 0 }}
+          >
+            {g.label && (
+              <div
+                style={{
+                  padding: "6px 10px 4px",
+                  fontSize: 10,
+                  fontWeight: 600,
+                  color: "var(--text-tertiary)",
+                  textTransform: "uppercase",
+                  letterSpacing: 0.6,
+                }}
+              >
+                {g.label}
+              </div>
+            )}
+            {g.items.map(renderItem)}
+          </div>
+        ))}
+      </nav>
+
+      {/* User block */}
+      <div
+        className="p-2"
+        style={{ borderTop: "1px solid var(--border)" }}
+      >
+        <div
+          className="flex items-center gap-2.5 w-full px-2 py-1.5 rounded-lg"
+        >
+          <div
+            className="flex items-center justify-center flex-shrink-0 text-white font-semibold"
+            style={{
+              width: 26,
+              height: 26,
+              borderRadius: 999,
+              background: "linear-gradient(135deg, #ff6b9d 0%, #c44569 100%)",
+              fontSize: 11,
+            }}
+          >
+            {initials}
+          </div>
+          <div className="flex-1 min-w-0">
+            <div
+              style={{ fontSize: 12, fontWeight: 600, color: "var(--text)" }}
+              className="truncate"
+            >
+              {session?.user?.name || session?.user?.email || "User"}
+            </div>
+            <div
+              style={{
+                fontSize: 10,
+                color: "var(--text-tertiary)",
+              }}
+              className="flex items-center gap-1 truncate"
+            >
+              <span
+                style={{
+                  width: 5,
+                  height: 5,
+                  borderRadius: 999,
+                  background: "var(--brand)",
+                  flexShrink: 0,
+                }}
+              />
+              <span className="truncate">{userRole}</span>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => signOut({ callbackUrl: "/login" })}
+            title="Sign out"
+            className="polaris-btn polaris-btn-icon"
+            style={{ padding: 5 }}
+          >
+            <LogOut size={14} color="var(--text-tertiary)" />
+          </button>
+        </div>
+      </div>
+    </aside>
   );
 
   return (
     <>
-      {/* Mobile hamburger - fixed top-left, above everything */}
+      {/* Mobile hamburger — fixed top-left */}
       <button
         onClick={() => setIsMobileMenuOpen(!isMobileMenuOpen)}
-        className="sm:hidden fixed top-3 left-3 z-[60] p-2 bg-slate-900 text-white rounded-lg shadow-lg"
+        className="sm:hidden fixed top-3 left-3 z-[60] p-2 rounded-lg shadow-lg"
+        style={{
+          background: "var(--text)",
+          color: "white",
+          minHeight: "auto",
+        }}
         aria-label="Toggle menu"
       >
-        {isMobileMenuOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
+        {isMobileMenuOpen ? (
+          <X className="w-5 h-5" />
+        ) : (
+          <Menu className="w-5 h-5" />
+        )}
       </button>
 
-      {/* Mobile overlay backdrop */}
+      {/* Mobile overlay */}
       {isMobileMenuOpen && (
         <div
-          className="sm:hidden fixed inset-0 bg-black/50 z-[45]"
+          className="sm:hidden fixed inset-0 bg-black/40 z-[45]"
           onClick={closeMobile}
         />
       )}
 
-      {/* Sidebar */}
-      <aside
-        className={`
-          fixed left-0 top-0 h-full bg-slate-900 text-white flex flex-col
-          transition-all duration-200 ease-in-out
-          ${isMobileMenuOpen ? "z-[50] w-64 translate-x-0" : "max-sm:-translate-x-full max-sm:w-64"}
-          ${isOpen ? "sm:w-64" : "sm:w-[68px]"}
-          sm:translate-x-0 sm:z-30
-        `}
+      {/* Mobile drawer */}
+      <div
+        className={`sm:hidden fixed left-0 top-0 z-[50] transition-transform duration-200 ${
+          isMobileMenuOpen ? "translate-x-0" : "-translate-x-full"
+        }`}
       >
-        {/* Header */}
-        <div className="flex items-center gap-3 px-4 py-4 border-b border-slate-700/50 min-h-[64px]">
-          <div className="w-9 h-9 bg-blue-600 rounded-lg flex items-center justify-center font-bold text-sm flex-shrink-0">
-            BV
-          </div>
-          {isOpen && (
-            <div className="overflow-hidden">
-              <h1 className="font-bold text-base leading-tight">Better Vision</h1>
-              <p className="text-[10px] text-slate-400">Inventory Manager</p>
-            </div>
-          )}
-        </div>
+        {sidebarBody}
+      </div>
 
-        {/* Navigation - scrollable */}
-        <nav className="flex-1 px-3 py-3 overflow-y-auto overflow-x-hidden scrollbar-thin">
-          {/* Main */}
-          <div className="space-y-0.5">{mainLinks.map(renderLink)}</div>
-
-          {/* Design Queue — visible to designers and admins */}
-          {canSeeDesignQueue &&
-            renderSection("Design", [designQueueLink])}
-
-          {/* Insights */}
-          {renderSection("Insights", insightLinks)}
-
-          {/* Admin */}
-          {isAdmin && renderSection("Admin", adminLinks)}
-        </nav>
-
-        {/* User footer */}
-        <div className="border-t border-slate-700/50 p-3">
-          {isOpen && (
-            <div className="px-3 mb-2">
-              <p className="text-xs font-medium text-slate-300 truncate">
-                {session?.user?.email}
-              </p>
-              <span className="inline-block bg-blue-600/20 text-blue-300 text-[10px] px-2 py-0.5 rounded mt-1 font-medium">
-                {userRole}
-              </span>
-            </div>
-          )}
-          <button
-            onClick={() => {
-              signOut({ callbackUrl: "/login" });
-              closeMobile();
-            }}
-            className="flex items-center gap-3 w-full px-3 py-2.5 rounded-lg text-slate-400 hover:bg-slate-800 hover:text-white transition-colors text-sm"
-          >
-            <LogOut className="w-5 h-5 flex-shrink-0" />
-            {isOpen && <span>Logout</span>}
-          </button>
-        </div>
-
-        {/* Desktop collapse toggle */}
-        <button
-          onClick={() => setIsOpen(!isOpen)}
-          className="hidden sm:flex absolute -right-3 top-[72px] w-6 h-6 bg-slate-700 hover:bg-slate-600 text-white rounded-full items-center justify-center border-2 border-slate-900 shadow transition-colors"
-          aria-label={isOpen ? "Collapse sidebar" : "Expand sidebar"}
-        >
-          {isOpen ? <ChevronLeft className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
-        </button>
-      </aside>
+      {/* Desktop sticky sidebar */}
+      <div className="hidden sm:block">{sidebarBody}</div>
     </>
   );
 }
