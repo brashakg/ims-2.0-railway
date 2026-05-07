@@ -214,6 +214,14 @@ class DatabaseConnection:
             stores.create_index("store_id", unique=True, background=True)
             stores.create_index("store_code", unique=True, background=True)
 
+            # Walkouts (Pune Incentive Module i — Phase 1)
+            walkouts = self._db["walkouts"]
+            walkouts.create_index("walkout_id", unique=True, background=True)
+            walkouts.create_index([("store_id", 1), ("date_str", -1)], background=True)
+            walkouts.create_index([("store_id", 1), ("sales_person_id", 1), ("date_str", -1)], background=True)
+            walkouts.create_index("mobile", background=True)
+            walkouts.create_index("customer_id", background=True)
+
             print("[OK] MongoDB indexes ensured")
         except Exception as e:
             print(f"[WARN] Index creation error (non-fatal): {e}")

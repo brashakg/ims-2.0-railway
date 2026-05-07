@@ -64,6 +64,7 @@ const JarvisPage = lazy(() => import('./pages/jarvis/JarvisPage').then(m => ({ d
 const AddProductPage = lazy(() => import('./pages/catalog/AddProductPage'));
 const ExpenseTracker = lazy(() => import('./pages/finance/ExpenseTracker'));
 const FinanceDashboard = lazy(() => import('./pages/finance/FinanceDashboard'));
+const WalkoutsPage = lazy(() => import('./pages/walkouts/WalkoutsPage').then(m => ({ default: m.WalkoutsPage })));
 
 // Loading fallback component
 const PageLoader = () => (
@@ -307,6 +308,18 @@ function App() {
                         allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'CASHIER', 'SALES_CASHIER', 'SALES_STAFF', 'OPTOMETRIST', 'WORKSHOP_STAFF']}
                       >
                         <OrdersPage />
+                      </ProtectedRoute>
+                    }
+                  />
+
+                  {/* Walkouts (Pune Incentive Module i) */}
+                  <Route
+                    path="walkouts"
+                    element={
+                      <ProtectedRoute
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'SALES_STAFF', 'SALES_CASHIER', 'CASHIER']}
+                      >
+                        <WalkoutsPage />
                       </ProtectedRoute>
                     }
                   />
