@@ -34,4 +34,5 @@ export {
   adminIntegrationApi,
   walkoutsApi,
   incentiveApi,
+  payoutApi,
 } from './api/index';

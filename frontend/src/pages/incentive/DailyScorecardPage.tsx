@@ -11,7 +11,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { Save, Loader2, RefreshCw, AlertCircle, Trash2, BarChart3, History, ChevronRight } from 'lucide-react';
+import { Save, Loader2, RefreshCw, AlertCircle, Trash2, BarChart3, History, ChevronRight, Calculator } from 'lucide-react';
 import { incentiveApi } from '../../services/api';
 import { adminUserApi } from '../../services/api/stores';
 import { useAuth } from '../../context/AuthContext';
@@ -241,6 +241,12 @@ export function DailyScorecardPage() {
             className="btn-secondary inline-flex items-center gap-2"
           >
             <BarChart3 className="w-4 h-4" /> Leaderboard
+          </Link>
+          <Link
+            to="/incentive/payout"
+            className="btn-secondary inline-flex items-center gap-2"
+          >
+            <Calculator className="w-4 h-4" /> Payout
           </Link>
           <button
             type="button"

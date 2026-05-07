@@ -70,6 +70,8 @@ const WalkoutsDashboardPage = lazy(() => import('./pages/walkouts/WalkoutsDashbo
 const DailyScorecardPage = lazy(() => import('./pages/incentive/DailyScorecardPage').then(m => ({ default: m.DailyScorecardPage })));
 const MTDLeaderboardPage = lazy(() => import('./pages/incentive/MTDLeaderboardPage').then(m => ({ default: m.MTDLeaderboardPage })));
 const PointsHistoryPage = lazy(() => import('./pages/incentive/PointsHistoryPage').then(m => ({ default: m.PointsHistoryPage })));
+const PayoutDashboardPage = lazy(() => import('./pages/incentive/PayoutDashboardPage').then(m => ({ default: m.PayoutDashboardPage })));
+const PayoutSnapshotsPage = lazy(() => import('./pages/incentive/PayoutSnapshotsPage').then(m => ({ default: m.PayoutSnapshotsPage })));
 
 // Loading fallback component
 const PageLoader = () => (
@@ -377,6 +379,26 @@ function App() {
                         allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT']}
                       >
                         <PointsHistoryPage />
+                      </ProtectedRoute>
+                    }
+                  />
+                  <Route
+                    path="incentive/payout"
+                    element={
+                      <ProtectedRoute
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT']}
+                      >
+                        <PayoutDashboardPage />
+                      </ProtectedRoute>
+                    }
+                  />
+                  <Route
+                    path="incentive/payouts"
+                    element={
+                      <ProtectedRoute
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT']}
+                      >
+                        <PayoutSnapshotsPage />
                       </ProtectedRoute>
                     }
                   />

@@ -703,6 +703,97 @@ export interface IncentiveSettings {
   updated_by: string | null;
 }
 
+// ============================================================================
+// Pune Incentive Module (iii) — Payout
+// ============================================================================
+
+export type PayoutLevel = 'L1' | 'L2' | 'L3';
+export type PayoutStatus = 'DRAFT' | 'LOCKED' | 'PAID';
+
+export interface PayoutTargetEntry {
+  growth: number;
+  target: number;
+  achieved: boolean;
+}
+
+export interface StaffPayout {
+  user_id: string;
+  name?: string | null;
+  weightage: number;
+  mtd_avg_total: number | null;
+  eligibility: number;
+  payout_by_level: Record<PayoutLevel, number>;
+  total_payout: number;
+}
+
+export interface ManagerBonus {
+  user_id: string;
+  role?: string | null;
+  name?: string | null;
+  eligibility: number;
+  bonus_pct: Record<PayoutLevel, number>;
+  bonus_by_level: Record<PayoutLevel, number>;
+  total_bonus: number;
+}
+
+export interface PayoutEnvelope {
+  store_id: string;
+  year: number;
+  month: number;
+  inputs: {
+    last_year_sale: number;
+    this_year_sale: number;
+    avg_discount_pct: number;
+    visufit_usage_pct: number;
+  };
+  targets: Record<PayoutLevel, PayoutTargetEntry>;
+  best_level_achieved: PayoutLevel | null;
+  discount_kill_active: boolean;
+  multiplier: number;
+  multiplier_tier: string;
+  pools: Record<PayoutLevel, number>;
+  total_team_pool: number;
+  staff_payouts: StaffPayout[];
+  manager_bonuses: ManagerBonus[];
+  grand_total: { staff: number; manager: number; all: number };
+}
+
+export interface PayoutSnapshot extends PayoutEnvelope {
+  snapshot_id: string;
+  status: PayoutStatus;
+  locked_at: string | null;
+  locked_by: string | null;
+  paid_at: string | null;
+  paid_by: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PreviewParams {
+  year?: number;
+  month?: number;
+  last_year_sale?: number;
+  this_year_sale?: number;
+  avg_discount_pct?: number;
+  visufit_usage_pct?: number;
+  store_id?: string;
+}
+
+export interface LockSnapshotRequest {
+  year: number;
+  month: number;
+  last_year_sale?: number;
+  this_year_sale?: number;
+  avg_discount_pct?: number;
+  visufit_usage_pct?: number;
+}
+
+export interface SnapshotsListResponse {
+  items: PayoutSnapshot[];
+  store_id: string;
+  year: number;
+}
+
 export interface Walkout {
   walkout_id: string;
   store_id: string;

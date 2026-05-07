@@ -105,6 +105,7 @@ from .routers import (
     agents_router,
     walkouts_router,
     points_router,
+    payout_router,
 )
 
 
@@ -633,6 +634,7 @@ app.include_router(analytics_v2_router, prefix="/api/v1/analytics-v2", tags=["An
 app.include_router(agents_router, prefix="/api/v1/jarvis", tags=["Agents"])
 app.include_router(walkouts_router, prefix="/api/v1/walkouts", tags=["Walkouts"])
 app.include_router(points_router, prefix="/api/v1/incentive/points", tags=["Daily Points"])
+app.include_router(payout_router, prefix="/api/v1/payout", tags=["Payout"])
 
 
 if __name__ == "__main__":

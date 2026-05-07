@@ -248,6 +248,27 @@ class DatabaseConnection:
             settings = self._db["incentive_settings"]
             settings.create_index("store_id", unique=True, background=True)
 
+            # Per-store-per-month manual incentive inputs (last_year_sale, etc.)
+            inputs = self._db["incentive_inputs"]
+            inputs.create_index(
+                [("store_id", 1), ("year", 1), ("month", 1)],
+                unique=True, background=True,
+            )
+
+            # Payout snapshots (Pune Incentive Module iii)
+            # Multiple DRAFTs allowed; only one LOCKED per (store, year, month).
+            payouts = self._db["payout_snapshots"]
+            payouts.create_index(
+                [("store_id", 1), ("year", 1), ("month", 1)],
+                unique=True,
+                partialFilterExpression={"status": "LOCKED"},
+                background=True,
+            )
+            payouts.create_index(
+                [("store_id", 1), ("year", -1), ("month", -1)],
+                background=True,
+            )
+
             print("[OK] MongoDB indexes ensured")
         except Exception as e:
             print(f"[WARN] Index creation error (non-fatal): {e}")

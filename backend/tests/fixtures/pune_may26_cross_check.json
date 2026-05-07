@@ -1,0 +1,50 @@
+{
+  "_comment": "Pune May-26 cross-check fixture. The expected values must match the Excel calc cell-by-cell. If this drifts, the calculator regressed.",
+  "inputs": {
+    "last_year_sale": 1838000,
+    "this_year_sale": 2600000,
+    "avg_discount_pct": 0.10,
+    "visufit_usage_pct": 0.94
+  },
+  "settings": {
+    "growth_targets": { "L1": 0.20, "L2": 0.25, "L3": 0.30 },
+    "base_rates": { "L1": 0.01, "L2": 0.0125, "L3": 0.015 },
+    "discount_kill_threshold": 0.15,
+    "discount_multipliers": [
+      { "max_pct": 0.10, "multiplier": 1.5 },
+      { "max_pct": 0.11, "multiplier": 1.4 },
+      { "max_pct": 0.12, "multiplier": 1.3 },
+      { "max_pct": 0.13, "multiplier": 1.2 },
+      { "max_pct": 0.14, "multiplier": 1.1 },
+      { "max_pct": 0.15, "multiplier": 1.0 }
+    ],
+    "staff_weightages": {
+      "user-akshay":  0.24,
+      "user-rupesh":  0.18,
+      "user-sameer":  0.18,
+      "user-priya":   0.12,
+      "user-vinay":   0.12,
+      "user-asha":    0.10,
+      "user-rohit":   0.06
+    },
+    "supervisor_bonuses": [
+      {
+        "user_id": "user-sameer",
+        "role": "STORE_MANAGER",
+        "bonus_pct": { "L1": 0.25, "L2": 0.30, "L3": 0.35 }
+      }
+    ]
+  },
+  "expected": {
+    "targets": { "L1": 2210000, "L2": 2300000, "L3": 2390000 },
+    "best_level": "L3",
+    "discount_kill_active": false,
+    "multiplier": 1.5,
+    "multiplier_tier": "≤10%",
+    "pool_total": 58500.0,
+    "pool_l3": 58500.0,
+    "pool_l1": 0,
+    "pool_l2": 0,
+    "_pool_math": "max(2600000, 2390000) * 0.015 * 1.5 = 58500"
+  }
+}

@@ -684,6 +684,135 @@ async def update_eligibility(
     return _serialize(updated)
 
 
+class UpdatePayoutSettingsRequest(BaseModel):
+    """SUPERADMIN-only — Module iii inputs that drive the calculator."""
+
+    growth_targets: Optional[Dict[str, float]] = None
+    base_rates: Optional[Dict[str, float]] = None
+    discount_kill_threshold: Optional[float] = Field(None, ge=0, le=1)
+    discount_multipliers: Optional[List[Dict[str, float]]] = None
+    staff_weightages: Optional[Dict[str, float]] = None
+    supervisor_bonuses: Optional[List[Dict]] = None
+
+
+class LastYearSaleInput(BaseModel):
+    """Per-(store, year, month) manual override of last_year_sale.
+    Module iii's calculator picks this up before falling back to the
+    aggregated last-year actuals."""
+
+    year: int = Field(..., ge=2024, le=2100)
+    month: int = Field(..., ge=1, le=12)
+    last_year_sale: float = Field(..., ge=0)
+
+
+@router.patch("/settings/payout")
+async def update_payout_settings(
+    payload: UpdatePayoutSettingsRequest,
+    current_user: dict = Depends(get_current_user),
+    store_id: Optional[str] = Query(None),
+):
+    """SUPERADMIN-only — patch the Module iii calculator inputs that
+    live on incentive_settings (growth, rates, multipliers, weightages,
+    supervisor bonuses)."""
+    if "SUPERADMIN" not in _user_role_set(current_user):
+        raise HTTPException(
+            status_code=403,
+            detail="Only SUPERADMIN can update payout settings",
+        )
+    store = _resolve_store(current_user, store_id)
+    settings_repo = _settings_repo()
+    if settings_repo is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    incoming = payload.model_dump(exclude_unset=True)
+    if not incoming:
+        raise HTTPException(
+            status_code=400, detail="At least one field must be provided",
+        )
+
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    coll = db.get_collection("incentive_settings")
+    existing = coll.find_one({"store_id": store})
+    now = datetime.now()
+    update_doc = {
+        **incoming,
+        "updated_at": now,
+        "updated_by": current_user.get("user_id"),
+    }
+    if existing:
+        coll.update_one({"store_id": store}, {"$set": update_doc})
+    else:
+        defaults = settings_repo._defaults(store)
+        defaults.update(update_doc)
+        defaults["_id"] = store
+        coll.insert_one(defaults)
+    _audit(
+        action="incentive.settings.update",
+        log_id=f"settings:{store}",
+        store_id=store,
+        current_user=current_user,
+        detail={"field": "payout", "patch": list(incoming.keys())},
+    )
+    return _serialize(settings_repo.get_for_store(store))
+
+
+@router.post("/inputs/last-year-sale", status_code=201)
+async def set_last_year_sale(
+    payload: LastYearSaleInput,
+    current_user: dict = Depends(get_current_user),
+    store_id: Optional[str] = Query(None),
+):
+    """Per-(store, year, month) manual input. SUPERADMIN/ADMIN/
+    AREA_MANAGER/STORE_MANAGER/ACCOUNTANT may set."""
+    roles = _user_role_set(current_user)
+    if not (roles & _LOG_ANY_STAFF_ROLES):
+        raise HTTPException(
+            status_code=403,
+            detail="Only managers / admin / accountant can set inputs",
+        )
+    store = _resolve_store(current_user, store_id)
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    coll = db.get_collection("incentive_inputs")
+    now = datetime.now()
+    existing = coll.find_one({
+        "store_id": store, "year": payload.year, "month": payload.month,
+    })
+    if existing:
+        coll.update_one(
+            {"store_id": store, "year": payload.year, "month": payload.month},
+            {"$set": {
+                "last_year_sale": payload.last_year_sale,
+                "updated_at": now,
+                "updated_by": current_user.get("user_id"),
+            }},
+        )
+    else:
+        coll.insert_one({
+            "store_id": store, "year": payload.year, "month": payload.month,
+            "last_year_sale": payload.last_year_sale,
+            "created_at": now, "created_by": current_user.get("user_id"),
+            "updated_at": now, "updated_by": current_user.get("user_id"),
+        })
+    _audit(
+        action="incentive.inputs.update",
+        log_id=f"inputs:{store}:{payload.year}-{payload.month:02d}",
+        store_id=store,
+        current_user=current_user,
+        detail={
+            "year": payload.year, "month": payload.month,
+            "last_year_sale": payload.last_year_sale,
+        },
+    )
+    return {
+        "store_id": store, "year": payload.year, "month": payload.month,
+        "last_year_sale": payload.last_year_sale,
+    }
+
+
 @router.patch("/settings/visufit-gate")
 async def update_visufit_gate(
     payload: UpdateVisufitGateRequest,
