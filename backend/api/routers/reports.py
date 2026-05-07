@@ -813,26 +813,15 @@ async def sales_comparison(
     prev_from_dt = datetime.combine(prev_from_date, datetime.min.time())
     prev_to_dt = datetime.combine(prev_to_date, datetime.max.time())
 
-    # Get current period orders
-    current_orders = order_repo.find_many(
-        {
-            "store_id": active_store,
-            "created_at": {"$gte": from_dt.isoformat(), "$lte": to_dt.isoformat()},
-            "status": {"$nin": ["CANCELLED", "DRAFT"]},
-        }
+    current_orders = _orders_in_window(
+        order_repo, store_id=active_store, start_dt=from_dt, end_dt=to_dt,
+    )
+    prev_orders = _orders_in_window(
+        order_repo, store_id=active_store, start_dt=prev_from_dt, end_dt=prev_to_dt,
     )
 
-    # Get previous period orders
-    prev_orders = order_repo.find_many(
-        {
-            "store_id": active_store,
-            "created_at": {"$gte": prev_from_dt.isoformat(), "$lte": prev_to_dt.isoformat()},
-            "status": {"$nin": ["CANCELLED", "DRAFT"]},
-        }
-    )
-
-    current_sales = sum(o.get("final_amount", 0) or o.get("total_amount", 0) for o in current_orders)
-    prev_sales = sum(o.get("final_amount", 0) or o.get("total_amount", 0) for o in prev_orders)
+    current_sales = sum(_order_revenue(o) for o in current_orders)
+    prev_sales = sum(_order_revenue(o) for o in prev_orders)
 
     change = ((current_sales - prev_sales) / prev_sales * 100) if prev_sales > 0 else 0
 
@@ -1052,43 +1041,57 @@ async def discount_analysis(
 
     from_dt = datetime.combine(from_date, datetime.min.time())
     to_dt = datetime.combine(to_date, datetime.max.time())
+    orders = _orders_in_window(
+        order_repo, store_id=active_store, start_dt=from_dt, end_dt=to_dt,
+    )
 
-    orders = order_repo.find_many({
-        "store_id": active_store,
-        "created_at": {"$gte": from_dt.isoformat(), "$lte": to_dt.isoformat()},
-        "status": {"$nin": ["CANCELLED", "DRAFT"]},
-    })
+    # Aggregate per-category: sum item-level discount_amount + line
+    # revenue. The avg_discount_percent is per-category (line-discount
+    # / pre-discount line revenue), not the previous tortured formula
+    # which divided by (total_discount + per-category-share-of-revenue).
+    by_category: dict = {}
+    total_discount = 0.0
+    total_revenue = 0.0
 
-    by_category = {}
-    total_discount = 0
-    total_revenue = 0
-    
     for order in orders:
+        # Cart-level discount is split proportionally across items by
+        # taxable value when the order was created. Reading per-item
+        # `discount_amount` already reflects the item-level discount
+        # only; the order's `total_discount` includes cart-level too.
         for item in order.get("items", []):
-            category = item.get("category", "Other")
+            category = item.get("category") or item.get("item_type") or "Other"
             if category not in by_category:
                 by_category[category] = {
                     "category": category,
-                    "total_discount": 0,
+                    "total_discount": 0.0,
+                    "total_revenue": 0.0,
                     "total_items": 0,
-                    "avg_discount_percent": 0,
+                    "avg_discount_percent": 0.0,
                 }
-            item_discount = item.get("discount", 0)
-            item_price = item.get("price", 0) * item.get("quantity", 1)
+            item_discount = float(item.get("discount_amount") or item.get("discount") or 0)
+            line_revenue = _item_revenue(item)
             by_category[category]["total_discount"] += item_discount
-            by_category[category]["total_items"] += item.get("quantity", 1)
+            by_category[category]["total_revenue"] += line_revenue
+            by_category[category]["total_items"] += int(item.get("quantity") or 1)
             total_discount += item_discount
-            total_revenue += item_price
+            total_revenue += line_revenue
 
     for cat in by_category.values():
-        if cat["total_items"] > 0:
-            cat["avg_discount_percent"] = round((cat["total_discount"] / (cat["total_discount"] + (total_revenue / len(by_category)))) * 100, 2)
+        # Pre-discount line revenue = post-discount + discount itself
+        gross = cat["total_revenue"] + cat["total_discount"]
+        cat["avg_discount_percent"] = (
+            round(cat["total_discount"] / gross * 100, 2) if gross > 0 else 0.0
+        )
+        cat["total_discount"] = round(cat["total_discount"], 2)
+        cat["total_revenue"] = round(cat["total_revenue"], 2)
 
+    gross_total = total_revenue + total_discount
     return {
-        "by_category": list(by_category.values()),
+        "by_category": sorted(by_category.values(), key=lambda c: -c["total_discount"]),
         "summary": {
             "total_discount": round(total_discount, 2),
-            "discount_percent": round((total_discount / (total_discount + total_revenue) * 100), 2) if (total_discount + total_revenue) > 0 else 0,
+            "total_revenue": round(total_revenue, 2),
+            "discount_percent": round(total_discount / gross_total * 100, 2) if gross_total > 0 else 0.0,
         },
     }
 
@@ -1114,12 +1117,9 @@ async def staff_ranking(
 
     from_dt = datetime.combine(from_date, datetime.min.time())
     to_dt = datetime.combine(to_date, datetime.max.time())
-
-    orders = order_repo.find_many({
-        "store_id": active_store,
-        "created_at": {"$gte": from_dt.isoformat(), "$lte": to_dt.isoformat()},
-        "status": {"$nin": ["CANCELLED", "DRAFT"]},
-    })
+    orders = _orders_in_window(
+        order_repo, store_id=active_store, start_dt=from_dt, end_dt=to_dt,
+    )
 
     staff_data = {}
     for order in orders:
@@ -1133,8 +1133,7 @@ async def staff_ranking(
                 "order_count": 0,
                 "avg_bill": 0,
             }
-        order_amount = order.get("final_amount", 0) or order.get("total_amount", 0)
-        staff_data[staff_id]["total_sales"] += order_amount
+        staff_data[staff_id]["total_sales"] += _order_revenue(order)
         staff_data[staff_id]["order_count"] += 1
 
     for staff in staff_data.values():
@@ -1390,19 +1389,21 @@ async def expense_vs_revenue(
 
     from_dt = datetime.combine(from_date, datetime.min.time())
     to_dt = datetime.combine(to_date, datetime.max.time())
+    orders = _orders_in_window(
+        order_repo, store_id=active_store, start_dt=from_dt, end_dt=to_dt,
+    )
 
-    orders = order_repo.find_many({
-        "store_id": active_store,
-        "created_at": {"$gte": from_dt.isoformat(), "$lte": to_dt.isoformat()},
-        "status": {"$nin": ["CANCELLED", "DRAFT"]},
-    })
+    revenue = sum(_order_revenue(o) for o in orders)
+    cost = 0.0
 
-    revenue = sum(o.get("final_amount", 0) or o.get("total_amount", 0) for o in orders)
-    cost = 0
-    
     for order in orders:
         for item in order.get("items", []):
-            cost += item.get("cost_price", 0) * item.get("quantity", 1)
+            try:
+                unit_cost = float(item.get("cost_price") or 0)
+                qty = float(item.get("quantity") or 1)
+                cost += unit_cost * qty
+            except (TypeError, ValueError):
+                continue
 
     profit = revenue - cost
     margin_percent = (profit / revenue * 100) if revenue > 0 else 0
@@ -1438,38 +1439,50 @@ async def customer_acquisition(
     from_dt = datetime.combine(from_date, datetime.min.time())
     to_dt = datetime.combine(to_date, datetime.max.time())
 
-    # Get all customers
-    all_customers = customer_repo.find_many({"store_id": active_store})
+    # Get all customers (small enough N to walk in-process)
+    all_customers = customer_repo.find_many({"store_id": active_store}) or []
 
-    # Count new customers in period
+    # New customers — created_at within window. Mongo stamps `created_at`
+    # as a real datetime, but legacy seeds may have it as ISO string.
+    def _in_window(ca) -> bool:
+        if isinstance(ca, datetime):
+            return from_dt <= ca <= to_dt
+        if isinstance(ca, str) and len(ca) >= 10:
+            return from_dt.date().isoformat() <= ca[:10] <= to_dt.date().isoformat()
+        return False
+
     new_customers = len([
-        c for c in all_customers
-        if from_dt.isoformat() <= c.get("created_at", "") <= to_dt.isoformat()
+        c for c in all_customers if _in_window(c.get("created_at"))
     ])
 
-    # Count returning customers (placed orders in period but created before)
+    # Returning customers: placed >1 order in the window.
+    returning_customers = 0
+    total_buyers = 0
     if order_repo:
-        orders = order_repo.find_many({
-            "store_id": active_store,
-            "created_at": {"$gte": from_dt.isoformat(), "$lte": to_dt.isoformat()},
-        })
-        repeat_customers = {}
+        orders = _orders_in_window(
+            order_repo, store_id=active_store, start_dt=from_dt, end_dt=to_dt,
+        )
+        repeat_customers: dict = {}
         for order in orders:
             cust_id = order.get("customer_id")
             if cust_id:
                 repeat_customers[cust_id] = repeat_customers.get(cust_id, 0) + 1
-        
-        returning_customers = len([c for c in repeat_customers.values() if c > 1])
-    else:
-        returning_customers = 0
+        total_buyers = len(repeat_customers)
+        returning_customers = sum(1 for n in repeat_customers.values() if n > 1)
 
-    retention_percent = ((returning_customers / new_customers * 100) if new_customers > 0 else 0)
+    # Retention% = returning customers as a share of all unique buyers
+    # in the window. The previous formula divided by `new_customers`,
+    # which produced > 100% whenever a returning buyer wasn't also a
+    # new signup.
+    retention_percent = (
+        round(returning_customers / total_buyers * 100, 2) if total_buyers > 0 else 0.0
+    )
 
     return {
         "new_customers": new_customers,
         "returning_customers": returning_customers,
         "total_customers": len(all_customers),
-        "retention_percent": round(retention_percent, 2),
+        "retention_percent": retention_percent,
     }
 
 
@@ -1490,14 +1503,12 @@ async def brand_sellthrough(
 
     from_dt = datetime.combine(from_date, datetime.min.time())
     to_dt = datetime.combine(to_date, datetime.max.time())
+    orders = _orders_in_window(
+        order_repo, store_id=active_store, start_dt=from_dt, end_dt=to_dt,
+    )
 
-    orders = order_repo.find_many({
-        "store_id": active_store,
-        "created_at": {"$gte": from_dt.isoformat(), "$lte": to_dt.isoformat()},
-        "status": {"$nin": ["CANCELLED", "DRAFT"]},
-    })
-
-    # Track brand sales
+    # Track brand sales (uses _item_revenue helper to handle the
+    # current item_total/unit_price schema + legacy fall-throughs).
     by_brand = {}
     for order in orders:
         for item in order.get("items", []):
@@ -1510,8 +1521,8 @@ async def brand_sellthrough(
                     "avg_price": 0,
                     "sellthrough_percent": 0,
                 }
-            by_brand[brand]["quantity_sold"] += item.get("quantity", 1)
-            by_brand[brand]["revenue"] += item.get("total", 0) or (item.get("price", 0) * item.get("quantity", 1))
+            by_brand[brand]["quantity_sold"] += int(item.get("quantity") or 1)
+            by_brand[brand]["revenue"] += _item_revenue(item)
 
     # Calculate average price
     for brand in by_brand.values():

@@ -140,10 +140,15 @@ def patched_reports(monkeypatch):
     order_repo = OrderRepository(fake_db.get_collection("orders"))
     monkeypatch.setattr(reports_module, "get_order_repository", lambda: order_repo)
     monkeypatch.setattr(reports_module, "get_stock_repository", lambda: None)
-    monkeypatch.setattr(reports_module, "get_customer_repository", lambda: None)
+    # Wire a real CustomerRepository — needed for the
+    # customers/acquisition test (the handler 503-equivalent's the
+    # response when customer_repo is None).
+    from database.repositories.customer_repository import CustomerRepository
+    customer_repo = CustomerRepository(fake_db.get_collection("customers"))
+    monkeypatch.setattr(reports_module, "get_customer_repository", lambda: customer_repo)
     monkeypatch.setattr(reports_module, "get_task_repository", lambda: None)
     monkeypatch.setattr(reports_module, "get_attendance_repository", lambda: None)
-    return {"db": fake_db, "order_repo": order_repo}
+    return {"db": fake_db, "order_repo": order_repo, "customer_repo": customer_repo}
 
 
 # ============================================================================
@@ -464,3 +469,208 @@ def test_helper_item_revenue_handles_all_shapes():
     assert _item_revenue({"unit_price": 200.0, "quantity": 4}) == 800.0
     assert _item_revenue({"price": 200.0, "quantity": 4}) == 800.0
     assert _item_revenue({}) == 0.0
+
+
+# ============================================================================
+# Round 2 — staff ranking, brand sell-through, customer acquisition,
+# discount analysis, expense vs revenue, sales comparison
+# ============================================================================
+
+
+def test_staff_ranking_uses_grand_total_not_legacy_fields(
+    client, auth_headers, patched_reports
+):
+    fake_db = patched_reports["db"]
+    today = datetime.now()
+    _seed_order(fake_db, order_id="A1", grand_total=1000.0, created_at=today,
+                items=[{"item_total": 800.0, "category": "FRAME"}])
+    fake_db.get_collection("orders").docs[-1]["sales_person_id"] = "user-akshay"
+    fake_db.get_collection("orders").docs[-1]["sales_person_name"] = "Akshay"
+    _seed_order(fake_db, order_id="A2", grand_total=2000.0, created_at=today)
+    fake_db.get_collection("orders").docs[-1]["sales_person_id"] = "user-akshay"
+    _seed_order(fake_db, order_id="R1", grand_total=500.0, created_at=today)
+    fake_db.get_collection("orders").docs[-1]["sales_person_id"] = "user-rupesh"
+    fake_db.get_collection("orders").docs[-1]["sales_person_name"] = "Rupesh"
+
+    today_d = today.date().isoformat()
+    resp = client.get(
+        f"/api/v1/reports/staff/ranking?from_date={today_d}&to_date={today_d}",
+        headers=auth_headers,
+    )
+    assert resp.status_code == 200, resp.text
+    rows = resp.json()["data"]
+    by_id = {r["staff_id"]: r for r in rows}
+    assert by_id["user-akshay"]["total_sales"] == 3000.0
+    assert by_id["user-akshay"]["order_count"] == 2
+    assert by_id["user-akshay"]["avg_bill"] == 1500.0
+    assert by_id["user-rupesh"]["total_sales"] == 500.0
+    # Sorted by sales desc → akshay first
+    assert rows[0]["staff_id"] == "user-akshay"
+
+
+def test_sales_comparison_uses_grand_total(
+    client, auth_headers, patched_reports
+):
+    """Window: from = today−6d, to = today. Previous period:
+    (today−13d) to (today−7d). Seed an order in each."""
+    fake_db = patched_reports["db"]
+    now = datetime.now()
+    # 4 orders in the requested 7-day window, ₹3,500 total
+    _seed_order(fake_db, order_id="C1", grand_total=1000.0, created_at=now)
+    _seed_order(fake_db, order_id="C2", grand_total=1500.0, created_at=now)
+    _seed_order(fake_db, order_id="C3", grand_total=500.0, created_at=now)
+    _seed_order(fake_db, order_id="C4", grand_total=500.0, created_at=now)
+    # 1 order in the previous 7-day window (day 10 ago)
+    _seed_order(
+        fake_db, order_id="P1", grand_total=2500.0,
+        created_at=now - timedelta(days=10),
+    )
+
+    today_d = now.date().isoformat()
+    yest = (now - timedelta(days=6)).date().isoformat()
+    resp = client.get(
+        f"/api/v1/reports/sales/comparison?from_date={yest}&to_date={today_d}",
+        headers=auth_headers,
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["current_period"]["sales"] == 3500.0
+    assert body["current_period"]["orders"] == 4
+    assert body["previous_period"]["sales"] == 2500.0
+
+
+def test_discount_analysis_aggregates_per_category(
+    client, auth_headers, patched_reports
+):
+    """Pre-fix: read item.get('discount') and item.get('price'). Now
+    reads discount_amount + uses _item_revenue."""
+    fake_db = patched_reports["db"]
+    now = datetime.now()
+    _seed_order(
+        fake_db, order_id="D1", grand_total=1800.0,
+        total_discount=200.0,
+        items=[
+            {"item_total": 800.0, "unit_price": 1000.0, "discount_amount": 200.0,
+             "quantity": 1, "category": "FRAME"},
+            {"item_total": 1000.0, "unit_price": 1000.0, "discount_amount": 0,
+             "quantity": 1, "category": "SUNGLASSES"},
+        ],
+        created_at=now,
+    )
+    today_d = now.date().isoformat()
+    resp = client.get(
+        f"/api/v1/reports/discount/analysis?from_date={today_d}&to_date={today_d}",
+        headers=auth_headers,
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    cats = {c["category"]: c for c in body["by_category"]}
+    assert cats["FRAME"]["total_discount"] == 200.0
+    assert cats["FRAME"]["total_revenue"] == 800.0
+    # 200 / (800 + 200) = 20%
+    assert cats["FRAME"]["avg_discount_percent"] == 20.0
+    assert cats["SUNGLASSES"]["total_discount"] == 0.0
+    assert body["summary"]["total_discount"] == 200.0
+
+
+def test_expense_vs_revenue_computes_margin(
+    client, auth_headers, patched_reports
+):
+    fake_db = patched_reports["db"]
+    now = datetime.now()
+    _seed_order(
+        fake_db, order_id="E1", grand_total=1000.0,
+        items=[{"item_total": 800.0, "unit_price": 800.0, "quantity": 1,
+                "category": "FRAME", "cost_price": 300.0}],
+        created_at=now,
+    )
+    today_d = now.date().isoformat()
+    resp = client.get(
+        f"/api/v1/reports/finance/expense-vs-revenue"
+        f"?from_date={today_d}&to_date={today_d}",
+        headers=auth_headers,
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    # revenue = 1000 (grand_total), cost = 300 × 1 = 300, profit = 700
+    assert body["revenue"] == 1000.0
+    assert body["cost"] == 300.0
+    assert body["profit"] == 700.0
+    assert body["margin_percent"] == 70.0
+
+
+def test_customer_acquisition_retention_pct_is_share_of_buyers(
+    client, auth_headers, patched_reports
+):
+    """Pre-fix the formula divided returning by new_customers,
+    yielding > 100% whenever a returning buyer wasn't a new signup.
+    Now divides by total unique buyers in the window."""
+    fake_db = patched_reports["db"]
+    now = datetime.now()
+    # 2 customers exist (1 new in window, 1 created last year)
+    fake_db.get_collection("customers").insert_one({
+        "customer_id": "cust-new", "store_id": "BV-TEST-01",
+        "name": "New", "created_at": now,
+    })
+    fake_db.get_collection("customers").insert_one({
+        "customer_id": "cust-old", "store_id": "BV-TEST-01",
+        "name": "Old", "created_at": now - timedelta(days=400),
+    })
+
+    # cust-new: 1 order in window
+    fake_db.get_collection("orders").insert_one({
+        "_id": "oN", "order_id": "oN", "store_id": "BV-TEST-01",
+        "customer_id": "cust-new", "grand_total": 500.0,
+        "created_at": now, "status": "CONFIRMED",
+    })
+    # cust-old: 2 orders in window → returning
+    for i in range(2):
+        fake_db.get_collection("orders").insert_one({
+            "_id": f"oO{i}", "order_id": f"oO{i}",
+            "store_id": "BV-TEST-01", "customer_id": "cust-old",
+            "grand_total": 800.0, "created_at": now, "status": "CONFIRMED",
+        })
+
+    today_d = now.date().isoformat()
+    resp = client.get(
+        f"/api/v1/reports/customers/acquisition"
+        f"?from_date={today_d}&to_date={today_d}",
+        headers=auth_headers,
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["new_customers"] == 1
+    # 1 returning buyer (cust-old, 2 orders) out of 2 total buyers = 50%
+    assert body["returning_customers"] == 1
+    assert body["retention_percent"] == 50.0
+    assert body["total_customers"] == 2
+
+
+def test_brand_sellthrough_uses_item_revenue_helper(
+    client, auth_headers, patched_reports
+):
+    fake_db = patched_reports["db"]
+    now = datetime.now()
+    _seed_order(
+        fake_db, order_id="B1", grand_total=3000.0,
+        items=[
+            {"item_total": 2000.0, "unit_price": 1000.0, "quantity": 2,
+             "brand": "Ray-Ban", "category": "SUNGLASSES"},
+            {"item_total": 1000.0, "unit_price": 1000.0, "quantity": 1,
+             "brand": "Persol", "category": "SUNGLASSES"},
+        ],
+        created_at=now,
+    )
+    today_d = now.date().isoformat()
+    resp = client.get(
+        f"/api/v1/reports/inventory/brand-sellthrough"
+        f"?from_date={today_d}&to_date={today_d}",
+        headers=auth_headers,
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    by_brand = {b["brand"]: b for b in body["data"]}
+    assert by_brand["Ray-Ban"]["revenue"] == 2000.0
+    assert by_brand["Ray-Ban"]["quantity_sold"] == 2
+    assert by_brand["Ray-Ban"]["avg_price"] == 1000.0
+    assert by_brand["Persol"]["revenue"] == 1000.0
