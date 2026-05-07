@@ -5,9 +5,16 @@ import {
   setVariantMetafields,
   updateProduct,
   updateVariantPrice,
+  findCollectionsByHandle,
+  addProductsToCollection,
   type ShopifyVariantInput,
 } from "@/lib/shopify";
 import { categoryLabel } from "@/lib/categories";
+import {
+  buildAltText,
+  shopifyTaxonomyGidFor,
+  autoCollectionHandlesFor,
+} from "@/lib/shopifySeo";
 
 // Map our internal product status (DRAFT/PUBLISHED/ARCHIVED) to the
 // values Shopify expects (ACTIVE/DRAFT/ARCHIVED). PUBLISHED → ACTIVE so
@@ -339,19 +346,32 @@ export async function pushProductsToShopify(
           })
         : [];
 
+      // SEO-rich image alt text — buildAltText composes Brand + Model +
+      // Colour + Size + Category, far better than the bare title.
       const allImages = [
         ...product.images.map((img) => ({
           src: img.url.startsWith("http")
             ? img.url
             : `${process.env.NEXTAUTH_URL || "http://localhost:3000"}${img.url}`,
-          alt: product.title || "",
+          alt: buildAltText({
+            brand: product.brand,
+            modelNo: product.modelNo,
+            category: product.category,
+          }),
         })),
         ...product.variants.flatMap((v) =>
           v.images.map((img) => ({
             src: img.url.startsWith("http")
               ? img.url
               : `${process.env.NEXTAUTH_URL || "http://localhost:3000"}${img.url}`,
-            alt: `${product.title || ""} ${v.colorCode || ""}`.trim(),
+            alt: buildAltText({
+              brand: product.brand,
+              modelNo: product.modelNo,
+              category: product.category,
+              colorCode: v.colorCode,
+              colorName: v.colorName,
+              frameSize: v.frameSize,
+            }),
           }))
         ),
       ];
@@ -368,9 +388,11 @@ export async function pushProductsToShopify(
         // Audit fixes:
         //   vendor = brand (was defaulting to store name)
         //   productType = human label (was sending UPPERCASE enum key)
+        //   productCategory = Shopify standard taxonomy GID (Google Shopping)
         //   status     = mapped from product.status, not always ACTIVE
         vendor: product.brand || undefined,
         productType: categoryLabel(product.category) || product.category || "",
+        productCategory: shopifyTaxonomyGidFor(product.category) || undefined,
         status: shopifyStatusFor(product.status),
       });
 
@@ -482,6 +504,25 @@ export async function pushProductsToShopify(
 
         if (metafields.length > 0) {
           await setProductMetafields(shopifyResult.shopifyId, metafields);
+        }
+
+        // Auto-assign to category + brand collections. We resolve handles
+        // → IDs in one query, then call addProductsToCollection per match.
+        // Collections that don't exist on Shopify silently no-op so this
+        // is safe to call even before staff has created the collections.
+        const handles = autoCollectionHandlesFor(
+          product.category,
+          product.brand
+        );
+        if (handles.length > 0) {
+          const lookup = await findCollectionsByHandle(handles);
+          if (lookup.success && lookup.idByHandle.size > 0) {
+            for (const [, collId] of lookup.idByHandle) {
+              await addProductsToCollection(collId, [
+                shopifyResult.shopifyId,
+              ]).catch(() => {});
+            }
+          }
         }
 
         await prisma.syncLog.create({

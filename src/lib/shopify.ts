@@ -193,6 +193,12 @@ export interface CreateProductInput {
    *  Audit 2026-05: every existing product had vendor="Better Vision",
    *  which broke Shopify's vendor filters and brand-collection rules. */
   vendor?: string;
+  /** Shopify standard product taxonomy GID (e.g.
+   *  "gid://shopify/TaxonomyCategory/aa-1-13-7" for Sunglasses).
+   *  Used by Google Shopping, Shop App, and Marketplaces for SEO and
+   *  filtering. Use shopifyTaxonomyGidFor() in shopifySeo.ts to look up
+   *  the right GID for a category. */
+  productCategory?: string;
 }
 
 export interface CreateProductResult {
@@ -249,6 +255,11 @@ export async function createProduct(
     // defaults to the store name which is what produced the
     // "vendor=Better Vision on every product" mess in 4,400+ historical rows.
     ...(productData.vendor ? { vendor: productData.vendor } : {}),
+    // Shopify standard product taxonomy. Lifts the product into Google
+    // Shopping / Shop App / Marketplace classifications automatically.
+    ...(productData.productCategory
+      ? { productCategory: { productTaxonomyNodeId: productData.productCategory } }
+      : {}),
     seo: {
       title: productData.seoTitle || productData.title,
       description: productData.seoDescription || "",
@@ -850,6 +861,49 @@ export async function updateCollection(
     return { success: false, message: errors.map((e) => `${e.field}: ${e.message}`).join("; ") };
   }
   return { success: true, message: "Collection updated successfully" };
+}
+
+/**
+ * Look up Shopify collections by handle (slug). Returns a map handle →
+ * collection GID so callers can resolve a list of handles to IDs in one
+ * GraphQL roundtrip and then call addProductsToCollection per matched
+ * collection.
+ *
+ * Used by the auto-assign-on-push flow — given handles like
+ * ["sunglasses", "ray-ban", "ray-ban-sunglasses"], we get back which
+ * ones actually exist on Shopify and skip the rest silently.
+ */
+export async function findCollectionsByHandle(
+  handles: string[]
+): Promise<{ success: boolean; idByHandle: Map<string, string>; error?: string }> {
+  const idByHandle = new Map<string, string>();
+  if (handles.length === 0) return { success: true, idByHandle };
+
+  // Shopify search supports "handle:foo OR handle:bar" — chain handles.
+  const escaped = handles
+    .map((h) => h.replace(/['"]/g, ""))
+    .map((h) => `handle:${h}`)
+    .join(" OR ");
+  const query = `
+    query FindCollections($q: String!) {
+      collections(first: 50, query: $q) {
+        edges { node { id handle } }
+      }
+    }
+  `;
+  const result = await makeGraphQLRequest<{
+    collections: {
+      edges: Array<{ node: { id: string; handle: string } }>;
+    };
+  }>(query, { q: escaped });
+
+  if (!result.success) {
+    return { success: false, idByHandle, error: result.error };
+  }
+  for (const e of result.data?.collections.edges || []) {
+    idByHandle.set(e.node.handle, e.node.id);
+  }
+  return { success: true, idByHandle };
 }
 
 export async function addProductsToCollection(
