@@ -103,6 +103,7 @@ from .routers import (
     marketing_router,
     analytics_v2_router,
     agents_router,
+    walkouts_router,
 )
 
 
@@ -623,6 +624,7 @@ app.include_router(payroll_router, prefix="/api/v1/payroll", tags=["Payroll"])
 app.include_router(marketing_router, prefix="/api/v1/marketing", tags=["Marketing"])
 app.include_router(analytics_v2_router, prefix="/api/v1/analytics-v2", tags=["Analytics V2"])
 app.include_router(agents_router, prefix="/api/v1/jarvis", tags=["Agents"])
+app.include_router(walkouts_router, prefix="/api/v1/walkouts", tags=["Walkouts"])
 
 
 if __name__ == "__main__":

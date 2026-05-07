@@ -109,6 +109,78 @@ export const tasksApi = {
     return response.data;
   },
 
+  // --- SOP templates (Phase 6.14) ----------------------------------
+  // sop_templates collection — persistent, role-gated, assignable to
+  // roles/users/stores. Replaces the static DEFAULT_CHECKLISTS dict.
+  getSopTemplates: async (opts?: { category?: string; storeId?: string; activeOnly?: boolean }) => {
+    const params: Record<string, string | boolean> = {};
+    if (opts?.category) params.category = opts.category;
+    if (opts?.storeId) params.store_id = opts.storeId;
+    if (opts?.activeOnly !== undefined) params.active_only = opts.activeOnly;
+    const response = await api.get('/tasks/sop-templates', { params });
+    return response.data as {
+      templates: Array<{
+        template_id: string;
+        title: string;
+        description: string;
+        category: string;
+        frequency: string;
+        estimated_time: number;
+        steps: Array<{ step_number: number; instruction: string; warning?: string }>;
+        assigned_roles: string[];
+        assigned_users: string[];
+        store_id: string | null;
+        is_active: boolean;
+        created_at: string;
+        updated_at: string;
+      }>;
+      total: number;
+    };
+  },
+
+  createSopTemplate: async (payload: {
+    title: string;
+    description?: string;
+    category?: string;
+    frequency?: string;
+    estimated_time?: number;
+    steps?: Array<{ step_number: number; instruction: string; warning?: string }>;
+    assigned_roles?: string[];
+    assigned_users?: string[];
+    store_id?: string;
+  }) => {
+    const response = await api.post('/tasks/sop-templates', payload);
+    return response.data;
+  },
+
+  updateSopTemplate: async (templateId: string, updates: Partial<{
+    title: string;
+    description: string;
+    category: string;
+    frequency: string;
+    estimated_time: number;
+    steps: Array<{ step_number: number; instruction: string; warning?: string }>;
+    assigned_roles: string[];
+    assigned_users: string[];
+    is_active: boolean;
+  }>) => {
+    const response = await api.patch(`/tasks/sop-templates/${templateId}`, updates);
+    return response.data;
+  },
+
+  deleteSopTemplate: async (templateId: string) => {
+    const response = await api.delete(`/tasks/sop-templates/${templateId}`);
+    return response.data;
+  },
+
+  assignSop: async (
+    templateId: string,
+    assignment: { assigned_roles?: string[]; assigned_users?: string[] },
+  ) => {
+    const response = await api.post(`/tasks/sop-templates/${templateId}/assign`, assignment);
+    return response.data;
+  },
+
   // Get tasks assigned to current user
   // Backend route is /tasks/my-tasks (not /tasks/my) — audit Run #2 fix
   getMyTasks: async (includeCompleted: boolean = false) => {

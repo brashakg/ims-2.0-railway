@@ -32,4 +32,5 @@ export {
   clinicalApi,
   settingsApi,
   adminIntegrationApi,
+  walkoutsApi,
 } from './api/index';

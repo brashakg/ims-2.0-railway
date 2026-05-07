@@ -45,3 +45,6 @@ export { marketingApi } from './marketing';
 
 // Analytics V2
 export { analyticsV2Api } from './analytics';
+
+// Walkouts (Pune Incentive Module i)
+export { walkoutsApi } from './walkouts';

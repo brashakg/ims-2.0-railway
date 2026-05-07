@@ -41,6 +41,28 @@ export function Topbar({ crumbs = [], actions }: TopbarProps) {
   useClickOutside(roleRef, () => setRoleOpen(false));
   useClickOutside(storeRef, () => setStoreOpen(false));
 
+  // Phase 6.13 — the "Search or jump to…" button in the topbar was a
+  // visual stub with no onClick. Wire it to the Customers page with the
+  // auto-focus flag — the most common global lookup is by customer.
+  // Cmd+K / Ctrl+K binds to the same route so the keyboard label isn't
+  // a lie either. Future work: replace with a proper command palette
+  // (cmdk lib) that also surfaces orders + products.
+  const openGlobalSearch = () => {
+    navigate('/customers?search=true');
+  };
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        openGlobalSearch();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   useEffect(() => {
     storeApi
       .getStores()
@@ -92,7 +114,12 @@ export function Topbar({ crumbs = [], actions }: TopbarProps) {
 
       <div className="spacer" />
 
-      <button className="cmdk" type="button" aria-label="Search or jump to...">
+      <button
+        className="cmdk"
+        type="button"
+        aria-label="Search or jump to…"
+        onClick={openGlobalSearch}
+      >
         <Icon.search width={14} height={14} />
         <span>Search or jump to…</span>
         <span className="kbd">⌘K</span>

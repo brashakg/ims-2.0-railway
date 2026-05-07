@@ -26,6 +26,7 @@ const RAIL_GROUPS: NavItem[][] = [
   [
     { id: 'pos', label: 'POS', to: '/pos', icon: 'cart' },
     { id: 'customers', label: 'Customers', to: '/customers', icon: 'users' },
+    { id: 'walkouts', label: 'Walkouts', to: '/walkouts', icon: 'user' },
     { id: 'orders', label: 'Orders', to: '/orders', icon: 'receipt' },
     { id: 'returns', label: 'Returns', to: '/returns', icon: 'refresh' },
   ],
@@ -53,7 +54,6 @@ const RAIL_GROUPS: NavItem[][] = [
   // Growth
   [
     { id: 'marketing', label: 'Marketing', to: '/customers/campaigns', icon: 'megaphone' },
-    { id: 'storefront', label: 'Storefront', to: '/storefront', icon: 'store' },
   ],
   // Support + Jarvis + Setup
   [

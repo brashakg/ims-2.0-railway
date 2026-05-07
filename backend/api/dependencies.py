@@ -45,6 +45,7 @@ try:
         EyeTestQueueRepository,
         EyeTestRepository,
     )
+    from database.repositories.walkout_repository import WalkoutRepository
 
     DATABASE_AVAILABLE = True
 except ImportError as e:
@@ -255,4 +256,15 @@ def get_eye_test_repository():
     db = get_db()
     if db is not None and db.is_connected:
         return EyeTestRepository(db.eye_tests)
+    return None
+
+
+def get_walkout_repository():
+    """Get WalkoutRepository instance (Pune Incentive Module i)."""
+    db = get_db()
+    if db is not None and db.is_connected:
+        try:
+            return WalkoutRepository(db.get_collection("walkouts"))
+        except Exception:
+            return WalkoutRepository(db.walkouts)
     return None

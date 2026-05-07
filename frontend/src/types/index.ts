@@ -439,3 +439,118 @@ export interface TopProduct {
   quantity: number;
   revenue: number;
 }
+
+
+// ============================================================================
+// WALKOUTS (Pune Incentive Module i)
+// ============================================================================
+
+export type AgeGroup =
+  | '<15' | '15-25' | '26-35' | '36-45' | '46-55' | '56-65' | '65+';
+
+export type WalkoutGender = 'MALE' | 'FEMALE' | 'OTHER';
+
+export type WalkoutProductCategory =
+  | 'FRAME' | 'SUNGLASS' | 'WATCH' | 'CLOCK'
+  | 'LENS' | 'CONTACT LENS' | 'ACCESSORY' | 'OTHER';
+
+export type YesNo = 'YES' | 'NO';
+
+export type WalkoutPriceRange =
+  | '<1000' | '1000-2000' | '2000-3000' | '3000-5000'
+  | '5000-10000' | '10000-20000' | '20000-50000' | '50000+';
+
+export type WalkoutReason =
+  | 'BUDGET/PRICE' | 'COLLECTION' | 'COLOR' | 'BRAND' | 'ENQUIRY ONLY'
+  | 'STAFF BEHAVIOUR' | 'NOT AVAILABLE' | 'STYLE/DESIGN' | 'FIT/SIZE' | 'OTHER';
+
+export type PurchasePlan =
+  | 'NEXT DAY' | '1-7 DAYS' | '8-15 DAYS' | '16-30 DAYS'
+  | 'AFTER A MONTH' | 'UNDECIDED';
+
+export interface WalkoutFollowUp {
+  round: number;
+  scheduled_date?: string;
+  scheduled_time?: string;
+  mode?: 'CALL' | 'WHATSAPP' | 'SMS' | 'EMAIL' | 'IN-PERSON';
+  supervisor_id?: string;
+  supervisor_name?: string;
+  status: 'PENDING' | 'DONE' | 'NOT REACHABLE' | 'NOT REQUIRED';
+  notes?: string;
+  completed_at?: string | null;
+  completed_by?: string | null;
+  escalation_task_id?: string | null;
+}
+
+export interface Walkout {
+  walkout_id: string;
+  store_id: string;
+  date: string;
+  date_str: string;
+  customer_id: string | null;
+  customer_name: string;
+  mobile: string;
+  age_group: AgeGroup;
+  gender: WalkoutGender;
+  product_interested: WalkoutProductCategory;
+  has_prescription: YesNo;
+  displayed_price_range: WalkoutPriceRange;
+  required_price_range: WalkoutPriceRange;
+  primary_walkout_reason: WalkoutReason;
+  secondary_walkout_reason: WalkoutReason | null;
+  brand_interest: string;
+  competitor_mentioned: string;
+  purchase_planned_in: PurchasePlan;
+  sales_person_id: string;
+  sales_person_name?: string;
+  followups: WalkoutFollowUp[];
+  result: 'DUE' | 'NEGATIVE' | 'CONVERTED' | null;
+  result_set_at: string | null;
+  converted_order_id: string | null;
+  action_remarks: string;
+  created_at: string;
+  created_by: string;
+  updated_at: string;
+}
+
+export interface CreateWalkoutRequest {
+  customer_name: string;
+  mobile: string;
+  age_group: AgeGroup;
+  gender: WalkoutGender;
+  product_interested: WalkoutProductCategory;
+  has_prescription: YesNo;
+  displayed_price_range: WalkoutPriceRange;
+  required_price_range: WalkoutPriceRange;
+  primary_walkout_reason: WalkoutReason;
+  secondary_walkout_reason?: WalkoutReason;
+  brand_interest?: string;
+  competitor_mentioned?: string;
+  purchase_planned_in: PurchasePlan;
+  sales_person_id: string;
+  action_remarks?: string;
+  date?: string;
+}
+
+// Frozen enum option arrays — single source of truth for the
+// WalkoutIntakeModal dropdowns. Order matches the Excel sheet.
+export const WALKOUT_AGE_GROUPS: AgeGroup[] = [
+  '<15', '15-25', '26-35', '36-45', '46-55', '56-65', '65+',
+];
+export const WALKOUT_GENDERS: WalkoutGender[] = ['MALE', 'FEMALE', 'OTHER'];
+export const WALKOUT_PRODUCT_CATEGORIES: WalkoutProductCategory[] = [
+  'FRAME', 'SUNGLASS', 'WATCH', 'CLOCK',
+  'LENS', 'CONTACT LENS', 'ACCESSORY', 'OTHER',
+];
+export const WALKOUT_PRICE_RANGES: WalkoutPriceRange[] = [
+  '<1000', '1000-2000', '2000-3000', '3000-5000',
+  '5000-10000', '10000-20000', '20000-50000', '50000+',
+];
+export const WALKOUT_REASONS: WalkoutReason[] = [
+  'BUDGET/PRICE', 'COLLECTION', 'COLOR', 'BRAND', 'ENQUIRY ONLY',
+  'STAFF BEHAVIOUR', 'NOT AVAILABLE', 'STYLE/DESIGN', 'FIT/SIZE', 'OTHER',
+];
+export const WALKOUT_PURCHASE_PLANS: PurchasePlan[] = [
+  'NEXT DAY', '1-7 DAYS', '8-15 DAYS', '16-30 DAYS',
+  'AFTER A MONTH', 'UNDECIDED',
+];

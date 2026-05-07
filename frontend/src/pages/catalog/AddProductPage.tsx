@@ -202,7 +202,6 @@ export function AddProductPage() {
   // Shopify
   const [syncToShopify, setSyncToShopify] = useState(false);
   const [shopifyTags, setShopifyTags] = useState<string[]>([]);
-  const [publishOnlineStore, setPublishOnlineStore] = useState(true);
   const [publishPOS, setPublishPOS] = useState(true);
 
   // Images
@@ -320,9 +319,11 @@ export function AddProductPage() {
         },
         images: [],
         shopify: {
+          // Shopify here is kept for future vendor sync only (NEXUS agent
+          // will push POS stock → Shopify). The in-app "online store"
+          // flag was removed since we don't render our own storefront.
           sync_to_shopify: syncToShopify,
           shopify_tags: shopifyTags,
-          publish_to_online_store: publishOnlineStore,
           publish_to_pos: publishPOS,
         },
       });
@@ -704,19 +705,9 @@ export function AddProductPage() {
 
         {syncToShopify && (
           <>
-            <div className="flex items-center justify-between p-4 border rounded-lg">
-              <div>
-                <p className="font-medium text-gray-900">Online Store</p>
-                <p className="text-sm text-gray-500">Publish to online store</p>
-              </div>
-              <input
-                type="checkbox"
-                checked={publishOnlineStore}
-                onChange={(e) => setPublishOnlineStore(e.target.checked)}
-                className="w-5 h-5 text-bv-gold-500 border-gray-300 rounded focus:ring-bv-gold-500"
-              />
-            </div>
-
+            {/* Online Store publish flag removed (Phase 6.12): we don't
+                run our own storefront — IMS is POS + back-office only;
+                Shopify remains as a future vendor channel. */}
             <div className="flex items-center justify-between p-4 border rounded-lg">
               <div>
                 <p className="font-medium text-gray-900">Point of Sale</p>

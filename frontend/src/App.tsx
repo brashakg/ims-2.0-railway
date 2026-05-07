@@ -62,9 +62,9 @@ const StockReplenishment = lazy(() => import('./pages/inventory/StockReplenishme
 const StockAudit = lazy(() => import('./pages/inventory/StockAudit').then(m => ({ default: m.StockAudit })));
 const JarvisPage = lazy(() => import('./pages/jarvis/JarvisPage').then(m => ({ default: m.JarvisPage })));
 const AddProductPage = lazy(() => import('./pages/catalog/AddProductPage'));
-const StorefrontPage = lazy(() => import('./pages/storefront/StorefrontPage').then(m => ({ default: m.StorefrontPage })));
 const ExpenseTracker = lazy(() => import('./pages/finance/ExpenseTracker'));
 const FinanceDashboard = lazy(() => import('./pages/finance/FinanceDashboard'));
+const WalkoutsPage = lazy(() => import('./pages/walkouts/WalkoutsPage').then(m => ({ default: m.WalkoutsPage })));
 
 // Loading fallback component
 const PageLoader = () => (
@@ -308,6 +308,18 @@ function App() {
                         allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'CASHIER', 'SALES_CASHIER', 'SALES_STAFF', 'OPTOMETRIST', 'WORKSHOP_STAFF']}
                       >
                         <OrdersPage />
+                      </ProtectedRoute>
+                    }
+                  />
+
+                  {/* Walkouts (Pune Incentive Module i) */}
+                  <Route
+                    path="walkouts"
+                    element={
+                      <ProtectedRoute
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'SALES_STAFF', 'SALES_CASHIER', 'CASHIER']}
+                      >
+                        <WalkoutsPage />
                       </ProtectedRoute>
                     }
                   />
@@ -589,16 +601,6 @@ function App() {
                     element={
                       <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER']}>
                         <AddProductPage />
-                      </ProtectedRoute>
-                    }
-                  />
-
-                  {/* Storefront / E-commerce */}
-                  <Route
-                    path="storefront"
-                    element={
-                      <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN']}>
-                        <StorefrontPage />
                       </ProtectedRoute>
                     }
                   />

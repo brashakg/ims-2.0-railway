@@ -139,6 +139,7 @@ async def list_vendors(
     return {"vendors": vendors or [], "total": len(vendors) if vendors else 0}
 
 
+@router.post("", status_code=201)
 @router.post("/", status_code=201)
 async def create_vendor(
     vendor: VendorCreate, current_user: dict = Depends(get_current_user)

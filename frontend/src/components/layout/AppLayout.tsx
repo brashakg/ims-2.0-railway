@@ -47,7 +47,6 @@ const SEGMENT_LABELS: Record<string, string> = {
   outstanding: 'Outstanding',
   finance: 'Finance',
   expenses: 'Expenses',
-  storefront: 'Storefront',
   settings: 'Store Setup',
   setup: 'Store Setup',
   jarvis: 'Jarvis',

@@ -150,6 +150,7 @@ async def list_follow_ups(
     return [FollowUpResponse(**fu) for fu in follow_ups]
 
 
+@router.post("", response_model=FollowUpResponse)
 @router.post("/", response_model=FollowUpResponse)
 async def create_follow_up(
     request: CreateFollowUpRequest,

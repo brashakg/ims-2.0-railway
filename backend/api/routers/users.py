@@ -196,6 +196,7 @@ async def list_users(
     return []
 
 
+@router.post("", response_model=dict, status_code=201)
 @router.post("/", response_model=dict, status_code=201)
 async def create_user(user: UserCreate, current_user: dict = Depends(require_admin)):
     """Create new user (Admin only)"""
