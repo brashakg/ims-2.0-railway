@@ -268,15 +268,18 @@ export async function createProduct(
     },
   };
 
-  // Add product options (Color, Size) if variants exist
+  // Add product options (Color, Size). productCreate accepts options
+  // inline so the bulk-variants call below can reference their names.
   if (productData.productOptions && productData.productOptions.length > 0) {
     input.productOptions = productData.productOptions;
   }
 
-  // Add variants
-  if (productData.variants && productData.variants.length > 0) {
-    input.variants = productData.variants;
-  }
+  // NOTE: ProductInput does NOT accept `variants` anymore. The current
+  // Shopify Admin API (2025-01+) requires variants be added via a
+  // separate productVariantsBulkCreate mutation AFTER productCreate.
+  // Sending input.variants returns "Variable $input of type ProductInput!
+  // was provided invalid value for variants (Field is not defined on
+  // ProductInput)". We do a two-step here.
 
   const media = (productData.images || []).map((img) => ({
     originalSource: img.src,
@@ -290,6 +293,10 @@ export async function createProduct(
         id: string;
         handle: string;
         title: string;
+        // variants returned here is the auto-created "Default Title"
+        // variant Shopify mints when no productOptions are supplied.
+        // We discard it via strategy:REMOVE_STANDALONE_VARIANT during
+        // the bulk-create call below.
         variants: {
           edges: Array<{
             node: {
@@ -323,12 +330,96 @@ export async function createProduct(
     return { success: false, message: "Product created but no ID returned" };
   }
 
-  const variantIds = (product.variants?.edges || []).map((edge) => ({
-    sku: edge.node.sku,
-    shopifyVariantId: edge.node.id,
-    title: edge.node.title,
-    inventoryItemId: edge.node.inventoryItem?.id,
-  }));
+  // Step 2: bulk-create variants. If none were requested we keep the
+  // auto-created Default Title variant — that's the right behaviour for
+  // single-SKU products (accessories, contact lens boxes).
+  let variantIds: CreateProductResult["variantIds"] = [];
+
+  if (productData.variants && productData.variants.length > 0) {
+    const bulkMutation = `
+      mutation BulkCreateVariants(
+        $productId: ID!,
+        $variants: [ProductVariantsBulkInput!]!
+      ) {
+        productVariantsBulkCreate(
+          productId: $productId,
+          variants: $variants,
+          strategy: REMOVE_STANDALONE_VARIANT
+        ) {
+          productVariants {
+            id
+            sku
+            title
+            price
+            inventoryItem { id }
+          }
+          userErrors { field message }
+        }
+      }
+    `;
+
+    // Translate our internal ShopifyVariantInput shape into the bulk
+    // input shape. SKU lives under inventoryItem.sku in the new API,
+    // not at the top level of the variant.
+    const bulkVariants = productData.variants.map((v) => ({
+      optionValues: v.optionValues,
+      price: v.price,
+      ...(v.compareAtPrice ? { compareAtPrice: v.compareAtPrice } : {}),
+      ...(v.barcode ? { barcode: v.barcode } : {}),
+      ...(v.sku
+        ? { inventoryItem: { sku: v.sku, tracked: true } }
+        : { inventoryItem: { tracked: true } }),
+    }));
+
+    const bulkResult = await makeGraphQLRequest<{
+      productVariantsBulkCreate: {
+        productVariants: Array<{
+          id: string;
+          sku: string | null;
+          title: string;
+          price: string;
+          inventoryItem: { id: string };
+        }> | null;
+        userErrors: Array<{ field: string; message: string }>;
+      };
+    }>(bulkMutation, { productId: product.id, variants: bulkVariants });
+
+    if (!bulkResult.success) {
+      return {
+        success: false,
+        shopifyId: product.id, // product itself succeeded — surface ID
+        message: `Product created but variants failed: ${bulkResult.error}`,
+      };
+    }
+    const bulkErrors =
+      bulkResult.data?.productVariantsBulkCreate.userErrors || [];
+    if (bulkErrors.length > 0) {
+      return {
+        success: false,
+        shopifyId: product.id,
+        message: `Variants rejected: ${bulkErrors.map((e) => `${e.field}: ${e.message}`).join("; ")}`,
+      };
+    }
+
+    variantIds = (
+      bulkResult.data?.productVariantsBulkCreate.productVariants || []
+    ).map((pv) => ({
+      sku: pv.sku || undefined,
+      shopifyVariantId: pv.id,
+      title: pv.title,
+      inventoryItemId: pv.inventoryItem?.id,
+    }));
+  } else {
+    // No variants requested — return whatever Default Title variant
+    // Shopify auto-created so the caller can still update price /
+    // inventory on it later.
+    variantIds = (product.variants?.edges || []).map((edge) => ({
+      sku: edge.node.sku || undefined,
+      shopifyVariantId: edge.node.id,
+      title: edge.node.title,
+      inventoryItemId: edge.node.inventoryItem?.id,
+    }));
+  }
 
   return {
     success: true,
