@@ -122,7 +122,7 @@ export function StepComplete({ onPrint, onReset }: StepCompleteProps) {
         <div className="flex justify-between"><span className="text-gray-500">Total</span><span className="font-bold text-lg">{fc(store.getGrandTotal())}</span></div>
         <div className="flex justify-between"><span className="text-gray-500">Paid</span><span className="font-medium text-green-600">{fc(store.getTotalPaid())}</span></div>
         {store.getBalance() > 0 && <div className="flex justify-between"><span className="text-gray-500">Balance due</span><span className="font-medium text-red-600">{fc(store.getBalance())}</span></div>}
-        {store.sale_type === 'prescription_order' && <div className="flex justify-between"><span className="text-gray-500">Type</span><span className="px-2 py-0.5 bg-purple-900/30 text-purple-600 rounded text-xs font-medium">Rx Order {'\u2192'} Workshop</span></div>}
+        {store.sale_type === 'prescription_order' && <div className="flex justify-between"><span className="text-gray-500">Type</span><span className="px-2 py-0.5 bg-purple-50 text-purple-700 rounded text-xs font-medium">Rx Order {'\u2192'} Workshop</span></div>}
       </div>
 
       {/* Incentive qualifying items — auto-tagged for kicker tracking */}

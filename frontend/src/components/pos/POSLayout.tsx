@@ -104,24 +104,13 @@ export function POSLayout() {
   const { user } = useAuth();
   const store = usePOSStore();
 
-  // HIGH #6: Block POS access when no store is selected
+  // HIGH #6: Block POS access when no store is selected.
+  // The actual "no store" branch is rendered AFTER all hooks have
+  // run — early-returning here would violate the rules of hooks
+  // and crash the page with "Rendered fewer hooks than expected"
+  // whenever the user toggled their active store mid-session.
   const activeStoreId = user?.activeStoreId || user?.storeIds?.[0] || '';
-  if (!activeStoreId || activeStoreId === 'No store') {
-    return (
-      <div className="min-h-screen min-h-[100dvh] bg-white flex items-center justify-center p-4">
-        <div className="bg-white border border-amber-300 rounded-2xl p-8 max-w-md text-center">
-          <AlertTriangle className="w-12 h-12 text-amber-500 mx-auto mb-4" />
-          <h2 className="text-xl font-bold text-gray-900 mb-2">No Store Selected</h2>
-          <p className="text-sm text-gray-500 mb-4">
-            POS requires an active store to process transactions. Please select a store from the header dropdown before accessing Point of Sale.
-          </p>
-          <p className="text-xs text-gray-500">
-            Orders created without a store context cannot be tracked, invoiced, or reported accurately.
-          </p>
-        </div>
-      </div>
-    );
-  }
+  const noStoreSelected = !activeStoreId || activeStoreId === 'No store';
 
   const [showPrescriptionModal, setShowPrescriptionModal] = useState(false);
   const [showNewPrescription, setShowNewPrescription] = useState(false);
@@ -405,6 +394,26 @@ export function POSLayout() {
   const showCartCol =
     (['products', 'review', 'prescription'] as POSStep[]).includes(store.current_step) &&
     (store.cart || []).length > 0;
+
+  // Hooks-rule-safe early return: every useState / useEffect / useMemo /
+  // useCallback above this point is unconditional, so React's hook
+  // ordering stays stable when activeStoreId flips.
+  if (noStoreSelected) {
+    return (
+      <div className="min-h-screen min-h-[100dvh] bg-white flex items-center justify-center p-4">
+        <div className="bg-white border border-amber-300 rounded-2xl p-8 max-w-md text-center">
+          <AlertTriangle className="w-12 h-12 text-amber-500 mx-auto mb-4" />
+          <h2 className="text-xl font-bold text-gray-900 mb-2">No Store Selected</h2>
+          <p className="text-sm text-gray-500 mb-4">
+            POS requires an active store to process transactions. Please select a store from the header dropdown before accessing Point of Sale.
+          </p>
+          <p className="text-xs text-gray-500">
+            Orders created without a store context cannot be tracked, invoiced, or reported accurately.
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="pos-body">
@@ -1121,7 +1130,7 @@ function StepCustomer() {
           <>
           <div className={`${isWalkin ? 'bg-white border-gray-200' : 'bg-bv-red-50 border-bv-red-600'} border rounded-xl p-4 flex items-center justify-between`}>
             <div className="flex items-center gap-3">
-              <div className={`w-10 h-10 rounded-full ${isWalkin ? 'bg-gray-500' : 'bg-bv-red-700'} text-gray-900 flex items-center justify-center font-semibold`}>{store.customer.name?.charAt(0)?.toUpperCase() || 'W'}</div>
+              <div className={`w-10 h-10 rounded-full ${isWalkin ? 'bg-gray-500 text-white' : 'bg-bv-red-700 text-white'} flex items-center justify-center font-semibold`}>{store.customer.name?.charAt(0)?.toUpperCase() || 'W'}</div>
               <div>
                 <p className="font-semibold text-gray-900">{store.customer.name}</p>
                 <p className="text-sm text-gray-500">{store.customer.phone || 'No phone'}</p>
@@ -1149,7 +1158,7 @@ function StepCustomer() {
                 const custPhone = cust.phone || cust.mobile || '';
                 return (
                   <div className="flex items-center gap-3">
-                    <div className="w-8 h-8 rounded-full bg-bv-red-700 flex items-center justify-center text-sm font-bold text-gray-900">{custName.charAt(0).toUpperCase()}</div>
+                    <div className="w-8 h-8 rounded-full bg-bv-red-700 flex items-center justify-center text-sm font-bold text-white">{custName.charAt(0).toUpperCase()}</div>
                     <div className="flex-1 min-w-0">
                       <p className="text-sm font-medium text-gray-900 truncate">{custName}</p>
                       <p className="text-xs text-gray-500">{custPhone} {cust.city && `\u00B7 ${cust.city}`}</p>
@@ -1425,7 +1434,7 @@ function StepProducts({ onOpenLensModal }: { onOpenLensModal: () => void }) {
           <BarcodeScanner onScan={handleBarcodeScan} onManualSearch={handleManualSearch} placeholder="Scan barcode or search products..." autoFocus />
         </div>
         {store.sale_type === 'prescription_order' && store.prescription && (
-          <button onClick={onOpenLensModal} className="flex items-center gap-2 px-4 py-2 bg-purple-900/30 text-purple-700 border border-purple-200 rounded-lg hover:bg-purple-100 whitespace-nowrap text-sm font-medium">
+          <button onClick={onOpenLensModal} className="flex items-center gap-2 px-4 py-2 bg-purple-50 text-purple-700 border border-purple-200 rounded-lg hover:bg-purple-100 whitespace-nowrap text-sm font-medium">
             <Eye className="w-4 h-4" /> Add Lens (Manual)
           </button>
         )}
@@ -1483,7 +1492,7 @@ function StepProducts({ onOpenLensModal }: { onOpenLensModal: () => void }) {
       </div>
 
       {store.sale_type === 'prescription_order' && store.prescription && (
-        <div className="bg-purple-900/30 border border-purple-200 rounded-lg p-3 flex items-center gap-3 text-sm">
+        <div className="bg-purple-50 border border-purple-200 rounded-lg p-3 flex items-center gap-3 text-sm">
           <Eye className="w-4 h-4 text-purple-600 flex-shrink-0" />
           <span className="text-purple-700 font-medium">Rx:</span>
           <span className="text-purple-500">OD {store.prescription.rightEye?.sphere}/{store.prescription.rightEye?.cylinder} {'\u00B7'} OS {store.prescription.leftEye?.sphere}/{store.prescription.leftEye?.cylinder}</span>
@@ -1608,7 +1617,7 @@ function StepReview({ onOpenDiscount }: { onOpenDiscount: (item: CartLineItem) =
       {store.customer && (
         <div className="bg-white rounded-lg p-3 flex items-center gap-3 text-sm">
           <User className="w-4 h-4 text-gray-500" /><span className="font-medium">{store.customer.name}</span><span className="text-gray-500">{store.customer.phone}</span>
-          {store.sale_type === 'prescription_order' && <span className="ml-auto px-2 py-0.5 bg-purple-900/30 text-purple-600 rounded text-xs font-medium">Prescription Order</span>}
+          {store.sale_type === 'prescription_order' && <span className="ml-auto px-2 py-0.5 bg-purple-50 text-purple-600 rounded text-xs font-medium">Prescription Order</span>}
         </div>
       )}
 
