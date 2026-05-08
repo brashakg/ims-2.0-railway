@@ -111,11 +111,6 @@ export default function LoginPage() {
               {loading ? "Signing in..." : "Sign In"}
             </button>
           </form>
-
-          {/* Footer */}
-          <div className="mt-6 text-center text-xs sm:text-sm text-slate-600">
-            <p>Demo credentials available upon request</p>
-          </div>
         </div>
       </div>
     </div>

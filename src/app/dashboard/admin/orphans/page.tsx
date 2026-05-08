@@ -109,6 +109,20 @@ export default function OrphansPage() {
     remaining: 0,
   });
 
+  // Failed-product detail collected across all chunks of a push run.
+  // We map productId → { title, brand, modelNo, message } so the
+  // post-push modal can show a row per failure with the actual Shopify
+  // userError text and a direct link to fix the product.
+  interface PushFailure {
+    productId: string;
+    title: string | null;
+    brand: string | null;
+    modelNo: string | null;
+    message: string;
+  }
+  const [failedDetails, setFailedDetails] = useState<PushFailure[]>([]);
+  const [failureModalOpen, setFailureModalOpen] = useState(false);
+
   // Delete state
   const [archiveRunning, setArchiveRunning] = useState(false);
   const [hardDeleteRunning, setHardDeleteRunning] = useState(false);
@@ -214,18 +228,27 @@ export default function OrphansPage() {
       remaining: startTotal,
     });
     setBanner(null);
+    setFailedDetails([]);
 
     let pushed = 0;
     let failed = 0;
     let skipped = 0;
     let remaining = startTotal;
     let loops = 0;
+    // Per-product failure log accumulated across chunks. We dedupe by
+    // productId — if the same product is retried and fails again, we
+    // keep the most recent message rather than duplicating the row.
+    const failuresByProductId = new Map<string, PushFailure>();
     // Client-side circuit breaker: stop after 5 consecutive chunks where the
     // backend reported zero successes. Pairs with the server-side breaker in
     // pushProductsToShopify so we don't hammer Shopify 60+ times.
     let consecutiveEmptyChunks = 0;
     const MAX_EMPTY_CHUNKS = 5;
     let abortReason: string | undefined;
+
+    // Snapshot the rows table so we can resolve productId → title/brand
+    // for the failure modal even if the filter changes underneath.
+    const rowIndex = new Map(rows.map((r) => [r.id, r]));
 
     while (remaining > 0 && loops < 200) {
       const chunk = await runPushChunk();
@@ -234,6 +257,21 @@ export default function OrphansPage() {
       failed += chunk.summary.failed;
       skipped += chunk.summary.skipped;
       remaining = chunk.remainingPushable;
+
+      // Capture per-product failures for the modal.
+      for (const r of chunk.results) {
+        if (r.status === "FAILED") {
+          const meta = rowIndex.get(r.productId);
+          failuresByProductId.set(r.productId, {
+            productId: r.productId,
+            title: meta?.title ?? null,
+            brand: meta?.brand ?? null,
+            modelNo: meta?.modelNo ?? null,
+            message: r.message || "(no error message returned)",
+          });
+        }
+      }
+
       setPushProgress({
         pushed,
         failed,
@@ -266,6 +304,8 @@ export default function OrphansPage() {
       await new Promise((r) => setTimeout(r, 200));
     }
 
+    const failures = Array.from(failuresByProductId.values());
+    setFailedDetails(failures);
     setPushRunning(false);
     setSelected(new Set());
     setBanner({
@@ -274,6 +314,9 @@ export default function OrphansPage() {
         ? `Push halted. ${pushed} pushed, ${failed} failed, ${skipped} skipped. ${abortReason}`
         : `Push finished. ${pushed} pushed, ${failed} failed, ${skipped} skipped. Remaining pushable: ${remaining}.`,
     });
+    // Auto-open the failure modal when there's anything to investigate.
+    // Staff can dismiss it; "View failures" link in the banner re-opens.
+    if (failures.length > 0) setFailureModalOpen(true);
     await fetchOrphans(1);
   };
 
@@ -384,13 +427,22 @@ export default function OrphansPage() {
 
       {banner && (
         <div
-          className={`mb-4 px-4 py-3 rounded-lg text-sm ${
+          className={`mb-4 px-4 py-3 rounded-lg text-sm flex items-center justify-between gap-3 flex-wrap ${
             banner.type === "success"
               ? "bg-emerald-50 text-emerald-800 border border-emerald-200"
               : "bg-red-50 text-red-800 border border-red-200"
           }`}
         >
-          {banner.text}
+          <span>{banner.text}</span>
+          {failedDetails.length > 0 && (
+            <button
+              type="button"
+              onClick={() => setFailureModalOpen(true)}
+              className="text-red-700 underline text-xs font-medium hover:text-red-900 whitespace-nowrap"
+            >
+              View {failedDetails.length} failure{failedDetails.length === 1 ? "" : "s"} →
+            </button>
+          )}
         </div>
       )}
 
@@ -735,6 +787,114 @@ export default function OrphansPage() {
                   <Loader2 className="w-4 h-4 animate-spin" />
                 )}
                 Permanently delete
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ─── Push failure detail modal ─────────────────────
+          Shows up automatically when a push run produces any FAILED
+          rows. Re-openable via the "View N failures" link inside the
+          banner. Each row shows the title, brand/model, the actual
+          Shopify error message (verbatim from the SyncLog), and a
+          direct Edit link so staff can fix the offending field. */}
+      {failureModalOpen && (
+        <div
+          onClick={() => setFailureModalOpen(false)}
+          className="fixed inset-0 z-50 bg-slate-900/40 flex items-start justify-center pt-[8vh] px-4"
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="bg-white rounded-xl shadow-2xl border border-slate-200 w-full max-w-3xl max-h-[80vh] flex flex-col fade-in"
+          >
+            <div className="flex items-center justify-between p-4 border-b border-slate-200">
+              <div>
+                <h2 className="text-base font-semibold text-slate-900">
+                  Push failures
+                </h2>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  {failedDetails.length} product
+                  {failedDetails.length === 1 ? "" : "s"} couldn&apos;t reach
+                  Shopify. Click the title or Edit to fix the underlying
+                  field, then re-run the push.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setFailureModalOpen(false)}
+                className="text-slate-400 hover:text-slate-700 text-xl leading-none w-8 h-8 flex items-center justify-center"
+                aria-label="Close"
+              >
+                ×
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto">
+              {failedDetails.length === 0 ? (
+                <div className="p-8 text-center text-slate-500 text-sm">
+                  No failures to show.
+                </div>
+              ) : (
+                <table className="w-full text-sm">
+                  <thead className="bg-slate-50 border-b border-slate-200 sticky top-0">
+                    <tr>
+                      <th className="px-3 py-2 text-left text-xs font-semibold text-slate-600 uppercase tracking-wide">
+                        Product
+                      </th>
+                      <th className="px-3 py-2 text-left text-xs font-semibold text-slate-600 uppercase tracking-wide">
+                        Reason
+                      </th>
+                      <th className="px-3 py-2 text-right text-xs font-semibold text-slate-600 uppercase tracking-wide w-20">
+                        Action
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {failedDetails.map((f) => (
+                      <tr
+                        key={f.productId}
+                        className="border-b border-slate-100 last:border-0 align-top"
+                      >
+                        <td className="px-3 py-3 max-w-xs">
+                          <Link
+                            href={`/dashboard/products/edit/${f.productId}`}
+                            className="font-medium text-slate-900 hover:text-blue-700 hover:underline block truncate"
+                          >
+                            {f.title || "(untitled)"}
+                          </Link>
+                          <div className="text-xs text-slate-500 mt-0.5">
+                            {(f.brand || "—") + " · " + (f.modelNo || "—")}
+                          </div>
+                        </td>
+                        <td className="px-3 py-3 text-xs text-red-700 bg-red-50/50 font-mono whitespace-pre-wrap break-words">
+                          {f.message}
+                        </td>
+                        <td className="px-3 py-3 text-right">
+                          <Link
+                            href={`/dashboard/products/edit/${f.productId}`}
+                            className="inline-flex items-center gap-1 px-2 py-1 text-xs text-slate-700 border border-slate-300 rounded hover:bg-slate-50"
+                          >
+                            <Edit2 className="w-3 h-3" />
+                            Edit
+                          </Link>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+            <div className="p-3 border-t border-slate-200 bg-slate-50 flex items-center justify-between text-xs text-slate-500">
+              <span>
+                Shopify error messages are returned verbatim — see SyncLog
+                for the same text.
+              </span>
+              <button
+                type="button"
+                onClick={() => setFailureModalOpen(false)}
+                className="px-3 py-1.5 bg-white border border-slate-300 rounded-md text-slate-700 hover:bg-slate-50"
+              >
+                Close
               </button>
             </div>
           </div>
