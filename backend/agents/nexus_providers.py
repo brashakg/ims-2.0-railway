@@ -241,12 +241,22 @@ async def shiprocket_track_awb(db, awb: str) -> SyncResult:
 # ============================================================================
 
 
-def tally_build_day_voucher_xml(orders: List[Dict[str, Any]]) -> str:
+def tally_build_day_voucher_xml(
+    orders: List[Dict[str, Any]],
+    store_meta: Optional[Dict[str, Any]] = None,
+) -> str:
     """
     Build a single Tally import XML for the day's sales vouchers.
     Pure function — no I/O. The caller decides what to do with the XML
     (write to tally_exports collection for CA to download, or push to
     Tally HTTP-Server if one's wired).
+
+    `store_meta`, when provided, is baked into the per-voucher
+    `<NARRATION>` and `<COSTCENTRECATEGORY>` so the CA's RDP-Tally
+    companies (one per branch) can identify the source store at import
+    time. Expected keys: store_id, store_code, store_name. None of
+    them are required individually — narration falls back to whatever
+    is present.
 
     Tally XML format: https://help.tallysolutions.com/docs/te9rel66/Tally.ERP9/...
     Simplified schema — one VOUCHER per order with sales ledger + party
@@ -254,6 +264,12 @@ def tally_build_day_voucher_xml(orders: List[Dict[str, Any]]) -> str:
     cost-center allocations, but those are per-tenant and can be
     parameterized later.
     """
+    meta = store_meta or {}
+    store_code = str(meta.get("store_code") or meta.get("store_id") or "").strip()
+    store_name = str(meta.get("store_name") or "").strip()
+    narration_bits = [b for b in (store_code, store_name) if b]
+    narration = " · ".join(narration_bits)
+
     vouchers = []
     for o in orders:
         order_id = o.get("order_id", "")
@@ -264,12 +280,21 @@ def tally_build_day_voucher_xml(orders: List[Dict[str, Any]]) -> str:
         sgst = float(o.get("sgst_amount", 0) or 0)
         total = float(o.get("grand_total", 0) or 0)
 
+        narration_block = (
+            f"\n    <NARRATION>{narration}</NARRATION>" if narration else ""
+        )
+        cost_centre_block = (
+            f"\n    <COSTCENTRECATEGORY>{store_code}</COSTCENTRECATEGORY>"
+            if store_code
+            else ""
+        )
+
         voucher = f"""
   <VOUCHER VCHTYPE="Sales" ACTION="Create">
     <DATE>{order_date}</DATE>
     <VOUCHERTYPENAME>Sales</VOUCHERTYPENAME>
     <VOUCHERNUMBER>{order_id}</VOUCHERNUMBER>
-    <PARTYLEDGERNAME>{party}</PARTYLEDGERNAME>
+    <PARTYLEDGERNAME>{party}</PARTYLEDGERNAME>{narration_block}{cost_centre_block}
     <ALLLEDGERENTRIES.LIST>
       <LEDGERNAME>{party}</LEDGERNAME>
       <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
@@ -309,3 +334,77 @@ def tally_build_day_voucher_xml(orders: List[Dict[str, Any]]) -> str:
   </BODY>
 </ENVELOPE>"""
     return wrapper
+
+
+def validate_voucher_balance(orders: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Pre-export sanity check on a day's orders.
+
+    Per-order assertion: `abs(taxable + tax - grand_total) < 0.50`
+    (50-paise tolerance for half-up rounding across line items).
+
+    Per-batch assertion: `sum(grand_total) - sum(total_discount) ≈
+    sum(taxable) + sum(tax)` within ₹1 (cumulative rounding can be
+    larger than the per-row tolerance).
+
+    Returns a structured report so the orchestrator can decide whether
+    to flag the row as `balanced=False` and suffix the XML filename
+    with `_UNBALANCED`. Does NOT mutate the orders. Pure function.
+    """
+    mismatches: List[Dict[str, Any]] = []
+    sum_grand = 0.0
+    sum_subtotal = 0.0
+    sum_taxable = 0.0
+    sum_tax = 0.0
+    sum_discount = 0.0
+
+    for o in orders:
+        grand = float(o.get("grand_total", 0) or 0)
+        taxable = float(o.get("taxable", 0) or 0)
+        tax = float(o.get("tax", o.get("tax_amount", 0)) or 0)
+        subtotal = float(o.get("subtotal", 0) or 0)
+        discount = float(o.get("total_discount", 0) or 0)
+
+        sum_grand += grand
+        sum_subtotal += subtotal
+        sum_taxable += taxable
+        sum_tax += tax
+        sum_discount += discount
+
+        # taxable + tax should land within 50 paise of grand_total.
+        # Skip the check when taxable is zero (e.g. legacy orders that
+        # predate the per-category GST split): it would always fail.
+        if taxable <= 0:
+            continue
+        expected = round(taxable + tax, 2)
+        delta = round(grand - expected, 2)
+        if abs(delta) >= 0.5:
+            mismatches.append(
+                {
+                    "order_id": o.get("order_id", ""),
+                    "grand_total": round(grand, 2),
+                    "taxable_plus_tax": expected,
+                    "delta": delta,
+                }
+            )
+
+    batch_check_lhs = round(sum_grand - sum_discount, 2)
+    batch_check_rhs = round(sum_taxable + sum_tax, 2)
+    batch_delta = round(batch_check_lhs - batch_check_rhs, 2)
+    batch_ok = abs(batch_delta) < 1.00
+
+    return {
+        "ok": len(mismatches) == 0 and batch_ok,
+        "mismatch_count": len(mismatches),
+        "mismatches": mismatches[:50],  # cap report size; full list still in mismatch_count
+        "batch_delta": batch_delta,
+        "batch_ok": batch_ok,
+        "totals": {
+            "grand_total": round(sum_grand, 2),
+            "subtotal": round(sum_subtotal, 2),
+            "taxable": round(sum_taxable, 2),
+            "tax": round(sum_tax, 2),
+            "total_discount": round(sum_discount, 2),
+            "order_count": len(orders),
+        },
+    }

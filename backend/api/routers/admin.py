@@ -651,6 +651,174 @@ async def test_tally_connection(current_user: dict = Depends(get_current_user)):
 
 
 # ============================================================================
+# TALLY EXPORT — list / download / regenerate (Phase I-6)
+# ============================================================================
+# Per-store voucher XML download for the CA's RDP-Tally companies.
+# The orchestrator (NEXUS daily 23:00 tick) writes one row per
+# (export_date, store_id) tuple to the `tally_exports` Mongo collection;
+# these endpoints surface that surface to the operator UI.
+
+from fastapi import Query
+from fastapi.responses import Response
+
+
+def _tally_exports_collection():
+    """Get the tally_exports collection or None when DB is offline."""
+    try:
+        from database.connection import get_db
+        db = get_db()
+        if db and db.is_connected:
+            return db.get_collection("tally_exports")
+    except Exception:
+        pass
+    return None
+
+
+def _normalise_export_date(date_str: str) -> str:
+    """Frontend posts YYYY-MM-DD; orchestrator writes ISO datetime at
+    midnight UTC (with +00:00 suffix). Normalise to the SAME form used
+    as the natural key in `tally_exports` so equality matches."""
+    try:
+        anchor = datetime.fromisoformat(date_str).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        # Force UTC tzinfo so isoformat produces '...+00:00' to match
+        # what the orchestrator writes via datetime.now(timezone.utc).
+        from datetime import timezone as _tz
+        if anchor.tzinfo is None:
+            anchor = anchor.replace(tzinfo=_tz.utc)
+        return anchor.isoformat()
+    except Exception:
+        raise HTTPException(status_code=400, detail="date must be YYYY-MM-DD")
+
+
+def _scrub_export_row(row: dict) -> dict:
+    """Drop _id and the heavy XML payload from list responses; keep the
+    XML when streaming a single row for download."""
+    if row is None:
+        return {}
+    out = {k: v for k, v in row.items() if k not in {"_id", "xml"}}
+    return out
+
+
+@router.get("/integrations/tally/exports")
+async def list_tally_exports(
+    date: str = Query(..., description="YYYY-MM-DD"),
+    current_user: dict = Depends(get_current_user),
+):
+    """List all per-store Tally exports for the given date.
+    Returns one row per store that had qualifying orders that day.
+    """
+    coll = _tally_exports_collection()
+    if coll is None:
+        return {"date": date, "exports": [], "total": 0}
+    export_date_iso = _normalise_export_date(date)
+    rows = []
+    try:
+        cursor = coll.find({"export_date": export_date_iso})
+        for row in cursor:
+            scrubbed = _scrub_export_row(row)
+            # Surface a precomputed download URL so the frontend doesn't
+            # have to know how to assemble it.
+            sid = scrubbed.get("store_id")
+            if sid:
+                scrubbed["download_url"] = (
+                    f"/api/v1/admin/integrations/tally/voucher.xml"
+                    f"?date={date}&store_id={sid}"
+                )
+            rows.append(scrubbed)
+    except Exception:
+        pass
+    rows.sort(key=lambda r: (r.get("store_code") or "", r.get("store_name") or ""))
+    return {"date": date, "exports": rows, "total": len(rows)}
+
+
+@router.get("/integrations/tally/voucher.xml")
+async def download_tally_voucher_xml(
+    date: str = Query(..., description="YYYY-MM-DD"),
+    store_id: str = Query(..., description="Active store_id"),
+    current_user: dict = Depends(get_current_user),
+):
+    """Stream the raw Tally voucher XML for one (date, store) tuple.
+    Filename gets `_UNBALANCED` suffix if the row failed validation
+    so the CA never accidentally imports an unreconciled voucher.
+    """
+    coll = _tally_exports_collection()
+    if coll is None:
+        raise HTTPException(status_code=503, detail="Database not available")
+    export_date_iso = _normalise_export_date(date)
+    row = coll.find_one({"export_date": export_date_iso, "store_id": store_id})
+    if row is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No Tally export found for date={date}, store_id={store_id}",
+        )
+    xml = row.get("xml", "")
+    code = row.get("store_code") or store_id
+    suffix = "" if row.get("balanced", True) else "_UNBALANCED"
+    filename = f"{code}_{date}{suffix}.xml"
+    return Response(
+        content=xml,
+        media_type="application/xml",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "X-Tally-Balanced": "1" if row.get("balanced", True) else "0",
+            "X-Tally-Voucher-Count": str(row.get("voucher_count", 0)),
+        },
+    )
+
+
+class RegenerateTallyExport(BaseModel):
+    date: str = Field(..., description="YYYY-MM-DD")
+    store_id: Optional[str] = Field(
+        None, description="Single store to regenerate; omit to run all active stores"
+    )
+
+
+@router.post("/integrations/tally/regenerate")
+async def regenerate_tally_export(
+    payload: RegenerateTallyExport,
+    current_user: dict = Depends(get_current_user),
+):
+    """Manually re-run the Tally export for one store or the whole chain.
+    Idempotent — overwrites any existing row for the same (date, store_id).
+    SUPERADMIN only.
+    """
+    if "SUPERADMIN" not in (current_user.get("roles") or []):
+        raise HTTPException(status_code=403, detail="SUPERADMIN required to regenerate Tally exports")
+
+    # Validate date format up front so the error message points at the input.
+    try:
+        anchor = datetime.fromisoformat(payload.date).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+    except Exception:
+        raise HTTPException(status_code=400, detail="date must be YYYY-MM-DD")
+
+    # Lazy-import the registry so the router file stays cheap to load
+    # when the agents subsystem isn't initialised (tests, scripts, etc).
+    try:
+        from agents.registry import get_agent
+        nexus = get_agent("nexus")
+        if nexus is None:
+            raise HTTPException(status_code=503, detail="NEXUS agent not registered")
+        result = await nexus._build_tally_export(target_date=anchor, store_id=payload.store_id)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Tally regenerate failed: {e}")
+
+    return {
+        "ok": getattr(result, "ok", False),
+        "items_synced": getattr(result, "items_synced", 0),
+        "notes": getattr(result, "notes", ""),
+        "error": getattr(result, "error", None),
+        "date": payload.date,
+        "store_id": payload.store_id,
+    }
+
+
+# ============================================================================
 # SMS GATEWAY ENDPOINTS
 # ============================================================================
 

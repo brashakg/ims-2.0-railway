@@ -25,7 +25,7 @@ Scope of MVP implementation:
     NEXUS would call into next pass
 """
 
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from datetime import datetime, timezone, timedelta
 import logging
 
@@ -36,6 +36,7 @@ from ..nexus_providers import (
     razorpay_list_payments,
     shiprocket_track_awb,
     tally_build_day_voucher_xml,
+    validate_voucher_balance,
 )
 
 logger = logging.getLogger(__name__)
@@ -218,12 +219,31 @@ class NexusAgent(JarvisAgent):
             notes=f"Checked {len(shipped_with_awb)} AWBs, {updated} status changes",
         )
 
-    async def _build_tally_export(self) -> SyncResult:
+    async def _build_tally_export(self, target_date: Optional[datetime] = None,
+                                   store_id: Optional[str] = None) -> SyncResult:
         """
-        Nightly Tally XML export — aggregate today's sales orders into
-        a single voucher XML, write to tally_exports collection for the
-        CA to download. Real push to Tally's HTTP Server is optional
-        (some tenants prefer manual import).
+        Nightly Tally XML export — split per active store.
+
+        For each active store with at least one matching order on
+        `target_date` (defaults to today UTC), generates a voucher XML,
+        runs a balance-validation gate (taxable + tax ≈ grand_total per
+        order; subtotal arithmetic per batch), and writes one row per
+        (date, store_id) tuple to `tally_exports`.
+
+        Per the user direction (Phase I-6) the CA imports the XML in a
+        Tally Company **per branch** through Remote Desktop, so each
+        store gets its own download. Old single-doc rows (pre-I-6)
+        remain queryable; new rows are distinguished by the presence
+        of a `store_id` field.
+
+        When `store_id` is supplied (manual /regenerate trigger), only
+        that store is processed. Without it, all active stores run.
+
+        When the orders for a store fail balance validation, the row
+        is still written (so the operator can see what's wrong) but
+        with `balanced=False`, `balance_issues`, and an `_UNBALANCED`
+        XML filename suffix. An `agent.event("tally.unbalanced", ...)`
+        is emitted so SENTINEL can flag it.
         """
         orders_coll = self.get_collection("orders")
         export_coll = self.get_collection("tally_exports")
@@ -231,10 +251,123 @@ class NexusAgent(JarvisAgent):
             return SyncResult(ok=True, provider="tally", kind="export",
                               notes="required collection unavailable — heartbeat")
 
+        # Resolve the day-window for the export
+        day_anchor = target_date or datetime.now(timezone.utc)
+        day_start = day_anchor.replace(hour=0, minute=0, second=0, microsecond=0)
+        day_end = day_start + timedelta(days=1)
+        export_date_iso = day_start.isoformat()
+
+        # Resolve the list of stores to process
         try:
-            today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+            from api.dependencies import get_store_repository
+            store_repo = get_store_repository()
+        except Exception as e:
+            logger.warning(f"[NEXUS] StoreRepository unavailable: {e}")
+            store_repo = None
+
+        if store_id:
+            store = store_repo.find_by_id(store_id) if store_repo else None
+            stores = [store] if store else []
+            if not stores:
+                return SyncResult(ok=False, provider="tally", kind="export",
+                                  error=f"store_id '{store_id}' not found")
+        else:
+            stores = store_repo.find_active() if store_repo else []
+            if not stores:
+                # Fallback: no store directory available — single-row legacy path
+                logger.warning("[NEXUS] No active stores; falling back to chain-wide single export.")
+                return await self._build_tally_export_legacy(day_start, day_end, orders_coll, export_coll)
+
+        rows_written = 0
+        unbalanced_stores: List[str] = []
+        total_vouchers = 0
+
+        for store in stores:
+            sid = store.get("store_id")
+            if not sid:
+                continue
+            try:
+                orders = list(orders_coll.find({
+                    "created_at": {"$gte": day_start.isoformat(), "$lt": day_end.isoformat()},
+                    "status": {"$in": ["COMPLETED", "DELIVERED", "PAID"]},
+                    "store_id": sid,
+                }))
+            except Exception as e:
+                logger.warning(f"[NEXUS] orders query failed for store {sid}: {e}")
+                continue
+
+            if not orders:
+                continue
+
+            balance = validate_voucher_balance(orders)
+            store_meta = {
+                "store_id": sid,
+                "store_code": store.get("store_code") or sid,
+                "store_name": store.get("store_name") or sid,
+            }
+            xml = tally_build_day_voucher_xml(orders, store_meta=store_meta)
+
+            row = {
+                "agent_id": self.agent_id,
+                "export_date": export_date_iso,
+                "store_id": sid,
+                "store_code": store_meta["store_code"],
+                "store_name": store_meta["store_name"],
+                "voucher_count": len(orders),
+                "xml": xml,
+                "balanced": balance["ok"],
+                "balance_check": balance,
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "consumed": False,
+            }
+
+            try:
+                # Replace any prior row for the same (date, store_id) so
+                # /regenerate is idempotent. Compound natural key.
+                export_coll.update_one(
+                    {"export_date": export_date_iso, "store_id": sid},
+                    {"$set": row},
+                    upsert=True,
+                )
+                rows_written += 1
+                total_vouchers += len(orders)
+                if not balance["ok"]:
+                    unbalanced_stores.append(sid)
+            except Exception as e:
+                logger.warning(f"[NEXUS] tally_exports write failed for store {sid}: {e}")
+
+        if unbalanced_stores:
+            try:
+                from ..registry import dispatch_event
+                await dispatch_event(
+                    "tally.unbalanced",
+                    {"date": export_date_iso, "stores": unbalanced_stores},
+                )
+            except Exception:
+                pass  # event bus is fail-soft
+
+        if rows_written == 0:
+            return SyncResult(ok=True, provider="tally", kind="export",
+                              notes="No completed orders today across active stores.")
+
+        notes = f"Exported {rows_written} store row(s), {total_vouchers} voucher(s) total"
+        if unbalanced_stores:
+            notes += f", {len(unbalanced_stores)} unbalanced"
+        return SyncResult(
+            ok=True,
+            provider="tally",
+            kind="export",
+            items_synced=total_vouchers,
+            notes=notes,
+        )
+
+    async def _build_tally_export_legacy(self, day_start, day_end, orders_coll, export_coll) -> SyncResult:
+        """Single-row chain-wide export — used when StoreRepository
+        is unavailable so we never silently skip the export. Mirrors
+        the pre-I-6 behavior."""
+        try:
             todays_orders = list(orders_coll.find({
-                "created_at": {"$gte": today.isoformat()},
+                "created_at": {"$gte": day_start.isoformat(), "$lt": day_end.isoformat()},
                 "status": {"$in": ["COMPLETED", "DELIVERED", "PAID"]},
             }))
         except Exception as e:
@@ -242,16 +375,18 @@ class NexusAgent(JarvisAgent):
 
         if not todays_orders:
             return SyncResult(ok=True, provider="tally", kind="export",
-                              notes="No completed orders today — nothing to export")
+                              notes="No completed orders today (legacy path)")
 
+        balance = validate_voucher_balance(todays_orders)
         xml = tally_build_day_voucher_xml(todays_orders)
-
         try:
             export_coll.insert_one({
                 "agent_id": self.agent_id,
-                "export_date": today.isoformat(),
+                "export_date": day_start.isoformat(),
                 "voucher_count": len(todays_orders),
                 "xml": xml,
+                "balanced": balance["ok"],
+                "balance_check": balance,
                 "generated_at": datetime.now(timezone.utc).isoformat(),
                 "consumed": False,
             })
@@ -262,7 +397,7 @@ class NexusAgent(JarvisAgent):
         return SyncResult(
             ok=True, provider="tally", kind="export",
             items_synced=len(todays_orders),
-            notes=f"Exported {len(todays_orders)} voucher(s), XML size {len(xml)} bytes",
+            notes=f"Legacy chain-wide export: {len(todays_orders)} voucher(s)",
         )
 
     async def _record_sync_runs(self, runs: List[Dict[str, Any]]):
