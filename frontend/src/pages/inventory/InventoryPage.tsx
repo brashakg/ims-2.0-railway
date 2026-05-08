@@ -313,6 +313,37 @@ export function InventoryPage() {
     { id: 'overstock',      label: 'Overstock',       icon: Boxes },
   ];
 
+  /**
+   * DELTAS punch-list: collapse 14 tabs into 5 functional groups.
+   * Catalog stays a top-level entry (primary read view); everything
+   * else clusters by intent — health checks, day-to-day operations,
+   * optical-specific surfaces, and read-only analytics.
+   *
+   * Sub-nav appears only when the active group has >1 child.
+   */
+  type GroupId = 'catalog' | 'health' | 'ops' | 'optical' | 'insights';
+  const tabGroups: Array<{
+    id: GroupId;
+    label: string;
+    icon: typeof AlertTriangle;
+    members: ViewTab[];
+  }> = [
+    { id: 'catalog',  label: 'Catalog',     icon: Package,         members: ['catalog'] },
+    { id: 'health',   label: 'Stock health',icon: AlertTriangle,   members: ['low-stock', 'non-moving', 'aging', 'alerts'] },
+    { id: 'ops',      label: 'Operations',  icon: ShoppingCart,    members: ['reorders', 'transfers', 'movements', 'stock-count'] },
+    { id: 'optical',  label: 'Optical',     icon: Eye,             members: ['serial-numbers', 'contact-lens', 'power-grid'] },
+    { id: 'insights', label: 'Insights',    icon: BarChart3,       members: ['sell-through', 'overstock'] },
+  ];
+  const activeGroupId: GroupId =
+    tabGroups.find((g) => g.members.includes(activeTab))?.id ?? 'catalog';
+  const activeGroup = tabGroups.find((g) => g.id === activeGroupId)!;
+  const subTabs = tabList.filter((t) => activeGroup.members.includes(t.id));
+  const groupCount = (g: typeof tabGroups[number]): number | undefined => {
+    // Surface a count badge on the group when one of its child tabs has one.
+    const child = tabList.find((t) => g.members.includes(t.id) && typeof t.count === 'number');
+    return child?.count;
+  };
+
   return (
     <div className="inv-body">
       {/* Editorial header */}
@@ -394,23 +425,49 @@ export function InventoryPage() {
         </div>
       </div>
 
-      {/* Tabs — underline style, mono count */}
+      {/* Primary tab groups (5) — Catalog · Stock health · Operations · Optical · Insights */}
       <div className="inv-tabs">
-        {tabList.map(tab => {
-          const TabIcon = tab.icon;
+        {tabGroups.map((g) => {
+          const GIcon = g.icon;
+          const cnt = groupCount(g);
           return (
             <button
-              key={tab.id}
-              onClick={() => setActiveTab(tab.id)}
-              className={activeTab === tab.id ? 'on' : ''}
+              key={g.id}
+              onClick={() => {
+                if (g.id === activeGroupId) return;
+                // Default each group to its first child tab.
+                setActiveTab(g.members[0]);
+              }}
+              className={activeGroupId === g.id ? 'on' : ''}
             >
-              <TabIcon className="w-4 h-4" />
-              {tab.label}
-              {typeof tab.count === 'number' && <span className="count">· {tab.count}</span>}
+              <GIcon className="w-4 h-4" />
+              {g.label}
+              {typeof cnt === 'number' && <span className="count">· {cnt}</span>}
             </button>
           );
         })}
       </div>
+
+      {/* Sub-nav for the active group — only renders when there is >1 child */}
+      {subTabs.length > 1 && (
+        <div className="inv-tabs" style={{ marginTop: -6, paddingLeft: 4, gap: 14 }}>
+          {subTabs.map((tab) => {
+            const TabIcon = tab.icon;
+            return (
+              <button
+                key={tab.id}
+                onClick={() => setActiveTab(tab.id)}
+                className={activeTab === tab.id ? 'on' : ''}
+                style={{ fontSize: 13 }}
+              >
+                <TabIcon className="w-3.5 h-3.5" />
+                {tab.label}
+                {typeof tab.count === 'number' && <span className="count">· {tab.count}</span>}
+              </button>
+            );
+          })}
+        </div>
+      )}
 
       {/* Search and Filters */}
       {activeTab !== 'alerts' && activeTab !== 'transfers' && activeTab !== 'reorders' && activeTab !== 'serial-numbers' && activeTab !== 'aging' && (
