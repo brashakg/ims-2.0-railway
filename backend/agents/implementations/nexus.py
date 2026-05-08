@@ -422,12 +422,113 @@ class NexusAgent(JarvisAgent):
             pass
 
     async def on_event(self, event: str, payload: Dict[str, Any]):
-        """Webhook events → drain the queue immediately."""
-        if event == "webhook.received":
-            integ = payload.get("integration")
-            if integ:
-                logger.info(f"[NEXUS] Webhook for {integ} — running sync")
-                await self._run_integration_sync(integ)
+        """
+        Webhook events — Phase I-2.
+
+        Two payload shapes are handled here:
+
+        1. {"webhook_id": <uuid>, "vendor": "razorpay|shopify|shiprocket"}
+           Emitted by `api/routers/webhooks.py` after a signed inbound POST.
+           We look up the inbox row, dispatch to the vendor-specific
+           handler stub, and mark the row processed=true.
+
+        2. {"integration": "shopify"}  (legacy / scheduler-style)
+           Older callers that just want to nudge a poll. We re-run the
+           integration's sync.
+        """
+        if event != "webhook.received":
+            return
+
+        webhook_id = payload.get("webhook_id")
+        vendor = payload.get("vendor") or payload.get("integration")
+
+        if webhook_id and vendor:
+            await self._handle_inbox_webhook(webhook_id, vendor)
+            return
+
+        # Legacy/scheduler shape — just trigger a sync.
+        if vendor:
+            logger.info(f"[NEXUS] Webhook nudge for {vendor} — running sync")
+            await self._run_integration_sync(vendor)
+
+    async def _handle_inbox_webhook(self, webhook_id: str, vendor: str):
+        """
+        Read the inbox row, hand off to vendor handler, mark processed.
+
+        Stays fail-soft: a missing inbox row, a handler exception, or a
+        Mongo update failure is logged but never raised — the agent loop
+        must keep ticking.
+        """
+        coll = self.get_collection("webhook_inbox")
+        if coll is None:
+            logger.warning(f"[NEXUS] webhook_inbox collection unavailable — cannot drain {webhook_id}")
+            return
+
+        try:
+            doc = coll.find_one({"webhook_id": webhook_id})
+        except Exception as e:
+            logger.warning(f"[NEXUS] inbox lookup failed for {webhook_id}: {e}")
+            return
+
+        if not doc:
+            logger.info(f"[NEXUS] inbox row not found for webhook_id={webhook_id} (already swept?)")
+            return
+
+        if doc.get("processed"):
+            # Idempotent — another worker already drained it.
+            return
+
+        webhook_payload = doc.get("payload") or {}
+        handler_error: str = ""
+        try:
+            if vendor == "razorpay":
+                await self._handle_razorpay_webhook(webhook_payload)
+            elif vendor == "shopify":
+                await self._handle_shopify_webhook(webhook_payload)
+            elif vendor == "shiprocket":
+                await self._handle_shiprocket_webhook(webhook_payload)
+            else:
+                handler_error = f"unknown_vendor:{vendor}"
+                logger.warning(f"[NEXUS] no handler for vendor={vendor!r} (webhook_id={webhook_id})")
+        except Exception as e:
+            handler_error = f"{type(e).__name__}: {e}"
+            logger.warning(f"[NEXUS] {vendor} handler raised on {webhook_id}: {e}")
+
+        # Mark processed regardless of handler outcome — the inbox row's
+        # job is "we received and acknowledged this". Handler-specific
+        # state (retries, dead-letter) goes on a future iteration.
+        try:
+            coll.update_one(
+                {"webhook_id": webhook_id},
+                {"$set": {
+                    "processed": True,
+                    "processed_at": datetime.now(timezone.utc).isoformat(),
+                    **({"handler_error": handler_error} if handler_error else {}),
+                }},
+            )
+        except Exception as e:
+            logger.warning(f"[NEXUS] processed-flag update failed on {webhook_id}: {e}")
+
+    # ------------------------------------------------------------------
+    # Vendor-specific handlers — stubs for now. Each one is the logical
+    # entry point for "translate this vendor envelope into an IMS-side
+    # mutation". MVP: log the event type. Phase I-3 will fill in:
+    #   razorpay:  payment.captured -> mark order PAID, refund.created -> mark REFUNDED
+    #   shopify:   orders/create -> sync inbound order, products/update -> refresh catalog mirror
+    #   shiprocket: shipment status -> update order.tracking_status
+    # ------------------------------------------------------------------
+
+    async def _handle_razorpay_webhook(self, payload: Dict[str, Any]):
+        evt = payload.get("event") or payload.get("type") or "unknown"
+        logger.info(f"[NEXUS] razorpay webhook event={evt}")
+
+    async def _handle_shopify_webhook(self, payload: Dict[str, Any]):
+        evt = payload.get("topic") or payload.get("event") or "unknown"
+        logger.info(f"[NEXUS] shopify webhook topic={evt}")
+
+    async def _handle_shiprocket_webhook(self, payload: Dict[str, Any]):
+        evt = payload.get("current_status") or payload.get("event") or "unknown"
+        logger.info(f"[NEXUS] shiprocket webhook status={evt}")
 
     async def run(self, query: str, context: AgentContext) -> AgentResponse:
         """On-demand: report recent sync runs."""
