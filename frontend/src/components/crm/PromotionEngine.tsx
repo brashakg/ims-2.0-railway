@@ -654,7 +654,7 @@ export function PromotionEngine() {
                         }}
                         className={`px-3 py-1 rounded-full text-xs font-medium transition-all ${
                           form.targetCategories.includes(cat)
-                            ? 'bg-pink-600 text-gray-900'
+                            ? 'bg-pink-600 text-white'
                             : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
                         }`}
                       >

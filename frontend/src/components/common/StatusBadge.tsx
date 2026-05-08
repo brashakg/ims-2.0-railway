@@ -94,20 +94,20 @@ const getStatusColor = (
       case 'at-risk':
         return 'bg-red-600 text-white dark:bg-red-700 dark:text-gray-900';
       case 'in-stock':
-        return 'bg-emerald-600 text-gray-900 dark:bg-emerald-700 dark:text-gray-900';
+        return 'bg-emerald-600 text-white';
       case 'out-of-stock':
       case 'damaged':
-        return 'bg-red-600 text-white dark:bg-red-700 dark:text-gray-900';
+        return 'bg-red-600 text-white';
       case 'low-stock':
-        return 'bg-orange-600 text-gray-900 dark:bg-orange-700 dark:text-gray-900';
+        return 'bg-orange-600 text-white';
       case 'draft':
-        return 'bg-gray-600 text-white dark:bg-gray-100 dark:text-gray-900';
+        return 'bg-gray-600 text-white';
       case 'shipped':
-        return 'bg-cyan-600 text-gray-900 dark:bg-cyan-700 dark:text-gray-900';
+        return 'bg-cyan-600 text-white';
       case 'returned':
-        return 'bg-indigo-600 text-white dark:bg-indigo-700 dark:text-gray-900';
+        return 'bg-indigo-600 text-white';
       case 'refunded':
-        return 'bg-teal-600 text-gray-900 dark:bg-teal-700 dark:text-gray-900';
+        return 'bg-teal-600 text-white';
       case 'inactive':
         return 'bg-gray-600 text-white dark:bg-gray-100 dark:text-gray-900';
       case 'archived':
