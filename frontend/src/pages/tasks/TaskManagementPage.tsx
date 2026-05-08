@@ -3,23 +3,21 @@
 // ============================================================================
 // Coordinate 40 employees with tasks, SOPs, and accountability tracking
 
-import { useState, useEffect } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   CheckSquare,
   Plus,
   Search,
   User,
   Users,
-  Clock,
-  CheckCircle,
-  XCircle,
   AlertTriangle,
   ListChecks,
   TrendingUp,
-  Target,
   Loader2,
   Eye,
   Edit,
+  Zap,
+  ArrowLeft,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
@@ -29,6 +27,17 @@ import { SopEditorModal, type SopTemplateForm } from '../../components/tasks/Sop
 type TabType = 'my-tasks' | 'team-tasks' | 'sop' | 'analytics';
 type TaskStatus = 'PENDING' | 'IN_PROGRESS' | 'COMPLETED' | 'OVERDUE';
 type TaskPriority = 'LOW' | 'MEDIUM' | 'HIGH' | 'URGENT';
+/** Tasks v2 (May-2026 redesign per docs/design/DELTAS.md) — backend
+ * canonical priority is P0-P4. Mapped on load. */
+type PCode = 'P0' | 'P1' | 'P2' | 'P3' | 'P4';
+
+const PRIORITY_META: Record<PCode, { label: string; sub: string }> = {
+  P0: { label: 'P0 · Now',     sub: 'Immediate' },
+  P1: { label: 'P1 · < 30m',   sub: 'Escalating' },
+  P2: { label: 'P2 · Today',   sub: 'Shift close' },
+  P3: { label: 'P3 · Week',    sub: 'Plannable' },
+  P4: { label: 'P4 · Backlog', sub: 'Nice-to-have' },
+};
 
 interface Task {
   id: string;
@@ -40,7 +49,13 @@ interface Task {
   assignedByName: string;
   status: TaskStatus;
   priority: TaskPriority;
+  /** Canonical P0-P4 (preserves the backend semantics). */
+  pCode: PCode;
+  /** Linked SOP id (e.g. SOP-FIN-02). Optional. */
+  sopId?: string;
   dueDate: string;
+  /** Minutes until due. Negative = overdue. Computed on load. */
+  dueInMin: number;
   createdDate: string;
   completedDate?: string;
   storeId: string;
@@ -107,7 +122,6 @@ export function TaskManagementPage() {
   // Phase 6.14 — wire the previously-broken "New Task" / "New SOP" button
   // (state getter was discarded with `const [, setShowCreateTask]`).
   const [showCreateTask, setShowCreateTask] = useState(false);
-  const [, setSelectedTask] = useState<Task | null>(null);
   // SOP editor state — open with null to create, with a template to edit.
   const [sopEditorOpen, setSopEditorOpen] = useState(false);
   const [editingSop, setEditingSop] = useState<SopTemplateForm | null>(null);
@@ -140,10 +154,26 @@ export function TaskManagementPage() {
       };
       const priorityFor = (raw: any): TaskPriority => {
         const p = String(raw ?? '').toUpperCase();
-        if (p === 'P1' || p === 'URGENT') return 'URGENT';
+        if (p === 'P0' || p === 'P1' || p === 'URGENT') return 'URGENT';
         if (p === 'P2' || p === 'HIGH') return 'HIGH';
         if (p === 'P3' || p === 'MEDIUM') return 'MEDIUM';
         return 'LOW';
+      };
+      // Tasks v2: keep backend's canonical P0-P4 alongside the legacy
+      // URGENT/HIGH/MEDIUM/LOW (analytics block still uses those).
+      const pCodeFor = (raw: any): PCode => {
+        const p = String(raw ?? '').toUpperCase();
+        if (p === 'P0') return 'P0';
+        if (p === 'P1' || p === 'URGENT') return 'P1';
+        if (p === 'P2' || p === 'HIGH') return 'P2';
+        if (p === 'P3' || p === 'MEDIUM') return 'P3';
+        return 'P4';
+      };
+      const minutesUntil = (iso?: string): number => {
+        if (!iso) return Number.POSITIVE_INFINITY;
+        const d = new Date(iso);
+        if (isNaN(d.getTime())) return Number.POSITIVE_INFINITY;
+        return Math.round((d.getTime() - Date.now()) / 60000);
       };
       const apiTasks: Task[] = (response?.tasks || []).map((t: any) => ({
         id: t.id,
@@ -155,6 +185,9 @@ export function TaskManagementPage() {
         assignedByName: t.assigned_by_name || t.assigned_by || '',
         status: statusFor(t.status),
         priority: priorityFor(t.priority),
+        pCode: pCodeFor(t.priority),
+        sopId: t.sop_id || t.source?.sop_id,
+        dueInMin: minutesUntil(t.due_at),
         dueDate: t.due_at ? t.due_at.split('T')[0] : '',
         createdDate: t.created_at ? t.created_at.split('T')[0] : '',
         completedDate: t.completed_at ? t.completed_at.split('T')[0] : undefined,
@@ -359,46 +392,8 @@ export function TaskManagementPage() {
     }
   };
 
-  const getStatusBadge = (status: TaskStatus) => {
-    const config: Record<string, { label: string; color: string; icon: typeof Clock }> = {
-      PENDING: { label: 'Pending', color: 'bg-gray-100 text-gray-800', icon: Clock },
-      IN_PROGRESS: { label: 'In Progress', color: 'bg-blue-100 text-blue-800', icon: Target },
-      COMPLETED: { label: 'Completed', color: 'bg-green-100 text-green-800', icon: CheckCircle },
-      OVERDUE: { label: 'Overdue', color: 'bg-red-100 text-red-800', icon: AlertTriangle },
-    };
-    // Defensive fallback: an unrecognised status shouldn't crash the page.
-    const { label, color, icon: Icon } = config[status] ?? {
-      label: String(status ?? 'Unknown'),
-      color: 'bg-gray-100 text-gray-700',
-      icon: Clock,
-    };
-
-    return (
-      <span className={`inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs font-medium ${color}`}>
-        <Icon className="w-3 h-3" />
-        {label}
-      </span>
-    );
-  };
-
-  const getPriorityBadge = (priority: TaskPriority) => {
-    const config: Record<string, { label: string; color: string }> = {
-      LOW: { label: 'Low', color: 'bg-gray-100 text-gray-700' },
-      MEDIUM: { label: 'Medium', color: 'bg-yellow-100 text-yellow-800' },
-      HIGH: { label: 'High', color: 'bg-orange-100 text-orange-800' },
-      URGENT: { label: 'Urgent', color: 'bg-red-100 text-red-800' },
-    };
-    const { label, color } = config[priority] ?? {
-      label: String(priority ?? '—'),
-      color: 'bg-gray-100 text-gray-700',
-    };
-
-    return (
-      <span className={`px-2 py-1 rounded text-xs font-medium ${color}`}>
-        {label}
-      </span>
-    );
-  };
+  // Tasks v2 (May-2026) renders priority via P0-P4 pills + countdown
+  // pills inline; the legacy badge helpers are no longer needed.
 
   const myTasks = tasks.filter(task => task.assignedTo === user?.id || user?.roles?.includes('ADMIN') || user?.roles?.includes('SUPERADMIN'));
   // Audit Run #4: /tasks crashed at the error boundary on initial render.
@@ -420,6 +415,29 @@ export function TaskManagementPage() {
   );
 
   const myOpen = myTasks.filter(t => t.status !== 'COMPLETED').length;
+
+  // Tasks v2 — selected task for split-panel detail. Defaults to the
+  // first overdue/escalating task on tab change so the detail card
+  // is always populated when there's something urgent.
+  const [selectedTaskV2, setSelectedTaskV2] = useState<Task | null>(null);
+  useEffect(() => {
+    if (selectedTaskV2 && filteredTasks.find(t => t.id === selectedTaskV2.id)) return;
+    const next = filteredTasks.find(t => t.pCode === 'P0' || t.pCode === 'P1')
+              || filteredTasks[0]
+              || null;
+    setSelectedTaskV2(next);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filteredTasks.length, activeTab]);
+
+  // Priority strip counts (open tasks only; completed don't count).
+  const priorityCounts: Record<PCode, number> = useMemo(() => {
+    const c: Record<PCode, number> = { P0: 0, P1: 0, P2: 0, P3: 0, P4: 0 };
+    for (const t of filteredTasks) {
+      if (t.status === 'COMPLETED') continue;
+      c[t.pCode] += 1;
+    }
+    return c;
+  }, [filteredTasks]);
 
   return (
     <div className="inv-body">
@@ -766,95 +784,13 @@ export function TaskManagementPage() {
           </div>
         </div>
       ) : (
-        /* Tasks List */
-        <div className="space-y-4">
-          {filteredTasks.map((task) => (
-            <div key={task.id} className="card hover:shadow-lg transition-shadow">
-              <div className="flex items-start justify-between mb-3">
-                <div className="flex-1">
-                  <div className="flex items-center gap-3 mb-2">
-                    <h3 className="text-lg font-semibold text-gray-900">{task.title}</h3>
-                    {getStatusBadge(task.status)}
-                    {getPriorityBadge(task.priority)}
-                  </div>
-                  <p className="text-sm text-gray-600 mb-3">{task.description}</p>
-                </div>
-              </div>
-
-              <div className="grid grid-cols-2 tablet:grid-cols-4 gap-4 mb-4">
-                <div>
-                  <p className="text-xs text-gray-600 mb-1">Assigned To</p>
-                  <p className="text-sm font-medium text-gray-900">{task.assignedToName}</p>
-                </div>
-                <div>
-                  <p className="text-xs text-gray-600 mb-1">Store</p>
-                  <p className="text-sm font-medium text-gray-900">{task.storeName}</p>
-                </div>
-                <div>
-                  <p className="text-xs text-gray-600 mb-1">Due Date</p>
-                  <p className={`text-sm font-medium ${
-                    task.status === 'OVERDUE' ? 'text-red-600' : 'text-gray-900'
-                  }`}>
-                    {new Date(task.dueDate).toLocaleDateString()}
-                  </p>
-                </div>
-                <div>
-                  <p className="text-xs text-gray-600 mb-1">Category</p>
-                  <p className="text-sm font-medium text-gray-900">{task.category}</p>
-                </div>
-              </div>
-
-              {/* Checklist Preview */}
-              {task.checklistItems && task.checklistItems.length > 0 && (
-                <div className="border-t border-gray-200 pt-3">
-                  <p className="text-xs text-gray-600 mb-2">
-                    Checklist ({task.checklistItems.filter(i => i.completed).length}/{task.checklistItems.length})
-                  </p>
-                  <div className="space-y-1">
-                    {task.checklistItems.map((item) => (
-                      <div key={item.id} className="flex items-center gap-2 text-sm">
-                        {item.completed ? (
-                          <CheckCircle className="w-4 h-4 text-green-600" />
-                        ) : (
-                          <XCircle className="w-4 h-4 text-gray-500" />
-                        )}
-                        <span className={item.completed ? 'text-gray-500 line-through' : 'text-gray-700'}>
-                          {item.text}
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              <div className="flex items-center justify-between mt-4 pt-3 border-t border-gray-200">
-                <div className="text-xs text-gray-500">
-                  Created by {task.assignedByName} on {new Date(task.createdDate).toLocaleDateString()}
-                </div>
-                <div className="flex items-center gap-2">
-                  <button
-                    onClick={() => setSelectedTask(task)}
-                    className="btn-outline text-sm py-1"
-                  >
-                    View Details
-                  </button>
-                  {task.status !== 'COMPLETED' && (
-                    <button className="btn-primary text-sm py-1">
-                      Mark Complete
-                    </button>
-                  )}
-                </div>
-              </div>
-            </div>
-          ))}
-
-          {filteredTasks.length === 0 && (
-            <div className="text-center py-12">
-              <CheckSquare className="w-12 h-12 text-gray-500 mx-auto mb-3" />
-              <p className="text-gray-500">No tasks found</p>
-            </div>
-          )}
-        </div>
+        /* Tasks v2 — priority strip + split-panel (per docs/design/tasks.html) */
+        <TasksV2View
+          tasks={filteredTasks}
+          counts={priorityCounts}
+          selected={selectedTaskV2}
+          onSelect={setSelectedTaskV2}
+        />
       )}
 
       {/* Phase 6.14 — SOP create/edit modal. Single surface for both
@@ -914,5 +850,294 @@ export function TaskManagementPage() {
         </div>
       )}
     </div>
+  );
+}
+
+// ============================================================================
+// Tasks v2 split-panel view (priority strip + task list + detail/ladder)
+// Ported from docs/design/tasks.html. Owner-avatar circles intentionally
+// omitted per direction; rendered as a compact mono chip instead.
+// ============================================================================
+
+const PRI_VAR: Record<PCode, string> = {
+  P0: 'var(--p0)',
+  P1: 'var(--p1)',
+  P2: 'var(--p2)',
+  P3: 'var(--p3)',
+  P4: 'var(--p4)',
+};
+
+interface TasksV2ViewProps {
+  tasks: Task[];
+  counts: Record<PCode, number>;
+  selected: Task | null;
+  onSelect: (t: Task | null) => void;
+}
+
+function TasksV2View({ tasks, counts, selected, onSelect }: TasksV2ViewProps) {
+  const detailOpen = !!selected;
+
+  return (
+    <div className={'t-body' + (detailOpen ? ' detail-open' : '')}>
+      {/* Left rail — priority strip + task list */}
+      <div className="t-list">
+        <div className="pri-strip">
+          {(Object.keys(PRIORITY_META) as PCode[]).map((p) => (
+            <div key={p}>
+              <div className="bar" style={{ background: PRI_VAR[p] }} />
+              <div className="l">{PRIORITY_META[p].label}</div>
+              <div className="v">{counts[p] || 0}</div>
+              <div className="d">{PRIORITY_META[p].sub}</div>
+            </div>
+          ))}
+        </div>
+
+        {tasks.length === 0 && (
+          <div className="text-center py-12">
+            <CheckSquare className="w-12 h-12 text-gray-400 mx-auto mb-3" />
+            <p className="text-gray-500">No tasks match the current filter.</p>
+          </div>
+        )}
+
+        {tasks.map((t) => {
+          const isSel = selected?.id === t.id;
+          const isOverdue = t.dueInMin < 0
+            || (t.pCode === 'P1' && t.dueInMin >= 0 && t.dueInMin < 10);
+          const ownerLabel = (t.assignedToName || t.assignedTo || '—')
+            .split(' ')
+            .map((s) => s[0])
+            .filter(Boolean)
+            .slice(0, 2)
+            .join('')
+            .toUpperCase() || '—';
+
+          return (
+            <div
+              key={t.id}
+              className={
+                't-item' +
+                (isSel ? ' sel' : '') +
+                (isOverdue ? ' overdue' : '')
+              }
+              onClick={() => onSelect(t)}
+              role="button"
+              tabIndex={0}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  onSelect(t);
+                }
+              }}
+            >
+              <div className="pri-wrap">
+                <span className={'pill-' + t.pCode}>{t.pCode}</span>
+                <Countdown minutes={t.dueInMin} />
+              </div>
+              <div>
+                <div className="ttl">{t.title}</div>
+                <div className="meta">
+                  <span className="mono">{t.id}</span>
+                  {t.sopId && (
+                    <>
+                      <span>·</span>
+                      <span className="mono">{t.sopId}</span>
+                    </>
+                  )}
+                  <span>·</span>
+                  <span>
+                    Stage: <strong>{t.status.replace('_', ' ').toLowerCase()}</strong>
+                  </span>
+                </div>
+                {(t.pCode === 'P0' || t.pCode === 'P1') && t.dueInMin >= 0 && (
+                  <div className="esc">
+                    <Zap className="w-3 h-3" />
+                    Escalates in {t.dueInMin}m if not closed
+                  </div>
+                )}
+              </div>
+              <div className="own" title={'Owner: ' + (t.assignedToName || '—')}>
+                {ownerLabel}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Detail panel */}
+      <aside className="t-detail">
+        {selected ? (
+          <TaskDetailPanel task={selected} onClose={() => onSelect(null)} />
+        ) : (
+          <div className="d-body">
+            <p className="text-sm text-gray-500">
+              Pick a task on the left to see its escalation ladder and SOP.
+            </p>
+          </div>
+        )}
+      </aside>
+    </div>
+  );
+}
+
+function TaskDetailPanel({ task, onClose }: { task: Task; onClose: () => void }) {
+  const minLeft = Math.max(0, task.dueInMin);
+  const showTimer = task.pCode === 'P0' || task.pCode === 'P1';
+  const created = task.createdDate
+    ? new Date(task.createdDate).toLocaleString('en-IN', {
+        hour: '2-digit',
+        minute: '2-digit',
+        day: '2-digit',
+        month: 'short',
+      })
+    : '—';
+
+  return (
+    <>
+      <div className="d-head">
+        <div className="row" style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 10 }}>
+          <span className={'pill-' + task.pCode}>{task.pCode}</span>
+          <span className="mono" style={{ fontSize: 11, color: 'var(--ink-4)' }}>{task.id}</span>
+          <span style={{ flex: 1 }} />
+          <button
+            type="button"
+            className="btn sm"
+            onClick={onClose}
+            aria-label="Close detail"
+          >
+            <ArrowLeft className="w-3 h-3" /> Back
+          </button>
+          <button type="button" className="btn sm">
+            <User className="w-3 h-3" /> Reassign
+          </button>
+        </div>
+        <h3>{task.title}</h3>
+        <div className="hint" style={{ fontSize: 11.5, color: 'var(--ink-4)', marginTop: 4 }}>
+          Created {created} · by {task.assignedByName || task.assignedBy || 'system'}
+        </div>
+      </div>
+
+      <div className="d-body">
+        {showTimer && (
+          <div className="timer-big">
+            <div>
+              <div className="l">Auto-escalates in</div>
+              <div className="v">
+                {minLeft}
+                <span style={{ fontSize: 20 }}>m</span>
+              </div>
+            </div>
+            <div
+              style={{
+                marginLeft: 'auto',
+                textAlign: 'right',
+                color: 'var(--err)',
+                fontSize: 11.5,
+                maxWidth: 160,
+              }}
+            >
+              Next: <strong>ASM</strong>
+              <br />
+              Then: <strong>Ops Head</strong> in +30m
+            </div>
+          </div>
+        )}
+
+        {task.description && (
+          <div className="d-sec">
+            <h4>Brief</h4>
+            <p style={{ fontSize: 12.5, lineHeight: 1.5, color: 'var(--ink-2)' }}>
+              {task.description}
+            </p>
+          </div>
+        )}
+
+        <div className="d-sec">
+          <h4>Escalation ladder</h4>
+          <div className="ladder">
+            <div className="ladder-step done">
+              <div className="rung">1</div>
+              <div className="who">{task.assignedByName || 'Originator'}</div>
+              <div className="when">Assigned</div>
+            </div>
+            <div className="ladder-step cur">
+              <div className="rung">2</div>
+              <div className="who">{task.assignedToName || 'Owner'} (current)</div>
+              <div className="when">
+                {task.dueInMin < 0 ? `${Math.abs(task.dueInMin)}m overdue` : `${minLeft}m left`}
+              </div>
+            </div>
+            <div className="ladder-step">
+              <div className="rung">3</div>
+              <div className="who">ASM</div>
+              <div className="when">+{minLeft || 30}m</div>
+            </div>
+            <div className="ladder-step">
+              <div className="rung">4</div>
+              <div className="who">Ops Head</div>
+              <div className="when">+{(minLeft || 30) + 30}m</div>
+            </div>
+          </div>
+        </div>
+
+        {task.sopId && (
+          <div className="d-sec">
+            <h4>Attached SOP</h4>
+            <div className="sop-box">
+              <div className="sid">{task.sopId}</div>
+              Open the SOP for the full step-by-step trigger / owner / approver
+              breakdown and checkpoints.
+              <div style={{ marginTop: 10 }}>
+                <button type="button" className="btn sm">Open full SOP</button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {task.checklistItems && task.checklistItems.length > 0 && (
+          <div className="d-sec">
+            <h4>Checklist</h4>
+            <ul style={{ paddingLeft: 18, margin: 0, fontSize: 12.5, color: 'var(--ink-2)' }}>
+              {task.checklistItems.map((c) => (
+                <li key={c.id} style={{ marginBottom: 4 }}>
+                  <span style={{ textDecoration: c.completed ? 'line-through' : 'none' }}>
+                    {c.text}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+      </div>
+    </>
+  );
+}
+
+/**
+ * Live-ticking countdown pill. Shows "Nm" / "<1m" / "Xm late".
+ *  • hot   if 0 ≤ minutes < 10 or already late
+ *  • warm  if 10 ≤ minutes < 30
+ *  • plain otherwise
+ */
+function Countdown({ minutes }: { minutes: number }) {
+  const [m, setM] = useState<number>(minutes);
+  useEffect(() => {
+    setM(minutes);
+    const id = window.setInterval(() => {
+      setM((prev) => prev - 1);
+    }, 60_000);
+    return () => window.clearInterval(id);
+  }, [minutes]);
+
+  const late = m < 0;
+  const hot = !late && m < 10;
+  const warm = !late && m >= 10 && m < 30;
+  const cls = 'count-pill' + (late || hot ? ' hot' : warm ? ' warm' : '');
+  const label = late ? `${Math.abs(m)}m late` : m < 1 ? '<1m' : `${m}m`;
+
+  return (
+    <span className={cls}>
+      {(late || hot) && <span className="dot" />}
+      {label}
+    </span>
   );
 }

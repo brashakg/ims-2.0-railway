@@ -297,6 +297,242 @@
 .chip.accent{ background: var(--bv-50); color: var(--bv); border-color: transparent; }
 .chip .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; opacity: .85; }
 
+/* ============================================================================
+   Tasks v2 — split-panel layout, priority strip, escalation ladder
+   Ported from docs/design/tasks.html (May-2026 redesign per DELTAS).
+   ============================================================================ */
+
+.t-body {
+  display: grid;
+  grid-template-columns: 1fr 400px;
+  height: calc(100vh - 52px);
+  min-height: 0;
+}
+.t-list { padding: 24px 28px; overflow-y: auto; }
+.t-detail {
+  background: var(--surface, #fafaf7);
+  border-left: 1px solid var(--line, #e6e6e0);
+  overflow-y: auto;
+}
+
+.t-head {
+  display: flex; justify-content: space-between; align-items: flex-end;
+  margin-bottom: 18px;
+}
+.t-head h2 {
+  margin: 0 0 4px;
+  font-family: var(--font-display);
+  font-size: 32px;
+  letter-spacing: -0.01em;
+  font-weight: 400;
+}
+
+/* Priority legend — 5 columns, count + label */
+.pri-strip {
+  display: grid; grid-template-columns: repeat(5, 1fr); gap: 0;
+  background: var(--surface, #fafaf7);
+  border: 1px solid var(--line, #e6e6e0);
+  border-radius: 12px;
+  margin-bottom: 18px;
+}
+.pri-strip > div {
+  padding: 12px 14px;
+  border-right: 1px solid var(--line, #e6e6e0);
+  position: relative;
+}
+.pri-strip > div:last-child { border-right: 0; }
+.pri-strip .bar { position: absolute; left: 0; top: 0; bottom: 0; width: 3px; }
+.pri-strip .l {
+  font: 500 10.5px/1 var(--font-mono);
+  color: var(--ink-4, #6b6b65);
+  text-transform: uppercase;
+  letter-spacing: .1em;
+  margin-bottom: 6px;
+}
+.pri-strip .v {
+  font-family: var(--font-sans);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  font-size: 24px;
+  line-height: 1;
+  letter-spacing: -.02em;
+  color: var(--ink, #141413);
+}
+.pri-strip .d { font-size: 11.5px; color: var(--ink-4, #6b6b65); margin-top: 3px; }
+
+/* Task card */
+.t-item {
+  padding: 14px 16px;
+  background: var(--surface, #fff);
+  border: 1px solid var(--line, #e6e6e0);
+  border-radius: 10px;
+  margin-bottom: 8px;
+  cursor: pointer;
+  transition: border-color .12s, background .12s;
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 14px;
+  align-items: center;
+}
+.t-item:hover { border-color: var(--line-strong, #d3d3cc); }
+.t-item.sel { border-color: var(--ink, #141413); box-shadow: 0 0 0 3px rgba(20,20,19,.06); }
+.t-item.overdue { border-color: var(--err, #b42318); background: var(--err-50, #fbeae7); }
+.t-item.overdue:hover { background: var(--err-50, #fbeae7); }
+
+.t-item .pri-wrap {
+  display: flex; flex-direction: column; align-items: center; gap: 6px;
+  min-width: 48px;
+}
+
+.count-pill {
+  font: 600 11px/1 var(--font-mono);
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 4px 7px; border-radius: 4px;
+  background: var(--bg-sunk, #f1f1ec);
+  color: var(--ink-3, #555550);
+}
+.count-pill.hot  { background: var(--err-50, #fbeae7); color: var(--err, #b42318); }
+.count-pill.warm { background: var(--warn-50, #fbf1df); color: var(--warn, #b46a00); }
+.count-pill .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; animation: t-blink 1.2s ease-in-out infinite; }
+@keyframes t-blink { 0%,100%{opacity:1} 50%{opacity:.3} }
+
+.t-item .ttl {
+  font: 500 13.5px/1.3 var(--font-sans);
+  color: var(--ink, #141413);
+  margin-bottom: 6px;
+}
+.t-item .meta {
+  display: flex; gap: 12px; font-size: 11.5px;
+  color: var(--ink-4, #6b6b65);
+  align-items: center;
+}
+.t-item .meta .mono {
+  font-family: var(--font-mono);
+  color: var(--ink-3, #555550);
+}
+.t-item .esc {
+  margin-top: 8px; padding: 6px 10px;
+  background: var(--err-50, #fbeae7);
+  color: var(--err, #b42318);
+  border-radius: 6px;
+  font-size: 11.5px;
+  display: flex; gap: 6px; align-items: center;
+}
+.t-item .own {
+  /* Per-user direction: skip avatar circles. Show role/name as a
+     compact mono chip instead. */
+  font: 500 11px/1 var(--font-mono);
+  color: var(--ink-3, #555550);
+  padding: 4px 8px;
+  background: var(--bg-sunk, #f1f1ec);
+  border-radius: 6px;
+  white-space: nowrap;
+}
+
+/* Detail panel */
+.d-head { padding: 20px 22px; border-bottom: 1px solid var(--line, #e6e6e0); }
+.d-head h3 {
+  margin: 0 0 6px;
+  font-family: var(--font-display);
+  font-size: 22px;
+  letter-spacing: -.01em;
+  line-height: 1.15;
+  font-weight: 400;
+}
+.d-body { padding: 18px 22px; }
+.d-sec { margin-bottom: 20px; }
+.d-sec h4 {
+  margin: 0 0 10px;
+  font: 500 10.5px/1 var(--font-mono);
+  color: var(--ink-4, #6b6b65);
+  text-transform: uppercase;
+  letter-spacing: .1em;
+}
+
+.timer-big {
+  display: flex; align-items: baseline; gap: 10px;
+  padding: 16px 18px;
+  background: var(--err-50, #fbeae7);
+  border-radius: 10px;
+  margin-bottom: 18px;
+}
+.timer-big .v {
+  font-family: var(--font-sans);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  font-size: 38px;
+  line-height: 1;
+  color: var(--err, #b42318);
+  letter-spacing: -.03em;
+}
+.timer-big .l {
+  font-size: 11.5px;
+  color: var(--err, #b42318);
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: .08em;
+}
+
+.ladder { background: var(--bg-sunk, #f1f1ec); border-radius: 10px; padding: 14px 16px; }
+.ladder-step {
+  display: flex; gap: 12px; align-items: center;
+  padding: 7px 0;
+  font-size: 12.5px;
+}
+.ladder-step .rung {
+  width: 22px; height: 22px; border-radius: 50%;
+  background: var(--surface, #fff);
+  border: 1.5px solid var(--line-strong, #d3d3cc);
+  display: grid; place-items: center;
+  font: 600 10px/1 var(--font-mono);
+  color: var(--ink-4, #6b6b65);
+  flex-shrink: 0;
+}
+.ladder-step.done .rung {
+  background: var(--ok, #0d7b4c);
+  border-color: var(--ok, #0d7b4c);
+  color: #fff;
+}
+.ladder-step.cur .rung {
+  background: var(--err, #b42318);
+  border-color: var(--err, #b42318);
+  color: #fff;
+}
+.ladder-step .when {
+  font-family: var(--font-mono);
+  color: var(--ink-4, #6b6b65);
+  font-size: 11px;
+  margin-left: auto;
+}
+.ladder-step .who { color: var(--ink-2, #2e2e2b); }
+.ladder-step.cur .who { font-weight: 600; color: var(--err, #b42318); }
+
+.sop-box {
+  border: 1px solid var(--line, #e6e6e0);
+  border-radius: 8px;
+  padding: 12px 14px;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--ink-2, #2e2e2b);
+}
+.sop-box .sid {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--bv, #b42318);
+  margin-bottom: 6px;
+  font-weight: 600;
+}
+.sop-box ol { margin: 8px 0 0; padding-left: 18px; color: var(--ink-3, #555550); }
+.sop-box ol li { margin-bottom: 4px; }
+
+/* Tablet/phone fallback for the split panel */
+@media (max-width: 1023px) {
+  .t-body { grid-template-columns: 1fr; }
+  .t-detail { display: none; }
+  .t-body.detail-open .t-list { display: none; }
+  .t-body.detail-open .t-detail { display: block; }
+}
+
 /* Priority pills for Tasks & SOPs (P0–P4) */
 .pill-P0 { background: var(--p0-bg); color: var(--p0); }
 .pill-P1 { background: var(--p1-bg); color: var(--p1); }
