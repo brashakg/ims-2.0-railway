@@ -806,6 +806,26 @@ async def create_order(
             except Exception:
                 pass  # fail-soft — counter must never block order create
 
+            # Loyalty engine — award earn points. Idempotent on
+            # (customer_id, order_id), and fully fail-soft (any failure
+            # is logged but never blocks the order response).
+            try:
+                from .loyalty import earn_for_order_internal
+                # Skip walk-ins: they have no real customer_id to credit.
+                if order.customer_id and not order.customer_id.startswith(
+                    ("walkin-", "walk-in")
+                ):
+                    earn_for_order_internal(
+                        customer_id=order.customer_id,
+                        order_id=created.get("order_id") or "",
+                        items=items_data,
+                        rupee_value=float(taxable_after_cart_discount),
+                        user_id=current_user.get("user_id"),
+                        store_id=store_id,
+                    )
+            except Exception:
+                pass  # fail-soft — loyalty must never block POS
+
             return {
                 "order_id": created["order_id"],
                 "order_number": created["order_number"],

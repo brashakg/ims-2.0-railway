@@ -109,6 +109,7 @@ from .routers import (
     points_router,
     payout_router,
     webhooks_router,
+    loyalty_router,
 )
 
 
@@ -641,6 +642,7 @@ app.include_router(walkouts_router, prefix="/api/v1/walkouts", tags=["Walkouts"]
 app.include_router(points_router, prefix="/api/v1/incentive/points", tags=["Daily Points"])
 app.include_router(payout_router, prefix="/api/v1/payout", tags=["Payout"])
 app.include_router(webhooks_router, prefix="/api/v1/webhooks", tags=["Webhooks"])
+app.include_router(loyalty_router, prefix="/api/v1/loyalty", tags=["Loyalty"])
 
 
 if __name__ == "__main__":

@@ -28,6 +28,7 @@ const CustomersPage = lazy(() => import('./pages/customers/CustomersPage').then(
 const Customer360Dashboard = lazy(() => import('./pages/customers/Customer360Dashboard').then(m => ({ default: m.Customer360Dashboard })));
 const CustomerSegmentation = lazy(() => import('./pages/customers/CustomerSegmentation').then(m => ({ default: m.CustomerSegmentation })));
 const LoyaltyProgram = lazy(() => import('./pages/customers/LoyaltyProgram').then(m => ({ default: m.LoyaltyProgram })));
+const LoyaltyLedger = lazy(() => import('./pages/customers/LoyaltyLedger'));
 const CampaignManager = lazy(() => import('./pages/customers/CampaignManager').then(m => ({ default: m.CampaignManager })));
 const ReferralTracker = lazy(() => import('./pages/customers/ReferralTracker').then(m => ({ default: m.ReferralTracker })));
 const CustomerFeedback = lazy(() => import('./pages/customers/CustomerFeedback').then(m => ({ default: m.CustomerFeedback })));
@@ -243,6 +244,18 @@ function App() {
                         allowedRoles={['SUPERADMIN', 'ADMIN', 'STORE_MANAGER']}
                       >
                         <LoyaltyProgram />
+                      </ProtectedRoute>
+                    }
+                  />
+
+                  {/* CRM: Per-customer Loyalty Ledger (audit trail) */}
+                  <Route
+                    path="customers/:customerId/loyalty"
+                    element={
+                      <ProtectedRoute
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'SALES_CASHIER', 'CASHIER', 'SALES_STAFF']}
+                      >
+                        <LoyaltyLedger />
                       </ProtectedRoute>
                     }
                   />
