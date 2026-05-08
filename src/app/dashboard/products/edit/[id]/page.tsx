@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { useRouter, useParams } from 'next/navigation';
+import { useRouter, useParams, useSearchParams } from 'next/navigation';
 import { Upload, X, Loader2 } from 'lucide-react';
 import SearchableDropdown from '@/components/SearchableDropdown';
 import { CATEGORIES as CATEGORY_DEFS } from '@/lib/categories';
@@ -9,6 +9,7 @@ import {
   isAttrApplicable,
   attributesForCategory,
 } from '@/lib/categoryAttributes';
+import EditProductV2 from '@/components/edit-product/EditProductV2';
 
 // Attribute keys that already have dedicated inputs in the form.
 // Everything applicable to the category and NOT in this set renders
@@ -96,7 +97,20 @@ interface FormData {
   stockByLocation: Record<string, number>;
 }
 
+// Default export = wrapper that picks V1 or V2 based on `?next=1`.
+// V1 (the existing layout) stays the default until migration step 6
+// flag-flips to V2.
 export default function EditProductPage() {
+  const params = useParams();
+  const searchParams = useSearchParams();
+  const productId = params.id as string;
+  if (searchParams?.get('next') === '1') {
+    return <EditProductV2 productId={productId} />;
+  }
+  return <EditProductV1 />;
+}
+
+function EditProductV1() {
   const router = useRouter();
   const params = useParams();
   const productId = params.id as string;
