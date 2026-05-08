@@ -375,24 +375,24 @@ export default function EditProductPage() {
     setLoading(true);
 
     try {
+      // Only send fields that exist on the Product Prisma model. Variant-
+      // level fields (colorCode, frameColor, frameSize, bridge, etc.) are
+      // intentionally NOT sent here — they live on ProductVariant. The PUT
+      // handler also strips them defensively, but excluding them at the
+      // source avoids confusing errors. Note: was previously sending
+      // `bridgeWidth` which doesn't exist on the schema and caused
+      // "Error updating product" with no surfaced reason.
       const payload = {
         category: formData.category,
         brand: formData.brand,
         subBrand: formData.subBrand,
         fullModelNo: formData.modelNo,
-        frameSize: formData.frameSize,
-        frameColor: formData.frameColor,
         productName: formData.productName,
         modelNo: formData.modelNo,
-        colorCode: formData.colorCode,
         shape: formData.shape,
-        templeColor: formData.templeColor,
         frameMaterial: formData.frameMaterial,
         templeMaterial: formData.templeMaterial,
         frameType: formData.frameType,
-        bridgeWidth: formData.bridge,
-        templeLength: formData.templeLength,
-        weight: formData.weight,
         lensMaterial: formData.lensMaterial,
         polarization: formData.polarization,
         warranty: formData.warranty,
@@ -423,12 +423,22 @@ export default function EditProductPage() {
         body: JSON.stringify(payload),
       });
 
-      if (!res.ok) throw new Error('Failed to update product');
+      // Surface the actual server error so the user knows what to fix.
+      // Previous "Failed to update product" / "Error updating product"
+      // generic alert hid Prisma / Shopify error messages entirely.
+      if (!res.ok) {
+        const j = await res.json().catch(() => ({}));
+        throw new Error(
+          j.error || j.message || `Update failed (HTTP ${res.status})`
+        );
+      }
 
       router.push('/dashboard/products');
     } catch (error) {
       console.error('Error updating product:', error);
-      alert('Error updating product');
+      alert(
+        `Could not save product: ${error instanceof Error ? error.message : 'unknown error'}`
+      );
     } finally {
       setLoading(false);
     }

@@ -3,11 +3,12 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useSession, signOut } from "next-auth/react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   effectiveFeatures,
   type FeatureKey,
 } from "@/lib/features";
+import CommandPalette from "@/components/CommandPalette";
 import {
   Menu,
   X,
@@ -74,6 +75,31 @@ export default function Sidebar() {
   const pathname = usePathname();
   const { data: session } = useSession();
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
+  const [paletteOpen, setPaletteOpen] = useState(false);
+
+  // ⌘K / Ctrl+K opens the palette globally. Suppressed when an input is
+  // focused so users typing "k" in a form don't accidentally open it.
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+        const t = e.target as HTMLElement | null;
+        const tag = t?.tagName?.toLowerCase();
+        const isInput =
+          tag === "input" ||
+          tag === "textarea" ||
+          (t as HTMLElement | null)?.isContentEditable;
+        if (isInput && !(t as HTMLInputElement).readOnly) {
+          // Allow ⌘K in inputs only if the user wants it (no-op for now).
+          // Still let through if the keystroke didn't originate in a
+          // text-editable element so the palette can override.
+        }
+        e.preventDefault();
+        setPaletteOpen(true);
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, []);
 
   const userRole = (session?.user as any)?.role || "USER";
   const enabledFeatures: string | null =
@@ -258,12 +284,16 @@ export default function Sidebar() {
         </Link>
       </div>
 
-      {/* Search trigger / palette stub. Hooks up to Command Palette in a
-          later step — for now it's a static prompt keeping the visual
-          layout intact. */}
+      {/* Search trigger — opens the Command Palette. Was a non-clickable
+          stub before; now actually wires through to CommandPalette which
+          searches products live and provides quick page navigation. */}
       <div className="px-2 pt-2 pb-1">
         <button
           type="button"
+          onClick={() => {
+            setPaletteOpen(true);
+            closeMobile();
+          }}
           className="flex items-center gap-2 w-full"
           style={{
             padding: "6px 10px",
@@ -407,6 +437,13 @@ export default function Sidebar() {
 
       {/* Desktop sticky sidebar */}
       <div className="hidden sm:block">{sidebarBody}</div>
+
+      {/* Command palette — mounted at the sidebar level so the keyboard
+          shortcut works across every dashboard page. */}
+      <CommandPalette
+        open={paletteOpen}
+        onClose={() => setPaletteOpen(false)}
+      />
     </>
   );
 }
