@@ -22,6 +22,7 @@ from .reports import router as reports_router
 from .settings import router as settings_router
 from .clinical import router as clinical_router
 from .admin import router as admin_router
+from .admin_catalog import router as admin_catalog_router
 from .transfers import router as transfers_router
 from .catalog import router as catalog_router
 from .jarvis import router as jarvis_router
@@ -60,6 +61,7 @@ __all__ = [
     "settings_router",
     "clinical_router",
     "admin_router",
+    "admin_catalog_router",
     "transfers_router",
     "catalog_router",
     "jarvis_router",
