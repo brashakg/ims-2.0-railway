@@ -4,7 +4,7 @@
 // Referral codes, chain tracking, rewards, leaderboard, analytics
 
 import { useState } from 'react';
-import { Share2, Gift, Copy, Check, Trophy, Award } from 'lucide-react';
+import { Share2, Gift, Copy, Check, Trophy, Award, AlertCircle } from 'lucide-react';
 import clsx from 'clsx';
 
 interface Referrer {
@@ -117,6 +117,26 @@ export function ReferralTracker() {
           <h1>Word of mouth, tracked.</h1>
           <div className="hint">Who sent whom. Leaderboard with referral count, conversion rate, and earned rewards paid via wallet credit.</div>
         </div>
+      </div>
+
+      {/* Demo data banner — referrals page renders sample fixtures
+          until the backend referral surface lands. */}
+      <div
+        style={{
+          padding: '10px 14px',
+          background: 'var(--warn-50)',
+          border: '1px solid var(--warn-50)',
+          borderRadius: 8,
+          fontSize: 12.5,
+          color: 'var(--warn)',
+          marginBottom: 14,
+          display: 'flex',
+          alignItems: 'center',
+          gap: 8,
+        }}
+      >
+        <AlertCircle className="w-4 h-4" />
+        <span><strong>Sample data shown</strong> — referral tracking backend is pending. Numbers below are illustrative.</span>
       </div>
 
       {/* Summary Stats */}

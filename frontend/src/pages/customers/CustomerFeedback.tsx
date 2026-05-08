@@ -105,6 +105,27 @@ export function CustomerFeedback() {
         </div>
       </div>
 
+      {/* Demo data banner — this page renders sample fixtures until the
+          backend feedback/NPS surface lands. Visible so the operator
+          knows they're not looking at live customer sentiment yet. */}
+      <div
+        style={{
+          padding: '10px 14px',
+          background: 'var(--warn-50)',
+          border: '1px solid var(--warn-50)',
+          borderRadius: 8,
+          fontSize: 12.5,
+          color: 'var(--warn)',
+          marginBottom: 14,
+          display: 'flex',
+          alignItems: 'center',
+          gap: 8,
+        }}
+      >
+        <AlertCircle className="w-4 h-4" />
+        <span><strong>Sample data shown</strong> — feedback/NPS feed is pending. Numbers below are illustrative, not from your stores.</span>
+      </div>
+
       {/* Summary Stats */}
       <div className="grid grid-cols-4 gap-4">
         <div className="bg-white border border-gray-200 rounded-lg p-4">
