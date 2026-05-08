@@ -272,3 +272,133 @@
 @media print {
   .no-print { display: none !important; }
 }
+
+/* ─────────────────────────────────────────────────────────────────
+   Mobile & tablet · responsive layer
+   The desktop layout above remains the default. These rules only
+   kick in at narrow widths.
+   ───────────────────────────────────────────────────────────────── */
+
+/* Tablet portrait + phone: rail becomes bottom nav */
+@media (max-width: 900px) {
+  .app {
+    grid-template-columns: 1fr;
+    grid-template-rows: 1fr 60px;
+  }
+
+  .rail {
+    grid-row: 2;
+    flex-direction: row;
+    align-items: center;
+    padding: 0 4px;
+    height: 60px;
+    border-top: 1px solid #2a2a28;
+    overflow-x: auto;
+    overflow-y: hidden;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+  .rail::-webkit-scrollbar { display: none; }
+
+  .rail .brand {
+    margin: 0 8px 0 4px;
+    width: 36px; height: 36px;
+    flex-shrink: 0;
+  }
+  .rail .rail-item {
+    width: 52px; height: 48px; margin: 0 1px;
+    flex-shrink: 0;
+    flex-direction: column; gap: 2px;
+  }
+  .rail .rail-item::after {
+    content: attr(title);
+    font-size: 9.5px; line-height: 1; color: inherit;
+    margin-top: 2px;
+  }
+  .rail .rail-item.active::before {
+    left: 12px; right: 12px; top: -1px; bottom: auto;
+    width: auto; height: 3px;
+    border-radius: 0 0 2px 2px;
+  }
+  .rail .rail-label { display: none; }
+  .rail .rail-sep {
+    width: 1px; height: 24px; margin: 0 6px;
+    background: #2a2a28;
+  }
+  .rail .rail-spacer { flex: 0; }
+  .rail .rail-avatar {
+    width: 32px; height: 32px;
+    margin: 0 6px 0 4px;
+    flex-shrink: 0;
+  }
+
+  /* Topbar */
+  .topbar {
+    height: 48px;
+    padding: 0 12px;
+    gap: 8px;
+    flex-wrap: nowrap;
+    overflow: hidden;
+  }
+  .crumbs { font-size: 12px; flex-shrink: 1; min-width: 0; overflow: hidden; }
+  .crumbs > *:not(:last-child) { display: none; }  /* show only current crumb */
+  .crumbs .cur { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .cmdk { display: none; }
+  .store-pill { padding: 0 8px; }
+  .store-pill .code { display: none; }
+  .role-pill { display: none; }
+  .topbar > .btn:not(.primary):not(.accent) {
+    /* keep primary/accent action; collapse secondary buttons */
+    padding: 0 8px;
+  }
+
+  /* Modals get bottom-sheet treatment on phones */
+  .scrim, .modal-overlay {
+    align-items: flex-end !important;
+    padding: 0;
+  }
+  .dialog, .modal {
+    width: 100% !important;
+    max-width: 100% !important;
+    max-height: 92vh !important;
+    border-radius: 18px 18px 0 0 !important;
+    margin: 0;
+  }
+
+  /* Tweaks panel out of the way */
+  .tweaks-panel {
+    width: calc(100vw - 32px); max-width: 320px;
+    right: 16px; bottom: 76px;  /* sit above bottom nav */
+  }
+
+  /* Tables get horizontal scroll */
+  .tbl-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .tbl { min-width: 640px; }
+}
+
+/* Phone */
+@media (max-width: 560px) {
+  .topbar { padding: 0 10px; gap: 6px; }
+  .crumbs { font-size: 12px; }
+  .topbar .btn { padding: 0 10px; font-size: 12px; height: 32px; }
+  .topbar .btn.sm { padding: 0 8px; }
+
+  .rail .rail-item { width: 48px; }
+  .rail .rail-item::after { font-size: 9px; }
+
+  .card-body { padding: 12px; }
+  .card-head { padding: 0 12px; height: 40px; }
+
+  .input { font-size: 16px; }  /* prevents iOS zoom-on-focus */
+  .btn { font-size: 13px; }    /* hit target friendlier */
+  .btn.sm { height: 30px; }
+
+  /* Universal: 2-col rows collapse */
+  .row-2 { grid-template-columns: 1fr !important; gap: 12px !important; }
+}
+
+/* Small phone */
+@media (max-width: 380px) {
+  .rail .brand { display: none; }
+  .rail .rail-item { width: 44px; }
+}

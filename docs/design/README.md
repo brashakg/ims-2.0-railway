@@ -296,11 +296,20 @@ Fonts come from Google Fonts:
 
 ---
 
+## ⚠️ Read DELTAS.md first if iterating on the existing build
+
+`DELTAS.md` is a punch-list of where the current Vercel deployment drifted from this design — critical issues, per-screen fixes, and systemic patterns. Start there before re-implementing.
+
+## 📱 Mobile responsiveness
+
+`shell/mobile.css` adds tablet (≤1023px) and phone (≤767px) layouts: rail collapses to a bottom tab bar, modals become bottom sheets, multi-column splits stack, tables horizontal-scroll. It's already linked in every page and the viewport meta is set correctly.
+
 ## Files In This Bundle
 
 ```
 design_handoff_ims_2_0/
 ├── README.md                 ← you are here
+├── DELTAS.md                 ← audit of build vs design (READ FIRST if iterating)
 ├── hub.html                  ← Module 1: Dashboard / launcher
 ├── pos.html                  ← Module 2: Checkout
 ├── clinical.html             ← Module 3: Exam flow
@@ -313,9 +322,10 @@ design_handoff_ims_2_0/
 └── shell/
     ├── tokens.css            ← All design tokens
     ├── shell.css             ← Shared component styles (rail, topbar, buttons, chips, cards, inputs, tbl, etc.)
+    ├── mobile.css            ← Tablet + phone responsive overrides
     ├── shell.jsx             ← Shell React components + Icon map
     └── data.js               ← MOCK data for every screen (good reference for data shapes)
-```
+}
 
 Open any `.html` file directly in a browser to see the live prototype. `tasks.html` is the deepest design — start there if you're implementing module-by-module.
 

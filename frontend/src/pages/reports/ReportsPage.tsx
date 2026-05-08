@@ -114,8 +114,9 @@ export function ReportsPage() {
   });
   const [categoryBreakdown, setCategoryBreakdown] = useState<CategoryBreakdown[]>([]);
   const [dailyTrend, setDailyTrend] = useState<DailyTrend[]>([]);
-  const [_salesComparison] = useState<any>(null);
-  const [_growthMetrics] = useState<any>(null);
+  // _salesComparison + _growthMetrics removed — sales comparison is
+  // now covered by reportsApi.getSalesComparison (wired below) and
+  // growth metrics by getSalesGrowth → setSalesGrowth.
   // Phase 6.3 — cash-tied-up-on-shelves & MoM/YoY growth
   const [nonMovingStock, setNonMovingStock] = useState<Array<{
     product_id: string | null;
@@ -134,13 +135,15 @@ export function ReportsPage() {
     mom_growth: { percent: number; previous_month_sales: number };
     yoy_growth: { percent: number; previous_year_sales: number };
   } | null>(null);
-  const [staffRanking, ] = useState<any[]>([]);
-  const [stockCount, ] = useState<any>(null);
-  const [brandSellthrough, ] = useState<any[]>([]);
-  const [customerAcquisition, ] = useState<any>(null);
-  const [discountAnalysis, ] = useState<any>(null);
-  // Unused - setExpenseVsRevenue not used in this component
-  const [expenseVsRevenue] = useState<any>(null);
+  // 6 reports that previously had backend handlers but no frontend
+  // call — added in May-2026 audit follow-up. Backends now also use
+  // proper Mongo Date filtering + grand_total field reads.
+  const [staffRanking, setStaffRanking] = useState<any[]>([]);
+  const [stockCount, setStockCount] = useState<any>(null);
+  const [brandSellthrough, setBrandSellthrough] = useState<any[]>([]);
+  const [customerAcquisition, setCustomerAcquisition] = useState<any>(null);
+  const [discountAnalysis, setDiscountAnalysis] = useState<any>(null);
+  const [expenseVsRevenue, setExpenseVsRevenue] = useState<any>(null);
   // UI state
   const [activeTab, setActiveTab] = useState<ReportType>('sales');
   const [dateRange, setDateRange] = useState<DateRange>('month');
@@ -232,20 +235,34 @@ export function ReportsPage() {
         }
       }
 
-      // Phase 6.3 — fetch non-moving stock + MoM/YoY growth in parallel.
-      // Both are additive — if either fails, the page still renders with
-      // the core sales summary above.
+      // Phase 6.3 — non-moving stock + MoM/YoY growth.
+      // May-2026 follow-up — wire the 6 reports the page renders cards
+      // for but never actually fetched. All run in parallel via
+      // Promise.allSettled so one failure doesn't blank the page.
       const now = new Date();
-      const [nmsRes, growthRes] = await Promise.allSettled([
-        reportsApi.getNonMovingStock(user.activeStoreId, 90, 200),
-        reportsApi.getSalesGrowth(user.activeStoreId, now.getFullYear(), now.getMonth() + 1),
+      const sid = user.activeStoreId;
+      const [
+        nmsRes, growthRes,
+        staffRes, stockRes, brandRes,
+        custRes, discRes, expRes,
+      ] = await Promise.allSettled([
+        reportsApi.getNonMovingStock(sid, 90, 200),
+        reportsApi.getSalesGrowth(sid, now.getFullYear(), now.getMonth() + 1),
+        reportsApi.getStaffRanking(sid, startDate, endDate),
+        reportsApi.getStockCount(sid, startDate, endDate),
+        reportsApi.getBrandSellthrough(sid, startDate, endDate),
+        reportsApi.getCustomerAcquisition(sid, startDate, endDate),
+        reportsApi.getDiscountAnalysis(sid, startDate, endDate),
+        reportsApi.getExpenseVsRevenue(sid, startDate, endDate),
       ]);
-      if (nmsRes.status === 'fulfilled') {
-        setNonMovingStock(nmsRes.value.data || []);
-      }
-      if (growthRes.status === 'fulfilled') {
-        setSalesGrowth(growthRes.value);
-      }
+      if (nmsRes.status === 'fulfilled') setNonMovingStock(nmsRes.value.data || []);
+      if (growthRes.status === 'fulfilled') setSalesGrowth(growthRes.value);
+      if (staffRes.status === 'fulfilled') setStaffRanking(staffRes.value.data || []);
+      if (stockRes.status === 'fulfilled') setStockCount(stockRes.value);
+      if (brandRes.status === 'fulfilled') setBrandSellthrough(brandRes.value.data || []);
+      if (custRes.status === 'fulfilled') setCustomerAcquisition(custRes.value);
+      if (discRes.status === 'fulfilled') setDiscountAnalysis(discRes.value);
+      if (expRes.status === 'fulfilled') setExpenseVsRevenue(expRes.value);
     } catch {
       setError('Failed to load report data. Please try again.');
     } finally {

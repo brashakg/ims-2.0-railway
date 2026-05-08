@@ -553,7 +553,10 @@ export function POSLayout() {
           {/* Editorial header */}
           <div className="work-head">
             <div className="eyebrow" style={{ marginBottom: 6 }}>
-              Step {currentStepIndex + 1} / {visibleSteps.length} · {visibleSteps.find((s) => s.id === store.current_step)?.label}
+              {/* DELTAS Critical #5: showed "Step 0/4" when
+                  store.current_step wasn't in activeSteps yet (indexOf
+                  returns -1 → 0 with the +1). Clamp to 1. */}
+              Step {Math.max(1, currentStepIndex + 1)} / {visibleSteps.length} · {visibleSteps.find((s) => s.id === store.current_step)?.label}
             </div>
             <h2>{header.title}</h2>
             <p className="sub">{header.sub}</p>

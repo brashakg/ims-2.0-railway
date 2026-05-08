@@ -26,7 +26,17 @@ import {
   ShoppingCart,
   Hash,
   Clock,
+  Glasses,
+  Sun,
+  BookOpen,
+  Search as Lens,
+  Watch,
+  Smartphone,
+  Headphones,
+  Sparkles,
+  Ear,
 } from 'lucide-react';
+import type { LucideIcon } from 'lucide-react';
 import type { ProductCategory } from '../../types';
 import { inventoryApi, adminProductApi } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
@@ -45,19 +55,21 @@ import { Pagination } from '../../components/common/Pagination';
 import clsx from 'clsx';
 
 // Category configuration
-const CATEGORIES: { code: ProductCategory; label: string; icon: string }[] = [
-  { code: 'FR', label: 'Frames', icon: '👓' },
-  { code: 'SG', label: 'Sunglasses', icon: '🕶️' },
-  { code: 'RG', label: 'Reading Glasses', icon: '📖' },
-  { code: 'LS', label: 'Optical Lenses', icon: '🔍' },
-  { code: 'CL', label: 'Contact Lenses', icon: '👁️' },
-  { code: 'WT', label: 'Watches', icon: '⌚' },
-  { code: 'SMTWT', label: 'Smartwatches', icon: '📱' },
-  { code: 'SMTSG', label: 'Smart Sunglasses', icon: '🥽' },
-  { code: 'SMTFR', label: 'Smart Frames', icon: '🤓' },
-  { code: 'CK', label: 'Wall Clocks', icon: '🕐' },
-  { code: 'ACC', label: 'Accessories', icon: '🧴' },
-  { code: 'HA', label: 'Hearing Aids', icon: '👂' },
+// DELTAS Critical #3: replaced emoji icons with the line-icon set.
+// Brand has no emoji; chips render Lucide icons inline at 14px.
+const CATEGORIES: { code: ProductCategory; label: string; icon: LucideIcon }[] = [
+  { code: 'FR', label: 'Frames', icon: Glasses },
+  { code: 'SG', label: 'Sunglasses', icon: Sun },
+  { code: 'RG', label: 'Reading Glasses', icon: BookOpen },
+  { code: 'LS', label: 'Optical Lenses', icon: Lens },
+  { code: 'CL', label: 'Contact Lenses', icon: Eye },
+  { code: 'WT', label: 'Watches', icon: Watch },
+  { code: 'SMTWT', label: 'Smartwatches', icon: Smartphone },
+  { code: 'SMTSG', label: 'Smart Sunglasses', icon: Sparkles },
+  { code: 'SMTFR', label: 'Smart Frames', icon: Sparkles },
+  { code: 'CK', label: 'Wall Clocks', icon: Clock },
+  { code: 'ACC', label: 'Accessories', icon: Headphones },
+  { code: 'HA', label: 'Hearing Aids', icon: Ear },
 ];
 
 // Stock item type
@@ -441,21 +453,29 @@ export function InventoryPage() {
           >
             All
           </button>
-          {CATEGORIES.map(cat => (
-            <button
-              key={cat.code}
-              onClick={() => setSelectedCategory(cat.code)}
-              className={clsx(
-                'px-3 py-1.5 rounded-full text-sm font-medium whitespace-nowrap transition-colors flex items-center gap-1',
-                selectedCategory === cat.code
-                  ? 'bg-bv-red-600 text-white'
-                  : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
-              )}
-            >
-              <span>{cat.icon}</span>
-              <span>{cat.label}</span>
-            </button>
-          ))}
+          {CATEGORIES.map(cat => {
+            const IconCmp = cat.icon;
+            const selected = selectedCategory === cat.code;
+            return (
+              <button
+                key={cat.code}
+                onClick={() => setSelectedCategory(cat.code)}
+                className={clsx(
+                  'px-3 py-1.5 rounded-full text-sm font-medium whitespace-nowrap transition-colors inline-flex items-center gap-1.5 border',
+                  /* DELTAS Critical #4: canonical selected state is
+                     bv-50 fill + bv-500 border + ink text (mirrors
+                     the Returns Exchange card). Solid red was
+                     reserved for one hero CTA per screen. */
+                  selected
+                    ? 'bg-bv-red-50 text-gray-900 border-bv-red-500'
+                    : 'bg-gray-100 text-gray-600 hover:bg-gray-200 border-transparent',
+                )}
+              >
+                <IconCmp className="w-3.5 h-3.5" strokeWidth={1.6} />
+                <span>{cat.label}</span>
+              </button>
+            );
+          })}
         </div>
       </div>
       )}
@@ -520,8 +540,15 @@ export function InventoryPage() {
                           )}
                         </td>
                         <td className="px-4 py-3">
-                          <span className="text-sm">
-                            {category?.icon || '📦'}{' '}
+                          <span className="text-sm inline-flex items-center gap-1.5">
+                            {category?.icon ? (
+                              (() => {
+                                const Cmp = category.icon;
+                                return <Cmp className="w-3.5 h-3.5 text-gray-500" strokeWidth={1.6} />;
+                              })()
+                            ) : (
+                              <Package className="w-3.5 h-3.5 text-gray-400" strokeWidth={1.6} />
+                            )}
                             {category?.label || item.category}
                           </span>
                         </td>
