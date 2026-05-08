@@ -241,10 +241,12 @@ export function generateTags(product: Product): string {
       seen.add(token);
     }
   };
+  // framesize / bridge / templelength stay as filterable tags (round 1
+  // 10.18 + round 2 U3 = "tags for all three"). Weight is intentionally
+  // dropped — round 1 5.2: "Weight — Shopify field only, NOT a tag".
   addVariantFallback("framesize",    product.frameSize);
   addVariantFallback("bridge",       product.bridge);
   addVariantFallback("templelength", product.templeLength);
-  addVariantFallback("weight",       product.weight);
   addVariantFallback("framecolor",   product.frameColor);
   addVariantFallback("templecolor",  product.templeColor);
 
@@ -252,136 +254,460 @@ export function generateTags(product: Product): string {
 }
 
 /**
- * Generate HTML product description for Shopify listing page.
- * Structured table layout with product specs.
+ * Generate HTML product description for the Shopify storefront.
+ *
+ * Format — matches the legacy Excel template exactly (Option A approved
+ * by the user 2026-05-09). Theme-owned styling: NO inline <style>, NO
+ * inline classes — the structure is plain headings + tables so the
+ * storefront theme renders it consistently.
+ *
+ *   <h4>Product Details</h4>
+ *   <h5>Model Number: <full model name>...</h5>
+ *   <p>Marketing intro paragraph (per-category, see buildMarketingIntro)</p>
+ *
+ *   <h4>Technical Specifications</h4>
+ *   <table><tbody>… category-specific spec rows …</tbody></table>
+ *
+ *   <h4>General Information</h4>
+ *   <table><tbody>… brand / model / shape / colours …</tbody></table>
+ *
+ *   <h4>Warranty</h4>
+ *   <p>…manufacturer warranty…<a href="https://bettervision.in/pages/warranty">Click Here</a></p>
+ *
+ * Each row is omitted when the value is missing — no "N/A" placeholders
+ * to keep the description clean.
  */
 export function generateHTMLDescription(product: Product): string {
-  const styles = `
-    <style>
-      .product-details-section {
-        font-family: Arial, sans-serif;
-        color: #333;
-        line-height: 1.6;
-      }
-      .section-title {
-        font-size: 18px;
-        font-weight: bold;
-        margin: 20px 0 10px 0;
-        color: #1a1a1a;
-        border-bottom: 2px solid #007bff;
-        padding-bottom: 8px;
-      }
-      .details-table {
-        width: 100%;
-        border-collapse: collapse;
-        margin-bottom: 20px;
-      }
-      .details-table th,
-      .details-table td {
-        border: 1px solid #ddd;
-        padding: 12px;
-        text-align: left;
-      }
-      .details-table th {
-        background-color: #f8f9fa;
-        font-weight: bold;
-        color: #333;
-      }
-      .details-table tr:nth-child(even) {
-        background-color: #f9f9f9;
-      }
-      .details-table tr:hover {
-        background-color: #f0f0f0;
-      }
-    </style>
-  `;
+  const cat = normalizeCategory(product.category);
+  const noun = categorySeoNoun(product.category);
 
-  const createTable = (rows: string[][]): string => {
-    // Filter out N/A rows
-    const validRows = rows.filter(([, value]) => value && value !== "N/A");
-    if (validRows.length === 0) return "";
-    let html = '<table class="details-table"><tbody>';
-    validRows.forEach(([label, value]) => {
-      html += `<tr><td><strong>${label}</strong></td><td>${value}</td></tr>`;
-    });
-    html += "</tbody></table>";
-    return html;
+  // Helper — only emit a <tr> when value is non-empty.
+  const tableRows = (pairs: Array<[label: string, value: unknown]>): string => {
+    const rows = pairs
+      .filter(([, v]) => v !== null && v !== undefined && String(v).trim() !== "")
+      .map(([label, v]) => `<tr><td>${label}</td><td>${escapeHtml(String(v))}</td></tr>`)
+      .join("");
+    return rows ? `<table><tbody>${rows}</tbody></table>` : "";
   };
 
-  const cat = (product.category || "").toUpperCase();
+  // Model-number sub-line — used right under "Product Details" h5.
+  // Mirrors how legacy did it: "<Brand> <Model> <Color> <Size> <Singular Noun>".
+  const modelLine = [
+    product.brand,
+    product.fullModelNo || product.modelNo,
+    product.colorCode,
+    product.frameSize,
+    product.label,
+    noun,
+  ]
+    .map((v) => (typeof v === "string" ? v.trim() : v))
+    .filter(Boolean)
+    .join(" ")
+    .replace(/\s+/g, " ");
 
-  // Build sections based on category
-  const productDetailsRows = [
-    ["Frame Color", product.frameColor || "N/A"],
-    ["Temple Color", product.templeColor || "N/A"],
-    ["Shape", product.shape || "N/A"],
-    ["Weight", product.weight || "N/A"],
-    ["Bridge Width", product.bridge || "N/A"],
-    ["Temple Length", product.templeLength || "N/A"],
-  ];
+  const intro = buildMarketingIntro(product);
 
-  const technicalRows = [
-    ["Frame Material", product.frameMaterial || "N/A"],
-    ["Temple Material", product.templeMaterial || "N/A"],
-    ["Frame Type", product.frameType || "N/A"],
-    ["Lens Material", product.lensMaterial || "N/A"],
-    ...(cat === "SUNGLASSES" ? [
-      ["Lens Colour", product.lensColour || "N/A"],
-      ["Tint", product.tint || "N/A"],
-      ["Polarization", product.polarization || "N/A"],
-      ["UV Protection", product.uvProtection || "N/A"],
-    ] : []),
-  ];
+  // Per-category technical / general tables. Eyewear shares one shape;
+  // contact lenses, watches, smartwatches, accessories diverge.
+  const { technical, general } = perCategoryTables(cat, product);
 
-  const generalRows = [
-    ["Brand", product.brand || "N/A"],
-    ["Model", product.fullModelNo || product.modelNo || "N/A"],
-    ["Size", product.frameSize || "N/A"],
-    ["Gender", product.gender || "N/A"],
-    ["Country of Origin", product.countryOfOrigin || "N/A"],
-    ["GTIN", product.gtin || "N/A"],
-  ];
+  const warrantyText = String(product.warranty || "").trim();
+  const warrantyParagraph = warrantyText
+    ? `<p>This product comes with a manufacturer's warranty of ${escapeHtml(warrantyText)} from the date of sale. For more details on warranty, <a title="Warranty" href="https://bettervision.in/pages/warranty" target="_blank" rel="noopener">Click Here</a>.</p>`
+    : `<p>For warranty details, <a title="Warranty" href="https://bettervision.in/pages/warranty" target="_blank" rel="noopener">Click Here</a>.</p>`;
 
-  let html = styles;
-  html += '<div class="product-details-section">';
+  const parts: string[] = [];
+  parts.push(`<h4>Product Details</h4>`);
+  if (modelLine) parts.push(`<h5>Model Number: ${escapeHtml(modelLine)}</h5>`);
+  if (intro) parts.push(`<p>${intro}</p>`);
+  if (technical) {
+    parts.push(`<h4>Technical Specifications</h4>`);
+    parts.push(technical);
+  }
+  if (general) {
+    parts.push(`<h4>General Information</h4>`);
+    parts.push(general);
+  }
+  // Solutions / contact-lens long-form notes (still useful for staff to
+  // type custom blurbs that aren't in spec tables).
+  const aboutProduct = String(product.aboutProduct || "").trim();
+  if (aboutProduct) {
+    parts.push(`<h4>About This Product</h4>`);
+    parts.push(`<p>${escapeHtml(aboutProduct)}</p>`);
+  }
+  parts.push(`<h4>Warranty</h4>`);
+  parts.push(warrantyParagraph);
 
-  if (cat === "SOLUTIONS") {
-    // Solutions get a different layout
-    const solutionRows = [
-      ["Brand", product.brand || "N/A"],
-      ["Product Name", product.productName || "N/A"],
-      ["Recommended For", product.recommendedFor || "N/A"],
-      ["Benefits", product.benefits || "N/A"],
-      ["Ingredients", product.ingredients || "N/A"],
-      ["Instructions", product.instructions || "N/A"],
-    ];
-    html += '<h3 class="section-title">Product Information</h3>';
-    html += createTable(solutionRows);
-    if (product.aboutProduct) {
-      html += '<h3 class="section-title">About This Product</h3>';
-      html += `<p>${product.aboutProduct}</p>`;
+  return parts.join("\n");
+
+  // ─────────────────────────────────────────────────────────────────
+  // Helper — chooses the per-category Technical + General table rows.
+  // Eyewear families share most rows; watches / contact lenses / etc.
+  // surface their own keys. ────────────────────────────────────────
+  function perCategoryTables(cat: string, p: Product): { technical: string; general: string } {
+    if (cat === "WATCHES" || cat === "SMARTWATCHES") {
+      const technical = tableRows([
+        ["Movement", p.movement],
+        ["Display", p.displayType],
+        ["Case Material", p.caseMaterial],
+        ["Case Size", p.caseSize],
+        ["Case Shape", p.caseShape],
+        ["Glass Type", p.glassType],
+        ["Water Resistance", p.waterResistance],
+        ["Battery Life", p.batteryLife],
+        ["Connectivity", p.connectivity],
+        ["Health Sensors", p.healthSensors],
+        ["OS Compatibility", p.osCompatibility],
+        ["Functions", p.watchFunctions],
+        ["Product Category", noun],
+      ]);
+      const general = tableRows([
+        ["Brand", p.brand],
+        ["Model No", p.fullModelNo || p.modelNo],
+        ["Strap Material", p.strapMaterial],
+        ["Strap Color", p.strapColor || p.frameColor || p.colorCode],
+        ["Dial Color", p.dialColor],
+        ["Dial Pattern", p.dialPattern],
+        ["Gender", p.gender],
+        ["Country of Origin", p.countryOfOrigin],
+      ]);
+      return { technical, general };
     }
-  } else {
-    html += '<h3 class="section-title">Product Details</h3>';
-    html += createTable(productDetailsRows);
-    html += '<h3 class="section-title">Technical Specifications</h3>';
-    html += createTable(technicalRows);
-    html += '<h3 class="section-title">General Information</h3>';
-    html += createTable(generalRows);
-  }
 
-  if (product.warranty) {
-    html += '<h3 class="section-title">Warranty</h3>';
-    html += `<p>${product.warranty}</p>`;
-  }
+    if (cat === "CONTACT_LENSES" || cat === "COLOR_CONTACT_LENSES") {
+      const technical = tableRows([
+        ["Lens Type", p.lensType],
+        ["Material", p.contactLensMaterial || p.lensMaterial],
+        ["Wear Schedule", p.wearSchedule],
+        ["Pack Size", p.packSize],
+        ["Base Curve", p.baseCurve],
+        ["Diameter", p.diameter],
+        ["Water Content", p.waterContent],
+        ["Oxygen Permeability", p.oxygenPermeability],
+        ["UV Protection", p.uvProtection],
+        ["Product Category", noun],
+      ]);
+      const general = tableRows([
+        ["Brand", p.brand],
+        ["Model No", p.fullModelNo || p.modelNo],
+        ["Tint / Colour", p.lensColour],
+        ["Country of Origin", p.countryOfOrigin],
+      ]);
+      return { technical, general };
+    }
 
-  if (product.productUSP) {
-    html += '<h3 class="section-title">Why Choose This Product</h3>';
-    html += `<p>${product.productUSP}</p>`;
-  }
+    if (cat === "ACCESSORIES") {
+      const technical = tableRows([
+        ["Accessory Type", p.accessoryType],
+        ["Material", p.material || p.frameMaterial],
+        ["Compatibility", p.compatibility],
+        ["Pack Size", p.packSize],
+        ["Product Category", noun],
+      ]);
+      const general = tableRows([
+        ["Brand", p.brand],
+        ["Model No", p.fullModelNo || p.modelNo],
+        ["Country of Origin", p.countryOfOrigin],
+      ]);
+      return { technical, general };
+    }
 
-  html += "</div>";
-  return html;
+    // Default — eyewear families: Spectacles, Sunglasses, Clip-On,
+    // Reading, Computer, Safety, Smartglasses.
+    // Spec rows are added per-category where applicable; missing rows
+    // simply drop out via tableRows().
+    const technical = tableRows([
+      ["Frame Type", p.frameType],
+      ["Polarization", cat === "SUNGLASSES" || cat === "CLIP_ON_FRAMES" || cat === "SMARTGLASSES" ? p.polarization : null],
+      ["UV Protection", p.uvProtection],
+      ["Frame Material", p.frameMaterial],
+      // Computer / reading glasses have explicit lens-feature fields that
+      // were called out in the round 2 mapping. Surface them when present.
+      ["Blue Light Protection", (p as any).blueLightProtection],
+      ["Anti-Glare Coating", (p as any).antiGlareCoating],
+      ["Anti-Fog Coating", (p as any).antiFogCoating],
+      ["Anti-Scratch Coating", (p as any).antiScratchCoating],
+      ["Power", cat === "READING_GLASSES" ? (p as any).power : null],
+      ["Vision Type", cat === "READING_GLASSES" ? (p as any).visionType : null],
+      ["Side Shields", cat === "SAFETY_GLASSES" ? (p as any).sideShields : null],
+      ["Certification", cat === "SAFETY_GLASSES" ? (p as any).certification : null],
+      ["Use-case", cat === "SAFETY_GLASSES" ? (p as any).useCase : null],
+      ["Product Category", noun],
+      ["Size", p.frameSize],
+      ["Bridge", p.bridge],
+      ["Temple Length", p.templeLength],
+      ["Weight", p.weight ? withUnit(p.weight, "g") : null],
+    ]);
+    const general = tableRows([
+      ["Brand", p.brand],
+      ["Model No", p.fullModelNo || p.modelNo],
+      ["Shape", p.shape],
+      ["Frame Code", p.colorCode],
+      ["Temple Colour", p.templeColor],
+      ["Lens Colour", p.lensColour],
+      ["Gender", p.gender],
+      ["Country of Origin", p.countryOfOrigin],
+    ]);
+    return { technical, general };
+  }
+}
+
+/**
+ * Per-category marketing intro paragraph (Option A — legacy pattern,
+ * approved by user 2026-05-09). Each template fills only with values
+ * actually present on the product so the prose doesn't read as a Mad
+ * Lib. Falls back to a generic line for unknown categories.
+ */
+export function buildMarketingIntro(product: Product): string {
+  const cat = normalizeCategory(product.category);
+  const noun = categorySeoNoun(product.category);
+  const brand = trimOrEmpty(product.brand);
+  const model = trimOrEmpty(product.fullModelNo || product.modelNo);
+  const colorCode = trimOrEmpty(product.colorCode);
+  const colorName = trimOrEmpty(product.colorName || product.frameColor);
+  const sizeStr = trimOrEmpty(product.frameSize);
+  const lensColour = trimOrEmpty(product.lensColour);
+  const shape = trimOrEmpty(product.shape);
+  const gender = trimOrEmpty(product.gender) || "Unisex";
+  const frameMaterial = trimOrEmpty(product.frameMaterial);
+  const polarization = trimOrEmpty(product.polarization);
+  const uv = trimOrEmpty(product.uvProtection);
+
+  // Reusable phrases — keep tone consistent across categories.
+  const ctaShort = "Discover your perfect pair at Better Vision today!";
+  const ctaWatch = "Authentic, fully warrantied, and shipped pan-India. Order from Better Vision.";
+  const ctaLens = "Ships free across India with COD support. Order now, only at Better Vision.";
+  const ctaAccessory = "Backed by Better Vision quality. Order now.";
+  const trust = "Enjoy unbeatable discounts and guaranteed authentic products.";
+
+  // Pieces that combine per template.
+  const brandModel = [brand, model].filter(Boolean).join(" ");
+  const colorPhrase = colorName || colorCode;
+  const sizeSuffix = sizeStr ? ` size ${sizeStr}` : "";
+  const lookPhrase = shape ? `${shape.toLowerCase()} look` : "classic look";
+
+  switch (cat) {
+    case "SUNGLASSES":
+    case "CLIP_ON_FRAMES": {
+      const colourLine = [
+        colorPhrase ? `${colorPhrase} colour` : "",
+        lensColour ? `with ${lensColour} lenses` : "",
+      ]
+        .filter(Boolean)
+        .join(" ");
+      const polUv = [polarization, uv].filter(Boolean).join(", ");
+      return [
+        `Reflect your style with the ${brandModel} ${shape || ""} ${noun}.`.replace(/\s+/g, " ").trim(),
+        colourLine ? `This ${noun} comes in ${colourLine},` : `This ${noun}`,
+        `with a ${lookPhrase} that turns every step into a moment.`,
+        `Suitable for ${gender}${sizeSuffix ? `,` : ""}${sizeSuffix ? ` this model comes in${sizeSuffix}.` : "."}`,
+        polUv ? `${polUv}.` : "",
+        trust,
+        ctaShort,
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .replace(/\s+/g, " ");
+    }
+
+    case "SPECTACLES":
+      return [
+        `Step into a sharper look with the ${brandModel} ${shape || ""} ${noun}.`.replace(/\s+/g, " ").trim(),
+        frameMaterial ? `Crafted in ${frameMaterial},` : "",
+        colorPhrase ? `this frame comes in ${colorPhrase}${sizeSuffix ? ` for${sizeSuffix}` : ""}.` : "",
+        `Lightweight, comfortable, and ready for your prescription. Suitable for ${gender}.`,
+        `Backed by manufacturer warranty and free pan-India shipping. Pick up your pair at Better Vision today.`,
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .replace(/\s+/g, " ")
+        .trim();
+
+    case "READING_GLASSES": {
+      const power = trimOrEmpty((product as any).power);
+      const vision = trimOrEmpty((product as any).visionType);
+      const lensFeatures = [
+        (product as any).antiGlareCoating ? "anti-glare" : "",
+        (product as any).blueLightProtection ? "blue-light protection" : "",
+      ]
+        .filter(Boolean)
+        .join(" and ");
+      return [
+        `See clearly, day after day, with the ${brandModel} ${noun}.`,
+        frameMaterial ? `${frameMaterial} frame${shape ? `, ${shape.toLowerCase()} shape` : ""},` : "",
+        colorPhrase ? `available in ${colorPhrase}.` : "",
+        vision || power ? `${vision ? vision + " " : ""}${power ? `at ${power} power` : ""}${lensFeatures ? ` with ${lensFeatures}` : ""} — easy on the eyes during long screen sessions.` : "",
+        `Suitable for ${gender}.`,
+        `Backed by manufacturer warranty and free pan-India shipping. Pick up your pair at Better Vision.`,
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .replace(/\s+/g, " ")
+        .trim();
+    }
+
+    case "COMPUTER_GLASSES": {
+      const lensFeatures = [
+        (product as any).antiGlareCoating ? "anti-glare" : "",
+        (product as any).blueLightProtection ? "blue-light protection" : "",
+      ]
+        .filter(Boolean)
+        .join(" and ");
+      return [
+        `Long screen sessions, easier on your eyes — meet the ${brandModel} ${noun}.`,
+        frameMaterial ? `${frameMaterial} frame,` : "",
+        colorPhrase ? `${colorPhrase} colour,` : "",
+        lensFeatures ? `with ${lensFeatures} built in.` : "",
+        `Suitable for ${gender}.`,
+        ctaWatch,
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .replace(/\s+/g, " ")
+        .trim();
+    }
+
+    case "SAFETY_GLASSES": {
+      const useCase = trimOrEmpty((product as any).useCase);
+      return [
+        `Stay protected on the job with the ${brandModel} ${noun}.`,
+        `Impact-rated lenses${frameMaterial ? ` and a ${frameMaterial.toLowerCase()} frame` : ""}${shape ? ` in ${shape.toLowerCase()}` : ""},${colorPhrase ? ` available in ${colorPhrase}.` : "."}`,
+        useCase ? `Built for ${useCase}.` : "",
+        `Suitable for ${gender}.`,
+        `Backed by manufacturer warranty. Order from Better Vision.`,
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .replace(/\s+/g, " ")
+        .trim();
+    }
+
+    case "CONTACT_LENSES":
+    case "COLOR_CONTACT_LENSES": {
+      const material = trimOrEmpty(product.contactLensMaterial || product.lensMaterial);
+      const wear = trimOrEmpty(product.wearSchedule);
+      const pack = trimOrEmpty(product.packSize);
+      const tint = trimOrEmpty(product.lensColour);
+      const isColor = cat === "COLOR_CONTACT_LENSES";
+      const opener = isColor
+        ? `Switch up your look with ${brandModel} ${noun}${tint ? ` in ${tint}` : ""}.`
+        : `Comfort that lasts, all day, with ${brandModel} ${noun}.`;
+      const specBits = [
+        material ? `${material} material` : "",
+        wear ? `${wear.toLowerCase()} wear` : "",
+        pack ? `pack of ${pack}` : "",
+      ].filter(Boolean);
+      const specSentence = specBits.length ? capitalizeFirst(specBits.join(", ") + ".") : "";
+      return [opener, specSentence, ctaLens].filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
+    }
+
+    case "SMARTGLASSES":
+      return [
+        `Tech meets style with the ${brandModel} ${noun}.`,
+        frameMaterial ? `${frameMaterial} frame${colorPhrase ? ` in ${colorPhrase}` : ""}${sizeSuffix ? `, size ${sizeStr}` : ""}.` : "",
+        `Built-in audio, camera, and connectivity in a frame you'd actually wear.`,
+        `Suitable for ${gender}.`,
+        ctaWatch,
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .replace(/\s+/g, " ")
+        .trim();
+
+    case "WATCHES": {
+      const dial = trimOrEmpty(product.dialColor);
+      const strapMat = trimOrEmpty(product.strapMaterial);
+      const movement = trimOrEmpty(product.movement);
+      const wr = trimOrEmpty(product.waterResistance);
+      // Build the descriptive sentence as proper clauses joined by commas,
+      // ending with a period — avoids the "Watch.Black dial" merge bug.
+      const clauses: string[] = [];
+      if (dial) clauses.push(`${dial} dial${strapMat ? ` paired with a ${strapMat.toLowerCase()} strap` : ""}`);
+      else if (strapMat) clauses.push(`${strapMat} strap`);
+      if (movement) clauses.push(`powered by precise ${movement.toLowerCase()} movement`);
+      if (wr) clauses.push(`built to handle ${wr} water resistance`);
+      const descSentence = clauses.length ? capitalizeFirst(clauses.join(", ") + ".") : "";
+      return [
+        `Discover everyday craftsmanship with the ${brandModel} ${noun}.`,
+        descSentence,
+        `Perfect for ${gender}.`,
+        ctaWatch,
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .replace(/\s+/g, " ")
+        .trim();
+    }
+
+    case "SMARTWATCHES": {
+      const display = trimOrEmpty(product.displayType);
+      const battery = trimOrEmpty(product.batteryLife);
+      const sensors = trimOrEmpty(product.healthSensors);
+      const clauses: string[] = [];
+      if (display) clauses.push(`${display} display`);
+      if (battery) clauses.push(`${battery} battery`);
+      if (sensors) clauses.push(`tracks ${sensors.toLowerCase()}`);
+      const descSentence = clauses.length ? capitalizeFirst(clauses.join(", ") + ".") : "";
+      return [
+        `Your day, on your wrist — the ${brandModel} ${noun}.`,
+        descSentence,
+        `Pairs with iOS and Android.`,
+        ctaWatch,
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .replace(/\s+/g, " ")
+        .trim();
+    }
+
+    case "ACCESSORIES": {
+      const accType = trimOrEmpty(product.accessoryType) || trimOrEmpty(product.label) || "accessory";
+      const material = trimOrEmpty(product.material || product.frameMaterial);
+      const compat = trimOrEmpty(product.compatibility);
+      const pack = trimOrEmpty(product.packSize);
+      return [
+        `Keep your eyewear at its best with the ${brandModel} ${accType}.`,
+        material ? `${material},` : "",
+        compat ? `compatible with ${compat},` : "",
+        pack ? `pack of ${pack}.` : "",
+        ctaAccessory,
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .replace(/\s+/g, " ")
+        .trim();
+    }
+
+    default:
+      return [
+        `Explore the ${brandModel} from Better Vision.`,
+        `Authentic products, manufacturer warranty, and free pan-India shipping. Order yours today.`,
+      ].join(" ");
+  }
+}
+
+function trimOrEmpty(v: unknown): string {
+  return typeof v === "string" ? v.trim() : v ? String(v).trim() : "";
+}
+
+function capitalizeFirst(s: string): string {
+  return s.length ? s[0].toUpperCase() + s.slice(1) : s;
+}
+
+function withUnit(v: unknown, unit: string): string {
+  const s = trimOrEmpty(v);
+  if (!s) return "";
+  // Avoid double-suffixing if user already wrote "37g".
+  if (new RegExp(`${unit}\\s*$`, "i").test(s)) return s;
+  return `${s}${unit}`;
+}
+
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
 }
 
 /**

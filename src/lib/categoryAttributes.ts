@@ -38,7 +38,9 @@ export interface AttributeMeta {
 export const ATTRIBUTES: Record<string, AttributeMeta> = {
   // ── Identity (columns exist on Product) ──
   brand:            { key: "brand",            label: "Brand",              level: "product", tag: true,  hasColumn: true },
-  subBrand:         { key: "subBrand",         label: "Sub-brand",          level: "product", tag: true,  hasColumn: true },
+  // sub-brand: title-only per round 1 (10.1) — title generator picks it up,
+  // but it is NOT emitted as a Shopify tag (used to be `subbrand_<value>`).
+  subBrand:         { key: "subBrand",         label: "Sub-brand",          level: "product", tag: false, hasColumn: true },
   modelNo:          { key: "modelNo",          label: "Model No",           level: "product", tag: true,  hasColumn: true },
   productName:      { key: "productName",      label: "Product Name",       level: "product", tag: false, hasColumn: true },
   label:            { key: "label",            label: "Label",              level: "product", tag: false, hasColumn: true },
@@ -50,7 +52,9 @@ export const ATTRIBUTES: Record<string, AttributeMeta> = {
 
   // ── Demographics / origin ──
   gender:           { key: "gender",           label: "Gender",             level: "product", tag: true,  hasColumn: true },
-  countryOfOrigin:  { key: "countryOfOrigin",  label: "Country of Origin",  level: "product", tag: true,  tagPrefix: "origin", attributeTypeName: "countryoforigin", hasColumn: true },
+  // country-of-origin: Shopify product field only per round 1 (4.6 / 10.14) —
+  // do NOT emit as a tag. The DB column stays for sync to inventoryItem.
+  countryOfOrigin:  { key: "countryOfOrigin",  label: "Country of Origin",  level: "product", tag: false, tagPrefix: "origin", attributeTypeName: "countryoforigin", hasColumn: true },
   warranty:         { key: "warranty",         label: "Warranty",           level: "product", tag: true,  hasColumn: true },
 
   // ── Pricing ──
