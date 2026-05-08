@@ -193,11 +193,15 @@ export async function pushProductsToShopify(
             ).catch(() => {});
           }
 
-          // Re-push variant prices + variant metafields.
+          // Re-push variant prices + variant metafields. Bulk-update
+          // takes the parent product GID — we already have it on the
+          // product row we're iterating over.
+          if (!product.shopifyProductId) continue;
           let varConsecFails = 0;
           for (const v of product.variants) {
             if (!v.shopifyVariantId) continue;
             const r = await updateVariantPrice(
+              product.shopifyProductId,
               v.shopifyVariantId,
               String(v.discountedPrice || v.mrp || product.mrp || 0),
               v.mrp ? String(v.mrp) : undefined

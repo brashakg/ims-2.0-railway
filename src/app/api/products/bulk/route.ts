@@ -136,7 +136,9 @@ export async function POST(request: NextRequest) {
             },
           });
 
-          // Sync variant prices to Shopify if published
+          // Sync variant prices to Shopify if published. Bulk-update
+          // requires the parent product's Shopify GID (we already have
+          // it from the same product row).
           if (product.shopifyProductId && product.status === "PUBLISHED") {
             const variants = await prisma.productVariant.findMany({
               where: { productId: id, shopifyVariantId: { not: null } },
@@ -144,6 +146,7 @@ export async function POST(request: NextRequest) {
             for (const v of variants) {
               if (v.shopifyVariantId) {
                 await updateVariantPrice(
+                  product.shopifyProductId,
                   v.shopifyVariantId,
                   String(newDiscounted),
                   String(newMrp)

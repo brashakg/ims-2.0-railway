@@ -538,85 +538,68 @@ export async function attachMediaToProduct(
   };
 }
 
-// ─── CREATE / UPDATE VARIANT ───────────────────────────
-
-export async function createVariant(
-  shopifyProductId: string,
-  variant: ShopifyVariantInput
-): Promise<{ success: boolean; shopifyVariantId?: string; message: string }> {
-  const mutation = `
-    mutation CreateVariant($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
-      productVariantsBulkCreate(productId: $productId, variants: $variants) {
-        productVariants {
-          id
-          sku
-          title
-          inventoryItem { id }
-        }
-        userErrors { field message }
-      }
-    }
-  `;
-
-  const result = await makeGraphQLRequest<{
-    productVariantsBulkCreate: {
-      productVariants: Array<{
-        id: string;
-        sku: string;
-        title: string;
-        inventoryItem: { id: string };
-      }>;
-      userErrors: Array<{ field: string; message: string }>;
-    };
-  }>(mutation, { productId: shopifyProductId, variants: [variant] });
-
-  if (!result.success) {
-    return { success: false, message: result.error || "Failed to create variant" };
-  }
-  const errors = result.data?.productVariantsBulkCreate.userErrors || [];
-  if (errors.length > 0) {
-    return { success: false, message: errors.map((e) => `${e.field}: ${e.message}`).join("; ") };
-  }
-  const created = result.data?.productVariantsBulkCreate.productVariants?.[0];
-  return {
-    success: true,
-    shopifyVariantId: created?.id,
-    message: "Variant created successfully",
-  };
-}
+// ─── UPDATE VARIANT PRICE ──────────────────────────────
+// Note: Shopify removed `productVariantUpdate` and `ProductVariantInput`
+// from the Admin API. The current path is `productVariantsBulkUpdate`
+// which requires the parent product's GID alongside the variant data —
+// see the schema audit notes in CLAUDE.md.
+//
+// `createVariant` (single-variant wrapper around productVariantsBulkCreate)
+// was also removed: it's unused, and its old signature accepted SKU at
+// the top level of the variant which the new bulk shape doesn't allow
+// (SKU lives under inventoryItem.sku now). If you ever need to add a
+// single variant, call productVariantsBulkCreate directly with one
+// element in the array.
 
 export async function updateVariantPrice(
+  shopifyProductId: string,
   shopifyVariantId: string,
   price: string,
   compareAtPrice?: string
 ): Promise<{ success: boolean; message: string }> {
   const mutation = `
-    mutation UpdateVariant($input: ProductVariantInput!) {
-      productVariantUpdate(input: $input) {
-        productVariant { id price }
+    mutation UpdateVariantPrice(
+      $productId: ID!,
+      $variants: [ProductVariantsBulkInput!]!
+    ) {
+      productVariantsBulkUpdate(productId: $productId, variants: $variants) {
+        productVariants { id price compareAtPrice }
         userErrors { field message }
       }
     }
   `;
 
-  const input: Record<string, unknown> = { id: shopifyVariantId, price };
-  if (compareAtPrice) input.compareAtPrice = compareAtPrice;
+  const variant: Record<string, unknown> = {
+    id: shopifyVariantId,
+    price,
+  };
+  if (compareAtPrice) variant.compareAtPrice = compareAtPrice;
 
   const result = await makeGraphQLRequest<{
-    productVariantUpdate: {
-      productVariant: { id: string; price: string } | null;
+    productVariantsBulkUpdate: {
+      productVariants: Array<{
+        id: string;
+        price: string;
+        compareAtPrice: string | null;
+      }> | null;
       userErrors: Array<{ field: string; message: string }>;
     };
-  }>(mutation, { input });
+  }>(mutation, { productId: shopifyProductId, variants: [variant] });
 
   if (!result.success) {
-    return { success: false, message: result.error || "Failed to update variant" };
+    return {
+      success: false,
+      message: result.error || "Failed to update variant price",
+    };
   }
-  const errors = result.data?.productVariantUpdate.userErrors || [];
+  const errors = result.data?.productVariantsBulkUpdate.userErrors || [];
   if (errors.length > 0) {
-    return { success: false, message: errors.map((e) => `${e.field}: ${e.message}`).join("; ") };
+    return {
+      success: false,
+      message: errors.map((e) => `${e.field}: ${e.message}`).join("; "),
+    };
   }
-  return { success: true, message: "Variant updated successfully" };
+  return { success: true, message: "Variant price updated successfully" };
 }
 
 // ─── INVENTORY ─────────────────────────────────────────
