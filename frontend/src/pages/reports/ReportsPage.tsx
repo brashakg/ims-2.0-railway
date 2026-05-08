@@ -924,7 +924,7 @@ export function ReportsPage() {
               </div>
               <div className="bg-white rounded p-3">
                 <p className="text-xs text-gray-500">Retention Rate</p>
-                <p className="text-xl font-bold text-purple-600 mt-1">{customerAcquisition.retention_percent}%</p>
+                <p className="text-xl font-bold text-bv-red-600 mt-1">{customerAcquisition.retention_percent}%</p>
               </div>
               <div className="bg-white rounded p-3">
                 <p className="text-xs text-gray-500">Total Customers</p>
@@ -1033,7 +1033,7 @@ export function ReportsPage() {
                 </div>
                 <div className="bg-white rounded p-3">
                   <p className="text-xs text-gray-500">Margin</p>
-                  <p className="text-lg font-bold text-purple-600">{expenseVsRevenue.margin_percent || 0}%</p>
+                  <p className="text-lg font-bold text-bv-red-600">{expenseVsRevenue.margin_percent || 0}%</p>
                 </div>
               </div>
             </div>
