@@ -9,6 +9,7 @@
 
 import { useState, useEffect } from 'react';
 import { useAuth } from '../../context/AuthContext';
+import api from '../../services/api/client';
 import { Phone, Clock, AlertCircle, CheckCircle2, RotateCcw, Calendar } from 'lucide-react';
 import clsx from 'clsx';
 
@@ -86,14 +87,8 @@ export function FollowUpDashboard() {
   const loadFollowUps = async () => {
     try {
       setLoading(true);
-      const response = await fetch(
-        `/api/v1/follow-ups/?store_id=${storeId}`,
-        { headers: { 'Content-Type': 'application/json' } }
-      );
-      if (response.ok) {
-        const data = await response.json();
-        setFollowUps(data);
-      }
+      const { data } = await api.get('/follow-ups/', { params: { store_id: storeId } });
+      setFollowUps(data);
     } catch (error) {
       // silently handle error
     } finally {
@@ -103,14 +98,8 @@ export function FollowUpDashboard() {
 
   const loadSummary = async () => {
     try {
-      const response = await fetch(
-        `/api/v1/follow-ups/summary?store_id=${storeId}`,
-        { headers: { 'Content-Type': 'application/json' } }
-      );
-      if (response.ok) {
-        const data = await response.json();
-        setSummary(data);
-      }
+      const { data } = await api.get('/follow-ups/summary', { params: { store_id: storeId } });
+      setSummary(data);
     } catch (error) {
       // silently handle error
     }
@@ -118,18 +107,9 @@ export function FollowUpDashboard() {
 
   const handleAutoGenerate = async () => {
     try {
-      const response = await fetch(
-        `/api/v1/follow-ups/auto-generate?store_id=${storeId}`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-        }
-      );
-      if (response.ok) {
-        await response.json();
-        await loadFollowUps();
-        await loadSummary();
-      }
+      await api.post('/follow-ups/auto-generate', null, { params: { store_id: storeId } });
+      await loadFollowUps();
+      await loadSummary();
     } catch (error) {
       // silently handle error
     }
@@ -141,15 +121,11 @@ export function FollowUpDashboard() {
 
     try {
       setCompleting(followUpId);
-      const response = await fetch(
-        `/api/v1/follow-ups/${followUpId}/complete`,
-        {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ outcome, notes: '' }),
-        }
-      );
-      if (response.ok) {
+      const response = await api.patch(`/follow-ups/${followUpId}/complete`, {
+        outcome,
+        notes: '',
+      });
+      if (response.status >= 200 && response.status < 300) {
         await loadFollowUps();
         await loadSummary();
         setSelectedOutcome((prev) => {
