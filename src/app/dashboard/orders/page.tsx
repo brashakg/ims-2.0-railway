@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, Fragment } from 'react';
 import Link from 'next/link';
 import { ChevronDown, ChevronUp, Loader2, RefreshCw, Search } from 'lucide-react';
 import Topbar from '@/components/Topbar';
@@ -185,177 +185,335 @@ export default function OrdersPage() {
       />
       <div style={{ padding: 24, maxWidth: 1400, margin: '0 auto' }}>
 
-        {/* Stats Cards */}
+        {/* Stats Cards — Polaris polaris-card with tabular-nums KPI numbers */}
         {stats && (
-          <div className="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
-            <div className="bg-white rounded-lg shadow p-6">
-              <p className="text-gray-600 text-sm font-medium">Total Orders</p>
-              <p className="text-3xl font-bold text-gray-900 mt-2">{stats.totalOrders}</p>
-            </div>
-            <div className="bg-white rounded-lg shadow p-6">
-              <p className="text-gray-600 text-sm font-medium">Open</p>
-              <p className="text-3xl font-bold text-blue-600 mt-2">{stats.openOrders}</p>
-            </div>
-            <div className="bg-white rounded-lg shadow p-6">
-              <p className="text-gray-600 text-sm font-medium">Closed</p>
-              <p className="text-3xl font-bold text-green-600 mt-2">{stats.closedOrders}</p>
-            </div>
-            <div className="bg-white rounded-lg shadow p-6">
-              <p className="text-gray-600 text-sm font-medium">Total Revenue</p>
-              <p className="text-3xl font-bold text-gray-900 mt-2">₹{(stats.totalRevenue || 0).toLocaleString('en-IN')}</p>
-            </div>
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-3 mb-4">
+            {[
+              { label: 'Total orders', value: stats.totalOrders, tone: 'default' },
+              { label: 'Open', value: stats.openOrders, tone: 'default' },
+              { label: 'Closed', value: stats.closedOrders, tone: 'success' },
+              {
+                label: 'Total revenue',
+                value: `₹${(stats.totalRevenue || 0).toLocaleString('en-IN')}`,
+                tone: 'default',
+              },
+            ].map((c) => (
+              <div key={c.label} className="polaris-card" style={{ padding: 14 }}>
+                <div
+                  style={{
+                    fontSize: 11,
+                    fontWeight: 600,
+                    color: 'var(--text-tertiary)',
+                    textTransform: 'uppercase',
+                    letterSpacing: 0.4,
+                  }}
+                >
+                  {c.label}
+                </div>
+                <div
+                  className="tabular-nums"
+                  style={{
+                    fontSize: 24,
+                    fontWeight: 600,
+                    letterSpacing: -0.4,
+                    marginTop: 4,
+                    color:
+                      c.tone === 'success' ? 'var(--success-text)' : 'var(--text)',
+                  }}
+                >
+                  {c.value}
+                </div>
+              </div>
+            ))}
           </div>
         )}
 
-        {/* Error Message */}
+        {/* Error banner */}
         {error && (
-          <div className="mb-6 bg-red-50 border border-red-200 rounded-lg p-4">
-            <p className="text-red-800">{error}</p>
+          <div
+            className="polaris-card mb-3"
+            style={{
+              padding: 12,
+              background: 'var(--critical-bg)',
+              borderColor: 'var(--critical)',
+              color: 'var(--critical-text)',
+              fontSize: 13,
+            }}
+          >
+            {error}
           </div>
         )}
 
-        {/* Controls — Sync button moved into Topbar actions. */}
-        <div className="bg-white rounded-lg shadow p-6 mb-6">
-          <div className="flex items-center gap-2 flex-wrap border-b border-gray-200 -mx-6 px-6 pb-3 mb-4">
-            {SEGMENTS.map((s) => (
+        {/* Filter rail — Polaris saved-views chip pattern, not a bordered card */}
+        <div className="flex items-center gap-2 flex-wrap mb-3">
+          {SEGMENTS.map((s) => {
+            const active = segment === s.key;
+            return (
               <button
                 key={s.key}
+                type="button"
                 onClick={() => {
                   setSegment(s.key);
                   setPage(1);
                 }}
-                className={`px-3 py-1.5 text-sm rounded-lg border transition-colors ${
-                  segment === s.key
-                    ? 'bg-blue-600 text-white border-blue-600'
-                    : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-50'
-                }`}
+                className="polaris-btn polaris-btn-sm"
+                style={{
+                  background: active ? 'var(--text)' : 'var(--bg-surface)',
+                  color: active ? 'white' : 'var(--text)',
+                  borderColor: active
+                    ? 'var(--text)'
+                    : 'var(--border-strong)',
+                  fontWeight: active ? 600 : 500,
+                }}
               >
                 {s.label}
               </button>
-            ))}
-          </div>
+            );
+          })}
+        </div>
 
-          <div className="flex-1 relative">
-            <Search className="absolute left-3 top-2.5 w-4 h-4 text-gray-400" />
+        {/* Search */}
+        <div
+          className="polaris-card mb-3"
+          style={{ padding: 12, display: 'flex', gap: 8, alignItems: 'center' }}
+        >
+          <div className="relative flex-1">
+            <Search
+              className="absolute left-3 top-2 text-slate-400"
+              size={14}
+            />
             <input
               type="text"
-              placeholder="Search by order number or customer..."
+              placeholder="Search by order number or customer…"
               value={search}
               onChange={(e) => {
                 setSearch(e.target.value);
                 setPage(1);
               }}
-              className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              style={{
+                width: '100%',
+                padding: '6px 10px 6px 32px',
+                border: '1px solid var(--border-strong)',
+                borderRadius: 8,
+                fontSize: 13,
+                height: 32,
+              }}
             />
           </div>
         </div>
 
-        {/* Orders Table */}
-        <div className="bg-white rounded-lg shadow overflow-hidden">
+        {/* Orders table — Polaris polaris-table primitive */}
+        <div className="polaris-card" style={{ overflow: 'hidden' }}>
           {loading ? (
-            <div className="flex items-center justify-center py-12">
-              <Loader2 className="w-8 h-8 animate-spin text-blue-600" />
+            <div
+              style={{
+                padding: 32,
+                textAlign: 'center',
+                color: 'var(--text-tertiary)',
+                fontSize: 13,
+              }}
+            >
+              <Loader2
+                className="animate-spin inline-block mr-2"
+                size={14}
+              />
+              Loading…
             </div>
           ) : orders.length === 0 ? (
-            <div className="flex items-center justify-center py-12">
-              <p className="text-gray-600">No orders found</p>
+            <div
+              style={{
+                padding: 32,
+                textAlign: 'center',
+                color: 'var(--text-tertiary)',
+                fontSize: 13,
+              }}
+            >
+              No orders match this filter.
             </div>
           ) : (
             <>
               <div className="overflow-x-auto">
-                <table className="w-full">
-                  <thead className="bg-gray-50 border-b border-gray-200">
+                <table className="polaris-table">
+                  <thead>
                     <tr>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-700 uppercase">Order #</th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-700 uppercase">Customer</th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-700 uppercase">Items</th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-700 uppercase">Total</th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-700 uppercase">Financial Status</th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-700 uppercase">Fulfillment</th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-700 uppercase">Date</th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-700 uppercase"></th>
+                      <th>Order #</th>
+                      <th>Customer</th>
+                      <th>Items</th>
+                      <th
+                        className="tabular-nums"
+                        style={{ textAlign: 'right' }}
+                      >
+                        Total
+                      </th>
+                      <th>Financial</th>
+                      <th>Fulfillment</th>
+                      <th>Date</th>
+                      <th></th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-gray-200">
-                    {orders.map((order) => (
-                      <tbody key={order.id}>
-                        <tr className="hover:bg-gray-50">
-                          <td className="px-6 py-4 text-sm font-medium">
-                            <Link
-                              href={`/dashboard/orders/${order.id}`}
-                              className="text-blue-600 hover:underline"
+                  <tbody>
+                    {orders.map((order) => {
+                      const finTone =
+                        order.financialStatus === 'PAID'
+                          ? 'polaris-badge polaris-badge-success'
+                          : order.financialStatus === 'REFUNDED'
+                            ? 'polaris-badge polaris-badge-critical'
+                            : 'polaris-badge polaris-badge-warning';
+                      const fulfilTone =
+                        order.fulfillmentStatus === 'FULFILLED'
+                          ? 'polaris-badge polaris-badge-success'
+                          : order.fulfillmentStatus === 'PARTIAL'
+                            ? 'polaris-badge polaris-badge-warning'
+                            : 'polaris-badge';
+                      return (
+                        <Fragment key={order.id}>
+                          <tr>
+                            <td>
+                              <Link
+                                href={`/dashboard/orders/${order.id}`}
+                                style={{
+                                  fontWeight: 500,
+                                  color: 'var(--brand-text)',
+                                  textDecoration: 'none',
+                                }}
+                                className="hover:underline"
+                              >
+                                #{order.orderNumber}
+                              </Link>
+                            </td>
+                            <td>{order.customerName}</td>
+                            <td style={{ color: 'var(--text-secondary)' }}>
+                              {(order.lineItems || []).length} item
+                              {(order.lineItems || []).length === 1 ? '' : 's'}
+                            </td>
+                            <td
+                              className="tabular-nums"
+                              style={{ textAlign: 'right', fontWeight: 500 }}
                             >
-                              #{order.orderNumber}
-                            </Link>
-                          </td>
-                          <td className="px-6 py-4 text-sm text-gray-900">{order.customerName}</td>
-                          <td className="px-6 py-4 text-sm text-gray-600">{(order.lineItems || []).length} items</td>
-                          <td className="px-6 py-4 text-sm font-medium text-gray-900">₹{(order.totalPrice || 0).toFixed(2)}</td>
-                          <td className="px-6 py-4">
-                            <span className={`inline-block px-3 py-1 text-xs font-medium rounded-full ${getFinancialStatusBadge(order.financialStatus)}`}>
-                              {order.financialStatus}
-                            </span>
-                          </td>
-                          <td className="px-6 py-4">
-                            <span className={`inline-block px-3 py-1 text-xs font-medium rounded-full ${getFulfillmentStatusBadge(order.fulfillmentStatus)}`}>
-                              {order.fulfillmentStatus}
-                            </span>
-                          </td>
-                          <td className="px-6 py-4 text-sm text-gray-600">{order.createdAt ? new Date(order.createdAt).toLocaleDateString() : '—'}</td>
-                          <td className="px-6 py-4">
-                            <button
-                              onClick={() => toggleOrderExpand(order.id)}
-                              aria-label={expandedOrders[order.id] ? 'Collapse line items' : 'Expand line items'}
-                              className="p-1 rounded hover:bg-gray-200"
+                              ₹{(order.totalPrice || 0).toFixed(2)}
+                            </td>
+                            <td>
+                              <span className={finTone}>
+                                {order.financialStatus}
+                              </span>
+                            </td>
+                            <td>
+                              <span className={fulfilTone}>
+                                {order.fulfillmentStatus}
+                              </span>
+                            </td>
+                            <td
+                              style={{
+                                color: 'var(--text-tertiary)',
+                                fontSize: 12,
+                              }}
                             >
-                              {expandedOrders[order.id] ? (
-                                <ChevronUp className="w-4 h-4 text-gray-400" />
-                              ) : (
-                                <ChevronDown className="w-4 h-4 text-gray-400" />
-                              )}
-                            </button>
-                          </td>
-                        </tr>
-                        {expandedOrders[order.id] && (
-                          <tr className="bg-gray-50">
-                            <td colSpan={8} className="px-6 py-4">
-                              <div className="bg-white rounded border border-gray-200 p-4">
-                                <h4 className="font-semibold text-gray-900 mb-3">Line Items</h4>
-                                <div className="space-y-2">
+                              {order.createdAt
+                                ? new Date(order.createdAt).toLocaleDateString(
+                                    'en-IN',
+                                    { month: 'short', day: 'numeric' }
+                                  )
+                                : '—'}
+                            </td>
+                            <td>
+                              <button
+                                type="button"
+                                onClick={() => toggleOrderExpand(order.id)}
+                                aria-label={
+                                  expandedOrders[order.id]
+                                    ? 'Collapse line items'
+                                    : 'Expand line items'
+                                }
+                                className="polaris-btn polaris-btn-icon"
+                              >
+                                {expandedOrders[order.id] ? (
+                                  <ChevronUp size={14} />
+                                ) : (
+                                  <ChevronDown size={14} />
+                                )}
+                              </button>
+                            </td>
+                          </tr>
+                          {expandedOrders[order.id] && (
+                            <tr>
+                              <td
+                                colSpan={8}
+                                style={{
+                                  background: 'var(--bg-surface-secondary)',
+                                  padding: 12,
+                                }}
+                              >
+                                <div
+                                  style={{
+                                    fontWeight: 600,
+                                    fontSize: 12,
+                                    marginBottom: 6,
+                                    color: 'var(--text-secondary)',
+                                  }}
+                                >
+                                  Line items
+                                </div>
+                                <div className="space-y-1">
                                   {order.lineItems.map((item) => (
-                                    <div key={item.id} className="flex justify-between items-center text-sm">
-                                      <span className="text-gray-700">{item.title}</span>
-                                      <span className="text-gray-600">Qty: {item.quantity} × ₹{(item.price || 0).toFixed(2)}</span>
+                                    <div
+                                      key={item.id}
+                                      className="flex justify-between"
+                                      style={{ fontSize: 12 }}
+                                    >
+                                      <span style={{ color: 'var(--text)' }}>
+                                        {item.title}
+                                      </span>
+                                      <span
+                                        className="tabular-nums"
+                                        style={{
+                                          color: 'var(--text-secondary)',
+                                        }}
+                                      >
+                                        Qty {item.quantity} · ₹
+                                        {(item.price || 0).toFixed(2)}
+                                      </span>
                                     </div>
                                   ))}
                                 </div>
-                              </div>
-                            </td>
-                          </tr>
-                        )}
-                      </tbody>
-                    ))}
+                              </td>
+                            </tr>
+                          )}
+                        </Fragment>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
 
-              {/* Pagination */}
-              <div className="flex items-center justify-between px-6 py-4 border-t border-gray-200">
-                <p className="text-sm text-gray-600">
+              {/* Pagination — Polaris compact footer */}
+              <div
+                style={{
+                  padding: '8px 16px',
+                  borderTop: '1px solid var(--border-subdued)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  fontSize: 12,
+                  color: 'var(--text-tertiary)',
+                }}
+              >
+                <span>
                   Page {page} of {totalPages}
-                </p>
-                <div className="flex gap-2">
+                </span>
+                <div className="flex gap-1">
                   <button
+                    type="button"
                     onClick={() => setPage(Math.max(1, page - 1))}
                     disabled={page === 1}
-                    className="px-3 py-2 border border-gray-300 rounded-lg text-sm font-medium hover:bg-gray-50 disabled:opacity-50"
+                    className="polaris-btn polaris-btn-sm"
                   >
                     Previous
                   </button>
                   <button
+                    type="button"
                     onClick={() => setPage(Math.min(totalPages, page + 1))}
                     disabled={page === totalPages}
-                    className="px-3 py-2 border border-gray-300 rounded-lg text-sm font-medium hover:bg-gray-50 disabled:opacity-50"
+                    className="polaris-btn polaris-btn-sm"
                   >
                     Next
                   </button>

@@ -147,117 +147,215 @@ export default function CustomersPage() {
           <p className="text-xs text-green-700 mb-3">{syncMessage}</p>
         )}
 
-        {/* Stats Cards */}
+        {/* Stats Cards — Polaris polaris-card with tabular-nums KPIs */}
         {stats && (
-          <div className="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
-            <div className="bg-white rounded-lg shadow p-6">
-              <p className="text-gray-600 text-sm font-medium">Total Customers</p>
-              <p className="text-3xl font-bold text-gray-900 mt-2">{stats.totalCustomers}</p>
-            </div>
-            <div className="bg-white rounded-lg shadow p-6">
-              <p className="text-gray-600 text-sm font-medium">With Orders</p>
-              <p className="text-3xl font-bold text-blue-600 mt-2">{stats.customersWithOrders}</p>
-            </div>
-            <div className="bg-white rounded-lg shadow p-6">
-              <p className="text-gray-600 text-sm font-medium">Accepts Marketing</p>
-              <p className="text-3xl font-bold text-green-600 mt-2">{stats.acceptsMarketing}</p>
-            </div>
-            <div className="bg-white rounded-lg shadow p-6">
-              <p className="text-gray-600 text-sm font-medium">Avg Order Value</p>
-              <p className="text-3xl font-bold text-gray-900 mt-2">₹{(stats.avgOrderValue || 0).toFixed(2)}</p>
-            </div>
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-3 mb-4">
+            {[
+              { label: 'Total customers', value: stats.totalCustomers, tone: 'default' },
+              { label: 'With orders', value: stats.customersWithOrders, tone: 'default' },
+              { label: 'Accepts marketing', value: stats.acceptsMarketing, tone: 'success' },
+              {
+                label: 'Avg order value',
+                value: `₹${(stats.avgOrderValue || 0).toFixed(2)}`,
+                tone: 'default',
+              },
+            ].map((c) => (
+              <div key={c.label} className="polaris-card" style={{ padding: 14 }}>
+                <div
+                  style={{
+                    fontSize: 11,
+                    fontWeight: 600,
+                    color: 'var(--text-tertiary)',
+                    textTransform: 'uppercase',
+                    letterSpacing: 0.4,
+                  }}
+                >
+                  {c.label}
+                </div>
+                <div
+                  className="tabular-nums"
+                  style={{
+                    fontSize: 24,
+                    fontWeight: 600,
+                    letterSpacing: -0.4,
+                    marginTop: 4,
+                    color:
+                      c.tone === 'success' ? 'var(--success-text)' : 'var(--text)',
+                  }}
+                >
+                  {c.value}
+                </div>
+              </div>
+            ))}
           </div>
         )}
 
-
-        {/* Error Message */}
+        {/* Error banner */}
         {error && (
-          <div className="mb-6 bg-red-50 border border-red-200 rounded-lg p-4">
-            <p className="text-red-800">{error}</p>
+          <div
+            className="polaris-card mb-3"
+            style={{
+              padding: 12,
+              background: 'var(--critical-bg)',
+              borderColor: 'var(--critical)',
+              color: 'var(--critical-text)',
+              fontSize: 13,
+            }}
+          >
+            {error}
           </div>
         )}
 
-        {/* Segment tabs + search */}
-        <div className="bg-white rounded-lg shadow p-4 mb-6">
-          <div className="flex items-center gap-2 flex-wrap border-b border-gray-200 -mx-4 px-4 pb-3 mb-3">
-            {SEGMENTS.map((s) => (
+        {/* Segment chip rail */}
+        <div className="flex items-center gap-2 flex-wrap mb-3">
+          {SEGMENTS.map((s) => {
+            const active = segment === s.key;
+            return (
               <button
                 key={s.key}
+                type="button"
                 onClick={() => {
                   setSegment(s.key);
                   setPage(1);
                 }}
-                className={`px-3 py-1.5 text-sm rounded-lg border transition-colors ${
-                  segment === s.key
-                    ? 'bg-blue-600 text-white border-blue-600'
-                    : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-50'
-                }`}
+                className="polaris-btn polaris-btn-sm"
+                style={{
+                  background: active ? 'var(--text)' : 'var(--bg-surface)',
+                  color: active ? 'white' : 'var(--text)',
+                  borderColor: active ? 'var(--text)' : 'var(--border-strong)',
+                  fontWeight: active ? 600 : 500,
+                }}
               >
                 {s.label}
               </button>
-            ))}
-          </div>
-          <div className="relative">
-            <Search className="absolute left-3 top-2.5 w-4 h-4 text-gray-400" />
+            );
+          })}
+        </div>
+
+        {/* Search */}
+        <div
+          className="polaris-card mb-3"
+          style={{ padding: 12, display: 'flex', gap: 8, alignItems: 'center' }}
+        >
+          <div className="relative flex-1">
+            <Search className="absolute left-3 top-2 text-slate-400" size={14} />
             <input
               type="text"
-              placeholder="Search by name, email, or phone..."
+              placeholder="Search by name, email, or phone…"
               value={search}
               onChange={(e) => {
                 setSearch(e.target.value);
                 setPage(1);
               }}
-              className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              style={{
+                width: '100%',
+                padding: '6px 10px 6px 32px',
+                border: '1px solid var(--border-strong)',
+                borderRadius: 8,
+                fontSize: 13,
+                height: 32,
+              }}
             />
           </div>
         </div>
 
-        {/* Customers Table */}
-        <div className="bg-white rounded-lg shadow overflow-hidden">
+        {/* Customers Table — Polaris polaris-table primitive */}
+        <div className="polaris-card" style={{ overflow: 'hidden' }}>
           {loading ? (
-            <div className="flex items-center justify-center py-12">
-              <Loader2 className="w-8 h-8 animate-spin text-blue-600" />
+            <div
+              style={{
+                padding: 32,
+                textAlign: 'center',
+                color: 'var(--text-tertiary)',
+                fontSize: 13,
+              }}
+            >
+              <Loader2 className="animate-spin inline-block mr-2" size={14} />
+              Loading…
             </div>
           ) : customers.length === 0 ? (
-            <div className="flex items-center justify-center py-12">
-              <p className="text-gray-600">No customers found</p>
+            <div
+              style={{
+                padding: 32,
+                textAlign: 'center',
+                color: 'var(--text-tertiary)',
+                fontSize: 13,
+              }}
+            >
+              No customers match this filter.
             </div>
           ) : (
             <>
               <div className="overflow-x-auto">
-                <table className="w-full">
-                  <thead className="bg-gray-50 border-b border-gray-200">
+                <table className="polaris-table">
+                  <thead>
                     <tr>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-700 uppercase">Name</th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-700 uppercase">Email</th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-700 uppercase">Phone</th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-700 uppercase">City</th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-700 uppercase">Orders</th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-700 uppercase">Total Spent</th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-700 uppercase">Marketing</th>
+                      <th>Name</th>
+                      <th>Email</th>
+                      <th>Phone</th>
+                      <th>City</th>
+                      <th
+                        className="tabular-nums"
+                        style={{ textAlign: 'right' }}
+                      >
+                        Orders
+                      </th>
+                      <th
+                        className="tabular-nums"
+                        style={{ textAlign: 'right' }}
+                      >
+                        Total spent
+                      </th>
+                      <th>Marketing</th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-gray-200">
+                  <tbody>
                     {customers.map((customer) => (
-                      <tr key={customer.id} className="hover:bg-gray-50">
-                        <td className="px-6 py-4 text-sm font-medium text-gray-900">
+                      <tr key={customer.id}>
+                        <td style={{ fontWeight: 500 }}>
                           <Link
                             href={`/dashboard/customers/${customer.id}`}
-                            className="text-blue-700 hover:underline"
+                            style={{
+                              color: 'var(--brand-text)',
+                              textDecoration: 'none',
+                            }}
+                            className="hover:underline"
                           >
                             {customerName(customer)}
                           </Link>
                         </td>
-                        <td className="px-6 py-4 text-sm text-gray-600">{customer.email || '—'}</td>
-                        <td className="px-6 py-4 text-sm text-gray-600">{customer.phone || '—'}</td>
-                        <td className="px-6 py-4 text-sm text-gray-600">{customer.city || '—'}</td>
-                        <td className="px-6 py-4 text-sm font-medium text-gray-900">{customer.ordersCount}</td>
-                        <td className="px-6 py-4 text-sm font-medium text-gray-900">₹{(customer.totalSpent || 0).toFixed(2)}</td>
-                        <td className="px-6 py-4">
+                        <td style={{ color: 'var(--text-secondary)' }}>
+                          {customer.email || '—'}
+                        </td>
+                        <td style={{ color: 'var(--text-secondary)' }}>
+                          {customer.phone || '—'}
+                        </td>
+                        <td style={{ color: 'var(--text-secondary)' }}>
+                          {customer.city || '—'}
+                        </td>
+                        <td
+                          className="tabular-nums"
+                          style={{ textAlign: 'right', fontWeight: 500 }}
+                        >
+                          {customer.ordersCount}
+                        </td>
+                        <td
+                          className="tabular-nums"
+                          style={{ textAlign: 'right', fontWeight: 500 }}
+                        >
+                          ₹{(customer.totalSpent || 0).toFixed(2)}
+                        </td>
+                        <td>
                           {customer.acceptsMarketing ? (
-                            <Check className="w-5 h-5 text-green-600" />
+                            <Check
+                              size={14}
+                              style={{ color: 'var(--success-text)' }}
+                            />
                           ) : (
-                            <X className="w-5 h-5 text-gray-400" />
+                            <X
+                              size={14}
+                              style={{ color: 'var(--text-tertiary)' }}
+                            />
                           )}
                         </td>
                       </tr>
@@ -266,23 +364,35 @@ export default function CustomersPage() {
                 </table>
               </div>
 
-              {/* Pagination */}
-              <div className="flex items-center justify-between px-6 py-4 border-t border-gray-200">
-                <p className="text-sm text-gray-600">
+              {/* Pagination — Polaris compact footer */}
+              <div
+                style={{
+                  padding: '8px 16px',
+                  borderTop: '1px solid var(--border-subdued)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  fontSize: 12,
+                  color: 'var(--text-tertiary)',
+                }}
+              >
+                <span>
                   Page {page} of {totalPages}
-                </p>
-                <div className="flex gap-2">
+                </span>
+                <div className="flex gap-1">
                   <button
+                    type="button"
                     onClick={() => setPage(Math.max(1, page - 1))}
                     disabled={page === 1}
-                    className="px-3 py-2 border border-gray-300 rounded-lg text-sm font-medium hover:bg-gray-50 disabled:opacity-50"
+                    className="polaris-btn polaris-btn-sm"
                   >
                     Previous
                   </button>
                   <button
+                    type="button"
                     onClick={() => setPage(Math.min(totalPages, page + 1))}
                     disabled={page === totalPages}
-                    className="px-3 py-2 border border-gray-300 rounded-lg text-sm font-medium hover:bg-gray-50 disabled:opacity-50"
+                    className="polaris-btn polaris-btn-sm"
                   >
                     Next
                   </button>
