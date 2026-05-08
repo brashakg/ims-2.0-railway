@@ -114,7 +114,18 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
           discountedPrice,
           compareAtPrice: mrp,
           sku: variantSku,
+          // Two-barcode model — round 1 mapping 4.2.
           barcode: v.barcode || null,
+          storeBarcode: v.storeBarcode || null,
+          // Round 2 — category-specific variant fields.
+          power: v.power || null,
+          packSize: v.packSize || null,
+          cylinder: v.cylinder || null,
+          axis: v.axis || null,
+          strapColor: v.strapColor || null,
+          caseSize: v.caseSize || null,
+          dialColor: v.dialColor || null,
+          extras: v.extras !== undefined ? v.extras : undefined,
           title: `${v.colorCode}${v.frameSize ? " / " + v.frameSize : ""}`,
           locations: {
             create: (v.locations || []).map(

@@ -199,6 +199,9 @@ export interface CreateProductInput {
    *  filtering. Use shopifyTaxonomyGidFor() in shopifySeo.ts to look up
    *  the right GID for a category. */
   productCategory?: string;
+  /** Theme template suffix — picks the storefront layout
+   *  (round 2 mapping U6: pre-order, appointment, rx-required). */
+  templateSuffix?: string | null;
 }
 
 export interface CreateProductResult {
@@ -266,6 +269,12 @@ export async function createProduct(
       title: productData.seoTitle || productData.title,
       description: productData.seoDescription || "",
     },
+    // Round 2 mapping U6 / 9.6 — theme template suffix maps to Shopify's
+    // ProductInput.templateSuffix and selects which storefront template
+    // renders this product (pre-order, price-on-appointment, rx-required).
+    ...(productData.templateSuffix
+      ? { templateSuffix: productData.templateSuffix }
+      : {}),
   };
 
   // Add product options (Color, Size). productCreate accepts options
@@ -441,6 +450,8 @@ export interface UpdateProductInput {
   vendor?: string;
   /** Shopify standard taxonomy GID (e.g. gid://shopify/TaxonomyCategory/aa-2-27 for Sunglasses). */
   productCategory?: string;
+  /** Theme template suffix (round 2 U6). */
+  templateSuffix?: string | null;
 }
 
 export async function updateProduct(
@@ -457,6 +468,9 @@ export async function updateProduct(
   `;
 
   const input: Record<string, unknown> = { id: shopifyId };
+  if (productData.templateSuffix !== undefined) {
+    input.templateSuffix = productData.templateSuffix || null;
+  }
   if (productData.title) input.title = productData.title;
   if (productData.description) input.descriptionHtml = productData.description;
   if (productData.tags) {

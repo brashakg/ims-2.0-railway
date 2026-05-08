@@ -55,18 +55,35 @@ export async function PUT(request: NextRequest, { params }: RouteParams) {
       );
     }
 
-    const { locations, images, ...variantFields } = body;
+    // Allowlist — defensive against unknown keys from the form. New
+    // variant-level fields added in round 2 mapping (storeBarcode, power,
+    // packSize, cylinder, axis, strapColor, caseSize, dialColor, extras)
+    // are accepted here.
+    const ALLOWED_VARIANT_FIELDS = [
+      "colorCode", "colorName", "frameColor", "templeColor", "frameSize",
+      "bridge", "templeLength", "weight", "lensColour", "tint",
+      "mrp", "discountedPrice", "compareAtPrice", "sku", "title",
+      "barcode", "storeBarcode",
+      "power", "packSize", "cylinder", "axis",
+      "strapColor", "caseSize", "dialColor", "extras",
+      "shopifyVariantId", "shopifyInventoryItemId",
+    ] as const;
+    const updateData: Record<string, unknown> = {};
+    for (const k of ALLOWED_VARIANT_FIELDS) {
+      if (Object.prototype.hasOwnProperty.call(body, k)) {
+        updateData[k] = (body as Record<string, unknown>)[k];
+      }
+    }
+    // Always re-derive title from colour-code + size so it stays canonical.
+    updateData.title = `${body.colorCode || existing.colorCode}${
+      (body.frameSize || existing.frameSize)
+        ? " / " + (body.frameSize || existing.frameSize)
+        : ""
+    }`;
 
     const variant = await prisma.productVariant.update({
       where: { id: variantId },
-      data: {
-        ...variantFields,
-        title: `${body.colorCode || existing.colorCode}${
-          (body.frameSize || existing.frameSize)
-            ? " / " + (body.frameSize || existing.frameSize)
-            : ""
-        }`,
-      },
+      data: updateData,
       include: {
         images: true,
         locations: { include: { location: true } },

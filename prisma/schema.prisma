@@ -149,6 +149,26 @@ model Product {
   gtin String?
   upc  String?
 
+  // RX-able — the product can be fitted with prescription lenses. Per
+  // round 2 U5 + 9.5 mapping: enables a prescription module on the
+  // storefront. Default false; categories where every product is RX-able
+  // (Spectacles, Clip-On, Contact Lenses) ship with default true via
+  // the form's category-aware default.
+  rxable Boolean @default(false)
+
+  // Shopify product theme template suffix (per round 2 U6 / 9.6).
+  // Maps 1:1 to ProductInput.templateSuffix on push. Drives the
+  // pre-order / price-on-appointment / RX-required layouts the
+  // storefront theme registers.
+  themeSuffix String?
+
+  // Free-form per-category extension data (movement, strapMaterial,
+  // certification, healthSensors, watchFunctions, etc.). Keys are the
+  // canonical attribute identifiers in src/lib/categoryAttributes.ts.
+  // Stored as JSON to avoid 30+ migrations for niche fields. Promote to
+  // a typed column when a field becomes critical for indexing/filter.
+  categorySpecific Json?
+
   // Relations
   createdById String?
   createdBy   User?    @relation(fields: [createdById], references: [id])
@@ -193,8 +213,29 @@ model ProductVariant {
 
   // Auto-generated
   sku     String? @unique  // e.g. "SP-BOSS-1234-086-55"
-  barcode String?          // GTIN/UPC for this specific variant
-  title   String?          // e.g. "086 / 55" or "Black / 55"
+  // Two-barcode model per round 1 mapping 4.2:
+  //   barcode      → GTIN/UPC, syncs to Shopify (inventoryItem.barcode)
+  //   storeBarcode → physical store barcode, NEVER pushed to Shopify;
+  //                  used for product search + stock-tally reconciliation
+  barcode      String?
+  storeBarcode String?
+  title        String?       // e.g. "086 / 55" or "Black / 55"
+
+  // Category-specific variant-level fields.
+  //   READING_GLASSES, CONTACT_LENSES → power
+  //   CONTACT_LENSES                  → packSize, cylinder, axis
+  //   WATCHES, SMARTWATCHES           → strapColor, caseSize, dialColor
+  //   COLOR_CONTACT_LENSES            → cosmetic colour goes in colorCode
+  // For everything else these stay null.
+  power      String?  // diopter / sphere
+  packSize   String?
+  cylinder   String?
+  axis       String?
+  strapColor String?
+  caseSize   String?
+  dialColor  String?
+  // Overflow for niche per-variant fields that don't deserve a column.
+  extras     Json?
 
   // Shopify sync
   shopifyVariantId      String?

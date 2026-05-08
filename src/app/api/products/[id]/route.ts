@@ -144,6 +144,10 @@ export async function PUT(
       "gtin",
       "upc",
       "imageDesignStatus",
+      // Round 2 mapping — round-tripped via PUT
+      "rxable",
+      "themeSuffix",
+      "categorySpecific",
     ] as const;
     const updateData: Record<string, any> = {};
     for (const k of PRODUCT_FIELDS) {

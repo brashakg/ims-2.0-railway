@@ -96,6 +96,9 @@ interface FormData {
   mrp: string;
   gtin: string;
   upc: string;
+  // Round 2 mapping additions
+  rxable: boolean;
+  themeSuffix: string;
   images: string[];
   stockByLocation: Record<string, number>;
 }
@@ -133,9 +136,34 @@ const EMPTY_FORM: FormData = {
   mrp: "",
   gtin: "",
   upc: "",
+  rxable: false,
+  themeSuffix: "",
   images: [],
   stockByLocation: {},
 };
+
+// Theme template suffixes per round 2 U6. Empty string = default theme
+// template; the others map to Shopify ProductInput.templateSuffix.
+const THEME_TEMPLATES: Array<{ value: string; label: string; description: string }> = [
+  { value: "", label: "Default", description: "Standard product page" },
+  { value: "preorder", label: "Pre-order", description: "Customer can place an order before stock arrives" },
+  { value: "appointment", label: "Price on Appointment", description: "Hide price; customer requests a quote" },
+  { value: "rx-required", label: "RX Required", description: "Prescription glasses — show prescription module on frontend" },
+];
+
+// Categories where the RX-able toggle is meaningful (per round 2 U5).
+// Watches / Smartwatches / Accessories don't take prescriptions.
+const RX_CATEGORIES = new Set([
+  "SPECTACLES", "SUNGLASSES", "CLIP_ON_FRAMES", "READING_GLASSES",
+  "COMPUTER_GLASSES", "SAFETY_GLASSES", "SMARTGLASSES",
+  "CONTACT_LENSES", "COLOR_CONTACT_LENSES",
+]);
+
+// RX-able default value per category (when a product is created from
+// scratch). Spectacles + Clip-On + Contact Lenses default ON; others off.
+const RX_DEFAULT_ON: Set<string> = new Set([
+  "SPECTACLES", "CLIP_ON_FRAMES", "CONTACT_LENSES",
+]);
 
 interface AttributeType {
   id: string;
@@ -244,6 +272,8 @@ export default function EditProductV2({ productId }: { productId: string }) {
             mrp: p.mrp ? String(p.mrp) : "",
             gtin: p.gtin || "",
             upc: p.upc || "",
+            rxable: typeof p.rxable === "boolean" ? p.rxable : RX_DEFAULT_ON.has(p.category || ""),
+            themeSuffix: p.themeSuffix || "",
             images: (p.images || []).map((img: { url?: string } | string) =>
               typeof img === "string" ? img : img?.url || ""
             ).filter(Boolean),
@@ -296,6 +326,8 @@ export default function EditProductV2({ productId }: { productId: string }) {
           gtin: formData.gtin,
           upc: formData.upc,
           mrp: parseFloat(formData.mrp || "0") || 0,
+          rxable: !!formData.rxable,
+          themeSuffix: formData.themeSuffix || null,
           status: status || productStatus,
           images: formData.images.map((url) => ({ url })),
           locations: Object.entries(formData.stockByLocation).map(([locationId, quantity]) => ({
@@ -601,6 +633,29 @@ export default function EditProductV2({ productId }: { productId: string }) {
                 />
               </Field>
             </Row>
+
+            {/* RX-able toggle — only meaningful for eyewear / contact lens
+                 categories (round 2 U5 + 9.5). Watches / smartwatches /
+                 accessories don't get this control. */}
+            {RX_CATEGORIES.has(formData.category) && (
+              <div style={{ marginTop: 14, padding: "12px 14px", background: "var(--ep-info-bg)", border: "1px solid var(--ep-border)", borderRadius: 8 }}>
+                <label style={{ display: "flex", alignItems: "center", gap: 10, cursor: "pointer" }}>
+                  <input
+                    type="checkbox"
+                    checked={formData.rxable}
+                    onChange={(e) => updateField("rxable", e.target.checked)}
+                    style={{ width: 16, height: 16, accentColor: "var(--ep-action)" }}
+                  />
+                  <span style={{ fontWeight: 600, fontSize: 13, color: "var(--ep-text)" }}>
+                    RX-able — this product accepts prescription lenses
+                  </span>
+                </label>
+                <p style={{ margin: "4px 0 0 26px", fontSize: 11.5, color: "var(--ep-text-3)" }}>
+                  Storefront shows the prescription module on RX-able products. Default for{" "}
+                  {Array.from(RX_DEFAULT_ON).map((c) => c.toLowerCase().replace(/_/g, "-")).join(", ")} is ON.
+                </p>
+              </div>
+            )}
           </Section>
 
           {/* Frame */}
@@ -983,6 +1038,32 @@ export default function EditProductV2({ productId }: { productId: string }) {
 
           {/* Publish */}
           <Section id="publish" title="Publish">
+            <Field
+              label="Storefront layout"
+              hint="Maps to Shopify ProductInput.templateSuffix. Choose 'Pre-order' or 'Price on Appointment' for products that aren't standard listings."
+            >
+              <select
+                value={formData.themeSuffix}
+                onChange={(e) => updateField("themeSuffix", e.target.value)}
+                style={{
+                  width: "100%",
+                  height: 32,
+                  padding: "0 10px",
+                  border: "1px solid var(--ep-border)",
+                  borderRadius: 7,
+                  background: "var(--ep-surface)",
+                  color: "var(--ep-text)",
+                  fontSize: 13,
+                  marginBottom: 14,
+                }}
+              >
+                {THEME_TEMPLATES.map((t) => (
+                  <option key={t.value} value={t.value}>
+                    {t.label} — {t.description}
+                  </option>
+                ))}
+              </select>
+            </Field>
             <p style={{ fontSize: 13, color: "var(--ep-text-2)", marginBottom: 12 }}>
               {blocking.length === 0
                 ? "All checks pass — you can publish to Shopify."

@@ -19,7 +19,129 @@ interface Variant {
   images?: string[];
   lensColour?: string;
   tint?: string;
+  // Identifiers (round 1 mapping 4.2 — TWO barcode types)
+  barcode?: string;       // GTIN/UPC, syncs to Shopify
+  storeBarcode?: string;  // local store barcode, NEVER syncs to Shopify
+  // Category-specific variant-level fields (round 2 mapping)
+  power?: string;       // reading glasses, contact lenses (diopter / sphere)
+  packSize?: string;    // contact lenses
+  cylinder?: string;    // contact lenses (toric)
+  axis?: string;        // contact lenses (toric)
+  strapColor?: string;  // watches, smartwatches
+  caseSize?: string;    // watches, smartwatches
+  dialColor?: string;   // watches
   saved?: boolean;
+}
+
+// Per-category labels + extras config. Drives both the label text on
+// the three main inputs (colour code / colour name / frame size) and
+// the additional category-specific input row that renders below the
+// lens block.
+interface VariantSpec {
+  colorCodeLabel: string;
+  colorNameLabel: string;
+  sizeLabel: string | null; // null → hide the frameSize input entirely
+  sizePlaceholder?: string;
+  showLensFields: boolean;
+  /** Extra per-variant inputs to render in their own row. Order matters. */
+  extras: Array<{
+    key: keyof Variant;
+    label: string;
+    placeholder?: string;
+    type?: "text" | "number";
+    optionsFrom?: string; // attribute-type name to look up dropdown options
+  }>;
+}
+
+function variantSpecForCategory(category: string): VariantSpec {
+  switch (category) {
+    case "READING_GLASSES":
+      return {
+        colorCodeLabel: "Colour Code",
+        colorNameLabel: "Colour Name",
+        sizeLabel: "Size",
+        sizePlaceholder: "e.g. 52",
+        showLensFields: false,
+        extras: [
+          { key: "power", label: "Power (Diopter)", placeholder: "e.g. +1.50", type: "text" },
+        ],
+      };
+    case "CONTACT_LENSES":
+      return {
+        colorCodeLabel: "Power (Sphere)",
+        colorNameLabel: "Variant Name",
+        sizeLabel: null, // packSize is rendered as an extra below
+        showLensFields: false,
+        extras: [
+          { key: "packSize", label: "Pack Size", placeholder: "e.g. 30 lenses" },
+          { key: "cylinder", label: "Cylinder (toric only)", placeholder: "e.g. -0.75" },
+          { key: "axis", label: "Axis (toric only)", placeholder: "e.g. 90" },
+        ],
+      };
+    case "COLOR_CONTACT_LENSES":
+      return {
+        colorCodeLabel: "Power (Sphere)",
+        colorNameLabel: "Cosmetic Colour",
+        sizeLabel: null,
+        showLensFields: false,
+        extras: [
+          { key: "packSize", label: "Pack Size", placeholder: "e.g. 2 lenses" },
+        ],
+      };
+    case "WATCHES":
+      return {
+        colorCodeLabel: "Strap Code",
+        colorNameLabel: "Strap Color",
+        sizeLabel: "Case Size (mm)",
+        sizePlaceholder: "e.g. 44mm",
+        showLensFields: false,
+        extras: [
+          { key: "dialColor", label: "Dial Color", placeholder: "e.g. Black", optionsFrom: "framecolor" },
+        ],
+      };
+    case "SMARTWATCHES":
+      return {
+        colorCodeLabel: "Strap Code",
+        colorNameLabel: "Strap Color",
+        sizeLabel: "Case Size (mm)",
+        sizePlaceholder: "e.g. 44mm",
+        showLensFields: false,
+        extras: [],
+      };
+    case "SMARTGLASSES":
+      return {
+        colorCodeLabel: "Frame Code",
+        colorNameLabel: "Frame Color",
+        sizeLabel: "Size",
+        sizePlaceholder: "e.g. 55",
+        showLensFields: true, // also doubles as Lens Color (Option 2 in user's mapping)
+        extras: [],
+      };
+    case "ACCESSORIES":
+      return {
+        colorCodeLabel: "Code",
+        colorNameLabel: "Colour",
+        sizeLabel: null,
+        showLensFields: false,
+        extras: [
+          { key: "packSize", label: "Pack Size", placeholder: "e.g. 6" },
+        ],
+      };
+    case "SAFETY_GLASSES":
+    case "COMPUTER_GLASSES":
+    case "SPECTACLES":
+    case "CLIP_ON_FRAMES":
+    case "SUNGLASSES":
+    default:
+      return {
+        colorCodeLabel: "Colour Code",
+        colorNameLabel: "Colour Name",
+        sizeLabel: "Frame Size",
+        sizePlaceholder: "e.g. 55",
+        showLensFields: ["SUNGLASSES", "CLIP_ON_FRAMES", "SAFETY_GLASSES"].includes(category),
+        extras: [],
+      };
+  }
 }
 
 interface VariantManagerProps {
@@ -64,9 +186,9 @@ export default function VariantManager({
   const lensColorOptions = resolveOptions(attributes, 'lenscolour');
   const tintOptions = resolveOptions(attributes, 'tint');
 
-  const hasLensFields = ['SUNGLASSES', 'CLIP_ON_FRAMES', 'SMARTGLASSES'].includes(
-    category
-  );
+  // Category-aware variant config — labels, which extras to show, etc.
+  const spec = variantSpecForCategory(category);
+  const hasLensFields = spec.showLensFields;
 
   useEffect(() => {
     onVariantsChange?.(variants);
@@ -82,7 +204,12 @@ export default function VariantManager({
       srp: 0,
       stockByLocation: Object.fromEntries(locations.map((loc) => [loc.id, 0])),
       images: [],
+      barcode: '',
+      storeBarcode: '',
       ...(hasLensFields && { lensColour: '', tint: '' }),
+      // Initialise per-category extras with empty strings so the
+      // controlled inputs don't bounce between "" and undefined.
+      ...Object.fromEntries(spec.extras.map((ex) => [ex.key as string, ''])),
       saved: false,
     };
     setVariants((prev) => [...prev, newVariant]);
@@ -222,7 +349,7 @@ export default function VariantManager({
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-1">
-                      Colour Code <span className="text-red-500">*</span>
+                      {spec.colorCodeLabel} <span className="text-red-500">*</span>
                     </label>
                     <input
                       type="text"
@@ -238,7 +365,7 @@ export default function VariantManager({
 
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-1">
-                      Colour Name
+                      {spec.colorNameLabel}
                     </label>
                     <SearchableDropdown
                       options={colorNameOptions}
@@ -256,21 +383,23 @@ export default function VariantManager({
                     />
                   </div>
 
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">
-                      Frame Size
-                    </label>
-                    <input
-                      type="text"
-                      value={variant.frameSize}
-                      onChange={(e) =>
-                        updateVariant(variant.id, 'frameSize', e.target.value)
-                      }
-                      disabled={locked}
-                      placeholder="e.g. 52"
-                      className="w-full px-3 py-2.5 min-h-[44px] text-base border border-gray-300 rounded-lg focus:outline-none focus:border-blue-500 disabled:bg-gray-50 disabled:text-gray-700"
-                    />
-                  </div>
+                  {spec.sizeLabel && (
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">
+                        {spec.sizeLabel}
+                      </label>
+                      <input
+                        type="text"
+                        value={variant.frameSize}
+                        onChange={(e) =>
+                          updateVariant(variant.id, 'frameSize', e.target.value)
+                        }
+                        disabled={locked}
+                        placeholder={spec.sizePlaceholder || 'e.g. 52'}
+                        className="w-full px-3 py-2.5 min-h-[44px] text-base border border-gray-300 rounded-lg focus:outline-none focus:border-blue-500 disabled:bg-gray-50 disabled:text-gray-700"
+                      />
+                    </div>
+                  )}
 
                   {hasLensFields && (
                     <>
@@ -315,6 +444,67 @@ export default function VariantManager({
                       </div>
                     </>
                   )}
+
+                  {/* Per-category extras row — power for reading, packSize +
+                       cylinder + axis for contact lenses, dialColor for watches.
+                       These come from variantSpecForCategory(). */}
+                  {spec.extras.map((ex) => (
+                    <div key={String(ex.key)}>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">
+                        {ex.label}
+                      </label>
+                      {ex.optionsFrom ? (
+                        <SearchableDropdown
+                          options={resolveOptions(attributes, ex.optionsFrom)}
+                          value={(variant[ex.key] as string) || ''}
+                          onChange={(val) => updateVariant(variant.id, ex.key, val)}
+                          placeholder={ex.placeholder || ''}
+                          disabled={locked}
+                          size="md"
+                        />
+                      ) : (
+                        <input
+                          type={ex.type || 'text'}
+                          value={(variant[ex.key] as string) || ''}
+                          onChange={(e) => updateVariant(variant.id, ex.key, e.target.value)}
+                          disabled={locked}
+                          placeholder={ex.placeholder || ''}
+                          className="w-full px-3 py-2.5 min-h-[44px] text-base border border-gray-300 rounded-lg focus:outline-none focus:border-blue-500 disabled:bg-gray-50 disabled:text-gray-700"
+                        />
+                      )}
+                    </div>
+                  ))}
+
+                  {/* Two barcode types per round 1 mapping 4.2:
+                       barcode      → GTIN/UPC, syncs to Shopify.
+                       storeBarcode → physical store barcode, local-only,
+                                       used for product search + stock tally. */}
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      Barcode (GTIN/UPC)
+                    </label>
+                    <input
+                      type="text"
+                      value={variant.barcode || ''}
+                      onChange={(e) => updateVariant(variant.id, 'barcode', e.target.value)}
+                      disabled={locked}
+                      placeholder="Syncs to Shopify"
+                      className="w-full px-3 py-2.5 min-h-[44px] text-base border border-gray-300 rounded-lg focus:outline-none focus:border-blue-500 disabled:bg-gray-50 disabled:text-gray-700"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      Store Barcode <span className="text-xs text-gray-500 font-normal">(local-only)</span>
+                    </label>
+                    <input
+                      type="text"
+                      value={variant.storeBarcode || ''}
+                      onChange={(e) => updateVariant(variant.id, 'storeBarcode', e.target.value)}
+                      disabled={locked}
+                      placeholder="For stock tally + search"
+                      className="w-full px-3 py-2.5 min-h-[44px] text-base border border-gray-300 rounded-lg focus:outline-none focus:border-blue-500 disabled:bg-gray-50 disabled:text-gray-700"
+                    />
+                  </div>
 
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-1">

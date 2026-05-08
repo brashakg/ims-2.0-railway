@@ -122,6 +122,46 @@ export const ATTRIBUTES: Record<string, AttributeMeta> = {
   connectivity:     { key: "connectivity",     label: "Connectivity",       level: "product", tag: true,  hasColumn: false },
   waterResistance:  { key: "waterResistance",  label: "Water Resistance",   level: "product", tag: true,  hasColumn: false },
 
+  // ── New per-category fields (round 2 mapping, 2026-05-08) ──
+  // Reading + Computer glasses — lens features
+  blueLightProtection:  { key: "blueLightProtection",  label: "Blue Light Protection", level: "product", tag: true,  hasColumn: false },
+  antiGlareCoating:     { key: "antiGlareCoating",     label: "Anti-Glare Coating",    level: "product", tag: true,  hasColumn: false },
+  // Reading glasses
+  power:                { key: "power",                label: "Power (Diopter)",       level: "variant", tag: false, hasColumn: true },
+  visionType:           { key: "visionType",           label: "Vision Type",           level: "product", tag: true,  hasColumn: false },
+  // Safety glasses
+  certification:        { key: "certification",        label: "Certification",         level: "product", tag: true,  hasColumn: false }, // multi-select: ANSI Z87.1, EN166, IS 5983
+  sideShields:          { key: "sideShields",          label: "Side Shields",          level: "product", tag: true,  hasColumn: false }, // Yes / No / Removable
+  antiFogCoating:       { key: "antiFogCoating",       label: "Anti-Fog Coating",      level: "product", tag: true,  hasColumn: false },
+  antiScratchCoating:   { key: "antiScratchCoating",   label: "Anti-Scratch Coating",  level: "product", tag: true,  hasColumn: false },
+  useCase:              { key: "useCase",              label: "Use Case",              level: "product", tag: true,  hasColumn: false }, // multi-select
+  impactRating:         { key: "impactRating",         label: "Impact Rating",         level: "product", tag: true,  hasColumn: false },
+  // Watches
+  movement:             { key: "movement",             label: "Movement",              level: "product", tag: true,  hasColumn: false },
+  caseShape:            { key: "caseShape",            label: "Case Shape",            level: "product", tag: true,  hasColumn: false },
+  dialPattern:          { key: "dialPattern",          label: "Dial Pattern",          level: "product", tag: true,  hasColumn: false },
+  watchFunctions:       { key: "watchFunctions",       label: "Watch Functions",       level: "product", tag: true,  hasColumn: false }, // multi-select
+  glassType:            { key: "glassType",            label: "Glass Type",            level: "product", tag: true,  hasColumn: false },
+  // Smartwatches / Smartglasses
+  displaySize:          { key: "displaySize",          label: "Display Size",          level: "product", tag: false, hasColumn: false },
+  chargingMethod:       { key: "chargingMethod",       label: "Charging Method",       level: "product", tag: true,  hasColumn: false },
+  ipxRating:            { key: "ipxRating",            label: "IPX Rating",            level: "product", tag: true,  hasColumn: false },
+  osCompatibility:      { key: "osCompatibility",      label: "OS Compatibility",      level: "product", tag: true,  hasColumn: false }, // iOS / Android / Both
+  aiAssistant:          { key: "aiAssistant",          label: "AI / Voice Assistant",  level: "product", tag: true,  hasColumn: false },
+  includesExtras:       { key: "includesExtras",       label: "Extras Included",       level: "product", tag: false, hasColumn: false },
+  // Contact lenses (extras beyond what's already there)
+  contactLensMaterial:  { key: "contactLensMaterial",  label: "Lens Material (CL)",    level: "product", tag: true,  hasColumn: false }, // Hydrogel / Silicone Hydrogel
+  cylinder:             { key: "cylinder",             label: "Cylinder",              level: "variant", tag: false, hasColumn: true }, // toric
+  axis:                 { key: "axis",                 label: "Axis",                  level: "variant", tag: false, hasColumn: true }, // toric
+  // Accessories
+  accessoryType:        { key: "accessoryType",        label: "Accessory Type",        level: "product", tag: true,  hasColumn: false }, // Case / Cleaning Kit / Chain / etc.
+  compatibility:        { key: "compatibility",        label: "Compatibility",         level: "product", tag: true,  hasColumn: false }, // Eyewear / Watches / Universal
+  material:             { key: "material",             label: "Material",              level: "product", tag: true,  hasColumn: false }, // generic material (accessories)
+  // RX-able + theme suffix (rendered as dedicated form controls; do not
+  // surface in the dynamic Category Attributes section)
+  rxable:               { key: "rxable",               label: "RX-able",               level: "product", tag: true,  hasColumn: true },
+  themeSuffix:          { key: "themeSuffix",          label: "Theme Template",        level: "product", tag: false, hasColumn: true },
+
   // ── Auto-generated (no input rendered) ──
   description:      { key: "description",      label: "Description",        level: "product", autoPopulate: true, tag: false, hasColumn: true },
   tags:             { key: "tags",             label: "Tags",               level: "product", autoPopulate: true, tag: false, hasColumn: true },
@@ -148,13 +188,16 @@ export const WATCH_ATTRS: AttributeMeta[] = [
 for (const w of WATCH_ATTRS) ATTRIBUTES[w.key] = w;
 
 export const CATEGORY_ATTRIBUTES: Record<string, string[]> = {
+  // SPECTACLES — round 2 SPECTACLES.lens = "Drop all" → no lens fields.
+  // RX-able default ON (frames are always RX-able). Bridge / Temple Length
+  // / Weight at variant level (per round 2 U4).
   SPECTACLES: [
     "brand","subBrand","modelNo","colorCode","productName","label","quantity",
     "gender","sku","countryOfOrigin","warranty","description","tags","shape",
     "mrp","srp","weightGrams","lensSize","bridgeSize","templeLength",
     "frameColor","templeColor","frameMaterial","templeMaterial","frameType",
-    "nosepadMaterial","photochromatic","productUSP1","productUSP2","lensUSP",
-    "barcode","gtin","upc","manufacturer",
+    "nosepadMaterial","photochromatic","productUSP1","productUSP2",
+    "barcode","gtin","upc","manufacturer","rxable","themeSuffix",
   ],
   CLIP_ON_FRAMES: [
     "brand","subBrand","modelNo","colorCode","productName","label","quantity",
@@ -163,7 +206,7 @@ export const CATEGORY_ATTRIBUTES: Record<string, string[]> = {
     "frameColor","templeColor","frameMaterial","templeMaterial","frameType",
     "nosepadMaterial","lensMaterial","lensColour","tint","photochromatic",
     "polarization","uvProtection","productUSP1","productUSP2","lensUSP",
-    "barcode","gtin","upc","manufacturer","prescriptionSupport",
+    "barcode","gtin","upc","manufacturer","prescriptionSupport","rxable","themeSuffix",
   ],
   SUNGLASSES: [
     "brand","subBrand","modelNo","colorCode","productName","label","quantity",
@@ -172,14 +215,25 @@ export const CATEGORY_ATTRIBUTES: Record<string, string[]> = {
     "frameColor","templeColor","frameMaterial","templeMaterial","frameType",
     "nosepadMaterial","lensMaterial","lensColour","tint","photochromatic",
     "polarization","uvProtection","productUSP1","productUSP2","lensUSP",
-    "barcode","gtin","upc","manufacturer","prescriptionSupport",
+    "barcode","gtin","upc","manufacturer","prescriptionSupport","rxable","themeSuffix",
   ],
   CONTACT_LENSES: [
     "brand","subBrand","modelNo","clearColor","colorCode","productName","label",
     "packSize","quantity","sku","countryOfOrigin","description","tags",
-    "mrp","srp","lensMaterial","barcode","gtin","upc","manufacturer",
+    "mrp","srp","contactLensMaterial","barcode","gtin","upc","manufacturer",
     "lensType","wearSchedule","wearingHours","waterContent","centerThickness",
     "oxygenPermeability","baseCurve","diameter","expiry",
+    "power","cylinder","axis","uvProtection","themeSuffix",
+  ],
+  // NEW (round 2): Color Contact Lenses — same spec set as CONTACT_LENSES
+  // but RX defaults OFF and cosmetic colour is part of the variant.
+  COLOR_CONTACT_LENSES: [
+    "brand","subBrand","modelNo","clearColor","colorCode","colorName","productName","label",
+    "packSize","quantity","sku","countryOfOrigin","description","tags",
+    "mrp","srp","contactLensMaterial","barcode","gtin","upc","manufacturer",
+    "lensType","wearSchedule","wearingHours","waterContent","centerThickness",
+    "oxygenPermeability","baseCurve","diameter","expiry",
+    "power","cylinder","axis","tint","themeSuffix",
   ],
   SMARTGLASSES: [
     "brand","subBrand","modelNo","colorCode","productName","label","quantity",
@@ -188,31 +242,37 @@ export const CATEGORY_ATTRIBUTES: Record<string, string[]> = {
     "frameColor","templeColor","frameMaterial","templeMaterial","frameType",
     "nosepadMaterial","lensMaterial","lensColour","tint","photochromatic",
     "polarization","uvProtection","productUSP1","productUSP2","lensUSP",
-    "barcode","gtin","upc","manufacturer","prescriptionSupport",
+    "barcode","gtin","upc","manufacturer","prescriptionSupport","rxable","themeSuffix",
     "displayType","audio","camera","cameraResolution","microphone","bluetooth",
-    "batteryLife","aiFeatures","healthSensors","gps","connectivity","waterResistance",
+    "batteryLife","chargingMethod","aiAssistant","aiFeatures","ipxRating",
+    "connectivity","osCompatibility",
   ],
-  // Reading / Computer / Safety glasses share the Spectacles attribute set
-  // (frame + lens attributes apply). If specific sub-attributes are needed
-  // later — e.g. computer-glasses BLUE_LIGHT_FILTER strength — add them here.
+  // Reading glasses — round 2 said "Drop all" lens fields, then add blue
+  // light protection + anti-glare. Variants Color × Power × Size (3-opt).
   READING_GLASSES: [
     "brand","subBrand","modelNo","colorCode","productName","label","quantity",
     "gender","sku","countryOfOrigin","warranty","description","tags","shape",
     "mrp","srp","weightGrams","lensSize","bridgeSize","templeLength",
     "frameColor","templeColor","frameMaterial","templeMaterial","frameType",
-    "nosepadMaterial","lensMaterial","photochromatic",
-    "productUSP1","productUSP2","lensUSP","barcode","gtin","upc","manufacturer",
-    "prescriptionSupport",
+    "nosepadMaterial","photochromatic",
+    "productUSP1","productUSP2","barcode","gtin","upc","manufacturer",
+    "prescriptionSupport","rxable","themeSuffix",
+    "blueLightProtection","antiGlareCoating","power","visionType",
   ],
+  // Computer glasses — same lens-feature add as Reading. Default noun
+  // "Blue-Light Glass" handled in categories.ts.
   COMPUTER_GLASSES: [
     "brand","subBrand","modelNo","colorCode","productName","label","quantity",
     "gender","sku","countryOfOrigin","warranty","description","tags","shape",
     "mrp","srp","weightGrams","lensSize","bridgeSize","templeLength",
     "frameColor","templeColor","frameMaterial","templeMaterial","frameType",
-    "nosepadMaterial","lensMaterial","photochromatic","lensUSP",
+    "nosepadMaterial","photochromatic","lensUSP",
     "productUSP1","productUSP2","barcode","gtin","upc","manufacturer",
-    "prescriptionSupport",
+    "prescriptionSupport","rxable","themeSuffix",
+    "blueLightProtection","antiGlareCoating",
   ],
+  // Safety — keep all lens fields, add cert + side shields + use case +
+  // anti-fog/scratch dedicated yes/no fields. Use case is multi-select.
   SAFETY_GLASSES: [
     "brand","subBrand","modelNo","colorCode","productName","label","quantity",
     "gender","sku","countryOfOrigin","warranty","description","tags","shape",
@@ -220,29 +280,35 @@ export const CATEGORY_ATTRIBUTES: Record<string, string[]> = {
     "frameColor","templeColor","frameMaterial","templeMaterial","frameType",
     "nosepadMaterial","lensMaterial","uvProtection","lensUSP",
     "productUSP1","productUSP2","barcode","gtin","upc","manufacturer",
+    "rxable","themeSuffix",
+    "certification","sideShields","antiFogCoating","antiScratchCoating",
+    "useCase","impactRating",
   ],
   WATCHES: [
     "brand","subBrand","modelNo","colorCode","productName","label","quantity",
     "gender","sku","countryOfOrigin","warranty","description","tags",
     "mrp","srp","weightGrams",
-    "movementType","features","caseColor","caseMaterial","caseSize",
-    "strapColor","strapMaterial","dialColor","waterResistance",
-    "productUSP1","productUSP2","barcode","gtin","upc","manufacturer",
+    "movement","movementType","features","watchFunctions",
+    "caseColor","caseMaterial","caseSize","caseShape","glassType",
+    "strapColor","strapMaterial","dialColor","dialPattern","waterResistance",
+    "productUSP1","productUSP2","barcode","gtin","upc","manufacturer","themeSuffix",
   ],
   SMARTWATCHES: [
     "brand","subBrand","modelNo","colorCode","productName","label","quantity",
     "gender","sku","countryOfOrigin","warranty","description","tags",
     "mrp","srp","weightGrams",
     "caseColor","caseMaterial","caseSize","strapColor","strapMaterial",
-    "displayType","os","bluetooth","batteryLife","aiFeatures",
-    "healthSensors","gps","connectivity","waterResistance",
-    "productUSP1","productUSP2","barcode","gtin","upc","manufacturer",
+    "displayType","displaySize","os","osCompatibility","bluetooth",
+    "batteryLife","chargingMethod","aiFeatures","aiAssistant",
+    "healthSensors","gps","connectivity","waterResistance","ipxRating","includesExtras",
+    "productUSP1","productUSP2","barcode","gtin","upc","manufacturer","themeSuffix",
   ],
   ACCESSORIES: [
     "brand","subBrand","modelNo","colorCode","productName","label","quantity",
     "sku","countryOfOrigin","warranty","description","tags",
     "mrp","srp","productUSP1","productUSP2",
     "barcode","gtin","upc","manufacturer",
+    "accessoryType","material","compatibility","packSize","themeSuffix",
   ],
 };
 

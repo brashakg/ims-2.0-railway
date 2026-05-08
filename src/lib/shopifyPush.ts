@@ -136,6 +136,8 @@ export async function pushProductsToShopify(
             categoryLabel(product.category) || product.category || "",
           vendor: product.brand || undefined,
           status: shopifyStatusFor(product.status),
+          // Round 2 U6 — push the storefront-template suffix.
+          templateSuffix: (product as { themeSuffix?: string | null }).themeSuffix ?? undefined,
         });
 
         if (!updateRes.success) {
@@ -398,6 +400,8 @@ export async function pushProductsToShopify(
         productType: categoryLabel(product.category) || product.category || "",
         productCategory: shopifyTaxonomyGidFor(product.category) || undefined,
         status: shopifyStatusFor(product.status),
+        // Round 2 U6 — push the storefront-template suffix.
+        templateSuffix: (product as { themeSuffix?: string | null }).themeSuffix ?? undefined,
       });
 
       if (shopifyResult.success && shopifyResult.shopifyId) {
