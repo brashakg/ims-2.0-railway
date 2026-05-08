@@ -91,6 +91,8 @@ from .routers import (
     settings_router,
     clinical_router,
     admin_router,
+    admin_catalog_router,
+    handoffs_router,
     transfers_router,
     catalog_router,
     jarvis_router,
@@ -106,6 +108,7 @@ from .routers import (
     walkouts_router,
     points_router,
     payout_router,
+    webhooks_router,
 )
 
 
@@ -616,6 +619,8 @@ app.include_router(reports_router, prefix="/api/v1/reports", tags=["Reports"])
 app.include_router(settings_router, prefix="/api/v1/settings", tags=["Settings"])
 app.include_router(clinical_router, prefix="/api/v1/clinical", tags=["Clinical"])
 app.include_router(admin_router, prefix="/api/v1/admin", tags=["Admin"])
+app.include_router(admin_catalog_router, prefix="/api/v1/admin", tags=["Admin · Catalog"])
+app.include_router(handoffs_router, prefix="/api/v1/handoffs", tags=["Handoffs"])
 app.include_router(
     transfers_router, prefix="/api/v1/transfers", tags=["Stock Transfers"]
 )
@@ -635,6 +640,7 @@ app.include_router(agents_router, prefix="/api/v1/jarvis", tags=["Agents"])
 app.include_router(walkouts_router, prefix="/api/v1/walkouts", tags=["Walkouts"])
 app.include_router(points_router, prefix="/api/v1/incentive/points", tags=["Daily Points"])
 app.include_router(payout_router, prefix="/api/v1/payout", tags=["Payout"])
+app.include_router(webhooks_router, prefix="/api/v1/webhooks", tags=["Webhooks"])
 
 
 if __name__ == "__main__":

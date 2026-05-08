@@ -211,7 +211,7 @@ export function CustomerSegmentation() {
                   segment.id === 'champions' ? 'bg-green-600 hover:bg-green-700 text-white' :
                   segment.id === 'loyal' ? 'bg-blue-600 hover:bg-blue-700 text-white' :
                   segment.id === 'big_spenders' ? 'bg-yellow-600 hover:bg-yellow-700 text-gray-900' :
-                  segment.id === 'at_risk' ? 'bg-orange-600 hover:bg-orange-700 text-gray-900' :
+                  segment.id === 'at_risk' ? 'bg-orange-600 hover:bg-orange-700 text-white' :
                   'bg-red-600 hover:bg-red-700 text-white'
                 )}>
                   <Target className="w-4 h-4" />

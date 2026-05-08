@@ -386,6 +386,67 @@ export const adminIntegrationApi = {
     return response.data;
   },
 
+  // Tally per-store voucher exports (Phase I-6)
+  // Each (date, store_id) tuple has its own row in tally_exports.
+  // The CA's RDP-Tally companies (one per branch) consume these.
+  listTallyExports: async (date: string) => {
+    const response = await api.get('/admin/integrations/tally/exports', {
+      params: { date },
+    });
+    return response.data as {
+      date: string;
+      total: number;
+      exports: Array<{
+        store_id: string;
+        store_code: string;
+        store_name: string;
+        voucher_count: number;
+        balanced: boolean;
+        balance_check?: { ok: boolean; mismatch_count: number; batch_delta: number };
+        generated_at: string;
+        download_url: string;
+      }>;
+    };
+  },
+
+  /** Stream the raw XML for one (date, store) tuple. Triggers a browser
+   * download via Content-Disposition. Filename is server-generated and
+   * gets `_UNBALANCED` suffix when the row failed validation. */
+  downloadTallyVoucherXml: async (date: string, storeId: string): Promise<void> => {
+    const response = await api.get('/admin/integrations/tally/voucher.xml', {
+      params: { date, store_id: storeId },
+      responseType: 'blob',
+    });
+    // Pull the server-generated filename from the Content-Disposition header.
+    // Falls back to a sensible default if the header is missing.
+    const cd = response.headers?.['content-disposition'] || '';
+    const match = cd.match(/filename="?([^"]+)"?/i);
+    const filename = match?.[1] || `tally_${storeId}_${date}.xml`;
+    const blob = new Blob([response.data], { type: 'application/xml' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  },
+
+  regenerateTallyExport: async (date: string, storeId?: string) => {
+    const payload: { date: string; store_id?: string } = { date };
+    if (storeId) payload.store_id = storeId;
+    const response = await api.post('/admin/integrations/tally/regenerate', payload);
+    return response.data as {
+      ok: boolean;
+      items_synced: number;
+      notes: string;
+      error: string | null;
+      date: string;
+      store_id: string | null;
+    };
+  },
+
   // Shopify
   getShopifyConfig: async () => {
     const response = await api.get('/admin/integrations/shopify');

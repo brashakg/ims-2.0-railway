@@ -159,7 +159,7 @@ export function StepPayment() {
         <div className="bg-white border border-gray-200 rounded-xl p-4 space-y-3">
           <p className="text-sm font-medium text-gray-700">Split payment</p>
           <div className="flex gap-2">
-            {methods.map(m => <button key={m.id} onClick={() => setPayMethod(m.id)} className={`px-3 py-1.5 rounded-lg text-xs font-medium ${payMethod === m.id ? 'bg-bv-red-600 text-gray-900' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'}`}>{m.label}</button>)}
+            {methods.map(m => <button key={m.id} onClick={() => setPayMethod(m.id)} className={`px-3 py-1.5 rounded-lg text-xs font-medium ${payMethod === m.id ? 'bg-bv-red-600 text-white' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'}`}>{m.label}</button>)}
           </div>
           <div className="flex gap-2">
             <input type="number" min="1" max={balance} step="0.01" value={payAmount}
@@ -178,7 +178,7 @@ export function StepPayment() {
               disabled={!payAmount || parseFloat(payAmount) <= 0 || (payMethod !== 'CASH' && !payRef.trim())}
               className={`px-4 py-2 rounded-lg text-sm font-semibold ${
                 !payAmount || parseFloat(payAmount) <= 0 || (payMethod !== 'CASH' && !payRef.trim())
-                  ? 'bg-gray-200 text-gray-500 cursor-not-allowed' : 'bg-bv-red-600 text-gray-900 hover:bg-bv-red-700'
+                  ? 'bg-gray-200 text-gray-500 cursor-not-allowed' : 'bg-bv-red-600 text-white hover:bg-bv-red-700'
               }`}>Add</button>
           </div>
           {payMethod !== 'CASH' && !payRef.trim() && payAmount && <p className="text-xs text-amber-600">Reference/Txn ID required for {payMethod}</p>}
@@ -217,7 +217,7 @@ export function StepPayment() {
                 setShowEMIForm(false);
                 setEmiDownPayment('');
               }} className="flex-1 px-4 py-2 rounded-lg text-sm font-semibold bg-gray-100 text-gray-700 hover:bg-gray-200">Cancel</button>
-              <button onClick={handleEMISubmit} disabled={!emiDownPayment || parseFloat(emiDownPayment) < 0 || parseFloat(emiDownPayment) >= balance} className={`flex-1 px-4 py-2 rounded-lg text-sm font-semibold ${!emiDownPayment || parseFloat(emiDownPayment) < 0 || parseFloat(emiDownPayment) >= balance ? 'bg-gray-200 text-gray-500 cursor-not-allowed' : 'bg-bv-red-600 text-gray-900 hover:bg-bv-red-700'}`}>Add EMI</button>
+              <button onClick={handleEMISubmit} disabled={!emiDownPayment || parseFloat(emiDownPayment) < 0 || parseFloat(emiDownPayment) >= balance} className={`flex-1 px-4 py-2 rounded-lg text-sm font-semibold ${!emiDownPayment || parseFloat(emiDownPayment) < 0 || parseFloat(emiDownPayment) >= balance ? 'bg-gray-200 text-gray-500 cursor-not-allowed' : 'bg-bv-red-600 text-white hover:bg-bv-red-700'}`}>Add EMI</button>
             </div>
           </div>
         </div>
@@ -227,7 +227,7 @@ export function StepPayment() {
         {(store.payments || []).map((p, i) => (
           <div key={i} className="flex items-center justify-between bg-green-50 border border-green-200 rounded-lg px-4 py-2 text-sm">
             <div className="flex items-center gap-2"><CheckCircle className="w-4 h-4 text-green-600" /><span className="font-medium text-gray-900">{p.method}</span>{p.reference && <span className="text-gray-500">({p.reference})</span>}</div>
-            <div className="flex items-center gap-2"><span className="font-semibold text-gray-900">{'₹'}{Math.round(p.amount * 100 / 100).toLocaleString('en-IN')}</span><button onClick={() => store.removePayment(i)} className="text-gray-500 hover:text-red-500"><X className="w-4 h-4" /></button></div>
+            <div className="flex items-center gap-2"><span className="font-semibold text-gray-900">{'₹'}{(Math.round(p.amount * 100) / 100).toLocaleString('en-IN')}</span><button onClick={() => store.removePayment(i)} className="text-gray-500 hover:text-red-500"><X className="w-4 h-4" /></button></div>
           </div>
         ))}
       </div>}

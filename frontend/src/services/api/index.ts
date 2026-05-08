@@ -55,3 +55,16 @@ export { incentiveApi } from './incentive';
 
 // Payout (Pune Incentive Module iii)
 export { payoutApi } from './payout';
+
+// Handoffs (user-to-user file handoff feature)
+export { handoffsApi } from './handoffs';
+export type {
+  Handoff,
+  HandoffRecipient,
+  HandoffRecipientStatus,
+  HandoffResponseValue,
+  HandoffFileMeta,
+  InboxItem,
+  EligibleRecipient,
+  DismissAction,
+} from './handoffs';

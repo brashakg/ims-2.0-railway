@@ -41,6 +41,13 @@ interface QueueItem {
   waitTime: number;
   createdAt: string;
   testId?: string;
+  /** Linked customer id when the patient is a dependent (e.g. a child)
+   *  whose bills are paid against a different customer record. Empty
+   *  when the patient and the customer are the same person. */
+  customerId?: string;
+  /** Linked customer name — only set when patientName !== customerName,
+   *  to make the patient-vs-customer relationship explicit on the card. */
+  customerName?: string;
 }
 
 interface CompletedTest {
@@ -392,9 +399,9 @@ export function ClinicalPage() {
         )}
       </div>
 
-      {/* Queue Tab */}
+      {/* Queue Tab — token-first intake (.q-item layout per design) */}
       {activeTab === 'queue' && (
-        <div className="space-y-3">
+        <div>
           {isLoading ? (
             <div className="card flex items-center justify-center py-12">
               <Loader2 className="w-8 h-8 animate-spin text-bv-red-600" />
@@ -406,114 +413,137 @@ export function ClinicalPage() {
             </div>
           ) : (
             queue.map((item) => {
-              const statusConfig = STATUS_CONFIG[item.status] || { label: item.status, class: 'bg-gray-100 text-gray-500' };
+              const statusConfig = STATUS_CONFIG[item.status] || {
+                label: item.status,
+                class: 'bg-gray-100 text-gray-500',
+              };
               const isActionLoading = actionLoading === item.id;
+              const linkedCustomerId = item.customerId;
+              const linkedCustomerName = item.customerName;
+              const isPatientCustomerSplit =
+                !!linkedCustomerId &&
+                !!linkedCustomerName &&
+                linkedCustomerName !== item.patientName;
+              const isLate = item.status === 'WAITING' && item.waitTime > 10;
+              const isCurrent = item.status === 'IN_PROGRESS';
+
               return (
                 <div
                   key={item.id}
-                  className={clsx(
-                    'card',
-                    item.status === 'IN_PROGRESS' && 'border-blue-300 bg-blue-50'
-                  )}
+                  className={clsx('q-item', isCurrent && 'cur')}
                 >
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-4">
-                      <div className="flex flex-col items-center gap-2">
-                        {/* Token Number */}
-                        <div className={clsx(
-                          'w-14 h-14 rounded-lg flex items-center justify-center font-bold text-lg',
-                          item.status === 'IN_PROGRESS'
-                            ? 'bg-blue-600 text-white'
-                            : 'bg-gray-100 text-gray-500'
-                        )}>
-                          {item.tokenNumber}
-                        </div>
-                        <button
-                          onClick={() => {
-                            if (storeInfo) {
-                              setPrintToken({
-                                tokenNumber: item.tokenNumber,
-                                patientName: item.patientName,
-                                dateTime: item.createdAt,
-                                optometristAssigned: undefined,
-                                queuePosition: [...queue].indexOf(item) + 1,
-                              });
-                            }
-                          }}
-                          className="text-[10px] px-2 py-1 bg-gray-100 hover:bg-gray-200 text-gray-600 rounded"
-                          title="Print Token"
-                        >
-                          Print
-                        </button>
-                      </div>
+                  {/* Token (mono, brand red) + tiny print action */}
+                  <div className="tok-stack">
+                    <div className="tok">{item.tokenNumber}</div>
+                    <button
+                      type="button"
+                      className="print-btn"
+                      onClick={() => {
+                        if (storeInfo) {
+                          setPrintToken({
+                            tokenNumber: item.tokenNumber,
+                            patientName: item.patientName,
+                            dateTime: item.createdAt,
+                            optometristAssigned: undefined,
+                            queuePosition: [...queue].indexOf(item) + 1,
+                          });
+                        }
+                      }}
+                      title="Print token"
+                    >
+                      Print
+                    </button>
+                  </div>
 
-                      {/* Patient Info */}
-                      <div>
-                        <div className="flex items-center gap-2">
-                          <p className="font-medium text-gray-900">{item.patientName}</p>
-                          <span className={clsx('px-2 py-0.5 rounded-full text-xs font-medium', statusConfig.class)}>
-                            {statusConfig.label}
-                          </span>
-                        </div>
-                        <div className="flex items-center gap-3 text-sm text-gray-500 mt-1">
-                          <span className="flex items-center gap-1">
-                            <Phone className="w-3 h-3" />
-                            {item.customerPhone}
-                          </span>
-                          {item.age && <span>Age: {item.age}</span>}
-                          {item.reason && <span>{item.reason}</span>}
-                        </div>
+                  {/* Patient (subject) — and the linked customer (account-holder)
+                      are surfaced separately when they differ. Most walk-ins
+                      have patient == customer; dependents (e.g. a child) won't. */}
+                  <div className="who">
+                    <div className="n">{item.patientName}</div>
+                    {isPatientCustomerSplit && (
+                      <div className="for-cust" title="Patient is a dependent of this customer">
+                        <span style={{ opacity: 0.6 }}>For</span>
+                        <span>{linkedCustomerName}</span>
+                        <span style={{ opacity: 0.6 }}>·</span>
+                        <span>{linkedCustomerId}</span>
                       </div>
-                    </div>
-
-                    <div className="flex items-center gap-4">
-                      {/* Wait Time */}
-                      <div className="text-right">
-                        <p className="text-sm text-gray-500">Wait Time</p>
-                        <p className={clsx(
-                          'font-medium',
-                          item.waitTime > 10 ? 'text-red-600' : 'text-gray-500'
-                        )}>
-                          {item.waitTime} min
-                        </p>
-                      </div>
-
-                      {/* Actions */}
-                      {item.status === 'WAITING' && canStartTest && (
-                        <button
-                          onClick={async () => {
-                            const testId = await handleStartTest(item.id);
-                            if (testId) {
-                              setCurrentTestId(testId);
-                              handleOpenEyeTest(item);
-                            }
-                          }}
-                          disabled={isActionLoading}
-                          className="btn-primary flex items-center gap-2 disabled:opacity-50"
-                        >
-                          {isActionLoading ? (
-                            <Loader2 className="w-4 h-4 animate-spin" />
-                          ) : (
-                            <Play className="w-4 h-4" />
-                          )}
-                          Start Test
-                        </button>
+                    )}
+                    <div className="p">
+                      <span className="flex items-center gap-1">
+                        <Phone className="w-3 h-3" />
+                        {item.customerPhone || '—'}
+                      </span>
+                      {item.age != null && (
+                        <>
+                          <span className="sep">·</span>
+                          <span>Age {item.age}</span>
+                        </>
                       )}
-                      {item.status === 'IN_PROGRESS' && canStartTest && (
-                        <button
-                          onClick={() => {
-                            // For in-progress tests, use the testId from the queue item or fallback to queue id
-                            const testId = item.testId || item.id;
+                      {item.reason && (
+                        <>
+                          <span className="sep">·</span>
+                          <span>{item.reason}</span>
+                        </>
+                      )}
+                    </div>
+                    <div className="chips">
+                      <span
+                        className={clsx(
+                          'px-2 py-0.5 rounded-full text-xs font-medium',
+                          statusConfig.class,
+                        )}
+                      >
+                        {statusConfig.label}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Wait time (mono pill, red when late) */}
+                  <div className={clsx('waited', isLate && 'late')}>
+                    {item.status === 'COMPLETED' ? (
+                      <span>—</span>
+                    ) : (
+                      <>
+                        <span className="v">{item.waitTime}</span>m {isLate ? 'late' : 'wait'}
+                      </>
+                    )}
+                  </div>
+
+                  {/* Actions */}
+                  <div className="flex items-center gap-2">
+                    {item.status === 'WAITING' && canStartTest && (
+                      <button
+                        onClick={async () => {
+                          const testId = await handleStartTest(item.id);
+                          if (testId) {
                             setCurrentTestId(testId);
                             handleOpenEyeTest(item);
-                          }}
-                          className="btn-primary flex items-center gap-2"
-                        >
-                          <Eye className="w-4 h-4" />
-                          Continue
-                        </button>
-                      )}
-                    </div>
+                          }
+                        }}
+                        disabled={isActionLoading}
+                        className="btn sm primary disabled:opacity-50"
+                      >
+                        {isActionLoading ? (
+                          <Loader2 className="w-4 h-4 animate-spin" />
+                        ) : (
+                          <Play className="w-4 h-4" />
+                        )}
+                        Start
+                      </button>
+                    )}
+                    {item.status === 'IN_PROGRESS' && canStartTest && (
+                      <button
+                        onClick={() => {
+                          const testId = item.testId || item.id;
+                          setCurrentTestId(testId);
+                          handleOpenEyeTest(item);
+                        }}
+                        className="btn sm primary"
+                      >
+                        <Eye className="w-4 h-4" />
+                        Continue
+                      </button>
+                    )}
                   </div>
                 </div>
               );

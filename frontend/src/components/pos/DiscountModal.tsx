@@ -129,7 +129,7 @@ export function DiscountModal({
               className={clsx(
                 'flex-1 py-2 px-3 rounded-lg text-sm font-medium transition-colors',
                 discountType === 'percent'
-                  ? 'bg-bv-red-600 text-gray-900'
+                  ? 'bg-bv-red-600 text-white'
                   : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
               )}
             >
@@ -140,7 +140,7 @@ export function DiscountModal({
               className={clsx(
                 'flex-1 py-2 px-3 rounded-lg text-sm font-medium transition-colors',
                 discountType === 'amount'
-                  ? 'bg-bv-red-600 text-gray-900'
+                  ? 'bg-bv-red-600 text-white'
                   : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
               )}
             >
@@ -194,7 +194,7 @@ export function DiscountModal({
                   className={clsx(
                     'px-4 py-2 rounded-lg text-sm font-medium transition-colors',
                     discountType === 'percent' && parseFloat(inputValue) === percent
-                      ? 'bg-bv-red-600 text-gray-900'
+                      ? 'bg-bv-red-600 text-white'
                       : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
                   )}
                 >
@@ -207,7 +207,7 @@ export function DiscountModal({
                   className={clsx(
                     'px-4 py-2 rounded-lg text-sm font-medium transition-colors',
                     discountType === 'percent' && parseFloat(inputValue) === maxDiscountPercent
-                      ? 'bg-bv-red-600 text-gray-900'
+                      ? 'bg-bv-red-600 text-white'
                       : 'bg-bv-red-100 text-bv-red-600 hover:bg-bv-red-200'
                   )}
                 >

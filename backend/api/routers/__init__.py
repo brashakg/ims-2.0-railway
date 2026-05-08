@@ -22,6 +22,8 @@ from .reports import router as reports_router
 from .settings import router as settings_router
 from .clinical import router as clinical_router
 from .admin import router as admin_router
+from .admin_catalog import router as admin_catalog_router
+from .handoffs import router as handoffs_router
 from .transfers import router as transfers_router
 from .catalog import router as catalog_router
 from .jarvis import router as jarvis_router
@@ -38,6 +40,7 @@ from .agents import router as agents_router
 from .walkouts import router as walkouts_router
 from .points import router as points_router
 from .payout import router as payout_router
+from .webhooks import router as webhooks_router
 
 __all__ = [
     "auth_router",
@@ -60,6 +63,8 @@ __all__ = [
     "settings_router",
     "clinical_router",
     "admin_router",
+    "admin_catalog_router",
+    "handoffs_router",
     "transfers_router",
     "catalog_router",
     "jarvis_router",
@@ -75,4 +80,5 @@ __all__ = [
     "walkouts_router",
     "points_router",
     "payout_router",
+    "webhooks_router",
 ]

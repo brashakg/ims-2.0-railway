@@ -1628,7 +1628,21 @@ async def gstr1_report(
       - B2B  : orders where the customer has a GSTIN on file
       - B2CL : orders to consumers with invoice value > 250000
       - B2CS : consolidated summary of remaining consumer invoices
+
+    Field-name fixes (Phase I-5):
+      - Reads `grand_total` (not legacy `total_amount`), `taxable` (not
+        `taxable_amount`), `tax` (not `cgst_amount + sgst_amount + igst_amount`).
+        The `_compute_per_category_gst` helper in orders.py stamps these
+        on every order; the legacy field names never landed.
+      - Stores carry their own `state` + `gstin` in the `stores`
+        collection — used to derive intra-state (CGST+SGST) vs
+        inter-state (IGST) splits and to fill the GSTIN/legalName
+        header. When the store row is absent, fallback is single-state
+        chain assumption (all sales intra-state, tax split 50/50).
+
     Returns empty lists/summaries when no data exists for the period.
+    Validation report (`validation`) flags B2B invoices missing GSTIN
+    so the CA can fix them before downloading.
     """
     active_store = store_id or current_user.get("active_store_id") or "store-001"
 
@@ -1642,60 +1656,119 @@ async def gstr1_report(
         from fastapi import HTTPException
         raise HTTPException(status_code=400, detail="month must be in YYYY-MM format")
 
-    from_iso = from_dt.isoformat()
-    to_iso = to_dt.isoformat()
-
     b2b: list = []
     b2cl: list = []
     b2cs_map: dict = {}
+    validation_issues: list = []
+
+    # Store header (gstin + legalName + home state for intra/inter split)
+    store_gstin = ""
+    store_legal_name = ""
+    store_state = ""
 
     db = _get_raw_db()
     if db is not None:
         try:
+            stores_col = db["stores"]
+            store_doc = stores_col.find_one({"store_id": active_store})
+            if store_doc:
+                store_gstin = str(store_doc.get("gstin", "") or "")
+                store_legal_name = str(store_doc.get("store_name") or store_doc.get("name", "") or "")
+                store_state = str(store_doc.get("state", "") or "")
+        except Exception:
+            pass
+
+        try:
             orders_col = db["orders"]
             customers_col = db["customers"]
 
-            # Build a GSTIN lookup from customers collection
-            gstin_map: dict = {}
+            # Build a lookup: customer_id -> {gstin, name, state}
+            cust_map: dict = {}
             try:
                 for cust in customers_col.find(
-                    {"gstin": {"$exists": True, "$nin": [None, ""]}},
-                    {"customer_id": 1, "gstin": 1, "name": 1},
+                    {},
+                    {"customer_id": 1, "gstin": 1, "name": 1, "state": 1},
                 ):
-                    gstin_map[str(cust.get("customer_id", ""))] = {
-                        "gstin": cust.get("gstin", ""),
-                        "name": cust.get("name", ""),
+                    cust_map[str(cust.get("customer_id", ""))] = {
+                        "gstin": str(cust.get("gstin", "") or ""),
+                        "name": str(cust.get("name", "") or ""),
+                        "state": str(cust.get("state", "") or ""),
                     }
             except Exception:
                 pass
 
-            # Fetch completed orders in the date range
+            # Fetch completed orders in the date range. Filter uses real
+            # datetime objects to match BaseRepository which writes
+            # `created_at` as a Date — comparing a Date to an ISO string
+            # silently never matches (this was the original GSTR bug).
             query = {
                 "store_id": active_store,
                 "status": {"$nin": ["CANCELLED", "DRAFT", "cancelled", "draft"]},
-                "created_at": {"$gte": from_iso, "$lte": to_iso},
+                "created_at": {"$gte": from_dt, "$lte": to_dt},
             }
 
             for order in orders_col.find(query):
                 cust_id = str(order.get("customer_id", ""))
-                cust_info = gstin_map.get(cust_id, {})
+                cust_info = cust_map.get(cust_id, {})
                 customer_gstin = cust_info.get("gstin", "")
-                customer_name = cust_info.get("name", "") or order.get("customer_name", "Walk-in Customer")
+                customer_state = cust_info.get("state", "") or store_state
+                customer_name = (
+                    cust_info.get("name", "")
+                    or order.get("customer_name", "")
+                    or "Walk-in Customer"
+                )
 
-                invoice_value = float(order.get("total_amount", 0))
-                taxable_value = float(order.get("taxable_amount", 0))
-                cgst = float(order.get("cgst_amount", 0))
-                sgst = float(order.get("sgst_amount", 0))
-                igst = float(order.get("igst_amount", 0))
-                total_tax = cgst + sgst + igst
+                # PRIMARY field map (Phase I-5 fix). Fall through legacy
+                # names for backwards-compat with any pre-Phase-6.15 rows.
+                invoice_value = float(
+                    order.get("grand_total", order.get("total_amount", 0)) or 0
+                )
+                taxable_value = float(
+                    order.get("taxable", order.get("taxable_amount", 0)) or 0
+                )
+                total_tax = float(
+                    order.get("tax", order.get("tax_amount", 0)) or 0
+                )
 
-                bill_number = order.get("bill_number", order.get("order_number", ""))
+                # Intra vs inter-state split. We don't have CGST/SGST/IGST
+                # split on the order doc, so derive it from store_state vs
+                # customer_state. When customer_state is empty (walk-in
+                # without state on file), assume same as store (intra).
+                is_inter_state = bool(
+                    store_state
+                    and customer_state
+                    and store_state.strip().lower() != customer_state.strip().lower()
+                )
+                if is_inter_state:
+                    igst = round(total_tax, 2)
+                    cgst = 0.0
+                    sgst = 0.0
+                else:
+                    cgst = round(total_tax / 2, 2)
+                    sgst = round(total_tax / 2, 2)
+                    igst = 0.0
+
+                bill_number = order.get("bill_number", order.get("order_number", "")) or order.get("order_id", "")
                 created_raw = order.get("created_at", "")
                 invoice_date = str(created_raw)[:10] if created_raw else month + "-01"
+                place_of_supply = customer_state or store_state or "Unknown"
 
-                # Determine place of supply (intra = CGST+SGST, inter = IGST)
-                is_igst = igst > 0
-                place_of_supply = "Inter-State" if is_igst else "Maharashtra"
+                # HSN: pull from the first line item if available; fallback
+                # to 9004 (frames/lenses default per CBIC). GSTR-1 row-level
+                # HSN is acceptable; section 12 HSN summary is computed
+                # separately below.
+                hsn_code = "9004"
+                gst_rate_dominant = 5
+                items = order.get("items") or []
+                if items:
+                    first = items[0] if isinstance(items[0], dict) else {}
+                    if first.get("hsn_code"):
+                        hsn_code = str(first.get("hsn_code"))
+                    if first.get("gst_rate") is not None:
+                        try:
+                            gst_rate_dominant = int(first.get("gst_rate"))
+                        except Exception:
+                            pass
 
                 base_invoice = {
                     "invoiceNumber": bill_number,
@@ -1704,12 +1777,12 @@ async def gstr1_report(
                     "placeOfSupply": place_of_supply,
                     "invoiceValue": round(invoice_value, 2),
                     "taxableValue": round(taxable_value, 2),
-                    "cgst": round(cgst, 2),
-                    "sgst": round(sgst, 2),
-                    "igst": round(igst, 2),
+                    "cgst": cgst,
+                    "sgst": sgst,
+                    "igst": igst,
                     "totalTax": round(total_tax, 2),
-                    "hsnCode": "9004",
-                    "gstRate": 5,
+                    "hsnCode": hsn_code,
+                    "gstRate": gst_rate_dominant,
                 }
 
                 if customer_gstin:
@@ -1717,34 +1790,29 @@ async def gstr1_report(
                     b2b.append({
                         **base_invoice,
                         "customerGSTIN": customer_gstin,
-                        "customerState": "Maharashtra" if not is_igst else "Other State",
+                        "customerState": customer_state or store_state,
                     })
                 elif invoice_value > 250000:
-                    # B2CL: large consumer invoice
+                    # B2CL: large consumer invoice (> ₹2.5L)
                     b2cl.append({
                         **base_invoice,
-                        "customerState": place_of_supply,
+                        "customerState": customer_state or store_state,
                     })
+                    # An "out-of-state" B2CL with no customer_state is
+                    # technically required to have one — flag it.
+                    if invoice_value > 250000 and not customer_state:
+                        validation_issues.append({
+                            "level": "warn",
+                            "invoice": bill_number,
+                            "issue": "B2CL invoice missing customer state",
+                        })
                 else:
-                    # B2CS: small consumer invoice — consolidate by place_of_supply + gst_rate
-                    # Determine effective GST rate (approximate from amounts)
-                    if taxable_value > 0:
-                        effective_rate = round((total_tax / taxable_value) * 100)
-                        # Snap to standard rates
-                        if effective_rate <= 6:
-                            effective_rate = 5
-                        elif effective_rate <= 14:
-                            effective_rate = 12
-                        else:
-                            effective_rate = 18
-                    else:
-                        effective_rate = 5
-
-                    key = f"{place_of_supply}|{effective_rate}"
+                    # B2CS: consolidate by (place_of_supply, gst_rate)
+                    key = f"{place_of_supply}|{gst_rate_dominant}"
                     if key not in b2cs_map:
                         b2cs_map[key] = {
                             "placeOfSupply": place_of_supply,
-                            "gstRate": effective_rate,
+                            "gstRate": gst_rate_dominant,
                             "taxableValue": 0.0,
                             "cgst": 0.0,
                             "sgst": 0.0,
@@ -1756,6 +1824,16 @@ async def gstr1_report(
                     b2cs_map[key]["sgst"] += sgst
                     b2cs_map[key]["igst"] += igst
                     b2cs_map[key]["totalTax"] += total_tax
+
+                # Validation: B2B without GSTIN — caught by the absence
+                # of customer_gstin above. Add an explicit warning for
+                # high-value invoices missing it.
+                if invoice_value > 250000 and not customer_gstin:
+                    validation_issues.append({
+                        "level": "info",
+                        "invoice": bill_number,
+                        "issue": "Invoice > ₹2.5L without customer GSTIN — confirm B2C status",
+                    })
 
         except Exception:
             pass
@@ -1786,14 +1864,20 @@ async def gstr1_report(
 
     return {
         "period": month,
-        "gstin": "",
-        "legalName": "",
+        "gstin": store_gstin,
+        "legalName": store_legal_name,
+        "storeState": store_state,
         "totalInvoices": total_invoices,
         "totalTaxableValue": round(total_taxable, 2),
         "totalTax": round(total_tax, 2),
         "b2b": b2b,
         "b2cl": b2cl,
         "b2cs": b2cs,
+        "validation": {
+            "ok": len(validation_issues) == 0,
+            "issueCount": len(validation_issues),
+            "issues": validation_issues[:50],
+        },
     }
 
 
@@ -1828,9 +1912,6 @@ async def gstr3b_report(
         from fastapi import HTTPException
         raise HTTPException(status_code=400, detail="month must be in YYYY-MM format")
 
-    from_iso = from_dt.isoformat()
-    to_iso = to_dt.isoformat()
-
     # Output tax accumulators
     out_igst = 0.0
     out_cgst = 0.0
@@ -1842,36 +1923,68 @@ async def gstr3b_report(
     itc_cgst = 0.0
     itc_sgst = 0.0
 
+    store_gstin = ""
+    store_legal_name = ""
+    store_state = ""
+
     db = _get_raw_db()
     if db is not None:
         try:
-            # --- Output tax from orders ---
+            stores_col = db["stores"]
+            store_doc = stores_col.find_one({"store_id": active_store})
+            if store_doc:
+                store_gstin = str(store_doc.get("gstin", "") or "")
+                store_legal_name = str(store_doc.get("store_name") or store_doc.get("name", "") or "")
+                store_state = str(store_doc.get("state", "") or "")
+        except Exception:
+            pass
+
+        try:
+            # --- Output tax from orders (Phase I-5 field-name fix).
+            #     Orders stamp `taxable` (taxable value) and `tax`
+            #     (total GST), via _compute_per_category_gst — there are
+            #     no `taxable_amount` / `cgst_amount` etc. fields. We
+            #     split tax by deriving intra/inter from store vs
+            #     customer state, in the same loop as GSTR-1 above.
             orders_col = db["orders"]
-            pipeline = [
+            customers_col = db["customers"]
+
+            cust_state_map: dict = {}
+            try:
+                for cust in customers_col.find(
+                    {}, {"customer_id": 1, "state": 1}
+                ):
+                    cust_state_map[str(cust.get("customer_id", ""))] = (
+                        str(cust.get("state", "") or "")
+                    )
+            except Exception:
+                pass
+
+            for order in orders_col.find(
                 {
-                    "$match": {
-                        "store_id": active_store,
-                        "status": {"$nin": ["CANCELLED", "DRAFT", "cancelled", "draft"]},
-                        "created_at": {"$gte": from_iso, "$lte": to_iso},
-                    }
-                },
-                {
-                    "$group": {
-                        "_id": None,
-                        "igst": {"$sum": "$igst_amount"},
-                        "cgst": {"$sum": "$cgst_amount"},
-                        "sgst": {"$sum": "$sgst_amount"},
-                        "taxable": {"$sum": "$taxable_amount"},
-                    }
-                },
-            ]
-            result = list(orders_col.aggregate(pipeline))
-            if result:
-                agg = result[0]
-                out_igst = float(agg.get("igst", 0.0))
-                out_cgst = float(agg.get("cgst", 0.0))
-                out_sgst = float(agg.get("sgst", 0.0))
-                out_taxable = float(agg.get("taxable", 0.0))
+                    "store_id": active_store,
+                    "status": {"$nin": ["CANCELLED", "DRAFT", "cancelled", "draft"]},
+                    "created_at": {"$gte": from_dt, "$lte": to_dt},
+                }
+            ):
+                taxable = float(order.get("taxable", order.get("taxable_amount", 0)) or 0)
+                tax = float(order.get("tax", order.get("tax_amount", 0)) or 0)
+                if taxable <= 0 and tax <= 0:
+                    continue
+                out_taxable += taxable
+
+                cust_id = str(order.get("customer_id", ""))
+                customer_state = cust_state_map.get(cust_id, "") or store_state
+                is_inter_state = bool(
+                    store_state
+                    and customer_state
+                    and store_state.strip().lower() != customer_state.strip().lower()
+                )
+                if is_inter_state:
+                    out_igst += tax
+                else:
+                    out_cgst += tax / 2
+                    out_sgst += tax / 2
         except Exception:
             pass
 
@@ -1883,7 +1996,7 @@ async def gstr3b_report(
                     "$match": {
                         "store_id": active_store,
                         "status": {"$nin": ["CANCELLED", "cancelled"]},
-                        "created_at": {"$gte": from_iso, "$lte": to_iso},
+                        "created_at": {"$gte": from_dt, "$lte": to_dt},
                     }
                 },
                 {
@@ -1915,8 +2028,9 @@ async def gstr3b_report(
 
     return {
         "period": month,
-        "gstin": "",
-        "legalName": "",
+        "gstin": store_gstin,
+        "legalName": store_legal_name,
+        "storeState": store_state,
         "outwardTaxableValue": _r(out_taxable),
         "outwardTaxableSupplies": {
             "integratedTax": _r(out_igst),

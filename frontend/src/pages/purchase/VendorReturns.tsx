@@ -381,7 +381,7 @@ export function VendorReturns() {
                       {ret.status === 'shipped' && (
                         <button
                           onClick={() => handleUpdateStatus(ret.return_id, 'received_by_vendor')}
-                          className="flex-1 bg-purple-600 hover:bg-purple-700 text-gray-900 px-3 py-2 rounded text-sm font-medium transition"
+                          className="flex-1 bg-purple-600 hover:bg-purple-700 text-white px-3 py-2 rounded text-sm font-medium transition"
                         >
                           Received by Vendor
                         </button>

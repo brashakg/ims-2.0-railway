@@ -183,6 +183,22 @@ export function SettingsPage() {
     return section.role.some(role => userRoles.includes(role as UserRole)) || user.activeRole === 'SUPERADMIN';
   });
 
+  /**
+   * DELTAS punch-list: 17 settings sections were rendered as a flat
+   * list, forcing a long visual scan. Bucketed into 5 functional
+   * groups (Account, Organisation, Catalog, Operations, System) so
+   * the operator can locate a setting by intent. Items + content
+   * panels are unchanged; only the side-nav rendering changed.
+   */
+  type GroupId = 'account' | 'org' | 'catalog' | 'ops' | 'system';
+  const SETTINGS_GROUPS: Array<{ id: GroupId; label: string; members: SettingsTab[] }> = [
+    { id: 'account', label: 'Account',      members: ['profile'] },
+    { id: 'org',     label: 'Organisation', members: ['business', 'stores', 'users'] },
+    { id: 'catalog', label: 'Catalog',      members: ['categories', 'brands', 'lens-master', 'discounts'] },
+    { id: 'ops',     label: 'Operations',   members: ['tax-invoice', 'printers', 'notifications', 'integrations'] },
+    { id: 'system',  label: 'System',       members: ['approvals', 'agents', 'feature-toggles', 'audit-logs', 'system'] },
+  ];
+
   // Load data for inline tabs
   useEffect(() => {
     loadInlineTabData();
@@ -267,22 +283,31 @@ export function SettingsPage() {
 
   return (
     <div className="setup-grid">
-      {/* Left nav — 240px */}
+      {/* Left nav — 240px, sections bucketed into 5 functional groups */}
       <nav className="s-nav">
         <span className="eyebrow">Configuration · {visibleSections.length} sections</span>
-        {visibleSections.map(section => {
-          const IconCmp = section.icon;
+        {SETTINGS_GROUPS.map((group) => {
+          const groupSections = visibleSections.filter((s) => group.members.includes(s.id));
+          if (groupSections.length === 0) return null;
           return (
-            <button
-              key={section.id}
-              type="button"
-              onClick={() => setActiveTab(section.id)}
-              className={'s-nav-item' + (activeTab === section.id ? ' on' : '')}
-              title={section.description}
-            >
-              <IconCmp className="s-nav-icon" />
-              <span className="s-nav-label">{section.label}</span>
-            </button>
+            <div key={group.id}>
+              <span className="s-nav-group">{group.label}</span>
+              {groupSections.map((section) => {
+                const IconCmp = section.icon;
+                return (
+                  <button
+                    key={section.id}
+                    type="button"
+                    onClick={() => setActiveTab(section.id)}
+                    className={'s-nav-item' + (activeTab === section.id ? ' on' : '')}
+                    title={section.description}
+                  >
+                    <IconCmp className="s-nav-icon" />
+                    <span className="s-nav-label">{section.label}</span>
+                  </button>
+                );
+              })}
+            </div>
           );
         })}
         {user?.activeRole === 'SUPERADMIN' && (

@@ -252,7 +252,7 @@ export function PurchaseOrderDashboard() {
                 </>
               )}
               {po.status === 'approved' && (
-                <button className="px-3 py-1 bg-purple-600 hover:bg-purple-700 text-gray-900 text-sm rounded font-semibold flex items-center gap-1">
+                <button className="px-3 py-1 bg-purple-600 hover:bg-purple-700 text-white text-sm rounded font-semibold flex items-center gap-1">
                   <Send className="w-4 h-4" /> Send to Vendor
                 </button>
               )}

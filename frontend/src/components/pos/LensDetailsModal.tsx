@@ -311,7 +311,7 @@ export function LensDetailsModal({ onClose, onSave }: LensDetailsModalProps) {
                           onClick={() => setLensCategory(type.id as any)}
                           className={`px-4 py-2 rounded-lg text-sm ${
                             lensCategory === type.id
-                              ? 'bg-bv-red-600 text-gray-900'
+                              ? 'bg-bv-red-600 text-white'
                               : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
                           }`}
                         >

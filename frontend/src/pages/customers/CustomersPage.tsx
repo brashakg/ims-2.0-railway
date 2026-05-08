@@ -52,17 +52,15 @@ export function CustomersPage() {
   const [searchParams] = useSearchParams();
   const searchInputRef = useRef<HTMLInputElement>(null);
 
-  // CRM Tab routing from URL params
+  // CRM Tab routing from URL params.
+  // The early-return for `recalls` / `campaigns` must happen AFTER
+  // all hooks have run — otherwise React crashes with "Rendered fewer
+  // hooks than expected" when `?tab=` flips between values mid-session
+  // (every state hook below this point would only run for the
+  // 'customers' tab). The actual return statements live at the bottom
+  // of the function, just before the main return.
   const tabParam = searchParams.get('tab') as CRMTab | null;
   const activeTab: CRMTab = tabParam && ['recalls', 'campaigns'].includes(tabParam) ? tabParam : 'customers';
-
-  // Render CRM sub-tabs (Recalls & Campaigns)
-  if (activeTab === 'recalls') {
-    return <RecallManager />;
-  }
-  if (activeTab === 'campaigns') {
-    return <PromotionEngine />;
-  }
 
   // Auto-focus search when navigated with ?search=true
   useEffect(() => {
@@ -506,6 +504,15 @@ export function CustomersPage() {
     Visit: { icon: User, color: 'text-orange-600', bg: 'bg-orange-50' },
     Email: { icon: Mail, color: 'text-purple-600', bg: 'bg-purple-50' },
   };
+
+  // CRM sub-tab routing — runs AFTER all hooks above so React's hook
+  // ordering stays stable across tab changes.
+  if (activeTab === 'recalls') {
+    return <RecallManager />;
+  }
+  if (activeTab === 'campaigns') {
+    return <PromotionEngine />;
+  }
 
   // Customer Detail View
   return (

@@ -740,6 +740,28 @@ export function ApprovalWorkflows() {
 
   return (
     <div className="space-y-6">
+      {/* Demo data banner — approval workflows panel renders sample
+          rules + sample pending approvals until the backend surface
+          (configurable rules + queue) is wired. The render structure
+          stays so the design stays reviewable; numbers + names are
+          illustrative. */}
+      <div
+        style={{
+          padding: '10px 14px',
+          background: 'var(--warn-50)',
+          border: '1px solid var(--warn-50)',
+          borderRadius: 8,
+          fontSize: 12.5,
+          color: 'var(--warn)',
+          display: 'flex',
+          alignItems: 'center',
+          gap: 8,
+        }}
+      >
+        <AlertTriangle className="w-4 h-4" />
+        <span><strong>Sample data shown</strong> — approval workflow rules + pending queue are not yet backend-wired. Edits here don't persist; numbers are illustrative.</span>
+      </div>
+
       {/* Summary Stats */}
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
         <div className="flex items-center gap-3 p-4 bg-white border border-gray-200 rounded-lg shadow-sm">

@@ -124,6 +124,12 @@ class FakeDB:
             self._collections[name] = FakeCollection()
         return self._collections[name]
     def __getattr__(self, name):
+        # Special-case `.db` to satisfy reports._get_raw_db() which
+        # does `conn.db[<collection>]` style access.
+        if name == "db":
+            return self
+        return self.get_collection(name)
+    def __getitem__(self, name):
         return self.get_collection(name)
 
 
@@ -167,11 +173,14 @@ def _seed_order(
     items: list = None,
     created_at: datetime = None,
     status: str = "CONFIRMED",
+    customer_id: str = "cust-x",
+    customer_name: str = "Default Customer",
 ):
     fake_db.get_collection("orders").insert_one({
         "_id": order_id, "order_id": order_id,
         "order_number": order_id, "store_id": store_id,
-        "customer_id": "cust-x",
+        "customer_id": customer_id,
+        "customer_name": customer_name,
         "items": items or [{
             "item_total": 1000.0, "unit_price": 1000.0, "quantity": 1,
             "category": "FRAME", "item_type": "FRAME",
@@ -674,3 +683,226 @@ def test_brand_sellthrough_uses_item_revenue_helper(
     assert by_brand["Ray-Ban"]["quantity_sold"] == 2
     assert by_brand["Ray-Ban"]["avg_price"] == 1000.0
     assert by_brand["Persol"]["revenue"] == 1000.0
+
+
+# ============================================================================
+# GSTR-1 / GSTR-3B regression tests (Phase I-5)
+# ============================================================================
+# Pre-fix bug: both endpoints summed legacy field names
+# (`total_amount`, `taxable_amount`, `cgst_amount`, etc.) that orders
+# never actually carry. The fields stamped by `_compute_per_category_gst`
+# are `grand_total`, `taxable`, `tax`. So GSTR returns rendered all-zero
+# in production. These tests seed real-shaped orders + customers + a
+# store row, hit the endpoints, and assert the totals match the
+# manual calculation.
+
+
+def _seed_store(fake_db, *, store_id="BV-TEST-01", state="Delhi", gstin="07AABCB0001Q1ZZ"):
+    fake_db.get_collection("stores").insert_one(
+        {
+            "store_id": store_id,
+            "store_code": store_id,
+            "store_name": f"BV {state}",
+            "state": state,
+            "gstin": gstin,
+            "is_active": True,
+        }
+    )
+
+
+def _seed_customer(fake_db, *, customer_id, name, state="Delhi", gstin=""):
+    doc = {"customer_id": customer_id, "name": name, "state": state}
+    if gstin:
+        doc["gstin"] = gstin
+    fake_db.get_collection("customers").insert_one(doc)
+
+
+class TestGSTR1:
+    """Hot bug from the audit: both endpoints returned 0 for everything
+    because they read legacy `total_amount` / `cgst_amount` etc. that
+    orders never actually have. The fix reads `grand_total` / `taxable`
+    / `tax` and derives CGST/SGST split from store vs customer state."""
+
+    def test_b2b_invoice_with_gstin_classifies_correctly(self, client, auth_headers, patched_reports):
+        """An order from a B2B customer (GSTIN on file) lands in b2b[]."""
+        fake_db = patched_reports["db"]
+        _seed_store(fake_db)
+        _seed_customer(fake_db, customer_id="C-B2B-1", name="ACME Ltd",
+                       state="Delhi", gstin="07AAAAA0000A1ZZ")
+        # An April 2026 invoice
+        _seed_order(
+            fake_db,
+            order_id="O-1",
+            store_id="BV-TEST-01",
+            grand_total=11800.0,
+            tax_amount=1800.0,
+            created_at=datetime(2026, 4, 15, 10, 0),
+            customer_id="C-B2B-1",
+            customer_name="ACME Ltd",
+        )
+        # _seed_order doesn't stamp `taxable` directly — backfill it on
+        # the row so the new GSTR loop has data
+        fake_db.get_collection("orders").docs[-1]["taxable"] = 10000.0
+        fake_db.get_collection("orders").docs[-1]["tax"] = 1800.0
+
+        r = client.get("/api/v1/reports/gstr1?month=2026-04", headers=auth_headers)
+        assert r.status_code == 200
+        body = r.json()
+        assert body["totalInvoices"] == 1
+        assert body["totalTaxableValue"] == 10000.0
+        assert body["totalTax"] == 1800.0
+        assert len(body["b2b"]) == 1
+        assert len(body["b2cl"]) == 0
+        assert len(body["b2cs"]) == 0
+        assert body["b2b"][0]["customerGSTIN"] == "07AAAAA0000A1ZZ"
+        # Same state → CGST+SGST split, IGST=0
+        assert body["b2b"][0]["cgst"] == 900.0
+        assert body["b2b"][0]["sgst"] == 900.0
+        assert body["b2b"][0]["igst"] == 0.0
+        # Header carries store GSTIN + name
+        assert body["gstin"] == "07AABCB0001Q1ZZ"
+        assert "BV " in body["legalName"]
+
+    def test_inter_state_invoice_uses_igst(self, client, auth_headers, patched_reports):
+        """When customer state ≠ store state, tax goes entirely to IGST."""
+        fake_db = patched_reports["db"]
+        _seed_store(fake_db, state="Delhi")
+        _seed_customer(fake_db, customer_id="C-OOS", name="Out-of-state Co",
+                       state="Maharashtra", gstin="27ZZZZZ0000Z1ZZ")
+        _seed_order(
+            fake_db, order_id="O-OOS", store_id="BV-TEST-01",
+            grand_total=5900.0, tax_amount=900.0,
+            created_at=datetime(2026, 4, 16, 12, 0),
+            customer_id="C-OOS", customer_name="Out-of-state Co",
+        )
+        fake_db.get_collection("orders").docs[-1]["taxable"] = 5000.0
+        fake_db.get_collection("orders").docs[-1]["tax"] = 900.0
+
+        r = client.get("/api/v1/reports/gstr1?month=2026-04", headers=auth_headers)
+        assert r.status_code == 200
+        body = r.json()
+        b2b = body["b2b"][0]
+        assert b2b["igst"] == 900.0
+        assert b2b["cgst"] == 0.0
+        assert b2b["sgst"] == 0.0
+
+    def test_walkin_consumer_invoice_classifies_b2cs(self, client, auth_headers, patched_reports):
+        """Walk-in / consumer invoice without GSTIN < ₹2.5L → B2CS bucket."""
+        fake_db = patched_reports["db"]
+        _seed_store(fake_db)
+        # No customer row needed — walk-in
+        _seed_order(
+            fake_db, order_id="O-WALKIN", store_id="BV-TEST-01",
+            grand_total=1180.0, tax_amount=180.0,
+            created_at=datetime(2026, 4, 17, 13, 0),
+            customer_id="",
+            customer_name="Walk-in",
+        )
+        fake_db.get_collection("orders").docs[-1]["taxable"] = 1000.0
+        fake_db.get_collection("orders").docs[-1]["tax"] = 180.0
+        fake_db.get_collection("orders").docs[-1]["items"] = [
+            {"hsn_code": "9004", "gst_rate": 18}
+        ]
+
+        r = client.get("/api/v1/reports/gstr1?month=2026-04", headers=auth_headers)
+        body = r.json()
+        assert len(body["b2b"]) == 0
+        assert len(body["b2cs"]) == 1
+        assert body["b2cs"][0]["taxableValue"] == 1000.0
+        assert body["b2cs"][0]["totalTax"] == 180.0
+
+    def test_b2cl_threshold_above_2_5_lakh(self, client, auth_headers, patched_reports):
+        """Consumer invoice > ₹2.5L without GSTIN goes to B2CL."""
+        fake_db = patched_reports["db"]
+        _seed_store(fake_db)
+        _seed_order(
+            fake_db, order_id="O-BIG", store_id="BV-TEST-01",
+            grand_total=295000.0,
+            created_at=datetime(2026, 4, 18, 14, 0),
+            customer_id="",
+            customer_name="HNI customer",
+        )
+        fake_db.get_collection("orders").docs[-1]["taxable"] = 250000.0
+        fake_db.get_collection("orders").docs[-1]["tax"] = 45000.0
+
+        r = client.get("/api/v1/reports/gstr1?month=2026-04", headers=auth_headers)
+        body = r.json()
+        assert len(body["b2cl"]) == 1
+        assert body["b2cl"][0]["invoiceValue"] == 295000.0
+
+    def test_cancelled_orders_excluded(self, client, auth_headers, patched_reports):
+        """CANCELLED + DRAFT orders should not appear in GSTR-1."""
+        fake_db = patched_reports["db"]
+        _seed_store(fake_db)
+        _seed_order(
+            fake_db, order_id="O-OK", store_id="BV-TEST-01",
+            grand_total=1180.0, status="COMPLETED",
+            created_at=datetime(2026, 4, 1),
+        )
+        fake_db.get_collection("orders").docs[-1]["taxable"] = 1000.0
+        fake_db.get_collection("orders").docs[-1]["tax"] = 180.0
+        _seed_order(
+            fake_db, order_id="O-CXL", store_id="BV-TEST-01",
+            grand_total=99999.0, status="CANCELLED",
+            created_at=datetime(2026, 4, 2),
+        )
+        fake_db.get_collection("orders").docs[-1]["taxable"] = 99999.0
+        fake_db.get_collection("orders").docs[-1]["tax"] = 18000.0
+
+        r = client.get("/api/v1/reports/gstr1?month=2026-04", headers=auth_headers)
+        body = r.json()
+        assert body["totalInvoices"] == 1
+        assert body["totalTaxableValue"] == 1000.0
+
+
+class TestGSTR3B:
+    def test_outward_supplies_use_grand_total(self, client, auth_headers, patched_reports):
+        """The bug: GSTR-3B summed `taxable_amount` / `cgst_amount` etc.
+        which never exist on orders. Fixed to use `taxable` + `tax`,
+        derive intra/inter from store vs customer state."""
+        fake_db = patched_reports["db"]
+        _seed_store(fake_db, state="Delhi")
+        _seed_customer(fake_db, customer_id="C1", name="Local", state="Delhi")
+        _seed_customer(fake_db, customer_id="C2", name="OOS", state="Maharashtra")
+
+        # Local order (intra) — taxable 10000, tax 1800
+        _seed_order(
+            fake_db, order_id="O-1", store_id="BV-TEST-01",
+            grand_total=11800.0, customer_id="C1",
+            created_at=datetime(2026, 4, 5),
+        )
+        fake_db.get_collection("orders").docs[-1]["taxable"] = 10000.0
+        fake_db.get_collection("orders").docs[-1]["tax"] = 1800.0
+
+        # Out-of-state order (inter) — taxable 5000, tax 900
+        _seed_order(
+            fake_db, order_id="O-2", store_id="BV-TEST-01",
+            grand_total=5900.0, customer_id="C2",
+            created_at=datetime(2026, 4, 6),
+        )
+        fake_db.get_collection("orders").docs[-1]["taxable"] = 5000.0
+        fake_db.get_collection("orders").docs[-1]["tax"] = 900.0
+
+        r = client.get("/api/v1/reports/gstr3b?month=2026-04", headers=auth_headers)
+        assert r.status_code == 200
+        body = r.json()
+        assert body["outwardTaxableValue"] == 15000.0
+        # Local: cgst 900, sgst 900; OOS: igst 900
+        assert body["outwardTaxableSupplies"]["centralTax"] == 900.0
+        assert body["outwardTaxableSupplies"]["stateTax"] == 900.0
+        assert body["outwardTaxableSupplies"]["integratedTax"] == 900.0
+        # Header carries store gstin + state
+        assert body["gstin"] == "07AABCB0001Q1ZZ"
+        assert body["storeState"] == "Delhi"
+
+    def test_returns_empty_envelope_when_no_orders(self, client, auth_headers, patched_reports):
+        """No orders → all-zero figures."""
+        fake_db = patched_reports["db"]
+        _seed_store(fake_db)
+        r = client.get("/api/v1/reports/gstr3b?month=2026-04", headers=auth_headers)
+        assert r.status_code == 200
+        body = r.json()
+        assert body["outwardTaxableValue"] == 0.0
+        assert body["outwardTaxableSupplies"]["centralTax"] == 0.0
+        assert body["outwardTaxableSupplies"]["stateTax"] == 0.0
+        assert body["outwardTaxableSupplies"]["integratedTax"] == 0.0

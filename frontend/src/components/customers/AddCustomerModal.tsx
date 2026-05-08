@@ -5,6 +5,7 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import { useDebounce } from '../../hooks/useDebounce';
+import { customerApi } from '../../services/api';
 import {
   X,
   Plus,
@@ -243,21 +244,20 @@ export function AddCustomerModal({ isOpen, onClose, onSave, initialName }: AddCu
     if (query.length < 2) { setSearchResults([]); return; }
     setSearching(true);
     try {
-      const token = localStorage.getItem('ims_token');
-      const baseUrl = import.meta.env.VITE_API_URL || 'https://ims-20-railway-production.up.railway.app/api/v1';
-      // Use phone-specific endpoint if query looks like a phone number
+      // Phone-shaped queries hit the dedicated phone endpoint;
+      // anything else uses the generic ?search= list endpoint.
+      // Both are routed through the shared axios client so they
+      // resolve correctly on Vercel (was hitting a hardcoded fallback
+      // URL via raw fetch before — fragile if the prod URL changes
+      // and missing the auth interceptor for some endpoints).
       const isPhone = /^\d{3,}$/.test(query.trim());
-      const url = isPhone
-        ? `${baseUrl}/customers/search/phone?phone=${encodeURIComponent(query)}`
-        : `${baseUrl}/customers/search?q=${encodeURIComponent(query)}`;
-      const resp = await fetch(url, {
-        headers: token ? { Authorization: 'Bearer ' + token } : {},
-      });
-      if (resp.ok) {
-        const data = await resp.json();
-        const list = Array.isArray(data) ? data : data.customers || (data.customer ? [data.customer] : []);
-        setSearchResults(list);
-      }
+      const data = isPhone
+        ? await customerApi.searchByPhone(query)
+        : await customerApi.getCustomers({ search: query, limit: 10 });
+      const list = Array.isArray(data)
+        ? data
+        : data?.customers || (data?.customer ? [data.customer] : []);
+      setSearchResults(list);
     } catch { setSearchResults([]); }
     setSearching(false);
   }, []);

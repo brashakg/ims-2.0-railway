@@ -294,7 +294,7 @@ export function ReceiptPreview({
         <div className="bg-white border-t border-gray-200 px-6 py-4 flex gap-4 flex-wrap">
           <button
             onClick={handlePrint}
-            className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-gray-900 rounded-lg transition-colors"
+            className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors"
           >
             <Printer className="w-5 h-5" />
             Print
@@ -302,7 +302,7 @@ export function ReceiptPreview({
           {selectedCustomer?.phone && (
             <button
               onClick={handleWhatsAppShare}
-              className="flex items-center gap-2 px-4 py-2 bg-green-600 hover:bg-green-700 text-gray-900 rounded-lg transition-colors"
+              className="flex items-center gap-2 px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg transition-colors"
             >
               <Share2 className="w-5 h-5" />
               WhatsApp
@@ -311,7 +311,7 @@ export function ReceiptPreview({
           {selectedCustomer?.email && (
             <button
               onClick={handleEmailShare}
-              className="flex items-center gap-2 px-4 py-2 bg-purple-600 hover:bg-purple-700 text-gray-900 rounded-lg transition-colors"
+              className="flex items-center gap-2 px-4 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded-lg transition-colors"
             >
               <Mail className="w-5 h-5" />
               Email

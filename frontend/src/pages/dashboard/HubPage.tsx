@@ -6,9 +6,12 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
+import { Send } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { Icon } from '../../components/shell';
 import { analyticsApi, tasksApi, clinicalApi } from '../../services/api';
+import HandoffInboxCard from '../../components/handoffs/HandoffInboxCard';
+import HandoffUploadModal from '../../components/handoffs/HandoffUploadModal';
 
 interface HeroMeta {
   salesToday: string;
@@ -54,6 +57,11 @@ export default function HubPage() {
     queue: '—',
     queueDetail: '',
   });
+
+  // Handoff feature state — modal visibility + a tick that the inbox
+  // card listens to for a fresh refetch after a successful send.
+  const [showSendFile, setShowSendFile] = useState(false);
+  const [inboxRefreshKey, setInboxRefreshKey] = useState(0);
 
   // Fire-and-forget — resilient to 404/500; show placeholders on failure.
   useEffect(() => {
@@ -221,6 +229,17 @@ export default function HubPage() {
             Every Better Vision store is one shift, one queue, one ledger. IMS 2.0 is the single surface your team opens at 10 AM and closes at 9 PM — checkout, exam, stock, tasks, and the agents that quietly keep everything in line.
             {firstName && <> Welcome back, {firstName}.</>}
           </p>
+          <div style={{ marginTop: 14 }}>
+            <button
+              type="button"
+              onClick={() => setShowSendFile(true)}
+              className="btn sm"
+              style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}
+            >
+              <Send className="w-3.5 h-3.5" />
+              Send a file
+            </button>
+          </div>
         </div>
         <div className="hub-meta-grid">
           <div>
@@ -243,6 +262,9 @@ export default function HubPage() {
           </div>
         </div>
       </section>
+
+      {/* Handoff inbox — only renders when the user has at least one card. */}
+      <HandoffInboxCard refreshKey={inboxRefreshKey} />
 
       <section className="modules">
         <div className="section-head">
@@ -280,6 +302,20 @@ export default function HubPage() {
           );
         })}
       </section>
+
+      {/* Send-file (handoff upload) modal — owned by the Hub so it
+          remains accessible from a single, predictable entry point. */}
+      <HandoffUploadModal
+        isOpen={showSendFile}
+        onClose={() => setShowSendFile(false)}
+        onSent={() => {
+          // Bumping the refresh key triggers a refetch in the inbox
+          // card (the sender is also a recipient if they sent to
+          // themselves, but more importantly we want any other state
+          // changes to surface immediately).
+          setInboxRefreshKey((k) => k + 1);
+        }}
+      />
     </div>
   );
 }
