@@ -423,14 +423,24 @@ export default function EditProductPage() {
         body: JSON.stringify(payload),
       });
 
-      // Surface the actual server error so the user knows what to fix.
-      // Previous "Failed to update product" / "Error updating product"
-      // generic alert hid Prisma / Shopify error messages entirely.
+      const j = await res.json().catch(() => ({}));
+
+      // Hard failure (5xx, network, validation) — show the real reason.
       if (!res.ok) {
-        const j = await res.json().catch(() => ({}));
         throw new Error(
           j.error || j.message || `Update failed (HTTP ${res.status})`
         );
+      }
+
+      // Soft failure: local save succeeded but Shopify rejected the
+      // push. Status 200 with success=false + shopifyError. The local
+      // edit IS saved, so the form is no longer "dirty" — but the user
+      // needs to know Shopify didn't accept it.
+      if (j.success === false && j.shopifyError) {
+        alert(
+          `Saved locally, but Shopify rejected the push:\n\n${j.shopifyError}\n\nFix the issue (most often a missing variant price or required field) and click "Publish to Shopify" again.`
+        );
+        return; // keep user on the edit page so they can retry
       }
 
       router.push('/dashboard/products');
