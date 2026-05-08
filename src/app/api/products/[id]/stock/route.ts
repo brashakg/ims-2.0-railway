@@ -10,16 +10,17 @@ interface UpdateStockRequest {
 
 export async function PUT(
   request: NextRequest,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
     const auth = await requireAuth(["ADMIN", "CATALOG_MANAGER"]);
     if (!auth.authorized) return auth.response!;
+    const { id } = await params;
 
     const body: UpdateStockRequest = await request.json();
 
     const product = await prisma.product.findUnique({
-      where: { id: params.id },
+      where: { id },
       include: { locations: true },
     });
 
@@ -55,7 +56,7 @@ export async function PUT(
 
       await prisma.syncLog.create({
         data: {
-          productId: params.id,
+          productId: id,
           action: "STOCK_UPDATE",
           status: shopifyResult.success ? "SUCCESS" : "FAILED",
           message: shopifyResult.message,

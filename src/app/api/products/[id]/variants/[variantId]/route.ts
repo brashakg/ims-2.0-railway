@@ -3,7 +3,7 @@ import { prisma } from "@/lib/prisma";
 import { requireAuth } from "@/lib/apiAuth";
 
 interface RouteParams {
-  params: { id: string; variantId: string };
+  params: Promise<{ id: string; variantId: string }>;
 }
 
 // GET single variant
@@ -11,9 +11,10 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
   try {
     const auth = await requireAuth();
     if (!auth.authorized) return auth.response!;
+    const { id, variantId } = await params;
 
     const variant = await prisma.productVariant.findFirst({
-      where: { id: params.variantId, productId: params.id },
+      where: { id: variantId, productId: id },
       include: {
         images: true,
         locations: { include: { location: true } },
@@ -39,11 +40,12 @@ export async function PUT(request: NextRequest, { params }: RouteParams) {
   try {
     const auth = await requireAuth(["ADMIN", "CATALOG_MANAGER"]);
     if (!auth.authorized) return auth.response!;
+    const { id, variantId } = await params;
 
     const body = await request.json();
 
     const existing = await prisma.productVariant.findFirst({
-      where: { id: params.variantId, productId: params.id },
+      where: { id: variantId, productId: id },
     });
 
     if (!existing) {
@@ -56,7 +58,7 @@ export async function PUT(request: NextRequest, { params }: RouteParams) {
     const { locations, images, ...variantFields } = body;
 
     const variant = await prisma.productVariant.update({
-      where: { id: params.variantId },
+      where: { id: variantId },
       data: {
         ...variantFields,
         title: `${body.colorCode || existing.colorCode}${
@@ -83,9 +85,10 @@ export async function DELETE(request: NextRequest, { params }: RouteParams) {
   try {
     const auth = await requireAuth(["ADMIN", "CATALOG_MANAGER"]);
     if (!auth.authorized) return auth.response!;
+    const { id, variantId } = await params;
 
     const existing = await prisma.productVariant.findFirst({
-      where: { id: params.variantId, productId: params.id },
+      where: { id: variantId, productId: id },
     });
 
     if (!existing) {
@@ -96,7 +99,7 @@ export async function DELETE(request: NextRequest, { params }: RouteParams) {
     }
 
     await prisma.productVariant.delete({
-      where: { id: params.variantId },
+      where: { id: variantId },
     });
 
     return NextResponse.json({

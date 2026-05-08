@@ -5,16 +5,17 @@ import { unlink } from "fs/promises";
 import { join } from "path";
 
 interface RouteParams {
-  params: { id: string };
+  params: Promise<{ id: string }>;
 }
 
 export async function DELETE(request: NextRequest, { params }: RouteParams) {
   try {
     const auth = await requireAuth(["ADMIN", "CATALOG_MANAGER"]);
     if (!auth.authorized) return auth.response!;
+    const { id } = await params;
 
     const image = await prisma.productImage.findUnique({
-      where: { id: params.id },
+      where: { id },
     });
 
     if (!image) {
@@ -45,7 +46,7 @@ export async function DELETE(request: NextRequest, { params }: RouteParams) {
 
     // Delete from database
     await prisma.productImage.delete({
-      where: { id: params.id },
+      where: { id },
     });
 
     return NextResponse.json(

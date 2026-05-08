@@ -20,13 +20,14 @@ import { logActivity } from "@/lib/activityLog";
 
 export async function GET(
   request: NextRequest,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
     const auth = await requireAuth();
     if (!auth.authorized) return auth.response!;
+    const { id } = await params;
     const product = await prisma.product.findUnique({
-      where: { id: params.id },
+      where: { id },
       include: {
         images: true,
         locations: true,
@@ -63,16 +64,17 @@ type UpdateProductRequest = Record<string, any>;
 
 export async function PUT(
   request: NextRequest,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
     const auth = await requireAuth(["ADMIN", "CATALOG_MANAGER"]);
     if (!auth.authorized) return auth.response!;
+    const { id } = await params;
 
     const body: UpdateProductRequest = await request.json();
 
     const product = await prisma.product.findUnique({
-      where: { id: params.id },
+      where: { id },
       include: { variants: true },
     });
 
@@ -168,7 +170,7 @@ export async function PUT(
     void locations;
 
     const updatedProduct = await prisma.product.update({
-      where: { id: params.id },
+      where: { id: id },
       data: updateData,
       include: {
         images: true,
@@ -200,7 +202,7 @@ export async function PUT(
 
     if (shouldPush) {
       try {
-        const products = await fetchProductsForPush([params.id]);
+        const products = await fetchProductsForPush([id]);
         if (products.length === 0) {
           shopifyPushError = "Product not found for Shopify push";
         } else {
@@ -241,7 +243,7 @@ export async function PUT(
       userEmail: auth.session?.user?.email,
       action: "UPDATE",
       entity: "PRODUCT",
-      entityId: params.id,
+      entityId: id,
       details: `Updated product: ${updatedProduct.title || updatedProduct.brand}`,
     });
 
@@ -283,14 +285,15 @@ export async function PUT(
 
 export async function DELETE(
   request: NextRequest,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
     const auth = await requireAuth(["ADMIN", "CATALOG_MANAGER"]);
     if (!auth.authorized) return auth.response!;
+    const { id } = await params;
 
     const product = await prisma.product.findUnique({
-      where: { id: params.id },
+      where: { id: id },
     });
 
     if (!product) {
@@ -301,7 +304,7 @@ export async function DELETE(
     }
 
     await prisma.product.update({
-      where: { id: params.id },
+      where: { id: id },
       data: { status: "ARCHIVED" },
     });
 
@@ -310,7 +313,7 @@ export async function DELETE(
 
       await prisma.syncLog.create({
         data: {
-          productId: params.id,
+          productId: id,
           action: "DELETE",
           status: shopifyResult.success ? "SUCCESS" : "FAILED",
           message: shopifyResult.message,
@@ -325,7 +328,7 @@ export async function DELETE(
       userEmail: auth.session?.user?.email,
       action: "DELETE",
       entity: "PRODUCT",
-      entityId: params.id,
+      entityId: id,
       details: `Archived product: ${product.title || product.brand} (${product.sku || 'no-sku'})`,
     });
 

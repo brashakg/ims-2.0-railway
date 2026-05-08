@@ -3,8 +3,9 @@ import { prisma } from "@/lib/prisma";
 import { requireAuth } from "@/lib/apiAuth";
 import { updateCollection as shopifyUpdateCollection } from "@/lib/shopify";
 
+// Next 15+ requires `params` to be a Promise that the handler awaits.
 interface RouteParams {
-  params: { id: string };
+  params: Promise<{ id: string }>;
 }
 
 // GET /api/collections/:id — Get a single collection with its products
@@ -12,9 +13,10 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
   try {
     const auth = await requireAuth();
     if (!auth.authorized) return auth.response!;
+    const { id } = await params;
 
     const collection = await prisma.collection.findUnique({
-      where: { id: params.id },
+      where: { id },
       include: {
         products: {
           include: {
@@ -57,10 +59,11 @@ export async function PATCH(request: NextRequest, { params }: RouteParams) {
   try {
     const auth = await requireAuth(["ADMIN"]);
     if (!auth.authorized) return auth.response!;
+    const { id } = await params;
 
     const body = await request.json();
     const collection = await prisma.collection.findUnique({
-      where: { id: params.id },
+      where: { id },
     });
 
     if (!collection) {
@@ -82,7 +85,7 @@ export async function PATCH(request: NextRequest, { params }: RouteParams) {
     if (body.imageAlt !== undefined) updateData.imageAlt = body.imageAlt;
 
     const updated = await prisma.collection.update({
-      where: { id: params.id },
+      where: { id },
       data: updateData,
     });
 
@@ -105,7 +108,7 @@ export async function PATCH(request: NextRequest, { params }: RouteParams) {
 
       if (shopifyResult.success) {
         await prisma.collection.update({
-          where: { id: params.id },
+          where: { id },
           data: { locallyModified: false, lastSyncedAt: new Date() },
         });
       }

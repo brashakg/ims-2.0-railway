@@ -4,7 +4,7 @@ import { requireAuth } from "@/lib/apiAuth";
 import { generateSKU } from "@/lib/autoGenerate";
 
 interface RouteParams {
-  params: { id: string };
+  params: Promise<{ id: string }>;
 }
 
 // GET all variants for a product
@@ -12,9 +12,10 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
   try {
     const auth = await requireAuth();
     if (!auth.authorized) return auth.response!;
+    const { id } = await params;
 
     const product = await prisma.product.findUnique({
-      where: { id: params.id },
+      where: { id },
       include: {
         variants: {
           include: {
@@ -48,10 +49,11 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
   try {
     const auth = await requireAuth(["ADMIN", "CATALOG_MANAGER"]);
     if (!auth.authorized) return auth.response!;
+    const { id } = await params;
 
     const body = await request.json();
     const product = await prisma.product.findUnique({
-      where: { id: params.id },
+      where: { id },
     });
 
     if (!product) {
@@ -97,7 +99,7 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
 
       const variant = await prisma.productVariant.create({
         data: {
-          productId: params.id,
+          productId: id,
           colorCode: v.colorCode,
           colorName: v.colorName || null,
           frameColor: v.frameColor || null,

@@ -5,14 +5,15 @@ import { requireAuth } from "@/lib/apiAuth";
 // GET /api/customers/[id] — full customer detail with recent orders
 export async function GET(
   _request: NextRequest,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
     const auth = await requireAuth();
     if (!auth.authorized) return auth.response!;
+    const { id } = await params;
 
     const customer = await prisma.customer.findUnique({
-      where: { id: params.id },
+      where: { id },
       include: {
         orders: {
           orderBy: { createdAt: "desc" },

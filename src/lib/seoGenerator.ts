@@ -4,6 +4,9 @@
 // runs pay full input-token cost only on the first call.
 
 const ANTHROPIC_URL = "https://api.anthropic.com/v1/messages";
+// Anthropic API version. 2023-06-01 is the long-stable version every
+// current model supports. Prompt caching graduated from beta to GA in
+// late 2024; the `anthropic-beta` header is no longer required.
 const ANTHROPIC_VERSION = "2023-06-01";
 const MODEL = "claude-haiku-4-5-20251001";
 
@@ -130,7 +133,6 @@ export async function generateSeoForProduct(
       "Content-Type": "application/json",
       "x-api-key": apiKey,
       "anthropic-version": ANTHROPIC_VERSION,
-      "anthropic-beta": "prompt-caching-2024-07-31",
     },
     body: JSON.stringify(body),
   });

@@ -9,14 +9,15 @@ import { logActivity } from "@/lib/activityLog";
 // must be deleted in Shopify — we don't want drift.
 export async function DELETE(
   _request: NextRequest,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
     const auth = await requireAuth(["ADMIN"]);
     if (!auth.authorized) return auth.response!;
+    const { id } = await params;
 
     const location = await prisma.location.findUnique({
-      where: { id: params.id },
+      where: { id },
     });
 
     if (!location) {
@@ -38,8 +39,8 @@ export async function DELETE(
     }
 
     const [productLocCount, variantLocCount] = await Promise.all([
-      prisma.productLocation.count({ where: { locationId: params.id } }),
-      prisma.variantLocation.count({ where: { locationId: params.id } }),
+      prisma.productLocation.count({ where: { locationId: id } }),
+      prisma.variantLocation.count({ where: { locationId: id } }),
     ]);
 
     if (productLocCount > 0 || variantLocCount > 0) {
@@ -52,7 +53,7 @@ export async function DELETE(
       );
     }
 
-    await prisma.location.delete({ where: { id: params.id } });
+    await prisma.location.delete({ where: { id: id } });
 
     logActivity({
       userId: (auth.session?.user as any)?.id,
@@ -60,7 +61,7 @@ export async function DELETE(
       userEmail: auth.session?.user?.email,
       action: "DELETE",
       entity: "LOCATION",
-      entityId: params.id,
+      entityId: id,
       details: `Deleted local-only location: ${location.name} (${location.code})`,
     });
 

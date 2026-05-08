@@ -4,9 +4,7 @@ import { authOptions } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 
 interface RouteParams {
-  params: {
-    id: string;
-  };
+  params: Promise<{ id: string }>;
 }
 
 export async function PUT(request: NextRequest, { params }: RouteParams) {
@@ -22,6 +20,7 @@ export async function PUT(request: NextRequest, { params }: RouteParams) {
         { status: 403 }
       );
     }
+    const { id } = await params;
 
     const { value } = await request.json();
 
@@ -36,7 +35,7 @@ export async function PUT(request: NextRequest, { params }: RouteParams) {
     }
 
     const attributeOption = await prisma.attributeOption.update({
-      where: { id: params.id },
+      where: { id },
       data: { value },
     });
 
@@ -67,8 +66,10 @@ export async function DELETE(request: NextRequest, { params }: RouteParams) {
       );
     }
 
+    const { id } = await params;
+
     await prisma.attributeOption.delete({
-      where: { id: params.id },
+      where: { id },
     });
 
     return NextResponse.json(

@@ -14,11 +14,12 @@ interface StockUpdateRequest {
 // the cataloger can edit a cell and have it persist on blur.
 export async function POST(
   request: NextRequest,
-  { params }: { params: { variantId: string } }
+  { params }: { params: Promise<{ variantId: string }> }
 ) {
   try {
     const auth = await requireAuth(["ADMIN", "CATALOG_MANAGER"]);
     if (!auth.authorized) return auth.response!;
+    const { variantId } = await params;
 
     const body: StockUpdateRequest = await request.json();
     if (!body.locationId) {
@@ -36,7 +37,7 @@ export async function POST(
     }
 
     const variant = await prisma.productVariant.findUnique({
-      where: { id: params.variantId },
+      where: { id: variantId },
       select: { id: true, productId: true, colorCode: true, frameSize: true },
     });
     if (!variant) {

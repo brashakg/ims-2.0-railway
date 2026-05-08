@@ -16,11 +16,12 @@ interface DesignUploadRequest {
 // design workflow as READY.
 export async function POST(
   request: NextRequest,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
     const auth = await requireAuth(["ADMIN", "DESIGN_MANAGER"]);
     if (!auth.authorized) return auth.response!;
+    const { id } = await params;
 
     const body: DesignUploadRequest = await request.json();
 
@@ -32,7 +33,7 @@ export async function POST(
     }
 
     const product = await prisma.product.findUnique({
-      where: { id: params.id },
+      where: { id: id },
       include: { images: true },
     });
     if (!product) {
@@ -109,7 +110,7 @@ export async function POST(
 
     // Update local product status regardless — the designer did their job.
     const updatedProduct = await prisma.product.update({
-      where: { id: params.id },
+      where: { id: id },
       data: {
         imageDesignStatus: "READY",
         status: shopifyOk ? "PUBLISHED" : product.status,
@@ -119,7 +120,7 @@ export async function POST(
     // Log for audit + sync history
     await prisma.syncLog.create({
       data: {
-        productId: params.id,
+        productId: id,
         action: "DESIGN_UPLOAD",
         status: shopifyOk ? "SUCCESS" : "FAILED",
         message: shopifyMessage,
@@ -132,7 +133,7 @@ export async function POST(
       userEmail: auth.session?.user?.email,
       action: "DESIGN_UPLOAD",
       entity: "PRODUCT",
-      entityId: params.id,
+      entityId: id,
       details: `Designer uploaded ${createdRows.length} edited image(s); removed ${removedRawCount} raw; ${shopifyMessage}`,
     });
 

@@ -22,7 +22,7 @@ const USER_SELECT = {
  *  prevent a non-admin from escalating their own role/features. */
 export async function PATCH(
   request: NextRequest,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
     const session = await getServerSession(authOptions);
@@ -33,8 +33,9 @@ export async function PATCH(
       );
     }
 
+    const { id } = await params;
     const isAdmin = (session.user as any).role === "ADMIN";
-    const isSelf = (session.user as any).id === params.id;
+    const isSelf = (session.user as any).id === id;
 
     if (!isAdmin && !isSelf) {
       return NextResponse.json(
@@ -84,7 +85,7 @@ export async function PATCH(
     }
 
     const updated = await prisma.user.update({
-      where: { id: params.id },
+      where: { id: id },
       data,
       select: USER_SELECT,
     });
@@ -109,7 +110,7 @@ export async function PATCH(
  *  out the only admin if they fat-finger the wrong row). */
 export async function DELETE(
   _request: NextRequest,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
     const session = await getServerSession(authOptions);
@@ -119,14 +120,15 @@ export async function DELETE(
         { status: 403 }
       );
     }
-    if ((session.user as any).id === params.id) {
+    const { id } = await params;
+    if ((session.user as any).id === id) {
       return NextResponse.json(
         { success: false, message: "Cannot delete your own account" },
         { status: 400 }
       );
     }
 
-    await prisma.user.delete({ where: { id: params.id } });
+    await prisma.user.delete({ where: { id: id } });
     return NextResponse.json({ success: true });
   } catch (error) {
     if ((error as any)?.code === "P2025") {
