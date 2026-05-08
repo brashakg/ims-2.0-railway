@@ -10,6 +10,13 @@ import {
   attributesForCategory,
 } from '@/lib/categoryAttributes';
 import EditProductV2 from '@/components/edit-product/EditProductV2';
+import { uploadImages, type UploadFail, type UploadOk } from '@/lib/imageUpload';
+import {
+  UploadErrorModal,
+  UploadInlineBanner,
+  bannerFromUploadResult,
+  type BannerTone,
+} from '@/components/ImageUploadFeedback';
 
 // Attribute keys that already have dedicated inputs in the form.
 // Everything applicable to the category and NOT in this set renders
@@ -121,6 +128,11 @@ function EditProductV1() {
   const [locations, setLocations] = useState<Location[]>([]);
   const [uploadingImage, setUploadingImage] = useState(false);
   const [extraAttrs, setExtraAttrs] = useState<Record<string, string>>({});
+  // Per F1/U8 — image upload feedback channels
+  const [uploadBanner, setUploadBanner] = useState<{ tone: BannerTone; message: string; detail?: string } | null>(null);
+  const [uploadFailures, setUploadFailures] = useState<UploadFail[]>([]);
+  const [uploadSuccesses, setUploadSuccesses] = useState<UploadOk[]>([]);
+  const [uploadModalOpen, setUploadModalOpen] = useState(false);
 
   const [formData, setFormData] = useState<FormData>({
     category: '',
@@ -336,44 +348,26 @@ function EditProductV1() {
   const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files || []);
     if (files.length === 0) return;
-
-    // Check file size (5MB limit)
-    const MAX_SIZE = 5 * 1024 * 1024;
-    for (const file of files) {
-      if (file.size > MAX_SIZE * 2) {
-        alert(
-          `File "${file.name}" is too large (${(file.size / (1024 * 1024)).toFixed(1)}MB). Maximum allowed is 5MB after compression.`
-        );
-        return;
-      }
-    }
-
     setUploadingImage(true);
+    setUploadBanner(null);
     try {
-      const uploadedUrls: string[] = [];
-      for (const file of files) {
-        // Compress image client-side before upload
-        const compressedFile = await compressImage(file);
-        const formDataObj = new FormData();
-        formDataObj.append('file', compressedFile);
-
-        const res = await fetch('/api/images', {
-          method: 'POST',
-          body: formDataObj,
-        });
-        const data = await res.json();
-        if (data.url) {
-          uploadedUrls.push(data.url);
-        }
+      const result = await uploadImages(files);
+      if (result.uploaded.length > 0) {
+        setFormData((prev) => ({
+          ...prev,
+          images: [...prev.images, ...result.uploaded.map((u) => u.url)],
+        }));
       }
-      setFormData((prev) => ({
-        ...prev,
-        images: [...prev.images, ...uploadedUrls],
-      }));
-    } catch (error) {
-      console.error('Error uploading image:', error);
+      setUploadBanner(bannerFromUploadResult(result));
+      const hardFailures = result.failed.filter((f) => f.level === "hard");
+      if (hardFailures.length > 0) {
+        setUploadFailures(result.failed);
+        setUploadSuccesses(result.uploaded);
+        setUploadModalOpen(true);
+      }
     } finally {
       setUploadingImage(false);
+      e.target.value = "";
     }
   };
 
@@ -904,6 +898,15 @@ function EditProductV1() {
                 <h3 className="text-base font-semibold text-gray-900 mb-4">
                   Images
                 </h3>
+                {/* Inline banner — most recent upload outcome (F1/U8). */}
+                {uploadBanner && (
+                  <UploadInlineBanner
+                    tone={uploadBanner.tone}
+                    message={uploadBanner.message}
+                    detail={uploadBanner.detail}
+                    onDismiss={() => setUploadBanner(null)}
+                  />
+                )}
                 <div className="border-2 border-dashed border-gray-300 rounded-lg p-6 text-center hover:border-blue-500 transition-colors cursor-pointer">
                   <input
                     type="file"
@@ -1059,6 +1062,14 @@ function EditProductV1() {
           </div>
         </div>
       </div>
+      {/* Modal interruption (F1/U8) — fires on hard upload failure. */}
+      {uploadModalOpen && (
+        <UploadErrorModal
+          failures={uploadFailures}
+          successes={uploadSuccesses}
+          onClose={() => setUploadModalOpen(false)}
+        />
+      )}
     </div>
   );
 }

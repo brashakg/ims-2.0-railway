@@ -37,6 +37,13 @@ import {
 } from "@/lib/autoGenerate";
 import { CAT_SPECS, navForCategory } from "@/lib/products/categorySpecs";
 import { getIssues, blockingIssues, type Issue } from "@/lib/products/validation";
+import { uploadImages, type UploadFail, type UploadOk } from "@/lib/imageUpload";
+import {
+  UploadErrorModal,
+  UploadInlineBanner,
+  bannerFromUploadResult,
+  type BannerTone,
+} from "@/components/ImageUploadFeedback";
 import {
   TopBar,
   SectionNav,
@@ -179,6 +186,11 @@ export default function EditProductV2({ productId }: { productId: string }) {
   const [activeSec, setActiveSec] = useState("identity");
   const [previewOpen, setPreviewOpen] = useState(false);
   const [uploadingImage, setUploadingImage] = useState(false);
+  // F1/U8 upload feedback channels
+  const [uploadBanner, setUploadBanner] = useState<{ tone: BannerTone; message: string; detail?: string } | null>(null);
+  const [uploadFailures, setUploadFailures] = useState<UploadFail[]>([]);
+  const [uploadSuccesses, setUploadSuccesses] = useState<UploadOk[]>([]);
+  const [uploadModalOpen, setUploadModalOpen] = useState(false);
 
   // ---------- Initial fetch ----------
   useEffect(() => {
@@ -431,31 +443,28 @@ export default function EditProductV2({ productId }: { productId: string }) {
     return () => window.removeEventListener("keydown", onKey);
   }, [saveDraft, blocking.length, previewOpen]);
 
-  // ---------- Image upload (NB: same response-shape bug as old page —
-  // fix is gated on Q1 of the audit; not changing here. ---------
+  // ---------- Image upload — uses the shared utility (F1/U8). Failures
+  // surface via banner + modal + activity log. ----------
   const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files || []);
     if (files.length === 0) return;
     setUploadingImage(true);
+    setUploadBanner(null);
     try {
-      const uploaded: string[] = [];
-      for (const file of files) {
-        const fd = new FormData();
-        fd.append("file", file);
-        const res = await fetch("/api/images", { method: "POST", body: fd });
-        const j = await res.json();
-        // Tolerate both response shapes (current bug + post-fix shape).
-        const url =
-          (j?.data?.urls?.original as string | undefined) ||
-          (j?.data?.url as string | undefined) ||
-          (j?.url as string | undefined);
-        if (url) uploaded.push(url);
+      const result = await uploadImages(files);
+      if (result.uploaded.length > 0) {
+        setFormData((prev) => ({ ...prev, images: [...prev.images, ...result.uploaded.map((u) => u.url)] }));
       }
-      if (uploaded.length > 0) {
-        setFormData((prev) => ({ ...prev, images: [...prev.images, ...uploaded] }));
+      setUploadBanner(bannerFromUploadResult(result));
+      const hardFailures = result.failed.filter((f) => f.level === "hard");
+      if (hardFailures.length > 0) {
+        setUploadFailures(result.failed);
+        setUploadSuccesses(result.uploaded);
+        setUploadModalOpen(true);
       }
     } finally {
       setUploadingImage(false);
+      e.target.value = "";
     }
   };
 
@@ -901,6 +910,16 @@ export default function EditProductV2({ productId }: { productId: string }) {
 
           {/* Media */}
           <Section id="media" title="Images">
+            {uploadBanner && (
+              <div style={{ marginBottom: 12 }}>
+                <UploadInlineBanner
+                  tone={uploadBanner.tone}
+                  message={uploadBanner.message}
+                  detail={uploadBanner.detail}
+                  onDismiss={() => setUploadBanner(null)}
+                />
+              </div>
+            )}
             <div
               style={{
                 border: "2px dashed var(--ep-border)",
@@ -1133,6 +1152,13 @@ export default function EditProductV2({ productId }: { productId: string }) {
           mrp={formData.mrp}
           seoDesc={derivedSeoDesc}
           onClose={() => setPreviewOpen(false)}
+        />
+      )}
+      {uploadModalOpen && (
+        <UploadErrorModal
+          failures={uploadFailures}
+          successes={uploadSuccesses}
+          onClose={() => setUploadModalOpen(false)}
         />
       )}
     </div>

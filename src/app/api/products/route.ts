@@ -139,14 +139,22 @@ export async function POST(request: NextRequest) {
 
     const body: CreateProductRequest = await request.json();
 
-    // Three-role design workflow: CATALOG_MANAGER submissions ALWAYS route
+    // Design-queue routing — per user feedback (F2 = "this needs to be
+    // implemented for all users"), every product creation now routes
     // through the design queue. The product starts as DRAFT locally +
-    // imageDesignStatus=PENDING_DESIGN; uploaded images are stored as "RAW"
-    // for the designer; the product is pushed to Shopify as DRAFT WITHOUT
-    // images so shoppers never see a half-done listing. The designer
-    // completes it later via /api/products/[id]/design-upload.
+    // imageDesignStatus=PENDING_DESIGN; uploaded images are stored as
+    // "RAW" for the designer; the product is pushed to Shopify as DRAFT
+    // WITHOUT images so shoppers never see a half-done listing. The
+    // designer completes it later via /api/products/[id]/design-upload.
+    //
+    // Admin can still bypass by passing { skipDesignQueue: true } in the
+    // body — used by Shopify-pull and bulk-import flows where images are
+    // already final.
     const userRole = (auth.session?.user as any)?.role || "";
-    const isCatalogerFlow = userRole === "CATALOG_MANAGER";
+    const skipDesignQueue =
+      (body as unknown as { skipDesignQueue?: boolean }).skipDesignQueue === true;
+    const isCatalogerFlow = !skipDesignQueue;
+    void userRole; // role no longer gates the flow; retained for activity log readers
 
     const discountRules = await prisma.discountRule.findMany();
 

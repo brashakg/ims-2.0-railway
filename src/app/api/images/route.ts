@@ -160,6 +160,22 @@ export async function POST(request: NextRequest) {
   } catch (error) {
     const errorMessage =
       error instanceof Error ? error.message : "Unknown error";
+    // Log failures too — per F1/U8, every upload outcome (good or bad)
+    // must show up in the activity log so cataloguers and admins can
+    // see what went wrong without digging through server logs.
+    try {
+      const auth = await requireAuth();
+      logActivity({
+        userId: (auth.session?.user as { id?: string } | undefined)?.id,
+        userName: auth.session?.user?.name,
+        userEmail: auth.session?.user?.email,
+        action: "UPLOAD_FAILED",
+        entity: "IMAGE",
+        details: `Image upload failed: ${errorMessage}`,
+      });
+    } catch {
+      // Auth itself may have failed — still surface the error to caller.
+    }
     return NextResponse.json(
       { success: false, error: errorMessage },
       { status: 500 }

@@ -11,6 +11,8 @@ import {
   Search,
   RefreshCw,
 } from "lucide-react";
+import { uploadImages, type UploadFail, type UploadOk } from "@/lib/imageUpload";
+import { UploadErrorModal } from "@/components/ImageUploadFeedback";
 
 interface RawImage {
   id: string;
@@ -46,6 +48,10 @@ export default function DesignQueuePage() {
   const [uploadingFor, setUploadingFor] = useState<string | null>(null);
   const [publishingFor, setPublishingFor] = useState<string | null>(null);
   const [stagedEdits, setStagedEdits] = useState<Record<string, string[]>>({});
+  // F1/U8 — modal for hard upload failures
+  const [uploadFailures, setUploadFailures] = useState<UploadFail[]>([]);
+  const [uploadSuccesses, setUploadSuccesses] = useState<UploadOk[]>([]);
+  const [uploadModalOpen, setUploadModalOpen] = useState(false);
 
   const fetchQueue = useCallback(async () => {
     setLoading(true);
@@ -89,30 +95,36 @@ export default function DesignQueuePage() {
     setUploadingFor(productId);
     setBanner(null);
     try {
-      const uploaded: string[] = [];
-      for (const file of Array.from(files)) {
-        const fd = new FormData();
-        fd.append("file", file);
-        const res = await fetch("/api/images", { method: "POST", body: fd });
-        const data = await res.json();
-        if (!data.url) {
-          throw new Error(data.error || `Failed to upload ${file.name}`);
-        }
-        uploaded.push(data.url);
+      const result = await uploadImages(Array.from(files));
+      const urls = result.uploaded.map((u) => u.url);
+      if (urls.length > 0) {
+        setStagedEdits((prev) => ({
+          ...prev,
+          [productId]: [...(prev[productId] || []), ...urls],
+        }));
       }
-      setStagedEdits((prev) => ({
-        ...prev,
-        [productId]: [...(prev[productId] || []), ...uploaded],
-      }));
-      setBanner({
-        tone: "success",
-        text: `Uploaded ${uploaded.length} edited image(s). Review and click "Publish" to push to Shopify.`,
-      });
-    } catch (e) {
-      setBanner({
-        tone: "error",
-        text: e instanceof Error ? e.message : "Upload failed",
-      });
+      // Banner — keeps the tone-binary success/error contract this page expects.
+      if (result.failed.length === 0) {
+        setBanner({
+          tone: "success",
+          text: `Uploaded ${urls.length} edited image(s). Review and click "Publish" to push to Shopify.`,
+        });
+      } else {
+        setBanner({
+          tone: "error",
+          text:
+            result.failed.length === 1
+              ? `Failed: ${result.failed[0].fileName} — ${result.failed[0].error}`
+              : `Failed ${result.failed.length} of ${result.failed.length + urls.length} images. Open the dialog for details.`,
+        });
+      }
+      // Modal for hard failures (F1/U8).
+      const hardFailures = result.failed.filter((f) => f.level === "hard");
+      if (hardFailures.length > 0) {
+        setUploadFailures(result.failed);
+        setUploadSuccesses(result.uploaded);
+        setUploadModalOpen(true);
+      }
     } finally {
       setUploadingFor(null);
     }
@@ -411,6 +423,13 @@ export default function DesignQueuePage() {
           </div>
         )}
       </div>
+      {uploadModalOpen && (
+        <UploadErrorModal
+          failures={uploadFailures}
+          successes={uploadSuccesses}
+          onClose={() => setUploadModalOpen(false)}
+        />
+      )}
     </div>
   );
 }

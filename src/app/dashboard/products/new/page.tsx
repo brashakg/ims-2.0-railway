@@ -39,6 +39,13 @@ import {
   generatePageUrl,
   generateTags,
 } from '@/lib/autoGenerate';
+import { uploadImages, type UploadFail, type UploadOk } from '@/lib/imageUpload';
+import {
+  UploadErrorModal,
+  UploadInlineBanner,
+  bannerFromUploadResult,
+  type BannerTone,
+} from '@/components/ImageUploadFeedback';
 
 interface Attribute {
   id: string;
@@ -131,6 +138,11 @@ export default function NewProductPage() {
   const [attributes, setAttributes] = useState<Attribute[]>([]);
   const [locations, setLocations] = useState<Location[]>([]);
   const [uploadingImage, setUploadingImage] = useState(false);
+  // Per F1/U8 — image upload feedback channels
+  const [uploadBanner, setUploadBanner] = useState<{ tone: BannerTone; message: string; detail?: string } | null>(null);
+  const [uploadFailures, setUploadFailures] = useState<UploadFail[]>([]);
+  const [uploadSuccesses, setUploadSuccesses] = useState<UploadOk[]>([]);
+  const [uploadModalOpen, setUploadModalOpen] = useState(false);
 
   const [productVariants, setProductVariants] = useState<any[]>([]);
 
@@ -349,84 +361,39 @@ export default function NewProductPage() {
     }));
   };
 
-  // Client-side image compression to reduce upload size
-  const compressImage = (file: File, maxSizeMB: number = 4.5): Promise<File> => {
-    return new Promise((resolve, reject) => {
-      if (file.size <= maxSizeMB * 1024 * 1024) {
-        resolve(file);
-        return;
-      }
-      const canvas = document.createElement('canvas');
-      const ctx = canvas.getContext('2d');
-      const img = new Image();
-      img.onload = () => {
-        // Scale down if needed (max 2048px on longest side)
-        let { width, height } = img;
-        const maxDim = 2048;
-        if (width > maxDim || height > maxDim) {
-          const ratio = Math.min(maxDim / width, maxDim / height);
-          width = Math.round(width * ratio);
-          height = Math.round(height * ratio);
-        }
-        canvas.width = width;
-        canvas.height = height;
-        ctx?.drawImage(img, 0, 0, width, height);
-        canvas.toBlob(
-          (blob) => {
-            if (blob) {
-              resolve(new File([blob], file.name, { type: 'image/jpeg' }));
-            } else {
-              resolve(file);
-            }
-          },
-          'image/jpeg',
-          0.85
-        );
-      };
-      img.onerror = () => reject(new Error('Failed to load image'));
-      img.src = URL.createObjectURL(file);
-    });
-  };
-
+  // Image upload — uses the shared utility (compression, response-shape
+  // tolerance, structured failures). Per F1/U8, every failure surfaces
+  // via three channels: modal interruption, inline banner, activity
+  // log (the log entry is written server-side by /api/images itself).
   const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files || []);
     if (files.length === 0) return;
 
-    // Check file size (5MB limit)
-    const MAX_SIZE = 5 * 1024 * 1024;
-    for (const file of files) {
-      if (file.size > MAX_SIZE * 2) {
-        alert(`File "${file.name}" is too large (${(file.size / (1024 * 1024)).toFixed(1)}MB). Maximum allowed is 5MB after compression.`);
-        return;
-      }
-    }
-
     setUploadingImage(true);
+    setUploadBanner(null);
     try {
-      const uploadedUrls: string[] = [];
-      for (const file of files) {
-        // Compress image client-side before upload
-        const compressedFile = await compressImage(file);
-        const formDataObj = new FormData();
-        formDataObj.append('file', compressedFile);
-
-        const res = await fetch('/api/images', {
-          method: 'POST',
-          body: formDataObj,
-        });
-        const data = await res.json();
-        if (data.url) {
-          uploadedUrls.push(data.url);
-        }
+      const result = await uploadImages(files);
+      // Append successes to the form
+      if (result.uploaded.length > 0) {
+        setFormData((prev) => ({
+          ...prev,
+          images: [...prev.images, ...result.uploaded.map((u) => u.url)],
+        }));
       }
-      setFormData((prev) => ({
-        ...prev,
-        images: [...prev.images, ...uploadedUrls],
-      }));
-    } catch (error) {
-      console.error('Error uploading image:', error);
+      // Inline banner — summarises the run
+      const banner = bannerFromUploadResult(result);
+      setUploadBanner(banner);
+      // Modal interruption — when at least one HARD failure happened
+      const hardFailures = result.failed.filter((f) => f.level === "hard");
+      if (hardFailures.length > 0) {
+        setUploadFailures(result.failed);
+        setUploadSuccesses(result.uploaded);
+        setUploadModalOpen(true);
+      }
     } finally {
       setUploadingImage(false);
+      // Reset the input so re-selecting the same file fires onChange again
+      e.target.value = "";
     }
   };
 
@@ -1717,6 +1684,15 @@ export default function NewProductPage() {
                 <h3 className="text-base font-semibold text-gray-900 mb-4">
                   Images
                 </h3>
+                {/* Inline banner — surfaces the most recent upload outcome (F1/U8). */}
+                {uploadBanner && (
+                  <UploadInlineBanner
+                    tone={uploadBanner.tone}
+                    message={uploadBanner.message}
+                    detail={uploadBanner.detail}
+                    onDismiss={() => setUploadBanner(null)}
+                  />
+                )}
                 <div className="border-2 border-dashed border-gray-300 rounded-lg p-6 text-center hover:border-blue-500 transition-colors cursor-pointer">
                   <input
                     type="file"
@@ -1872,6 +1848,14 @@ export default function NewProductPage() {
           </div>
         </div>
       </div>
+      {/* Modal interruption (F1/U8) — fires when at least one HARD upload failure happens. */}
+      {uploadModalOpen && (
+        <UploadErrorModal
+          failures={uploadFailures}
+          successes={uploadSuccesses}
+          onClose={() => setUploadModalOpen(false)}
+        />
+      )}
     </div>
   );
 }
