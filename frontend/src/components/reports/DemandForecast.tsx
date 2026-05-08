@@ -606,7 +606,7 @@ export function DemandForecast() {
               key={trend.season}
               className={`rounded-lg border-2 p-5 transition-all ${
                 isActive
-                  ? `${trend.bgColor} ${trend.borderColor} ring-2 ring-offset-1 ring-purple-300`
+                  ? `${trend.bgColor} ${trend.borderColor} ring-2 ring-offset-1 ring-bv-red-300`
                   : 'bg-white border-gray-200'
               }`}
             >
@@ -622,7 +622,7 @@ export function DemandForecast() {
                   <span className="text-xs text-gray-500">({trend.months})</span>
                 </div>
                 {isActive && (
-                  <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-bold bg-purple-600 text-white">
+                  <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-bold bg-bv-red-600 text-white">
                     <Clock className="w-3 h-3" />
                     CURRENT
                   </span>
@@ -782,7 +782,7 @@ export function DemandForecast() {
                   {suggestion.suggestedQty > 0 && (
                     <div className="text-center">
                       <p className="text-xs text-gray-500">Order Qty</p>
-                      <p className="font-bold text-purple-700">{suggestion.suggestedQty}</p>
+                      <p className="font-bold text-bv-red-700">{suggestion.suggestedQty}</p>
                     </div>
                   )}
                 </div>
@@ -804,7 +804,7 @@ export function DemandForecast() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold text-gray-900 flex items-center gap-2">
-            <BarChart3 className="w-6 h-6 text-purple-600" />
+            <BarChart3 className="w-6 h-6 text-bv-red-600" />
             Demand Forecasting
           </h1>
           <p className="text-gray-500">
@@ -816,7 +816,7 @@ export function DemandForecast() {
           <span className="text-sm text-gray-600">
             {now.toLocaleDateString('en-IN', { day: 'numeric', month: 'long', year: 'numeric' })}
           </span>
-          <span className="text-xs font-medium px-2 py-0.5 rounded-full bg-purple-100 text-purple-700">
+          <span className="text-xs font-medium px-2 py-0.5 rounded-full bg-bv-red-50 text-bv-red-700">
             {currentSeason} Season
           </span>
         </div>
@@ -827,7 +827,7 @@ export function DemandForecast() {
         <div className="card">
           <div className="flex items-center justify-between">
             <p className="text-sm text-gray-600">Forecast Period</p>
-            <ShoppingCart className="w-4 h-4 text-purple-500" />
+            <ShoppingCart className="w-4 h-4 text-bv-red-500" />
           </div>
           <p className="text-2xl font-bold text-gray-900">{forecastRange} Days</p>
           <p className="text-xs text-gray-500 mt-1">
@@ -886,7 +886,7 @@ export function DemandForecast() {
               onClick={() => setActiveSection('category')}
               className={`px-4 py-2 rounded-lg font-medium text-sm transition-colors flex items-center gap-2 ${
                 activeSection === 'category'
-                  ? 'bg-purple-100 text-purple-700'
+                  ? 'bg-bv-red-50 text-bv-red-700'
                   : 'text-gray-600 hover:bg-gray-100 hover:text-gray-900'
               }`}
             >
@@ -897,7 +897,7 @@ export function DemandForecast() {
               onClick={() => setActiveSection('seasonal')}
               className={`px-4 py-2 rounded-lg font-medium text-sm transition-colors flex items-center gap-2 ${
                 activeSection === 'seasonal'
-                  ? 'bg-purple-100 text-purple-700'
+                  ? 'bg-bv-red-50 text-bv-red-700'
                   : 'text-gray-600 hover:bg-gray-100 hover:text-gray-900'
               }`}
             >
@@ -908,7 +908,7 @@ export function DemandForecast() {
               onClick={() => setActiveSection('reorder')}
               className={`px-4 py-2 rounded-lg font-medium text-sm transition-colors flex items-center gap-2 ${
                 activeSection === 'reorder'
-                  ? 'bg-purple-100 text-purple-700'
+                  ? 'bg-bv-red-50 text-bv-red-700'
                   : 'text-gray-600 hover:bg-gray-100 hover:text-gray-900'
               }`}
             >
@@ -932,7 +932,7 @@ export function DemandForecast() {
                   onClick={() => setForecastRange(range)}
                   className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${
                     forecastRange === range
-                      ? 'bg-purple-600 text-white'
+                      ? 'bg-bv-red-600 text-white'
                       : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
                   }`}
                 >

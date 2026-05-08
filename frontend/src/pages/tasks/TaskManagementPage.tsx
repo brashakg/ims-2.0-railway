@@ -92,18 +92,14 @@ interface SOPStep {
   image?: string;
 }
 
+/** Per-employee performance row aggregated from the live tasks array. */
 interface EmployeePerformance {
   employeeId: string;
   employeeName: string;
-  role: string;
-  storeId: string;
-  storeName: string;
   tasksAssigned: number;
   tasksCompleted: number;
   tasksOverdue: number;
-  completionRate: number;
-  avgCompletionTime: number; // hours
-  rating: number; // 1-5
+  completionRate: number; // 0-100
 }
 
 export function TaskManagementPage() {
@@ -118,7 +114,6 @@ export function TaskManagementPage() {
 
   const [tasks, setTasks] = useState<Task[]>([]);
   const [sops, setSops] = useState<SOP[]>([]);
-  const [employeePerformance, setEmployeePerformance] = useState<EmployeePerformance[]>([]);
   // Phase 6.14 — wire the previously-broken "New Task" / "New SOP" button
   // (state getter was discarded with `const [, setShowCreateTask]`).
   const [showCreateTask, setShowCreateTask] = useState(false);
@@ -328,61 +323,10 @@ export function TaskManagementPage() {
         console.warn('[TaskManagement] SOP load failed:', sopErr);
       }
 
-      // Mock employee performance
-      setEmployeePerformance([
-        {
-          employeeId: 'emp1',
-          employeeName: 'Rajesh Kumar',
-          role: 'Store Manager',
-          storeId: '1',
-          storeName: 'Main Branch',
-          tasksAssigned: 45,
-          tasksCompleted: 43,
-          tasksOverdue: 1,
-          completionRate: 95.6,
-          avgCompletionTime: 4.2,
-          rating: 4.8,
-        },
-        {
-          employeeId: 'emp2',
-          employeeName: 'Priya Patel',
-          role: 'Sales Associate',
-          storeId: '1',
-          storeName: 'Main Branch',
-          tasksAssigned: 52,
-          tasksCompleted: 48,
-          tasksOverdue: 2,
-          completionRate: 92.3,
-          avgCompletionTime: 5.1,
-          rating: 4.5,
-        },
-        {
-          employeeId: 'emp3',
-          employeeName: 'Amit Sharma',
-          role: 'Sales Associate',
-          storeId: '2',
-          storeName: 'Mall Road',
-          tasksAssigned: 38,
-          tasksCompleted: 30,
-          tasksOverdue: 5,
-          completionRate: 78.9,
-          avgCompletionTime: 8.3,
-          rating: 3.5,
-        },
-        {
-          employeeId: 'emp4',
-          employeeName: 'Sneha Desai',
-          role: 'Accountant',
-          storeId: '1',
-          storeName: 'Main Branch',
-          tasksAssigned: 28,
-          tasksCompleted: 27,
-          tasksOverdue: 0,
-          completionRate: 96.4,
-          avgCompletionTime: 3.8,
-          rating: 5.0,
-        },
-      ]);
+      // Performance metrics are derived from the live `tasks` array
+      // via a useMemo — no mock seed (the previous Rajesh / Priya /
+      // Amit / Sneha placeholders were misleading because they showed
+      // even when there were zero real tasks).
 
     } catch (err: any) {
       setError('Failed to load task data. Please try again.');
@@ -438,6 +382,58 @@ export function TaskManagementPage() {
     }
     return c;
   }, [filteredTasks]);
+
+  /**
+   * Performance analytics derived from the live `tasks` array.
+   * Replaces the previous Rajesh / Priya / Amit / Sneha mock seed
+   * which kept rendering even when the backend returned zero tasks.
+   * If `tasks` is empty, the analytics tab renders an honest empty
+   * state instead of fake numbers.
+   */
+  const analytics = useMemo(() => {
+    const total = tasks.length;
+    const completed = tasks.filter((t) => t.status === 'COMPLETED').length;
+    const overdue = tasks.filter((t) => t.status === 'OVERDUE').length;
+    const completionRate = total > 0 ? (completed / total) * 100 : 0;
+    const activeEmployees = new Set(
+      tasks.map((t) => t.assignedTo).filter((id): id is string => !!id),
+    ).size;
+
+    // Per-employee aggregation
+    const byEmp = new Map<string, EmployeePerformance>();
+    for (const t of tasks) {
+      const id = t.assignedTo || '__unassigned__';
+      const name = t.assignedToName || (id === '__unassigned__' ? 'Unassigned' : id);
+      const cur = byEmp.get(id) ?? {
+        employeeId: id,
+        employeeName: name,
+        tasksAssigned: 0,
+        tasksCompleted: 0,
+        tasksOverdue: 0,
+        completionRate: 0,
+      };
+      cur.tasksAssigned += 1;
+      if (t.status === 'COMPLETED') cur.tasksCompleted += 1;
+      if (t.status === 'OVERDUE') cur.tasksOverdue += 1;
+      byEmp.set(id, cur);
+    }
+    const employees = Array.from(byEmp.values())
+      .map((e) => ({
+        ...e,
+        completionRate:
+          e.tasksAssigned > 0 ? (e.tasksCompleted / e.tasksAssigned) * 100 : 0,
+      }))
+      .sort((a, b) => b.completionRate - a.completionRate);
+
+    return {
+      total,
+      completed,
+      overdue,
+      completionRate,
+      activeEmployees,
+      employees,
+    };
+  }, [tasks]);
 
   return (
     <div className="inv-body">
@@ -666,7 +662,8 @@ export function TaskManagementPage() {
           )}
         </div>
       ) : activeTab === 'analytics' ? (
-        /* Team Performance Analytics */
+        /* Team Performance Analytics — fully derived from the live tasks
+           array. Empty state surfaces honestly when no tasks exist. */
         <div className="space-y-6">
           <div className="grid grid-cols-1 tablet:grid-cols-4 gap-4">
             <div className="card">
@@ -675,8 +672,8 @@ export function TaskManagementPage() {
                   <Users className="w-5 h-5 text-green-600" />
                 </div>
                 <div>
-                  <p className="text-sm text-gray-600">Active Employees</p>
-                  <p className="text-2xl font-bold text-gray-900">40</p>
+                  <p className="text-sm text-gray-600">Active Owners</p>
+                  <p className="text-2xl font-bold text-gray-900">{analytics.activeEmployees}</p>
                 </div>
               </div>
             </div>
@@ -687,7 +684,9 @@ export function TaskManagementPage() {
                 </div>
                 <div>
                   <p className="text-sm text-gray-600">Tasks Completed</p>
-                  <p className="text-2xl font-bold text-gray-900">148/163</p>
+                  <p className="text-2xl font-bold text-gray-900">
+                    {analytics.completed}/{analytics.total}
+                  </p>
                 </div>
               </div>
             </div>
@@ -697,8 +696,10 @@ export function TaskManagementPage() {
                   <TrendingUp className="w-5 h-5 text-purple-600" />
                 </div>
                 <div>
-                  <p className="text-sm text-gray-600">Avg Completion Rate</p>
-                  <p className="text-2xl font-bold text-gray-900">90.8%</p>
+                  <p className="text-sm text-gray-600">Completion Rate</p>
+                  <p className="text-2xl font-bold text-gray-900">
+                    {analytics.total > 0 ? `${analytics.completionRate.toFixed(1)}%` : '—'}
+                  </p>
                 </div>
               </div>
             </div>
@@ -709,78 +710,101 @@ export function TaskManagementPage() {
                 </div>
                 <div>
                   <p className="text-sm text-gray-600">Overdue Tasks</p>
-                  <p className="text-2xl font-bold text-red-900">8</p>
+                  <p className={`text-2xl font-bold ${analytics.overdue > 0 ? 'text-red-900' : 'text-gray-900'}`}>
+                    {analytics.overdue}
+                  </p>
                 </div>
               </div>
             </div>
           </div>
 
-          {/* Employee Performance Ranking */}
+          {/* Owner Performance Ranking — derived from real tasks */}
           <div className="card">
-            <h3 className="text-lg font-semibold text-gray-900 mb-4">Employee Performance Ranking</h3>
-            <div className="space-y-3">
-              {employeePerformance
-                .sort((a, b) => b.completionRate - a.completionRate)
-                .map((emp, index) => (
-                  <div key={emp.employeeId} className={`p-4 rounded-lg border-2 ${
-                    emp.completionRate >= 90 ? 'border-green-200 bg-green-50' :
-                    emp.completionRate >= 80 ? 'border-blue-200 bg-blue-50' :
-                    'border-red-200 bg-red-50'
-                  }`}>
-                    <div className="flex items-center gap-4">
-                      <div className={`w-10 h-10 rounded-full flex items-center justify-center font-bold text-lg ${
-                        index === 0 ? 'bg-yellow-100 text-yellow-800' :
-                        index === 1 ? 'bg-gray-200 text-gray-700' :
-                        index === 2 ? 'bg-orange-100 text-orange-700' :
-                        'bg-gray-100 text-gray-600'
-                      }`}>
-                        {index + 1}
-                      </div>
-                      <div className="flex-1">
-                        <div className="flex items-center gap-3 mb-1">
-                          <h4 className="font-semibold text-gray-900">{emp.employeeName}</h4>
-                          <span className="px-2 py-1 bg-white text-gray-700 text-xs rounded border">
-                            {emp.role}
-                          </span>
-                          <span className="text-xs text-gray-600">{emp.storeName}</span>
+            <h3 className="text-lg font-semibold text-gray-900 mb-4">
+              Owner Performance Ranking
+            </h3>
+            {analytics.employees.length === 0 ? (
+              <div className="text-center py-12">
+                <Users className="w-12 h-12 text-gray-400 mx-auto mb-3" />
+                <p className="text-gray-700 font-medium">No tasks yet</p>
+                <p className="text-sm text-gray-500 mt-1">
+                  Owner-level performance will populate as tasks are created
+                  and assigned. Stats here are computed from the live tasks
+                  collection — no placeholder data is shown.
+                </p>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {analytics.employees.map((emp, index) => {
+                  const rateBand =
+                    emp.completionRate >= 90
+                      ? 'border-green-200 bg-green-50'
+                      : emp.completionRate >= 70
+                      ? 'border-blue-200 bg-blue-50'
+                      : 'border-red-200 bg-red-50';
+                  return (
+                    <div
+                      key={emp.employeeId}
+                      className={`p-4 rounded-lg border-2 ${rateBand}`}
+                    >
+                      <div className="flex items-center gap-4">
+                        <div
+                          className={`w-10 h-10 rounded-full flex items-center justify-center font-bold text-lg ${
+                            index === 0
+                              ? 'bg-yellow-100 text-yellow-800'
+                              : index === 1
+                              ? 'bg-gray-200 text-gray-700'
+                              : index === 2
+                              ? 'bg-orange-100 text-orange-700'
+                              : 'bg-gray-100 text-gray-600'
+                          }`}
+                        >
+                          {index + 1}
                         </div>
-                        <div className="flex items-center gap-1">
-                          {[...Array(5)].map((_, i) => (
-                            <svg
-                              key={i}
-                              className={`w-4 h-4 ${i < Math.floor(emp.rating) ? 'text-yellow-600' : 'text-gray-700'}`}
-                              fill="currentColor"
-                              viewBox="0 0 20 20"
-                            >
-                              <path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.07 3.292a1 1 0 00.95.69h3.462c.969 0 1.371 1.24.588 1.81l-2.8 2.034a1 1 0 00-.364 1.118l1.07 3.292c.3.921-.755 1.688-1.54 1.118l-2.8-2.034a1 1 0 00-1.175 0l-2.8 2.034c-.784.57-1.838-.197-1.539-1.118l1.07-3.292a1 1 0 00-.364-1.118L2.98 8.72c-.783-.57-.38-1.81.588-1.81h3.461a1 1 0 00.951-.69l1.07-3.292z" />
-                            </svg>
-                          ))}
-                        </div>
-                      </div>
-                      <div className="grid grid-cols-3 gap-6 text-center">
-                        <div>
-                          <p className="text-xs text-gray-600">Assigned</p>
-                          <p className="text-lg font-semibold text-gray-900">{emp.tasksAssigned}</p>
-                        </div>
-                        <div>
-                          <p className="text-xs text-gray-600">Completed</p>
-                          <p className="text-lg font-semibold text-green-600">{emp.tasksCompleted}</p>
-                        </div>
-                        <div>
-                          <p className="text-xs text-gray-600">Overdue</p>
-                          <p className={`text-lg font-semibold ${emp.tasksOverdue > 0 ? 'text-red-600' : 'text-gray-900'}`}>
-                            {emp.tasksOverdue}
+                        <div className="flex-1">
+                          <h4 className="font-semibold text-gray-900">
+                            {emp.employeeName}
+                          </h4>
+                          <p className="text-xs text-gray-500 font-mono mt-0.5">
+                            {emp.employeeId}
                           </p>
                         </div>
-                      </div>
-                      <div className="text-right">
-                        <p className="text-2xl font-bold text-gray-900">{emp.completionRate.toFixed(1)}%</p>
-                        <p className="text-xs text-gray-600">Completion Rate</p>
+                        <div className="grid grid-cols-3 gap-6 text-center">
+                          <div>
+                            <p className="text-xs text-gray-600">Assigned</p>
+                            <p className="text-lg font-semibold text-gray-900">
+                              {emp.tasksAssigned}
+                            </p>
+                          </div>
+                          <div>
+                            <p className="text-xs text-gray-600">Completed</p>
+                            <p className="text-lg font-semibold text-green-600">
+                              {emp.tasksCompleted}
+                            </p>
+                          </div>
+                          <div>
+                            <p className="text-xs text-gray-600">Overdue</p>
+                            <p
+                              className={`text-lg font-semibold ${
+                                emp.tasksOverdue > 0 ? 'text-red-600' : 'text-gray-900'
+                              }`}
+                            >
+                              {emp.tasksOverdue}
+                            </p>
+                          </div>
+                        </div>
+                        <div className="text-right">
+                          <p className="text-2xl font-bold text-gray-900">
+                            {emp.completionRate.toFixed(1)}%
+                          </p>
+                          <p className="text-xs text-gray-600">Completion</p>
+                        </div>
                       </div>
                     </div>
-                  </div>
-                ))}
-            </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
         </div>
       ) : (
