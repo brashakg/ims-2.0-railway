@@ -26,6 +26,7 @@ try:
     from database.repositories.prescription_repository import PrescriptionRepository
     from database.repositories.task_repository import TaskRepository
     from database.repositories.workshop_repository import WorkshopJobRepository
+    from database.repositories.handoff_repository import HandoffRepository
     from database.repositories.expense_repository import (
         ExpenseRepository,
         AdvanceRepository,
@@ -169,6 +170,14 @@ def get_workshop_repository():
     db = get_db()
     if db is not None and db.is_connected:
         return WorkshopJobRepository(db.get_collection("workshop_jobs"))
+    return None
+
+
+def get_handoff_repository():
+    """Get HandoffRepository instance (file-handoff feature)."""
+    db = get_db()
+    if db is not None and db.is_connected:
+        return HandoffRepository(db.get_collection("handoffs"))
     return None
 
 
