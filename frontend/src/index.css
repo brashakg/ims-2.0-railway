@@ -533,6 +533,97 @@
   .t-body.detail-open .t-detail { display: block; }
 }
 
+/* ============================================================================
+   Clinical queue — token-first row layout
+   Ported from docs/design/clinical.html (.q-item etc.)
+   ============================================================================ */
+
+.q-item {
+  display: grid;
+  grid-template-columns: 64px 1fr auto auto;
+  gap: 16px;
+  align-items: center;
+  padding: 14px 18px;
+  background: var(--surface, #fff);
+  border: 1px solid var(--line, #e6e6e0);
+  border-radius: 12px;
+  margin-bottom: 8px;
+  cursor: default;
+  transition: border-color .12s, background .12s;
+}
+.q-item:hover { border-color: var(--line-strong, #d3d3cc); }
+.q-item.cur {
+  border-color: var(--bv, #b42318);
+  background: var(--bv-soft, #fdf3f1);
+}
+
+.q-item .tok-stack {
+  display: flex; flex-direction: column; align-items: center; gap: 4px;
+  min-width: 64px;
+}
+.q-item .tok {
+  font: 600 18px/1 var(--font-mono);
+  color: var(--bv, #b42318);
+  letter-spacing: .04em;
+  padding: 8px 10px;
+  background: var(--bv-soft, #fdf3f1);
+  border-radius: 8px;
+  width: 100%;
+  text-align: center;
+}
+.q-item.cur .tok { background: var(--bv, #b42318); color: #fff; }
+.q-item .print-btn {
+  font: 500 9.5px/1 var(--font-mono);
+  color: var(--ink-4, #6b6b65);
+  text-transform: uppercase;
+  letter-spacing: .08em;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  padding: 2px 4px;
+}
+.q-item .print-btn:hover { color: var(--ink-2, #2e2e2b); }
+
+.q-item .who {
+  min-width: 0;
+}
+.q-item .n {
+  font: 600 14px/1.2 var(--font-sans);
+  color: var(--ink, #141413);
+  margin-bottom: 2px;
+}
+.q-item .for-cust {
+  display: inline-flex; align-items: center; gap: 4px;
+  font: 500 11px/1 var(--font-mono);
+  color: var(--ink-3, #555550);
+  margin-bottom: 6px;
+  background: var(--bg-sunk, #f1f1ec);
+  padding: 3px 7px;
+  border-radius: 4px;
+}
+.q-item .p {
+  font-size: 12px;
+  color: var(--ink-3, #555550);
+  margin-bottom: 6px;
+  display: flex; gap: 10px; flex-wrap: wrap; align-items: center;
+}
+.q-item .p .sep { color: var(--ink-5, #b6b6ae); }
+.q-item .chips { display: flex; gap: 6px; align-items: center; }
+
+.q-item .waited {
+  font: 500 11.5px/1 var(--font-mono);
+  color: var(--ink-4, #6b6b65);
+  text-align: right;
+  white-space: nowrap;
+}
+.q-item .waited.late { color: var(--err, #b42318); }
+.q-item .waited .v {
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--ink-2, #2e2e2b);
+}
+.q-item.cur .waited { color: var(--ink-2, #2e2e2b); }
+
 /* Priority pills for Tasks & SOPs (P0–P4) */
 .pill-P0 { background: var(--p0-bg); color: var(--p0); }
 .pill-P1 { background: var(--p1-bg); color: var(--p1); }
