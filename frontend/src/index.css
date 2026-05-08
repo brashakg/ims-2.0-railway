@@ -1060,6 +1060,15 @@
   color: inherit; opacity: .7;
 }
 .s-nav .divider { margin: 10px 8px; }
+.s-nav .s-nav-group {
+  font: 500 9.5px/1 var(--font-mono);
+  color: var(--ink-4, #6b6b65);
+  text-transform: uppercase;
+  letter-spacing: .12em;
+  padding: 14px 10px 6px;
+  display: block;
+}
+.s-nav .s-nav-group:first-child { padding-top: 4px; }
 
 .s-content {
   overflow-y: auto;
