@@ -129,7 +129,77 @@ export const prescriptionApi = {
     const response = await api.get(`/prescriptions/${prescriptionId}/validate`);
     return response.data;
   },
+
+  // ----- 4-version Rx model (May 2026) -------------------------------
+  // Each prescription captures four states: before_testing, after_testing,
+  // manual, final. `final` mirrors back to top-level on finalize for
+  // backwards compat with the existing POS/Order code.
+  getVersions: async (prescriptionId: string) => {
+    const response = await api.get(`/prescriptions/${prescriptionId}/versions`);
+    return response.data as {
+      prescription_id: string;
+      status: 'in_progress' | 'finalized';
+      versions: {
+        before_testing: PrescriptionVersionData | null;
+        after_testing: PrescriptionVersionData | null;
+        manual: PrescriptionVersionData | null;
+        final: PrescriptionVersionData | null;
+      };
+      finalized_at?: string;
+    };
+  },
+
+  patchVersion: async (
+    prescriptionId: string,
+    versionName: 'before_testing' | 'after_testing' | 'manual' | 'final',
+    payload: Partial<PrescriptionVersionData>,
+  ) => {
+    const response = await api.patch(
+      `/prescriptions/${prescriptionId}/version/${versionName}`,
+      payload,
+    );
+    return response.data;
+  },
+
+  finalizePrescription: async (prescriptionId: string) => {
+    const response = await api.post(`/prescriptions/${prescriptionId}/finalize`);
+    return response.data;
+  },
+
+  getProgression: async (customerId: string) => {
+    const response = await api.get(`/prescriptions/customer/${customerId}/progression`);
+    return response.data as {
+      customer_id: string;
+      deltas: Array<{
+        from_date: string;
+        to_date: string;
+        right_eye: { sphere?: number | null; cylinder?: number | null; axis?: number | null; addition?: number | null };
+        left_eye: { sphere?: number | null; cylinder?: number | null; axis?: number | null; addition?: number | null };
+        pd?: number | null;
+      }>;
+      visits: number;
+    };
+  },
 };
+
+export interface PrescriptionEyeData {
+  sphere?: number | null;
+  cylinder?: number | null;
+  axis?: number | null;
+  addition?: number | null;
+  va?: string | null;
+}
+
+export interface PrescriptionVersionData {
+  right_eye?: PrescriptionEyeData | null;
+  left_eye?: PrescriptionEyeData | null;
+  pd?: number | null;
+  source?: string | null;
+  override_reason?: string | null;
+  signed_off_by?: string | null;
+  captured_by?: string | null;
+  captured_at?: string | null;
+}
 
 // ============================================================================
 // Workshop API

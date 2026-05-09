@@ -27,10 +27,13 @@ import {
   AlertTriangle,
   MessageCircle as MessageCircleIcon,
   PhoneCall,
+  Layers,
 } from 'lucide-react';
 import type { Customer } from '../../types';
 import { customerApi, orderApi, prescriptionApi } from '../../services/api';
 import { useToast } from '../../context/ToastContext';
+import { PrescriptionVersionsEditor } from '../../components/clinical/PrescriptionVersionsEditor';
+import { PrescriptionHistoryModal } from '../../components/clinical/PrescriptionHistoryModal';
 import clsx from 'clsx';
 
 type Customer360Tab = 'overview' | 'prescriptions' | 'orders' | 'interactions' | 'loyalty' | 'preferences';
@@ -366,7 +369,7 @@ export function Customer360Dashboard() {
       {/* Tab Content */}
       <div className="bg-white border border-gray-200 rounded-lg p-6">
         {activeTab === 'overview' && stats && <OverviewTab stats={stats} />}
-        {activeTab === 'prescriptions' && <PrescriptionsTab prescriptions={prescriptions} />}
+        {activeTab === 'prescriptions' && <PrescriptionsTab prescriptions={prescriptions} customerId={customerId!} customerName={customer?.name} />}
         {activeTab === 'orders' && <OrdersTab orders={orders} />}
         {activeTab === 'interactions' && <InteractionsTab interactions={interactions} />}
         {activeTab === 'loyalty' && loyaltyData && <LoyaltyTab loyaltyData={loyaltyData} />}
@@ -543,9 +546,14 @@ function MetricRow({ label, value, icon }: MetricRowProps) {
 
 interface PrescriptionsTabProps {
   prescriptions: PrescriptionData[];
+  customerId: string;
+  customerName?: string;
 }
 
-function PrescriptionsTab({ prescriptions }: PrescriptionsTabProps) {
+function PrescriptionsTab({ prescriptions, customerId, customerName }: PrescriptionsTabProps) {
+  const [versionsRxId, setVersionsRxId] = useState<string | null>(null);
+  const [historyOpen, setHistoryOpen] = useState(false);
+
   if (prescriptions.length === 0) {
     return (
       <div className="text-center py-12 text-gray-500">
@@ -557,6 +565,33 @@ function PrescriptionsTab({ prescriptions }: PrescriptionsTabProps) {
 
   return (
     <div className="space-y-4">
+      {versionsRxId && (
+        <PrescriptionVersionsEditor
+          prescriptionId={versionsRxId}
+          isOpen={!!versionsRxId}
+          onClose={() => setVersionsRxId(null)}
+        />
+      )}
+      <PrescriptionHistoryModal
+        customerId={customerId}
+        customerName={customerName}
+        isOpen={historyOpen}
+        onClose={() => setHistoryOpen(false)}
+        onOpenVersions={(rxId) => {
+          setHistoryOpen(false);
+          setVersionsRxId(rxId);
+        }}
+      />
+      <div className="flex justify-end">
+        <button
+          type="button"
+          onClick={() => setHistoryOpen(true)}
+          className="px-3 py-1.5 text-sm font-semibold text-gray-700 bg-white border border-gray-300 rounded hover:bg-gray-50 flex items-center gap-1.5"
+        >
+          <Clock className="w-4 h-4" />
+          History &amp; progression
+        </button>
+      </div>
       {prescriptions.map((rx) => (
         <div key={rx.id} className="bg-gray-50 rounded-lg p-4 space-y-2">
           <div className="flex items-start justify-between">
@@ -586,6 +621,17 @@ function PrescriptionsTab({ prescriptions }: PrescriptionsTabProps) {
                 {rx.renewalStatus === 'expired' && <AlertCircle className="w-4 h-4" />}
                 {rx.renewalStatus.charAt(0).toUpperCase() + rx.renewalStatus.slice(1)}
               </div>
+              {rx.id && (
+                <button
+                  type="button"
+                  onClick={() => setVersionsRxId(rx.id)}
+                  className="px-2 py-1 text-xs font-semibold text-indigo-700 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 rounded flex items-center gap-1"
+                  title="Manage 4-version Rx"
+                >
+                  <Layers className="w-3.5 h-3.5" />
+                  Versions
+                </button>
+              )}
             </div>
           </div>
 

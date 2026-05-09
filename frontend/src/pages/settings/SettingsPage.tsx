@@ -17,7 +17,7 @@ import {
   RefreshCw, ToggleLeft, ToggleRight, Upload, Download,
   Link, Boxes, CircleDot,
   User, Building2, Receipt, Bell, History, Printer, Save,
-  Search, Calendar, Filter, X, Shield, LogOut, Bot,
+  Search, Calendar, Filter, X, Shield, LogOut, Bot, Award,
 } from 'lucide-react';
 import clsx from 'clsx';
 import { useAuth } from '../../context/AuthContext';
@@ -34,6 +34,8 @@ import { IntegrationSettings } from '../../components/settings/IntegrationSettin
 import { NotificationSettings } from '../../components/settings/NotificationSettings';
 import { AdminControlPanel } from '../../components/settings/AdminControlPanel';
 import { AgentControlPanel } from '../../components/settings/AgentControlPanel';
+import { LoyaltySettingsSection } from '../../components/settings/LoyaltySettings';
+import { LensRangePricingSection } from '../../components/settings/LensRangePricing';
 
 // Sub-components
 import { ProfileSection, BusinessSection } from './SettingsProfile';
@@ -91,7 +93,9 @@ const SETTINGS_SECTIONS = [
   { id: 'categories' as SettingsTab, label: 'Category Master', icon: Tag, description: 'Product categories and attributes', role: ['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER'] },
   { id: 'brands' as SettingsTab, label: 'Brand Master', icon: Boxes, description: 'Brands and subbrands', role: ['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER'] },
   { id: 'lens-master' as SettingsTab, label: 'Lens Master', icon: CircleDot, description: 'Lens brands, indices, coatings', role: ['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER'] },
+  { id: 'lens-pricing' as SettingsTab, label: 'Lens Pricing', icon: Receipt, description: 'Range-based tier pricing brackets', role: ['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER'] },
   { id: 'discounts' as SettingsTab, label: 'Discount Rules', icon: Percent, description: 'Role-based discount limits', role: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER'] },
+  { id: 'loyalty' as SettingsTab, label: 'Loyalty Programme', icon: Award, description: 'Earn rate, tiers, expiry, redemption rules', role: ['SUPERADMIN', 'ADMIN'] },
   { id: 'tax-invoice' as SettingsTab, label: 'Tax & Invoice', icon: Receipt, description: 'GST, invoice numbering', role: ['SUPERADMIN', 'ADMIN', 'ACCOUNTANT'] },
   { id: 'notifications' as SettingsTab, label: 'Notifications', icon: Bell, description: 'SMS, WhatsApp templates', role: ['SUPERADMIN', 'ADMIN'] },
   { id: 'integrations' as SettingsTab, label: 'Integrations', icon: Link, description: 'Payment, Tally, Shopify', role: ['SUPERADMIN', 'ADMIN'] },
@@ -117,7 +121,7 @@ export function SettingsPage() {
   useEffect(() => {
     const tabParam = searchParams.get('tab');
     if (tabParam && tabParam !== activeTab) {
-      const validTabs: SettingsTab[] = ['profile', 'business', 'stores', 'users', 'categories', 'brands', 'lens-master', 'discounts', 'tax-invoice', 'notifications', 'integrations', 'printers', 'approvals', 'agents', 'feature-toggles', 'audit-logs', 'system'];
+      const validTabs: SettingsTab[] = ['profile', 'business', 'stores', 'users', 'categories', 'brands', 'lens-master', 'lens-pricing', 'discounts', 'loyalty', 'tax-invoice', 'notifications', 'integrations', 'printers', 'approvals', 'agents', 'feature-toggles', 'audit-logs', 'system'];
       if (validTabs.includes(tabParam as SettingsTab)) {
         setActiveTab(tabParam as SettingsTab);
       }
@@ -367,6 +371,8 @@ export function SettingsPage() {
           {activeTab === 'notifications' && <div><NotificationSettings /></div>}
           {activeTab === 'approvals' && <div><ApprovalWorkflows /></div>}
           {activeTab === 'agents' && <div><AgentControlPanel /></div>}
+          {activeTab === 'loyalty' && <div><LoyaltySettingsSection /></div>}
+          {activeTab === 'lens-pricing' && <div><LensRangePricingSection /></div>}
           {activeTab === 'feature-toggles' && <div><FeatureToggles storeId={user?.activeStoreId || ''} /></div>}
 
           {/* ---- Inline tabs ---- */}
