@@ -149,7 +149,7 @@
                     <div class="product-card__image">
                       {%- render 'badge-overlay', product: product -%}
                       {%- if product.featured_image -%}
-                        {{- product.featured_image | image_url: width: 600 | image_tag: alt: product.title | escape, loading: 'lazy', widths: '300,600,900' -}}
+                        {%- assign __bv_alt = product.title | escape -%}{{ product.featured_image | image_url: width: 600 | image_tag: alt: __bv_alt, loading: 'lazy', widths: '300,600,900' }}
                       {%- else -%}
                         {{- 'product-1' | placeholder_svg_tag: 'placeholder-svg' -}}
                       {%- endif -%}

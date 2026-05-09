@@ -42,7 +42,7 @@
           <div class="product__media-gallery">
             {%- for media in product.media -%}
               <div class="product__media-item" data-index="{{ forloop.index0 }}">
-                {{- media | image_url: width: 1200 | image_tag: alt: media.alt | escape, widths: '300,600,900,1200,1800', loading: 'lazy' -}}
+                {%- assign __bv_alt = media.alt | escape -%}{{ media | image_url: width: 1200 | image_tag: alt: __bv_alt, widths: '300,600,900,1200,1800', loading: 'lazy' }}
               </div>
             {%- endfor -%}
           </div>
