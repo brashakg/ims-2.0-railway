@@ -22,9 +22,9 @@ USER_SCHEMA = {
         "roles": {
             "bsonType": "array",
             "items": {
-                "enum": ["SALES_STAFF", "CASHIER", "OPTOMETRIST", "WORKSHOP_STAFF", 
-                        "STORE_MANAGER", "AREA_MANAGER", "CATALOG_MANAGER", 
-                        "ACCOUNTANT", "ADMIN", "SUPERADMIN"]
+                "enum": ["SALES_STAFF", "CASHIER", "OPTOMETRIST", "WORKSHOP_STAFF",
+                        "STORE_MANAGER", "AREA_MANAGER", "CATALOG_MANAGER",
+                        "ACCOUNTANT", "ADMIN", "SUPERADMIN", "INVESTOR"]
             }
         },
         "store_ids": {"bsonType": "array", "items": {"bsonType": "string"}},

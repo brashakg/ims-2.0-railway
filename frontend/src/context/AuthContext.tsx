@@ -28,6 +28,11 @@ interface AuthContextType extends AuthState {
   hasPermission: (permission: string) => boolean;
   hasRole: (role: UserRole | UserRole[]) => boolean;
   canAccessStore: (storeId: string) => boolean;
+  /** True iff the user holds INVESTOR and no other role with write
+   *  power. Mirrors the server-side _is_investor_only check in
+   *  backend/api/main.py — UI hides write actions when this is true.
+   */
+  isReadOnly: () => boolean;
 }
 
 // ============================================================================
@@ -277,6 +282,17 @@ export function AuthProvider({ children }: AuthProviderProps) {
       SALES_CASHIER: ['pos.*', 'till.*'],
       SALES_STAFF: ['pos.create', 'pos.discount'],
       WORKSHOP_STAFF: ['inventory.view', 'workshop.*'],
+      // INVESTOR is read-only — explicitly enumerate the .view permissions
+      // they should see. Backend middleware ALSO blocks any non-GET request
+      // so this list is defence-in-depth, not the only barrier.
+      INVESTOR: [
+        'reports.view',
+        'inventory.view',
+        'finance.view',
+        'pos.view',
+        'customers.view',
+        'orders.view',
+      ],
     };
 
     // Check permissions for ALL user roles, not just activeRole
@@ -327,6 +343,15 @@ export function AuthProvider({ children }: AuthProviderProps) {
     return (state.user.storeIds ?? []).includes(storeId);
   };
 
+  /** True iff the user is an INVESTOR-only seat (no other role on the
+   *  same account). Backend middleware enforces this server-side via
+   *  `_is_investor_only` in main.py — the frontend uses this helper to
+   *  hide write actions and show a top-of-app "read-only" banner. */
+  const isReadOnly = (): boolean => {
+    const userRoles = state.user?.roles || [];
+    return userRoles.length === 1 && userRoles[0] === 'INVESTOR';
+  };
+
   const value: AuthContextType = {
     ...state,
     login,
@@ -336,6 +361,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
     hasPermission,
     hasRole,
     canAccessStore,
+    isReadOnly,
   };
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

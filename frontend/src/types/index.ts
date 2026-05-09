@@ -17,7 +17,10 @@ export type UserRole =
   | 'CASHIER'
   | 'SALES_CASHIER'
   | 'SALES_STAFF'
-  | 'WORKSHOP_STAFF';
+  | 'WORKSHOP_STAFF'
+  | 'INVESTOR';  // 12th canonical role (May 2026): silent investor /
+                 // franchise partner accountant. Read-only across the
+                 // entire app; backend middleware blocks all writes.
 
 // Product Categories - complete list
 export type ProductCategory =
