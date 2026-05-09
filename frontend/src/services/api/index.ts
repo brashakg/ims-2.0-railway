@@ -68,3 +68,20 @@ export type {
   EligibleRecipient,
   DismissAction,
 } from './handoffs';
+
+// Customer Loyalty / Points engine
+export { loyaltyApi } from './loyalty';
+export type {
+  LoyaltyAccount,
+  LoyaltyTier,
+  LoyaltyTxnType,
+  LoyaltyTransaction,
+  LoyaltySettings,
+  LoyaltyAccountResponse,
+  LoyaltyLedgerResponse,
+  EarnRequest,
+  EarnResponse,
+  RedeemRequest,
+  RedeemResponse,
+  AdjustRequest,
+} from './loyalty';

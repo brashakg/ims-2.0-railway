@@ -417,3 +417,159 @@ async def print_prescription(
         }
 
     return {"html": "<html><body>Prescription not found</body></html>"}
+
+
+# ============================================================================
+# 4-VERSION PRESCRIPTION MODEL (May 2026)
+# ============================================================================
+# Per the YouTube competitor research (Optical CRM ships a 4-version Rx
+# model), each visit captures FOUR distinct Rx states: before_testing /
+# after_testing / manual / final. `final` is mirrored into top-level
+# right_eye/left_eye/pd on finalize so existing POS code keeps working.
+# Pure logic lives in `api/services/prescription_versions.py`.
+
+
+class VersionEyeData(BaseModel):
+    sphere: Optional[float] = None
+    cylinder: Optional[float] = None
+    axis: Optional[int] = None
+    addition: Optional[float] = None
+    va: Optional[str] = None
+
+
+class PrescriptionVersionPayload(BaseModel):
+    right_eye: Optional[VersionEyeData] = None
+    left_eye: Optional[VersionEyeData] = None
+    pd: Optional[float] = None
+    source: Optional[str] = Field(None, description="auto_ref | subjective_refraction | manual_override | optometrist_signoff | etc")
+    override_reason: Optional[str] = None
+    signed_off_by: Optional[str] = None  # Required for the `final` version
+
+
+@router.patch("/{prescription_id}/version/{version_name}")
+async def patch_prescription_version(
+    prescription_id: str,
+    version_name: str,
+    payload: PrescriptionVersionPayload,
+    current_user: dict = Depends(get_current_user),
+):
+    """Write or overwrite one of the 4 Rx versions. Only writable
+    while status='in_progress'. Use POST /finalize to lock the record."""
+    from ..services.prescription_versions import (
+        VALID_VERSION_NAMES, merge_version, backfill_versions_from_top_level,
+    )
+    if version_name not in VALID_VERSION_NAMES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"version_name must be one of {sorted(VALID_VERSION_NAMES)}",
+        )
+
+    repo = get_prescription_repository()
+    if repo is None:
+        raise HTTPException(status_code=503, detail="Database not available")
+    doc = repo.find_by_id(prescription_id)
+    if doc is None:
+        raise HTTPException(status_code=404, detail="Prescription not found")
+
+    # Backfill legacy single-Rx docs so they're patchable as if they
+    # had a versions block from the start.
+    doc = backfill_versions_from_top_level(doc)
+
+    body = payload.model_dump(exclude_unset=True)
+    try:
+        new_doc = merge_version(
+            doc, version_name, body, captured_by=current_user.get("user_id")
+        )
+    except ValueError as e:
+        if "finalized" in str(e):
+            raise HTTPException(status_code=409, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e))
+
+    repo.update(prescription_id, {
+        "versions": new_doc["versions"],
+        "status": new_doc["status"],
+    })
+    return {"prescription_id": prescription_id, "versions": new_doc["versions"]}
+
+
+@router.post("/{prescription_id}/finalize")
+async def finalize_prescription(
+    prescription_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """Lock the prescription. Mirrors versions.final into top-level
+    right_eye/left_eye/pd for backwards-compat. Only optometrist /
+    superadmin / admin can finalize."""
+    from ..services.prescription_versions import (
+        can_finalize, mirror_final_to_top_level,
+    )
+    roles = current_user.get("roles") or []
+    if not any(r in {"OPTOMETRIST", "SUPERADMIN", "ADMIN"} for r in roles):
+        raise HTTPException(
+            status_code=403,
+            detail="Only OPTOMETRIST / SUPERADMIN / ADMIN can finalize a prescription",
+        )
+
+    repo = get_prescription_repository()
+    if repo is None:
+        raise HTTPException(status_code=503, detail="Database not available")
+    doc = repo.find_by_id(prescription_id)
+    if doc is None:
+        raise HTTPException(status_code=404, detail="Prescription not found")
+    if doc.get("status") == "finalized":
+        raise HTTPException(status_code=409, detail="Already finalized")
+    if not can_finalize(doc):
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot finalize: `final` version is missing right_eye / left_eye",
+        )
+
+    new_doc = mirror_final_to_top_level(doc)
+    repo.update(prescription_id, {
+        "right_eye": new_doc.get("right_eye"),
+        "left_eye": new_doc.get("left_eye"),
+        "pd": new_doc.get("pd"),
+        "status": "finalized",
+        "finalized_at": new_doc.get("finalized_at"),
+    })
+    return {"prescription_id": prescription_id, "status": "finalized"}
+
+
+@router.get("/{prescription_id}/versions")
+async def get_prescription_versions(
+    prescription_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """Return all 4 versions for a prescription. Auto-backfills for
+    legacy single-Rx docs."""
+    from ..services.prescription_versions import backfill_versions_from_top_level
+    repo = get_prescription_repository()
+    if repo is None:
+        raise HTTPException(status_code=503, detail="Database not available")
+    doc = repo.find_by_id(prescription_id)
+    if doc is None:
+        raise HTTPException(status_code=404, detail="Prescription not found")
+    doc = backfill_versions_from_top_level(doc)
+    return {
+        "prescription_id": prescription_id,
+        "status": doc.get("status", "in_progress"),
+        "versions": doc.get("versions"),
+        "finalized_at": doc.get("finalized_at"),
+    }
+
+
+@router.get("/customer/{customer_id}/progression")
+async def get_prescription_progression(
+    customer_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """Adjacent-visit deltas for a customer's FINAL Rx history. Useful
+    for the clinical dashboard's progression chart ('is this myopia
+    accelerating?')."""
+    from ..services.prescription_versions import progression_diffs
+    repo = get_prescription_repository()
+    if repo is None:
+        return {"customer_id": customer_id, "deltas": []}
+    history = repo.find_many({"customer_id": customer_id}) or []
+    deltas = progression_diffs(history)
+    return {"customer_id": customer_id, "deltas": deltas, "visits": len(history)}

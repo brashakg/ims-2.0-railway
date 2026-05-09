@@ -6,8 +6,10 @@
 
 import { Outlet, useLocation } from 'react-router-dom';
 import { useMemo } from 'react';
+import { Eye } from 'lucide-react';
 import { Shell, type Crumb } from '../shell';
 import { useAppearance } from '../../context/AppearanceContext';
+import { useAuth } from '../../context/AuthContext';
 
 // Keep labels consistent with the Rail labels so the crumb matches the active item.
 const SEGMENT_LABELS: Record<string, string> = {
@@ -76,11 +78,39 @@ function pathToCrumbs(pathname: string): Crumb[] {
 export function AppLayout() {
   const location = useLocation();
   const { brand } = useAppearance();
+  const { isReadOnly } = useAuth();
 
   const crumbs = useMemo(() => pathToCrumbs(location.pathname), [location.pathname]);
 
   return (
     <Shell crumbs={crumbs} brand={brand}>
+      {/* INVESTOR read-only banner — sticky top-of-page strip when the
+          signed-in user is INVESTOR-only. Backend middleware also blocks
+          writes server-side; this is the user-facing acknowledgement so
+          the operator never wonders why nothing saves. */}
+      {isReadOnly() && (
+        <div
+          style={{
+            background: 'var(--warn-50, #fef3c7)',
+            borderBottom: '1px solid var(--warn-200, #fcd34d)',
+            padding: '8px 16px',
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8,
+            fontSize: 13,
+            color: 'var(--warn-800, #92400e)',
+            position: 'sticky',
+            top: 52,
+            zIndex: 50,
+          }}
+        >
+          <Eye style={{ width: 16, height: 16 }} />
+          <strong>Read-only mode</strong>
+          <span style={{ opacity: 0.85 }}>
+            · You're signed in with the INVESTOR role. Numbers and reports are visible; create / edit / delete actions are disabled.
+          </span>
+        </div>
+      )}
       <main style={{ padding: '0' }}>
         <Outlet />
       </main>

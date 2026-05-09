@@ -112,6 +112,49 @@ class SentinelAgent(JarvisAgent):
             message=f"System health: {self._health_score}/100",
         )
 
+    async def on_event(self, event: str, payload: Dict[str, Any]):
+        """SENTINEL listens for system + audit signals.
+
+        New (May 2026): `audit.alert` events — fired by `services/audit_alerts.py`
+        whenever a sensitive write hits an order / line item / P&L period.
+        SENTINEL turns CRITICAL/HIGH events into alert rows + (when configured)
+        Slack pings via the existing observability helper.
+        """
+        if event == "audit.alert":
+            severity = (payload.get("severity") or "LOW").upper()
+            action = payload.get("action") or "audit.unknown"
+            entity_id = payload.get("entity_id") or "?"
+            user_id = payload.get("user_id") or "system"
+
+            # Always file the alert in our in-memory tail (surfaced via /run query)
+            await self._create_alert(
+                severity=severity,
+                domain="audit",
+                message=f"{action} on {entity_id} by {user_id}",
+                details=payload,
+            )
+
+            # Mid+ severities also dispatch a Slack ping via the existing
+            # observability hook, which is fail-soft on missing webhook URL
+            if severity in {"HIGH", "CRITICAL"}:
+                try:
+                    from observability import notify_slack_anomaly
+                    notify_slack_anomaly(
+                        severity=severity,
+                        title=f"[AUDIT] {action}",
+                        body=(
+                            f"User: {user_id}\n"
+                            f"Entity: {payload.get('entity_type')} {entity_id}\n"
+                            f"Diff: {payload.get('diff') or {}}\n"
+                            f"Context: {payload.get('context') or {}}"
+                        ),
+                    )
+                except Exception as e:
+                    logger.debug(f"[SENTINEL] Slack notify on audit failed (soft): {e}")
+            return
+
+        # Existing handlers stay default-passthrough (base no-op).
+
     async def health_check(self) -> Dict[str, Any]:
         """Self-diagnostic — returns SENTINEL's own health plus system score."""
         base = await super().health_check()
