@@ -11,6 +11,7 @@ import {
   CheckCircle,
   EyeOff,
   Star,
+  CloudDownload,
 } from "lucide-react";
 
 interface MenuRow {
@@ -37,6 +38,11 @@ export default function MenusListPage() {
   const [newTitle, setNewTitle] = useState("");
   const [newHandle, setNewHandle] = useState("");
   const [createError, setCreateError] = useState<string | null>(null);
+  // Bootstrap sync state — pulls every live Shopify menu into the
+  // local DB in one click. Required for first use because the page
+  // only reads local Menu rows.
+  const [bulkSyncing, setBulkSyncing] = useState(false);
+  const [bulkSyncMessage, setBulkSyncMessage] = useState<string | null>(null);
 
   const fetchMenus = async () => {
     setLoading(true);
@@ -63,6 +69,30 @@ export default function MenusListPage() {
     fetchMenus();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [includeInactive]);
+
+  const handleBulkSync = async () => {
+    setBulkSyncing(true);
+    setBulkSyncMessage(null);
+    try {
+      const res = await fetch("/api/menus/bulk-sync", { method: "POST" });
+      const json = await res.json();
+      if (!json.success) {
+        setBulkSyncMessage(`Sync failed: ${json.error || "Unknown error"}`);
+        return;
+      }
+      setBulkSyncMessage(
+        `Synced ${json.total} menu${json.total === 1 ? "" : "s"} from Shopify ` +
+          `(${json.created} created, ${json.updated} updated, ${json.skipped} skipped).`
+      );
+      await fetchMenus();
+    } catch (err) {
+      setBulkSyncMessage(
+        `Sync error: ${err instanceof Error ? err.message : "Unknown"}`
+      );
+    } finally {
+      setBulkSyncing(false);
+    }
+  };
 
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -141,6 +171,20 @@ export default function MenusListPage() {
             >
               <RefreshCw className="w-3.5 h-3.5" />
               Refresh
+            </button>
+            <button
+              type="button"
+              onClick={handleBulkSync}
+              disabled={bulkSyncing}
+              className="inline-flex items-center gap-1 px-3 py-1.5 bg-emerald-600 text-white rounded-md text-sm hover:bg-emerald-700 disabled:opacity-50"
+              title="Pull every live menu (and its items) from Shopify into the local DB. Use this once on first visit."
+            >
+              {bulkSyncing ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              ) : (
+                <CloudDownload className="w-3.5 h-3.5" />
+              )}
+              Sync from Shopify
             </button>
             <button
               type="button"
@@ -226,6 +270,13 @@ export default function MenusListPage() {
           </div>
         )}
 
+        {bulkSyncMessage && (
+          <div className="bg-emerald-50 border border-emerald-200 rounded-md p-3 mb-4 text-sm text-emerald-800 flex items-center gap-2">
+            <CheckCircle className="w-4 h-4" />
+            {bulkSyncMessage}
+          </div>
+        )}
+
         <div className="bg-white rounded-lg border border-slate-200 shadow-sm overflow-hidden">
           {loading ? (
             <div className="p-8 text-center text-slate-500">
@@ -233,8 +284,26 @@ export default function MenusListPage() {
               Loading menus...
             </div>
           ) : menus.length === 0 ? (
-            <div className="p-8 text-center text-slate-500">
-              No menus found. Create one above or run a Shopify sync.
+            <div className="p-8 text-center">
+              <p className="text-slate-700 mb-2">No menus found locally.</p>
+              <p className="text-sm text-slate-500 mb-4">
+                Click <strong>Sync from Shopify</strong> above to pull every
+                live menu (and its items) into this app, or create a new menu
+                from scratch.
+              </p>
+              <button
+                type="button"
+                onClick={handleBulkSync}
+                disabled={bulkSyncing}
+                className="inline-flex items-center gap-2 px-4 py-2 bg-emerald-600 text-white rounded-md text-sm hover:bg-emerald-700 disabled:opacity-50"
+              >
+                {bulkSyncing ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <CloudDownload className="w-4 h-4" />
+                )}
+                Sync from Shopify now
+              </button>
             </div>
           ) : (
             <ul className="divide-y divide-slate-200">
