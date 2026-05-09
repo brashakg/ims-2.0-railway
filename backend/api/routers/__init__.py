@@ -42,6 +42,7 @@ from .points import router as points_router
 from .payout import router as payout_router
 from .webhooks import router as webhooks_router
 from .loyalty import router as loyalty_router
+from .vendor_portal import router as vendor_portal_router
 
 __all__ = [
     "auth_router",
@@ -83,4 +84,5 @@ __all__ = [
     "payout_router",
     "webhooks_router",
     "loyalty_router",
+    "vendor_portal_router",
 ]

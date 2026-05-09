@@ -53,6 +53,9 @@ try:
         LoyaltySettingsRepository,
         LoyaltyTransactionRepository,
     )
+    from database.repositories.vendor_portal_token_repository import (
+        VendorPortalTokenRepository,
+    )
 
     DATABASE_AVAILABLE = True
 except ImportError as e:
@@ -333,4 +336,16 @@ def get_loyalty_settings_repository():
             return LoyaltySettingsRepository(db.get_collection("loyalty_settings"))
         except Exception:
             return LoyaltySettingsRepository(db.loyalty_settings)
+    return None
+
+
+def get_vendor_portal_token_repository():
+    """Get VendorPortalTokenRepository instance (vendor portal token-auth)."""
+    db = get_db()
+    if db is not None and db.is_connected:
+        try:
+            return VendorPortalTokenRepository(db.get_collection("vendor_portal_tokens"))
+        except Exception:
+            return VendorPortalTokenRepository(db.vendor_portal_tokens)
+    return None
     return None

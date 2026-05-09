@@ -110,6 +110,7 @@ from .routers import (
     payout_router,
     webhooks_router,
     loyalty_router,
+    vendor_portal_router,
 )
 
 
@@ -721,6 +722,12 @@ app.include_router(points_router, prefix="/api/v1/incentive/points", tags=["Dail
 app.include_router(payout_router, prefix="/api/v1/payout", tags=["Payout"])
 app.include_router(webhooks_router, prefix="/api/v1/webhooks", tags=["Webhooks"])
 app.include_router(loyalty_router, prefix="/api/v1/loyalty", tags=["Loyalty"])
+# Vendor portal — PUBLIC, token-auth via path param. Mounted OUTSIDE the
+# JWT-protected family of routers because external lens labs hit this
+# without an IMS user account.
+app.include_router(
+    vendor_portal_router, prefix="/api/v1/vendor-portal", tags=["Vendor Portal"]
+)
 
 
 if __name__ == "__main__":
