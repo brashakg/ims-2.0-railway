@@ -27,7 +27,10 @@ export async function POST(request: NextRequest) {
       commit?: boolean;
       dryRun?: boolean;
     };
-    const commit = body.commit === true;
+    // Hotfix H1 (security audit) — when dryRun is explicitly true, force
+    // dry-run regardless of the commit flag. Previously "{ commit: true,
+    // dryRun: true }" silently committed.
+    const commit = body.commit === true && body.dryRun !== true;
 
     const plan = await buildMigrationPlan();
 

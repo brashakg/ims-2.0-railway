@@ -65,6 +65,10 @@ export interface CleanupResult {
  * ------------------------------------------------------------------ */
 export async function executeCleanup(opts: {
   dryRun: boolean;
+  /** Override the cleanup spec — used by the menu-cleanup route to pass
+   *  in resolved (or unresolved, on dry-run) collection GIDs.
+   *  Defaults to MENU_CLEANUP_TASKS unmodified. */
+  tasks?: MenuCleanupTask[];
 }): Promise<CleanupResult> {
   const fetched = await fetchAllMenus();
   if (!fetched.success || !fetched.menus) {
@@ -73,6 +77,7 @@ export async function executeCleanup(opts: {
     );
   }
   const snapshot: ShopifyMenu[] = fetched.menus;
+  const taskSpec = opts.tasks ?? MENU_CLEANUP_TASKS;
 
   // Build a working copy of the menus, keyed by handle, that ops will
   // mutate. Deep-clone via JSON to keep the snapshot pristine for the
@@ -86,7 +91,7 @@ export async function executeCleanup(opts: {
   const dirtyHandles = new Set<string>();
   const handlesToDelete = new Set<string>();
 
-  for (const task of MENU_CLEANUP_TASKS) {
+  for (const task of taskSpec) {
     const taskResult: TaskResult = {
       taskId: task.id,
       taskTitle: task.title,
@@ -240,18 +245,42 @@ function applyMove(
 ): OpResult {
   const menu = working[op.menuHandle];
   if (!menu) return { op, status: "skipped", detail: `Menu ${op.menuHandle} not found` };
-  const removed = removeItemByPath(menu.items, op.fromPath);
-  if (!removed) return { op, status: "skipped", detail: `Source not found at ${op.fromPath.join(" → ")}` };
+  // Hotfix TS#2 — pre-locate the target BEFORE removing the source so a
+  // missing target doesn't leave the source orphaned. Previous version
+  // removed first and only checked the target after, causing data loss
+  // in the working tree if the path was wrong.
   const target = findItemByPath(menu.items, op.toParentPath, /*looseWhitespace*/ true);
   if (!target) {
-    // Restore — put it back at original path's parent end. Best effort.
     return { op, status: "failed", detail: `Target parent not found at ${op.toParentPath.join(" → ")}` };
   }
-  // Insert at given position.
+  const removed = removeItemByPath(menu.items, op.fromPath);
+  if (!removed) return { op, status: "skipped", detail: `Source not found at ${op.fromPath.join(" → ")}` };
+  // Cycle guard — refuse to insert a node into itself or its descendants.
+  if (containsItemRef(removed, target)) {
+    // Re-insert at original parent's end (best effort) since we've
+    // already removed it. The source path still resolves the parent.
+    const parent = op.fromPath.length > 1
+      ? findItemByPath(menu.items, op.fromPath.slice(0, -1), true)
+      : null;
+    const restoreList = parent ? (parent.items ||= []) : menu.items;
+    restoreList.push(removed);
+    return { op, status: "failed", detail: `Cycle: target is a descendant of the moved item` };
+  }
   if (!Array.isArray(target.items)) target.items = [];
   const pos = Math.max(0, Math.min(op.position, target.items.length));
   target.items.splice(pos, 0, removed);
   return { op, status: "applied", detail: `Moved ${op.fromPath.join(" → ")} → ${op.toParentPath.join(" → ")}` };
+}
+
+/** Returns true when `node` is `target` or any descendant of `node`
+ *  contains a reference equal to `target`. Used to refuse cyclic moves. */
+function containsItemRef(node: ShopifyMenuItem, target: ShopifyMenuItem): boolean {
+  if (node === target) return true;
+  if (!Array.isArray(node.items)) return false;
+  for (const child of node.items) {
+    if (containsItemRef(child, target)) return true;
+  }
+  return false;
 }
 
 function applyReplace(

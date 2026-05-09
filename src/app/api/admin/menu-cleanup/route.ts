@@ -26,13 +26,22 @@ export async function POST(request: NextRequest) {
 
     const body = (await request.json().catch(() => ({}))) as {
       commit?: boolean;
+      dryRun?: boolean;
     };
-    const dryRun = body.commit !== true;
+    // Hotfix H1/H2 (security audit) — explicit dryRun:true wins over commit.
+    const dryRun = body.dryRun === true || body.commit !== true;
 
-    // Resolve CL3 + CL5 collection GIDs (creates 'cases-bags' if missing).
-    const tasks = await resolveCollectionRefs(MENU_CLEANUP_TASKS);
+    // Hotfix H2 — resolveCollectionRefs has a side-effect (creates the
+    // 'cases-bags' collection on Shopify when missing). That MUST NOT
+    // run during a dry-run. Skip the resolution pass when dryRun is on
+    // so the response carries unresolved (null) resourceIds; the UI
+    // shows them as such and the user explicitly commits to actually
+    // create the collection + apply the cleanup.
+    const tasks = dryRun
+      ? MENU_CLEANUP_TASKS
+      : await resolveCollectionRefs(MENU_CLEANUP_TASKS);
 
-    const result = await executeCleanup({ dryRun });
+    const result = await executeCleanup({ dryRun, tasks });
 
     if (!dryRun) {
       const opsApplied = result.tasks.flatMap((t) => t.ops).filter((o) => o.status === "applied").length;

@@ -144,9 +144,13 @@ const EMPTY_FORM: FormData = {
 
 // Theme template suffixes per round 2 U6. Empty string = default theme
 // template; the others map to Shopify ProductInput.templateSuffix.
+//
+// Hotfix UI#3 — `preorder-bv` (not `preorder`) because Shopify already had
+// a `templates/product.preorder.json` we couldn't replace via the connector
+// (themeFilesDelete is blocked). The renamed file is the deployed one.
 const THEME_TEMPLATES: Array<{ value: string; label: string; description: string }> = [
   { value: "", label: "Default", description: "Standard product page" },
-  { value: "preorder", label: "Pre-order", description: "Customer can place an order before stock arrives" },
+  { value: "preorder-bv", label: "Pre-order", description: "Customer can place an order before stock arrives" },
   { value: "appointment", label: "Price on Appointment", description: "Hide price; customer requests a quote" },
   { value: "rx-required", label: "RX Required", description: "Prescription glasses — show prescription module on frontend" },
 ];
@@ -235,7 +239,30 @@ export default function EditProductV2({ productId }: { productId: string }) {
         const aJson = await aRes.json();
         const lJson = await lRes.json();
 
-        const p = pJson.data || pJson;
+        // Hotfix UI#5 — only fall back to pJson when it's clearly a
+        // direct product object, not a wrapped error envelope. Previous
+        // `pJson.data || pJson` accepted `{ success: false, error: ... }`
+        // as a "product", populating EMPTY_FORM and silently overwriting
+        // the real record on the next auto-save.
+        const looksLikeProduct = (o: unknown): o is { id?: string; category?: string } =>
+          !!o && typeof o === "object" && ("id" in (o as object) || "brand" in (o as object) || "modelNo" in (o as object));
+        // Cast to `any` after the typed gate above — every field access
+        // below uses `?:` fallbacks anyway, so loose typing here matches
+        // the rest of the loader (kept consistent with the V1 page).
+        const p: any =
+          pJson && typeof pJson === "object" && "data" in pJson && looksLikeProduct((pJson as { data?: unknown }).data)
+            ? (pJson as { data: any }).data
+            : looksLikeProduct(pJson)
+              ? (pJson as any)
+              : null;
+        if (!pRes.ok || !p) {
+          console.error("Failed to load product", pJson);
+          // Don't overwrite formData — keep EMPTY_FORM and fall through
+          // so the page renders an empty form rather than auto-saving
+          // bad data over the real record.
+          setFetching(false);
+          return;
+        }
         if (p) {
           setProductStatus((p.status as string) || "DRAFT");
           setShopifyProductId((p.shopifyProductId as string) || null);
@@ -296,8 +323,16 @@ export default function EditProductV2({ productId }: { productId: string }) {
   }, [productId]);
 
   // ---------- Auto-save (debounced 1.2s on dirty) ----------
+  // Hotfix UI#11 — concurrent-save lock. Without this, a manual ⌘S
+  // racing with the debounced auto-save fires two PUTs against
+  // /api/products/[id]; the second one's response can lose if the
+  // first finished first, and shopifyError state flickers. The ref
+  // is checked-then-set synchronously so two callers can't both pass.
+  const saveInFlight = useRef(false);
   const saveDraft = useCallback(
     async (status?: "DRAFT" | "PUBLISHED") => {
+      if (saveInFlight.current) return; // already saving — let it finish
+      saveInFlight.current = true;
       setSaveState("saving");
       setSaveError(undefined);
       try {
@@ -364,6 +399,8 @@ export default function EditProductV2({ productId }: { productId: string }) {
       } catch (e) {
         setSaveState("error");
         setSaveError(e instanceof Error ? e.message : "Save failed");
+      } finally {
+        saveInFlight.current = false;
       }
     },
     [formData, extraAttrs, productId, productStatus]

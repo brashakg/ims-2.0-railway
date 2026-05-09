@@ -97,7 +97,12 @@ export function migrateCondition(rule: RuleEntry): string {
   const newPrefix = slugifyForRule(prefix);
   const newValue = slugifyForRule(value);
   if (!newPrefix) return trimmed; // pathological — leave alone
-  if (!newValue) return newPrefix; // value reduced to empty — keep prefix
+  // Hotfix TS#6 — when the value slugifies to empty (input ended with
+  // "_" or was all-non-alphanumeric after the underscore), preserve the
+  // original condition unchanged. Returning just `newPrefix` silently
+  // changed the rule semantics — a tag rule for "casecolor_" would
+  // become "casecolor" and match nothing.
+  if (!newValue) return trimmed;
   return `${newPrefix}_${newValue}`;
 }
 

@@ -49,6 +49,26 @@ interface MenuItemTreeProps {
   level?: number;
 }
 
+// Item types that are valid PARENTS in the tree. Leaf types (PRODUCT,
+// HTTP, ARTICLE, SHOP_POLICY, SEARCH) cannot have children — Shopify's
+// storefront menu schema rejects them too. Hotfix UI#2.
+const CONTAINER_TYPES = new Set([
+  "COLLECTION", "COLLECTIONS", "CATALOG", "PAGE", "BLOG", "FRONTPAGE",
+]);
+function isContainerType(type: string): boolean {
+  return CONTAINER_TYPES.has(type);
+}
+
+/** True if `id` matches the node itself or any descendant — used by
+ *  the drop-cycle guard (Hotfix UI#1). */
+function containsDescendant(node: MenuTreeNode, id: string): boolean {
+  if (node.id === id) return true;
+  for (const child of node.children) {
+    if (containsDescendant(child, id)) return true;
+  }
+  return false;
+}
+
 // Pick an icon based on the Shopify item type. Lucide picks were
 // chosen to match the existing collection / product / page UI on the
 // rest of the dashboard.
@@ -166,6 +186,12 @@ function TreeRow({
     const pos = dragOver || "after";
     setDragOver(null);
     if (!dragId || dragId === node.id) return;
+    // Hotfix UI#1 — refuse drops that would create a cycle (dropping a
+    // node onto its own descendant). Walk node.children for dragId.
+    if (containsDescendant(node, dragId)) return;
+    // Hotfix UI#2 — refuse "inside" drops on leaf types. PRODUCT, HTTP,
+    // ARTICLE, SHOP_POLICY and SEARCH cannot have children.
+    if (pos === "inside" && !isContainerType(node.itemType)) return;
     onMove(dragId, node.id, pos);
   };
 
