@@ -58,8 +58,14 @@ export default function CollectionsPage() {
   const [typeFilter, setTypeFilter] = useState<string>('');
   const [segment, setSegment] = useState<Segment>('all');
 
-  // Filter locally since API doesn't have a "published" filter yet — cheap
-  // since the page loads at most 100 collections.
+  // Total in DB (across all pages of the API). Set from response
+  // pagination metadata so the segment badges + "Showing X of Y" line
+  // reflect the real count, not what's currently rendered.
+  const [totalInDb, setTotalInDb] = useState(0);
+
+  // Filter locally since API doesn't have a "published" filter yet —
+  // cheap because we now load up to LOAD_LIMIT collections at a time
+  // (catalog is ~1,200 today; well within memory).
   const visibleCollections = collections.filter((c) => {
     if (segment === 'active') return c.published;
     if (segment === 'hidden') return !c.published;
@@ -71,18 +77,25 @@ export default function CollectionsPage() {
     hidden: collections.filter((c) => !c.published).length,
   };
 
+  // Load up to 2,500 collections in one fetch — covers catalogs of any
+  // realistic Indian optical chain. Shopify itself caps stores at
+  // around the same number. If you ever exceed this, switch to true
+  // server-side pagination + virtualised list.
+  const LOAD_LIMIT = 2500;
+
   const fetchCollections = async () => {
     setLoading(true);
     try {
       const params = new URLSearchParams();
       if (search) params.set('search', search);
       if (typeFilter) params.set('type', typeFilter);
-      params.set('limit', '100');
+      params.set('limit', String(LOAD_LIMIT));
 
       const res = await fetch(`/api/collections?${params.toString()}`);
       const json = await res.json();
       if (json.success) {
         setCollections(json.data);
+        setTotalInDb(json.pagination?.total ?? json.data.length);
       }
     } catch (error) {
       console.error('Error fetching collections:', error);
@@ -365,7 +378,8 @@ export default function CollectionsPage() {
         {/* Summary */}
         {!loading && visibleCollections.length > 0 && (
           <div className="mt-4 text-sm text-gray-500 text-center">
-            Showing {visibleCollections.length} of {collections.length} collection{collections.length !== 1 ? 's' : ''}
+            Showing {visibleCollections.length} of {collections.length} loaded
+            {totalInDb > collections.length && ` (${totalInDb} total in DB — increase LOAD_LIMIT to load more)`}
             {typeFilter && ` · type ${typeFilter.toLowerCase()}`}
             {segment !== 'all' && ` · ${segment}`}
           </div>
