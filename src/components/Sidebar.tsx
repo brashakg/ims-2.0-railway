@@ -36,6 +36,9 @@ import {
   ChevronDown,
   Search,
   Grid3x3,
+  ListTree,
+  Sparkles,
+  Languages,
 } from "lucide-react";
 
 interface NavItem {
@@ -157,6 +160,10 @@ export default function Sidebar() {
         { href: "/dashboard/images", label: "Images", icon: ImageIcon, feature: "images" },
         { href: "/dashboard/activity-logs", label: "Activity Logs", icon: ScrollText, feature: "activity_logs" },
         { href: "/dashboard/admin/orphans", label: "Orphan Audit", icon: AlertTriangle, badgeTone: "critical", feature: "orphan_audit" },
+        // Round 2 mapping rollout (2026-05-09).
+        { href: "/dashboard/admin/menus", label: "Storefront Menus", icon: ListTree, feature: "storefront_menus" },
+        { href: "/dashboard/admin/tag-casing-migration", label: "Tag Casing Migration", icon: Languages, feature: "tag_casing_migration" },
+        { href: "/dashboard/admin/auto-collections", label: "Auto Collections", icon: Sparkles, feature: "auto_collections" },
       ],
     },
   ];

@@ -1,0 +1,177 @@
+{%- comment -%}
+  collection.gender.liquid
+  ------------------------
+  Collection page customised for gender-based collections — Men, Women,
+  Unisex, Kids.
+
+  Editorial header:
+    - Lifestyle hero image from `collection.metafields.bv.editorial_image`
+    - Tagline overlay from `collection.metafields.bv.editorial_tagline`
+    - Two-column intro: title + descriptive paragraph
+
+  Per-handle defaults so the page is never bare when the metafields
+  aren't set.
+
+  Usage:
+    Shopify admin -> collection -> Theme template -> `collection.gender`.
+{%- endcomment -%}
+
+{%- liquid
+  assign gender_handle = collection.handle | downcase
+  assign hero    = collection.metafields.bv.editorial_image
+  assign tagline = collection.metafields.bv.editorial_tagline | strip
+
+  case gender_handle
+    when 'men', 'mens', 'mens-eyewear'
+      assign default_tagline = 'Built for the daily haul — frames that hold up.'
+      assign intro = 'Sharp silhouettes, durable materials, and the brands men keep coming back to. Find your fit, from boardroom polish to weekend casual.'
+    when 'women', 'womens', 'womens-eyewear'
+      assign default_tagline = 'Everyday wear that earns the second look.'
+      assign intro = 'Refined cat-eye, oversized squares, easy aviators. Curated frames in proportions and finishes designed for women — from understated to statement.'
+    when 'unisex'
+      assign default_tagline = 'Frames that read on anyone.'
+      assign intro = 'Wayfarers, rounds, and modern classics — proportioned to flatter every face. The styles that move easily between wardrobes.'
+    when 'kids', 'children', 'kids-eyewear'
+      assign default_tagline = 'Tough enough for school. Cool enough for them to wear it.'
+      assign intro = 'Lightweight TR90 frames, flexible hinges, and shock-rated lenses — eyewear that survives the playground and still looks great in the school photo.'
+    else
+      assign default_tagline = 'Curated for ' | append: collection.title | append: '.'
+      assign intro = 'Hand-picked frames in the proportions and finishes that work best for ' | append: collection.title | append: '. Authentic, warrantied, and shipped pan-India.'
+  endcase
+
+  if tagline == blank
+    assign tagline = default_tagline
+  endif
+-%}
+
+<section class="section section-collection section--gender" data-collection-template="gender">
+
+  {%- if hero -%}
+    <div class="bv-collection-hero" style="background-image: url('{{ hero | image_url: width: 1800 }}');">
+      <div class="bv-collection-hero__overlay"></div>
+      <div class="bv-collection-hero__inner">
+        <h1 class="bv-collection-hero__title">{{ collection.title }}</h1>
+        <p class="bv-collection-hero__lead">{{ tagline | escape }}</p>
+      </div>
+    </div>
+  {%- else -%}
+    <div class="page-width">
+      <h1 class="collection__title">{{ collection.title }}</h1>
+      <p class="collection__tagline">{{ tagline | escape }}</p>
+    </div>
+  {%- endif -%}
+
+  <div class="page-width">
+    <div class="collection__intro-row">
+      <div class="collection__intro-row-half">
+        <h4>{{ collection.title }} eyewear</h4>
+        <p>{{ intro }}</p>
+      </div>
+      <div class="collection__intro-row-half">
+        <ul class="collection__intro-points">
+          <li>Authentic, manufacturer-warrantied</li>
+          <li>Free pan-India shipping, COD available</li>
+          <li>30-day exchange &amp; fit guarantee</li>
+          <li>Optical team reviews every prescription order</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="collection__layout">
+
+      <aside class="collection__filters" aria-label="Gender collection filters">
+        {%- if collection.filters.size > 0 -%}
+          {%- for filter in collection.filters -%}
+            {%- assign label = filter.label | downcase -%}
+            {%- if label contains 'shape' or label contains 'brand' or label contains 'material' or label contains 'price' or label contains 'polariz' -%}
+              <details class="collection-filter" open>
+                <summary>{{ filter.label }}</summary>
+                {%- case filter.type -%}
+                  {%- when 'list' -%}
+                    <ul class="collection-filter__values">
+                      {%- for value in filter.values -%}
+                        <li>
+                          <label>
+                            <input type="checkbox"
+                                   name="{{ value.param_name }}"
+                                   value="{{ value.value }}"
+                                   {%- if value.active -%} checked {%- endif -%} />
+                            {{ value.label }} <span class="collection-filter__count">({{ value.count }})</span>
+                          </label>
+                        </li>
+                      {%- endfor -%}
+                    </ul>
+                  {%- when 'price_range' -%}
+                    <div class="collection-filter__price">
+                      <label>
+                        Min
+                        <input type="number" name="{{ filter.min_value.param_name }}"
+                               value="{{ filter.min_value.value }}" min="0" step="100" />
+                      </label>
+                      <label>
+                        Max
+                        <input type="number" name="{{ filter.max_value.param_name }}"
+                               value="{{ filter.max_value.value }}" min="0" step="100" />
+                      </label>
+                    </div>
+                {%- endcase -%}
+              </details>
+            {%- endif -%}
+          {%- endfor -%}
+        {%- endif -%}
+      </aside>
+
+      <div class="collection__grid">
+        {%- paginate collection.products by 24 -%}
+          {%- if collection.products.size == 0 -%}
+            <p class="collection__empty">
+              Nothing matches these filters. Try clearing them, or browse
+              the full {{ collection.title | downcase }} edit below.
+            </p>
+          {%- else -%}
+            <ul class="product-grid product-grid--gender">
+              {%- for product in collection.products -%}
+                <li class="product-grid__item">
+                  <a href="{{ product.url | within: collection }}" class="product-card">
+                    <div class="product-card__image">
+                      {%- render 'badge-overlay', product: product -%}
+                      {%- if product.featured_image -%}
+                        {{- product.featured_image | image_url: width: 600 | image_tag: alt: product.title | escape, loading: 'lazy', widths: '300,600,900' -}}
+                      {%- else -%}
+                        {{- 'product-1' | placeholder_svg_tag: 'placeholder-svg' -}}
+                      {%- endif -%}
+                    </div>
+                    <h3 class="product-card__title">{{ product.title }}</h3>
+                    {%- if product.vendor -%}
+                      <p class="product-card__vendor">{{ product.vendor }}</p>
+                    {%- endif -%}
+                    <div class="product-card__price">
+                      {%- if product.compare_at_price > product.price -%}
+                        <s>{{ product.compare_at_price | money }}</s>
+                      {%- endif -%}
+                      <span>{{ product.price | money }}</span>
+                    </div>
+                  </a>
+                </li>
+              {%- endfor -%}
+            </ul>
+            {%- if paginate.pages > 1 -%}
+              <nav class="pagination" aria-label="Pagination">
+                {{- paginate | default_pagination -}}
+              </nav>
+            {%- endif -%}
+          {%- endif -%}
+        {%- endpaginate -%}
+      </div>
+
+    </div>
+  </div>
+</section>
+
+{% schema %}
+{
+  "name": "Gender collection",
+  "settings": [],
+  "presets": []
+}
+{% endschema %}

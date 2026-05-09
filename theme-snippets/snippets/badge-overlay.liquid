@@ -1,0 +1,40 @@
+{%- comment -%}
+  badge-overlay.liquid
+  --------------------
+  Renders a small badge overlay on a product card image.
+
+  Reads:
+    product.metafields.bv.label        -> Badge text (required)
+    product.metafields.bv.label_color  -> Optional hex color (e.g. #0a8754)
+
+  If the label metafield is empty the snippet renders nothing — safe to
+  include unconditionally inside the product card image wrapper.
+
+  Per round 1 mapping 10.2: the product label is a *badge*, not a Shopify
+  tag. The bv-app stores it as a single-line text metafield in the `bv`
+  namespace and the storefront surfaces it here.
+
+  Position: top-left of the image, ~28px high, padded, subtle shadow.
+  All visual styling lives in `assets/theme.css` under `.bv-badge-overlay`
+  (see README) — no inline <style>.
+
+  Usage:
+    {%- render 'badge-overlay', product: product -%}
+{%- endcomment -%}
+
+{%- liquid
+  assign bv_label = product.metafields.bv.label | default: '' | strip
+  assign bv_color = product.metafields.bv.label_color | default: '' | strip
+-%}
+
+{%- if bv_label != blank -%}
+  {%- if bv_color != blank -%}
+    <span class="bv-badge-overlay" style="--bv-badge-color: {{ bv_color | escape }}" aria-label="{{ bv_label | escape }}">
+      {{- bv_label | escape -}}
+    </span>
+  {%- else -%}
+    <span class="bv-badge-overlay" aria-label="{{ bv_label | escape }}">
+      {{- bv_label | escape -}}
+    </span>
+  {%- endif -%}
+{%- endif -%}

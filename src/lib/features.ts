@@ -35,7 +35,11 @@ export type FeatureKey =
   | "users"
   | "images"
   | "activity_logs"
-  | "orphan_audit";
+  | "orphan_audit"
+  // Round 2 collections + menu rollout (2026-05-09)
+  | "storefront_menus"
+  | "tag_casing_migration"
+  | "auto_collections";
 
 export interface FeatureDef {
   key: FeatureKey;
@@ -185,6 +189,27 @@ export const FEATURES: FeatureDef[] = [
     key: "orphan_audit",
     label: "Orphan audit",
     description: "Manage products that never reached Shopify.",
+    group: "admin",
+    defaultsFor: [],
+  },
+  {
+    key: "storefront_menus",
+    label: "Storefront menus",
+    description: "Edit BetterVision Shopify storefront navigation menus (round 2 mapping M1).",
+    group: "admin",
+    defaultsFor: [],
+  },
+  {
+    key: "tag_casing_migration",
+    label: "Tag casing migration",
+    description: "One-shot migration to lowercase Shopify smart-collection rule conditions (round 2 C6).",
+    group: "admin",
+    defaultsFor: [],
+  },
+  {
+    key: "auto_collections",
+    label: "Auto collections",
+    description: "Auto-generate brand × category × shape × gender smart collections (round 2 C2/C3/C4).",
     group: "admin",
     defaultsFor: [],
   },
