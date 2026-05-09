@@ -105,6 +105,7 @@ export function AddCustomerModal({ isOpen, onClose, onSave, initialName }: AddCu
 
   const [gstVerified, setGstVerified] = useState<boolean | null>(null);
   const [gstError, setGstError] = useState<string | null>(null);
+  const [mobileError, setMobileError] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const debouncedSearchQuery = useDebounce(searchQuery, 400);
@@ -159,6 +160,7 @@ export function AddCustomerModal({ isOpen, onClose, onSave, initialName }: AddCu
       });
       setGstVerified(null);
       setGstError(null);
+      setMobileError(null);
       setIsSaving(false);
       setShowAddPatient(false);
       setNewPatient({
@@ -306,6 +308,25 @@ export function AddCustomerModal({ isOpen, onClose, onSave, initialName }: AddCu
       return;
     }
 
+    // Backend mobile field requires exactly 10 digits. Strip any pasted
+    // country code, spaces, dashes, brackets etc. before sending; if the
+    // user landed on a longer number ("+919876543210") keep the last 10.
+    const digits = formData.mobileNumber.replace(/\D/g, '');
+    const tenDigit = digits.slice(-10);
+    if (tenDigit.length !== 10) {
+      setMobileError('Mobile number must contain 10 digits');
+      return;
+    }
+    setMobileError(null);
+    const sanitizedFormData: CustomerFormData = {
+      ...formData,
+      mobileNumber: tenDigit,
+      patients: formData.patients.map(p => ({
+        ...p,
+        mobile: p.mobile ? (p.mobile.replace(/\D/g, '').slice(-10) || p.mobile) : p.mobile,
+      })),
+    };
+
     if (formData.customerType === 'B2B' && !gstVerified) {
       setGstError('Please verify GST number first');
       return;
@@ -313,7 +334,7 @@ export function AddCustomerModal({ isOpen, onClose, onSave, initialName }: AddCu
 
     setIsSaving(true);
     try {
-      await onSave(formData);
+      await onSave(sanitizedFormData);
       onClose();
     } catch {
       // Error handling done in parent
@@ -519,14 +540,25 @@ export function AddCustomerModal({ isOpen, onClose, onSave, initialName }: AddCu
                   type="tel"
                   value={formData.mobileNumber}
                   onChange={e => {
-                    setFormData(prev => ({ ...prev, mobileNumber: e.target.value }));
-                    triggerAutoSearch(e.target.value);
+                    // Strip non-digits inline and cap at 10 digits so a
+                    // pasted "+919876543210" survives as "9876543210"
+                    // instead of getting hard-truncated to "+919876543".
+                    const digits = e.target.value.replace(/\D/g, '').slice(-10);
+                    setFormData(prev => ({ ...prev, mobileNumber: digits }));
+                    setMobileError(null);
+                    triggerAutoSearch(digits);
                   }}
                   placeholder="9876543210"
                   maxLength={10}
                   className="input-field"
                   required
                 />
+                {mobileError && (
+                  <p className="text-sm text-red-600 mt-1 flex items-center gap-1">
+                    <AlertCircle className="w-4 h-4" />
+                    {mobileError}
+                  </p>
+                )}
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">

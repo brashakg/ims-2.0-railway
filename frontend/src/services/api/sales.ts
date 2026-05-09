@@ -129,7 +129,77 @@ export const prescriptionApi = {
     const response = await api.get(`/prescriptions/${prescriptionId}/validate`);
     return response.data;
   },
+
+  // ----- 4-version Rx model (May 2026) -------------------------------
+  // Each prescription captures four states: before_testing, after_testing,
+  // manual, final. `final` mirrors back to top-level on finalize for
+  // backwards compat with the existing POS/Order code.
+  getVersions: async (prescriptionId: string) => {
+    const response = await api.get(`/prescriptions/${prescriptionId}/versions`);
+    return response.data as {
+      prescription_id: string;
+      status: 'in_progress' | 'finalized';
+      versions: {
+        before_testing: PrescriptionVersionData | null;
+        after_testing: PrescriptionVersionData | null;
+        manual: PrescriptionVersionData | null;
+        final: PrescriptionVersionData | null;
+      };
+      finalized_at?: string;
+    };
+  },
+
+  patchVersion: async (
+    prescriptionId: string,
+    versionName: 'before_testing' | 'after_testing' | 'manual' | 'final',
+    payload: Partial<PrescriptionVersionData>,
+  ) => {
+    const response = await api.patch(
+      `/prescriptions/${prescriptionId}/version/${versionName}`,
+      payload,
+    );
+    return response.data;
+  },
+
+  finalizePrescription: async (prescriptionId: string) => {
+    const response = await api.post(`/prescriptions/${prescriptionId}/finalize`);
+    return response.data;
+  },
+
+  getProgression: async (customerId: string) => {
+    const response = await api.get(`/prescriptions/customer/${customerId}/progression`);
+    return response.data as {
+      customer_id: string;
+      deltas: Array<{
+        from_date: string;
+        to_date: string;
+        right_eye: { sphere?: number | null; cylinder?: number | null; axis?: number | null; addition?: number | null };
+        left_eye: { sphere?: number | null; cylinder?: number | null; axis?: number | null; addition?: number | null };
+        pd?: number | null;
+      }>;
+      visits: number;
+    };
+  },
 };
+
+export interface PrescriptionEyeData {
+  sphere?: number | null;
+  cylinder?: number | null;
+  axis?: number | null;
+  addition?: number | null;
+  va?: string | null;
+}
+
+export interface PrescriptionVersionData {
+  right_eye?: PrescriptionEyeData | null;
+  left_eye?: PrescriptionEyeData | null;
+  pd?: number | null;
+  source?: string | null;
+  override_reason?: string | null;
+  signed_off_by?: string | null;
+  captured_by?: string | null;
+  captured_at?: string | null;
+}
 
 // ============================================================================
 // Workshop API
@@ -153,6 +223,26 @@ export const workshopApi = {
 
   assignJob: async (jobId: string, staffId: string) => {
     const response = await api.post(`/workshop/jobs/${jobId}/assign`, { staff_id: staffId });
+    return response.data;
+  },
+
+  // Vendor / lens-lab capture (May 2026 — vendor portal feature).
+  // PATCH a job with the external lab's reference ID + tracking URL.
+  patchJobVendor: async (
+    jobId: string,
+    payload: { vendor_id?: string | null; vendor_order_id?: string | null; vendor_tracking_url?: string | null },
+  ) => {
+    const response = await api.patch(`/workshop/jobs/${jobId}/vendor`, payload);
+    return response.data;
+  },
+
+  // POST a vendor status update from the IMS-side admin (mirrors what
+  // the lab can do via the public portal). Source stamped 'ims_user'.
+  postJobVendorStatus: async (
+    jobId: string,
+    payload: { status: string; note?: string },
+  ) => {
+    const response = await api.post(`/workshop/jobs/${jobId}/vendor-status`, payload);
     return response.data;
   },
 

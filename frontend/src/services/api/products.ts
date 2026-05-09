@@ -350,4 +350,86 @@ export const adminLensApi = {
     const response = await api.post('/admin/lens/pricing', data);
     return response.data;
   },
+
+  // ----- Range pricing (May 2026) ------------------------------------
+  // Bracket-based tier pricing (e.g. SPH 0-2.00 = ₹1,200 · 2.25-4.00 =
+  // ₹1,500). Avoids the per-SKU explosion when there are 80+ Rx combos.
+  // POS calls /admin/lens/pricing-ranges/quote at the prescription step.
+  listLensPricingRanges: async (params?: {
+    brand_id?: string;
+    index_id?: string;
+    category?: string;
+  }) => {
+    const response = await api.get('/admin/lens/pricing-ranges', { params });
+    return response.data as {
+      ranges: Array<{
+        range_id: string;
+        brand_id: string;
+        index_id: string;
+        category: string;
+        parameter: 'sphere' | 'cylinder' | 'addition';
+        min_value: number;
+        max_value: number;
+        base_price: number;
+        is_active: boolean;
+      }>;
+      total: number;
+    };
+  },
+
+  createLensPricingRange: async (data: {
+    brand_id: string;
+    index_id: string;
+    category: string;
+    parameter: 'sphere' | 'cylinder' | 'addition';
+    min_value: number;
+    max_value: number;
+    base_price: number;
+  }) => {
+    const response = await api.post('/admin/lens/pricing-ranges', data);
+    return response.data;
+  },
+
+  updateLensPricingRange: async (
+    rangeId: string,
+    patch: Partial<{
+      min_value: number;
+      max_value: number;
+      base_price: number;
+      is_active: boolean;
+    }>,
+  ) => {
+    const response = await api.put(`/admin/lens/pricing-ranges/${rangeId}`, patch);
+    return response.data;
+  },
+
+  deleteLensPricingRange: async (rangeId: string) => {
+    const response = await api.delete(`/admin/lens/pricing-ranges/${rangeId}`);
+    return response.data;
+  },
+
+  quoteLensPrice: async (input: {
+    brand_id: string;
+    index_id: string;
+    category: string;
+    sphere?: number;
+    cylinder?: number;
+    addition?: number;
+    coatings?: string[];
+  }) => {
+    const response = await api.post('/admin/lens/pricing-ranges/quote', input);
+    return response.data as {
+      ok: boolean;
+      source?: 'exact_match' | 'range_match' | 'no_pricing';
+      base_price?: number;
+      total?: number;
+      breakdown?: {
+        base_price: number;
+        brand_multiplier?: number;
+        index_multiplier?: number;
+        coatings_subtotal?: number;
+      };
+      hint?: string;
+    };
+  },
 };

@@ -678,12 +678,18 @@ export function ClinicalPage() {
         storeId={user?.activeStoreId}
         onQueue={async (customer, patient) => {
           try {
+            // Search hits return the raw Mongo doc which carries `mobile`,
+            // not the camelCase `phone` from the TS type. Read both so the
+            // queue request never lands at the backend with phone undefined
+            // (which 422'd silently before).
+            const phone = (customer as any).phone || (customer as any).mobile || '';
             await clinicalApi.addToQueue({
               storeId: user?.activeStoreId || '',
               patientName: patient?.name || customer.name,
-              customerPhone: customer.phone,
+              customerPhone: phone,
               age: patient?.dateOfBirth ? calculateAge(patient.dateOfBirth) : undefined,
               reason: 'Eye examination',
+              customerId: (customer as any).customer_id || customer.id,
             });
             toast.success(`${patient?.name || customer.name} added to queue`);
             setShowQueueExistingModal(false);

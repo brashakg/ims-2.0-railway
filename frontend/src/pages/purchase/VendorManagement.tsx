@@ -4,7 +4,7 @@
 // Vendor directory, scorecards, comparison, performance analytics, contracts
 
 import { useState, useEffect } from 'react';
-import { Star, Phone, Mail, FileText, BarChart3, Filter, Plus } from 'lucide-react';
+import { Star, Phone, Mail, FileText, BarChart3, Filter, Plus, Link2, Copy, Check, Loader2, X } from 'lucide-react';
 import clsx from 'clsx';
 import { vendorsApi } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
@@ -54,7 +54,8 @@ const getContractStatusColor = (status: string) => {
 };
 
 export function VendorManagement() {
-  const { } = useAuth();
+  const { hasRole } = useAuth();
+  const [portalForVendor, setPortalForVendor] = useState<{ id: string; name: string } | null>(null);
   const toast = useToast();
   const [activeTab, setActiveTab] = useState<'directory' | 'performance' | 'contracts'>('directory');
   const [filterRating, setFilterRating] = useState('all');
@@ -238,9 +239,30 @@ export function VendorManagement() {
                     Edit
                   </button>
                 </div>
+
+                {/* Vendor portal token — admin gives the lab a no-login URL */}
+                {(hasRole(['SUPERADMIN', 'ADMIN'])) && (
+                  <button
+                    type="button"
+                    onClick={() => setPortalForVendor({ id: vendor.id, name: vendor.name })}
+                    className="w-full mt-2 px-3 py-2 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 rounded text-xs font-semibold flex items-center justify-center gap-1.5 border border-indigo-200"
+                  >
+                    <Link2 className="w-3.5 h-3.5" />
+                    Generate vendor portal link
+                  </button>
+                )}
               </div>
             ))}
           </div>
+
+          {/* Token-generation modal */}
+          {portalForVendor && (
+            <PortalTokenModal
+              vendorId={portalForVendor.id}
+              vendorName={portalForVendor.name}
+              onClose={() => setPortalForVendor(null)}
+            />
+          )}
         </div>
       )}
 
@@ -340,3 +362,154 @@ export function VendorManagement() {
 }
 
 export default VendorManagement;
+
+
+// ============================================================================
+// Portal Token Modal — generates a no-login URL the lens lab opens directly
+// ============================================================================
+
+function PortalTokenModal({
+  vendorId, vendorName, onClose,
+}: { vendorId: string; vendorName: string; onClose: () => void }) {
+  const toast = useToast();
+  const [generating, setGenerating] = useState(false);
+  const [result, setResult] = useState<{ token_id: string; portal_url: string; expires_at: string } | null>(null);
+  const [copied, setCopied] = useState(false);
+
+  const generate = async () => {
+    setGenerating(true);
+    try {
+      const r = await vendorsApi.generatePortalToken(vendorId);
+      setResult({ token_id: r.token_id, portal_url: r.portal_url, expires_at: r.expires_at });
+      toast.success(`Portal link generated for ${vendorName}`);
+    } catch (err: unknown) {
+      const msg =
+        (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ??
+        'Failed to generate token';
+      toast.error(msg);
+    } finally {
+      setGenerating(false);
+    }
+  };
+
+  const copy = async () => {
+    if (!result) return;
+    try {
+      await navigator.clipboard.writeText(result.portal_url);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      toast.error('Could not copy to clipboard');
+    }
+  };
+
+  return (
+    <div
+      className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4"
+      onClick={onClose}
+    >
+      <div
+        className="bg-white rounded-xl shadow-2xl w-full max-w-lg"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="px-5 py-4 border-b border-gray-200 flex items-center justify-between">
+          <div>
+            <h2 className="font-semibold text-gray-900 flex items-center gap-2">
+              <Link2 className="w-4 h-4 text-indigo-600" />
+              Vendor portal link
+            </h2>
+            <p className="text-sm text-gray-500 mt-0.5">{vendorName}</p>
+          </div>
+          <button onClick={onClose} className="text-gray-500 hover:text-gray-700">
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        <div className="p-5 space-y-4">
+          {!result ? (
+            <>
+              <p className="text-sm text-gray-600">
+                Generate a no-login URL that <strong>{vendorName}</strong> can open
+                directly to view the jobs you've assigned them. They can post status
+                updates without an IMS account. Customer PII (phone / address) is
+                hidden — only initials are shown.
+              </p>
+              <ul className="text-xs text-gray-500 space-y-1 ml-4 list-disc">
+                <li>Default validity: 1 year</li>
+                <li>Token can be revoked anytime</li>
+                <li>Every status update is audit-logged</li>
+              </ul>
+              <button
+                type="button"
+                onClick={generate}
+                disabled={generating}
+                className="w-full px-4 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg font-medium flex items-center justify-center gap-2 disabled:opacity-50"
+              >
+                {generating ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <Link2 className="w-4 h-4" />
+                )}
+                Generate portal link
+              </button>
+            </>
+          ) : (
+            <>
+              <div className="bg-green-50 border border-green-200 rounded-lg p-3 text-sm text-green-800">
+                <p className="font-medium">Link generated. Share it with {vendorName} via WhatsApp / email.</p>
+                <p className="text-xs text-green-700 mt-1">
+                  Valid until {new Date(result.expires_at).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })}
+                </p>
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-gray-500 uppercase tracking-wide mb-1">
+                  Portal URL
+                </label>
+                <div className="flex gap-2">
+                  <input
+                    readOnly
+                    value={result.portal_url}
+                    className="flex-1 px-3 py-2 text-sm font-mono border border-gray-300 rounded-lg bg-gray-50 text-gray-700"
+                    onFocus={(e) => e.target.select()}
+                  />
+                  <button
+                    type="button"
+                    onClick={copy}
+                    className="px-3 py-2 bg-gray-900 hover:bg-gray-700 text-white rounded-lg text-sm font-medium flex items-center gap-1.5"
+                  >
+                    {copied ? (
+                      <>
+                        <Check className="w-3.5 h-3.5" />
+                        Copied
+                      </>
+                    ) : (
+                      <>
+                        <Copy className="w-3.5 h-3.5" />
+                        Copy
+                      </>
+                    )}
+                  </button>
+                </div>
+              </div>
+
+              <p className="text-xs text-gray-500 font-mono">
+                Token: {result.token_id}
+              </p>
+            </>
+          )}
+        </div>
+
+        <div className="px-5 py-3 border-t border-gray-200 flex justify-end">
+          <button
+            type="button"
+            onClick={onClose}
+            className="px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-100 rounded-lg"
+          >
+            Done
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}

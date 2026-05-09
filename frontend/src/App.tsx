@@ -20,6 +20,7 @@ import { Analytics } from '@vercel/analytics/react';
 
 // Lazy load pages for code splitting
 const LoginPage = lazy(() => import('./pages/auth/LoginPage').then(m => ({ default: m.LoginPage })));
+const VendorPortalPage = lazy(() => import('./pages/vendor-portal/VendorPortalPage'));
 const DashboardPage = lazy(() => import('./pages/dashboard/HubPage'));
 const ExecutiveDashboard = lazy(() => import('./pages/dashboard/ExecutiveDashboard').then(m => ({ default: m.ExecutiveDashboard })));
 const EnterpriseAnalyticsDashboard = lazy(() => import('./pages/dashboard/EnterpriseAnalyticsDashboard'));
@@ -133,6 +134,11 @@ function App() {
                   {/* Public routes */}
                   <Route path="/login" element={<LoginPage />} />
                   <Route path="/unauthorized" element={<UnauthorizedPage />} />
+                  {/* Vendor Portal — public, token-auth via URL.
+                      Mounted OUTSIDE ProtectedRoute because external lens
+                      labs hit this without an IMS user account. The
+                      tokenId in the URL IS the auth (server-side check). */}
+                  <Route path="/vendor-portal/:tokenId" element={<VendorPortalPage />} />
 
                 {/* Protected routes with layout */}
                 <Route
