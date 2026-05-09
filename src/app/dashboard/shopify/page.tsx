@@ -344,45 +344,77 @@ export default function ShopifySettingsPage() {
           </div>
         )}
 
-        {/* Connection Status Banner */}
+        {/* Connection Status Banner — three states:
+              1. loading + no status yet  → "Checking connection..." (yellow)
+              2. status loaded, configured → "Connected to Shopify" (green)
+              3. status loaded, NOT configured → "Not Connected" (red)
+            Previously the page showed (3) during state (1), making the
+            page look broken on every Railway cold start. Fixed by
+            tracking initialLoad separately and showing a neutral
+            "Checking connection..." until the first fetch resolves. */}
         <div className="bg-white rounded-lg shadow p-6 mb-6">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-4">
               <div
                 className={`w-4 h-4 rounded-full ${
-                  status?.configured ? "bg-green-500" : "bg-red-500"
+                  loading && !status
+                    ? "bg-amber-400 animate-pulse"
+                    : status?.configured
+                      ? "bg-green-500"
+                      : "bg-red-500"
                 }`}
               />
               <div>
                 <p className="font-semibold text-slate-900">
-                  {status?.configured ? "Connected to Shopify" : "Not Connected"}
+                  {loading && !status
+                    ? "Checking connection…"
+                    : status?.configured
+                      ? "Connected to Shopify"
+                      : "Not Connected"}
                 </p>
                 <p className="text-sm text-slate-500">
-                  {status?.storeUrl || "Configure credentials in Railway env vars"}
+                  {loading && !status
+                    ? "Fetching status from /api/shopify/status"
+                    : status?.storeUrl || (status?.configured === false
+                        ? "Configure credentials in Railway env vars"
+                        : "Failed to load status — try Refresh")}
                 </p>
               </div>
             </div>
-            <div className="flex gap-3 text-sm">
+            <div className="flex gap-3 text-sm items-center">
               <div className="text-center px-4">
                 <p className="text-2xl font-bold text-green-600">
-                  {status?.stats.totalSynced || 0}
+                  {status?.stats.totalSynced ?? "—"}
                 </p>
                 <p className="text-slate-500">Synced</p>
               </div>
               <div className="text-center px-4">
                 <p className="text-2xl font-bold text-red-600">
-                  {status?.stats.failedSyncs || 0}
+                  {status?.stats.failedSyncs ?? "—"}
                 </p>
-                <p className="text-slate-500">Failed</p>
+                <p className="text-slate-500" title="Last bulk-sync attempt's failed product count — see SyncLog for details. NOT webhook failures.">
+                  Sync Failed
+                </p>
               </div>
               <div className="text-center px-4">
                 <p className="text-sm font-medium text-slate-700">
                   {status?.stats.lastSync
                     ? new Date(status.stats.lastSync).toLocaleString()
-                    : "Never"}
+                    : status
+                      ? "Never"
+                      : "—"}
                 </p>
                 <p className="text-slate-500">Last Sync</p>
               </div>
+              <button
+                type="button"
+                onClick={() => fetchAll()}
+                disabled={loading}
+                className="ml-2 px-3 py-1.5 border border-slate-300 rounded-md text-xs text-slate-700 hover:bg-slate-100 disabled:opacity-50"
+                title="Re-fetch connection status"
+              >
+                {loading ? "Refreshing…" : "Refresh"}
+              </button>
             </div>
           </div>
         </div>
