@@ -156,6 +156,26 @@ export const workshopApi = {
     return response.data;
   },
 
+  // Vendor / lens-lab capture (May 2026 — vendor portal feature).
+  // PATCH a job with the external lab's reference ID + tracking URL.
+  patchJobVendor: async (
+    jobId: string,
+    payload: { vendor_id?: string | null; vendor_order_id?: string | null; vendor_tracking_url?: string | null },
+  ) => {
+    const response = await api.patch(`/workshop/jobs/${jobId}/vendor`, payload);
+    return response.data;
+  },
+
+  // POST a vendor status update from the IMS-side admin (mirrors what
+  // the lab can do via the public portal). Source stamped 'ims_user'.
+  postJobVendorStatus: async (
+    jobId: string,
+    payload: { status: string; note?: string },
+  ) => {
+    const response = await api.post(`/workshop/jobs/${jobId}/vendor-status`, payload);
+    return response.data;
+  },
+
   createJob: async (data: {
     order_id: string;
     frame_details: Record<string, any>;
