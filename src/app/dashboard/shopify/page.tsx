@@ -10,6 +10,11 @@ interface ShopifyStatus {
     totalSynced: number;
     failedSyncs: number;
     lastSync: string | null;
+    // Round 4 status rewrite — meaningful numbers vs. raw SyncLog ratios.
+    lastSuccessAt?: string | null;
+    lastAttemptAt?: string | null;
+    recent24h?: { success: number; failed: number };
+    lastBatch?: { success: number; failed: number };
   };
 }
 
@@ -52,6 +57,10 @@ export default function ShopifySettingsPage() {
   const [registeringWebhooks, setRegisteringWebhooks] = useState(false);
   const [deletingWebhooks, setDeletingWebhooks] = useState(false);
   const [activeTab, setActiveTab] = useState<"sync" | "webhooks" | "events">("sync");
+  // Round 4 status rewrite — clear stale FAILED rows from SyncLog so the
+  // "Failed (24h)" badge isn't permanently stuck on yesterday's pre-hotfix
+  // batch.
+  const [clearingHistory, setClearingHistory] = useState(false);
 
   const fetchAll = useCallback(async () => {
     try {
@@ -158,6 +167,39 @@ export default function ShopifySettingsPage() {
         body: doneMsg,
         icon: "/app-icon.png",
       });
+    }
+  };
+
+  // ── Clear stale FAILED rows from SyncLog so the "Failed (24h)"
+  //    counter resets after a botched batch. Round 4 status rewrite. ──
+  const handleClearStaleFailures = async () => {
+    if (
+      !confirm(
+        "Delete all FAILED sync log rows older than 1 day? This won't affect Shopify or your products — it only cleans the badge counter."
+      )
+    ) {
+      return;
+    }
+    try {
+      setClearingHistory(true);
+      setError(null);
+      setSuccess(null);
+      const res = await fetch("/api/shopify/sync-history", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode: "failed-older-than", days: 1 }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setSuccess(data.message || `Cleared ${data.deleted} stale failures.`);
+        await fetchAll();
+      } else {
+        setError(data.error || "Failed to clear sync history");
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to clear sync history");
+    } finally {
+      setClearingHistory(false);
     }
   };
 
@@ -386,25 +428,31 @@ export default function ShopifySettingsPage() {
                 <p className="text-2xl font-bold text-green-600">
                   {status?.stats.totalSynced ?? "—"}
                 </p>
-                <p className="text-slate-500">Synced</p>
+                <p className="text-slate-500" title="Products with shopifyProductId set — current state, not a SyncLog ratio.">
+                  Live on Shopify
+                </p>
               </div>
               <div className="text-center px-4">
                 <p className="text-2xl font-bold text-red-600">
-                  {status?.stats.failedSyncs ?? "—"}
+                  {status?.stats.recent24h?.failed ?? status?.stats.failedSyncs ?? "—"}
                 </p>
-                <p className="text-slate-500" title="Last bulk-sync attempt's failed product count — see SyncLog for details. NOT webhook failures.">
-                  Sync Failed
+                <p className="text-slate-500" title="FAILED SyncLog rows from the last 24 hours only. Not cumulative, not webhook failures. Click 'Clear stale failures' below to remove old entries.">
+                  Failed (24h)
                 </p>
               </div>
               <div className="text-center px-4">
                 <p className="text-sm font-medium text-slate-700">
-                  {status?.stats.lastSync
-                    ? new Date(status.stats.lastSync).toLocaleString()
-                    : status
-                      ? "Never"
-                      : "—"}
+                  {status?.stats.lastSuccessAt
+                    ? new Date(status.stats.lastSuccessAt).toLocaleString()
+                    : status?.stats.lastAttemptAt
+                      ? `Attempt: ${new Date(status.stats.lastAttemptAt).toLocaleString()}`
+                      : status
+                        ? "Never"
+                        : "—"}
                 </p>
-                <p className="text-slate-500">Last Sync</p>
+                <p className="text-slate-500" title="Most recent SUCCESSFUL sync. Falls back to last attempt if there hasn't been a success yet.">
+                  Last Success
+                </p>
               </div>
               <button
                 type="button"
@@ -417,6 +465,35 @@ export default function ShopifySettingsPage() {
               </button>
             </div>
           </div>
+
+          {/* Last-batch breakdown + Clear-stale action — adds context so
+              the user understands what the Failed (24h) counter actually
+              represents and gives them a one-click way to reset it. */}
+          {status?.stats.lastBatch && (status.stats.lastBatch.success + status.stats.lastBatch.failed > 0) && (
+            <div className="mt-4 pt-4 border-t border-slate-200 flex items-center justify-between text-xs">
+              <div className="text-slate-600">
+                <strong>Last batch</strong> ({status.stats.lastAttemptAt ? new Date(status.stats.lastAttemptAt).toLocaleString() : "—"}):{" "}
+                <span className="text-green-600 font-semibold">{status.stats.lastBatch.success} ok</span>
+                {" · "}
+                <span className="text-red-600 font-semibold">{status.stats.lastBatch.failed} failed</span>
+                {" · "}
+                <span className="text-slate-500">
+                  Total live on Shopify: {status.stats.totalSynced.toLocaleString()}
+                </span>
+              </div>
+              {(status.stats.recent24h?.failed ?? 0) > 0 && (
+                <button
+                  type="button"
+                  onClick={handleClearStaleFailures}
+                  disabled={clearingHistory}
+                  className="px-3 py-1.5 border border-red-300 text-red-700 rounded-md hover:bg-red-50 disabled:opacity-50"
+                  title="Delete FAILED SyncLog rows older than 1 day. Doesn't touch Shopify — only resets the badge counter."
+                >
+                  {clearingHistory ? "Clearing…" : "Clear stale failures"}
+                </button>
+              )}
+            </div>
+          )}
         </div>
 
         {/* Tab Navigation */}
