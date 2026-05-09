@@ -207,6 +207,7 @@ def initialize_registry(db=None):
     subscribe_event("stock.below_reorder","sentinel")
     subscribe_event("anomaly.detected",  "sentinel")
     subscribe_event("sync.failed",       "sentinel")
+    subscribe_event("audit.alert",       "sentinel")  # May 2026 — auto-alerts on edits/deletes/P&L
 
     # PIXEL listens for Vercel deploy events to trigger an audit cycle
     subscribe_event("deploy.success",    "pixel")

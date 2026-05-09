@@ -884,6 +884,17 @@ async def update_order(
         update_data["updated_by"] = current_user.get("user_id")
 
         if repo.update(order_id, update_data):
+            # Audit alert (May 2026) — fire-and-forget, never blocks order edit
+            try:
+                from ..services.audit_alerts import alert_order_edited
+                fresh = repo.find_by_id(order_id) or {}
+                import asyncio as _aio
+                _aio.create_task(alert_order_edited(
+                    order_id, before=existing, after=fresh,
+                    user_id=current_user.get("user_id"),
+                ))
+            except Exception:
+                pass
             return {"order_id": order_id, "message": "Order updated"}
 
         raise HTTPException(status_code=500, detail="Failed to update order")
@@ -1001,6 +1012,23 @@ async def remove_order_item(
                 "balance_due": grand_total - order.get("amount_paid", 0),
             },
         )
+
+        # Audit alert (May 2026) — flag the deleted item even on DRAFT
+        # so the audit trail is complete; severity HIGH for DRAFT.
+        try:
+            from ..services.audit_alerts import alert_item_deleted
+            import asyncio as _aio
+            removed = next(
+                (i for i in order.get("items", []) if i.get("item_id") == item_id),
+                {"item_id": item_id},
+            )
+            _aio.create_task(alert_item_deleted(
+                order_id, item_id, item_data=removed,
+                user_id=current_user.get("user_id"),
+                order_status=order.get("status", "DRAFT"),
+            ))
+        except Exception:
+            pass
 
         return {"message": "Item removed from order"}
 
@@ -1229,6 +1257,18 @@ async def cancel_order(
                 "cancelled_at": datetime.now().isoformat(),
             },
         )
+
+        # Audit alert (May 2026) — every cancellation is CRITICAL severity
+        try:
+            from ..services.audit_alerts import alert_order_cancelled
+            import asyncio as _aio
+            _aio.create_task(alert_order_cancelled(
+                order_id, before=order,
+                user_id=current_user.get("user_id"),
+                reason=reason,
+            ))
+        except Exception:
+            pass
 
         return {
             "order_id": order_id,
