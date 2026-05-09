@@ -919,6 +919,11 @@ Is there a specific aspect you'd like me to dive deeper into? I can provide deta
                     }}
                     dangerouslySetInnerHTML={{
                       __html: message.content
+                        .replace(/&/g, '&amp;')
+                        .replace(/</g, '&lt;')
+                        .replace(/>/g, '&gt;')
+                        .replace(/"/g, '&quot;')
+                        .replace(/'/g, '&#x27;')
                         .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
                         .replace(/\n/g, '<br />'),
                     }}
