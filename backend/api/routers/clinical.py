@@ -220,6 +220,14 @@ async def start_test(queue_id: str, current_user: dict = Depends(get_current_use
             )
 
             if test:
+                # Stamp the test_id back onto the queue doc so a page
+                # reload mid-test still lets "Continue" resolve the
+                # right test record. Without this stamp the frontend
+                # fell back to queue_id-as-test_id on Continue, the
+                # completion call no-op'd (find_by_id on a queue_id
+                # returns nothing), and the queue stayed IN_PROGRESS
+                # forever.
+                queue_repo.update(queue_id, {"test_id": test.get("test_id")})
                 return {"testId": test.get("test_id"), "message": "Test started"}
 
         # Queue item may be from sample data, create test anyway

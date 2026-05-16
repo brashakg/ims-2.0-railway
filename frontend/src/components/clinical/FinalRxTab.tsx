@@ -75,10 +75,26 @@ export function FinalRxTab({ data, onChange, subjectiveRxData }: FinalRxTabProps
   };
 
   const handleCopyFromSubjective = () => {
+    // The Subjective tab stores ADD nested inside each eye
+    // (`subjectiveRxData.rightEye.add`), but the Final tab's Near Vision
+    // section renders from flat root fields (`data.rightAdd` /
+    // `data.leftAdd`). The earlier spread-only copy populated the eye
+    // objects but never the flat fields the inputs were bound to, so
+    // ADD looked blank after the copy. Mirror the per-eye ADD onto the
+    // flat fields here. Same fix for IPD (Subjective captures PD per
+    // eye; Final has a single IPD value — prefer the right-eye PD,
+    // fall back to left, only when Final's IPD isn't already set).
     onChange({
       ...data,
       rightEye: { ...data.rightEye, ...subjectiveRxData.rightEye },
       leftEye: { ...data.leftEye, ...subjectiveRxData.leftEye },
+      rightAdd: subjectiveRxData.rightEye.add || data.rightAdd,
+      leftAdd: subjectiveRxData.leftEye.add || data.leftAdd,
+      ipd:
+        data.ipd ||
+        subjectiveRxData.rightEye.pd ||
+        subjectiveRxData.leftEye.pd ||
+        '',
     });
   };
 
@@ -195,6 +211,7 @@ export function FinalRxTab({ data, onChange, subjectiveRxData }: FinalRxTabProps
             <input
               type="date"
               value={data.nextCheckup}
+              min={new Date().toISOString().slice(0, 10)}
               onChange={(e) => onChange({ ...data, nextCheckup: e.target.value })}
               className="input-field"
             />
