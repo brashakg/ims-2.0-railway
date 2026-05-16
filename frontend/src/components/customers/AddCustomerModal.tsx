@@ -51,6 +51,9 @@ export interface CustomerFormData {
   panNumber: string;
   // Patients
   patients: PatientFormData[];
+  // Marketing consent — opt-in default, operator flips off only on
+  // explicit decline. Drives birthday / Rx-expiry / WhatsApp campaigns.
+  marketingConsent: boolean;
 }
 
 interface AddCustomerModalProps {
@@ -101,6 +104,7 @@ export function AddCustomerModal({ isOpen, onClose, onSave, initialName }: AddCu
     businessName: '',
     panNumber: '',
     patients: [],
+    marketingConsent: true,
   });
 
   const [gstVerified, setGstVerified] = useState<boolean | null>(null);
@@ -159,6 +163,7 @@ export function AddCustomerModal({ isOpen, onClose, onSave, initialName }: AddCu
         businessName: '',
         panNumber: '',
         patients: [],
+        marketingConsent: true,
       });
       setGstVerified(null);
       setGstError(null);
@@ -611,6 +616,25 @@ export function AddCustomerModal({ isOpen, onClose, onSave, initialName }: AddCu
                   onChange={e => setFormData(prev => ({ ...prev, anniversary: e.target.value }))}
                   className="input-field"
                 />
+              </div>
+              {/* Marketing opt-in — default on. Flip off only if the
+                  customer explicitly declines on the spot. Drives
+                  birthday / Rx-expiry / WhatsApp campaigns. */}
+              <div className="col-span-2">
+                <label className="flex items-start gap-2 cursor-pointer p-2 rounded-lg hover:bg-gray-50">
+                  <input
+                    type="checkbox"
+                    checked={formData.marketingConsent}
+                    onChange={e => setFormData(prev => ({ ...prev, marketingConsent: e.target.checked }))}
+                    className="mt-0.5 w-4 h-4 text-bv-red-600 rounded border-gray-300 focus:ring-bv-red-500"
+                  />
+                  <span className="text-sm">
+                    <span className="font-medium text-gray-900">Receive marketing messages</span>
+                    <span className="block text-xs text-gray-500 mt-0.5">
+                      Birthday wishes, Rx renewal reminders, and offers via SMS / WhatsApp. Customer can opt out anytime.
+                    </span>
+                  </span>
+                </label>
               </div>
             </div>
           </div>
