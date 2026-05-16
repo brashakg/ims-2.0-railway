@@ -125,8 +125,10 @@ export function AddCustomerModal({ isOpen, onClose, onSave, initialName }: AddCu
       ...prev,
       ...(isNumeric ? { mobileNumber: trimmed } : { fullName: trimmed }),
     }));
-    // Skip the search step — user already searched in the previous modal
-    setShowSearch(false);
+    // Pre-seed the search box with whatever they typed in the previous
+    // modal so existing matches surface immediately instead of forcing
+    // them to re-type.
+    setSearchQuery(trimmed);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen, initialName]);
   const [showAddPatient, setShowAddPatient] = useState(false);
@@ -288,7 +290,7 @@ export function AddCustomerModal({ isOpen, onClose, onSave, initialName }: AddCu
     setFormData(prev => ({
       ...prev,
       fullName: customer.name || customer.full_name || '',
-      mobileNumber: customer.phone || customer.mobile || '',
+      mobileNumber: customer.mobile || customer.phone || '',
       email: customer.email || '',
       city: customer.city || '',
       state: customer.state || '',
@@ -297,7 +299,13 @@ export function AddCustomerModal({ isOpen, onClose, onSave, initialName }: AddCu
       businessName: customer.business_name || '',
       customerType: customer.customer_type === 'B2B' ? 'B2B' : 'B2C',
     }));
-    setShowSearch(false);
+    setMobileError(null);
+    // Clear the dropdown but keep the search bar visible so the operator
+    // can switch to a different match if they picked the wrong one. The
+    // parent's lookup-first save flow will reuse the existing record by
+    // mobile regardless of whether they hit save now or after editing.
+    setSearchResults([]);
+    setSearchQuery('');
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -359,31 +367,41 @@ export function AddCustomerModal({ isOpen, onClose, onSave, initialName }: AddCu
           </button>
         </div>
 
-        {/* Customer Search */}
+        {/* Customer Search — always visible; the duplicate-tolerant
+            parent flow will use whatever exists if you skip past it */}
         {showSearch && (
-          <div className="px-4 pt-3 pb-2 border-b border-gray-100 bg-gray-50">
+          <div className="px-4 pt-3 pb-3 border-b border-gray-100 bg-amber-50/40">
+            <p className="text-xs font-medium text-gray-600 mb-1.5">
+              Search first — pick an existing customer to auto-fill their details (no duplicate created).
+            </p>
             <div className="relative">
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-500" />
               <input
                 type="text"
                 value={searchQuery}
                 onChange={(e) => handleSearch(e.target.value)}
-                placeholder="Search existing customer by name or phone..."
+                placeholder="Type name or 10-digit phone..."
                 className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-bv-gold-500 focus:border-transparent"
               />
               {searching && <Loader2 className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 animate-spin text-gray-500" />}
             </div>
             {searchResults.length > 0 && (
-              <div className="mt-2 max-h-32 overflow-y-auto rounded-lg border border-gray-200 bg-white">
+              <div className="mt-2 max-h-48 overflow-y-auto rounded-lg border border-amber-300 bg-white shadow-sm">
+                <p className="px-3 py-1.5 text-xs font-semibold text-amber-700 bg-amber-50 border-b border-amber-200 sticky top-0">
+                  {searchResults.length} existing customer{searchResults.length === 1 ? '' : 's'} found — click to use
+                </p>
                 {searchResults.map((cust: any, i: number) => (
                   <button
                     key={cust._id || cust.customer_id || i}
                     type="button"
                     onClick={() => selectExistingCustomer(cust)}
-                    className="w-full text-left px-3 py-2 text-sm hover:bg-bv-gold-50 flex justify-between border-b last:border-b-0"
+                    className="w-full text-left px-3 py-2 text-sm hover:bg-amber-50 flex justify-between items-center border-b last:border-b-0"
                   >
-                    <span className="font-medium">{cust.name || cust.full_name}</span>
-                    <span className="text-gray-500">{cust.phone || cust.mobile}</span>
+                    <span>
+                      <span className="font-medium text-gray-900">{cust.name || cust.full_name}</span>
+                      <span className="text-gray-500 ml-2">{cust.mobile || cust.phone}</span>
+                    </span>
+                    <span className="text-xs font-semibold text-bv-red-600">Use →</span>
                   </button>
                 ))}
               </div>
@@ -583,27 +601,6 @@ export function AddCustomerModal({ isOpen, onClose, onSave, initialName }: AddCu
                   className="input-field"
                 />
               </div>
-              {/* Inline auto-search results when typing in name/mobile */}
-              {searchResults.length > 0 && showSearch && !searchQuery && (
-                <div className="col-span-2">
-                  <div className="rounded-lg border border-amber-200 bg-amber-50 p-2">
-                    <p className="text-xs font-medium text-amber-700 mb-1">Existing customers found — click to auto-fill:</p>
-                    <div className="max-h-24 overflow-y-auto space-y-1">
-                      {searchResults.slice(0, 5).map((cust: any, i: number) => (
-                        <button
-                          key={cust._id || cust.customer_id || i}
-                          type="button"
-                          onClick={() => selectExistingCustomer(cust)}
-                          className="w-full text-left px-2 py-1.5 text-sm rounded hover:bg-amber-100 flex justify-between"
-                        >
-                          <span className="font-medium">{cust.name || cust.full_name}</span>
-                          <span className="text-gray-500">{cust.phone || cust.mobile}</span>
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                </div>
-              )}
               <div className="col-span-2">
                 <label className="block text-sm font-medium text-gray-700 mb-1">
                   Anniversary
