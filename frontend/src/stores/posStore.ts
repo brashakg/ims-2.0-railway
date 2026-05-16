@@ -242,6 +242,20 @@ function calcLineTotal(item: { unit_price: number; quantity: number; discount_pe
   return Math.round((gross - discountAmt) * 100) / 100;
 }
 
+// Re-derives `cart_discount_amount` from the post-item-discount subtotal
+// and the current cart-level discount percent. Used by every cart
+// mutator so the field stays in sync without doing a `set()` inside the
+// `getGrandTotal` selector (which is read during render and would crash
+// React 18+/zustand 5 with "Cannot update a component while rendering").
+function recalcCartDiscountAmount(cart: CartLineItem[], percent: number): number {
+  if (!percent) return 0;
+  const subtotalAfterItem = (cart || []).reduce(
+    (s, i) => s + (i.line_total || 0),
+    0,
+  );
+  return Math.round(subtotalAfterItem * (percent / 100) * 100) / 100;
+}
+
 function generateLineId(): string {
   return `line-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
@@ -330,13 +344,23 @@ export const usePOSStore = create<POSState>()(
           discount_amount: 0,
           line_total: item.unit_price * item.quantity,
         };
-        set((state) => ({ cart: [...(state.cart || []), newItem] }));
+        set((state) => {
+          const newCart = [...(state.cart || []), newItem];
+          return {
+            cart: newCart,
+            cart_discount_amount: recalcCartDiscountAmount(newCart, state.cart_discount_percent || 0),
+          };
+        });
       },
 
       removeFromCart: (lineId: string) => {
-        set((state: POSState) => ({
-          cart: (state.cart || []).filter((item: CartLineItem) => item.id !== lineId),
-        }));
+        set((state: POSState) => {
+          const newCart = (state.cart || []).filter((item: CartLineItem) => item.id !== lineId);
+          return {
+            cart: newCart,
+            cart_discount_amount: recalcCartDiscountAmount(newCart, state.cart_discount_percent || 0),
+          };
+        });
       },
 
       updateQuantity: (lineId: string, qty: number) => {
@@ -344,8 +368,8 @@ export const usePOSStore = create<POSState>()(
           get().removeFromCart(lineId);
           return;
         }
-        set((state: POSState) => ({
-          cart: (state.cart || []).map((item: CartLineItem) =>
+        set((state: POSState) => {
+          const newCart = (state.cart || []).map((item: CartLineItem) =>
             item.id === lineId
               ? {
                   ...item,
@@ -354,13 +378,17 @@ export const usePOSStore = create<POSState>()(
                   line_total: calcLineTotal({ ...item, quantity: qty }),
                 }
               : item
-          ),
-        }));
+          );
+          return {
+            cart: newCart,
+            cart_discount_amount: recalcCartDiscountAmount(newCart, state.cart_discount_percent || 0),
+          };
+        });
       },
 
       applyDiscount: (lineId: string, percent: number, reason?: string, approvedBy?: string) => {
-        set((state: POSState) => ({
-          cart: (state.cart || []).map((item: CartLineItem) => {
+        set((state: POSState) => {
+          const newCart = (state.cart || []).map((item: CartLineItem) => {
             if (item.id !== lineId) return item;
             const discountAmt = item.unit_price * item.quantity * (percent / 100);
             return {
@@ -371,8 +399,12 @@ export const usePOSStore = create<POSState>()(
               discount_approved_by: approvedBy,
               line_total: calcLineTotal({ ...item, discount_percent: percent }),
             };
-          }),
-        }));
+          });
+          return {
+            cart: newCart,
+            cart_discount_amount: recalcCartDiscountAmount(newCart, state.cart_discount_percent || 0),
+          };
+        });
       },
 
       updateItemNote: (lineId: string, note: string) => {
@@ -505,10 +537,6 @@ export const usePOSStore = create<POSState>()(
         // amount charged).
         const state = get();
         const cart = state.cart || [];
-        const subtotalAfterItem = cart.reduce(
-          (sum: number, item: CartLineItem) => sum + (item.line_total || 0),
-          0
-        );
         const cartDiscountPct = state.cart_discount_percent || 0;
         const cartDiscountFactor = 1 - cartDiscountPct / 100;  // 1.0 when 0
 
@@ -521,13 +549,12 @@ export const usePOSStore = create<POSState>()(
           const gstRate = getGSTRateByCategory(item.category);
           totalTax += itemTaxable * (gstRate / 100);
         }
-        // Side-effect: keep cart_discount_amount in sync with the current
-        // subtotal so "Total Discount" on the Review card reflects reality
-        // even after the user edits cart quantities.
-        const syncedCartDiscountAmt = Math.round(subtotalAfterItem * (cartDiscountPct / 100) * 100) / 100;
-        if (Math.abs(syncedCartDiscountAmt - (state.cart_discount_amount || 0)) > 0.01) {
-          set({ cart_discount_amount: syncedCartDiscountAmt });
-        }
+        // NOTE: never `set()` inside a getter. React 18+ / zustand 5
+        // make calling set() during render illegal (it surfaces as
+        // "Cannot update a component while rendering a different
+        // component" or as a re-entrant render loop). The cart
+        // discount amount is recomputed by `setCartDiscount` whenever
+        // the percent or cart changes — see that action below.
         return Math.round((taxable + totalTax) * 100) / 100;
       },
 
