@@ -263,28 +263,74 @@ export function ClinicalPage() {
       let customerId: string | undefined;
       let customerName: string;
 
+      // Build a billing_address object only when at least one address
+      // field has content; otherwise omit so we don't blow away any
+      // existing address on update.
+      const billingAddress =
+        customerData.address || customerData.city || customerData.pincode || customerData.state
+          ? {
+              address: customerData.address || undefined,
+              city: customerData.city || undefined,
+              state: customerData.state || undefined,
+              pincode: customerData.pincode || undefined,
+            }
+          : undefined;
+
+      const patientsPayload = (customerData.patients || [])
+        .filter(p => p.name && p.name.trim())
+        .map(p => ({
+          name: p.name,
+          mobile: p.mobile ? p.mobile.replace(/\D/g, '').slice(-10) : undefined,
+          dob: p.dateOfBirth || undefined,
+          relation: p.relation || 'Self',
+        }));
+
       if (existing) {
         customerId = existing.customer_id || existing._id || existing.id;
         customerName = existing.name || customerData.fullName;
+
+        // Amend the existing record — backend ignores empty diffs and
+        // appends patients additively (de-dups on name+mobile). This lets
+        // the operator add a DOB / marketing-opt-out / new dependent on
+        // a return visit without ever hitting the duplicate-mobile wall.
+        const updatePayload: Record<string, unknown> = {
+          marketing_consent: customerData.marketingConsent,
+        };
+        if (customerData.dateOfBirth) updatePayload.dob = customerData.dateOfBirth;
+        if (customerData.anniversary) updatePayload.anniversary = customerData.anniversary;
+        if (customerData.email && customerData.email !== existing.email) {
+          updatePayload.email = customerData.email;
+        }
+        if (
+          customerData.customerType === 'B2B' &&
+          customerData.gstNumber &&
+          customerData.gstNumber !== existing.gstin
+        ) {
+          updatePayload.gstin = customerData.gstNumber;
+          updatePayload.customer_type = 'B2B';
+        }
+        if (billingAddress) updatePayload.billing_address = billingAddress;
+        if (patientsPayload.length > 0) updatePayload.patients = patientsPayload;
+
+        try {
+          await customerApi.updateCustomer(customerId as string, updatePayload);
+        } catch {
+          // Don't block the queue add if the amend fails — log + continue.
+          // eslint-disable-next-line no-console
+          console.warn('[Clinical] updateCustomer failed; proceeding with queue add anyway');
+        }
       } else {
         const customerPayload = {
           name: customerData.fullName,
           mobile: sanitizedMobile,
           email: customerData.email || undefined,
+          dob: customerData.dateOfBirth || undefined,
+          anniversary: customerData.anniversary || undefined,
           customer_type: customerData.customerType,
           gstin: customerData.customerType === 'B2B' ? customerData.gstNumber : undefined,
-          billing_address: (customerData.address || customerData.city || customerData.pincode) ? {
-            address: customerData.address,
-            city: customerData.city,
-            state: customerData.state,
-            pincode: customerData.pincode,
-          } : undefined,
-          patients: (customerData.patients || []).map(p => ({
-            name: p.name,
-            mobile: p.mobile ? p.mobile.replace(/\D/g, '').slice(-10) : undefined,
-            dob: p.dateOfBirth || undefined,
-            relation: p.relation || 'Self',
-          })),
+          billing_address: billingAddress,
+          marketing_consent: customerData.marketingConsent,
+          patients: patientsPayload,
         };
 
         try {
@@ -339,7 +385,7 @@ export function ClinicalPage() {
 
       if (isExisting) {
         toast.info(
-          `Existing customer found — ${queuePatientName} added to queue (using ${customerName})`,
+          `Existing customer record amended — ${queuePatientName} added to queue (${customerName})`,
         );
       } else {
         toast.success(

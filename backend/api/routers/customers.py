@@ -50,8 +50,14 @@ class CustomerCreate(BaseModel):
     name: str = Field(..., min_length=2)
     mobile: str = Field(..., pattern=r"^\d{10}$")
     email: Optional[str] = None
+    dob: Optional[date] = None
+    anniversary: Optional[date] = None
     gstin: Optional[str] = None
     billing_address: Optional[dict] = None
+    # Marketing opt-in defaults to True so the engine can include them in
+    # birthday / Rx-expiry / WhatsApp campaigns. Operators flip this off
+    # only when the customer explicitly declines on the spot.
+    marketing_consent: bool = True
     patients: List[PatientCreate] = []
 
     @field_validator("name", mode="before")
@@ -61,9 +67,24 @@ class CustomerCreate(BaseModel):
 
 
 class CustomerUpdate(BaseModel):
+    # Editable fields when an existing customer is amended (e.g. operator
+    # captures a DOB or marketing opt-out the customer didn't give on the
+    # original visit). `patients`, when supplied, is APPENDED — never used
+    # to replace the existing patient list (see endpoint logic).
     name: Optional[str] = None
     email: Optional[str] = None
+    dob: Optional[date] = None
+    anniversary: Optional[date] = None
+    customer_type: Optional[str] = None
+    gstin: Optional[str] = None
     billing_address: Optional[dict] = None
+    marketing_consent: Optional[bool] = None
+    patients: Optional[List[PatientCreate]] = None
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def sanitize_name_update(cls, v):
+        return _sanitize_text(v) if isinstance(v, str) else v
 
 
 # ============================================================================
@@ -139,8 +160,11 @@ async def create_customer(
             "name": customer.name,
             "mobile": customer.mobile,
             "email": customer.email,
+            "dob": customer.dob.isoformat() if customer.dob else None,
+            "anniversary": customer.anniversary.isoformat() if customer.anniversary else None,
             "gstin": customer.gstin,
             "billing_address": customer.billing_address,
+            "marketing_consent": customer.marketing_consent,
             "home_store_id": current_user.get("active_store_id"),
             "loyalty_points": 0,
             "store_credit": 0,
@@ -274,7 +298,13 @@ async def update_customer(
     customer: CustomerUpdate = Body(...),
     current_user: dict = Depends(get_current_user),
 ):
-    """Update customer details"""
+    """Update customer details.
+
+    Supplied `patients` are APPENDED to the existing list (de-duped on
+    name + mobile), not replaced. The clinical flow sends a single
+    patient per visit; we don't want a re-edit to wipe siblings off the
+    customer record.
+    """
     repo = get_customer_repository()
 
     if repo is not None:
@@ -283,6 +313,58 @@ async def update_customer(
             raise HTTPException(status_code=404, detail="Customer not found")
 
         update_data = customer.model_dump(exclude_unset=True)
+
+        # Serialize date fields to ISO strings — Mongo + downstream JSON
+        # consumers prefer strings over datetime objects on this doc.
+        for key in ("dob", "anniversary"):
+            if key in update_data and update_data[key] is not None:
+                v = update_data[key]
+                update_data[key] = v.isoformat() if hasattr(v, "isoformat") else v
+
+        # Handle patients additively
+        if "patients" in update_data:
+            incoming = update_data.pop("patients") or []
+            current_patients = list(existing.get("patients") or [])
+            seen_keys = {
+                (
+                    (p.get("name") or "").strip().lower(),
+                    (p.get("mobile") or "").strip(),
+                )
+                for p in current_patients
+            }
+            for p in incoming:
+                # `p` is a dict (PatientCreate dumped)
+                name = (p.get("name") or "").strip()
+                mobile = (p.get("mobile") or "").strip()
+                if not name:
+                    continue
+                key = (name.lower(), mobile)
+                if key in seen_keys:
+                    continue
+                seen_keys.add(key)
+                current_patients.append(
+                    {
+                        "patient_id": str(uuid.uuid4()),
+                        "name": name,
+                        "mobile": mobile or None,
+                        "dob": (
+                            p["dob"].isoformat()
+                            if isinstance(p.get("dob"), date)
+                            else p.get("dob")
+                        ),
+                        "anniversary": (
+                            p["anniversary"].isoformat()
+                            if isinstance(p.get("anniversary"), date)
+                            else p.get("anniversary")
+                        ),
+                        "relation": p.get("relation") or "Other",
+                    }
+                )
+            update_data["patients"] = current_patients
+
+        if not update_data:
+            return {"message": "No changes", "customer_id": customer_id}
+
         if repo.update(customer_id, update_data):
             return {"message": "Customer updated", "customer_id": customer_id}
 
