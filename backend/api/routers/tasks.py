@@ -241,22 +241,28 @@ async def get_overdue_tasks(
     return {"tasks": tasks, "total": len(tasks)}
 
 
-@router.get("/{task_id}")
+# IMPORTANT: GET /{task_id} is registered at the BOTTOM of this file via
+# `router.add_api_route(...)`, NOT here. FastAPI matches routes in the
+# order they're registered, and a `/{task_id}` decorator here would
+# shadow every specific GET below it (`/checklists`, `/summary`,
+# `/sop-templates`, ...) — they'd resolve to this handler with
+# task_id="summary" etc. and return 404 ("Task not found"). The Hub's
+# OPEN TASKS card silently rendered "—" because of exactly that bug.
 async def get_task(
     task_id: str,
     current_user: dict = Depends(get_current_user),
 ):
     """Get task by ID"""
     repo = get_task_repository()
-    
+
     if repo is None:
         return {"task_id": task_id}
-    
+
     task = repo.find_by_id(task_id)
-    
+
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
-    
+
     return task
 
 
@@ -889,3 +895,12 @@ async def assign_sop(
 
     tpl = col.find_one({"template_id": template_id}, {"_id": 0})
     return {"template_id": template_id, "template": tpl, "message": "SOP assignment updated"}
+
+
+
+# ============================================================================
+# Catch-all parametric routes — registered LAST so they do not shadow
+# any specific path above (`/summary`, `/checklists`, `/sop-templates`,
+# `/auto-generate`, etc.). FastAPI resolves routes in registration order.
+# ============================================================================
+router.add_api_route("/{task_id}", get_task, methods=["GET"])
