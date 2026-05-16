@@ -66,7 +66,26 @@ export function QueueExistingCustomerModal({
           limit: 20,
         });
         const list = (resp as any)?.customers || (resp as any) || [];
-        setResults(Array.isArray(list) ? list : []);
+        // The /customers endpoint returns raw Mongo docs with snake_case
+        // fields (customer_id, mobile, patient_id). Normalize to the
+        // camelCase shape the rest of the modal + parent expect, so
+        // (a) `c.id` actually resolves (fixes a bug where every row's
+        // isSelected check resolved to true and the patient list could
+        // never expand) and (b) `c.phone` surfaces in the result list
+        // instead of always rendering "—".
+        const normalized = (Array.isArray(list) ? list : []).map((c: any) => ({
+          ...c,
+          id: c.id || c.customer_id || c._id,
+          phone: c.phone || c.mobile || '',
+          patients: Array.isArray(c.patients)
+            ? c.patients.map((p: any) => ({
+                ...p,
+                id: p.id || p.patient_id,
+                phone: p.phone || p.mobile || '',
+              }))
+            : [],
+        }));
+        setResults(normalized);
       } catch (e) {
         // eslint-disable-next-line no-console
         console.error('[Clinical] customer search failed:', e);
