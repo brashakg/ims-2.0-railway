@@ -109,11 +109,16 @@ export function PrescriptionSelectModal({
 
         {/* Content */}
         <div className="flex-1 overflow-y-auto p-4">
-          {!patient ? (
+          {/* The earlier short-circuit on `!patient` blocked anyone whose
+              POS flow only set the customer (no per-patient pick yet) —
+              the modal said "select a patient first" with no picker.
+              Customer-id lookup already covers the patient-less case, so
+              fall through unless we have neither. */}
+          {!lookupId ? (
             <div className="flex flex-col items-center justify-center h-48 text-gray-500">
               <User className="w-12 h-12 mb-3 opacity-50" />
-              <p>No patient selected</p>
-              <p className="text-sm">Please select a patient first</p>
+              <p>No customer selected</p>
+              <p className="text-sm">Pick a customer in step 1 first</p>
             </div>
           ) : isLoading ? (
             <div className="flex items-center justify-center h-48">

@@ -93,7 +93,7 @@ export interface CartLineItem {
 }
 
 export interface PaymentEntry {
-  method: 'CASH' | 'UPI' | 'CARD' | 'BANK_TRANSFER' | 'EMI' | 'CREDIT' | 'VOUCHER';
+  method: 'CASH' | 'UPI' | 'CARD' | 'BANK_TRANSFER' | 'EMI' | 'CREDIT' | 'VOUCHER' | 'LOYALTY';
   amount: number;
   reference?: string;            // UPI ref, card last 4, voucher code, etc.
   timestamp: string;

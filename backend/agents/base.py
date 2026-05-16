@@ -287,9 +287,7 @@ class JarvisAgent(ABC):
         pass
 
     async def emit_event(self, event: str, payload: Dict[str, Any]):
-        """Publish event to the event bus (Redis pub/sub in production)."""
-        # For now, use in-memory event dispatch
-        # TODO: Replace with Redis pub/sub when Redis is configured
+        """Publish event to the event bus (Redis pub/sub when REDIS_URL is set, in-process otherwise)."""
         from .registry import dispatch_event
         await dispatch_event(event, payload, source=self.agent_id)
 

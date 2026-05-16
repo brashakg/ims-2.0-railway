@@ -72,6 +72,9 @@ class Role(str, Enum):
     CUSTOMER_SUPPORT = "CUSTOMER_SUPPORT"
     ACCOUNTANT = "ACCOUNTANT"
     READ_ONLY = "READ_ONLY"
+    INVESTOR = "INVESTOR"  # Canonical 12th role (May 2026) — silent
+    # investor / franchise partner accountant. Read-only across the
+    # entire app; the app-wide write-block lives in main.py middleware.
 
 
 # ============================================================================
@@ -168,6 +171,18 @@ ROLE_PERMISSIONS: Dict[Role, Set[Permission]] = {
         Permission.ORDER_READ,
         Permission.INVENTORY_READ,
         Permission.FINANCIAL_READ,
+    },
+    Role.INVESTOR: {
+        # Same read-set as READ_ONLY but explicitly distinct so tooling
+        # can tell "silent investor / franchise partner accountant"
+        # apart from a generic read-only seat.
+        Permission.PRODUCT_READ,
+        Permission.CUSTOMER_READ,
+        Permission.ORDER_READ,
+        Permission.INVENTORY_READ,
+        Permission.FINANCIAL_READ,
+        Permission.FINANCIAL_EXPORT,  # owners' accountants need to export
+        Permission.FINANCIAL_AUDIT,
     },
 }
 
@@ -273,6 +288,10 @@ class ResourceAccessControl:
 # ============================================================================
 
 from fastapi import Depends, HTTPException, status
+
+# Lazy local import — avoids circular deps if/when this module is
+# imported during auth-router setup itself.
+from ..routers.auth import get_current_user
 
 
 async def require_permission(

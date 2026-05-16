@@ -19,6 +19,8 @@ export type SettingsTab =
   | 'approvals'
   | 'feature-toggles'
   | 'agents'
+  | 'loyalty'
+  | 'lens-pricing'
   | 'system';
 
 export interface StoreData {

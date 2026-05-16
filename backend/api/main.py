@@ -109,6 +109,8 @@ from .routers import (
     points_router,
     payout_router,
     webhooks_router,
+    loyalty_router,
+    vendor_portal_router,
 )
 
 
@@ -477,6 +479,84 @@ async def add_process_time_header(request: Request, call_next):
     return response
 
 
+# ── INVESTOR write-block ──────────────────────────────────────────────────
+# The INVESTOR role (12th canonical role added May 2026) is read-only across
+# the entire app — silent investors / franchise partners' accountants need
+# numbers but must never edit anything. Rather than annotating every router
+# with a role gate, we 403 every non-safe HTTP method at the middleware
+# layer. Read methods (GET, HEAD, OPTIONS) flow through; writes (POST, PUT,
+# PATCH, DELETE) get blocked.
+#
+# Carve-outs:
+#   - /api/v1/auth/login          (otherwise the investor can't log in)
+#   - /api/v1/auth/logout         (let them sign out)
+#   - /api/v1/auth/refresh        (refresh the JWT)
+#   - /api/v1/auth/change-password (let them change their own password)
+#
+# The check is gated on "user holds INVESTOR but no other elevated role" —
+# someone tagged INVESTOR + SUPERADMIN keeps full write access.
+_INVESTOR_WRITE_CARVE_OUTS = {
+    "/api/v1/auth/login",
+    "/api/v1/auth/logout",
+    "/api/v1/auth/refresh",
+    "/api/v1/auth/change-password",
+}
+_INVESTOR_WRITE_BLOCK_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+
+
+def _is_investor_only(roles) -> bool:
+    """True iff the user holds INVESTOR and no other role with write power.
+    Any other role (SUPERADMIN, ADMIN, AREA_MANAGER, STORE_MANAGER, etc.) on
+    the same user opens the gate — INVESTOR is purely additive, never a
+    privilege downgrade."""
+    if not roles:
+        return False
+    role_set = set(roles) if not isinstance(roles, set) else roles
+    if "INVESTOR" not in role_set:
+        return False
+    # If the user has only INVESTOR (or INVESTOR + non-write roles, but
+    # there aren't any non-INVESTOR read-only roles in the canonical set)
+    return role_set == {"INVESTOR"}
+
+
+@app.middleware("http")
+async def block_investor_writes(request: Request, call_next):
+    if request.method not in _INVESTOR_WRITE_BLOCK_METHODS:
+        return await call_next(request)
+    if request.url.path in _INVESTOR_WRITE_CARVE_OUTS:
+        return await call_next(request)
+
+    # Decode JWT just enough to inspect roles. Don't fail on missing —
+    # downstream auth dependency will return 401 if the token is bad.
+    auth_header = request.headers.get("authorization", "")
+    if not auth_header.startswith("Bearer "):
+        return await call_next(request)
+    token = auth_header.split(" ", 1)[1].strip()
+    try:
+        from .routers.auth import decode_token
+        payload = decode_token(token)
+        roles = payload.get("roles", [])
+    except Exception:
+        return await call_next(request)
+
+    if _is_investor_only(roles):
+        # Add CORS headers so the browser doesn't mask the 403 as a network error
+        origin = request.headers.get("origin")
+        response = JSONResponse(
+            status_code=403,
+            content={
+                "detail": "INVESTOR role is read-only. Write operations are not permitted.",
+                "code": "investor_read_only",
+            },
+        )
+        if origin and _is_allowed_origin(origin):
+            response.headers["Access-Control-Allow-Origin"] = origin
+            response.headers["Access-Control-Allow-Credentials"] = "true"
+        return response
+
+    return await call_next(request)
+
+
 # HTTPException handler - handles authentication and validation errors
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):
@@ -641,6 +721,13 @@ app.include_router(walkouts_router, prefix="/api/v1/walkouts", tags=["Walkouts"]
 app.include_router(points_router, prefix="/api/v1/incentive/points", tags=["Daily Points"])
 app.include_router(payout_router, prefix="/api/v1/payout", tags=["Payout"])
 app.include_router(webhooks_router, prefix="/api/v1/webhooks", tags=["Webhooks"])
+app.include_router(loyalty_router, prefix="/api/v1/loyalty", tags=["Loyalty"])
+# Vendor portal — PUBLIC, token-auth via path param. Mounted OUTSIDE the
+# JWT-protected family of routers because external lens labs hit this
+# without an IMS user account.
+app.include_router(
+    vendor_portal_router, prefix="/api/v1/vendor-portal", tags=["Vendor Portal"]
+)
 
 
 if __name__ == "__main__":

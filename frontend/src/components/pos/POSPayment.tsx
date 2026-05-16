@@ -16,6 +16,7 @@ import {
 import { usePOSStore } from '../../stores/posStore';
 import { CreditBillingOption } from './CreditBillingOption';
 import { VoucherRedemption } from './VoucherRedemption';
+import { LoyaltyRedeemControl } from './LoyaltyRedeemControl';
 
 /** Safe currency format */
 function fc(amount: number | undefined | null): string {
@@ -131,6 +132,7 @@ export function StepPayment() {
       {/* Loyalty Points & Credit Billing Options */}
       {store.customer && !store.customer.id?.toString().startsWith('walkin-') && (
         <div className="space-y-3">
+          <LoyaltyRedeemControl />
           <CreditBillingOption />
           <VoucherRedemption />
         </div>

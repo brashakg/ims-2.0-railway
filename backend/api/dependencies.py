@@ -48,6 +48,14 @@ try:
     )
     from database.repositories.walkout_repository import WalkoutRepository
     from database.repositories.walkin_counter_repository import WalkInCounterRepository
+    from database.repositories.loyalty_repository import (
+        LoyaltyAccountRepository,
+        LoyaltySettingsRepository,
+        LoyaltyTransactionRepository,
+    )
+    from database.repositories.vendor_portal_token_repository import (
+        VendorPortalTokenRepository,
+    )
 
     DATABASE_AVAILABLE = True
 except ImportError as e:
@@ -288,4 +296,56 @@ def get_walkin_counter_repository():
             return WalkInCounterRepository(db.get_collection("walk_in_counters"))
         except Exception:
             return WalkInCounterRepository(db.walk_in_counters)
+    return None
+
+
+# ============================================================================
+# Loyalty engine repositories
+# ============================================================================
+
+
+def get_loyalty_account_repository():
+    """Per-customer loyalty account (one row per customer)."""
+    db = get_db()
+    if db is not None and db.is_connected:
+        try:
+            return LoyaltyAccountRepository(db.get_collection("loyalty_accounts"))
+        except Exception:
+            return LoyaltyAccountRepository(db.loyalty_accounts)
+    return None
+
+
+def get_loyalty_transaction_repository():
+    """Immutable EARN/REDEEM/EXPIRE/ADJUST ledger."""
+    db = get_db()
+    if db is not None and db.is_connected:
+        try:
+            return LoyaltyTransactionRepository(
+                db.get_collection("loyalty_transactions")
+            )
+        except Exception:
+            return LoyaltyTransactionRepository(db.loyalty_transactions)
+    return None
+
+
+def get_loyalty_settings_repository():
+    """Single-doc engine config (rates, tiers, caps)."""
+    db = get_db()
+    if db is not None and db.is_connected:
+        try:
+            return LoyaltySettingsRepository(db.get_collection("loyalty_settings"))
+        except Exception:
+            return LoyaltySettingsRepository(db.loyalty_settings)
+    return None
+
+
+def get_vendor_portal_token_repository():
+    """Get VendorPortalTokenRepository instance (vendor portal token-auth)."""
+    db = get_db()
+    if db is not None and db.is_connected:
+        try:
+            return VendorPortalTokenRepository(db.get_collection("vendor_portal_tokens"))
+        except Exception:
+            return VendorPortalTokenRepository(db.vendor_portal_tokens)
+    return None
     return None

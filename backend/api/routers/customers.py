@@ -208,17 +208,32 @@ async def search_customers(
 async def search_customer_by_phone(
     phone: str = Query(...), current_user: dict = Depends(get_current_user)
 ):
-    """Search customer by phone number (for quick lookup)"""
+    """Search customers by phone number — partial match.
+
+    Returns ``{customers: [...]}`` so the same response shape works for
+    every caller. Legacy callers that read the bare object (single
+    customer) keep working via the `customer` key for the first hit.
+    """
     repo = get_customer_repository()
 
-    if repo is not None:
-        customer = repo.find_by_mobile(phone)
-        if customer:
-            return customer
-        return None
+    if repo is None:
+        return {"customers": [], "customer": None}
 
-    # No database available
-    return None
+    digits = "".join(ch for ch in (phone or "") if ch.isdigit())
+    if not digits:
+        return {"customers": [], "customer": None}
+
+    # Try exact first (fast path), then fall back to a digit-prefix regex
+    # so partial typing ("9876") surfaces matches as the user types.
+    exact = repo.find_by_mobile(digits)
+    if exact:
+        return {"customers": [exact], "customer": exact}
+
+    matches = repo.search(digits, ["mobile"])
+    return {
+        "customers": matches,
+        "customer": matches[0] if matches else None,
+    }
 
 
 @router.get("/mobile/{mobile}")

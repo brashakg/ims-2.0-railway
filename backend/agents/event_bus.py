@@ -283,6 +283,8 @@ class EventBus:
                     continue
                 try:
                     data = json.loads(msg["data"])
+                    if not isinstance(data, dict):
+                        raise ValueError(f"Expected dict, got {type(data).__name__}")
                 except Exception as e:
                     logger.warning(f"[EVENT_BUS] Bad pubsub payload: {e}")
                     continue

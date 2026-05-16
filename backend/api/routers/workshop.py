@@ -14,7 +14,26 @@ import logging
 logger = logging.getLogger(__name__)
 
 from .auth import get_current_user
-from ..dependencies import get_workshop_repository, get_order_repository
+from ..dependencies import (
+    get_workshop_repository,
+    get_order_repository,
+    get_audit_repository,
+    get_vendor_repository,
+)
+
+
+# Vendor-side status taxonomy used by the admin endpoints below. Mirrors
+# vendor_portal.PORTAL_STATUSES — kept duplicated to avoid a cross-router
+# import cycle (vendor_portal imports from workshop's dependencies; if
+# workshop imported back we'd have a circle at module-load time).
+ADMIN_VENDOR_STATUSES = {
+    "RECEIVED",
+    "IN_PRODUCTION",
+    "DISPATCHED",
+    "DELIVERED",
+    "ON_HOLD",
+    "CANCELLED",
+}
 
 # Valid workshop job state transitions
 VALID_JOB_TRANSITIONS = {
@@ -85,6 +104,26 @@ class WorkshopJobUpdate(BaseModel):
 class FittingDetailsUpdate(BaseModel):
     """Payload for PATCH /workshop/jobs/{id}/fitting-details."""
     fitting_details: FittingDetails
+
+
+class WorkshopVendorPatch(BaseModel):
+    """Payload for PATCH /workshop/jobs/{id}/vendor — admin assigns / edits
+    the lens lab handling this job. All fields are individually optional;
+    we only update what's supplied (so a partial form save doesn't blow
+    away tracking_url, etc.)."""
+    vendor_id: Optional[str] = None
+    vendor_order_id: Optional[str] = None
+    vendor_tracking_url: Optional[str] = None
+    vendor_dispatch_date: Optional[str] = None  # ISO date
+    vendor_received_date: Optional[str] = None
+
+
+class WorkshopVendorStatusBody(BaseModel):
+    """Payload for POST /workshop/jobs/{id}/vendor-status — admin (IMS user)
+    logging a vendor-status update on behalf of the lab (e.g. lab phoned
+    them). Source on the resulting history row is `ims_user`."""
+    status: str
+    note: Optional[str] = None
 
 
 # ============================================================================
@@ -381,6 +420,41 @@ async def get_dashboard_kpis(
         "avg_turnaround_days": avg_turnaround,
         "store_id": active_store,
         "as_of": now.isoformat(),
+    }
+
+
+@router.get("/jobs/by-vendor/{vendor_id}")
+async def list_jobs_by_vendor(
+    vendor_id: str,
+    include_delivered: bool = Query(False),
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=500),
+    current_user: dict = Depends(get_current_user),
+):
+    """Admin view of the same queue an external vendor sees through
+    their portal — useful for checking what the lab is supposed to be
+    seeing without copy-pasting their token URL.
+
+    Registered BEFORE `/jobs/{job_id}` so the literal path segment
+    `by-vendor` doesn't get matched as a job_id (FastAPI matches by
+    registration order — first match wins).
+    """
+    repo = get_workshop_repository()
+    if repo is None:
+        return {"vendor_id": vendor_id, "jobs": [], "total": 0}
+
+    filter_dict: dict = {"vendor_id": vendor_id}
+    if not include_delivered:
+        filter_dict["status"] = {"$nin": ["DELIVERED", "CANCELLED"]}
+
+    jobs = repo.find_many(
+        filter_dict, skip=skip, limit=limit, sort=[("expected_date", 1)]
+    ) or []
+
+    return {
+        "vendor_id": vendor_id,
+        "jobs": [job_to_frontend(j) for j in jobs],
+        "total": len(jobs),
     }
 
 
@@ -744,3 +818,160 @@ async def rework_job(
         raise HTTPException(status_code=500, detail="Failed to send job for rework")
 
     return {"message": "Job sent for rework"}
+
+
+# ============================================================================
+# VENDOR / LENS-LAB ADMIN ENDPOINTS
+# ============================================================================
+# These three endpoints are the IMS-side complement to the public token-auth
+# vendor portal (backend/api/routers/vendor_portal.py). Admin users assign a
+# lab to a job, log status updates the lab phoned in, and pull a per-vendor
+# queue view.
+
+
+@router.patch("/jobs/{job_id}/vendor")
+async def patch_job_vendor(
+    job_id: str,
+    payload: WorkshopVendorPatch,
+    current_user: dict = Depends(get_current_user),
+):
+    """Admin assigns / updates the lens lab handling a workshop job.
+
+    Setting `vendor_id` for the first time is the trigger that makes a
+    job visible on the corresponding vendor portal token's `/jobs` feed.
+    """
+    repo = get_workshop_repository()
+    if repo is None:
+        raise HTTPException(status_code=503, detail="Workshop repository unavailable")
+
+    job = repo.find_by_id(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Workshop job not found")
+
+    # Only admin / store-manager / workshop-staff can assign vendors. Sales
+    # staff can see jobs but shouldn't be touching vendor IDs.
+    user_roles = current_user.get("roles", [])
+    if not any(r in user_roles for r in ["SUPERADMIN", "ADMIN", "AREA_MANAGER", "STORE_MANAGER", "WORKSHOP_STAFF"]):
+        raise HTTPException(status_code=403, detail="Not authorized to manage vendor assignment")
+
+    update = payload.model_dump(exclude_unset=True, exclude_none=True)
+    if not update:
+        return {"job_id": job_id, "message": "No changes"}
+
+    # Validate vendor exists if a new vendor_id is supplied
+    if "vendor_id" in update:
+        vendor_repo = get_vendor_repository()
+        if vendor_repo is not None:
+            vendor = vendor_repo.find_by_id(update["vendor_id"])
+            if vendor is None:
+                raise HTTPException(status_code=404, detail="Vendor not found")
+            # Cache the vendor's display name on the job for fast list rendering
+            update["vendor_name"] = vendor.get("trade_name") or vendor.get("legal_name")
+
+    update["vendor_updated_by"] = current_user.get("user_id")
+    update["vendor_updated_at"] = datetime.now()
+
+    if not repo.update(job_id, update):
+        raise HTTPException(status_code=500, detail="Failed to update vendor fields")
+
+    # Audit
+    try:
+        audit = get_audit_repository()
+        if audit is not None:
+            audit.create({
+                "action": "workshop.vendor_assign",
+                "entity_type": "workshop_job",
+                "entity_id": job_id,
+                "store_id": job.get("store_id"),
+                "user_id": current_user.get("user_id"),
+                "detail": update,
+            })
+    except Exception as e:
+        logger.warning(f"workshop vendor_assign audit failed: {e}")
+
+    return {"job_id": job_id, "message": "Vendor fields updated", **update}
+
+
+@router.post("/jobs/{job_id}/vendor-status")
+async def post_admin_vendor_status(
+    job_id: str,
+    payload: WorkshopVendorStatusBody,
+    current_user: dict = Depends(get_current_user),
+):
+    """IMS user logs a vendor status update (e.g. "lab called, says
+    DISPATCHED today"). Logged with source='ims_user' so the audit trail
+    can distinguish phoned-in updates from the lab's own portal posts.
+    """
+    if payload.status not in ADMIN_VENDOR_STATUSES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unknown vendor status. Allowed: {', '.join(sorted(ADMIN_VENDOR_STATUSES))}",
+        )
+
+    repo = get_workshop_repository()
+    if repo is None:
+        raise HTTPException(status_code=503, detail="Workshop repository unavailable")
+
+    job = repo.find_by_id(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Workshop job not found")
+    if not job.get("vendor_id"):
+        raise HTTPException(
+            status_code=400,
+            detail="Job has no vendor assigned. PATCH /vendor first.",
+        )
+
+    now = datetime.now()
+    history_entry = {
+        "status": payload.status,
+        "note": payload.note,
+        "source": "ims_user",
+        "logged_by": current_user.get("user_id"),
+        "logged_at": now.isoformat(),
+    }
+    history = list(job.get("vendor_status_history") or [])
+    history.append(history_entry)
+
+    update = {
+        "vendor_status": payload.status,
+        "vendor_status_history": history,
+        "vendor_status_updated_at": now,
+    }
+    if payload.status == "DISPATCHED" and not job.get("vendor_dispatch_date"):
+        update["vendor_dispatch_date"] = now.isoformat()
+    if payload.status == "DELIVERED" and not job.get("vendor_received_date"):
+        update["vendor_received_date"] = now.isoformat()
+
+    repo.update(job_id, update)
+
+    # Audit
+    try:
+        audit = get_audit_repository()
+        if audit is not None:
+            audit.create({
+                "action": "workshop.vendor_status",
+                "entity_type": "workshop_job",
+                "entity_id": job_id,
+                "store_id": job.get("store_id"),
+                "user_id": current_user.get("user_id"),
+                "detail": {
+                    "vendor_id": job.get("vendor_id"),
+                    "status": payload.status,
+                    "source": "ims_user",
+                    "note": payload.note,
+                },
+            })
+    except Exception as e:
+        logger.warning(f"workshop vendor_status (ims) audit failed: {e}")
+
+    return {
+        "job_id": job_id,
+        "vendor_status": payload.status,
+        "logged_at": history_entry["logged_at"],
+        "source": "ims_user",
+    }
+
+
+# NOTE: `/jobs/by-vendor/{vendor_id}` is registered up near the other
+# specific `/jobs/...` routes so it doesn't get shadowed by the catch-all
+# `/jobs/{job_id}` (FastAPI matches by registration order).

@@ -219,6 +219,42 @@ export const vendorsApi = {
     const response = await api.get('/vendors/grn', { params: { store_id: storeId, status: 'PENDING' } });
     return response.data;
   },
+
+  // Vendor portal token (May 2026) — admin generates a signed URL the
+  // lens lab opens directly without an IMS user account.
+  generatePortalToken: async (vendorId: string, expiresDays?: number) => {
+    const response = await api.post(
+      `/vendors/${vendorId}/portal-token`,
+      expiresDays ? { expires_days: expiresDays } : {},
+    );
+    return response.data as {
+      token_id: string;
+      portal_url: string;
+      expires_at: string;
+      vendor_id: string;
+      vendor_name: string;
+    };
+  },
+
+  listPortalTokens: async (vendorId: string) => {
+    const response = await api.get(`/vendors/${vendorId}/portal-tokens`);
+    return response.data as {
+      tokens: Array<{
+        token_id: string;
+        created_at: string;
+        expires_at: string;
+        active: boolean;
+        last_used_at: string | null;
+      }>;
+    };
+  },
+
+  revokePortalToken: async (vendorId: string, tokenId: string) => {
+    const response = await api.delete(
+      `/vendors/${vendorId}/portal-tokens/${tokenId}`,
+    );
+    return response.data;
+  },
 };
 
 // ============================================================================

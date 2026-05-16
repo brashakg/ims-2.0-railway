@@ -182,7 +182,7 @@ export const handoffsApi = {
     const response = await api.get<Blob>(`/handoffs/${id}/file`, {
       responseType: 'blob',
     });
-    const mime_type = response.headers['content-type'] || 'application/octet-stream';
+    const mime_type = (response.headers['content-type'] as string) || 'application/octet-stream';
     const filename = filenameFromContentDisposition(
       response.headers['content-disposition'],
       `handoff-${id}`,

@@ -491,6 +491,189 @@ async def upsert_lens_pricing(payload: LensPricingCreate):
     return _scrub(body) or {}
 
 
+# ---------------- Lens pricing RANGES (May 2026) ----------------
+# Range-wise tier pricing. Avoids the per-SKU explosion when a chain
+# has 50+ brands × 5 indices × ~80 sphere/cyl combos × 4 coatings.
+# Operator sets brackets like:
+#   Sphere ±0.00 → ±2.00 = ₹1,200
+#   Sphere ±2.25 → ±4.00 = ₹1,500
+# Pure resolver lives in `api/services/lens_pricing.py`.
+
+
+class LensPricingRangeCreate(BaseModel):
+    brand_id: str
+    index_id: str
+    category: str = Field(..., description="SINGLE_VISION | BIFOCAL | PROGRESSIVE | OFFICE")
+    parameter: str = Field(..., description="sphere | cylinder | addition")
+    min_value: float = Field(..., description="Inclusive (signed; absolute value used for matching)")
+    max_value: float = Field(..., description="Inclusive (signed; absolute value used for matching)")
+    base_price: float = Field(..., ge=0)
+
+
+class LensPricingRangeUpdate(BaseModel):
+    min_value: Optional[float] = None
+    max_value: Optional[float] = None
+    base_price: Optional[float] = Field(None, ge=0)
+    is_active: Optional[bool] = None
+
+
+class LensPriceQuoteInput(BaseModel):
+    brand_id: str
+    index_id: str
+    category: str
+    sphere: Optional[float] = None
+    cylinder: Optional[float] = None
+    addition: Optional[float] = None
+    coatings: List[str] = Field(default_factory=list)
+
+
+_VALID_PARAMS = frozenset({"sphere", "cylinder", "addition"})
+_VALID_CATEGORIES = frozenset({"SINGLE_VISION", "BIFOCAL", "PROGRESSIVE", "OFFICE"})
+
+
+@router.get("/lens/pricing-ranges")
+async def list_lens_pricing_ranges(
+    brand_id: Optional[str] = None,
+    index_id: Optional[str] = None,
+    category: Optional[str] = None,
+):
+    """List active pricing ranges. Each row matches a (brand × index ×
+    category × parameter) tier slot."""
+    filter_: Dict = {"is_active": True}
+    if brand_id:
+        filter_["brand_id"] = brand_id
+    if index_id:
+        filter_["index_id"] = index_id
+    if category:
+        filter_["category"] = category
+    return _list_envelope(
+        "lens_pricing_ranges", "ranges", filter_=filter_, sort_field="base_price"
+    )
+
+
+@router.post("/lens/pricing-ranges", status_code=201)
+async def create_lens_pricing_range(payload: LensPricingRangeCreate):
+    if payload.parameter not in _VALID_PARAMS:
+        raise HTTPException(status_code=400, detail=f"parameter must be one of {sorted(_VALID_PARAMS)}")
+    if payload.category not in _VALID_CATEGORIES:
+        raise HTTPException(status_code=400, detail=f"category must be one of {sorted(_VALID_CATEGORIES)}")
+    if abs(payload.min_value) > abs(payload.max_value):
+        raise HTTPException(status_code=400, detail="abs(min_value) must be ≤ abs(max_value)")
+
+    coll = _coll("lens_pricing_ranges")
+    if coll is None:
+        raise HTTPException(status_code=503, detail="Database not available")
+
+    # Overlap detection — same key + overlapping bracket = 409
+    from ..services.lens_pricing import detect_overlap
+    existing = list(coll.find({
+        "brand_id": payload.brand_id,
+        "index_id": payload.index_id,
+        "category": payload.category,
+        "parameter": payload.parameter,
+    }))
+    body = payload.model_dump()
+    overlap = detect_overlap(body, [_scrub(dict(r)) for r in existing if r])
+    if overlap is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Overlap with existing range {overlap.get('range_id')} ({overlap.get('min_value')}..{overlap.get('max_value')})",
+        )
+
+    return _create_doc("lens_pricing_ranges", body, "range_id")
+
+
+@router.put("/lens/pricing-ranges/{range_id}")
+async def update_lens_pricing_range(range_id: str, payload: LensPricingRangeUpdate):
+    return _update_doc(
+        "lens_pricing_ranges", "range_id", range_id, payload.model_dump(exclude_unset=True)
+    )
+
+
+@router.delete("/lens/pricing-ranges/{range_id}")
+async def delete_lens_pricing_range(range_id: str):
+    """Soft delete: flips is_active=False so historic resolutions still
+    explain. Hard-delete is intentionally not exposed."""
+    coll = _coll("lens_pricing_ranges")
+    if coll is None:
+        raise HTTPException(status_code=503, detail="Database not available")
+    if not coll.find_one({"range_id": range_id}):
+        raise HTTPException(status_code=404, detail=f"Range {range_id} not found")
+    coll.update_one({"range_id": range_id}, {"$set": {"is_active": False, "updated_at": _now()}})
+    return {"deactivated": True, "range_id": range_id}
+
+
+@router.post("/lens/pricing-ranges/bulk", status_code=201)
+async def bulk_create_lens_pricing_ranges(payload: List[LensPricingRangeCreate]):
+    """Bulk create — chain-wide price refresh. All-or-nothing on overlap."""
+    if not payload:
+        raise HTTPException(status_code=400, detail="At least one range required")
+    coll = _coll("lens_pricing_ranges")
+    if coll is None:
+        raise HTTPException(status_code=503, detail="Database not available")
+    created: List[Dict] = []
+    for item in payload:
+        if item.parameter not in _VALID_PARAMS:
+            raise HTTPException(status_code=400, detail=f"parameter must be one of {sorted(_VALID_PARAMS)}")
+        if item.category not in _VALID_CATEGORIES:
+            raise HTTPException(status_code=400, detail=f"category must be one of {sorted(_VALID_CATEGORIES)}")
+        body = item.model_dump()
+        body["range_id"] = _new_id()
+        body["_id"] = body["range_id"]
+        body["created_at"] = _now()
+        body["updated_at"] = _now()
+        body["is_active"] = True
+        coll.insert_one(body)
+        created.append(_scrub(body) or {})
+    return {"created": created, "total": len(created)}
+
+
+@router.post("/lens/pricing-ranges/quote")
+async def quote_lens_price(payload: LensPriceQuoteInput):
+    """Single source of truth for "what does this lens cost given these
+    Rx params" — POS calls this on the prescription step.
+
+    Lookup priority: exact_match (lens_pricing_masters) → range_match
+    (lens_pricing_ranges) → no_pricing (404 with hint).
+    """
+    from ..services.lens_pricing import resolve_price
+
+    coll_ranges = _coll("lens_pricing_ranges")
+    coll_exact = _coll("lens_pricing_masters")
+    coll_brand = _coll("lens_brand_masters")
+    coll_index = _coll("lens_index_masters")
+    coll_coatings = _coll("lens_coating_masters")
+
+    ranges = list(coll_ranges.find({"is_active": True})) if coll_ranges is not None else []
+    exact_pricing = list(coll_exact.find({})) if coll_exact is not None else []
+    brand = coll_brand.find_one({"brand_id": payload.brand_id}) if coll_brand is not None else None
+    index_master = coll_index.find_one({"index_id": payload.index_id}) if coll_index is not None else None
+    coating_masters = list(coll_coatings.find({})) if coll_coatings is not None else []
+
+    rx = {
+        "sphere": payload.sphere,
+        "cylinder": payload.cylinder,
+        "addition": payload.addition,
+    }
+    quote = resolve_price(
+        rx=rx,
+        brand_id=payload.brand_id,
+        index_id=payload.index_id,
+        category=payload.category,
+        coatings=payload.coatings,
+        exact_pricing=[_scrub(dict(p)) for p in exact_pricing if p],
+        ranges=[_scrub(dict(r)) for r in ranges if r],
+        brand=_scrub(dict(brand)) if brand else None,
+        index_master=_scrub(dict(index_master)) if index_master else None,
+        coating_masters=[_scrub(dict(c)) for c in coating_masters if c],
+    )
+    if not quote.get("ok"):
+        # Soft 200 with `ok=False` so the POS can fall back to manual pricing
+        # rather than crashing the checkout. The hint guides the operator.
+        return quote
+    return quote
+
+
 # ============================================================================
 # PRODUCTS — bulk-import + generate-sku helpers
 # ============================================================================

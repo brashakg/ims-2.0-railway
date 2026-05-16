@@ -20,6 +20,7 @@ import { Analytics } from '@vercel/analytics/react';
 
 // Lazy load pages for code splitting
 const LoginPage = lazy(() => import('./pages/auth/LoginPage').then(m => ({ default: m.LoginPage })));
+const VendorPortalPage = lazy(() => import('./pages/vendor-portal/VendorPortalPage'));
 const DashboardPage = lazy(() => import('./pages/dashboard/HubPage'));
 const ExecutiveDashboard = lazy(() => import('./pages/dashboard/ExecutiveDashboard').then(m => ({ default: m.ExecutiveDashboard })));
 const EnterpriseAnalyticsDashboard = lazy(() => import('./pages/dashboard/EnterpriseAnalyticsDashboard'));
@@ -28,6 +29,7 @@ const CustomersPage = lazy(() => import('./pages/customers/CustomersPage').then(
 const Customer360Dashboard = lazy(() => import('./pages/customers/Customer360Dashboard').then(m => ({ default: m.Customer360Dashboard })));
 const CustomerSegmentation = lazy(() => import('./pages/customers/CustomerSegmentation').then(m => ({ default: m.CustomerSegmentation })));
 const LoyaltyProgram = lazy(() => import('./pages/customers/LoyaltyProgram').then(m => ({ default: m.LoyaltyProgram })));
+const LoyaltyLedger = lazy(() => import('./pages/customers/LoyaltyLedger'));
 const CampaignManager = lazy(() => import('./pages/customers/CampaignManager').then(m => ({ default: m.CampaignManager })));
 const ReferralTracker = lazy(() => import('./pages/customers/ReferralTracker').then(m => ({ default: m.ReferralTracker })));
 const CustomerFeedback = lazy(() => import('./pages/customers/CustomerFeedback').then(m => ({ default: m.CustomerFeedback })));
@@ -132,6 +134,11 @@ function App() {
                   {/* Public routes */}
                   <Route path="/login" element={<LoginPage />} />
                   <Route path="/unauthorized" element={<UnauthorizedPage />} />
+                  {/* Vendor Portal — public, token-auth via URL.
+                      Mounted OUTSIDE ProtectedRoute because external lens
+                      labs hit this without an IMS user account. The
+                      tokenId in the URL IS the auth (server-side check). */}
+                  <Route path="/vendor-portal/:tokenId" element={<VendorPortalPage />} />
 
                 {/* Protected routes with layout */}
                 <Route
@@ -243,6 +250,18 @@ function App() {
                         allowedRoles={['SUPERADMIN', 'ADMIN', 'STORE_MANAGER']}
                       >
                         <LoyaltyProgram />
+                      </ProtectedRoute>
+                    }
+                  />
+
+                  {/* CRM: Per-customer Loyalty Ledger (audit trail) */}
+                  <Route
+                    path="customers/:customerId/loyalty"
+                    element={
+                      <ProtectedRoute
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'SALES_CASHIER', 'CASHIER', 'SALES_STAFF']}
+                      >
+                        <LoyaltyLedger />
                       </ProtectedRoute>
                     }
                   />
