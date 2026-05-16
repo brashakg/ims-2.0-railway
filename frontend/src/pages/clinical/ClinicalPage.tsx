@@ -224,55 +224,136 @@ export function ClinicalPage() {
     }
   };
 
-  // Save customer and add to queue
+  // Save customer and add to queue.
+  // The flow tolerates duplicates by design: if a record with this mobile
+  // already exists we silently use it instead of 400'ing — repeat walk-ins
+  // shouldn't get blocked at the front desk. Order of operations:
+  //   1. sanitize the mobile to 10 digits (matches backend regex)
+  //   2. lookup by mobile — if found, use that record
+  //   3. otherwise create
+  //   4. if create races against a parallel create and 400s with "already
+  //      exists", retry the lookup and use the winner
+  //   5. queue the patient against whichever customer id we ended up with
   const handleSaveCustomer = async (customerData: CustomerFormData) => {
     try {
-      // Map to backend CustomerCreate schema (same as POS, same as CustomersPage)
-      const customerPayload = {
-        name: customerData.fullName,
-        mobile: customerData.mobileNumber,
-        email: customerData.email || undefined,
-        customer_type: customerData.customerType,
-        gstin: customerData.customerType === 'B2B' ? customerData.gstNumber : undefined,
-        billing_address: (customerData.address || customerData.city || customerData.pincode) ? {
-          address: customerData.address,
-          city: customerData.city,
-          state: customerData.state,
-          pincode: customerData.pincode,
-        } : undefined,
-        patients: (customerData.patients || []).map(p => ({
-          name: p.name,
-          mobile: p.mobile || undefined,
-          dob: p.dateOfBirth || undefined,
-          relation: p.relation || 'Self',
-        })),
+      const sanitizedMobile = (customerData.mobileNumber || '').replace(/\D/g, '').slice(-10);
+      if (sanitizedMobile.length !== 10) {
+        toast.error('Mobile number must contain 10 digits');
+        throw new Error('Invalid mobile');
+      }
+
+      const lookupByMobile = async (): Promise<any | null> => {
+        try {
+          const r = await customerApi.searchByPhone(sanitizedMobile);
+          if (!r) return null;
+          if (Array.isArray(r)) return r[0] || null;
+          if ((r as any).customer) return (r as any).customer;
+          if (Array.isArray((r as any).customers)) return (r as any).customers[0] || null;
+          // Bare object response (legacy shape)
+          if ((r as any).customer_id || (r as any)._id || (r as any).id) return r;
+          return null;
+        } catch {
+          return null;
+        }
       };
 
-      // Create customer in the system
-      await customerApi.createCustomer(customerPayload as any);
+      let existing = await lookupByMobile();
+      let isExisting = !!existing;
 
-      // After customer is created, add the first patient to the queue
-      if (customerData.patients && customerData.patients.length > 0) {
-        const firstPatient = customerData.patients[0];
+      let customerId: string | undefined;
+      let customerName: string;
 
-        await clinicalApi.addToQueue({
-          storeId: user?.activeStoreId || '',
-          patientName: firstPatient.name,
-          customerPhone: customerData.mobileNumber,
-          age: firstPatient.dateOfBirth ? calculateAge(firstPatient.dateOfBirth) : undefined,
-          reason: 'Eye examination',
-        });
-
-        toast.success(`Customer created and ${firstPatient.name} added to queue`);
+      if (existing) {
+        customerId = existing.customer_id || existing._id || existing.id;
+        customerName = existing.name || customerData.fullName;
       } else {
-        toast.success('Customer created successfully');
+        const customerPayload = {
+          name: customerData.fullName,
+          mobile: sanitizedMobile,
+          email: customerData.email || undefined,
+          customer_type: customerData.customerType,
+          gstin: customerData.customerType === 'B2B' ? customerData.gstNumber : undefined,
+          billing_address: (customerData.address || customerData.city || customerData.pincode) ? {
+            address: customerData.address,
+            city: customerData.city,
+            state: customerData.state,
+            pincode: customerData.pincode,
+          } : undefined,
+          patients: (customerData.patients || []).map(p => ({
+            name: p.name,
+            mobile: p.mobile ? p.mobile.replace(/\D/g, '').slice(-10) : undefined,
+            dob: p.dateOfBirth || undefined,
+            relation: p.relation || 'Self',
+          })),
+        };
+
+        try {
+          const created = await customerApi.createCustomer(customerPayload as any);
+          customerId = created?.customer_id || created?.id;
+          customerName = created?.name || customerData.fullName;
+        } catch (err: any) {
+          const detail: string =
+            err?.response?.data?.detail ?? err?.message ?? '';
+          if (/already exists/i.test(detail)) {
+            // Race: someone created the record between our lookup and POST.
+            // Fall back to lookup-and-use rather than blocking the operator.
+            existing = await lookupByMobile();
+            if (existing) {
+              customerId = existing.customer_id || existing._id || existing.id;
+              customerName = existing.name || customerData.fullName;
+              isExisting = true;
+            } else {
+              throw err;
+            }
+          } else {
+            throw err;
+          }
+        }
+      }
+
+      // Decide which patient to queue. Prefer the modal's first patient (the
+      // operator's explicit choice for this visit); fall back to the
+      // existing customer's first registered patient; finally fall back to
+      // the customer themselves.
+      const modalPatient = customerData.patients?.[0];
+      const existingPatient =
+        Array.isArray(existing?.patients) && existing.patients.length > 0
+          ? existing.patients[0]
+          : null;
+      const queuePatientName =
+        (modalPatient?.name && modalPatient.name.trim()) ||
+        (existingPatient?.name) ||
+        customerName;
+      const queueAge = modalPatient?.dateOfBirth
+        ? calculateAge(modalPatient.dateOfBirth)
+        : undefined;
+
+      await clinicalApi.addToQueue({
+        storeId: user?.activeStoreId || '',
+        patientName: queuePatientName,
+        customerPhone: sanitizedMobile,
+        customerId,
+        age: queueAge,
+        reason: 'Eye examination',
+      });
+
+      if (isExisting) {
+        toast.info(
+          `Existing customer found — ${queuePatientName} added to queue (using ${customerName})`,
+        );
+      } else {
+        toast.success(
+          `Customer created and ${queuePatientName} added to queue`,
+        );
       }
 
       setShowAddCustomerModal(false);
+      setAddCustomerInitialName('');
       await loadData();
     } catch (error: any) {
-      toast.error(error?.message || 'Failed to create customer');
-      throw error; // Re-throw to prevent modal from closing
+      const detail = error?.response?.data?.detail || error?.message || 'Failed to add customer';
+      toast.error(detail);
+      throw error;
     }
   };
 
