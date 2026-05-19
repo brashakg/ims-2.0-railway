@@ -740,7 +740,7 @@
   background: var(--bg);
   transition: grid-template-columns .15s ease;
 }
-.app-shell.rail-expanded { --rail-width: 200px; }
+.app-shell.rail-expanded { --rail-width: 224px; }
 
 /* Left rail */
 .rail {
@@ -755,12 +755,56 @@
   overflow: visible;
 }
 .rail .brand {
-  width: 40px; height: 40px; margin: 0 auto 16px;
+  width: 40px; height: 40px; margin: 0 auto 0;
   border-radius: 10px;
   display: grid; place-items: center;
   background: var(--bv);
   color: #fff;
   font-family: var(--font-display); font-size: 20px;
+  flex-shrink: 0;
+}
+
+/* Header row — brand + (optional) wordmark + toggle button. Sits above
+   the menu so the operator can flip between icon-only and icon+label
+   without hunting for a corner control. */
+.rail .rail-header {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 0 16px;
+  gap: 8px;
+}
+.rail.expanded .rail-header {
+  justify-content: space-between;
+  padding: 0 12px 16px;
+}
+.rail .rail-brand-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+.rail .rail-wordmark {
+  font-family: var(--font-display);
+  font-size: 16px;
+  font-weight: 600;
+  color: #fff;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Group titles — render in expanded mode only, separating nav clusters
+   like "Sales floor", "Stock & supply", "Ops", etc. */
+.rail .rail-group-title {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #6f6f68;
+  padding: 14px 22px 6px;
 }
 .rail .rail-group { display: contents; }
 .rail .rail-item {
@@ -796,28 +840,40 @@
   display: grid; place-items: center;
   font-size: 12px; font-weight: 600; cursor: pointer;
 }
+.rail .rail-avatar-initials {
+  display: inline-grid; place-items: center;
+}
 
-/* Collapse / expand toggle button — sits above the avatar at the bottom. */
+/* Collapse / expand toggle — lives in the rail header (top), beside the
+   wordmark when expanded, or below the brand glyph when collapsed. */
 .rail .rail-toggle {
   position: relative;
-  width: 48px; height: 36px; margin: 4px auto;
-  border-radius: 10px;
+  width: 28px; height: 28px;
+  border-radius: 8px;
   display: grid; place-items: center;
   background: transparent;
-  border: none;
+  border: 1px solid #2e2e2b;
   color: #9a9a92;
   cursor: pointer;
-  transition: background .12s, color .12s;
+  transition: background .12s, color .12s, border-color .12s;
+  flex-shrink: 0;
 }
-.rail .rail-toggle:hover { background: #222220; color: #fff; }
+.rail:not(.expanded) .rail-toggle {
+  margin: 6px auto 0;
+}
+.rail .rail-toggle:hover {
+  background: #222220;
+  color: #fff;
+  border-color: #3a3a37;
+}
 .rail .rail-toggle:focus-visible {
   outline: 2px solid var(--bv); outline-offset: 2px;
 }
 
-/* Expanded mode — labels render inline next to icons; rail widens to 200px. */
-.rail.expanded .brand { margin: 0 16px 16px; }
+/* Expanded mode — labels render inline next to icons; rail widens to 224px. */
 .rail.expanded .rail-item {
   width: auto; margin: 2px 10px;
+  height: 38px;
   display: flex; align-items: center; gap: 12px;
   padding: 0 12px; justify-content: flex-start;
 }
@@ -826,28 +882,31 @@
   position: static; transform: none;
   opacity: 1; pointer-events: auto;
   background: transparent; color: inherit; padding: 0;
-  font-size: 13px; box-shadow: none;
+  font-size: 13.5px; box-shadow: none;
   transition: none;
 }
 .rail.expanded .rail-item:hover .rail-label { opacity: 1; }
-.rail.expanded .rail-toggle {
-  width: auto; margin: 4px 10px;
-  display: flex; align-items: center; gap: 12px;
-  padding: 0 12px; justify-content: flex-start;
+
+/* Avatar — collapsed: circle with initials; expanded: pill with first
+   name beside the initials. */
+.rail.expanded .rail-avatar {
+  width: auto; margin: 4px 10px 0;
+  height: 44px;
+  padding: 4px;
+  border-radius: 10px;
+  display: flex; align-items: center; gap: 10px;
+  justify-content: flex-start;
+  background: #1d1d1b;
 }
-.rail.expanded .rail-toggle .rail-label {
-  position: static; transform: none; opacity: 1;
-  background: transparent; color: inherit; padding: 0;
-  font-size: 13px; box-shadow: none; pointer-events: auto;
+.rail.expanded .rail-avatar-initials {
+  width: 32px; height: 32px; border-radius: 50%;
+  background: #2e2e2b; flex-shrink: 0;
 }
-.rail:not(.expanded) .rail-toggle .rail-label {
-  /* Tooltip-only when collapsed, mirroring rail-item behavior. */
-  position: absolute; left: calc(100% + 10px); top: 50%; transform: translateY(-50%);
-  background: #141413; color: #fff; padding: 4px 8px; border-radius: 6px;
-  font-size: 11.5px; white-space: nowrap; opacity: 0; pointer-events: none;
-  transition: opacity .15s; z-index: 30; box-shadow: var(--sh-md);
+.rail .rail-avatar-name {
+  font-size: 13px; font-weight: 500; color: #e9e9e4;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  padding-right: 6px;
 }
-.rail:not(.expanded) .rail-toggle:hover .rail-label { opacity: 1; }
 
 /* Main column */
 .app-main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }

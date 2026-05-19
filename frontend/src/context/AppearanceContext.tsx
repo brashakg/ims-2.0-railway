@@ -39,8 +39,14 @@ function readDensity(): Density {
 }
 
 function readRailExpanded(): boolean {
-  if (typeof localStorage === 'undefined') return false;
-  return localStorage.getItem(RAIL_KEY) === '1';
+  if (typeof localStorage === 'undefined') return true;
+  // Default to expanded so first-time users see icon + label and discover
+  // the nav. Operators can collapse to icon-only via the toggle and the
+  // pref is persisted from then on.
+  const v = localStorage.getItem(RAIL_KEY);
+  if (v === '1') return true;
+  if (v === '0') return false;
+  return true;
 }
 
 export function AppearanceProvider({ children }: { children: ReactNode }) {

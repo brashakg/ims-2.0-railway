@@ -17,52 +17,75 @@ interface NavItem {
   requireRoles?: UserRole[]; // if set, only visible to users holding one of these roles
 }
 
-// Rail groups — dividers render between groups
-const RAIL_GROUPS: NavItem[][] = [
-  // Overview
-  [
-    { id: 'hub', label: 'Hub', to: '/dashboard', icon: 'home' },
-  ],
-  // Sales floor
-  [
-    { id: 'pos', label: 'POS', to: '/pos', icon: 'cart' },
-    { id: 'customers', label: 'Customers', to: '/customers', icon: 'users' },
-    { id: 'walkouts', label: 'Walkouts', to: '/walkouts', icon: 'user' },
-    { id: 'orders', label: 'Orders', to: '/orders', icon: 'receipt' },
-    { id: 'returns', label: 'Returns', to: '/returns', icon: 'refresh' },
-  ],
-  // Clinical
-  [
-    { id: 'clinical', label: 'Clinical', to: '/clinical', icon: 'eye' },
-  ],
-  // Stock & supply
-  [
-    { id: 'inventory', label: 'Inventory', to: '/inventory', icon: 'box' },
-    { id: 'purchase', label: 'Purchase', to: '/purchase', icon: 'truck' },
-    { id: 'workshop', label: 'Workshop', to: '/workshop', icon: 'wrench' },
-    { id: 'catalog', label: 'Catalog', to: '/catalog/add', icon: 'tag' },
-  ],
-  // Ops
-  [
-    { id: 'tasks', label: 'Tasks & SOPs', to: '/tasks', icon: 'check' },
-    { id: 'hr', label: 'HR', to: '/hr', icon: 'user' },
-    { id: 'incentive', label: 'Incentive', to: '/incentive', icon: 'zap' },
-  ],
-  // Analysis
-  [
-    { id: 'reports', label: 'Reports', to: '/reports', icon: 'chart' },
-    { id: 'finance', label: 'Finance', to: '/finance/dashboard', icon: 'banknote' },
-  ],
-  // Growth
-  [
-    { id: 'marketing', label: 'Marketing', to: '/customers/campaigns', icon: 'megaphone' },
-  ],
-  // Support + Jarvis + Setup
-  [
-    { id: 'print', label: 'Print', to: '/print', icon: 'printer' },
-    { id: 'jarvis', label: 'Jarvis', to: '/jarvis', icon: 'cpu', requireRoles: ['SUPERADMIN'] },
-    { id: 'setup', label: 'Store Setup', to: '/settings', icon: 'settings' },
-  ],
+interface NavGroup {
+  /** Section title rendered only in expanded mode. Omit for the first
+   *  group so the menu starts flush with the brand wordmark. */
+  title?: string;
+  items: NavItem[];
+}
+
+// Rail groups — section titles render only in expanded mode; thin
+// dividers render between groups in collapsed mode for orientation.
+const RAIL_GROUPS: NavGroup[] = [
+  {
+    items: [
+      { id: 'hub', label: 'Hub', to: '/dashboard', icon: 'home' },
+    ],
+  },
+  {
+    title: 'Sales floor',
+    items: [
+      { id: 'pos', label: 'POS', to: '/pos', icon: 'cart' },
+      { id: 'customers', label: 'Customers', to: '/customers', icon: 'users' },
+      { id: 'walkouts', label: 'Walkouts', to: '/walkouts', icon: 'user' },
+      { id: 'orders', label: 'Orders', to: '/orders', icon: 'receipt' },
+      { id: 'returns', label: 'Returns', to: '/returns', icon: 'refresh' },
+    ],
+  },
+  {
+    title: 'Clinical',
+    items: [
+      { id: 'clinical', label: 'Clinical', to: '/clinical', icon: 'eye' },
+    ],
+  },
+  {
+    title: 'Stock & supply',
+    items: [
+      { id: 'inventory', label: 'Inventory', to: '/inventory', icon: 'box' },
+      { id: 'purchase', label: 'Purchase', to: '/purchase', icon: 'truck' },
+      { id: 'workshop', label: 'Workshop', to: '/workshop', icon: 'wrench' },
+      { id: 'catalog', label: 'Catalog', to: '/catalog/add', icon: 'tag' },
+    ],
+  },
+  {
+    title: 'Ops',
+    items: [
+      { id: 'tasks', label: 'Tasks & SOPs', to: '/tasks', icon: 'check' },
+      { id: 'hr', label: 'HR', to: '/hr', icon: 'user' },
+      { id: 'incentive', label: 'Incentive', to: '/incentive', icon: 'zap' },
+    ],
+  },
+  {
+    title: 'Analysis',
+    items: [
+      { id: 'reports', label: 'Reports', to: '/reports', icon: 'chart' },
+      { id: 'finance', label: 'Finance', to: '/finance/dashboard', icon: 'banknote' },
+    ],
+  },
+  {
+    title: 'Growth',
+    items: [
+      { id: 'marketing', label: 'Marketing', to: '/customers/campaigns', icon: 'megaphone' },
+    ],
+  },
+  {
+    title: 'System',
+    items: [
+      { id: 'print', label: 'Print', to: '/print', icon: 'printer' },
+      { id: 'jarvis', label: 'Jarvis', to: '/jarvis', icon: 'cpu', requireRoles: ['SUPERADMIN'] },
+      { id: 'setup', label: 'Store Setup', to: '/settings', icon: 'settings' },
+    ],
+  },
 ];
 
 function hasAnyRole(userRoles: readonly UserRole[] | undefined, required: UserRole[]): boolean {
@@ -78,16 +101,18 @@ export function Rail({ brand = 'bv' }: { brand?: 'bv' | 'wizopt' }) {
 
   // Filter hidden items based on role
   const visibleGroups = useMemo(() => {
-    return RAIL_GROUPS.map((group) =>
-      group.filter((item) => {
+    return RAIL_GROUPS.map((group) => ({
+      ...group,
+      items: group.items.filter((item) => {
         if (!item.requireRoles) return true;
         // Check both stored roles[] and active role (covers role-switching)
         return hasAnyRole(userRoles, item.requireRoles) || (activeRole && item.requireRoles.includes(activeRole));
-      })
-    ).filter((group) => group.length > 0);
+      }),
+    })).filter((group) => group.items.length > 0);
   }, [userRoles, activeRole]);
 
   const glyph = brand === 'wizopt' ? 'W' : 'B';
+  const wordmark = brand === 'wizopt' ? 'WizOpt' : 'Better Vision';
   const userInitials = (user?.name ?? '')
     .split(/\s+/)
     .map((s) => s[0])
@@ -98,12 +123,33 @@ export function Rail({ brand = 'bv' }: { brand?: 'bv' | 'wizopt' }) {
 
   return (
     <aside className={'rail' + (railExpanded ? ' expanded' : '')}>
-      <div className="brand" title={brand === 'wizopt' ? 'WizOpt' : 'Better Vision'}>
-        {glyph}
+      {/* Header row — brand glyph + wordmark (expanded only) + toggle.
+          Toggle moved up here so it's discoverable above the fold; the
+          old position at the bottom was easy to miss. */}
+      <div className="rail-header">
+        <div className="rail-brand-row">
+          <div className="brand" title={wordmark}>{glyph}</div>
+          {railExpanded && (
+            <span className="rail-wordmark" aria-hidden="true">{wordmark}</span>
+          )}
+        </div>
+        <button
+          type="button"
+          className="rail-toggle"
+          onClick={toggleRailExpanded}
+          title={railExpanded ? 'Collapse — show icons only' : 'Expand — show icons + labels'}
+          aria-label={railExpanded ? 'Collapse sidebar' : 'Expand sidebar'}
+        >
+          <ChevronIcon flipped={railExpanded} />
+        </button>
       </div>
+
       {visibleGroups.map((group, gi) => (
         <div key={gi} className="rail-group">
-          {group.map((item) => {
+          {railExpanded && group.title && (
+            <div className="rail-group-title" aria-hidden="true">{group.title}</div>
+          )}
+          {group.items.map((item) => {
             const IconCmp = Icon[item.icon];
             return (
               <NavLink
@@ -117,22 +163,17 @@ export function Rail({ brand = 'bv' }: { brand?: 'bv' | 'wizopt' }) {
               </NavLink>
             );
           })}
-          {gi < visibleGroups.length - 1 && <div className="rail-sep" />}
+          {gi < visibleGroups.length - 1 && !railExpanded && <div className="rail-sep" />}
         </div>
       ))}
       <div className="rail-spacer" />
-      <button
-        type="button"
-        className="rail-toggle"
-        onClick={toggleRailExpanded}
-        title={railExpanded ? 'Collapse sidebar' : 'Expand sidebar (show labels)'}
-        aria-label={railExpanded ? 'Collapse sidebar' : 'Expand sidebar'}
-      >
-        <ChevronIcon flipped={railExpanded} />
-        <span className="rail-label">Collapse</span>
-      </button>
       <div className="rail-avatar" title={user?.name ? `${user.name} • ${activeRole}` : 'User'}>
-        {userInitials}
+        <span className="rail-avatar-initials">{userInitials}</span>
+        {railExpanded && (
+          <span className="rail-avatar-name" aria-hidden="true">
+            {user?.name?.split(' ')[0] || 'User'}
+          </span>
+        )}
       </div>
     </aside>
   );
