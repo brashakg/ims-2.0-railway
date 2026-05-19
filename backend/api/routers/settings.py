@@ -10,7 +10,7 @@ Comprehensive settings management for all user roles.
 - Audit logs
 """
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any
 from datetime import datetime
@@ -540,6 +540,70 @@ async def update_invoice_settings(
 # ============================================================================
 # NOTIFICATION SETTINGS ENDPOINTS
 # ============================================================================
+
+
+@router.get("/notifications/providers")
+async def get_notification_providers(current_user: dict = Depends(get_current_user)):
+    """Channel provider config (SMS / WhatsApp / Email). Frontend
+    settingsApi.getNotificationProviders was 404'ing. Reads the
+    `notification_providers` singleton; falls back to env-driven
+    defaults so the Settings → Notifications tab always renders."""
+    import os
+    coll = _get_settings_collection("notification_providers")
+    defaults = {
+        "whatsapp": {
+            "provider": "MSG91",
+            "enabled": bool(os.getenv("MSG91_API_KEY")),
+            "sender": os.getenv("MSG91_WHATSAPP_INTEGRATED_NUMBER", ""),
+        },
+        "sms": {
+            "provider": "MSG91",
+            "enabled": bool(os.getenv("MSG91_API_KEY")),
+            "sender": os.getenv("MSG91_SENDER", "BVOPTL"),
+        },
+        "email": {"provider": "SMTP", "enabled": False, "sender": ""},
+        "dispatch_mode": os.getenv("DISPATCH_MODE", "off"),
+    }
+    if coll is not None:
+        doc = coll.find_one({"_id": "notification_providers"})
+        if doc:
+            doc.pop("_id", None)
+            defaults.update(doc)
+    return defaults
+
+
+@router.put("/notifications/providers")
+async def update_notification_providers(
+    providers: dict, current_user: dict = Depends(get_current_user)
+):
+    coll = _get_settings_collection("notification_providers")
+    if coll is None:
+        raise HTTPException(status_code=503, detail="Database not available")
+    providers = {k: v for k, v in providers.items() if k != "_id"}
+    providers["updated_at"] = datetime.now().isoformat()
+    coll.update_one({"_id": "notification_providers"}, {"$set": providers}, upsert=True)
+    doc = coll.find_one({"_id": "notification_providers"})
+    if doc:
+        doc.pop("_id", None)
+    return doc or {}
+
+
+@router.get("/notifications/logs")
+async def get_notification_logs(
+    limit: int = Query(100, ge=1, le=500),
+    current_user: dict = Depends(get_current_user),
+):
+    """Recent outbound notification log. Frontend
+    settingsApi.getNotificationLogs was 404'ing. Reads the
+    `notification_logs` collection (written by MEGAPHONE / marketing
+    dispatch)."""
+    coll = _get_settings_collection("notification_logs")
+    if coll is None:
+        return {"logs": [], "total": 0}
+    docs = list(coll.find({}).sort("sent_at", -1).limit(limit))
+    for d in docs:
+        d.pop("_id", None)
+    return {"logs": docs, "total": len(docs)}
 
 
 @router.get("/notifications/templates")

@@ -344,6 +344,60 @@ async def remove_role(
     return {"message": f"Role {role} removed from user"}
 
 
+class ResetPasswordBody(BaseModel):
+    new_password: str = Field(..., min_length=6)
+
+
+@router.post("/{user_id}/reset-password")
+async def reset_password(
+    user_id: str, body: ResetPasswordBody, current_user: dict = Depends(require_admin)
+):
+    """Admin resets a user's password. Frontend adminUserApi.resetPassword
+    was 404'ing (no such route)."""
+    repo = get_user_repository()
+    if repo is None:
+        return {"user_id": user_id, "message": "Password reset"}
+    existing = repo.find_by_id(user_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    repo.update(user_id, {
+        "password_hash": hash_password(body.new_password),
+        "password_reset_at": datetime.now().isoformat(),
+        "password_reset_by": current_user.get("user_id"),
+        "must_change_password": True,
+    })
+    return {"user_id": user_id, "message": "Password reset successfully"}
+
+
+class AssignStoreBody(BaseModel):
+    store_id: str
+    role: Optional[str] = None
+
+
+@router.post("/{user_id}/assign-store")
+async def assign_store(
+    user_id: str, body: AssignStoreBody, current_user: dict = Depends(require_admin)
+):
+    """Grant a user access to a store (optionally with a role). Frontend
+    adminUserApi.assignStore was 404'ing — it posts a body rather than
+    using the path-param /{user_id}/stores/{store_id} variant."""
+    repo = get_user_repository()
+    if repo is None:
+        return {"user_id": user_id, "store_id": body.store_id, "message": "Store assigned"}
+    existing = repo.find_by_id(user_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    repo.add_store(user_id, body.store_id)
+    if body.role:
+        # Add the role if the repo supports it; ignore failures so the
+        # store assignment still succeeds.
+        try:
+            repo.add_role(user_id, body.role)
+        except Exception:
+            pass
+    return {"user_id": user_id, "store_id": body.store_id, "message": "Store assigned"}
+
+
 @router.post("/{user_id}/stores/{store_id}")
 async def add_store_access(
     user_id: str, store_id: str, current_user: dict = Depends(require_admin)

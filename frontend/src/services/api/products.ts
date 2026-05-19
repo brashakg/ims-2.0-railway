@@ -54,7 +54,9 @@ export const productApi = {
   },
 
   searchProducts: async (query: string, category?: string) => {
-    const response = await api.get('/products/search', { params: { q: query, category } });
+    // Backend exposes search via the list endpoint's `search` param, not a
+    // dedicated /products/search route (which 404'd).
+    const response = await api.get('/products', { params: { search: query, category } });
     return response.data;
   },
 

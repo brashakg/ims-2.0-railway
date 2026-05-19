@@ -92,6 +92,7 @@ from .routers import (
     clinical_router,
     admin_router,
     admin_catalog_router,
+    admin_extras_router,
     handoffs_router,
     transfers_router,
     catalog_router,
@@ -700,6 +701,7 @@ app.include_router(settings_router, prefix="/api/v1/settings", tags=["Settings"]
 app.include_router(clinical_router, prefix="/api/v1/clinical", tags=["Clinical"])
 app.include_router(admin_router, prefix="/api/v1/admin", tags=["Admin"])
 app.include_router(admin_catalog_router, prefix="/api/v1/admin", tags=["Admin · Catalog"])
+app.include_router(admin_extras_router, prefix="/api/v1/admin", tags=["Admin · Discounts & System"])
 app.include_router(handoffs_router, prefix="/api/v1/handoffs", tags=["Handoffs"])
 app.include_router(
     transfers_router, prefix="/api/v1/transfers", tags=["Stock Transfers"]

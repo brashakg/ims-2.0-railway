@@ -346,6 +346,69 @@ async def get_prescription(
     return {"prescription_id": prescription_id}
 
 
+@router.get("/{prescription_id}/validate")
+async def validate_prescription(
+    prescription_id: str, current_user: dict = Depends(get_current_user)
+):
+    """Validate a prescription's Rx values against the clinical ranges
+    (SPH -20..+20, CYL -6..+6, AXIS 1-180, ADD +0.75..+3.50) and report
+    expiry. Frontend prescriptionApi.validatePrescription was 404'ing.
+    Returns {valid, expired, issues:[...]}."""
+    repo = get_prescription_repository()
+    if repo is None:
+        return {"prescription_id": prescription_id, "valid": True, "expired": False, "issues": []}
+    rx = repo.find_by_id(prescription_id)
+    if rx is None:
+        raise HTTPException(status_code=404, detail="Prescription not found")
+
+    issues = []
+
+    def _check(eye_label, eye):
+        if not isinstance(eye, dict):
+            return
+        sph = eye.get("sphere", eye.get("sph"))
+        cyl = eye.get("cylinder", eye.get("cyl"))
+        axis = eye.get("axis")
+        add = eye.get("add", eye.get("addition"))
+        try:
+            if sph is not None and sph != "" and not (-20.0 <= float(sph) <= 20.0):
+                issues.append(f"{eye_label} SPH {sph} out of range (-20..+20)")
+            if cyl is not None and cyl != "" and not (-6.0 <= float(cyl) <= 6.0):
+                issues.append(f"{eye_label} CYL {cyl} out of range (-6..+6)")
+            if axis is not None and axis != "" and not (1 <= int(float(axis)) <= 180):
+                issues.append(f"{eye_label} AXIS {axis} out of range (1-180)")
+            if add not in (None, "", 0) and not (0.75 <= float(add) <= 3.50):
+                issues.append(f"{eye_label} ADD {add} out of range (+0.75..+3.50)")
+        except (ValueError, TypeError):
+            issues.append(f"{eye_label} has a non-numeric Rx value")
+
+    _check("Right", rx.get("right_eye") or rx.get("rightEye"))
+    _check("Left", rx.get("left_eye") or rx.get("leftEye"))
+
+    # Expiry — 12 months from test/created date unless validity set
+    expired = False
+    try:
+        from datetime import datetime as _dt
+        test_date = rx.get("test_date") or rx.get("testDate") or rx.get("created_at")
+        months = int(rx.get("validity_months") or rx.get("validityMonths") or 12)
+        if test_date:
+            td = _dt.fromisoformat(str(test_date).replace("Z", "").split(".")[0])
+            expiry = td.replace(
+                year=td.year + (td.month - 1 + months) // 12,
+                month=(td.month - 1 + months) % 12 + 1,
+            )
+            expired = _dt.utcnow() > expiry
+    except Exception:
+        pass
+
+    return {
+        "prescription_id": prescription_id,
+        "valid": len(issues) == 0,
+        "expired": expired,
+        "issues": issues,
+    }
+
+
 @router.get("/{prescription_id}/print")
 async def print_prescription(
     prescription_id: str, current_user: dict = Depends(get_current_user)
