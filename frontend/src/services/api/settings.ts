@@ -184,7 +184,10 @@ export const settingsApi = {
     variables: Record<string, string>;
     channel?: 'SMS' | 'WHATSAPP' | 'EMAIL';
   }) => {
-    const response = await api.post('/notifications/send', notification);
+    // Notification send + bulk send live under /marketing on the backend
+    // (see routers/marketing.py). The FE used to call /notifications/...
+    // which 404'd — corrected here to use the actual mounted prefix.
+    const response = await api.post('/marketing/notifications/send', notification);
     return response.data;
   },
 
@@ -199,7 +202,7 @@ export const settingsApi = {
     }>;
     channel?: 'SMS' | 'WHATSAPP' | 'EMAIL';
   }) => {
-    const response = await api.post('/notifications/send-bulk', notifications);
+    const response = await api.post('/marketing/notifications/send-bulk', notifications);
     return response.data;
   },
 

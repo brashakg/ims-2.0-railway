@@ -114,6 +114,39 @@ async def check_out(current_user: dict = Depends(get_current_user)):
     return {"message": "Check-out recorded", "checkOutTime": datetime.now().isoformat()}
 
 
+@router.post("/attendance/{attendance_id}/check-out")
+async def check_out_by_id(
+    attendance_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """Per-attendance-record check-out — frontend's hrApi was 404'ing
+    because the original `/attendance/check-out` endpoint didn't accept
+    an attendance_id in the path. Stamps the check-out timestamp on the
+    matching record. Falls back to a stub response if the repo isn't
+    available so the operator UI doesn't break in demo mode."""
+    repo = get_attendance_repository()
+    if repo is None:
+        return {
+            "attendance_id": attendance_id,
+            "message": "Check-out recorded",
+            "checkOutTime": datetime.now().isoformat(),
+        }
+    existing = repo.find_one({
+        "$or": [
+            {"attendance_id": attendance_id},
+            {"_id": attendance_id},
+        ]
+    })
+    if existing is None:
+        raise HTTPException(status_code=404, detail="Attendance record not found")
+    now_iso = datetime.now().isoformat()
+    repo.update(
+        existing.get("attendance_id") or existing.get("_id"),
+        {"check_out": now_iso, "checked_out_by": current_user.get("user_id")},
+    )
+    return {"attendance_id": attendance_id, "checkOutTime": now_iso}
+
+
 @router.post("/attendance/mark")
 async def mark_attendance(
     request: AttendanceMarkRequest, current_user: dict = Depends(get_current_user)

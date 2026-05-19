@@ -904,3 +904,81 @@ async def assign_sop(
 # `/auto-generate`, etc.). FastAPI resolves routes in registration order.
 # ============================================================================
 router.add_api_route("/{task_id}", get_task, methods=["GET"])
+
+
+# ============================================================================
+# Action aliases — match what the frontend's `tasksApi` already calls
+# ============================================================================
+# `PUT /tasks/{id}` was 404'ing because only PATCH is decorated above.
+# `POST /tasks/{id}/start` and `/reassign` likewise didn't exist.
+# Thin wrappers so the task UI works end-to-end without touching FE.
+
+class TaskReassign(BaseModel):
+    assigned_to: str
+    reason: Optional[str] = None
+
+
+@router.put("/{task_id}")
+async def put_task(
+    task_id: str,
+    update: TaskUpdate,
+    current_user: dict = Depends(get_current_user),
+):
+    """PUT alias for PATCH /{task_id} — frontend uses PUT for task edits."""
+    return await update_task(task_id, update, current_user)
+
+
+@router.post("/{task_id}/start")
+async def start_task(
+    task_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """Transition a task from open → in_progress."""
+    repo = get_task_repository()
+    if repo is None:
+        return {"task_id": task_id, "status": "in_progress"}
+    task = repo.find_by_id(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    if task.get("status") == "in_progress":
+        return {"task_id": task_id, "status": "in_progress", "message": "Already in progress"}
+    if task.get("status") == "completed":
+        raise HTTPException(status_code=400, detail="Task already completed")
+    repo.update(task_id, {
+        "status": "in_progress",
+        "started_at": datetime.now(),
+        "started_by": current_user.get("user_id"),
+    })
+    return {"task_id": task_id, "status": "in_progress", "message": "Task started"}
+
+
+@router.post("/{task_id}/reassign")
+async def reassign_task(
+    task_id: str,
+    body: TaskReassign,
+    current_user: dict = Depends(get_current_user),
+):
+    """Reassign an open/in-progress task to another user. Audit-logged via task history."""
+    repo = get_task_repository()
+    if repo is None:
+        return {"task_id": task_id, "assigned_to": body.assigned_to}
+    task = repo.find_by_id(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    if task.get("status") == "completed":
+        raise HTTPException(status_code=400, detail="Cannot reassign a completed task")
+    history_entry = {
+        "action": "reassigned",
+        "from": task.get("assigned_to"),
+        "to": body.assigned_to,
+        "reason": body.reason,
+        "by": current_user.get("user_id"),
+        "at": datetime.now(),
+    }
+    repo.update(task_id, {
+        "assigned_to": body.assigned_to,
+        "reassigned_at": datetime.now(),
+        "reassigned_by": current_user.get("user_id"),
+        "history": (task.get("history") or []) + [history_entry],
+    })
+    return {"task_id": task_id, "assigned_to": body.assigned_to, "message": "Task reassigned"}

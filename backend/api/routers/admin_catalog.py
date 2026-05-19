@@ -741,3 +741,94 @@ async def bulk_import_products(
         "status": "received",
         "next_step": "POST /api/v1/catalog/products/import to process rows",
     }
+
+
+# ============================================================================
+# PRODUCTS — full CRUD aliases under /admin/products
+# ============================================================================
+# The frontend's `adminProductApi` was written against `/admin/products`
+# CRUD, but only `/admin/products/generate-sku` and
+# `/admin/products/bulk-import` existed at that prefix — every list /
+# read / create / update / delete call was 404'ing. Backend HAD the
+# canonical endpoints at `/catalog/products` (catalog.py) and
+# `/products` (products.py), but admin pages weren't reaching them.
+# These thin aliases route admin-prefixed calls to the same `products`
+# Mongo collection so the catalog page works end-to-end.
+
+@router.get("/products")
+async def list_products(
+    search: Optional[str] = None,
+    category: Optional[str] = None,
+    brand: Optional[str] = None,
+    is_active: Optional[bool] = None,
+):
+    coll = _coll("products")
+    if coll is None:
+        return {"products": [], "total": 0}
+    filter_: Dict = {}
+    if is_active is not None:
+        filter_["is_active"] = is_active
+    if category:
+        filter_["category"] = category
+    if brand:
+        filter_["brand"] = brand
+    if search:
+        filter_["$or"] = [
+            {"name": {"$regex": search, "$options": "i"}},
+            {"sku": {"$regex": search, "$options": "i"}},
+            {"barcode": {"$regex": search, "$options": "i"}},
+        ]
+    docs = list(coll.find(filter_).limit(200))
+    return {"products": [_scrub(d) for d in docs if d], "total": len(docs)}
+
+
+@router.get("/products/{product_id}")
+async def get_product(product_id: str):
+    coll = _coll("products")
+    if coll is None:
+        raise HTTPException(status_code=503, detail="Database not available")
+    doc = coll.find_one({"$or": [{"product_id": product_id}, {"_id": product_id}]})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Product not found")
+    return _scrub(doc) or {}
+
+
+@router.post("/products", status_code=201)
+async def create_product(payload: Dict[str, Any]):
+    coll = _coll("products")
+    if coll is None:
+        raise HTTPException(status_code=503, detail="Database not available")
+    pid = _new_id()
+    body = {**payload, "product_id": pid, "_id": pid, "created_at": _now(), "updated_at": _now()}
+    body.setdefault("is_active", True)
+    coll.insert_one(body)
+    return _scrub(body) or {}
+
+
+@router.put("/products/{product_id}")
+async def update_product(product_id: str, updates: Dict[str, Any]):
+    coll = _coll("products")
+    if coll is None:
+        raise HTTPException(status_code=503, detail="Database not available")
+    if not coll.find_one({"$or": [{"product_id": product_id}, {"_id": product_id}]}):
+        raise HTTPException(status_code=404, detail="Product not found")
+    updates = {k: v for k, v in updates.items() if k not in ("_id", "product_id")}
+    updates["updated_at"] = _now()
+    coll.update_one({"$or": [{"product_id": product_id}, {"_id": product_id}]}, {"$set": updates})
+    doc = coll.find_one({"$or": [{"product_id": product_id}, {"_id": product_id}]})
+    return _scrub(doc) or {}
+
+
+@router.delete("/products/{product_id}")
+async def delete_product(product_id: str):
+    """Soft-delete via is_active=False. Hard delete is intentionally not exposed."""
+    coll = _coll("products")
+    if coll is None:
+        raise HTTPException(status_code=503, detail="Database not available")
+    if not coll.find_one({"$or": [{"product_id": product_id}, {"_id": product_id}]}):
+        raise HTTPException(status_code=404, detail="Product not found")
+    coll.update_one(
+        {"$or": [{"product_id": product_id}, {"_id": product_id}]},
+        {"$set": {"is_active": False, "updated_at": _now()}},
+    )
+    return {"deactivated": True, "product_id": product_id}

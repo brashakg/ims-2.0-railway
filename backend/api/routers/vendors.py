@@ -182,7 +182,13 @@ async def create_vendor(
     return {"vendor_id": vendor_id, "message": "Vendor created successfully"}
 
 
-@router.get("/{vendor_id}")
+# IMPORTANT: GET /{vendor_id} is registered at the BOTTOM of this file via
+# `router.add_api_route(...)`, NOT here. FastAPI matches routes in
+# registration order; a `/{vendor_id}` decorator here shadowed every
+# specific GET below it (`/purchase-orders`, `/grn`) — they'd resolve
+# to this handler with `vendor_id="purchase-orders"` and return 404
+# ("Vendor not found"). Same class of bug as the tasks.py route-order
+# fix in PR #103.
 async def get_vendor(vendor_id: str, current_user: dict = Depends(get_current_user)):
     """Get vendor details"""
     vendor_repo = get_vendor_repository()
@@ -708,3 +714,12 @@ async def revoke_portal_token(
     except Exception:
         pass
     return {"token_id": token_id, "vendor_id": vendor_id, "active": False, "message": "Token revoked"}
+
+
+
+# ============================================================================
+# Catch-all parametric routes — registered LAST so they do not shadow
+# specific paths above (`/purchase-orders`, `/grn`, etc.). FastAPI
+# resolves routes in registration order.
+# ============================================================================
+router.add_api_route("/{vendor_id}", get_vendor, methods=["GET"])
