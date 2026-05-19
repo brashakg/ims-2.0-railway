@@ -117,6 +117,53 @@ async def send_marketing_notification(
     return {"message": "Notification queued", "notification": result}
 
 
+class BulkRecipient(BaseModel):
+    customer_id: Optional[str] = None
+    phone: Optional[str] = None
+    email: Optional[str] = None
+    variables: dict = {}
+
+
+class SendBulkRequest(BaseModel):
+    template_id: str
+    recipients: List[BulkRecipient]
+    channel: str = "WHATSAPP"
+
+
+@router.post("/notifications/send-bulk")
+async def send_bulk_notifications(
+    req: SendBulkRequest,
+    store_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Fan-out a template to many recipients. Frontend
+    settingsApi.sendBulkNotifications was 404'ing. Honors the same
+    rate-limit + DISPATCH_MODE safety gate as the single send."""
+    rate_err = _check_notification_rate(current_user.get("user_id", "unknown"))
+    if rate_err:
+        raise HTTPException(status_code=429, detail=rate_err)
+    active_store = store_id or current_user.get("active_store_id", "")
+    results = []
+    for r in req.recipients:
+        try:
+            res = await send_notification(
+                store_id=active_store,
+                customer_id=r.customer_id or "",
+                customer_phone=r.phone or "",
+                customer_name=(r.variables or {}).get("name", ""),
+                template_id=req.template_id,
+                channel=req.channel,
+                variables=r.variables,
+                category="MARKETING",
+                triggered_by=current_user.get("user_id", "unknown"),
+            )
+            results.append({"phone": r.phone, "status": "queued", "result": res})
+        except Exception as e:
+            results.append({"phone": r.phone, "status": "failed", "error": str(e)})
+    queued = sum(1 for r in results if r["status"] == "queued")
+    return {"message": f"{queued}/{len(results)} queued", "results": results}
+
+
 @router.get("/notifications/logs")
 async def get_notification_logs(
     store_id: Optional[str] = Query(None),

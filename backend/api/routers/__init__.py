@@ -23,6 +23,7 @@ from .settings import router as settings_router
 from .clinical import router as clinical_router
 from .admin import router as admin_router
 from .admin_catalog import router as admin_catalog_router
+from .admin_extras import router as admin_extras_router
 from .handoffs import router as handoffs_router
 from .transfers import router as transfers_router
 from .catalog import router as catalog_router
@@ -66,6 +67,7 @@ __all__ = [
     "clinical_router",
     "admin_router",
     "admin_catalog_router",
+    "admin_extras_router",
     "handoffs_router",
     "transfers_router",
     "catalog_router",
