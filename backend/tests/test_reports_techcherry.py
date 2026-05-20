@@ -24,7 +24,14 @@ import os
 import sys
 from datetime import datetime
 
-import pytest
+# Must be set BEFORE auth.py is imported transitively by api.routers.reports
+# — that module raises at import time if JWT_SECRET_KEY is unset, which would
+# break the pure-function helper tests that don't pull in the `client`
+# fixture (the fixture sets these in conftest, but plain test methods don't).
+os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-for-unit-tests")
+os.environ.setdefault("MONGODB_URI", "")
+
+import pytest  # noqa: E402
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -248,3 +255,97 @@ class TestSeasonalityEndpoint:
             headers=auth_headers,
         )
         assert r.status_code == 422
+
+
+# ============================================================================
+# R2 — Purchase Recommendations
+# ============================================================================
+
+
+class TestPurchaseRecommendations:
+    def test_requires_auth(self, client):
+        r = client.get("/api/v1/reports/purchase/recommendations")
+        assert r.status_code == 401
+
+    def test_empty_envelope_when_db_absent(self, client, auth_headers):
+        r = client.get(
+            "/api/v1/reports/purchase/recommendations",
+            headers=auth_headers,
+        )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["recommendations"] == []
+        # Summary shape contract
+        s = body["summary"]
+        for k in (
+            "total_recommendations", "total_suggested_units",
+            "estimated_revenue_at_risk", "estimated_purchase_cost",
+        ):
+            assert k in s
+            assert s[k] == 0 or s[k] == 0.0
+        # Params echo
+        p = body["params"]
+        assert p["store_id"] == "BV-TEST-01"
+        assert p["lookback_days"] == 90
+        assert p["lead_time_days"] == 30
+        assert p["reorder_cycle_days"] == 30
+        assert p["safety_buffer_days"] == 7
+
+    def test_query_params_propagate(self, client, auth_headers):
+        r = client.get(
+            "/api/v1/reports/purchase/recommendations"
+            "?lookback_days=60&lead_time_days=14&reorder_cycle_days=14"
+            "&safety_buffer_days=3&min_velocity=5&limit=50",
+            headers=auth_headers,
+        )
+        assert r.status_code == 200
+        p = r.json()["params"]
+        assert p["lookback_days"] == 60
+        assert p["lead_time_days"] == 14
+        assert p["reorder_cycle_days"] == 14
+        assert p["safety_buffer_days"] == 3
+        assert p["min_velocity"] == 5
+        # cover_days = 14+14+3 = 31
+        assert p["cover_days_total"] == 31
+
+    def test_param_bounds(self, client, auth_headers):
+        # lookback_days hard floor at 14
+        r = client.get(
+            "/api/v1/reports/purchase/recommendations?lookback_days=13",
+            headers=auth_headers,
+        )
+        assert r.status_code == 422
+        # lookback_days hard ceiling at 365
+        r = client.get(
+            "/api/v1/reports/purchase/recommendations?lookback_days=366",
+            headers=auth_headers,
+        )
+        assert r.status_code == 422
+        # min_velocity 0 allowed (means no noise filter)
+        r = client.get(
+            "/api/v1/reports/purchase/recommendations?min_velocity=0",
+            headers=auth_headers,
+        )
+        assert r.status_code == 200
+
+
+# ============================================================================
+# R2 — confidence band helper
+# ============================================================================
+
+
+class TestConfidenceBand:
+    def test_high_threshold(self):
+        from api.routers.reports import _confidence_for
+        assert _confidence_for(30) == "HIGH"
+        assert _confidence_for(100) == "HIGH"
+
+    def test_medium_band(self):
+        from api.routers.reports import _confidence_for
+        assert _confidence_for(5) == "MEDIUM"
+        assert _confidence_for(29) == "MEDIUM"
+
+    def test_low_band(self):
+        from api.routers.reports import _confidence_for
+        assert _confidence_for(0) == "LOW"
+        assert _confidence_for(4) == "LOW"
