@@ -241,140 +241,24 @@ class JarvisAnalyticsEngine:
 
     @staticmethod
     def get_business_overview() -> Dict:
-        """Get comprehensive business overview from database.
-
-        Primary path computes live from the real operational collections
-        (orders / products / customers / users) so JARVIS reflects actual
-        data regardless of store. Falls back to the legacy
-        business_metrics stub doc, then to an empty envelope.
-        """
+        """Comprehensive business overview — live from real collections,
+        else an empty envelope. No seeded/mock fallback."""
         live = JarvisAnalyticsEngine._compute_overview_live()
         if live is not None:
             return live
-
-        # Legacy: pre-seeded metrics doc (kept for back-compat)
-        metrics_col = get_db_collection("business_metrics")
-        if metrics_col:
-            metrics = metrics_col.find_one({"store_id": "store-001"})
-            if metrics:
-                return {
-                    "revenue": {
-                        "today": metrics["revenue"]["total"] // 30,  # Approximate daily
-                        "yesterday": int(metrics["revenue"]["total"] // 30 * 0.95),
-                        "this_week": metrics["revenue"]["total"] // 4,
-                        "this_month": metrics["revenue"]["total"],
-                        "last_month": int(
-                            metrics["revenue"]["total"]
-                            / (1 + metrics["revenue"]["growth_vs_last_month"] / 100)
-                        ),
-                        "growth_percentage": metrics["revenue"]["growth_vs_last_month"],
-                        "target": metrics["revenue"]["target"],
-                        "achievement_percent": metrics["revenue"][
-                            "achievement_percent"
-                        ],
-                        "trend": (
-                            "up"
-                            if metrics["revenue"]["growth_vs_last_month"] > 0
-                            else "down"
-                        ),
-                    },
-                    "orders": {
-                        "today": metrics["orders"]["total"] // 30,
-                        "pending": metrics["orders"]["pending"],
-                        "in_progress": metrics["orders"]["total"]
-                        - metrics["orders"]["completed"]
-                        - metrics["orders"]["cancelled"],
-                        "ready_for_delivery": metrics["orders"]["completed"]
-                        - (metrics["orders"]["completed"] - 10),
-                        "average_order_value": metrics["orders"]["avg_value"],
-                        "conversion_rate": (
-                            metrics["clinical"]["conversion_rate"] * 100
-                            if "clinical" in metrics
-                            else 34.5
-                        ),
-                    },
-                    "inventory": {
-                        "total_products": metrics["inventory"]["total_items"],
-                        "low_stock_items": metrics["inventory"]["low_stock_items"],
-                        "out_of_stock": metrics["inventory"]["out_of_stock_items"],
-                        "inventory_value": metrics["inventory"]["total_value"],
-                        "fast_moving_count": 145,
-                        "slow_moving_count": 67,
-                        "expiring_soon": metrics["inventory"]["expiring_soon"],
-                        "turnover_rate": metrics["inventory"]["turnover_rate"],
-                    },
-                    "customers": {
-                        "total": metrics["customers"]["total_active"],
-                        "new_this_month": metrics["customers"]["new_this_month"],
-                        "returning_rate": metrics["customers"]["repeat_rate"] * 100,
-                        "average_lifetime_value": metrics["customers"][
-                            "avg_lifetime_value"
-                        ],
-                        "nps_score": metrics["customers"]["nps_score"],
-                        "top_segment": "Premium Eyewear",
-                    },
-                    "staff": {
-                        "total_employees": metrics["staff"]["total_employees"],
-                        "present_today": metrics["staff"]["present_today"],
-                        "on_leave": metrics["staff"]["total_employees"]
-                        - metrics["staff"]["present_today"],
-                        "top_performer": metrics["staff"]["top_performer"],
-                        "average_sales_per_staff": metrics["staff"][
-                            "top_performer_sales"
-                        ]
-                        // metrics["staff"]["total_employees"],
-                        "attendance_rate": metrics["staff"]["avg_attendance_rate"]
-                        * 100,
-                    },
-                }
-
-        # Return empty structure if database not available
         return {
-            "revenue": {
-                "today": 0,
-                "yesterday": 0,
-                "this_week": 0,
-                "this_month": 0,
-                "last_month": 0,
-                "growth_percentage": 0,
-                "target": 0,
-                "achievement_percent": 0,
-                "trend": "stable",
-            },
-            "orders": {
-                "today": 0,
-                "pending": 0,
-                "in_progress": 0,
-                "ready_for_delivery": 0,
-                "average_order_value": 0,
-                "conversion_rate": 0,
-            },
-            "inventory": {
-                "total_products": 0,
-                "low_stock_items": 0,
-                "out_of_stock": 0,
-                "inventory_value": 0,
-                "fast_moving_count": 0,
-                "slow_moving_count": 0,
-                "expiring_soon": 0,
-                "turnover_rate": 0,
-            },
-            "customers": {
-                "total": 0,
-                "new_this_month": 0,
-                "returning_rate": 0,
-                "average_lifetime_value": 0,
-                "nps_score": 0,
-                "top_segment": "N/A",
-            },
-            "staff": {
-                "total_employees": 0,
-                "present_today": 0,
-                "on_leave": 0,
-                "top_performer": "N/A",
-                "average_sales_per_staff": 0,
-                "attendance_rate": 0,
-            },
+            "revenue": {"today": 0, "yesterday": 0, "this_week": 0, "this_month": 0,
+                        "last_month": 0, "growth_percentage": 0, "target": 0,
+                        "achievement_percent": 0, "trend": "stable"},
+            "orders": {"today": 0, "pending": 0, "in_progress": 0,
+                       "ready_for_delivery": 0, "average_order_value": 0, "conversion_rate": 0},
+            "inventory": {"total_products": 0, "low_stock_items": 0, "out_of_stock": 0,
+                          "inventory_value": 0, "fast_moving_count": 0, "slow_moving_count": 0,
+                          "expiring_soon": 0, "turnover_rate": 0},
+            "customers": {"total": 0, "new_this_month": 0, "returning_rate": 0,
+                          "average_lifetime_value": 0, "nps_score": 0, "top_segment": "N/A"},
+            "staff": {"total_employees": 0, "present_today": 0, "on_leave": 0,
+                      "top_performer": "N/A", "average_sales_per_staff": 0, "attendance_rate": 0},
         }
 
     @staticmethod
@@ -427,130 +311,15 @@ class JarvisAnalyticsEngine:
 
     @staticmethod
     def get_sales_insights() -> Dict:
-        """Get detailed sales insights from database"""
+        """Detailed sales insights — live from orders, else empty (no mock)."""
         live = JarvisAnalyticsEngine._compute_sales_live()
         if live is not None:
             return live
-        # Try to get daily sales from database
-        sales_col = get_db_collection("daily_sales")
-        products_col = get_db_collection("products")
-        stores_col = get_db_collection("stores")
-
-        if sales_col:
-            # Get last 30 days of sales
-            sales_records = list(
-                sales_col.find({"store_id": "store-001"}).sort([("date", -1)]).limit(30)
-            )
-
-            if sales_records:
-                # Calculate totals
-                total_revenue = sum(s.get("revenue", 0) for s in sales_records)
-                total_orders = sum(s.get("order_count", 0) for s in sales_records)
-
-                # Category breakdown from latest records
-                category_totals = {
-                    "frames": 0,
-                    "lenses": 0,
-                    "sunglasses": 0,
-                    "accessories": 0,
-                }
-                for s in sales_records:
-                    breakdown = s.get("category_breakdown", {})
-                    for cat, amount in breakdown.items():
-                        if cat in category_totals:
-                            category_totals[cat] += amount
-
-                # Payment method breakdown
-                payment_totals = {"cash": 0, "card": 0, "upi": 0}
-                for s in sales_records:
-                    methods = s.get("payment_methods", {})
-                    for method, amount in methods.items():
-                        if method in payment_totals:
-                            payment_totals[method] += amount
-
-                total_payments = sum(payment_totals.values()) or 1
-
-                return {
-                    "top_selling_categories": [
-                        {
-                            "category": "Frames",
-                            "sales": category_totals["frames"],
-                            "units": total_orders // 3,
-                            "growth": 12.5,
-                        },
-                        {
-                            "category": "Lenses",
-                            "sales": category_totals["lenses"],
-                            "units": total_orders // 3,
-                            "growth": 8.3,
-                        },
-                        {
-                            "category": "Sunglasses",
-                            "sales": category_totals["sunglasses"],
-                            "units": total_orders // 5,
-                            "growth": 15.2,
-                        },
-                        {
-                            "category": "Accessories",
-                            "sales": category_totals["accessories"],
-                            "units": total_orders // 4,
-                            "growth": 5.1,
-                        },
-                    ],
-                    "top_selling_products": [
-                        {
-                            "name": "Ray-Ban Aviator Classic",
-                            "sku": "BV-FR-RAY-001",
-                            "sales": 89,
-                            "revenue": 445000,
-                        },
-                        {
-                            "name": "Zeiss Progressive Individual",
-                            "sku": "BV-LS-ZEI-001",
-                            "sales": 67,
-                            "revenue": 234500,
-                        },
-                        {
-                            "name": "Ray-Ban Wayfarer Sunglasses",
-                            "sku": "BV-SG-RAY-001",
-                            "sales": 54,
-                            "revenue": 108000,
-                        },
-                    ],
-                    "sales_by_store": [
-                        {
-                            "store": "Better Vision - CP",
-                            "sales": total_revenue,
-                            "target": 2500000,
-                            "achievement": round(total_revenue / 25000, 2),
-                        },
-                    ],
-                    "peak_hours": [
-                        {"hour": "11:00-12:00", "sales": 125000, "footfall": 45},
-                        {"hour": "16:00-17:00", "sales": 118000, "footfall": 42},
-                        {"hour": "19:00-20:00", "sales": 145000, "footfall": 56},
-                    ],
-                    "payment_methods": {
-                        "UPI": round(payment_totals["upi"] / total_payments * 100, 1),
-                        "Card": round(payment_totals["card"] / total_payments * 100, 1),
-                        "Cash": round(payment_totals["cash"] / total_payments * 100, 1),
-                        "EMI": 8.0,
-                    },
-                    "total_revenue_30_days": total_revenue,
-                    "total_orders_30_days": total_orders,
-                    "avg_daily_revenue": total_revenue // 30 if total_revenue else 0,
-                }
-
-        # Return empty structure if database not available
         return {
             "top_selling_categories": [],
             "top_selling_products": [],
             "sales_by_store": [],
-            "peak_hours": [],
-            "payment_methods": {},
-            "total_revenue_30_days": 0,
-            "total_orders_30_days": 0,
-            "avg_daily_revenue": 0,
+            "month_revenue": 0,
         }
 
     @staticmethod
@@ -612,518 +381,94 @@ class JarvisAnalyticsEngine:
 
     @staticmethod
     def get_inventory_insights() -> Dict:
-        """Get inventory insights and alerts from database."""
-        # Live primary path — compute reorder/stock alerts straight from
-        # the products collection (the real inventory source), chain-wide.
+        """Inventory insights — live from the products collection, else an
+        empty envelope. No seeded/mock fallback."""
         live = JarvisAnalyticsEngine._compute_inventory_live()
         if live is not None:
             return live
-
-        stock_col = get_db_collection("stock_units")
-        products_col = get_db_collection("products")
-        alerts_col = get_db_collection("alerts")
-        metrics_col = get_db_collection("business_metrics")
-
-        critical_alerts = []
-        reorder_recommendations = []
-        slow_movers = []
-        inventory_health_score = 0
-        turnover_ratio = 0
-        dead_stock_value = 0
-        total_value = 0
-
-        # Get alerts from database
-        if alerts_col:
-            db_alerts = list(
-                alerts_col.find(
-                    {
-                        "alert_type": {
-                            "$in": ["LOW_STOCK", "OUT_OF_STOCK", "EXPIRING_SOON"]
-                        }
-                    }
-                )
-            )
-            for alert in db_alerts:
-                if alert.get("alert_type") == "LOW_STOCK":
-                    critical_alerts.append(
-                        {
-                            "type": "low_stock",
-                            "sku": alert.get("entity_id", ""),
-                            "product": (
-                                alert.get("message", "").split(" has")[0]
-                                if "has" in alert.get("message", "")
-                                else alert.get("title", "")
-                            ),
-                            "quantity": 5,
-                            "reorder_point": 10,
-                        }
-                    )
-                elif alert.get("alert_type") == "OUT_OF_STOCK":
-                    critical_alerts.append(
-                        {
-                            "type": "out_of_stock",
-                            "sku": alert.get("entity_id", ""),
-                            "product": (
-                                alert.get("message", "").split(" is")[0]
-                                if "is" in alert.get("message", "")
-                                else alert.get("title", "")
-                            ),
-                            "last_sold": "recently",
-                            "demand": "high",
-                        }
-                    )
-
-        # Get stock data for analysis
-        if stock_col:
-            all_stock = list(stock_col.find({"store_id": "store-001"}))
-
-            # Find low stock items for reorder recommendations
-            for item in all_stock:
-                qty = item.get("quantity", 0)
-                if qty > 0 and qty <= 5:
-                    reorder_recommendations.append(
-                        {
-                            "sku": item.get("sku", ""),
-                            "product": item.get("product_name", "Unknown"),
-                            "current": qty,
-                            "recommended_order": max(20, qty * 4),
-                            "supplier": item.get("vendor", "Default Supplier"),
-                        }
-                    )
-
-            # Calculate inventory metrics
-            total_value = sum(
-                s.get("quantity", 0) * s.get("cost_price", 0) for s in all_stock
-            )
-            low_stock_count = len(
-                [s for s in all_stock if 0 < s.get("quantity", 0) <= 5]
-            )
-            out_of_stock_count = len(
-                [s for s in all_stock if s.get("quantity", 0) <= 0]
-            )
-            total_items = len(all_stock)
-
-            # Calculate health score (0-100)
-            if total_items > 0:
-                healthy_ratio = (
-                    total_items - low_stock_count - out_of_stock_count
-                ) / total_items
-                inventory_health_score = round(healthy_ratio * 100)
-
-        # Get metrics from business_metrics collection
-        if metrics_col:
-            metrics = metrics_col.find_one({"store_id": "store-001"})
-            if metrics and "inventory" in metrics:
-                turnover_ratio = metrics["inventory"].get("turnover_rate", 4.2)
-                dead_stock_value = (
-                    total_value * 0.025 if total_value else 0
-                )  # Estimate 2.5% as dead stock
-
         return {
-            "critical_alerts": critical_alerts[:5],  # Limit to 5
-            "reorder_recommendations": reorder_recommendations[:5],
-            "slow_movers": slow_movers[:5],
-            "inventory_health_score": inventory_health_score,
-            "turnover_ratio": turnover_ratio,
-            "dead_stock_value": round(dead_stock_value),
+            "critical_alerts": [],
+            "reorder_recommendations": [],
+            "slow_movers": [],
+            "inventory_health_score": 0,
+            "turnover_ratio": 0,
+            "dead_stock_value": 0,
         }
 
     @staticmethod
     def get_customer_insights() -> Dict:
-        """Get customer behavior insights from database"""
-        segments_col = get_db_collection("customer_segments")
-        customers_col = get_db_collection("customers")
-        metrics_col = get_db_collection("business_metrics")
-
-        if segments_col:
-            segments = list(segments_col.find({}))
-            if segments:
-                # Build segments data from database
-                segment_data = []
-                for seg in segments:
-                    segment_data.append(
-                        {
-                            "name": seg.get("name", "Unknown"),
-                            "count": seg.get("customer_count", 0),
-                            "avg_spend": seg.get("avg_order_value", 0),
-                            "characteristics": ", ".join(
-                                seg.get("characteristics", [])
-                            ),
-                        }
-                    )
-
-                # Get loyalty metrics from business metrics
-                loyalty_metrics = {
-                    "repeat_purchase_rate": 42.0,
-                    "average_time_between_purchases": 8.5,
-                    "referral_rate": 12.3,
-                    "nps_score": 72,
-                }
-
-                if metrics_col:
-                    metrics = metrics_col.find_one({"store_id": "store-001"})
-                    if metrics and "customers" in metrics:
-                        loyalty_metrics["repeat_purchase_rate"] = (
-                            metrics["customers"].get("repeat_rate", 0.42) * 100
-                        )
-                        loyalty_metrics["nps_score"] = metrics["customers"].get(
-                            "nps_score", 72
-                        )
-
-                return {
-                    "segments": segment_data,
-                    "churn_risk": [
-                        {
-                            "customer": "Vikram Singh",
-                            "phone": "98765xxxxx",
-                            "last_purchase": "6 months ago",
-                            "lifetime_value": 78500,
-                            "risk": "medium",
-                        },
-                    ],
-                    "loyalty_metrics": loyalty_metrics,
-                    "upcoming_eye_tests": [
-                        {
-                            "customer": "Rahul Sharma",
-                            "last_test": "11 months ago",
-                            "phone": "9876543210",
-                        },
-                        {
-                            "customer": "Anita Verma",
-                            "last_test": "10 months ago",
-                            "phone": "9876543211",
-                        },
-                    ],
-                }
-
-        # Return empty structure if database not available
-        return {
-            "segments": [],
-            "churn_risk": [],
-            "loyalty_metrics": {
-                "repeat_purchase_rate": 0,
-                "average_time_between_purchases": 0,
-                "referral_rate": 0,
-                "nps_score": 0,
-            },
-            "upcoming_eye_tests": [],
-        }
+        """Customer insights — live counts from the customers collection."""
+        col = get_db_collection("customers")
+        if col is None:
+            return {"segments": [], "loyalty_metrics": {}, "churn_risk": [], "upcoming_eye_tests": []}
+        try:
+            from datetime import datetime as _dt
+            month_start = _dt.now().strftime("%Y-%m-01")
+            total = col.count_documents({})
+            new_this_month = col.count_documents({"created_at": {"$gte": month_start}})
+            b2b = col.count_documents({"customer_type": "B2B"})
+            return {
+                "segments": [
+                    {"name": "All customers", "count": total, "avg_spend": 0, "characteristics": ""},
+                    {"name": "New this month", "count": new_this_month, "avg_spend": 0, "characteristics": ""},
+                    {"name": "B2B", "count": b2b, "avg_spend": 0, "characteristics": ""},
+                ],
+                "loyalty_metrics": {"repeat_purchase_rate": 0, "referral_rate": 0, "nps_score": 0},
+                "churn_risk": [],
+                "upcoming_eye_tests": [],
+            }
+        except Exception:
+            return {"segments": [], "loyalty_metrics": {}, "churn_risk": [], "upcoming_eye_tests": []}
 
     @staticmethod
     def get_staff_insights() -> Dict:
-        """Get staff performance insights from database"""
-        attendance_col = get_db_collection("attendance")
-        users_col = get_db_collection("users")
-        today_str = datetime.now().strftime("%Y-%m-%d")
-
-        if attendance_col:
-            # Get attendance for today
-            today_attendance = list(
-                attendance_col.find({"date": today_str, "store_id": "store-001"})
-            )
-
-            # Get last 30 days attendance for analytics
-            all_attendance = list(attendance_col.find({"store_id": "store-001"}))
-
-            if all_attendance:
-                # Calculate staff performance
-                staff_sales = {}
-                for att in all_attendance:
-                    user_id = att.get("user_id")
-                    user_name = att.get("user_name", "Unknown")
-                    sales = att.get("sales_amount", 0)
-
-                    if user_id not in staff_sales:
-                        staff_sales[user_id] = {
-                            "name": user_name,
-                            "role": att.get("role", ""),
-                            "total_sales": 0,
-                            "days_present": 0,
-                        }
-
-                    staff_sales[user_id]["total_sales"] += sales
-                    if att.get("status") == "PRESENT":
-                        staff_sales[user_id]["days_present"] += 1
-
-                # Build performance ranking
-                performance = []
-                for user_id, data in staff_sales.items():
-                    if data["total_sales"] > 0:
-                        performance.append(
-                            {
-                                "name": data["name"],
-                                "role": data["role"],
-                                "store": "Better Vision - CP",
-                                "sales": data["total_sales"],
-                                "conversion": round(
-                                    45.0 + (data["total_sales"] / 100000), 1
-                                ),
-                                "rating": 4.5,
-                            }
-                        )
-
-                performance.sort(key=lambda x: x["sales"], reverse=True)
-
-                # Calculate attendance metrics
-                total_records = len(all_attendance)
-                present_records = len(
-                    [a for a in all_attendance if a.get("status") == "PRESENT"]
-                )
-                present_rate = (
-                    round(present_records / total_records * 100, 1)
-                    if total_records
-                    else 0
-                )
-
-                # Today's status
-                present_today = [
-                    a["user_name"]
-                    for a in today_attendance
-                    if a.get("status") == "PRESENT"
-                ]
-                on_leave = [
-                    f"{a['user_name']} ({a.get('leave_type', 'Leave')})"
-                    for a in today_attendance
-                    if a.get("status") == "ABSENT"
-                ]
-
-                return {
-                    "performance_ranking": performance[:5],
-                    "attendance_summary": {
-                        "present_rate": present_rate,
-                        "late_arrivals_today": 1,
-                        "present_today": present_today,
-                        "on_leave": on_leave,
-                    },
-                    "training_needs": [
-                        {
-                            "staff": "Sales Staff",
-                            "area": "Progressive Lens Selling",
-                            "priority": "high",
-                        },
-                        {
-                            "staff": "New Joiners",
-                            "area": "Customer Objection Handling",
-                            "priority": "medium",
-                        },
-                    ],
-                    "workload_distribution": {
-                        "Better Vision - CP": {
-                            "staff": 4,
-                            "orders_per_staff": 8.5,
-                            "status": "balanced",
-                        },
-                    },
-                }
-
-        # Return empty structure if database not available
+        """Staff insights — live active-staff count; perf ranking needs the
+        incentive module (no mock numbers here)."""
+        users = get_db_collection("users")
+        total = 0
+        if users is not None:
+            try:
+                total = users.count_documents({"is_active": {"$ne": False}})
+            except Exception:
+                total = 0
         return {
             "performance_ranking": [],
             "attendance_summary": {
-                "present_rate": 0,
-                "late_arrivals_today": 0,
-                "present_today": [],
-                "on_leave": [],
+                "total_staff": total, "present_today": 0, "on_leave": 0,
+                "present_rate": 0, "late_arrivals_today": 0,
             },
-            "training_needs": [],
-            "workload_distribution": {},
+            "orders_per_staff": 0,
         }
 
     @staticmethod
     def get_predictions() -> Dict:
-        """Get AI predictions and forecasts from database"""
-        sales_col = get_db_collection("daily_sales")
-        metrics_col = get_db_collection("business_metrics")
-        stock_col = get_db_collection("stock_units")
-
-        # Default values
-        sales_forecast = {
-            "next_week": 0,
-            "next_month": 0,
-            "confidence": 0,
-            "factors": [],
-        }
-        demand_predictions = []
-        stock_predictions = []
-        customer_behavior = {
-            "expected_footfall_today": 0,
-            "expected_conversion": 0,
-            "peak_hours": [],
-        }
-
-        # Calculate forecasts from historical sales data
-        if sales_col:
-            sales_records = list(
-                sales_col.find({"store_id": "store-001"}).sort([("date", -1)]).limit(30)
-            )
-            if sales_records:
-                total_30_days = sum(s.get("revenue", 0) for s in sales_records)
-                avg_daily = total_30_days / 30 if total_30_days else 0
-
-                # Simple forecast based on recent trends
-                sales_forecast = {
-                    "next_week": round(avg_daily * 7 * 1.05),  # 5% growth assumption
-                    "next_month": round(avg_daily * 30 * 1.08),  # 8% growth assumption
-                    "confidence": 75,
-                    "factors": [
-                        "Based on 30-day historical trends",
-                        "Seasonal adjustments applied",
-                    ],
-                }
-
-                # Calculate category trends
-                category_totals = {}
-                for s in sales_records[:7]:  # Last week
-                    breakdown = s.get("category_breakdown", {})
-                    for cat, amount in breakdown.items():
-                        if cat not in category_totals:
-                            category_totals[cat] = {"recent": 0, "previous": 0}
-                        category_totals[cat]["recent"] += amount
-
-                for s in sales_records[7:14]:  # Week before
-                    breakdown = s.get("category_breakdown", {})
-                    for cat, amount in breakdown.items():
-                        if cat in category_totals:
-                            category_totals[cat]["previous"] += amount
-
-                for cat, data in category_totals.items():
-                    if data["previous"] > 0:
-                        change = (
-                            (data["recent"] - data["previous"]) / data["previous"]
-                        ) * 100
-                        trend = (
-                            "up" if change > 5 else "down" if change < -5 else "stable"
-                        )
-                        demand_predictions.append(
-                            {
-                                "category": cat.title(),
-                                "trend": trend,
-                                "change": f"{'+' if change >= 0 else ''}{change:.0f}%",
-                                "reason": "Based on recent sales trends",
-                            }
-                        )
-
-                # Customer behavior from sales
-                avg_orders = sum(s.get("order_count", 0) for s in sales_records[:7]) / 7
-                avg_conversion = (
-                    sum(s.get("conversion_rate", 0.6) for s in sales_records[:7]) / 7
-                )
-                customer_behavior = {
-                    "expected_footfall_today": round(
-                        avg_orders * 2
-                    ),  # Assume 2x footfall to orders
-                    "expected_conversion": round(avg_conversion * 100),
-                    "peak_hours": ["11:00-13:00", "17:00-20:00"],
-                }
-
-        # Stock predictions
-        if stock_col:
-            low_stock_items = list(
-                stock_col.find(
-                    {"store_id": "store-001", "quantity": {"$gt": 0, "$lte": 20}}
-                ).limit(5)
-            )
-
-            for item in low_stock_items:
-                qty = item.get("quantity", 0)
-                # Estimate days until stockout (assuming 1-2 units sold per day)
-                days_until_stockout = qty // 2 if qty > 0 else 0
-                stock_predictions.append(
-                    {
-                        "sku": item.get("sku", ""),
-                        "current": qty,
-                        "predicted_demand": qty * 3,
-                        "days_until_stockout": days_until_stockout,
-                    }
-                )
-
+        """Forecasts require the ORACLE agent + history. Honest empty
+        envelope until that runs (no fabricated predictions)."""
         return {
-            "sales_forecast": sales_forecast,
-            "demand_predictions": demand_predictions[:5],
-            "stock_predictions": stock_predictions[:5],
-            "customer_behavior": customer_behavior,
+            "revenue_forecast": [],
+            "demand_forecast": [],
+            "stockout_predictions": [],
+            "churn_predictions": [],
         }
 
     @staticmethod
     def get_recommendations() -> List[Dict]:
-        """Get AI-powered recommendations from database"""
-        alerts_col = get_db_collection("alerts")
-        metrics_col = get_db_collection("business_metrics")
-        stock_col = get_db_collection("stock_units")
-        segments_col = get_db_collection("customer_segments")
-
-        recommendations = []
-
-        # Get alerts from database and convert to recommendations
-        if alerts_col:
-            db_alerts = list(alerts_col.find({"is_resolved": False}).limit(10))
-            for alert in db_alerts:
-                severity_map = {
-                    "HIGH": "high",
-                    "WARNING": "high",
-                    "NORMAL": "medium",
-                    "INFO": "low",
-                }
-                priority = severity_map.get(alert.get("severity", "INFO"), "medium")
-
-                category_map = {
-                    "LOW_STOCK": "inventory",
-                    "PAYMENT_DUE": "finance",
-                    "DELIVERY_DUE": "operations",
-                    "TARGET_ACHIEVEMENT": "sales",
-                }
-                category = category_map.get(alert.get("alert_type", ""), "operations")
-
-                recommendations.append(
-                    {
-                        "priority": priority,
-                        "category": category,
-                        "title": alert.get("title", "Alert"),
-                        "description": alert.get("message", ""),
-                        "action": f"Review and resolve {alert.get('alert_type', 'issue').lower().replace('_', ' ')}",
-                        "impact": "Improve operational efficiency",
-                    }
-                )
-
-        # Add inventory-based recommendations
-        if stock_col and metrics_col:
-            metrics = metrics_col.find_one({"store_id": "store-001"})
-            if metrics and metrics.get("inventory", {}).get("low_stock_items", 0) > 0:
-                low_count = metrics["inventory"]["low_stock_items"]
-                recommendations.append(
-                    {
-                        "priority": "high" if low_count > 10 else "medium",
-                        "category": "inventory",
-                        "title": "Stock Replenishment Required",
-                        "description": f"{low_count} items are running low on stock.",
-                        "action": "Review and generate purchase orders for low stock items",
-                        "impact": f"Prevent potential stockouts and lost sales",
-                    }
-                )
-
-        # Add customer-based recommendations
-        if segments_col:
-            dormant_seg = segments_col.find_one({"segment_id": "seg-dormant"})
-            if dormant_seg and dormant_seg.get("customer_count", 0) > 0:
-                count = dormant_seg["customer_count"]
-                recommendations.append(
-                    {
-                        "priority": "medium",
-                        "category": "marketing",
-                        "title": "Re-engagement Campaign Needed",
-                        "description": f"{count} customers haven't purchased in 6+ months.",
-                        "action": "Launch personalized re-engagement campaign",
-                        "impact": f"Potential revenue recovery from dormant customers",
-                    }
-                )
-
-        # Sort by priority
-        priority_order = {"high": 0, "medium": 1, "low": 2}
-        recommendations.sort(
-            key=lambda x: priority_order.get(x.get("priority", "low"), 3)
-        )
-
-        return recommendations[:5]
+        """Actionable recommendations derived from live inventory — real
+        low/out-of-stock reorder prompts, no canned suggestions."""
+        recs: List[Dict] = []
+        inv = JarvisAnalyticsEngine._compute_inventory_live()
+        if inv:
+            oos = sum(1 for a in inv.get("critical_alerts", []) if a.get("type") == "out_of_stock")
+            low = sum(1 for a in inv.get("critical_alerts", []) if a.get("type") == "low_stock")
+            if oos:
+                recs.append({"priority": "high", "category": "inventory",
+                             "title": f"{oos} product(s) out of stock",
+                             "action": "Reorder to avoid lost sales"})
+            if low:
+                recs.append({"priority": "medium", "category": "inventory",
+                             "title": f"{low} product(s) below reorder point",
+                             "action": "Raise purchase orders"})
+        return recs
 
 
 # ============================================================================
