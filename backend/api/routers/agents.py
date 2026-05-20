@@ -406,8 +406,41 @@ async def agents_reseed(user: dict = Depends(require_superadmin)):
     except Exception:
         before_ids = []
 
-    # Seed missing configs. seed_configs() is idempotent.
-    mgr.seed_configs()
+    # Inline-seed so per-doc failures don't 500 the entire reseed call.
+    # The original `mgr.seed_configs()` ran all 8 inserts in one loop with
+    # no per-doc try/except — a single duplicate-key or schema mismatch
+    # took out the whole recovery. Also: deepcopy each default so we
+    # don't mutate the module-level template (which would poison the
+    # next call with a stale `_id` field that pymongo adds on insert).
+    seed_errors: List[Dict[str, str]] = []
+    from copy import deepcopy as _deepcopy
+    from datetime import datetime as _dt, timezone as _tz
+    for default in DEFAULT_AGENT_CONFIGS:
+        try:
+            existing = col.find_one({"agent_id": default["agent_id"]})
+            if existing:
+                continue
+            doc = _deepcopy(default)
+            doc["created_at"] = _dt.now(_tz.utc)
+            doc["last_run"] = None
+            doc["last_status"] = None
+            doc["last_error"] = None
+            doc["run_count"] = 0
+            doc["error_count"] = 0
+            doc["avg_run_time_ms"] = 0
+            doc["toggled_by"] = "system"
+            doc["toggled_at"] = _dt.now(_tz.utc)
+            col.insert_one(doc)
+        except Exception as e:
+            seed_errors.append({
+                "agent_id": default.get("agent_id", "?"),
+                "error": f"{type(e).__name__}: {str(e)[:200]}",
+            })
+            logger.warning(
+                "[AGENTS-RESEED] failed to seed %s: %s",
+                default.get("agent_id"),
+                e,
+            )
 
     # Snapshot what's there after
     try:
@@ -457,6 +490,7 @@ async def agents_reseed(user: dict = Depends(require_superadmin)):
     return {
         "seeded": seeded,
         "already_present": already_present,
+        "seed_errors": seed_errors,
         "scheduler_rehydrated": scheduler_rehydrated,
         "rehydrate_error": rehydrate_error,
         "configured_after": after_ids,
