@@ -26,6 +26,10 @@ import { GSTR1Report } from '../../components/reports/GSTR1Report';
 import { GSTR3BReport } from '../../components/reports/GSTR3BReport';
 import { DemandForecast } from '../../components/reports/DemandForecast';
 import { exportToCSV, SALES_REPORT_COLUMNS, INVENTORY_REPORT_COLUMNS, CUSTOMER_REPORT_COLUMNS, GST_REPORT_COLUMNS } from '../../utils/exportUtils';
+import { FootfallAuditCard } from './sections/FootfallAuditCard';
+import { PriceBandCard } from './sections/PriceBandCard';
+import { LensDeepDiveCard } from './sections/LensDeepDiveCard';
+import { SeasonalityCard } from './sections/SeasonalityCard';
 
 type ReportType = 'sales' | 'inventory' | 'customers' | 'gst' | 'forecast';
 type DateRange = 'today' | 'week' | 'month' | 'quarter' | 'custom';
@@ -676,6 +680,16 @@ export function ReportsPage() {
         )}
       </div>
       </>}
+
+      {/* TechCherry R1 — net-new analytics dimensions (Sales tab) */}
+      {activeTab === 'sales' && (
+        <>
+          <PriceBandCard storeId={user?.activeStoreId} />
+          <LensDeepDiveCard storeId={user?.activeStoreId} />
+          <SeasonalityCard storeId={user?.activeStoreId} />
+        </>
+      )}
+
       {/* Report Cards */}
       <div>
         <h3 className="font-semibold text-gray-900 mb-3">Available Reports</h3>
@@ -903,6 +917,9 @@ export function ReportsPage() {
       )}
 
       {/* Customers Tab Content */}
+      {activeTab === 'customers' && (
+        <FootfallAuditCard storeId={user?.activeStoreId} />
+      )}
       {activeTab === 'customers' && (
         <div className="card">
           <div className="flex items-center justify-between mb-4">

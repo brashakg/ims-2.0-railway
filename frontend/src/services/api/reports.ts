@@ -166,6 +166,109 @@ export const reportsApi = {
       comparison: { sales_change_percent: number; sales_change_amount: number; order_change: number };
     };
   },
+
+  // TechCherry R1 — 4 net-new analytics dimensions.
+  // Spec: docs/TECHCHERRY_PORT_SCOPE.md §5.
+
+  getFootfallAudit: async (storeId?: string, monthsBack = 12) => {
+    const r = await api.get('/reports/walkouts/footfall-audit', {
+      params: { months_back: monthsBack, ...(storeId ? { store_id: storeId } : {}) },
+    });
+    return r.data as {
+      store_id: string;
+      period_start: string;
+      period_end: string;
+      months: Array<{
+        month: string;
+        walkins_total: number;
+        walkouts_total: number;
+        walkouts_converted: number;
+        orders_total: number;
+        hidden_sales: number;
+        hidden_sales_pct: number;
+        staff_reported_conversion_pct: number;
+        true_conversion_pct: number;
+      }>;
+      rolling: {
+        walkins_total: number;
+        walkouts_total: number;
+        walkouts_converted: number;
+        orders_total: number;
+        hidden_sales: number;
+        hidden_sales_pct: number;
+        staff_reported_conversion_pct: number;
+        true_conversion_pct: number;
+      };
+    };
+  },
+
+  getPriceBands: async (storeId?: string, fyCount = 3, trendBands = 4) => {
+    const r = await api.get('/reports/sales/price-bands', {
+      params: { fy_count: fyCount, trend_bands: trendBands, ...(storeId ? { store_id: storeId } : {}) },
+    });
+    return r.data as {
+      store_id: string;
+      bands: string[];
+      fy_count: number;
+      by_fy: Array<{
+        fy: string;
+        invoices_by_band: number[];
+        revenue_by_band: number[];
+        atv_by_band: number[];
+      }>;
+      trend_bands: string[];
+      monthly_trend_by_band: Record<string, Array<{ month: string; revenue: number; invoices: number }>>;
+      movement_summary: {
+        premiumized_pct: number;
+        stable_pct: number;
+        downgraded_pct: number;
+        compared_customers: number;
+      };
+      total_orders: number;
+    };
+  },
+
+  getLensDeepDive: async (storeId?: string, monthsBack = 12) => {
+    const r = await api.get('/reports/sales/lens-deep-dive', {
+      params: { months_back: monthsBack, ...(storeId ? { store_id: storeId } : {}) },
+    });
+    return r.data as {
+      store_id: string;
+      period_start: string;
+      period_end: string;
+      totals: {
+        lens_units: number;
+        lens_revenue: number;
+        atv: number;
+        contact_lens_units: number;
+        contact_lens_revenue: number;
+      };
+      by_brand: Array<{ brand: string; units: number; revenue: number; share: number }>;
+      by_type: Array<{ type: string; units: number; revenue: number }>;
+      by_coating: Array<{ coating: string; units: number; revenue: number }>;
+      by_refractive_index: Array<{ index: string; units: number; revenue: number }>;
+      parse_rate: number;
+      metadata_pending: boolean;
+    };
+  },
+
+  getSeasonality: async (storeId?: string, yearsBack = 2) => {
+    const r = await api.get('/reports/sales/seasonality', {
+      params: { years_back: yearsBack, ...(storeId ? { store_id: storeId } : {}) },
+    });
+    return r.data as {
+      store_id: string;
+      years_back: number;
+      day_of_week: Array<{ dow: string; invoices: number; revenue: number; atv: number }>;
+      month_of_year: Array<{ month: string; invoices: number; revenue: number; atv: number }>;
+      peak_dow: string | null;
+      trough_dow: string | null;
+      peak_month: string | null;
+      trough_month: string | null;
+      peak_dow_lift_pct: number;
+      total_orders: number;
+    };
+  },
 };
 
 // ============================================================================
