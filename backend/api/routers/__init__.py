@@ -4,6 +4,7 @@ IMS 2.0 - API Routers
 """
 
 from .auth import router as auth_router
+from .dashboard_widgets import router as dashboard_widgets_router
 from .users import router as users_router
 from .stores import router as stores_router
 from .products import router as products_router
@@ -46,6 +47,7 @@ from .vendor_portal import router as vendor_portal_router
 
 __all__ = [
     "auth_router",
+    "dashboard_widgets_router",
     "users_router",
     "stores_router",
     "products_router",

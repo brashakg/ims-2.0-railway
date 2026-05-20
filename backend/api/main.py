@@ -72,6 +72,7 @@ except ImportError:
 # Import routers
 from .routers import (
     auth_router,
+    dashboard_widgets_router,
     users_router,
     stores_router,
     products_router,
@@ -677,6 +678,9 @@ async def seed_database(secret: str = "", force: str = ""):
 
 
 # Include routers
+# Dashboard widgets FIRST — its exact paths must resolve before any
+# domain router's /{id} catch-all could shadow them.
+app.include_router(dashboard_widgets_router, prefix="/api/v1", tags=["Dashboard Widgets"])
 app.include_router(auth_router, prefix="/api/v1/auth", tags=["Authentication"])
 app.include_router(users_router, prefix="/api/v1/users", tags=["Users"])
 app.include_router(stores_router, prefix="/api/v1/stores", tags=["Stores"])
