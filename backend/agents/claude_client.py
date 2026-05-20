@@ -34,8 +34,15 @@ DEFAULT_TIMEOUT = float(os.getenv("AGENT_CLAUDE_TIMEOUT", "30.0"))
 
 
 def is_claude_available() -> bool:
-    """Quick check for agents to decide whether to bother calling."""
-    return bool(ANTHROPIC_API_KEY)
+    """True if ANY LLM (local OSS or Claude) is configured. Agents call
+    this to decide whether to attempt an LLM completion at all. Now
+    delegates to the pluggable provider registry so a self-hosted local
+    model counts even without an Anthropic key."""
+    try:
+        from . import llm_provider
+        return llm_provider.any_available()
+    except Exception:
+        return bool(ANTHROPIC_API_KEY)
 
 
 async def call_claude(
@@ -65,55 +72,13 @@ async def call_claude(
       history: Optional prior messages [{"role": "user"|"assistant", "content": ...}]
                appended in order before the user message.
     """
-    if not ANTHROPIC_API_KEY:
-        logger.debug("[CLAUDE] API key unset — skipping call")
-        return None
-
-    messages: List[Dict[str, str]] = []
-    if history:
-        # Only keep the last 8 turns to bound token usage
-        messages.extend(history[-8:])
-    messages.append({"role": "user", "content": user})
-
-    payload = {
-        "model": model,
-        "max_tokens": max_tokens,
-        "system": system,
-        "messages": messages,
-    }
-    headers = {
-        "x-api-key": ANTHROPIC_API_KEY,
-        "anthropic-version": "2023-06-01",
-        "content-type": "application/json",
-    }
-
-    try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            resp = await client.post(ANTHROPIC_API_URL, headers=headers, json=payload)
-        if resp.status_code != 200:
-            logger.warning(f"[CLAUDE] {resp.status_code} from Anthropic: {resp.text[:400]}")
-            return None
-        body = resp.json()
-        # Response shape: {"content": [{"type": "text", "text": "..."}], ...}
-        content = body.get("content") or []
-        if not content or not isinstance(content, list):
-            logger.warning(f"[CLAUDE] Empty content in response: {body}")
-            return None
-        first = content[0]
-        text = first.get("text") if isinstance(first, dict) else None
-        if not text:
-            logger.warning(f"[CLAUDE] No text in first content block: {first}")
-            return None
-        return text
-    except httpx.TimeoutException:
-        logger.warning(f"[CLAUDE] Timeout after {timeout}s")
-        return None
-    except httpx.HTTPError as e:
-        logger.warning(f"[CLAUDE] HTTP error: {e}")
-        return None
-    except (ValueError, KeyError, TypeError) as e:
-        logger.warning(f"[CLAUDE] Response parse error: {e}")
-        return None
+    # Delegate to the pluggable provider so agents use whichever model is
+    # configured (local OSS and/or Claude). Backwards-compatible: returns
+    # the text or None on any failure.
+    from . import llm_provider
+    return await llm_provider.complete(
+        system, user, history=history, max_tokens=max_tokens, timeout=timeout, scrub=False
+    )
 
 
 async def call_claude_json(

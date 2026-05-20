@@ -68,6 +68,7 @@ class JarvisQuery(BaseModel):
     message: str
     context: Optional[Dict[str, Any]] = None
     query_type: Optional[JarvisQueryType] = None
+    model: Optional[str] = None  # which configured LLM to use (local|claude|extra)
 
 
 class JarvisCommand(BaseModel):
@@ -741,71 +742,28 @@ Current date and time: {current_datetime}
 
     @classmethod
     async def call_claude(
-        cls, message: str, business_data: Dict, conversation_history: List[Dict] = None
+        cls, message: str, business_data: Dict,
+        conversation_history: List[Dict] = None, model_id: str = None,
     ) -> str:
-        """Call Claude API with business context"""
-        if not ANTHROPIC_API_KEY:
-            logger.warning("ANTHROPIC_API_KEY not set - using fallback response")
-            return None
+        """Run a JARVIS chat completion through the pluggable LLM provider
+        (local OSS and/or Claude). `model_id` selects which configured
+        model answers; None = the configured default. business_data PII is
+        scrubbed by the provider before it leaves the process. Returns the
+        text or None (caller falls back to the deterministic template)."""
+        from agents import llm_provider
 
-        # Build system prompt with current datetime
         system_prompt = cls.JARVIS_SYSTEM_PROMPT.format(
             current_datetime=datetime.now().strftime("%Y-%m-%d %H:%M:%S IST")
         )
-
-        # Add business data context
-        system_prompt += f"""
-
-## Current Business Data:
-```json
-{json.dumps(business_data, indent=2, default=str)}
-```
-
-Use this data to provide accurate, data-driven responses. Reference specific numbers and trends when relevant.
-"""
-
-        # Build messages
-        messages = []
-
-        # Add conversation history if provided
-        if conversation_history:
-            for msg in conversation_history[-10:]:  # Last 10 messages for context
-                messages.append(
-                    {"role": msg.get("role", "user"), "content": msg.get("content", "")}
-                )
-
-        # Add current message
-        messages.append({"role": "user", "content": message})
-
-        try:
-            async with httpx.AsyncClient(timeout=60.0) as client:
-                response = await client.post(
-                    "https://api.anthropic.com/v1/messages",
-                    headers={
-                        "x-api-key": ANTHROPIC_API_KEY,
-                        "anthropic-version": "2023-06-01",
-                        "content-type": "application/json",
-                    },
-                    json={
-                        "model": CLAUDE_MODEL,
-                        "max_tokens": 2048,
-                        "system": system_prompt,
-                        "messages": messages,
-                    },
-                )
-
-                if response.status_code == 200:
-                    result = response.json()
-                    return result["content"][0]["text"]
-                else:
-                    logger.error(
-                        f"Claude API error: {response.status_code} - {response.text}"
-                    )
-                    return None
-
-        except Exception as e:
-            logger.error(f"Claude API call failed: {str(e)}")
-            return None
+        return await llm_provider.complete(
+            system_prompt,
+            message,
+            model_id=model_id,
+            business_data=business_data,
+            history=conversation_history,
+            max_tokens=2048,
+            scrub=True,
+        )
 
 
 # ============================================================================
@@ -821,10 +779,19 @@ class Jarvis:
         self.nlp = JarvisNLP()
         self.response_gen = JarvisResponseGenerator()
         self.conversation_history = []
-        self.claude_enabled = bool(ANTHROPIC_API_KEY)
 
-    async def process_query_async(self, query: str, context: Dict = None) -> Dict:
-        """Process a natural language query using Claude AI"""
+    @property
+    def claude_enabled(self) -> bool:
+        """True if any LLM (local OSS or Claude) is configured."""
+        try:
+            from agents import llm_provider
+            return llm_provider.any_available()
+        except Exception:
+            return bool(ANTHROPIC_API_KEY)
+
+    async def process_query_async(self, query: str, context: Dict = None, model_id: str = None) -> Dict:
+        """Process a natural language query via the selected LLM (or the
+        deterministic template fallback)."""
         intent = self.nlp.detect_intent(query)
         entities = self.nlp.extract_entities(query)
 
@@ -839,13 +806,14 @@ class Jarvis:
             "recommendations": self.analytics.get_recommendations(),
         }
 
-        # Try Claude first
+        # Try the selected LLM first (local OSS and/or Claude)
         claude_response = None
         if self.claude_enabled:
             claude_response = await ClaudeClient.call_claude(
                 message=query,
                 business_data=business_data,
                 conversation_history=self.conversation_history,
+                model_id=model_id,
             )
 
         if claude_response:
@@ -858,13 +826,15 @@ class Jarvis:
             if len(self.conversation_history) > 20:
                 self.conversation_history = self.conversation_history[-20:]
 
+            from agents import llm_provider
+            used_model = model_id or llm_provider.default_model_id() or "llm"
             return {
                 "response": claude_response,
                 "intent": intent,
                 "entities": entities,
                 "data": business_data.get("overview", {}),
                 "ai_powered": True,
-                "model": CLAUDE_MODEL,
+                "model": used_model,
                 "timestamp": datetime.now().isoformat(),
             }
 
@@ -1186,12 +1156,26 @@ async def get_jarvis_status(current_user: dict = Depends(require_superadmin)):
     }
 
 
+@router.get("/models")
+async def list_jarvis_models(current_user: dict = Depends(require_superadmin)):
+    """Available LLM choices for the JARVIS chat selector. Reflects what's
+    configured via env (local OSS, Claude, extra). Empty list = JARVIS
+    runs on the deterministic template fallback only."""
+    from agents import llm_provider
+    return {
+        "models": llm_provider.list_models(),
+        "default": llm_provider.default_model_id(),
+    }
+
+
 @router.post("/query")
 async def query_jarvis(
     query: JarvisQuery, current_user: dict = Depends(require_superadmin)
 ):
     """Send a query to JARVIS - SUPERADMIN ONLY"""
-    result = await jarvis_instance.process_query_async(query.message, query.context)
+    result = await jarvis_instance.process_query_async(
+        query.message, query.context, model_id=query.model
+    )
 
     return {
         "query": query.message,
