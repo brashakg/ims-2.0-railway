@@ -102,7 +102,6 @@ from .routers import (
     supply_chain_router,
     follow_ups_router,
     payroll_router,
-    incentives_router,
     marketing_router,
     analytics_v2_router,
     agents_router,
@@ -713,7 +712,6 @@ app.include_router(billing_router, prefix="/api/v1/billing", tags=["Billing"])
 app.include_router(
     supply_chain_router, prefix="/api/v1/supply-chain", tags=["Supply Chain"]
 )
-app.include_router(incentives_router, prefix="/api/v1/incentives", tags=["Incentives"])
 app.include_router(follow_ups_router, prefix="/api/v1/follow-ups", tags=["Follow-ups"])
 app.include_router(payroll_router, prefix="/api/v1/payroll", tags=["Payroll"])
 app.include_router(marketing_router, prefix="/api/v1/marketing", tags=["Marketing"])
