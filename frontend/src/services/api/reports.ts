@@ -269,6 +269,73 @@ export const reportsApi = {
       total_orders: number;
     };
   },
+
+  // R2 — Purchase Recommendations
+  // Spec: docs/TECHCHERRY_PORT_SCOPE.md §6
+  getPurchaseRecommendations: async (
+    storeId?: string,
+    opts?: {
+      lookback_days?: number;
+      lead_time_days?: number;
+      reorder_cycle_days?: number;
+      safety_buffer_days?: number;
+      min_velocity?: number;
+      limit?: number;
+    }
+  ) => {
+    const r = await api.get('/reports/purchase/recommendations', {
+      params: {
+        ...(opts ?? {}),
+        ...(storeId ? { store_id: storeId } : {}),
+      },
+    });
+    return r.data as {
+      recommendations: Array<{
+        product_id: string;
+        name: string;
+        brand: string;
+        category: string;
+        velocity_90d: number;
+        daily_velocity: number;
+        current_stock: number;
+        reorder_point: number;
+        desired_cover: number;
+        gap_units: number;
+        suggested_order_qty: number;
+        avg_selling_price: number;
+        cost_price: number;
+        unit_margin: number;
+        estimated_revenue_impact: number;
+        estimated_purchase_cost: number;
+        estimated_margin: number;
+        confidence: 'HIGH' | 'MEDIUM' | 'LOW';
+        reason: string;
+      }>;
+      by_category: Array<{
+        category: string;
+        count: number;
+        suggested_units: number;
+        estimated_revenue_impact: number;
+      }>;
+      summary: {
+        total_recommendations: number;
+        total_suggested_units: number;
+        estimated_revenue_at_risk: number;
+        estimated_purchase_cost: number;
+        estimated_margin?: number;
+      };
+      params: {
+        store_id: string;
+        lookback_days: number;
+        lead_time_days: number;
+        reorder_cycle_days: number;
+        safety_buffer_days: number;
+        cover_days_total: number;
+        min_velocity: number;
+      };
+      as_of: string;
+    };
+  },
 };
 
 // ============================================================================

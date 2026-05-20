@@ -139,6 +139,29 @@ export function ReportsPage() {
     mom_growth: { percent: number; previous_month_sales: number };
     yoy_growth: { percent: number; previous_year_sales: number };
   } | null>(null);
+  // R2 — Purchase Recommendations
+  const [purchaseRecs, setPurchaseRecs] = useState<Array<{
+    product_id: string;
+    name: string;
+    brand: string;
+    category: string;
+    velocity_90d: number;
+    current_stock: number;
+    reorder_point: number;
+    suggested_order_qty: number;
+    avg_selling_price: number;
+    estimated_revenue_impact: number;
+    estimated_margin: number;
+    confidence: 'HIGH' | 'MEDIUM' | 'LOW';
+    reason: string;
+  }>>([]);
+  const [purchaseRecsSummary, setPurchaseRecsSummary] = useState<{
+    total_recommendations: number;
+    total_suggested_units: number;
+    estimated_revenue_at_risk: number;
+    estimated_purchase_cost: number;
+    estimated_margin?: number;
+  } | null>(null);
   // 6 reports that previously had backend handlers but no frontend
   // call — added in May-2026 audit follow-up. Backends now also use
   // proper Mongo Date filtering + grand_total field reads.
@@ -249,6 +272,7 @@ export function ReportsPage() {
         nmsRes, growthRes,
         staffRes, stockRes, brandRes,
         custRes, discRes, expRes,
+        purchRes,
       ] = await Promise.allSettled([
         reportsApi.getNonMovingStock(sid, 90, 200),
         reportsApi.getSalesGrowth(sid, now.getFullYear(), now.getMonth() + 1),
@@ -258,6 +282,7 @@ export function ReportsPage() {
         reportsApi.getCustomerAcquisition(sid, startDate, endDate),
         reportsApi.getDiscountAnalysis(sid, startDate, endDate),
         reportsApi.getExpenseVsRevenue(sid, startDate, endDate),
+        reportsApi.getPurchaseRecommendations(sid, { limit: 50 }),
       ]);
       if (nmsRes.status === 'fulfilled') setNonMovingStock(nmsRes.value.data || []);
       if (growthRes.status === 'fulfilled') setSalesGrowth(growthRes.value);
@@ -267,6 +292,10 @@ export function ReportsPage() {
       if (custRes.status === 'fulfilled') setCustomerAcquisition(custRes.value);
       if (discRes.status === 'fulfilled') setDiscountAnalysis(discRes.value);
       if (expRes.status === 'fulfilled') setExpenseVsRevenue(expRes.value);
+      if (purchRes.status === 'fulfilled') {
+        setPurchaseRecs(purchRes.value.recommendations || []);
+        setPurchaseRecsSummary(purchRes.value.summary || null);
+      }
     } catch {
       setError('Failed to load report data. Please try again.');
     } finally {
@@ -908,6 +937,127 @@ export function ReportsPage() {
                 {nonMovingStock.length > 50 && (
                   <p className="text-xs text-gray-500 mt-3">
                     Showing first 50 of {nonMovingStock.length}. Export CSV for the full list.
+                  </p>
+                )}
+              </div>
+            )}
+          </div>
+
+          {/* R2 — Purchase Recommendations.
+              Combines velocity (last 90d) × current stock × reorder point
+              to surface what the buyer should reorder now, ranked by
+              revenue at risk × confidence. Spec: TECHCHERRY_PORT_SCOPE §6. */}
+          <div className="card laptop:col-span-2">
+            <div className="flex items-center justify-between mb-4">
+              <div>
+                <h3 className="font-semibold text-gray-900">Purchase Recommendations</h3>
+                <p className="text-xs text-gray-500 mt-1">
+                  {purchaseRecsSummary
+                    ? `${purchaseRecsSummary.total_recommendations} SKU${purchaseRecsSummary.total_recommendations === 1 ? '' : 's'} to reorder · ${purchaseRecsSummary.total_suggested_units} units suggested · ₹${(purchaseRecsSummary.estimated_revenue_at_risk / 100000).toFixed(2)}L revenue at risk`
+                    : 'Based on 90-day velocity × current stock × reorder point'}
+                </p>
+              </div>
+              {canExport && purchaseRecs.length > 0 && (
+                <button
+                  onClick={() => {
+                    exportToCSV(
+                      purchaseRecs.map(p => ({
+                        name: p.name || '',
+                        brand: p.brand || '',
+                        category: p.category || '',
+                        velocity_90d: p.velocity_90d,
+                        current_stock: p.current_stock,
+                        reorder_point: p.reorder_point,
+                        suggested_order_qty: p.suggested_order_qty,
+                        avg_selling_price: p.avg_selling_price,
+                        estimated_revenue_impact: p.estimated_revenue_impact,
+                        estimated_margin: p.estimated_margin,
+                        confidence: p.confidence,
+                        reason: p.reason,
+                      })),
+                      'purchase_recommendations',
+                      [
+                        { key: 'name', label: 'Product' },
+                        { key: 'brand', label: 'Brand' },
+                        { key: 'category', label: 'Category' },
+                        { key: 'velocity_90d', label: 'Velocity (90d)' },
+                        { key: 'current_stock', label: 'Current Stock' },
+                        { key: 'reorder_point', label: 'Reorder Point' },
+                        { key: 'suggested_order_qty', label: 'Suggested Qty' },
+                        { key: 'avg_selling_price', label: 'Avg Price (₹)' },
+                        { key: 'estimated_revenue_impact', label: 'Revenue Impact (₹)' },
+                        { key: 'estimated_margin', label: 'Est. Margin (₹)' },
+                        { key: 'confidence', label: 'Confidence' },
+                        { key: 'reason', label: 'Reasoning' },
+                      ]
+                    );
+                    toast.success('Purchase recommendations exported');
+                  }}
+                  className="text-sm text-bv-red-600 hover:text-bv-red-700 flex items-center gap-1"
+                >
+                  <Download className="w-4 h-4" />
+                  Export CSV
+                </button>
+              )}
+            </div>
+            {isLoading ? (
+              <div className="h-32 flex items-center justify-center">
+                <Loader2 className="w-6 h-6 animate-spin text-bv-red-600" />
+              </div>
+            ) : purchaseRecs.length === 0 ? (
+              <div className="py-8 text-center text-gray-500">
+                <p>No purchase recommendations — stock is healthy relative to demand.</p>
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead className="border-b border-gray-200 text-left text-xs uppercase tracking-wider text-gray-500">
+                    <tr>
+                      <th className="py-2 pr-3">Product</th>
+                      <th className="py-2 pr-3">Category</th>
+                      <th className="py-2 pr-3 text-right">90d Velocity</th>
+                      <th className="py-2 pr-3 text-right">Stock</th>
+                      <th className="py-2 pr-3 text-right">Reorder Pt</th>
+                      <th className="py-2 pr-3 text-right">Suggest Qty</th>
+                      <th className="py-2 pr-3 text-right">Revenue Impact</th>
+                      <th className="py-2 pr-3 text-center">Confidence</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {purchaseRecs.slice(0, 50).map((p, idx) => (
+                      <tr key={p.product_id || idx} className="border-b border-gray-100 last:border-b-0">
+                        <td className="py-2 pr-3 text-gray-900">
+                          <span className="font-medium">{p.brand || 'Unbranded'}</span>
+                          {p.name ? <span className="text-gray-500"> · {p.name}</span> : null}
+                        </td>
+                        <td className="py-2 pr-3 text-gray-600">{p.category || '-'}</td>
+                        <td className="py-2 pr-3 text-right text-gray-700">{p.velocity_90d}</td>
+                        <td className="py-2 pr-3 text-right">
+                          <span className={p.current_stock <= p.reorder_point ? 'text-red-600 font-medium' : 'text-gray-700'}>
+                            {p.current_stock}
+                          </span>
+                        </td>
+                        <td className="py-2 pr-3 text-right text-gray-600">{p.reorder_point || '-'}</td>
+                        <td className="py-2 pr-3 text-right font-medium text-bv-red-600">{p.suggested_order_qty}</td>
+                        <td className="py-2 pr-3 text-right text-gray-900">
+                          ₹{(p.estimated_revenue_impact / 1000).toFixed(1)}K
+                        </td>
+                        <td className="py-2 pr-3 text-center">
+                          <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${
+                            p.confidence === 'HIGH' ? 'bg-green-100 text-green-700'
+                            : p.confidence === 'MEDIUM' ? 'bg-yellow-100 text-yellow-700'
+                            : 'bg-gray-100 text-gray-600'
+                          }`}>
+                            {p.confidence}
+                          </span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                {purchaseRecs.length > 50 && (
+                  <p className="text-xs text-gray-500 mt-3">
+                    Showing top 50 of {purchaseRecs.length}. Export CSV for the full list.
                   </p>
                 )}
               </div>
