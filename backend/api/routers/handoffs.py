@@ -37,7 +37,7 @@ from typing import Optional, List, Dict, Any
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query
 from fastapi.responses import Response
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, field_validator
 
 from .auth import get_current_user
 from ..dependencies import get_handoff_repository, get_user_repository
@@ -87,7 +87,8 @@ class HandoffResponseInput(BaseModel):
     response: str = Field(..., description="approved | denied | accepted | received")
     comment: Optional[str] = Field(None, max_length=200)
 
-    @validator("response")
+    @field_validator("response")
+    @classmethod
     def _v_response(cls, v):
         v = (v or "").strip().lower()
         # Reshare goes through the dedicated /reshare endpoint
@@ -111,7 +112,8 @@ class HandoffDismissInput(BaseModel):
         description="Required if action=snooze. Minutes until card reappears.",
     )
 
-    @validator("action")
+    @field_validator("action")
+    @classmethod
     def _v_action(cls, v):
         v = (v or "").strip().lower()
         if v not in {"dismiss", "keep", "snooze"}:

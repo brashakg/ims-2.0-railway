@@ -1,0 +1,270 @@
+"""
+IMS 2.0 — Pluggable LLM provider
+================================
+One async entry point (`complete`) that routes to whichever model the
+caller selects, plus a registry of the models that are configured via
+env. Lets JARVIS + the agents run a self-hosted OSS model (Ollama /
+vLLM / any OpenAI-compatible server) and/or Anthropic Claude, with a
+runtime per-query selector — a hybrid of "local & private" and
+"Claude deep analysis".
+
+Model registry is env-driven so no code change is needed to add/remove
+a model:
+
+  Local (OpenAI-compatible — Ollama, vLLM, LM Studio, Groq, …):
+    LLM_LOCAL_BASE_URL   e.g. http://ollama.railway.internal:11434/v1
+    LLM_LOCAL_MODEL      e.g. qwen2.5:3b-instruct   (default)
+    LLM_LOCAL_LABEL      e.g. "Local (fast & private)"
+    LLM_LOCAL_API_KEY    optional (Ollama needs none; Groq needs a key)
+
+  Claude:
+    ANTHROPIC_API_KEY    (already used elsewhere)
+    AGENT_CLAUDE_MODEL   default claude-haiku-4-5
+    LLM_CLAUDE_LABEL     e.g. "Claude (deep analysis)"
+
+  Optional third (any OpenAI-compatible):
+    LLM_EXTRA_BASE_URL / LLM_EXTRA_MODEL / LLM_EXTRA_LABEL / LLM_EXTRA_API_KEY
+
+  LLM_DEFAULT_MODEL      id to default to (local | claude | extra)
+
+Privacy: `scrub_pii` redacts customer PII (names, phones, emails,
+addresses, GSTIN) from any structured context before it leaves the
+process. On by default for every provider — defence in depth even for
+the local one.
+"""
+from __future__ import annotations
+
+from typing import Optional, Dict, Any, List
+import json
+import logging
+import os
+import re
+
+import httpx
+
+logger = logging.getLogger(__name__)
+
+
+# ============================================================================
+# PII scrubbing
+# ============================================================================
+
+_PHONE_RE = re.compile(r"\b\d{10}\b")
+_EMAIL_RE = re.compile(r"\b[\w.+-]+@[\w-]+\.[\w.-]+\b")
+_PII_KEYS = {
+    "phone", "mobile", "customer_phone", "customerphone", "email",
+    "customer_name", "customername", "name", "full_name", "fullname",
+    "patient_name", "patientname", "address", "billing_address",
+    "billingaddress", "gstin", "pan", "pan_number",
+}
+
+
+def scrub_pii(obj: Any) -> Any:
+    """Recursively redact PII from a dict/list/str so it never leaves the
+    process in an LLM prompt. Keys in _PII_KEYS are blanked; phone/email
+    patterns in free text are masked."""
+    if isinstance(obj, dict):
+        out = {}
+        for k, v in obj.items():
+            if isinstance(k, str) and k.lower().replace("_", "") in _PII_KEYS:
+                out[k] = "[redacted]"
+            else:
+                out[k] = scrub_pii(v)
+        return out
+    if isinstance(obj, list):
+        return [scrub_pii(x) for x in obj]
+    if isinstance(obj, str):
+        s = _PHONE_RE.sub("[phone]", obj)
+        s = _EMAIL_RE.sub("[email]", s)
+        return s
+    return obj
+
+
+# ============================================================================
+# Model registry (env-driven)
+# ============================================================================
+
+def _registry() -> Dict[str, Dict[str, Any]]:
+    """Build the live registry from env. Called fresh each time so a
+    config change (e.g. via Railway redeploy) is picked up without a
+    code change."""
+    models: Dict[str, Dict[str, Any]] = {}
+
+    local_url = os.getenv("LLM_LOCAL_BASE_URL") or os.getenv("OLLAMA_BASE_URL")
+    if local_url:
+        models["local"] = {
+            "id": "local",
+            "label": os.getenv("LLM_LOCAL_LABEL", "Local (fast & private)"),
+            "provider": "openai_compat",
+            "base_url": local_url.rstrip("/"),
+            "model": os.getenv("LLM_LOCAL_MODEL", "qwen2.5:3b-instruct"),
+            "api_key": os.getenv("LLM_LOCAL_API_KEY", ""),
+        }
+
+    if os.getenv("ANTHROPIC_API_KEY"):
+        models["claude"] = {
+            "id": "claude",
+            "label": os.getenv("LLM_CLAUDE_LABEL", "Claude (deep analysis)"),
+            "provider": "anthropic",
+            "model": os.getenv("AGENT_CLAUDE_MODEL", "claude-haiku-4-5"),
+            "api_key": os.getenv("ANTHROPIC_API_KEY"),
+            "api_url": os.getenv("ANTHROPIC_API_URL", "https://api.anthropic.com/v1/messages"),
+        }
+
+    extra_url = os.getenv("LLM_EXTRA_BASE_URL")
+    if extra_url:
+        models["extra"] = {
+            "id": "extra",
+            "label": os.getenv("LLM_EXTRA_LABEL", "Cloud (fast)"),
+            "provider": "openai_compat",
+            "base_url": extra_url.rstrip("/"),
+            "model": os.getenv("LLM_EXTRA_MODEL", "llama-3.3-70b-versatile"),
+            "api_key": os.getenv("LLM_EXTRA_API_KEY", ""),
+        }
+
+    return models
+
+
+def list_models() -> List[Dict[str, str]]:
+    """Public list for the UI selector — id + label + provider only."""
+    return [
+        {"id": m["id"], "label": m["label"], "provider": m["provider"]}
+        for m in _registry().values()
+    ]
+
+
+def default_model_id() -> Optional[str]:
+    reg = _registry()
+    pref = os.getenv("LLM_DEFAULT_MODEL")
+    if pref and pref in reg:
+        return pref
+    # Prefer the private local model, then claude, then extra.
+    for k in ("local", "claude", "extra"):
+        if k in reg:
+            return k
+    return None
+
+
+def any_available() -> bool:
+    return bool(_registry())
+
+
+# ============================================================================
+# Completion routing
+# ============================================================================
+
+DEFAULT_TIMEOUT = float(os.getenv("LLM_TIMEOUT", "45.0"))
+
+
+def _context_block(business_data: Optional[Dict]) -> str:
+    if not business_data:
+        return ""
+    safe = scrub_pii(business_data)
+    try:
+        return "\n\nBUSINESS DATA (JSON):\n" + json.dumps(safe, default=str)[:12000]
+    except Exception:
+        return ""
+
+
+async def complete(
+    system: str,
+    user: str,
+    *,
+    model_id: Optional[str] = None,
+    business_data: Optional[Dict] = None,
+    history: Optional[List[Dict[str, str]]] = None,
+    max_tokens: int = 800,
+    timeout: float = DEFAULT_TIMEOUT,
+    scrub: bool = True,
+) -> Optional[str]:
+    """Route a completion to the selected (or default) model. Returns the
+    text, or None on any failure / no model configured (caller falls back
+    to deterministic output). PII in business_data is scrubbed by default.
+    """
+    reg = _registry()
+    mid = model_id if (model_id and model_id in reg) else default_model_id()
+    if not mid:
+        return None
+    m = reg[mid]
+
+    ctx = _context_block(business_data) if scrub else (
+        "\n\nBUSINESS DATA (JSON):\n" + json.dumps(business_data, default=str)[:12000]
+        if business_data else ""
+    )
+    full_system = system + ctx
+
+    try:
+        if m["provider"] == "anthropic":
+            return await _call_anthropic(full_system, user, m, history, max_tokens, timeout)
+        return await _call_openai_compat(full_system, user, m, history, max_tokens, timeout)
+    except httpx.TimeoutException:
+        logger.warning("[LLM] %s timeout after %ss", mid, timeout)
+    except httpx.HTTPError as e:
+        logger.warning("[LLM] %s HTTP error: %s", mid, e)
+    except (ValueError, KeyError, TypeError) as e:
+        logger.warning("[LLM] %s parse error: %s", mid, e)
+    return None
+
+
+async def _call_anthropic(system, user, m, history, max_tokens, timeout) -> Optional[str]:
+    messages: List[Dict[str, str]] = []
+    if history:
+        messages.extend(history[-8:])
+    messages.append({"role": "user", "content": user})
+    payload = {"model": m["model"], "max_tokens": max_tokens, "system": system, "messages": messages}
+    headers = {
+        "x-api-key": m["api_key"],
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+    }
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        resp = await client.post(m["api_url"], headers=headers, json=payload)
+    if resp.status_code != 200:
+        logger.warning("[LLM] anthropic %s: %s", resp.status_code, resp.text[:300])
+        return None
+    content = (resp.json().get("content") or [])
+    if content and isinstance(content, list) and isinstance(content[0], dict):
+        return content[0].get("text")
+    return None
+
+
+async def _call_openai_compat(system, user, m, history, max_tokens, timeout) -> Optional[str]:
+    messages: List[Dict[str, str]] = [{"role": "system", "content": system}]
+    if history:
+        messages.extend(history[-8:])
+    messages.append({"role": "user", "content": user})
+    payload = {"model": m["model"], "messages": messages, "max_tokens": max_tokens, "stream": False}
+    headers = {"content-type": "application/json"}
+    if m.get("api_key"):
+        headers["authorization"] = f"Bearer {m['api_key']}"
+    url = m["base_url"] + "/chat/completions"
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        resp = await client.post(url, headers=headers, json=payload)
+    if resp.status_code != 200:
+        logger.warning("[LLM] openai_compat %s: %s", resp.status_code, resp.text[:300])
+        return None
+    choices = resp.json().get("choices") or []
+    if choices and isinstance(choices[0], dict):
+        return (choices[0].get("message") or {}).get("content")
+    return None
+
+
+async def complete_json(system: str, user: str, **kwargs) -> Optional[Dict[str, Any]]:
+    """complete() that expects a JSON object back."""
+    json_system = (
+        system
+        + "\n\nRESPONSE FORMAT (STRICT): Respond with a single JSON object. "
+        + "No markdown, no code fences, no commentary. First char must be `{`."
+    )
+    text = await complete(json_system, user, **kwargs)
+    if not text:
+        return None
+    s = text.strip()
+    if s.startswith("```"):
+        s = s.strip("`")
+        if s.lower().startswith("json"):
+            s = s[4:].lstrip()
+    try:
+        return json.loads(s)
+    except (json.JSONDecodeError, ValueError):
+        return None

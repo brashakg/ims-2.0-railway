@@ -107,7 +107,7 @@ async def emit_audit_alert(
 
     # 2. Dispatch the event so SENTINEL/CORTEX can react in real time
     try:
-        from ...agents.registry import dispatch_event
+        from agents.registry import dispatch_event
         await dispatch_event(
             "audit.alert",
             {
