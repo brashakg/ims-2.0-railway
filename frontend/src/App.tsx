@@ -73,6 +73,7 @@ const MTDLeaderboardPage = lazy(() => import('./pages/incentive/MTDLeaderboardPa
 const PointsHistoryPage = lazy(() => import('./pages/incentive/PointsHistoryPage').then(m => ({ default: m.PointsHistoryPage })));
 const PayoutDashboardPage = lazy(() => import('./pages/incentive/PayoutDashboardPage').then(m => ({ default: m.PayoutDashboardPage })));
 const PayoutSnapshotsPage = lazy(() => import('./pages/incentive/PayoutSnapshotsPage').then(m => ({ default: m.PayoutSnapshotsPage })));
+const IncentiveSettingsPage = lazy(() => import('./pages/incentive/IncentiveSettingsPage').then(m => ({ default: m.IncentiveSettingsPage })));
 
 // Loading fallback component
 const PageLoader = () => (
@@ -417,6 +418,16 @@ function App() {
                         allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT']}
                       >
                         <PayoutSnapshotsPage />
+                      </ProtectedRoute>
+                    }
+                  />
+                  <Route
+                    path="incentive/settings"
+                    element={
+                      <ProtectedRoute
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT']}
+                      >
+                        <IncentiveSettingsPage />
                       </ProtectedRoute>
                     }
                   />
