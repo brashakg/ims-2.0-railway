@@ -938,6 +938,45 @@ async def walkins_manual_topup(
     return _serialize_value(result)
 
 
+# Roles allowed to tap the POS "+1 walk-in" button — every customer-
+# facing in-store role, not just managers (unlike manual-topup, which
+# can inflate the count and stays manager-gated).
+_WALKIN_POS_ROLES = _ALLOWED_CREATE_ROLES | {"OPTOMETRIST", "AREA_MANAGER", "ACCOUNTANT"}
+
+
+class PosWalkinRequest(BaseModel):
+    """POS "+1 walk-in" tap. Attributes the footfall to a salesperson and
+    deduplicates per (mobile, day) when a mobile is supplied."""
+    sales_person_id: str = Field(..., min_length=1)
+    mobile: Optional[str] = None
+
+
+@router.post("/walkins/pos-increment", status_code=201)
+async def walkins_pos_increment(
+    payload: PosWalkinRequest,
+    current_user: dict = Depends(get_current_user),
+    store_id: Optional[str] = Query(None),
+):
+    """Sales-staff-allowed walk-in increment from the POS. Unlike
+    manual-topup (manager-only, arbitrary delta), this bumps the counter
+    by exactly one and attributes it to the order's salesperson, so the
+    per-staff conversion denominator stays accurate. Deduped per
+    (mobile, day) by the repo's auto_increment."""
+    roles = _user_role_set(current_user)
+    if not (roles & _WALKIN_POS_ROLES):
+        raise HTTPException(status_code=403, detail="Not allowed to record walk-ins")
+    store = _resolve_dashboard_store(current_user, store_id)
+    repo = get_walkin_counter_repository()
+    if repo is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    result = repo.auto_increment(
+        store_id=store,
+        sales_person_id=payload.sales_person_id,
+        mobile=payload.mobile,
+    )
+    return _serialize_value(result)
+
+
 @router.get("/dashboard/per-staff")
 async def dashboard_per_staff(
     current_user: dict = Depends(get_current_user),

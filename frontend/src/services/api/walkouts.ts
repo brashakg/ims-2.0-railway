@@ -149,6 +149,17 @@ export const walkoutsApi = {
     return r.data;
   },
 
+  /** Sales-staff "+1 walk-in" from POS. Attributes to the salesperson;
+   *  deduped per (mobile, day) server-side. */
+  walkinsPosIncrement: async (
+    payload: { sales_person_id: string; mobile?: string }, storeId?: string,
+  ): Promise<{ total: number; pos_auto_count: number; deduped: boolean }> => {
+    const r = await api.post('/walkouts/walkins/pos-increment', payload, {
+      params: storeId ? { store_id: storeId } : undefined,
+    });
+    return r.data;
+  },
+
   dashboardPerStaff: async (storeId?: string): Promise<PerStaffResponse> => {
     const r = await api.get('/walkouts/dashboard/per-staff', { params: storeId ? { store_id: storeId } : undefined });
     return r.data;
