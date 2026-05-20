@@ -16,7 +16,7 @@ import { useAuth } from '../../context/AuthContext';
 import { usePOSStore } from '../../stores/posStore';
 import type { SaleType, POSStep, CartLineItem } from '../../stores/posStore';
 import { useProducts } from '../../hooks/usePOSQueries';
-import { customerApi, orderApi, prescriptionApi, productApi, workshopApi } from '../../services/api';
+import { customerApi, orderApi, prescriptionApi, productApi, workshopApi, adminStoreApi } from '../../services/api';
 import type { Prescription } from '../../types';
 
 // Backwards-compatible type exports (used by BillingEngine, CartPanel)
@@ -206,9 +206,12 @@ export function POSLayout() {
   };
 
   useEffect(() => {
-    if (user && !store.salesperson_id) {
+    if (user) {
       store.setStoreId(user.activeStoreId || user.storeIds?.[0] || '');
-      store.setSalesperson(user.id, user.name);
+      // Salesperson is NOT auto-defaulted to the logged-in user — the
+      // incentive engine needs conscious attribution, so the cashier
+      // must pick it explicitly on step 1 (see StepCustomer). It carries
+      // across sales within a session once chosen.
     }
   }, [user]);
 
@@ -218,7 +221,7 @@ export function POSLayout() {
 
   const canProceed = useMemo(() => {
     switch (store.current_step) {
-      case 'customer': return !!store.customer;
+      case 'customer': return !!store.customer && !!store.salesperson_id;
       case 'prescription': return !!store.prescription;
       case 'products': return (store.cart || []).length > 0;
       case 'review': return (store.cart || []).length > 0;
@@ -228,7 +231,7 @@ export function POSLayout() {
       }
       default: return true;
     }
-  }, [store.current_step, store.customer, store.prescription, store.cart, store.payments, store.is_advance_payment]);
+  }, [store.current_step, store.customer, store.salesperson_id, store.prescription, store.cart, store.payments, store.is_advance_payment]);
 
   useEffect(() => {
     const handle = (e: KeyboardEvent) => {
@@ -274,6 +277,8 @@ export function POSLayout() {
         store_id: store.store_id,
         order_type: store.sale_type,
         salesperson_id: store.salesperson_id,
+        salesperson_name: store.salesperson_name,
+        visufit_id: store.visufit_id || undefined,
         items: (store.cart || []).map(item => ({
           item_type: mapCategory(item.category),
           product_id: item.product_id,
@@ -1047,6 +1052,65 @@ function getTimeAgo(date: Date): string {
 }
 
 // ============================================================================
+// Salesperson picker — required attribution for the incentive engine.
+// Lists active users for the current store; starts empty (no default to
+// the logged-in user) so attribution is a conscious choice.
+function SalespersonPicker() {
+  const store = usePOSStore();
+  const { user } = useAuth();
+  const [people, setPeople] = useState<Array<{ id: string; name: string }>>([]);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    const sid = store.store_id || user?.activeStoreId;
+    if (!sid) return;
+    let cancelled = false;
+    setLoading(true);
+    adminStoreApi
+      .getStoreUsers(sid)
+      .then((r: any) => {
+        if (cancelled) return;
+        const list = (r?.users || r || []) as any[];
+        const mapped = list
+          .map((u) => ({
+            id: u.user_id || u.id || u._id || u.username,
+            name: u.name || u.full_name || u.username || u.user_id,
+          }))
+          .filter((u) => u.id);
+        setPeople(mapped);
+      })
+      .catch(() => setPeople([]))
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [store.store_id, user?.activeStoreId]);
+
+  return (
+    <div>
+      <label className="block text-sm font-medium text-gray-700 mb-2">
+        Salesperson <span className="text-red-500">*</span>
+      </label>
+      <select
+        value={store.salesperson_id}
+        onChange={(e) => {
+          const p = people.find((x) => x.id === e.target.value);
+          store.setSalesperson(e.target.value, p?.name || '');
+        }}
+        className={`w-full px-3 py-2.5 border-2 rounded-xl text-sm bg-white ${
+          store.salesperson_id ? 'border-gray-200' : 'border-amber-300'
+        }`}
+      >
+        <option value="">{loading ? 'Loading staff…' : '— Select salesperson —'}</option>
+        {people.map((p) => (
+          <option key={p.id} value={p.id}>{p.name}</option>
+        ))}
+      </select>
+      {!store.salesperson_id && (
+        <p className="text-xs text-amber-600 mt-1">Required — pick who is handling this sale.</p>
+      )}
+    </div>
+  );
+}
+
 // STEP 1: Customer
 // ============================================================================
 function StepCustomer() {
@@ -1123,6 +1187,10 @@ function StepCustomer() {
           ))}
         </div>
       </div>
+
+      {/* Salesperson — required, conscious attribution for incentives.
+          No auto-default; must be chosen before advancing past step 1. */}
+      <SalespersonPicker />
 
       <div>
         <label className="block text-sm font-medium text-gray-700 mb-2">Customer</label>
@@ -1672,6 +1740,27 @@ function StepReview({ onOpenDiscount }: { onOpenDiscount: (item: CartLineItem) =
       </div>
 
       <textarea value={store.cart_note} onChange={(e) => store.setCartNote(e.target.value)} placeholder="Order notes, fitting instructions..." className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm h-16 resize-none" />
+
+      {/* Visufit measurement ID — shown for optical carts only. Optional;
+          drives the per-staff Visufit-coverage gate in the incentive
+          engine. Empty = no Visufit demo done for this order. */}
+      {(store.cart || []).some((i) =>
+        i.is_optical || ['FRAMES', 'RX_LENSES', 'CONTACT_LENSES', 'OPTICAL_LENS', 'COLOUR_CONTACTS'].includes(i.category)
+      ) && (
+        <div className="bg-white border border-gray-200 rounded-xl p-4 text-sm">
+          <label className="font-medium text-gray-900 block mb-1">
+            Visufit measurement ID <span className="text-xs font-normal text-gray-400">(optional)</span>
+          </label>
+          <p className="text-xs text-gray-500 mb-2">Enter the Visufit / Avataar measurement reference if a demo was done.</p>
+          <input
+            type="text"
+            value={store.visufit_id}
+            onChange={(e) => store.setVisufitId(e.target.value)}
+            placeholder="e.g. VF-2026-04829"
+            className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm"
+          />
+        </div>
+      )}
 
       {/* Phase 6.7 — Order-level discount. Stacks on top of per-item
           discounts. Capped at the user's role discount cap. */}
