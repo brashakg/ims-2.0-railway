@@ -101,6 +101,9 @@ export function JarvisPage() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [inputValue, setInputValue] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  // LLM model selector — populated from /jarvis/models (local OSS / Claude / …)
+  const [llmModels, setLlmModels] = useState<Array<{ id: string; label: string }>>([]);
+  const [selectedModel, setSelectedModel] = useState<string>('');
   const [insights, setInsights] = useState<QuickInsight | null>(null);
   const [recommendations, setRecommendations] = useState<Recommendation[]>([]);
   const [isListening, setIsListening] = useState(false);
@@ -124,6 +127,17 @@ export function JarvisPage() {
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
+
+  // Load the available LLM models for the chat selector
+  useEffect(() => {
+    api.get<{ models: Array<{ id: string; label: string }>; default: string | null }>('/jarvis/models')
+      .then(({ data }) => {
+        setLlmModels(data.models || []);
+        if (data.default) setSelectedModel(data.default);
+        else if (data.models?.length) setSelectedModel(data.models[0].id);
+      })
+      .catch(() => setLlmModels([]));
+  }, []);
 
   // Load initial insights + live agent list + activity feed
   useEffect(() => {
@@ -298,7 +312,7 @@ export function JarvisPage() {
         ai_powered?: boolean;
         model?: string;
         intent_detected?: string;
-      }>('/jarvis/query', { message: queryText });
+      }>('/jarvis/query', { message: queryText, model: selectedModel || undefined });
 
       setMessages((prev) => [
         ...prev,
@@ -998,6 +1012,20 @@ Is there a specific aspect you'd like me to dive deeper into? I can provide deta
                 className="input"
                 style={{ flex: 1 }}
               />
+              {llmModels.length > 1 && (
+                <select
+                  value={selectedModel}
+                  onChange={(e) => setSelectedModel(e.target.value)}
+                  className="input sm"
+                  style={{ maxWidth: 180 }}
+                  title="Choose which model answers"
+                  aria-label="LLM model"
+                >
+                  {llmModels.map((m) => (
+                    <option key={m.id} value={m.id}>{m.label}</option>
+                  ))}
+                </select>
+              )}
               <button
                 type="button"
                 onClick={handleSend}
