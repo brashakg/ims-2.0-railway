@@ -11,6 +11,7 @@ import {
   ChevronRight, ChevronLeft, Plus, X,
   Pause, Play, RotateCcw, AlertTriangle,
   Glasses, Watch, FileText, Zap, Sparkles,
+  UserPlus, DoorOpen,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { usePOSStore } from '../../stores/posStore';
@@ -59,6 +60,10 @@ import { AddCustomerModal, type CustomerFormData } from '../customers/AddCustome
 import { CustomerCardWithLoyalty } from './CustomerCardWithLoyalty';
 import { getGSTRateByCategory } from '../../constants/gst';
 import type { PrescriptionInput } from '../../utils/lensAutoSuggest';
+
+import { useToast } from '../../context/ToastContext';
+import { walkoutsApi } from '../../services/api/walkouts';
+import { WalkoutIntakeModal } from '../../pages/walkouts/WalkoutIntakeModal';
 
 // Extracted sub-components
 import { CartSidebar } from './POSCart';
@@ -121,7 +126,32 @@ export function POSLayout() {
   const [showRecallPanel, setShowRecallPanel] = useState(false);
   const [showDayEnd, setShowDayEnd] = useState(false);
   const [showNewConfirm, setShowNewConfirm] = useState(false);
+  const [showWalkoutModal, setShowWalkoutModal] = useState(false);
+  const [walkinBusy, setWalkinBusy] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const toast = useToast();
+
+  // POS "+1 walk-in" — attributes footfall to the chosen salesperson.
+  // Requires a salesperson to be picked first (the conversion engine
+  // needs the attribution); otherwise nudges the cashier to pick one.
+  const handleWalkin = async () => {
+    if (!store.salesperson_id) {
+      toast.warning('Pick a salesperson first (step 1) to record a walk-in');
+      return;
+    }
+    setWalkinBusy(true);
+    try {
+      const r = await walkoutsApi.walkinsPosIncrement(
+        { sales_person_id: store.salesperson_id, mobile: store.customer?.phone || undefined },
+        store.store_id || undefined,
+      );
+      toast.success(r?.deduped ? 'Already counted today' : `Walk-in recorded · ${r?.total ?? ''} today`);
+    } catch {
+      toast.error('Could not record walk-in');
+    } finally {
+      setWalkinBusy(false);
+    }
+  };
   // Phase 6.8 — workshop handoff modal. When an Rx order spawns a workshop
   // job, we hold the jobId here and open LensFittingFormModal so sales can
   // attach the physical fitting measurements before the Complete step.
@@ -517,6 +547,24 @@ export function POSLayout() {
           >
             <RotateCcw className="w-4 h-4" /> New sale
           </button>
+          {/* Footfall + walkout capture — feed the incentive conversion math */}
+          <button
+            type="button"
+            onClick={handleWalkin}
+            disabled={walkinBusy}
+            className="btn sm"
+            title="Record a walk-in (footfall) for the current salesperson"
+          >
+            <UserPlus className="w-4 h-4" /> {walkinBusy ? 'Recording…' : '+1 walk-in'}
+          </button>
+          <button
+            type="button"
+            onClick={() => setShowWalkoutModal(true)}
+            className="btn sm"
+            title="Log a customer who left without buying"
+          >
+            <DoorOpen className="w-4 h-4" /> Walkout
+          </button>
           <div className="kbd-row">
             <span><kbd className="kbd">F2</kbd>Search</span>
             <span><kbd className="kbd">F4</kbd>Hold</span>
@@ -679,6 +727,16 @@ export function POSLayout() {
           </aside>
         )}
       </div>
+
+      {/* Walkout capture — reuses the Walkouts-module intake modal */}
+      <WalkoutIntakeModal
+        isOpen={showWalkoutModal}
+        onClose={() => setShowWalkoutModal(false)}
+        onSaved={() => {
+          toast.success('Walkout logged');
+          setShowWalkoutModal(false);
+        }}
+      />
 
       {/* Mobile floating cart FAB — unchanged behavior */}
       {showCartCol && (
