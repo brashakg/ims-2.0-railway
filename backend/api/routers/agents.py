@@ -334,6 +334,138 @@ async def agents_diagnostic(user: dict = Depends(require_superadmin)):
     }
 
 
+@router.post(
+    "/agents/reseed",
+    summary="Re-seed agent configs into agent_config + rehydrate the scheduler",
+    description=(
+        "Recovery endpoint. If the diagnostic shows `missing_from_config` "
+        "is non-empty (the DB was never seeded — typically because "
+        "`get_seeded_db()` returned None during lifespan startup), call "
+        "this to seed the defaults from `DEFAULT_AGENT_CONFIGS` into "
+        "agent_config and then re-attach the scheduler so the newly-seeded "
+        "schedules start ticking immediately, without a redeploy. "
+        "Idempotent — existing configs are preserved as-is. "
+        "SUPERADMIN-only."
+    ),
+)
+async def agents_reseed(user: dict = Depends(require_superadmin)):
+    """
+    Force-reseed agent configs into the agent_config collection.
+
+    Returns:
+        seeded: list of agent_ids newly inserted by this call
+        already_present: list of agent_ids that already had a config
+        scheduler_rehydrated: whether the scheduler picked up the new configs
+        configured_after: full list of agent_ids in agent_config after the call
+    """
+    from datetime import datetime, timezone
+    import sys
+    import os as _os
+
+    sys.path.insert(
+        0,
+        _os.path.dirname(
+            _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+        ),
+    )
+
+    # Fresh db lookup — don't trust whatever the lifespan captured. If the
+    # DB came up AFTER backend startup, the lifespan-time db ref is None
+    # and that's how we end up with an empty agent_config in the first
+    # place. Re-resolve here so a manual recovery call doesn't repeat the
+    # bug.
+    db = None
+    try:
+        from database.connection import get_seeded_db
+
+        db = get_seeded_db()
+    except Exception as e:
+        logger.warning(f"[AGENTS-RESEED] get_seeded_db failed: {e}")
+
+    if db is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Database unavailable — cannot seed configs",
+        )
+
+    from agents.config import AgentConfigManager, DEFAULT_AGENT_CONFIGS
+
+    mgr = AgentConfigManager(db=db)
+    col = mgr.collection
+    if col is None:
+        raise HTTPException(
+            status_code=503,
+            detail="agent_config collection unavailable",
+        )
+
+    # Snapshot what's there before
+    try:
+        before_ids = sorted(
+            c["agent_id"] for c in col.find({}, {"agent_id": 1, "_id": 0})
+        )
+    except Exception:
+        before_ids = []
+
+    # Seed missing configs. seed_configs() is idempotent.
+    mgr.seed_configs()
+
+    # Snapshot what's there after
+    try:
+        after_ids = sorted(
+            c["agent_id"] for c in col.find({}, {"agent_id": 1, "_id": 0})
+        )
+    except Exception:
+        after_ids = []
+
+    seeded = sorted(set(after_ids) - set(before_ids))
+    already_present = sorted(set(after_ids) & set(before_ids))
+
+    # Rehydrate the scheduler — it took its snapshot at startup when configs
+    # were empty, so the in-memory map of (agent_id → cadence) doesn't include
+    # any of the just-seeded entries. Pull it down and re-attach to the live
+    # registry so the newly-configured agents start ticking on their schedules.
+    scheduler_rehydrated = False
+    rehydrate_error: Optional[str] = None
+    try:
+        from agents.registry import AGENT_REGISTRY
+
+        scheduler = _get_scheduler()
+        if scheduler is not None:
+            # Best-effort restart — every scheduler implementation should
+            # be safe to .start() over an already-started instance because
+            # this is exactly the recovery path it's meant for.
+            try:
+                stop = getattr(scheduler, "stop", None)
+                if callable(stop):
+                    maybe_coro = stop()
+                    if hasattr(maybe_coro, "__await__"):
+                        await maybe_coro
+            except Exception as e:
+                rehydrate_error = f"stop() raised: {e}"
+            try:
+                start = getattr(scheduler, "start", None)
+                if callable(start):
+                    maybe_coro = start(AGENT_REGISTRY or {})
+                    if hasattr(maybe_coro, "__await__"):
+                        await maybe_coro
+                scheduler_rehydrated = True
+            except Exception as e:
+                rehydrate_error = f"start() raised: {e}"
+    except Exception as e:
+        rehydrate_error = f"rehydrate failed: {e}"
+
+    return {
+        "seeded": seeded,
+        "already_present": already_present,
+        "scheduler_rehydrated": scheduler_rehydrated,
+        "rehydrate_error": rehydrate_error,
+        "configured_after": after_ids,
+        "default_count": len(DEFAULT_AGENT_CONFIGS),
+        "worker_id": _os.getenv("HOSTNAME") or _os.getenv("RAILWAY_REPLICA_ID") or "unknown",
+        "as_of": datetime.now(timezone.utc).isoformat(),
+    }
+
+
 @router.get("/agents/{agent_id}/status")
 async def get_agent_status(agent_id: str, user: dict = Depends(require_superadmin)):
     """Get detailed status for a single agent."""
