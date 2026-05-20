@@ -437,7 +437,7 @@ async def agents_reseed(user: dict = Depends(require_superadmin)):
             try:
                 stop = getattr(scheduler, "stop", None)
                 if callable(stop):
-                    maybe_coro = stop()
+                    maybe_coro = stop()  # pylint: disable=not-callable
                     if hasattr(maybe_coro, "__await__"):
                         await maybe_coro
             except Exception as e:
@@ -445,7 +445,7 @@ async def agents_reseed(user: dict = Depends(require_superadmin)):
             try:
                 start = getattr(scheduler, "start", None)
                 if callable(start):
-                    maybe_coro = start(AGENT_REGISTRY or {})
+                    maybe_coro = start(AGENT_REGISTRY or {})  # pylint: disable=not-callable
                     if hasattr(maybe_coro, "__await__"):
                         await maybe_coro
                 scheduler_rehydrated = True
