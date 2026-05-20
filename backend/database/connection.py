@@ -400,12 +400,28 @@ class MockCursor:
         self._skip = 0
         self._limit = None
 
-    def sort(self, sort_spec):
-        """Sort the results"""
-        if sort_spec and len(sort_spec) > 0:
-            field, direction = sort_spec[0] if isinstance(sort_spec[0], tuple) else (sort_spec[0], 1)
-            reverse = direction == -1
-            self._data = sorted(self._data, key=lambda x: x.get(field, ""), reverse=reverse)
+    def sort(self, sort_spec, direction=None):
+        """Sort the results. Supports both pymongo signatures:
+        sort("field", -1)  and  sort([("field", -1), ...]).
+        Sorts by the first key only (sufficient for mock use)."""
+        try:
+            if direction is not None:
+                # sort("field", -1) form
+                field, dir_ = sort_spec, direction
+            elif isinstance(sort_spec, (list, tuple)) and sort_spec and isinstance(sort_spec[0], tuple):
+                field, dir_ = sort_spec[0]
+            elif isinstance(sort_spec, str):
+                field, dir_ = sort_spec, 1
+            else:
+                return self
+            reverse = dir_ == -1
+            self._data = sorted(
+                self._data,
+                key=lambda x: (x.get(field) is None, x.get(field, "")),
+                reverse=reverse,
+            )
+        except Exception:
+            pass
         return self
 
     def skip(self, n: int):
@@ -509,7 +525,10 @@ class MockCollection:
                 return doc
         return None
 
-    def find(self, filter: Dict = None) -> MockCursor:
+    def find(self, filter: Dict = None, projection: Dict = None) -> MockCursor:
+        # Accept (and ignore) a projection arg so callers using the real
+        # pymongo signature find(filter, projection) — e.g. {"_id": 0} —
+        # don't blow up in no-Mongo mode (was: TASKMASTER find() error).
         if not filter:
             return MockCursor(list(self._data.values()))
 
