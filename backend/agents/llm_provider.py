@@ -51,29 +51,78 @@ logger = logging.getLogger(__name__)
 
 _PHONE_RE = re.compile(r"\b\d{10}\b")
 _EMAIL_RE = re.compile(r"\b[\w.+-]+@[\w-]+\.[\w.-]+\b")
-_PII_KEYS = {
-    "phone", "mobile", "customer_phone", "customerphone", "email",
-    "customer_name", "customername", "name", "full_name", "fullname",
-    "patient_name", "patientname", "address", "billing_address",
-    "billingaddress", "gstin", "pan", "pan_number",
+
+# Customer-only PII — third-party data the chain holds on behalf of
+# patients/buyers. Always scrubbed before going to any LLM, even local.
+_PII_KEYS_CUSTOMER = {
+    "customername", "patientname",
+    "customerphone", "customeremail",
+    "patientphone", "patientemail",
+    "billingaddress", "shippingaddress",
 }
 
+# Owner-data PII — names/phones of the chain's own employees + vendors.
+# JARVIS is SUPERADMIN-only and the SUPERADMIN owns this data, so by
+# default (scrub_level="customer") we let it through so JARVIS can say
+# "Ravi sold 12 units today" instead of "[redacted] sold 12 units".
+# scrub_level="all" still strips it (use that mode for outbound flows
+# where data leaves the owner's perimeter — e.g. third-party support).
+_PII_KEYS_OWNER = {
+    "phone", "mobile", "email",
+    "name", "fullname", "firstname", "lastname",
+    "address",
+    "gstin", "pan", "pannumber",
+}
 
-def scrub_pii(obj: Any) -> Any:
+_PII_KEYS_ALL = _PII_KEYS_CUSTOMER | _PII_KEYS_OWNER
+
+
+def _norm_key(k: str) -> str:
+    return k.lower().replace("_", "").replace("-", "")
+
+
+def scrub_pii(obj: Any, level: str = "all") -> Any:
     """Recursively redact PII from a dict/list/str so it never leaves the
-    process in an LLM prompt. Keys in _PII_KEYS are blanked; phone/email
-    patterns in free text are masked."""
+    process in an LLM prompt.
+
+    `level`:
+      - "all"      : strip every PII key + mask phone/email in free text.
+                     Default — defence in depth.
+      - "customer" : strip only customer/patient PII keys. Owner-data
+                     (own staff names, vendor names, store GSTIN) flows
+                     through so JARVIS can reason about it by name.
+                     Free-text phone/email patterns are still NOT
+                     masked here because the cost of false-positives
+                     (masking a part number that looks like a phone)
+                     outweighs the benefit for owner-data.
+      - "none"     : no redaction. Use only when you know the model is
+                     fully local and the data is owner-owned.
+    """
+    if level == "none":
+        return obj
+
+    if level == "customer":
+        keys = _PII_KEYS_CUSTOMER
+        mask_regex = False
+    else:  # "all" or anything else → safe default
+        keys = _PII_KEYS_ALL
+        mask_regex = True
+
+    return _walk_scrub(obj, keys, mask_regex)
+
+
+def _walk_scrub(obj: Any, keys: set, mask_regex: bool) -> Any:
     if isinstance(obj, dict):
         out = {}
         for k, v in obj.items():
-            if isinstance(k, str) and k.lower().replace("_", "") in _PII_KEYS:
+            if isinstance(k, str) and _norm_key(k) in keys:
                 out[k] = "[redacted]"
             else:
-                out[k] = scrub_pii(v)
+                out[k] = _walk_scrub(v, keys, mask_regex)
         return out
     if isinstance(obj, list):
-        return [scrub_pii(x) for x in obj]
-    if isinstance(obj, str):
+        return [_walk_scrub(x, keys, mask_regex) for x in obj]
+    if isinstance(obj, str) and mask_regex:
         s = _PHONE_RE.sub("[phone]", obj)
         s = _EMAIL_RE.sub("[email]", s)
         return s
@@ -183,12 +232,12 @@ def any_available() -> bool:
 DEFAULT_TIMEOUT = float(os.getenv("LLM_TIMEOUT", "45.0"))
 
 
-def _context_block(business_data: Optional[Dict]) -> str:
+def _context_block(business_data: Optional[Dict], level: str = "all", budget: int = 12000) -> str:
     if not business_data:
         return ""
-    safe = scrub_pii(business_data)
+    safe = scrub_pii(business_data, level=level)
     try:
-        return "\n\nBUSINESS DATA (JSON):\n" + json.dumps(safe, default=str)[:12000]
+        return "\n\nBUSINESS DATA (JSON):\n" + json.dumps(safe, default=str)[:budget]
     except Exception:
         return ""
 
@@ -203,10 +252,22 @@ async def complete(
     max_tokens: int = 800,
     timeout: float = DEFAULT_TIMEOUT,
     scrub: bool = True,
+    scrub_level: Optional[str] = None,
+    context_budget: int = 12000,
 ) -> Optional[str]:
     """Route a completion to the selected (or default) model. Returns the
     text, or None on any failure / no model configured (caller falls back
     to deterministic output). PII in business_data is scrubbed by default.
+
+    `scrub_level` (new, takes precedence over the legacy `scrub` bool):
+      - "all"      : full PII scrub (default — defence in depth).
+      - "customer" : strip only customer/patient PII; staff/vendor data
+                     flows through so JARVIS can name them.
+      - "none"     : no redaction.
+
+    `scrub=False` is equivalent to `scrub_level="none"` for back-compat.
+    `context_budget` is the max chars from business_data baked into the
+    system prompt — bumped from 12k by callers that pass a wider lens.
     """
     reg = _registry()
     mid = model_id if (model_id and model_id in reg) else default_model_id()
@@ -214,10 +275,8 @@ async def complete(
         return None
     m = reg[mid]
 
-    ctx = _context_block(business_data) if scrub else (
-        "\n\nBUSINESS DATA (JSON):\n" + json.dumps(business_data, default=str)[:12000]
-        if business_data else ""
-    )
+    level = scrub_level if scrub_level else ("all" if scrub else "none")
+    ctx = _context_block(business_data, level=level, budget=context_budget)
     full_system = system + ctx
 
     try:

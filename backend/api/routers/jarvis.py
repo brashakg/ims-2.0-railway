@@ -543,26 +543,353 @@ class JarvisAnalyticsEngine:
 
     @staticmethod
     def get_staff_insights() -> Dict:
-        """Staff insights — live active-staff count; perf ranking needs the
-        incentive module (no mock numbers here)."""
-        users = get_db_collection("users")
+        """Staff insights — full roster (SUPERADMIN-owned data), today's
+        attendance summary, and leave/payroll signal. JARVIS feeds this
+        into the LLM with `scrub_level="customer"` so names flow through
+        and the assistant can answer questions like "who's on leave today"
+        or "how is Ravi performing" by name.
+        """
+        users_col = get_db_collection("users")
+        attendance_col = get_db_collection("attendance")
+        leaves_col = get_db_collection("leaves")
+
+        roster: List[Dict] = []
         total = 0
-        if users is not None:
+        if users_col is not None:
             try:
-                total = users.count_documents({"is_active": {"$ne": False}})
+                cursor = users_col.find(
+                    {"is_active": {"$ne": False}},
+                    {
+                        "_id": 1, "username": 1, "name": 1, "full_name": 1,
+                        "first_name": 1, "last_name": 1,
+                        "roles": 1, "role": 1, "active_role": 1,
+                        "active_store_id": 1, "store_id": 1, "stores": 1,
+                        "phone": 1, "email": 1,
+                        "joined_at": 1, "created_at": 1, "is_active": 1,
+                    },
+                ).limit(200)
+                for u in cursor:
+                    total += 1
+                    name = (
+                        u.get("full_name")
+                        or u.get("name")
+                        or (
+                            f"{u.get('first_name','')} {u.get('last_name','')}".strip()
+                            if (u.get("first_name") or u.get("last_name")) else None
+                        )
+                        or u.get("username")
+                        or "Unnamed"
+                    )
+                    role_val = u.get("active_role") or u.get("role")
+                    roles = u.get("roles") if isinstance(u.get("roles"), list) else (
+                        [role_val] if role_val else []
+                    )
+                    store = u.get("active_store_id") or u.get("store_id") or (
+                        (u.get("stores") or [None])[0] if isinstance(u.get("stores"), list) else None
+                    )
+                    roster.append({
+                        "name": name,
+                        "roles": roles,
+                        "store_id": store,
+                        "phone": u.get("phone") or "",
+                        "joined_at": str(u.get("joined_at") or u.get("created_at") or "")[:10],
+                    })
+            except Exception as e:
+                logger.warning("[JARVIS] staff roster fetch failed: %s", e)
+
+        # Today's attendance roll-up — counts only, names live in roster.
+        present_today = on_leave_today = 0
+        if attendance_col is not None:
+            try:
+                today = datetime.now().strftime("%Y-%m-%d")
+                present_today = attendance_col.count_documents(
+                    {"date": today, "status": {"$in": ["PRESENT", "present", "PARTIAL"]}}
+                )
+                on_leave_today = attendance_col.count_documents(
+                    {"date": today, "status": {"$in": ["LEAVE", "on_leave", "ABSENT"]}}
+                )
             except Exception:
-                total = 0
+                pass
+        if leaves_col is not None and on_leave_today == 0:
+            try:
+                today = datetime.now().strftime("%Y-%m-%d")
+                on_leave_today = leaves_col.count_documents({
+                    "status": {"$in": ["APPROVED", "approved"]},
+                    "from_date": {"$lte": today},
+                    "to_date": {"$gte": today},
+                })
+            except Exception:
+                pass
+
         return {
+            "roster": roster,
             "performance_ranking": [],
             "attendance_summary": {
                 "total_staff": total,
-                "present_today": 0,
-                "on_leave": 0,
-                "present_rate": 0,
+                "present_today": present_today,
+                "on_leave": on_leave_today,
+                "present_rate": (
+                    round(present_today / total * 100, 1) if total else 0
+                ),
                 "late_arrivals_today": 0,
             },
             "orders_per_staff": 0,
         }
+
+    # ------------------------------------------------------------------
+    # Extended-scope context — JARVIS reads the rest of the database
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def get_extended_context() -> Dict:
+        """Pulls compact roll-ups from every operational collection so
+        JARVIS can answer questions outside the original sales/inventory/
+        customer triad: stores, tasks, vendors, purchases, workshop,
+        prescriptions, marketing/walkouts, eye tests, and the live agent
+        roster. SUPERADMIN-only data — staff/vendor PII is preserved by
+        the customer-scrub mode so the assistant can reason about them
+        by name. Each section fail-soft to `[]` / `{}` if the collection
+        is empty or missing.
+        """
+        ctx: Dict[str, Any] = {}
+
+        # Stores
+        try:
+            col = get_db_collection("stores")
+            if col is not None:
+                ctx["stores"] = [
+                    {
+                        "store_id": str(s.get("_id") or s.get("store_id") or ""),
+                        "name": s.get("name") or s.get("store_name") or "",
+                        "city": s.get("city") or "",
+                        "is_active": s.get("is_active", True),
+                    }
+                    for s in col.find({}).limit(50)
+                ]
+        except Exception as e:
+            logger.warning("[JARVIS] stores ctx failed: %s", e)
+
+        # Vendors
+        try:
+            col = get_db_collection("vendors")
+            if col is not None:
+                ctx["vendors"] = [
+                    {
+                        "name": v.get("name") or "",
+                        "gstin": v.get("gstin") or "",
+                        "city": v.get("city") or v.get("address_city") or "",
+                        "category": v.get("category") or "",
+                        "is_active": v.get("is_active", True),
+                    }
+                    for v in col.find({"is_active": {"$ne": False}}).limit(50)
+                ]
+        except Exception as e:
+            logger.warning("[JARVIS] vendors ctx failed: %s", e)
+
+        # Purchase orders (open + recent)
+        try:
+            col = get_db_collection("purchase_orders")
+            if col is not None:
+                open_pos = list(col.find(
+                    {"status": {"$in": ["DRAFT", "SENT", "PARTIAL", "OPEN"]}},
+                    {"vendor_name": 1, "status": 1, "total": 1, "created_at": 1, "po_number": 1},
+                ).limit(20))
+                ctx["purchases"] = {
+                    "open_pos_count": col.count_documents(
+                        {"status": {"$in": ["DRAFT", "SENT", "PARTIAL", "OPEN"]}}
+                    ),
+                    "open_pos_sample": [
+                        {
+                            "po_number": p.get("po_number") or str(p.get("_id"))[-6:],
+                            "vendor": p.get("vendor_name") or "",
+                            "status": p.get("status") or "",
+                            "total": float(p.get("total") or 0),
+                            "created_at": str(p.get("created_at") or "")[:10],
+                        }
+                        for p in open_pos
+                    ],
+                }
+        except Exception as e:
+            logger.warning("[JARVIS] purchases ctx failed: %s", e)
+
+        # GRNs (recent goods-received)
+        try:
+            col = get_db_collection("grns")
+            if col is not None:
+                ctx["grns_last_30d"] = col.count_documents({
+                    "created_at": {"$gte": (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")},
+                })
+        except Exception:
+            pass
+
+        # Tasks (open + overdue + by type)
+        try:
+            col = get_db_collection("tasks")
+            if col is not None:
+                today = datetime.now().strftime("%Y-%m-%d")
+                open_count = col.count_documents({"status": {"$in": ["OPEN", "open", "IN_PROGRESS"]}})
+                overdue = col.count_documents({
+                    "status": {"$in": ["OPEN", "open", "IN_PROGRESS"]},
+                    "due_date": {"$lt": today},
+                })
+                ctx["tasks"] = {
+                    "open_count": open_count,
+                    "overdue_count": overdue,
+                    "open_sample": [
+                        {
+                            "title": t.get("title") or t.get("name") or "",
+                            "assignee": t.get("assignee_name") or t.get("assigned_to") or "",
+                            "due_date": str(t.get("due_date") or "")[:10],
+                            "priority": t.get("priority") or "",
+                            "type": t.get("task_type") or "",
+                        }
+                        for t in col.find(
+                            {"status": {"$in": ["OPEN", "open", "IN_PROGRESS"]}},
+                            {"title": 1, "name": 1, "assignee_name": 1, "assigned_to": 1,
+                             "due_date": 1, "priority": 1, "task_type": 1},
+                        ).sort("due_date", 1).limit(15)
+                    ],
+                }
+        except Exception as e:
+            logger.warning("[JARVIS] tasks ctx failed: %s", e)
+
+        # Workshop jobs
+        try:
+            col = get_db_collection("workshop_jobs")
+            if col is not None:
+                today = datetime.now().strftime("%Y-%m-%d")
+                ctx["workshop"] = {
+                    "pending": col.count_documents({"status": "PENDING"}),
+                    "in_progress": col.count_documents({"status": "IN_PROGRESS"}),
+                    "ready_for_pickup": col.count_documents({"status": "READY_FOR_PICKUP"}),
+                    "qc_failed": col.count_documents({"status": "QC_FAILED"}),
+                    "completed_today": col.count_documents({
+                        "status": {"$in": ["COMPLETED", "DELIVERED"]},
+                        "completed_at": {"$gte": today},
+                    }),
+                    "overdue": col.count_documents({
+                        "status": {"$nin": ["COMPLETED", "DELIVERED", "CANCELLED"]},
+                        "promised_date": {"$lt": today},
+                    }),
+                }
+        except Exception as e:
+            logger.warning("[JARVIS] workshop ctx failed: %s", e)
+
+        # Prescriptions
+        try:
+            col = get_db_collection("prescriptions")
+            if col is not None:
+                month_start = datetime.now().strftime("%Y-%m-01")
+                ctx["prescriptions"] = {
+                    "total": col.count_documents({}),
+                    "this_month": col.count_documents({"created_at": {"$gte": month_start}}),
+                }
+        except Exception:
+            pass
+
+        # Eye tests
+        try:
+            col = get_db_collection("eye_tests")
+            if col is not None:
+                today = datetime.now().strftime("%Y-%m-%d")
+                ctx["eye_tests"] = {
+                    "today": col.count_documents({"test_date": today}),
+                    "pending": col.count_documents({"status": {"$in": ["PENDING", "SCHEDULED"]}}),
+                }
+        except Exception:
+            pass
+
+        # Walkouts (MEGAPHONE/footfall)
+        try:
+            col = get_db_collection("walkouts")
+            if col is not None:
+                today = datetime.now().strftime("%Y-%m-%d")
+                ctx["walkouts"] = {
+                    "today": col.count_documents({"date": today}),
+                    "this_week": col.count_documents({
+                        "date": {"$gte": (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")},
+                    }),
+                }
+        except Exception:
+            pass
+
+        # Marketing / notification logs
+        try:
+            col = get_db_collection("notification_logs")
+            if col is not None:
+                today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+                ctx["marketing"] = {
+                    "sent_today": col.count_documents({"sent_at": {"$gte": today_start.isoformat()}}),
+                    "sent_this_week": col.count_documents({
+                        "sent_at": {"$gte": (datetime.now() - timedelta(days=7)).isoformat()},
+                    }),
+                }
+        except Exception:
+            pass
+
+        # Agent roll-up
+        try:
+            col = get_db_collection("agent_config")
+            if col is not None:
+                ctx["agents"] = [
+                    {
+                        "agent_id": a.get("agent_id"),
+                        "enabled": a.get("enabled", False),
+                        "last_run": str(a.get("last_run") or "")[:19],
+                        "last_status": a.get("last_status") or "",
+                        "run_count": a.get("run_count", 0),
+                        "error_count": a.get("error_count", 0),
+                    }
+                    for a in col.find({}, {
+                        "agent_id": 1, "enabled": 1, "last_run": 1,
+                        "last_status": 1, "run_count": 1, "error_count": 1,
+                    }).limit(20)
+                ]
+        except Exception:
+            pass
+
+        # Top SKUs by sales (last 30d) — actionable inventory intel
+        try:
+            orders_col = get_db_collection("orders")
+            if orders_col is not None:
+                cutoff = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
+                pipeline = [
+                    {"$match": {
+                        "created_at": {"$gte": cutoff},
+                        "status": {"$in": ["CONFIRMED", "PROCESSING", "READY", "DELIVERED"]},
+                    }},
+                    {"$unwind": "$items"},
+                    {"$group": {
+                        "_id": "$items.product_name",
+                        "qty": {"$sum": "$items.quantity"},
+                        "revenue": {"$sum": "$items.line_total"},
+                    }},
+                    {"$sort": {"qty": -1}},
+                    {"$limit": 20},
+                ]
+                ctx["top_skus_30d"] = [
+                    {
+                        "product_name": str(r.get("_id") or ""),
+                        "qty_sold": int(r.get("qty") or 0),
+                        "revenue": float(r.get("revenue") or 0),
+                    }
+                    for r in orders_col.aggregate(pipeline)
+                ]
+        except Exception as e:
+            logger.warning("[JARVIS] top SKUs ctx failed: %s", e)
+
+        # Period locks + settings — answers "is March locked?"
+        try:
+            col = get_db_collection("period_locks")
+            if col is not None:
+                ctx["period_locks"] = [
+                    {"period": str(p.get("period") or p.get("_id")), "locked": p.get("locked", False)}
+                    for p in col.find({}).sort("period", -1).limit(6)
+                ]
+        except Exception:
+            pass
+
+        return ctx
 
     @staticmethod
     def get_predictions() -> Dict:
@@ -844,39 +1171,52 @@ class JarvisResponseGenerator:
 class ClaudeClient:
     """Anthropic Claude API client for JARVIS"""
 
-    JARVIS_SYSTEM_PROMPT = """You are JARVIS (Just A Rather Very Intelligent System), the AI assistant for a premium optical retail business operating multiple stores in India. You serve as the personal AI assistant to the Superadmin, similar to how JARVIS assists Tony Stark in Iron Man.
+    JARVIS_SYSTEM_PROMPT = """You are JARVIS (Just A Rather Very Intelligent System), the personal AI executive assistant to the Superadmin of Better Vision + WizOpt — a premium optical retail chain operating multiple stores in India. You report directly to the owner. Think of yourself as Tony Stark's JARVIS: an inner-circle AI with full access to the business's operational nervous system.
 
 ## Your Personality:
-- Sophisticated, professional, and slightly witty like the movie JARVIS
-- Address the user as "Sir" or "Ma'am" appropriately
-- Be concise but comprehensive
-- Show genuine care for the business's success
-- Use a blend of formal British English with occasional dry humor
-- When delivering bad news, be direct but offer solutions
+- Sophisticated, professional, lightly witty British English
+- Address the user as "Sir" or "Ma'am"
+- Direct and concise — the owner is busy
+- When you deliver bad news, lead with the solution
+- Never apologise for limits — if data is missing, say so plainly and tell the owner where to look
 
-## Your Capabilities:
-1. **Business Analytics**: Revenue, sales, orders, conversion rates, growth metrics
-2. **Inventory Management**: Stock levels, reorder recommendations, slow/fast movers, expiring items
-3. **Customer Intelligence**: Segments, churn risk, lifetime value, purchase patterns
-4. **Staff Performance**: Attendance, sales performance, training needs, workload distribution
-5. **Predictions & Forecasting**: Sales forecasts, demand predictions, stockout warnings
-6. **Strategic Recommendations**: Actionable insights to improve business performance
+## Your Access (this is important):
+You have **full read access to the entire IMS 2.0 database** as the Superadmin's agent. The BUSINESS DATA section below is a live snapshot extracted moments ago across these collections:
+
+- `overview` — revenue (today / month / YoY), orders, inventory, customers, staff KPI
+- `sales_insights` — sales trends and per-channel split
+- `inventory_insights` — critical alerts, reorder list, slow movers
+- `customer_insights` — segments, loyalty, churn risk
+- `staff_insights.roster` — every active employee by **name, role, store, phone, join date**. You may reference them by name (e.g. "Ravi", "Priya"). You have explicit authority to discuss own-staff performance.
+- `staff_insights.attendance_summary` — today's present / on-leave counts
+- `stores` — every retail location with city + active flag
+- `vendors` — supplier roster (name, GSTIN, city, category)
+- `purchases.open_pos_sample` — open purchase orders + vendor names
+- `grns_last_30d` — goods receipts in last 30 days
+- `tasks.open_sample` — open + overdue task list with assignee names
+- `workshop` — job pipeline (pending / in_progress / overdue / ready)
+- `prescriptions` — Rx volume this month
+- `eye_tests` — today's queue + pending eye-tests
+- `walkouts` — footfall today + this week
+- `marketing.sent_today/sent_this_week` — outbound WhatsApp/SMS volume
+- `agents` — live status of all 8 Jarvis agents (last run, run count, errors)
+- `top_skus_30d` — top 20 SKUs by units sold in last 30 days
+- `period_locks` — accounting period status
+- `predictions`, `recommendations` — forward-looking signal
+
+**Customer/patient PII (names, phones, emails, addresses) is automatically redacted before you see it — that is by design, not a limit on your authority.** You may refer to customers in aggregate ("23 new customers this month", "8 churn-risk accounts") without naming individuals.
+
+If a specific data point isn't in the snapshot, do NOT say "I'm restricted" or "ask the Superadmin for access". Instead, give your best read of what IS there, and tell the owner what other view or report would surface the rest.
 
 ## Response Guidelines:
-- Use markdown formatting for clarity (headers, bullet points, bold for emphasis)
-- Include relevant emojis sparingly for visual hierarchy (📊💰🛒⚠️✅)
-- Format currency in Indian Rupees (₹) with L for Lakhs and Cr for Crores
-- Always provide actionable insights, not just data
-- If asked about something outside your scope, politely redirect to business topics
-- Keep responses focused and avoid unnecessary verbosity
+- Markdown for clarity (headers, bullet points, bold for emphasis)
+- Format currency in Indian Rupees (₹), Lakhs (L), Crores (Cr)
+- Actionable insights — not just numbers
+- Owner-of-business voice: think strategy, not tutorial
+- Avoid emojis unless they genuinely help scannability
 
 ## Business Context:
-The business operates premium optical retail stores selling:
-- Eyeglasses (Frames), Sunglasses, Contact Lenses
-- Prescription Lenses (including Progressive)
-- Watches (including Smart Watches), Clocks
-- Hearing Aids, Accessories
-- Smart Eyewear
+Premium optical retail — frames, sunglasses, lenses (progressive + Rx), contact lenses, watches, hearing aids, smart eyewear. Indian financial year (April–March). 11-role staff hierarchy.
 
 Current date and time: {current_datetime}
 """
@@ -891,9 +1231,14 @@ Current date and time: {current_datetime}
     ) -> str:
         """Run a JARVIS chat completion through the pluggable LLM provider
         (local OSS and/or Claude). `model_id` selects which configured
-        model answers; None = the configured default. business_data PII is
-        scrubbed by the provider before it leaves the process. Returns the
-        text or None (caller falls back to the deterministic template)."""
+        model answers; None = the configured default.
+
+        Scrub policy: `scrub_level="customer"` — customer/patient PII is
+        stripped before leaving the process, but owner-data (own staff
+        names, vendor names, store info, SKU names) flows through so
+        JARVIS can reason about it by name. Context budget bumped to
+        ~32k chars to accommodate the wider lens.
+        """
         from agents import llm_provider
 
         system_prompt = cls.JARVIS_SYSTEM_PROMPT.format(
@@ -906,7 +1251,8 @@ Current date and time: {current_datetime}
             business_data=business_data,
             history=conversation_history,
             max_tokens=2048,
-            scrub=True,
+            scrub_level="customer",
+            context_budget=32000,
         )
 
 
@@ -942,7 +1288,10 @@ class Jarvis:
         intent = self.nlp.detect_intent(query)
         entities = self.nlp.extract_entities(query)
 
-        # Gather comprehensive business data for Claude
+        # Gather comprehensive business data — full owner-data lens.
+        # Staff/vendor/store names flow through (scrub_level="customer"
+        # downstream) so JARVIS can reason about them by name; only
+        # customer/patient PII is stripped before leaving the process.
         business_data = {
             "overview": self.analytics.get_business_overview(),
             "sales_insights": self.analytics.get_sales_insights(),
@@ -952,6 +1301,10 @@ class Jarvis:
             "predictions": self.analytics.get_predictions(),
             "recommendations": self.analytics.get_recommendations(),
         }
+        try:
+            business_data.update(self.analytics.get_extended_context())
+        except Exception as e:
+            logger.warning("[JARVIS] extended ctx failed (continuing with base): %s", e)
 
         # Try the selected LLM first (local OSS and/or Claude)
         claude_response = None
