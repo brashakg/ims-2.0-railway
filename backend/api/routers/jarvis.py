@@ -378,8 +378,59 @@ class JarvisAnalyticsEngine:
         }
 
     @staticmethod
+    def _compute_sales_live() -> Optional[Dict]:
+        """Live category breakdown + top products from this month's orders."""
+        orders_col = get_db_collection("orders")
+        if orders_col is None:
+            return None
+        try:
+            from datetime import datetime as _dt
+            month_start = _dt.now().strftime("%Y-%m-01")
+            counted = {"CONFIRMED", "PROCESSING", "READY", "DELIVERED"}
+            cat_sales: Dict[str, float] = {}
+            cat_units: Dict[str, int] = {}
+            prod_rev: Dict[str, Dict[str, Any]] = {}
+            total_rev = 0.0
+            for o in orders_col.find({"created_at": {"$gte": month_start}}):
+                if (o.get("status") or "").upper() not in counted:
+                    continue
+                total_rev += float(o.get("grand_total") or 0)
+                for it in (o.get("items") or []):
+                    cat = (it.get("category") or it.get("item_type") or "OTHER").upper()
+                    val = float(it.get("item_total") or it.get("item_value") or 0)
+                    qty = int(it.get("quantity") or 1)
+                    cat_sales[cat] = cat_sales.get(cat, 0) + val
+                    cat_units[cat] = cat_units.get(cat, 0) + qty
+                    key = it.get("sku") or it.get("product_id") or it.get("product_name") or "?"
+                    slot = prod_rev.setdefault(key, {"name": it.get("product_name") or key, "sku": it.get("sku") or "", "sales": 0, "revenue": 0.0})
+                    slot["sales"] += qty
+                    slot["revenue"] += val
+            if not cat_sales and total_rev == 0:
+                return None
+            top_cats = sorted(cat_sales.items(), key=lambda kv: -kv[1])[:6]
+            top_prods = sorted(prod_rev.values(), key=lambda p: -p["revenue"])[:5]
+            return {
+                "top_selling_categories": [
+                    {"category": c.title(), "sales": round(s, 2), "units": cat_units.get(c, 0), "growth": 0}
+                    for c, s in top_cats
+                ],
+                "top_selling_products": [
+                    {"name": p["name"], "sku": p["sku"], "sales": p["sales"], "revenue": round(p["revenue"], 2)}
+                    for p in top_prods
+                ],
+                "sales_by_store": [],
+                "month_revenue": round(total_rev, 2),
+            }
+        except Exception as e:
+            logger.warning("JARVIS live sales failed: %s", e)
+            return None
+
+    @staticmethod
     def get_sales_insights() -> Dict:
         """Get detailed sales insights from database"""
+        live = JarvisAnalyticsEngine._compute_sales_live()
+        if live is not None:
+            return live
         # Try to get daily sales from database
         sales_col = get_db_collection("daily_sales")
         products_col = get_db_collection("products")
@@ -503,8 +554,71 @@ class JarvisAnalyticsEngine:
         }
 
     @staticmethod
+    def _compute_inventory_live() -> Optional[Dict]:
+        """Reorder + stock-health insights from the live products
+        collection. Returns None if products are unavailable."""
+        products_col = get_db_collection("products")
+        if products_col is None:
+            return None
+        try:
+            critical_alerts = []
+            reorder_recs = []
+            total = low = oos = 0
+            total_value = 0.0
+            for p in products_col.find({}):
+                if p.get("is_active") is False:
+                    continue
+                total += 1
+                qty = int(p.get("stock_quantity") or p.get("quantity") or 0)
+                reorder = int(p.get("reorder_point") or 0)
+                price = float(p.get("offer_price") or p.get("mrp") or p.get("cost_price") or 0)
+                total_value += qty * price
+                name = p.get("name") or p.get("product_name") or "Unknown"
+                sku = p.get("sku") or p.get("product_id") or ""
+                if qty <= 0:
+                    oos += 1
+                    critical_alerts.append({
+                        "type": "out_of_stock", "sku": sku, "product": name,
+                        "last_sold": "—", "demand": "unknown",
+                    })
+                elif reorder and qty <= reorder:
+                    low += 1
+                    critical_alerts.append({
+                        "type": "low_stock", "sku": sku, "product": name,
+                        "quantity": qty, "reorder_point": reorder,
+                    })
+                    reorder_recs.append({
+                        "sku": sku, "product": name, "current": qty,
+                        "recommended_order": max(int(p.get("reorder_quantity") or 0), reorder * 2, 20),
+                        "supplier": p.get("vendor") or p.get("brand") or "—",
+                    })
+            if total == 0:
+                return None
+            healthy = max(0, total - low - oos)
+            health = round(healthy / total * 100) if total else 0
+            return {
+                "critical_alerts": critical_alerts[:8],
+                "reorder_recommendations": reorder_recs[:8],
+                "slow_movers": [],
+                "inventory_health_score": health,
+                "turnover_ratio": 0,
+                "dead_stock_value": 0,
+                "totals": {"products": total, "low_stock": low, "out_of_stock": oos,
+                           "inventory_value": round(total_value, 2)},
+            }
+        except Exception as e:
+            logger.warning("JARVIS live inventory failed: %s", e)
+            return None
+
+    @staticmethod
     def get_inventory_insights() -> Dict:
-        """Get inventory insights and alerts from database"""
+        """Get inventory insights and alerts from database."""
+        # Live primary path — compute reorder/stock alerts straight from
+        # the products collection (the real inventory source), chain-wide.
+        live = JarvisAnalyticsEngine._compute_inventory_live()
+        if live is not None:
+            return live
+
         stock_col = get_db_collection("stock_units")
         products_col = get_db_collection("products")
         alerts_col = get_db_collection("alerts")
