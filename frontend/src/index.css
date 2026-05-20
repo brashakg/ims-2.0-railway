@@ -1559,7 +1559,15 @@
 .rail-actions .kbd-row span { display: inline-flex; align-items: center; gap: 3px; }
 
 /* Work surface (center column) */
+/* Work surface (center column).
+   Must `flex: 1` so that on steps where the right cart column is hidden
+   (Customer pick on an empty cart, Complete after the order's printed,
+   etc.) the work surface expands to fill the row. Without flex-grow the
+   work col stayed at its natural width and the rest of the row sat empty
+   — looked broken on wide screens. */
 .pos-work {
+  flex: 1 1 auto;
+  min-width: 0;
   overflow-y: auto;
   padding: 20px 28px 120px;
   background: var(--bg);
