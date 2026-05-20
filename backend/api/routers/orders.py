@@ -327,6 +327,11 @@ class OrderCreate(BaseModel):
     cart_discount_amount: float = Field(default=0.0, ge=0.0)
     cart_discount_reason: Optional[str] = None
     cart_discount_approved_by: Optional[str] = None
+    # Incentive integration — explicit salesperson attribution (POS picker)
+    # and the Visufit measurement ID for the per-staff Visufit coverage gate.
+    salesperson_id: Optional[str] = None
+    salesperson_name: Optional[str] = None
+    visufit_id: Optional[str] = None
 
 
 class OrderUpdate(BaseModel):
@@ -530,7 +535,11 @@ async def create_order(
     order_repo = get_order_repository()
     customer_repo = get_customer_repository()
     store_id = current_user.get("active_store_id")
-    salesperson_id = current_user.get("user_id")
+    # Salesperson attribution drives the incentive engine. Prefer the
+    # explicit POS picker value; fall back to the logged-in user so older
+    # clients (and quick sales) still attribute somewhere.
+    salesperson_id = order.salesperson_id or current_user.get("user_id")
+    salesperson_name = order.salesperson_name or current_user.get("full_name") or current_user.get("name")
 
     # Validate items
     if not order.items:
@@ -770,6 +779,8 @@ async def create_order(
             "customer_phone": customer_phone,
             "patient_id": order.patient_id,
             "salesperson_id": salesperson_id,
+            "salesperson_name": salesperson_name,
+            "visufit_id": (order.visufit_id or None),
             "items": items_data,
             "subtotal": subtotal,
             "cart_discount_percent": cart_discount_percent,
