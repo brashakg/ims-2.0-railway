@@ -28,9 +28,11 @@ router = APIRouter(dependencies=[Depends(_require_admin_role)])
 # DB HELPERS
 # ============================================================================
 
+
 def _coll(name: str):
     try:
         from database.connection import get_db
+
         db = get_db()
         if db and db.is_connected:
             return db.get_collection(name)
@@ -64,12 +66,20 @@ async def get_discount_rules():
     as defaults, overlaid with any DB overrides."""
     defaults = {
         "category_caps": {
-            "MASS": 15, "PREMIUM": 20, "LUXURY": 5,
-            "SERVICE": 10, "NON_DISCOUNTABLE": 0,
+            "MASS": 15,
+            "PREMIUM": 20,
+            "LUXURY": 5,
+            "SERVICE": 10,
+            "NON_DISCOUNTABLE": 0,
         },
         "luxury_brand_caps": {
-            "Cartier": 2, "Chopard": 2, "Bvlgari": 2,
-            "Gucci": 5, "Prada": 5, "Versace": 5, "Burberry": 5,
+            "Cartier": 2,
+            "Chopard": 2,
+            "Bvlgari": 2,
+            "Gucci": 5,
+            "Prada": 5,
+            "Versace": 5,
+            "Burberry": 5,
         },
     }
     coll = _coll("discount_rules")
@@ -85,8 +95,12 @@ async def get_discount_rules():
 async def get_role_discount_caps():
     """Per-role maximum discount %."""
     defaults = {
-        "SUPERADMIN": 100, "ADMIN": 100, "AREA_MANAGER": 25,
-        "STORE_MANAGER": 20, "SALES_CASHIER": 10, "SALES_STAFF": 10,
+        "SUPERADMIN": 100,
+        "ADMIN": 100,
+        "AREA_MANAGER": 25,
+        "STORE_MANAGER": 20,
+        "SALES_CASHIER": 10,
+        "SALES_STAFF": 10,
     }
     coll = _coll("role_discount_caps")
     if coll is not None:
@@ -109,7 +123,13 @@ async def set_role_discount_cap(body: RoleCapBody):
         raise HTTPException(status_code=503, detail="Database not available")
     coll.update_one(
         {"role": body.role},
-        {"$set": {"role": body.role, "max_discount": body.max_discount, "updated_at": _now_iso()}},
+        {
+            "$set": {
+                "role": body.role,
+                "max_discount": body.max_discount,
+                "updated_at": _now_iso(),
+            }
+        },
         upsert=True,
     )
     return {"role": body.role, "max_discount": body.max_discount}
@@ -140,7 +160,13 @@ async def set_tier_discount(body: TierDiscountBody):
         raise HTTPException(status_code=503, detail="Database not available")
     coll.update_one(
         {"tier": body.tier},
-        {"$set": {"tier": body.tier, "discount": body.discount, "updated_at": _now_iso()}},
+        {
+            "$set": {
+                "tier": body.tier,
+                "discount": body.discount,
+                "updated_at": _now_iso(),
+            }
+        },
         upsert=True,
     )
     return {"tier": body.tier, "discount": body.discount}
@@ -178,12 +204,19 @@ async def create_promo_code(body: PromoCodeCreate):
         raise HTTPException(status_code=400, detail="Promo code already exists")
     code_id = str(uuid.uuid4())
     doc = {
-        "_id": code_id, "code_id": code_id, "code": body.code.upper(),
-        "discount_type": body.discountType, "discount_value": body.discountValue,
-        "min_purchase": body.minPurchase, "max_discount": body.maxDiscount,
-        "valid_from": body.validFrom, "valid_to": body.validTo,
-        "usage_limit": body.usageLimit, "usage_count": 0,
-        "categories": body.categories or [], "is_active": True,
+        "_id": code_id,
+        "code_id": code_id,
+        "code": body.code.upper(),
+        "discount_type": body.discountType,
+        "discount_value": body.discountValue,
+        "min_purchase": body.minPurchase,
+        "max_discount": body.maxDiscount,
+        "valid_from": body.validFrom,
+        "valid_to": body.validTo,
+        "usage_limit": body.usageLimit,
+        "usage_count": 0,
+        "categories": body.categories or [],
+        "is_active": True,
         "created_at": _now_iso(),
     }
     coll.insert_one(doc)
@@ -213,6 +246,7 @@ async def delete_promo_code(code_id: str):
 async def get_system_status():
     """Live health snapshot — DB connectivity + collection counts."""
     from database.connection import get_db
+
     status: Dict[str, Any] = {"api": "healthy", "checked_at": _now_iso()}
     try:
         db = get_db()
@@ -293,8 +327,15 @@ async def list_backups():
     in the `backups` collection but never claim to take a live DB dump."""
     coll = _coll("backups")
     if coll is None:
-        return {"backups": [], "note": "Backups are managed at the infrastructure layer."}
-    return {"backups": [_scrub(d) for d in coll.find({}).sort("created_at", -1).limit(50) if d]}
+        return {
+            "backups": [],
+            "note": "Backups are managed at the infrastructure layer.",
+        }
+    return {
+        "backups": [
+            _scrub(d) for d in coll.find({}).sort("created_at", -1).limit(50) if d
+        ]
+    }
 
 
 @router.post("/system/backups", status_code=202)
@@ -305,7 +346,9 @@ async def create_backup():
     coll = _coll("backups")
     backup_id = str(uuid.uuid4())
     rec = {
-        "_id": backup_id, "backup_id": backup_id, "status": "requested",
+        "_id": backup_id,
+        "backup_id": backup_id,
+        "status": "requested",
         "requested_at": _now_iso(),
         "note": "Snapshot handled by hosting provider; this is a request marker.",
     }
@@ -319,6 +362,7 @@ async def create_backup():
 # implemented as live operations — they require infra-level access. The
 # frontend buttons should be hidden for now; if called, they return 501.
 # ============================================================================
+
 
 @router.post("/system/backups/{backup_id}/restore", status_code=501)
 async def restore_backup(backup_id: str):

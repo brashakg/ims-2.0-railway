@@ -163,7 +163,7 @@ def _category_breakdown(orders: list) -> list:
     by_cat: dict = {}
     total = 0.0
     for o in orders:
-        for it in (o.get("items") or []):
+        for it in o.get("items") or []:
             cat = it.get("category") or it.get("item_type") or "Other"
             slot = by_cat.setdefault(cat, {"category": cat, "sales": 0.0, "units": 0})
             line_rev = _item_revenue(it)
@@ -177,12 +177,15 @@ def _category_breakdown(orders: list) -> list:
     return sorted(out, key=lambda x: -x["sales"])
 
 
-
 @router.get("")
 @router.get("/")
 async def get_reports_root():
     """Root endpoint for available reports"""
-    return {"module": "reports", "status": "active", "message": "reports overview endpoint ready"}
+    return {
+        "module": "reports",
+        "status": "active",
+        "message": "reports overview endpoint ready",
+    }
 
 
 @router.get("/dashboard")
@@ -346,8 +349,11 @@ async def sales_summary(
     order_repo = get_order_repository()
     empty = {
         "summary": {
-            "total_sales": 0, "total_orders": 0, "avg_order_value": 0,
-            "total_tax": 0, "total_discount": 0,
+            "total_sales": 0,
+            "total_orders": 0,
+            "avg_order_value": 0,
+            "total_tax": 0,
+            "total_discount": 0,
         },
         "dailyTrend": [],
         "categoryBreakdown": [],
@@ -358,7 +364,10 @@ async def sales_summary(
     from_dt = datetime.combine(from_date, datetime.min.time())
     to_dt = datetime.combine(to_date, datetime.max.time())
     orders = _orders_in_window(
-        order_repo, store_id=active_store, start_dt=from_dt, end_dt=to_dt,
+        order_repo,
+        store_id=active_store,
+        start_dt=from_dt,
+        end_dt=to_dt,
     )
     return {
         "summary": _summarise_orders(orders),
@@ -381,7 +390,10 @@ async def daily_sales(
     end_dt = datetime.now()
     start_dt = end_dt - timedelta(days=days)
     orders = _orders_in_window(
-        order_repo, store_id=active_store, start_dt=start_dt, end_dt=end_dt,
+        order_repo,
+        store_id=active_store,
+        start_dt=start_dt,
+        end_dt=end_dt,
     )
     return {"data": _daily_trend(orders)}
 
@@ -446,7 +458,10 @@ async def sales_by_category(
     from_dt = datetime.combine(from_date, datetime.min.time())
     to_dt = datetime.combine(to_date, datetime.max.time())
     orders = _orders_in_window(
-        order_repo, store_id=active_store, start_dt=from_dt, end_dt=to_dt,
+        order_repo,
+        store_id=active_store,
+        start_dt=from_dt,
+        end_dt=to_dt,
     )
     return {"data": _category_breakdown(orders)}
 
@@ -635,7 +650,9 @@ async def outstanding_report(
             days_old = 0
             try:
                 if isinstance(created_str, str) and created_str:
-                    created_dt = datetime.fromisoformat(created_str.replace("Z", "+00:00").replace("+00:00", ""))
+                    created_dt = datetime.fromisoformat(
+                        created_str.replace("Z", "+00:00").replace("+00:00", "")
+                    )
                     days_old = (now - created_dt).days
                 elif isinstance(created_str, datetime):
                     days_old = (now - created_str).days
@@ -683,10 +700,18 @@ async def outstanding_report(
             "90+ days": round(aging_buckets["90_plus"], 2),
         },
         "count_by_aging": {
-            "0-30 days": sum(1 for d in outstanding_data if d["aging_bucket"] == "0-30 days"),
-            "31-60 days": sum(1 for d in outstanding_data if d["aging_bucket"] == "31-60 days"),
-            "61-90 days": sum(1 for d in outstanding_data if d["aging_bucket"] == "61-90 days"),
-            "90+ days": sum(1 for d in outstanding_data if d["aging_bucket"] == "90+ days"),
+            "0-30 days": sum(
+                1 for d in outstanding_data if d["aging_bucket"] == "0-30 days"
+            ),
+            "31-60 days": sum(
+                1 for d in outstanding_data if d["aging_bucket"] == "31-60 days"
+            ),
+            "61-90 days": sum(
+                1 for d in outstanding_data if d["aging_bucket"] == "61-90 days"
+            ),
+            "90+ days": sum(
+                1 for d in outstanding_data if d["aging_bucket"] == "90+ days"
+            ),
         },
     }
 
@@ -814,10 +839,16 @@ async def sales_comparison(
     prev_to_dt = datetime.combine(prev_to_date, datetime.max.time())
 
     current_orders = _orders_in_window(
-        order_repo, store_id=active_store, start_dt=from_dt, end_dt=to_dt,
+        order_repo,
+        store_id=active_store,
+        start_dt=from_dt,
+        end_dt=to_dt,
     )
     prev_orders = _orders_in_window(
-        order_repo, store_id=active_store, start_dt=prev_from_dt, end_dt=prev_to_dt,
+        order_repo,
+        store_id=active_store,
+        start_dt=prev_from_dt,
+        end_dt=prev_to_dt,
     )
 
     current_sales = sum(_order_revenue(o) for o in current_orders)
@@ -829,12 +860,16 @@ async def sales_comparison(
         "current_period": {
             "sales": round(current_sales, 2),
             "orders": len(current_orders),
-            "avg_order_value": round(current_sales / len(current_orders), 2) if current_orders else 0,
+            "avg_order_value": (
+                round(current_sales / len(current_orders), 2) if current_orders else 0
+            ),
         },
         "previous_period": {
             "sales": round(prev_sales, 2),
             "orders": len(prev_orders),
-            "avg_order_value": round(prev_sales / len(prev_orders), 2) if prev_orders else 0,
+            "avg_order_value": (
+                round(prev_sales / len(prev_orders), 2) if prev_orders else 0
+            ),
         },
         "comparison": {
             "sales_change_percent": round(change, 2),
@@ -881,16 +916,22 @@ async def sales_growth(
         yoy_end = datetime(year - 1, month + 1, 1) - timedelta(seconds=1)
 
     current_orders = _orders_in_window(
-        order_repo, store_id=active_store,
-        start_dt=current_start, end_dt=current_end,
+        order_repo,
+        store_id=active_store,
+        start_dt=current_start,
+        end_dt=current_end,
     )
     mom_orders = _orders_in_window(
-        order_repo, store_id=active_store,
-        start_dt=mom_start, end_dt=mom_end,
+        order_repo,
+        store_id=active_store,
+        start_dt=mom_start,
+        end_dt=mom_end,
     )
     yoy_orders = _orders_in_window(
-        order_repo, store_id=active_store,
-        start_dt=yoy_start, end_dt=yoy_end,
+        order_repo,
+        store_id=active_store,
+        start_dt=yoy_start,
+        end_dt=yoy_end,
     )
 
     current_sales = sum(_order_revenue(o) for o in current_orders)
@@ -938,11 +979,13 @@ async def profit_by_category(
     from_dt = datetime.combine(from_date, datetime.min.time())
     to_dt = datetime.combine(to_date, datetime.max.time())
 
-    orders = order_repo.find_many({
-        "store_id": active_store,
-        "created_at": {"$gte": from_dt.isoformat(), "$lte": to_dt.isoformat()},
-        "status": {"$nin": ["CANCELLED", "DRAFT"]},
-    })
+    orders = order_repo.find_many(
+        {
+            "store_id": active_store,
+            "created_at": {"$gte": from_dt.isoformat(), "$lte": to_dt.isoformat()},
+            "status": {"$nin": ["CANCELLED", "DRAFT"]},
+        }
+    )
 
     profit_by_cat = {}
     for order in orders:
@@ -956,7 +999,9 @@ async def profit_by_category(
                     "profit": 0,
                     "margin_percent": 0,
                 }
-            selling_price = item.get("total", 0) or (item.get("price", 0) * item.get("quantity", 1))
+            selling_price = item.get("total", 0) or (
+                item.get("price", 0) * item.get("quantity", 1)
+            )
             cost_price = item.get("cost_price", 0) * item.get("quantity", 1)
             profit = selling_price - cost_price
 
@@ -992,10 +1037,12 @@ async def profit_by_store(
     from_dt = datetime.combine(from_date, datetime.min.time())
     to_dt = datetime.combine(to_date, datetime.max.time())
 
-    orders = order_repo.find_many({
-        "created_at": {"$gte": from_dt.isoformat(), "$lte": to_dt.isoformat()},
-        "status": {"$nin": ["CANCELLED", "DRAFT"]},
-    })
+    orders = order_repo.find_many(
+        {
+            "created_at": {"$gte": from_dt.isoformat(), "$lte": to_dt.isoformat()},
+            "status": {"$nin": ["CANCELLED", "DRAFT"]},
+        }
+    )
 
     profit_by_st = {}
     for order in orders:
@@ -1011,9 +1058,12 @@ async def profit_by_store(
         profit_by_st[store]["orders"] += 1
         order_amount = order.get("final_amount", 0) or order.get("total_amount", 0)
         profit_by_st[store]["revenue"] += order_amount
-        
+
         # Calculate cost from items
-        cost = sum(item.get("cost_price", 0) * item.get("quantity", 1) for item in order.get("items", []))
+        cost = sum(
+            item.get("cost_price", 0) * item.get("quantity", 1)
+            for item in order.get("items", [])
+        )
         profit_by_st[store]["cost"] += cost
         profit_by_st[store]["profit"] += order_amount - cost
 
@@ -1042,7 +1092,10 @@ async def discount_analysis(
     from_dt = datetime.combine(from_date, datetime.min.time())
     to_dt = datetime.combine(to_date, datetime.max.time())
     orders = _orders_in_window(
-        order_repo, store_id=active_store, start_dt=from_dt, end_dt=to_dt,
+        order_repo,
+        store_id=active_store,
+        start_dt=from_dt,
+        end_dt=to_dt,
     )
 
     # Aggregate per-category: sum item-level discount_amount + line
@@ -1068,7 +1121,9 @@ async def discount_analysis(
                     "total_items": 0,
                     "avg_discount_percent": 0.0,
                 }
-            item_discount = float(item.get("discount_amount") or item.get("discount") or 0)
+            item_discount = float(
+                item.get("discount_amount") or item.get("discount") or 0
+            )
             line_revenue = _item_revenue(item)
             by_category[category]["total_discount"] += item_discount
             by_category[category]["total_revenue"] += line_revenue
@@ -1091,7 +1146,9 @@ async def discount_analysis(
         "summary": {
             "total_discount": round(total_discount, 2),
             "total_revenue": round(total_revenue, 2),
-            "discount_percent": round(total_discount / gross_total * 100, 2) if gross_total > 0 else 0.0,
+            "discount_percent": (
+                round(total_discount / gross_total * 100, 2) if gross_total > 0 else 0.0
+            ),
         },
     }
 
@@ -1118,7 +1175,10 @@ async def staff_ranking(
     from_dt = datetime.combine(from_date, datetime.min.time())
     to_dt = datetime.combine(to_date, datetime.max.time())
     orders = _orders_in_window(
-        order_repo, store_id=active_store, start_dt=from_dt, end_dt=to_dt,
+        order_repo,
+        store_id=active_store,
+        start_dt=from_dt,
+        end_dt=to_dt,
     )
 
     staff_data = {}
@@ -1164,11 +1224,13 @@ async def eye_tests_report(
     to_dt = datetime.combine(to_date, datetime.max.time())
 
     # Get all tasks/appointments (eye tests)
-    tasks = task_repo.find_many({
-        "store_id": active_store,
-        "created_at": {"$gte": from_dt.isoformat(), "$lte": to_dt.isoformat()},
-        "task_type": "eye_test",
-    })
+    tasks = task_repo.find_many(
+        {
+            "store_id": active_store,
+            "created_at": {"$gte": from_dt.isoformat(), "$lte": to_dt.isoformat()},
+            "task_type": "eye_test",
+        }
+    )
 
     by_optometrist = {}
     for task in tasks:
@@ -1240,7 +1302,9 @@ async def pending_workshop_jobs(
         }
 
     repo = WorkshopJobRepository(db.get_collection("workshop_jobs"))
-    jobs = repo.find_pending(active_store)  # PENDING + IN_PROGRESS, sorted by expected_date
+    jobs = repo.find_pending(
+        active_store
+    )  # PENDING + IN_PROGRESS, sorted by expected_date
 
     now = datetime.now()
     data = []
@@ -1256,7 +1320,11 @@ async def pending_workshop_jobs(
         age_days = None
         if created:
             try:
-                cr_dt = created if isinstance(created, datetime) else datetime.fromisoformat(str(created).replace("Z", "+00:00"))
+                cr_dt = (
+                    created
+                    if isinstance(created, datetime)
+                    else datetime.fromisoformat(str(created).replace("Z", "+00:00"))
+                )
                 # Normalize tz — the stored timestamps are naive in dev but
                 # may be tz-aware in prod Mongo. Strip tz for the subtraction.
                 if cr_dt.tzinfo is not None:
@@ -1279,7 +1347,11 @@ async def pending_workshop_jobs(
         is_overdue = False
         if expected:
             try:
-                exp_dt = expected if isinstance(expected, datetime) else datetime.fromisoformat(str(expected).replace("Z", "+00:00"))
+                exp_dt = (
+                    expected
+                    if isinstance(expected, datetime)
+                    else datetime.fromisoformat(str(expected).replace("Z", "+00:00"))
+                )
                 if exp_dt.tzinfo is not None:
                     exp_dt = exp_dt.replace(tzinfo=None)
                 if exp_dt < now:
@@ -1291,18 +1363,24 @@ async def pending_workshop_jobs(
         tech = job.get("technician_id") or "unassigned"
         tech_counts[tech] = tech_counts.get(tech, 0) + 1
 
-        data.append({
-            "job_id": job.get("job_id") or str(job.get("_id", "")),
-            "job_number": job.get("job_number"),
-            "order_id": job.get("order_id"),
-            "status": job.get("status"),
-            "technician_id": job.get("technician_id"),
-            "expected_date": expected.isoformat() if isinstance(expected, datetime) else expected,
-            "created_at": created.isoformat() if isinstance(created, datetime) else created,
-            "age_days": age_days,
-            "aging_bucket": bucket,
-            "is_overdue": is_overdue,
-        })
+        data.append(
+            {
+                "job_id": job.get("job_id") or str(job.get("_id", "")),
+                "job_number": job.get("job_number"),
+                "order_id": job.get("order_id"),
+                "status": job.get("status"),
+                "technician_id": job.get("technician_id"),
+                "expected_date": (
+                    expected.isoformat() if isinstance(expected, datetime) else expected
+                ),
+                "created_at": (
+                    created.isoformat() if isinstance(created, datetime) else created
+                ),
+                "age_days": age_days,
+                "aging_bucket": bucket,
+                "is_overdue": is_overdue,
+            }
+        )
 
     # Sort: oldest first, with overdue jumping to the top regardless of age.
     data.sort(key=lambda r: (not r["is_overdue"], -(r["age_days"] or 0)))
@@ -1342,7 +1420,7 @@ async def daily_stock_count(
     by_category = {}
     total_items = 0
     total_value = 0
-    
+
     for item in all_stock:
         category = item.get("category", "Other")
         if category not in by_category:
@@ -1354,7 +1432,9 @@ async def daily_stock_count(
             }
         by_category[category]["item_count"] += 1
         by_category[category]["total_quantity"] += item.get("quantity", 0)
-        by_category[category]["total_value"] += item.get("quantity", 0) * item.get("cost_price", 0)
+        by_category[category]["total_value"] += item.get("quantity", 0) * item.get(
+            "cost_price", 0
+        )
         total_items += 1
         total_value += item.get("quantity", 0) * item.get("cost_price", 0)
 
@@ -1390,7 +1470,10 @@ async def expense_vs_revenue(
     from_dt = datetime.combine(from_date, datetime.min.time())
     to_dt = datetime.combine(to_date, datetime.max.time())
     orders = _orders_in_window(
-        order_repo, store_id=active_store, start_dt=from_dt, end_dt=to_dt,
+        order_repo,
+        store_id=active_store,
+        start_dt=from_dt,
+        end_dt=to_dt,
     )
 
     revenue = sum(_order_revenue(o) for o in orders)
@@ -1451,16 +1534,17 @@ async def customer_acquisition(
             return from_dt.date().isoformat() <= ca[:10] <= to_dt.date().isoformat()
         return False
 
-    new_customers = len([
-        c for c in all_customers if _in_window(c.get("created_at"))
-    ])
+    new_customers = len([c for c in all_customers if _in_window(c.get("created_at"))])
 
     # Returning customers: placed >1 order in the window.
     returning_customers = 0
     total_buyers = 0
     if order_repo:
         orders = _orders_in_window(
-            order_repo, store_id=active_store, start_dt=from_dt, end_dt=to_dt,
+            order_repo,
+            store_id=active_store,
+            start_dt=from_dt,
+            end_dt=to_dt,
         )
         repeat_customers: dict = {}
         for order in orders:
@@ -1504,7 +1588,10 @@ async def brand_sellthrough(
     from_dt = datetime.combine(from_date, datetime.min.time())
     to_dt = datetime.combine(to_date, datetime.max.time())
     orders = _orders_in_window(
-        order_repo, store_id=active_store, start_dt=from_dt, end_dt=to_dt,
+        order_repo,
+        store_id=active_store,
+        start_dt=from_dt,
+        end_dt=to_dt,
     )
 
     # Track brand sales (uses _item_revenue helper to handle the
@@ -1543,9 +1630,11 @@ async def brand_sellthrough(
         for brand in by_brand.values():
             if brand["brand"] in by_brand_stock:
                 total_stock = brand["quantity_sold"] + by_brand_stock[brand["brand"]]
-                brand["sellthrough_percent"] = round(
-                    (brand["quantity_sold"] / total_stock * 100), 2
-                ) if total_stock > 0 else 0
+                brand["sellthrough_percent"] = (
+                    round((brand["quantity_sold"] / total_stock * 100), 2)
+                    if total_stock > 0
+                    else 0
+                )
 
     return {
         "data": list(by_brand.values()),
@@ -1555,7 +1644,6 @@ async def brand_sellthrough(
             "total_revenue": round(sum(b["revenue"] for b in by_brand.values()), 2),
         },
     }
-
 
 
 # ============================================================================
@@ -1573,7 +1661,7 @@ async def get_targets(
     Returns configurable defaults or targets from database.
     """
     active_store = store_id or current_user.get("active_store_id") or "store-001"
-    
+
     # Default targets
     targets = {
         "store_id": active_store,
@@ -1654,6 +1742,7 @@ async def gstr1_report(
         to_dt = datetime(year, mon, last_day, 23, 59, 59)
     except Exception:
         from fastapi import HTTPException
+
         raise HTTPException(status_code=400, detail="month must be in YYYY-MM format")
 
     b2b: list = []
@@ -1673,7 +1762,9 @@ async def gstr1_report(
             store_doc = stores_col.find_one({"store_id": active_store})
             if store_doc:
                 store_gstin = str(store_doc.get("gstin", "") or "")
-                store_legal_name = str(store_doc.get("store_name") or store_doc.get("name", "") or "")
+                store_legal_name = str(
+                    store_doc.get("store_name") or store_doc.get("name", "") or ""
+                )
                 store_state = str(store_doc.get("state", "") or "")
         except Exception:
             pass
@@ -1726,9 +1817,7 @@ async def gstr1_report(
                 taxable_value = float(
                     order.get("taxable", order.get("taxable_amount", 0)) or 0
                 )
-                total_tax = float(
-                    order.get("tax", order.get("tax_amount", 0)) or 0
-                )
+                total_tax = float(order.get("tax", order.get("tax_amount", 0)) or 0)
 
                 # Intra vs inter-state split. We don't have CGST/SGST/IGST
                 # split on the order doc, so derive it from store_state vs
@@ -1748,7 +1837,9 @@ async def gstr1_report(
                     sgst = round(total_tax / 2, 2)
                     igst = 0.0
 
-                bill_number = order.get("bill_number", order.get("order_number", "")) or order.get("order_id", "")
+                bill_number = order.get(
+                    "bill_number", order.get("order_number", "")
+                ) or order.get("order_id", "")
                 created_raw = order.get("created_at", "")
                 invoice_date = str(created_raw)[:10] if created_raw else month + "-01"
                 place_of_supply = customer_state or store_state or "Unknown"
@@ -1787,25 +1878,31 @@ async def gstr1_report(
 
                 if customer_gstin:
                     # B2B: registered business with GSTIN
-                    b2b.append({
-                        **base_invoice,
-                        "customerGSTIN": customer_gstin,
-                        "customerState": customer_state or store_state,
-                    })
+                    b2b.append(
+                        {
+                            **base_invoice,
+                            "customerGSTIN": customer_gstin,
+                            "customerState": customer_state or store_state,
+                        }
+                    )
                 elif invoice_value > 250000:
                     # B2CL: large consumer invoice (> ₹2.5L)
-                    b2cl.append({
-                        **base_invoice,
-                        "customerState": customer_state or store_state,
-                    })
+                    b2cl.append(
+                        {
+                            **base_invoice,
+                            "customerState": customer_state or store_state,
+                        }
+                    )
                     # An "out-of-state" B2CL with no customer_state is
                     # technically required to have one — flag it.
                     if invoice_value > 250000 and not customer_state:
-                        validation_issues.append({
-                            "level": "warn",
-                            "invoice": bill_number,
-                            "issue": "B2CL invoice missing customer state",
-                        })
+                        validation_issues.append(
+                            {
+                                "level": "warn",
+                                "invoice": bill_number,
+                                "issue": "B2CL invoice missing customer state",
+                            }
+                        )
                 else:
                     # B2CS: consolidate by (place_of_supply, gst_rate)
                     key = f"{place_of_supply}|{gst_rate_dominant}"
@@ -1829,11 +1926,13 @@ async def gstr1_report(
                 # of customer_gstin above. Add an explicit warning for
                 # high-value invoices missing it.
                 if invoice_value > 250000 and not customer_gstin:
-                    validation_issues.append({
-                        "level": "info",
-                        "invoice": bill_number,
-                        "issue": "Invoice > ₹2.5L without customer GSTIN — confirm B2C status",
-                    })
+                    validation_issues.append(
+                        {
+                            "level": "info",
+                            "invoice": bill_number,
+                            "issue": "Invoice > ₹2.5L without customer GSTIN — confirm B2C status",
+                        }
+                    )
 
         except Exception:
             pass
@@ -1910,6 +2009,7 @@ async def gstr3b_report(
         to_dt = datetime(year, mon, last_day, 23, 59, 59)
     except Exception:
         from fastapi import HTTPException
+
         raise HTTPException(status_code=400, detail="month must be in YYYY-MM format")
 
     # Output tax accumulators
@@ -1934,7 +2034,9 @@ async def gstr3b_report(
             store_doc = stores_col.find_one({"store_id": active_store})
             if store_doc:
                 store_gstin = str(store_doc.get("gstin", "") or "")
-                store_legal_name = str(store_doc.get("store_name") or store_doc.get("name", "") or "")
+                store_legal_name = str(
+                    store_doc.get("store_name") or store_doc.get("name", "") or ""
+                )
                 store_state = str(store_doc.get("state", "") or "")
         except Exception:
             pass
@@ -1951,11 +2053,9 @@ async def gstr3b_report(
 
             cust_state_map: dict = {}
             try:
-                for cust in customers_col.find(
-                    {}, {"customer_id": 1, "state": 1}
-                ):
-                    cust_state_map[str(cust.get("customer_id", ""))] = (
-                        str(cust.get("state", "") or "")
+                for cust in customers_col.find({}, {"customer_id": 1, "state": 1}):
+                    cust_state_map[str(cust.get("customer_id", ""))] = str(
+                        cust.get("state", "") or ""
                     )
             except Exception:
                 pass
@@ -1967,7 +2067,9 @@ async def gstr3b_report(
                     "created_at": {"$gte": from_dt, "$lte": to_dt},
                 }
             ):
-                taxable = float(order.get("taxable", order.get("taxable_amount", 0)) or 0)
+                taxable = float(
+                    order.get("taxable", order.get("taxable_amount", 0)) or 0
+                )
                 tax = float(order.get("tax", order.get("tax_amount", 0)) or 0)
                 if taxable <= 0 and tax <= 0:
                     continue
@@ -2092,7 +2194,9 @@ async def gstr3b_report(
 @router.get("/inventory/non-moving-stock")
 async def non_moving_stock(
     store_id: Optional[str] = Query(None),
-    days: int = Query(90, ge=1, le=365, description="Products with no sale in the last N days"),
+    days: int = Query(
+        90, ge=1, le=365, description="Products with no sale in the last N days"
+    ),
     limit: int = Query(200, ge=1, le=1000),
     current_user: dict = Depends(get_current_user),
 ):
@@ -2124,6 +2228,7 @@ async def non_moving_stock(
         the full year of no-movement.
     """
     from datetime import timezone  # local import, keeps module-top imports minimal
+
     active_store = store_id or current_user.get("active_store_id")
     db = get_db()
 
@@ -2142,16 +2247,20 @@ async def non_moving_stock(
     try:
         orders_coll = db.get_collection("orders")
         pipeline = [
-            {"$match": {
-                "store_id": active_store,
-                "status": {"$nin": ["CANCELLED", "DRAFT"]},
-            }},
+            {
+                "$match": {
+                    "store_id": active_store,
+                    "status": {"$nin": ["CANCELLED", "DRAFT"]},
+                }
+            },
             {"$unwind": "$items"},
-            {"$group": {
-                "_id": "$items.product_id",
-                "last_sold_at": {"$max": "$created_at"},
-                "total_sold": {"$sum": {"$ifNull": ["$items.quantity", 1]}},
-            }},
+            {
+                "$group": {
+                    "_id": "$items.product_id",
+                    "last_sold_at": {"$max": "$created_at"},
+                    "total_sold": {"$sum": {"$ifNull": ["$items.quantity", 1]}},
+                }
+            },
         ]
         for doc in orders_coll.aggregate(pipeline):
             pid = doc.get("_id")
@@ -2189,7 +2298,9 @@ async def non_moving_stock(
                 if isinstance(last_sold_at, datetime):
                     last_dt = last_sold_at
                 else:
-                    last_dt = datetime.fromisoformat(str(last_sold_at).replace("Z", "+00:00"))
+                    last_dt = datetime.fromisoformat(
+                        str(last_sold_at).replace("Z", "+00:00")
+                    )
                 if last_dt.tzinfo is None:
                     last_dt = last_dt.replace(tzinfo=timezone.utc)
                 days_since = (now - last_dt).days
@@ -2198,26 +2309,36 @@ async def non_moving_stock(
                 never_sold = True
 
         if never_sold or (days_since is not None and days_since >= days):
-            results.append({
-                "product_id": pid or None,
-                "sku": p.get("sku"),
-                "brand": p.get("brand"),
-                "model": p.get("model"),
-                "category": p.get("category"),
-                "mrp": p.get("mrp") or 0,
-                "last_sold_at": last_sold_at if isinstance(last_sold_at, str) else (
-                    last_sold_at.isoformat() if isinstance(last_sold_at, datetime) else None
-                ),
-                "days_since_sold": days_since,
-                "never_sold": never_sold,
-                "total_sold_all_time": total_sold,
-            })
+            results.append(
+                {
+                    "product_id": pid or None,
+                    "sku": p.get("sku"),
+                    "brand": p.get("brand"),
+                    "model": p.get("model"),
+                    "category": p.get("category"),
+                    "mrp": p.get("mrp") or 0,
+                    "last_sold_at": (
+                        last_sold_at
+                        if isinstance(last_sold_at, str)
+                        else (
+                            last_sold_at.isoformat()
+                            if isinstance(last_sold_at, datetime)
+                            else None
+                        )
+                    ),
+                    "days_since_sold": days_since,
+                    "never_sold": never_sold,
+                    "total_sold_all_time": total_sold,
+                }
+            )
 
     # 3. Sort — never-sold first (infinite staleness), then by days desc.
-    results.sort(key=lambda r: (
-        0 if r["never_sold"] else 1,
-        -(r["days_since_sold"] or 0),
-    ))
+    results.sort(
+        key=lambda r: (
+            0 if r["never_sold"] else 1,
+            -(r["days_since_sold"] or 0),
+        )
+    )
     results = results[:limit]
 
     return {

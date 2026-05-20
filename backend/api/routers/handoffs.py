@@ -27,6 +27,7 @@ Post-reply UX:
   - The Hub query filters out cards where dismissed=True OR
     snooze_until > now (until snooze expires).
 """
+
 from __future__ import annotations
 
 import json
@@ -37,7 +38,7 @@ from typing import Optional, List, Dict, Any
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query
 from fastapi.responses import Response
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, field_validator
 
 from .auth import get_current_user
 from ..dependencies import get_handoff_repository, get_user_repository
@@ -58,21 +59,25 @@ logger = logging.getLogger(__name__)
 
 # Roles eligible to be RECIPIENTS — per user direction. Senders may
 # be anyone authenticated.
-ELIGIBLE_RECIPIENT_ROLES = frozenset({
-    "STORE_MANAGER",
-    "ACCOUNTANT",
-    "ADMIN",
-    "SUPERADMIN",
-})
+ELIGIBLE_RECIPIENT_ROLES = frozenset(
+    {
+        "STORE_MANAGER",
+        "ACCOUNTANT",
+        "ADMIN",
+        "SUPERADMIN",
+    }
+)
 
 # Allowed responses (must match frontend)
-VALID_RESPONSES = frozenset({
-    "approved",
-    "denied",
-    "accepted",
-    "received",
-    "reshared",
-})
+VALID_RESPONSES = frozenset(
+    {
+        "approved",
+        "denied",
+        "accepted",
+        "received",
+        "reshared",
+    }
+)
 
 MIN_VALIDITY_DAYS = 3
 MAX_VALIDITY_DAYS = 30
@@ -87,7 +92,8 @@ class HandoffResponseInput(BaseModel):
     response: str = Field(..., description="approved | denied | accepted | received")
     comment: Optional[str] = Field(None, max_length=200)
 
-    @validator("response")
+    @field_validator("response")
+    @classmethod
     def _v_response(cls, v):
         v = (v or "").strip().lower()
         # Reshare goes through the dedicated /reshare endpoint
@@ -111,7 +117,8 @@ class HandoffDismissInput(BaseModel):
         description="Required if action=snooze. Minutes until card reappears.",
     )
 
-    @validator("action")
+    @field_validator("action")
+    @classmethod
     def _v_action(cls, v):
         v = (v or "").strip().lower()
         if v not in {"dismiss", "keep", "snooze"}:
@@ -205,18 +212,26 @@ def _resolve_recipients(recipient_ids: List[str], user_repo) -> List[Dict]:
         if not any(r in ELIGIBLE_RECIPIENT_ROLES for r in roles):
             # Recipient must hold one of the eligible roles
             continue
-        out.append({
-            "user_id": uid,
-            "user_name": u.get("name") or u.get("full_name") or u.get("username") or uid,
-            "role": next((r for r in roles if r in ELIGIBLE_RECIPIENT_ROLES), roles[0] if roles else ""),
-            "status": "pending",
-            "response": None,
-            "comment": None,
-            "responded_at": None,
-            "dismissed": False,
-            "kept": False,
-            "snooze_until": None,
-        })
+        out.append(
+            {
+                "user_id": uid,
+                "user_name": u.get("name")
+                or u.get("full_name")
+                or u.get("username")
+                or uid,
+                "role": next(
+                    (r for r in roles if r in ELIGIBLE_RECIPIENT_ROLES),
+                    roles[0] if roles else "",
+                ),
+                "status": "pending",
+                "response": None,
+                "comment": None,
+                "responded_at": None,
+                "dismissed": False,
+                "kept": False,
+                "snooze_until": None,
+            }
+        )
     return out
 
 
@@ -387,7 +402,9 @@ async def get_handoff(
     is_recipient = any(r.get("user_id") == uid for r in handoff.get("recipients", []))
     is_super = "SUPERADMIN" in roles
     if not (is_uploader or is_recipient or is_super):
-        raise HTTPException(status_code=403, detail="Not authorised to view this handoff")
+        raise HTTPException(
+            status_code=403, detail="Not authorised to view this handoff"
+        )
 
     return _scrub(handoff)
 
@@ -452,9 +469,13 @@ async def respond_handoff(
         raise HTTPException(status_code=404, detail="Handoff not found")
 
     uid = current_user.get("user_id")
-    my_r = next((r for r in handoff.get("recipients", []) if r.get("user_id") == uid), None)
+    my_r = next(
+        (r for r in handoff.get("recipients", []) if r.get("user_id") == uid), None
+    )
     if my_r is None:
-        raise HTTPException(status_code=403, detail="You are not a recipient of this handoff")
+        raise HTTPException(
+            status_code=403, detail="You are not a recipient of this handoff"
+        )
     if my_r.get("status") == "responded":
         raise HTTPException(
             status_code=409,
@@ -498,9 +519,13 @@ async def reshare_handoff(
         raise HTTPException(status_code=404, detail="Handoff not found")
 
     uid = current_user.get("user_id")
-    my_r = next((r for r in parent.get("recipients", []) if r.get("user_id") == uid), None)
+    my_r = next(
+        (r for r in parent.get("recipients", []) if r.get("user_id") == uid), None
+    )
     if my_r is None:
-        raise HTTPException(status_code=403, detail="Only a recipient can reshare a handoff")
+        raise HTTPException(
+            status_code=403, detail="Only a recipient can reshare a handoff"
+        )
 
     # Resolve the new recipients (must hold an eligible role)
     user_repo = get_user_repository()
@@ -510,17 +535,16 @@ async def reshare_handoff(
 
     new_handoff_id = str(uuid.uuid4())
     parent_file = parent.get("file") or {}
-    parent_expires = parent.get("expires_at") or _now() + timedelta(days=MIN_VALIDITY_DAYS)
+    parent_expires = parent.get("expires_at") or _now() + timedelta(
+        days=MIN_VALIDITY_DAYS
+    )
 
     new_doc = {
         "handoff_id": new_handoff_id,
         "uploader_id": uid,
         "uploader_name": current_user.get("name") or current_user.get("username", ""),
         "title": parent.get("title"),
-        "description": (
-            (payload.comment or "").strip()
-            or parent.get("description")
-        ),
+        "description": ((payload.comment or "").strip() or parent.get("description")),
         "file": parent_file,  # same GridFS reference — no duplication
         "recipients": new_recipients,
         "created_at": _now(),
@@ -531,7 +555,9 @@ async def reshare_handoff(
 
     saved = repo.create(new_doc)
     if saved is None:
-        raise HTTPException(status_code=500, detail="Failed to persist reshared handoff")
+        raise HTTPException(
+            status_code=500, detail="Failed to persist reshared handoff"
+        )
 
     # Mark the parent recipient's record as 'reshared'
     repo.update_recipient(
@@ -564,9 +590,13 @@ async def dismiss_handoff(
         raise HTTPException(status_code=404, detail="Handoff not found")
 
     uid = current_user.get("user_id")
-    my_r = next((r for r in handoff.get("recipients", []) if r.get("user_id") == uid), None)
+    my_r = next(
+        (r for r in handoff.get("recipients", []) if r.get("user_id") == uid), None
+    )
     if my_r is None:
-        raise HTTPException(status_code=403, detail="You are not a recipient of this handoff")
+        raise HTTPException(
+            status_code=403, detail="You are not a recipient of this handoff"
+        )
 
     if payload.action == "dismiss":
         updates = {"dismissed": True, "kept": False, "snooze_until": None}
@@ -574,7 +604,9 @@ async def dismiss_handoff(
         updates = {"kept": True, "dismissed": False, "snooze_until": None}
     else:  # snooze
         if not payload.snooze_minutes:
-            raise HTTPException(status_code=400, detail="snooze_minutes required for action=snooze")
+            raise HTTPException(
+                status_code=400, detail="snooze_minutes required for action=snooze"
+            )
         snooze_until = _now() + timedelta(minutes=payload.snooze_minutes)
         updates = {"snooze_until": snooze_until, "dismissed": False, "kept": False}
 
@@ -604,7 +636,9 @@ async def revoke_handoff(
     is_uploader = handoff.get("uploader_id") == uid
     is_super = "SUPERADMIN" in roles
     if not (is_uploader or is_super):
-        raise HTTPException(status_code=403, detail="Only the uploader can revoke a handoff")
+        raise HTTPException(
+            status_code=403, detail="Only the uploader can revoke a handoff"
+        )
 
     file_id = (handoff.get("file") or {}).get("file_id")
     repo.delete(handoff_id)
@@ -647,11 +681,15 @@ async def list_eligible_recipients(
         username = (u.get("username") or "").strip()
         if needle and needle not in name.lower() and needle not in username.lower():
             continue
-        out.append({
-            "user_id": u.get("user_id"),
-            "name": name or username,
-            "username": username,
-            "role": next((r for r in roles if r in ELIGIBLE_RECIPIENT_ROLES), roles[0]),
-        })
+        out.append(
+            {
+                "user_id": u.get("user_id"),
+                "name": name or username,
+                "username": username,
+                "role": next(
+                    (r for r in roles if r in ELIGIBLE_RECIPIENT_ROLES), roles[0]
+                ),
+            }
+        )
     out.sort(key=lambda r: (r["role"], r["name"]))
     return {"recipients": out, "total": len(out)}

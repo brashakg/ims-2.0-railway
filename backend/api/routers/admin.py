@@ -13,6 +13,7 @@ from .auth import get_current_user
 import uuid
 import os
 
+
 async def _require_admin_role(
     current_user: dict = Depends(get_current_user),
 ) -> dict:
@@ -162,12 +163,15 @@ class ShopifyOrderSync(BaseModel):
 # ============================================================================
 
 
-
 @router.get("")
 @router.get("/")
 async def get_admin_root():
     """Root endpoint for admin integrations overview"""
-    return {"module": "admin", "status": "active", "message": "integrations endpoint ready"}
+    return {
+        "module": "admin",
+        "status": "active",
+        "message": "integrations endpoint ready",
+    }
 
 
 @router.get("/integrations/shopify")
@@ -666,6 +670,7 @@ def _tally_exports_collection():
     """Get the tally_exports collection or None when DB is offline."""
     try:
         from database.connection import get_db
+
         db = get_db()
         if db and db.is_connected:
             return db.get_collection("tally_exports")
@@ -685,6 +690,7 @@ def _normalise_export_date(date_str: str) -> str:
         # Force UTC tzinfo so isoformat produces '...+00:00' to match
         # what the orchestrator writes via datetime.now(timezone.utc).
         from datetime import timezone as _tz
+
         if anchor.tzinfo is None:
             anchor = anchor.replace(tzinfo=_tz.utc)
         return anchor.isoformat()
@@ -785,7 +791,9 @@ async def regenerate_tally_export(
     SUPERADMIN only.
     """
     if "SUPERADMIN" not in (current_user.get("roles") or []):
-        raise HTTPException(status_code=403, detail="SUPERADMIN required to regenerate Tally exports")
+        raise HTTPException(
+            status_code=403, detail="SUPERADMIN required to regenerate Tally exports"
+        )
 
     # Validate date format up front so the error message points at the input.
     try:
@@ -799,10 +807,13 @@ async def regenerate_tally_export(
     # when the agents subsystem isn't initialised (tests, scripts, etc).
     try:
         from agents.registry import get_agent
+
         nexus = get_agent("nexus")
         if nexus is None:
             raise HTTPException(status_code=503, detail="NEXUS agent not registered")
-        result = await nexus._build_tally_export(target_date=anchor, store_id=payload.store_id)
+        result = await nexus._build_tally_export(
+            target_date=anchor, store_id=payload.store_id
+        )
     except HTTPException:
         raise
     except Exception as e:

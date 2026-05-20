@@ -67,6 +67,7 @@ class UserResponse(BaseModel):
 def hash_password(password: str) -> str:
     """Hash password using bcrypt directly"""
     import bcrypt as _bc
+
     return _bc.hashpw(password.encode(), _bc.gensalt(rounds=12)).decode()
 
 
@@ -360,12 +361,15 @@ async def reset_password(
     existing = repo.find_by_id(user_id)
     if existing is None:
         raise HTTPException(status_code=404, detail="User not found")
-    repo.update(user_id, {
-        "password_hash": hash_password(body.new_password),
-        "password_reset_at": datetime.now().isoformat(),
-        "password_reset_by": current_user.get("user_id"),
-        "must_change_password": True,
-    })
+    repo.update(
+        user_id,
+        {
+            "password_hash": hash_password(body.new_password),
+            "password_reset_at": datetime.now().isoformat(),
+            "password_reset_by": current_user.get("user_id"),
+            "must_change_password": True,
+        },
+    )
     return {"user_id": user_id, "message": "Password reset successfully"}
 
 
@@ -383,7 +387,11 @@ async def assign_store(
     using the path-param /{user_id}/stores/{store_id} variant."""
     repo = get_user_repository()
     if repo is None:
-        return {"user_id": user_id, "store_id": body.store_id, "message": "Store assigned"}
+        return {
+            "user_id": user_id,
+            "store_id": body.store_id,
+            "message": "Store assigned",
+        }
     existing = repo.find_by_id(user_id)
     if existing is None:
         raise HTTPException(status_code=404, detail="User not found")

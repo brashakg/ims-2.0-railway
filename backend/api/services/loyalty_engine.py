@@ -9,6 +9,7 @@ Why pure functions:
   * the same math is reused by the order-create hook AND the explicit
     /loyalty/earn endpoint — keeping it stateless prevents drift.
 """
+
 from __future__ import annotations
 
 from datetime import datetime, timedelta
@@ -228,7 +229,9 @@ def calc_redeem(
 # ============================================================================
 
 
-def expiry_for_earn(settings: Dict[str, Any], now: Optional[datetime] = None) -> datetime:
+def expiry_for_earn(
+    settings: Dict[str, Any], now: Optional[datetime] = None
+) -> datetime:
     days = int(settings.get("expiry_days", 365) or 365)
     base = now or datetime.now()
     return base + timedelta(days=max(0, days))

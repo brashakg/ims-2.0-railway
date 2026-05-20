@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 def _get_db():
     try:
         from database.connection import get_db
+
         return get_db().db
     except Exception:
         return None
@@ -100,7 +101,12 @@ async def send_notification(
         try:
             coll = db.get_collection("notification_logs")
             coll.insert_one(notification)
-            logger.info("Notification logged: %s -> %s (%s)", template_id, customer_phone, channel)
+            logger.info(
+                "Notification logged: %s -> %s (%s)",
+                template_id,
+                customer_phone,
+                channel,
+            )
         except Exception as e:
             logger.warning("Failed to log notification: %s", e)
 

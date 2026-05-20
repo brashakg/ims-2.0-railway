@@ -287,7 +287,9 @@ async def create_po(po: POCreate, current_user: dict = Depends(get_current_user)
                 "po_number": po_number,
                 "vendor_id": po.vendor_id,
                 "vendor_name": (
-                    vendor.get("trade_name") if vendor_repo is not None and vendor else None
+                    vendor.get("trade_name")
+                    if vendor_repo is not None and vendor
+                    else None
                 ),
                 "delivery_store_id": po.delivery_store_id,
                 "items": [item.model_dump() for item in po.items],
@@ -508,14 +510,16 @@ async def accept_grn(grn_id: str, current_user: dict = Depends(get_current_user)
             if accepted_qty > 0:
                 # Create individual stock units for each accepted quantity
                 for _ in range(int(accepted_qty)):
-                    stock_repo.create({
-                        "store_id": grn.get("store_id"),
-                        "product_id": item.get("product_id"),
-                        "quantity": 1,
-                        "status": "AVAILABLE",
-                        "source_type": "GRN",
-                        "source_id": grn_id,
-                    })
+                    stock_repo.create(
+                        {
+                            "store_id": grn.get("store_id"),
+                            "product_id": item.get("product_id"),
+                            "quantity": 1,
+                            "status": "AVAILABLE",
+                            "source_type": "GRN",
+                            "source_id": grn_id,
+                        }
+                    )
 
     # Update GRN status
     grn_repo.update(
@@ -624,17 +628,19 @@ async def issue_portal_token(
     try:
         audit = get_audit_repository()
         if audit is not None:
-            audit.create({
-                "action": "vendor.portal_token_issue",
-                "entity_type": "vendor",
-                "entity_id": vendor_id,
-                "user_id": current_user.get("user_id"),
-                "detail": {
-                    "token_id": token.get("token_id"),
-                    "ttl_days": ttl_days,
-                    "vendor_name": token.get("vendor_name"),
-                },
-            })
+            audit.create(
+                {
+                    "action": "vendor.portal_token_issue",
+                    "entity_type": "vendor",
+                    "entity_id": vendor_id,
+                    "user_id": current_user.get("user_id"),
+                    "detail": {
+                        "token_id": token.get("token_id"),
+                        "ttl_days": ttl_days,
+                        "vendor_name": token.get("vendor_name"),
+                    },
+                }
+            )
     except Exception:
         pass
 
@@ -671,17 +677,31 @@ async def list_portal_tokens(
     masked = []
     for r in rows:
         tid = r.get("token_id") or ""
-        masked.append({
-            "token_id_prefix": tid[:8] + "..." if tid else "",
-            "vendor_id": r.get("vendor_id"),
-            "vendor_name": r.get("vendor_name"),
-            "active": r.get("active", False),
-            "created_at": r.get("created_at").isoformat() if hasattr(r.get("created_at"), "isoformat") else r.get("created_at"),
-            "created_by": r.get("created_by"),
-            "expires_at": r.get("expires_at").isoformat() if hasattr(r.get("expires_at"), "isoformat") else r.get("expires_at"),
-            "last_used_at": r.get("last_used_at").isoformat() if hasattr(r.get("last_used_at"), "isoformat") else r.get("last_used_at"),
-            "use_count": r.get("use_count", 0),
-        })
+        masked.append(
+            {
+                "token_id_prefix": tid[:8] + "..." if tid else "",
+                "vendor_id": r.get("vendor_id"),
+                "vendor_name": r.get("vendor_name"),
+                "active": r.get("active", False),
+                "created_at": (
+                    r.get("created_at").isoformat()
+                    if hasattr(r.get("created_at"), "isoformat")
+                    else r.get("created_at")
+                ),
+                "created_by": r.get("created_by"),
+                "expires_at": (
+                    r.get("expires_at").isoformat()
+                    if hasattr(r.get("expires_at"), "isoformat")
+                    else r.get("expires_at")
+                ),
+                "last_used_at": (
+                    r.get("last_used_at").isoformat()
+                    if hasattr(r.get("last_used_at"), "isoformat")
+                    else r.get("last_used_at")
+                ),
+                "use_count": r.get("use_count", 0),
+            }
+        )
     return {"vendor_id": vendor_id, "tokens": masked}
 
 
@@ -704,17 +724,23 @@ async def revoke_portal_token(
     try:
         audit = get_audit_repository()
         if audit is not None:
-            audit.create({
-                "action": "vendor.portal_token_revoke",
-                "entity_type": "vendor",
-                "entity_id": vendor_id,
-                "user_id": current_user.get("user_id"),
-                "detail": {"token_id": token_id},
-            })
+            audit.create(
+                {
+                    "action": "vendor.portal_token_revoke",
+                    "entity_type": "vendor",
+                    "entity_id": vendor_id,
+                    "user_id": current_user.get("user_id"),
+                    "detail": {"token_id": token_id},
+                }
+            )
     except Exception:
         pass
-    return {"token_id": token_id, "vendor_id": vendor_id, "active": False, "message": "Token revoked"}
-
+    return {
+        "token_id": token_id,
+        "vendor_id": vendor_id,
+        "active": False,
+        "message": "Token revoked",
+    }
 
 
 # ============================================================================

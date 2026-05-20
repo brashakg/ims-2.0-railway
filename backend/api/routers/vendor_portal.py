@@ -19,6 +19,7 @@ matching admin-side handler in workshop.py stamps `source='ims_user'`. The
 frontend treats them differently (vendor blue, ims green) so the audit trail
 is read at a glance.
 """
+
 from __future__ import annotations
 
 from collections import defaultdict
@@ -81,7 +82,9 @@ def _resolve_token(token_id: str) -> Dict[str, Any]:
         raise HTTPException(status_code=503, detail="Vendor portal storage unavailable")
     doc = repo.find_active(token_id)
     if doc is None:
-        raise HTTPException(status_code=401, detail="Invalid or expired vendor portal token")
+        raise HTTPException(
+            status_code=401, detail="Invalid or expired vendor portal token"
+        )
     # Bump last_used_at; ignore failure
     try:
         repo.touch(token_id)
@@ -126,7 +129,8 @@ def _redact_job_for_vendor(job: Dict, vendor_id: str) -> Dict:
         "frame_brand": (job.get("frame_details") or {}).get("brand"),
         "frame_model": (job.get("frame_details") or {}).get("model"),
         "lens_type": (job.get("lens_details") or {}).get("type"),
-        "lens_coating": (job.get("lens_details") or {}).get("coating") or fitting.get("coating"),
+        "lens_coating": (job.get("lens_details") or {}).get("coating")
+        or fitting.get("coating"),
         "lens_diameter": fitting.get("dia"),
         "fitting_height": fitting.get("fh"),
         "base_curve": fitting.get("base_curve"),
@@ -161,12 +165,12 @@ def _redact_job_for_vendor(job: Dict, vendor_id: str) -> Dict:
 # state machine, they want enough granularity to communicate "I got it",
 # "I'm cutting it", "it's coming back to you", "something's broken".
 PORTAL_STATUSES = {
-    "RECEIVED",        # Lab acknowledges the job
-    "IN_PRODUCTION",   # Cutting / fitting in progress
-    "DISPATCHED",      # On its way back to the store
-    "DELIVERED",       # IMS confirms receipt
-    "ON_HOLD",         # Blocked — waiting for clarification
-    "CANCELLED",       # Won't be fulfilled
+    "RECEIVED",  # Lab acknowledges the job
+    "IN_PRODUCTION",  # Cutting / fitting in progress
+    "DISPATCHED",  # On its way back to the store
+    "DELIVERED",  # IMS confirms receipt
+    "ON_HOLD",  # Blocked — waiting for clarification
+    "CANCELLED",  # Won't be fulfilled
 }
 
 
@@ -200,11 +204,14 @@ async def list_vendor_jobs(
 
     # Mongo filter: this vendor + still-active job. We filter on `vendor_id`
     # which the admin sets via PATCH /workshop/jobs/{id}/vendor.
-    rows = repo.find_many(
-        {"vendor_id": vendor_id, "status": {"$nin": ["DELIVERED", "CANCELLED"]}},
-        sort=[("expected_date", 1)],
-        limit=200,
-    ) or []
+    rows = (
+        repo.find_many(
+            {"vendor_id": vendor_id, "status": {"$nin": ["DELIVERED", "CANCELLED"]}},
+            sort=[("expected_date", 1)],
+            limit=200,
+        )
+        or []
+    )
 
     return {
         "vendor_id": vendor_id,
@@ -271,7 +278,7 @@ async def post_vendor_status(
         "status": payload.status,
         "note": payload.note,
         "source": "vendor_portal",
-        "logged_by": vendor_id,           # vendor_id is the closest thing to identity here
+        "logged_by": vendor_id,  # vendor_id is the closest thing to identity here
         "logged_at": now.isoformat(),
     }
     history = list(job.get("vendor_status_history") or [])
@@ -297,21 +304,23 @@ async def post_vendor_status(
     try:
         audit = get_audit_repository()
         if audit is not None:
-            audit.create({
-                "action": "workshop.vendor_status",
-                "entity_type": "workshop_job",
-                "entity_id": job_id,
-                "store_id": job.get("store_id"),
-                "user_id": f"vendor-portal:{vendor_id}",
-                "detail": {
-                    "vendor_id": vendor_id,
-                    "vendor_name": token.get("vendor_name"),
-                    "token_id": token_id,
-                    "status": payload.status,
-                    "source": "vendor_portal",
-                    "note": payload.note,
-                },
-            })
+            audit.create(
+                {
+                    "action": "workshop.vendor_status",
+                    "entity_type": "workshop_job",
+                    "entity_id": job_id,
+                    "store_id": job.get("store_id"),
+                    "user_id": f"vendor-portal:{vendor_id}",
+                    "detail": {
+                        "vendor_id": vendor_id,
+                        "vendor_name": token.get("vendor_name"),
+                        "token_id": token_id,
+                        "status": payload.status,
+                        "source": "vendor_portal",
+                        "note": payload.note,
+                    },
+                }
+            )
     except Exception as e:
         logger.warning(f"vendor portal audit-log failed: {e}")
 

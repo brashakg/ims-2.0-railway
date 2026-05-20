@@ -896,12 +896,15 @@ def generate_product_title(
 # ============================================================================
 
 
-
 @router.get("")
 @router.get("/")
 async def get_catalog_root():
     """Root endpoint for product catalog overview"""
-    return {"module": "catalog", "status": "active", "message": "catalog overview endpoint ready"}
+    return {
+        "module": "catalog",
+        "status": "active",
+        "message": "catalog overview endpoint ready",
+    }
 
 
 @router.get("/categories")

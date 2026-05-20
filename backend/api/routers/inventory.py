@@ -12,7 +12,11 @@ import uuid
 import logging
 
 from .auth import get_current_user
-from ..dependencies import get_stock_repository, get_product_repository, validate_store_access
+from ..dependencies import (
+    get_stock_repository,
+    get_product_repository,
+    validate_store_access,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -70,6 +74,7 @@ def _get_db():
     """Get raw MongoDB database for collections without a dedicated repository"""
     try:
         from ..dependencies import get_db
+
         conn = get_db()
         if conn is not None and conn.is_connected:
             return conn.db
@@ -87,7 +92,11 @@ def _get_db():
 @router.get("/")
 async def get_inventory_root():
     """Root endpoint for inventory stock list"""
-    return {"module": "inventory", "status": "active", "message": "stock overview endpoint ready"}
+    return {
+        "module": "inventory",
+        "status": "active",
+        "message": "stock overview endpoint ready",
+    }
 
 
 @router.get("/stock")
@@ -220,7 +229,9 @@ async def add_stock(
                 stock_items.append(created)
 
         return {
-            "stock_ids": [s.get("stock_unit_id", s.get("stock_id", "")) for s in stock_items],
+            "stock_ids": [
+                s.get("stock_unit_id", s.get("stock_id", "")) for s in stock_items
+            ],
             "barcodes": [s.get("barcode", "") for s in stock_items],
             "quantity": len(stock_items),
         }
@@ -259,26 +270,55 @@ async def get_stock_aging_report(
 
     # 1. Get all available stock grouped by product
     stock_pipeline = [
-        {"$match": {"store_id": active_store, "status": {"$in": ["AVAILABLE", "RESERVED"]}}},
-        {"$group": {
-            "_id": "$product_id",
-            "quantity": {"$sum": 1},
-            "oldest_date": {"$min": "$created_at"},
-            "total_value": {"$sum": {"$ifNull": ["$mrp", 0]}},
-        }},
+        {
+            "$match": {
+                "store_id": active_store,
+                "status": {"$in": ["AVAILABLE", "RESERVED"]},
+            }
+        },
+        {
+            "$group": {
+                "_id": "$product_id",
+                "quantity": {"$sum": 1},
+                "oldest_date": {"$min": "$created_at"},
+                "total_value": {"$sum": {"$ifNull": ["$mrp", 0]}},
+            }
+        },
     ]
     stock_groups = stock_repo.aggregate(stock_pipeline)
 
     if not stock_groups:
-        return {"products": [], "summary": {"total": 0, "classA": 0, "classB": 0, "classC": 0, "slowMovingValue": 0, "averageAge": 0}}
+        return {
+            "products": [],
+            "summary": {
+                "total": 0,
+                "classA": 0,
+                "classB": 0,
+                "classC": 0,
+                "slowMovingValue": 0,
+                "averageAge": 0,
+            },
+        }
 
     # 2. Get sold items in last 30 and 90 days for turnover calculation
     sold_30d_pipeline = [
-        {"$match": {"store_id": active_store, "status": "SOLD", "sold_at": {"$gte": thirty_days_ago}}},
+        {
+            "$match": {
+                "store_id": active_store,
+                "status": "SOLD",
+                "sold_at": {"$gte": thirty_days_ago},
+            }
+        },
         {"$group": {"_id": "$product_id", "sales_30d": {"$sum": 1}}},
     ]
     sold_90d_pipeline = [
-        {"$match": {"store_id": active_store, "status": "SOLD", "sold_at": {"$gte": ninety_days_ago}}},
+        {
+            "$match": {
+                "store_id": active_store,
+                "status": "SOLD",
+                "sold_at": {"$gte": ninety_days_ago},
+            }
+        },
         {"$group": {"_id": "$product_id", "sales_90d": {"$sum": 1}}},
     ]
     last_sale_pipeline = [
@@ -286,9 +326,15 @@ async def get_stock_aging_report(
         {"$group": {"_id": "$product_id", "last_sale": {"$max": "$sold_at"}}},
     ]
 
-    sales_30d = {r["_id"]: r["sales_30d"] for r in stock_repo.aggregate(sold_30d_pipeline)}
-    sales_90d = {r["_id"]: r["sales_90d"] for r in stock_repo.aggregate(sold_90d_pipeline)}
-    last_sales = {r["_id"]: r["last_sale"] for r in stock_repo.aggregate(last_sale_pipeline)}
+    sales_30d = {
+        r["_id"]: r["sales_30d"] for r in stock_repo.aggregate(sold_30d_pipeline)
+    }
+    sales_90d = {
+        r["_id"]: r["sales_90d"] for r in stock_repo.aggregate(sold_90d_pipeline)
+    }
+    last_sales = {
+        r["_id"]: r["last_sale"] for r in stock_repo.aggregate(last_sale_pipeline)
+    }
 
     # 3. Enrich with product details and calculate metrics
     products = []
@@ -345,26 +391,34 @@ async def get_stock_aging_report(
         if min_days is not None and days_in_stock < min_days:
             continue
 
-        products.append({
-            "id": pid,
-            "sku": product.get("sku", ""),
-            "name": product.get("name", product.get("model", "")),
-            "brand": product.get("brand", ""),
-            "category": product.get("category", ""),
-            "quantity": qty,
-            "value": round(value, 2),
-            "daysInStock": days_in_stock,
-            "lastSaleDate": last_sale.isoformat() if isinstance(last_sale, datetime) else last_sale,
-            "salesLast30Days": s30,
-            "salesLast90Days": s90,
-            "turnoverRate": round(turnover, 1),
-            "classification": cls,
-            "ageCategory": age_cat,
-        })
+        products.append(
+            {
+                "id": pid,
+                "sku": product.get("sku", ""),
+                "name": product.get("name", product.get("model", "")),
+                "brand": product.get("brand", ""),
+                "category": product.get("category", ""),
+                "quantity": qty,
+                "value": round(value, 2),
+                "daysInStock": days_in_stock,
+                "lastSaleDate": (
+                    last_sale.isoformat()
+                    if isinstance(last_sale, datetime)
+                    else last_sale
+                ),
+                "salesLast30Days": s30,
+                "salesLast90Days": s90,
+                "turnoverRate": round(turnover, 1),
+                "classification": cls,
+                "ageCategory": age_cat,
+            }
+        )
 
     # Sort: Slow movers first (C, then B, then A), then by days in stock desc
     cls_order = {"C": 0, "B": 1, "A": 2}
-    products.sort(key=lambda p: (cls_order.get(p["classification"], 1), -p["daysInStock"]))
+    products.sort(
+        key=lambda p: (cls_order.get(p["classification"], 1), -p["daysInStock"])
+    )
 
     # Summary stats
     total = len(products)
@@ -438,7 +492,12 @@ async def start_stock_count(
     system_quantities: Dict[str, int] = {}
     if stock_repo is not None:
         pipeline = [
-            {"$match": {"store_id": active_store, "status": {"$in": ["AVAILABLE", "RESERVED"]}}},
+            {
+                "$match": {
+                    "store_id": active_store,
+                    "status": {"$in": ["AVAILABLE", "RESERVED"]},
+                }
+            },
         ]
         if request.category:
             # Need to join with products to filter by category — use direct match if stock has category
@@ -458,7 +517,9 @@ async def start_stock_count(
         "status": "in_progress",
         "created_at": now.isoformat(),
         "created_by": current_user.get("user_id", ""),
-        "created_by_name": current_user.get("full_name", current_user.get("username", "")),
+        "created_by_name": current_user.get(
+            "full_name", current_user.get("username", "")
+        ),
         "items": [],
         "system_quantities": system_quantities,
         "completed_at": None,
@@ -497,7 +558,9 @@ async def record_count_item(
         if not count_doc:
             raise HTTPException(status_code=404, detail="Stock count session not found")
         if count_doc.get("status") != "in_progress":
-            raise HTTPException(status_code=400, detail="Stock count is not in progress")
+            raise HTTPException(
+                status_code=400, detail="Stock count is not in progress"
+            )
 
         # Upsert item: if product already counted, update; else append
         items = count_doc.get("items", [])
@@ -512,22 +575,28 @@ async def record_count_item(
                 break
 
         if not found:
-            items.append({
-                "product_id": item.product_id,
-                "product_name": item.product_name or "",
-                "sku": item.sku or "",
-                "counted_quantity": item.counted_quantity,
-                "notes": item.notes,
-                "counted_at": datetime.utcnow().isoformat(),
-                "counted_by": current_user.get("user_id", ""),
-            })
+            items.append(
+                {
+                    "product_id": item.product_id,
+                    "product_name": item.product_name or "",
+                    "sku": item.sku or "",
+                    "counted_quantity": item.counted_quantity,
+                    "notes": item.notes,
+                    "counted_at": datetime.utcnow().isoformat(),
+                    "counted_by": current_user.get("user_id", ""),
+                }
+            )
 
         collection.update_one(
             {"count_id": count_id},
             {"$set": {"items": items, "items_counted": len(items)}},
         )
 
-        return {"message": "Item recorded", "count_id": count_id, "items_counted": len(items)}
+        return {
+            "message": "Item recorded",
+            "count_id": count_id,
+            "items_counted": len(items),
+        }
 
     except HTTPException:
         raise
@@ -554,7 +623,9 @@ async def complete_stock_count(
         if not count_doc:
             raise HTTPException(status_code=404, detail="Stock count session not found")
         if count_doc.get("status") != "in_progress":
-            raise HTTPException(status_code=400, detail="Stock count is not in progress")
+            raise HTTPException(
+                status_code=400, detail="Stock count is not in progress"
+            )
 
         system_quantities = count_doc.get("system_quantities", {})
         items = count_doc.get("items", [])
@@ -577,18 +648,22 @@ async def complete_stock_count(
             if variance < 0:
                 total_shrinkage += abs(variance)
 
-            variances.append({
-                "product_id": pid,
-                "product_name": item.get("product_name", ""),
-                "sku": item.get("sku", ""),
-                "system_quantity": system,
-                "physical_quantity": counted,
-                "variance": variance,
-                "variance_percentage": var_pct,
-            })
+            variances.append(
+                {
+                    "product_id": pid,
+                    "product_name": item.get("product_name", ""),
+                    "sku": item.get("sku", ""),
+                    "system_quantity": system,
+                    "physical_quantity": counted,
+                    "variance": variance,
+                    "variance_percentage": var_pct,
+                }
+            )
 
         # Overall metrics
-        overall_var_pct = round(((total_counted - total_system) / max(total_system, 1)) * 100, 2)
+        overall_var_pct = round(
+            ((total_counted - total_system) / max(total_system, 1)) * 100, 2
+        )
         shrinkage_pct = round((total_shrinkage / max(total_system, 1)) * 100, 2)
 
         now = datetime.utcnow()
@@ -659,7 +734,10 @@ async def list_transfers(
     """List stock transfers — delegates to /transfers router for full implementation"""
     # This endpoint exists for backwards compatibility; the full transfer
     # workflow lives in transfers.py with approval/picking/shipping states
-    return {"transfers": [], "note": "Use /api/v1/transfers for full transfer management"}
+    return {
+        "transfers": [],
+        "note": "Use /api/v1/transfers for full transfer management",
+    }
 
 
 @router.post("/transfers")
@@ -698,6 +776,7 @@ async def receive_transfer(
 # 1. NON-MOVING STOCK IDENTIFICATION
 # ============================================================================
 
+
 @router.get("/non-moving")
 async def get_non_moving_stock(
     days: int = Query(90, ge=1, le=365),
@@ -730,7 +809,7 @@ async def get_non_moving_stock(
                 "created_at": {"$gte": cutoff_date},
                 "status": {"$in": ["completed", "delivered"]},
             },
-            {"items": 1}
+            {"items": 1},
         )
 
         for order in orders:
@@ -750,22 +829,28 @@ async def get_non_moving_stock(
                 last_order = orders_coll.find_one(
                     {"items.product_id": product_id},
                     {"created_at": 1},
-                    sort=[("created_at", -1)]
+                    sort=[("created_at", -1)],
                 )
 
-                non_moving.append({
-                    "product_id": product_id,
-                    "name": product.get("name", ""),
-                    "sku": product.get("sku", ""),
-                    "current_stock": total_qty,
-                    "last_sold_date": last_order.get("created_at") if last_order else None,
-                    "days_since_sale": days,
-                })
+                non_moving.append(
+                    {
+                        "product_id": product_id,
+                        "name": product.get("name", ""),
+                        "sku": product.get("sku", ""),
+                        "current_stock": total_qty,
+                        "last_sold_date": (
+                            last_order.get("created_at") if last_order else None
+                        ),
+                        "days_since_sale": days,
+                    }
+                )
 
         return {
             "total": len(non_moving),
             "days_threshold": days,
-            "products": sorted(non_moving, key=lambda x: x["current_stock"], reverse=True)[:100],
+            "products": sorted(
+                non_moving, key=lambda x: x["current_stock"], reverse=True
+            )[:100],
         }
 
     except Exception as e:
@@ -776,6 +861,7 @@ async def get_non_moving_stock(
 # ============================================================================
 # 2. STOCK COUNT SCANNING INTERFACE
 # ============================================================================
+
 
 class BarcodeScanRequest(BaseModel):
     barcode: str
@@ -835,6 +921,7 @@ async def scan_barcode_for_count(
 # 3. CONTACT LENS BATCH/EXPIRY TRACKING
 # ============================================================================
 
+
 @router.get("/contact-lenses/expiry-status")
 async def get_contact_lens_expiry_status(
     expiring_within_days: int = Query(90, ge=1, le=365),
@@ -856,10 +943,14 @@ async def get_contact_lens_expiry_status(
 
         # Get all contact lens stocks with expiry dates
         cutoff_date = datetime.utcnow() + timedelta(days=expiring_within_days)
-        stocks = list(stock_coll.find({
-            "category": {"$in": ["CL", "CONTACT_LENS"]},
-            "expiry_date": {"$exists": True, "$ne": None},
-        }))
+        stocks = list(
+            stock_coll.find(
+                {
+                    "category": {"$in": ["CL", "CONTACT_LENS"]},
+                    "expiry_date": {"$exists": True, "$ne": None},
+                }
+            )
+        )
 
         expiring_soon = []
         expired = []
@@ -892,13 +983,15 @@ async def get_contact_lens_expiry_status(
 
         return {
             "expired": sorted(expired, key=lambda x: x["days_until_expiry"]),
-            "expiring_soon": sorted(expiring_soon, key=lambda x: x["days_until_expiry"]),
+            "expiring_soon": sorted(
+                expiring_soon, key=lambda x: x["days_until_expiry"]
+            ),
             "safe": safe[:20],  # Limit to 20 items
             "summary": {
                 "expired_count": len(expired),
                 "expiring_soon_count": len(expiring_soon),
                 "safe_count": len(safe),
-            }
+            },
         }
 
     except Exception as e:
@@ -909,6 +1002,7 @@ async def get_contact_lens_expiry_status(
 # ============================================================================
 # 4. POWER-WISE LENS STOCK GRID
 # ============================================================================
+
 
 @router.get("/lenses/power-grid")
 async def get_lens_power_grid(
@@ -940,9 +1034,9 @@ async def get_lens_power_grid(
                 grid[sph][cyl] = {"count": 0, "in_stock": False}
 
         # Populate grid from stock
-        optical_lenses = list(products_coll.find(
-            {"category": {"$in": ["LS", "OPTICAL_LENS"]}}
-        ))
+        optical_lenses = list(
+            products_coll.find({"category": {"$in": ["LS", "OPTICAL_LENS"]}})
+        )
 
         for product in optical_lenses:
             sph = product.get("attributes", {}).get("sph", "")
@@ -969,6 +1063,7 @@ async def get_lens_power_grid(
 # 5. SELL-THROUGH % BY BRAND GROUP
 # ============================================================================
 
+
 @router.get("/sell-through-analysis")
 async def get_sell_through_analysis(
     days: int = Query(30, ge=1, le=365),
@@ -993,10 +1088,12 @@ async def get_sell_through_analysis(
 
         # Get sales by brand from completed orders
         sales_by_brand = {}
-        orders = orders_coll.find({
-            "created_at": {"$gte": cutoff_date},
-            "status": {"$in": ["completed", "delivered"]},
-        })
+        orders = orders_coll.find(
+            {
+                "created_at": {"$gte": cutoff_date},
+                "status": {"$in": ["completed", "delivered"]},
+            }
+        )
 
         for order in orders:
             for item in order.get("items", []):
@@ -1024,18 +1121,24 @@ async def get_sell_through_analysis(
         for brand in brands:
             units_sold = sales_by_brand.get(brand, 0)
             units_stocked = stock_by_brand.get(brand, 0)
-            sell_through = (units_sold / max(units_stocked, 1)) * 100 if units_stocked > 0 else 0
+            sell_through = (
+                (units_sold / max(units_stocked, 1)) * 100 if units_stocked > 0 else 0
+            )
 
-            results.append({
-                "brand": brand,
-                "units_sold": units_sold,
-                "units_stocked": units_stocked,
-                "sell_through_percent": round(sell_through, 2),
-            })
+            results.append(
+                {
+                    "brand": brand,
+                    "units_sold": units_sold,
+                    "units_stocked": units_stocked,
+                    "sell_through_percent": round(sell_through, 2),
+                }
+            )
 
         return {
             "period_days": days,
-            "brands": sorted(results, key=lambda x: x["sell_through_percent"], reverse=True),
+            "brands": sorted(
+                results, key=lambda x: x["sell_through_percent"], reverse=True
+            ),
         }
 
     except Exception as e:
@@ -1046,6 +1149,7 @@ async def get_sell_through_analysis(
 # ============================================================================
 # 6. STOCK DUMP ANALYSIS (OVERSTOCK)
 # ============================================================================
+
 
 @router.get("/overstock-analysis")
 async def get_overstock_analysis(
@@ -1071,10 +1175,12 @@ async def get_overstock_analysis(
 
         # Get sales volume by product
         sales_by_product = {}
-        orders = orders_coll.find({
-            "created_at": {"$gte": cutoff_date},
-            "status": {"$in": ["completed", "delivered"]},
-        })
+        orders = orders_coll.find(
+            {
+                "created_at": {"$gte": cutoff_date},
+                "status": {"$in": ["completed", "delivered"]},
+            }
+        )
 
         for order in orders:
             for item in order.get("items", []):
@@ -1100,24 +1206,29 @@ async def get_overstock_analysis(
                 product = products_coll.find_one({"_id": product_id})
                 months_of_stock = current_qty / max(avg_monthly, 1)
 
-                overstocked.append({
-                    "product_id": product_id,
-                    "product_name": product.get("name") if product else "Unknown",
-                    "sku": product.get("sku") if product else "",
-                    "current_stock": current_qty,
-                    "avg_monthly_sales": round(avg_monthly, 2),
-                    "months_of_stock": round(months_of_stock, 1),
-                    "overstock_multiple": round(current_qty / max(avg_monthly, 1), 2),
-                })
+                overstocked.append(
+                    {
+                        "product_id": product_id,
+                        "product_name": product.get("name") if product else "Unknown",
+                        "sku": product.get("sku") if product else "",
+                        "current_stock": current_qty,
+                        "avg_monthly_sales": round(avg_monthly, 2),
+                        "months_of_stock": round(months_of_stock, 1),
+                        "overstock_multiple": round(
+                            current_qty / max(avg_monthly, 1), 2
+                        ),
+                    }
+                )
 
         return {
             "threshold_multiple": overstocking_threshold,
             "analysis_period_days": days,
             "total_overstocked": len(overstocked),
-            "items": sorted(overstocked, key=lambda x: x["months_of_stock"], reverse=True)[:50],
+            "items": sorted(
+                overstocked, key=lambda x: x["months_of_stock"], reverse=True
+            )[:50],
         }
 
     except Exception as e:
         logger.error(f"get_overstock_analysis error: {e}")
         raise HTTPException(status_code=500, detail="Error analyzing overstock")
-

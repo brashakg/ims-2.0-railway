@@ -9,6 +9,7 @@ where cheap; empty/zero envelopes otherwise (the widgets fail-soft).
 Mounted FIRST at /api/v1 so these exact paths resolve before any
 domain router's /{id} catch-all could shadow them.
 """
+
 from fastapi import APIRouter, Depends, Query
 from typing import Optional, Dict, Any
 from datetime import datetime
@@ -21,6 +22,7 @@ router = APIRouter()
 def _coll(name: str):
     try:
         from database.connection import get_db
+
         db = get_db()
         if db and db.is_connected:
             return db.get_collection(name)
@@ -49,9 +51,11 @@ _COUNTED = {"CONFIRMED", "PROCESSING", "READY", "DELIVERED"}
 
 # ── Tasks ──────────────────────────────────────────────────────────────────
 
+
 @router.get("/tasks/completion-stats")
 async def tasks_completion_stats(
-    store_id: Optional[str] = Query(None), current_user: dict = Depends(get_current_user)
+    store_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
 ):
     coll = _coll("tasks")
     sid = _store(current_user, store_id)
@@ -63,7 +67,9 @@ async def tasks_completion_stats(
     done = coll.count_documents({**base, "status": "completed"})
     total = open_c + inprog + done
     return {
-        "open": open_c, "in_progress": inprog, "completed": done,
+        "open": open_c,
+        "in_progress": inprog,
+        "completed": done,
         "completion_rate": round(done / total * 100, 1) if total else 0,
     }
 
@@ -71,7 +77,8 @@ async def tasks_completion_stats(
 @router.get("/tasks/escalations")
 async def tasks_escalations(
     status: Optional[str] = Query(None),
-    store_id: Optional[str] = Query(None), current_user: dict = Depends(get_current_user)
+    store_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
 ):
     coll = _coll("tasks")
     sid = _store(current_user, store_id)
@@ -86,15 +93,21 @@ async def tasks_escalations(
 
 # ── Clinical ────────────────────────────────────────────────────────────────
 
+
 @router.get("/clinical/patient-queue")
 async def clinical_patient_queue(
-    store_id: Optional[str] = Query(None), current_user: dict = Depends(get_current_user)
+    store_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
 ):
     coll = _coll("eye_test_queue")
     sid = _store(current_user, store_id)
     if coll is None:
         return {"waiting": 0, "in_progress": 0, "queue": []}
-    q = {"store_id": sid, "created_date": _today()} if sid else {"created_date": _today()}
+    q = (
+        {"store_id": sid, "created_date": _today()}
+        if sid
+        else {"created_date": _today()}
+    )
     waiting = coll.count_documents({**q, "status": "WAITING"})
     inprog = coll.count_documents({**q, "status": "IN_PROGRESS"})
     return {"waiting": waiting, "in_progress": inprog, "queue": []}
@@ -102,8 +115,10 @@ async def clinical_patient_queue(
 
 @router.get("/clinical/eye-tests")
 async def clinical_eye_tests(
-    status: Optional[str] = Query(None), date: Optional[str] = Query(None),
-    store_id: Optional[str] = Query(None), current_user: dict = Depends(get_current_user)
+    status: Optional[str] = Query(None),
+    date: Optional[str] = Query(None),
+    store_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
 ):
     coll = _coll("eye_tests")
     sid = _store(current_user, store_id)
@@ -122,7 +137,8 @@ async def clinical_eye_tests(
 
 @router.get("/clinical/prescription-redo-rate")
 async def clinical_redo_rate(
-    store_id: Optional[str] = Query(None), current_user: dict = Depends(get_current_user)
+    store_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
 ):
     # No redo tracking field yet — honest zero envelope.
     return {"redo_rate": 0, "total_prescriptions": 0, "redos": 0}
@@ -130,9 +146,11 @@ async def clinical_redo_rate(
 
 # ── Finance ─────────────────────────────────────────────────────────────────
 
+
 @router.get("/finance/summary-month")
 async def finance_summary_month(
-    store_id: Optional[str] = Query(None), current_user: dict = Depends(get_current_user)
+    store_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
 ):
     orders = _coll("orders")
     sid = _store(current_user, store_id)
@@ -151,23 +169,31 @@ async def finance_summary_month(
 
 @router.get("/finance/gst-status")
 async def finance_gst_status(
-    store_id: Optional[str] = Query(None), current_user: dict = Depends(get_current_user)
+    store_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
 ):
-    return {"filed": False, "period": datetime.now().strftime("%Y-%m"), "pending_returns": []}
+    return {
+        "filed": False,
+        "period": datetime.now().strftime("%Y-%m"),
+        "pending_returns": [],
+    }
 
 
 @router.get("/finance/pending-reconciliations")
 async def finance_pending_reconciliations(
-    store_id: Optional[str] = Query(None), current_user: dict = Depends(get_current_user)
+    store_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
 ):
     return {"pending": 0, "items": []}
 
 
 # ── HR ──────────────────────────────────────────────────────────────────────
 
+
 @router.get("/hr/summary-today")
 async def hr_summary_today(
-    store_id: Optional[str] = Query(None), current_user: dict = Depends(get_current_user)
+    store_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
 ):
     users = _coll("users")
     sid = _store(current_user, store_id)
@@ -175,7 +201,11 @@ async def hr_summary_today(
     if users is not None:
         q: Dict[str, Any] = {"is_active": {"$ne": False}}
         if sid:
-            q["$or"] = [{"store_ids": sid}, {"home_store_id": sid}, {"active_store_id": sid}]
+            q["$or"] = [
+                {"store_ids": sid},
+                {"home_store_id": sid},
+                {"active_store_id": sid},
+            ]
         total = users.count_documents(q)
     att = _coll("attendance")
     present = 0
@@ -184,21 +214,28 @@ async def hr_summary_today(
         if sid:
             aq["store_id"] = sid
         present = att.count_documents(aq)
-    return {"total_staff": total, "present_today": present, "on_leave": max(0, total - present)}
+    return {
+        "total_staff": total,
+        "present_today": present,
+        "on_leave": max(0, total - present),
+    }
 
 
 @router.get("/hr/attendance-compliance")
 async def hr_attendance_compliance(
-    store_id: Optional[str] = Query(None), current_user: dict = Depends(get_current_user)
+    store_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
 ):
     return {"compliance_rate": 0, "late_arrivals": 0, "absent": 0}
 
 
 # ── Inventory ────────────────────────────────────────────────────────────────
 
+
 @router.get("/inventory/stock-count-status")
 async def inventory_stock_count_status(
-    store_id: Optional[str] = Query(None), current_user: dict = Depends(get_current_user)
+    store_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
 ):
     products = _coll("products")
     low = oos = total = 0
@@ -218,6 +255,7 @@ async def inventory_stock_count_status(
 
 # ── Catalog ──────────────────────────────────────────────────────────────────
 
+
 @router.get("/catalog/sku-counts")
 async def catalog_sku_counts(current_user: dict = Depends(get_current_user)):
     products = _coll("products")
@@ -236,10 +274,16 @@ async def catalog_recent_activity(
     if products is None:
         return {"activity": []}
     rows = list(products.find({}).sort("updated_at", -1).limit(limit))
-    return {"activity": [
-        {"name": r.get("name") or r.get("product_name"), "sku": r.get("sku"),
-         "updated_at": r.get("updated_at")} for r in rows
-    ]}
+    return {
+        "activity": [
+            {
+                "name": r.get("name") or r.get("product_name"),
+                "sku": r.get("sku"),
+                "updated_at": r.get("updated_at"),
+            }
+            for r in rows
+        ]
+    }
 
 
 @router.get("/catalog/price-change-requests")
@@ -256,9 +300,11 @@ async def catalog_price_change_requests(
 
 # ── Analytics ────────────────────────────────────────────────────────────────
 
+
 @router.get("/analytics/store-target-today")
 async def analytics_store_target_today(
-    store_id: Optional[str] = Query(None), current_user: dict = Depends(get_current_user)
+    store_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
 ):
     orders = _coll("orders")
     sid = _store(current_user, store_id)
@@ -275,6 +321,7 @@ async def analytics_store_target_today(
 
 # ── Admin ────────────────────────────────────────────────────────────────────
 
+
 @router.get("/admin/escalations")
 async def admin_escalations(
     level: Optional[str] = Query(None), current_user: dict = Depends(get_current_user)
@@ -282,14 +329,17 @@ async def admin_escalations(
     coll = _coll("tasks")
     if coll is None:
         return {"escalations": [], "count": 0}
-    rows = [{k: v for k, v in r.items() if k != "_id"}
-            for r in coll.find({"status": "escalated"}).limit(20)]
+    rows = [
+        {k: v for k, v in r.items() if k != "_id"}
+        for r in coll.find({"status": "escalated"}).limit(20)
+    ]
     return {"escalations": rows, "count": len(rows)}
 
 
 @router.get("/admin/system-health")
 async def admin_system_health(current_user: dict = Depends(get_current_user)):
     from database.connection import get_db
+
     status = {"api": "healthy", "checked_at": datetime.now().isoformat()}
     try:
         db = get_db()

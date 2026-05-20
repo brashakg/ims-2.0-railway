@@ -44,7 +44,9 @@ if _sentry_dsn:
         sentry_sdk.init(
             dsn=_sentry_dsn,
             environment=os.getenv("NODE_ENV", "development"),
-            release=os.getenv("SENTRY_RELEASE") or os.getenv("RAILWAY_DEPLOYMENT_ID") or "ims-2.0@dev",
+            release=os.getenv("SENTRY_RELEASE")
+            or os.getenv("RAILWAY_DEPLOYMENT_ID")
+            or "ims-2.0@dev",
             traces_sampler=_sentry_traces_sampler,
             profiles_sample_rate=float(os.getenv("SENTRY_PROFILES_RATE", "0.1")),
             send_default_pii=False,  # don't send user IPs/emails to Sentry
@@ -123,20 +125,28 @@ async def lifespan(app: FastAPI):
 
     # ── Environment validation ──────────────────────────────────────────
     _jwt_key = os.getenv("JWT_SECRET_KEY", "")
-    if not _jwt_key or _jwt_key in ("CHANGE_THIS_TO_A_RANDOM_SECRET_KEY_IN_PRODUCTION", "dev-secret-key-change-in-production"):
+    if not _jwt_key or _jwt_key in (
+        "CHANGE_THIS_TO_A_RANDOM_SECRET_KEY_IN_PRODUCTION",
+        "dev-secret-key-change-in-production",
+    ):
         logger.warning(
             "[SECURITY] JWT_SECRET_KEY is missing or using a default placeholder! "
             "Set a strong random secret via environment variable for production."
         )
-    _mongo_url = os.getenv("MONGODB_URL") or os.getenv("MONGO_URL") or os.getenv("MONGO_HOST")
+    _mongo_url = (
+        os.getenv("MONGODB_URL") or os.getenv("MONGO_URL") or os.getenv("MONGO_HOST")
+    )
     if not _mongo_url:
-        logger.warning("[CONFIG] No MongoDB connection configured (MONGODB_URL / MONGO_URL / MONGO_HOST). Running in stub mode.")
+        logger.warning(
+            "[CONFIG] No MongoDB connection configured (MONGODB_URL / MONGO_URL / MONGO_HOST). Running in stub mode."
+        )
     _missing_recommended = [
-        v for v in ("CORS_ORIGINS", "RATE_LIMIT_PER_MINUTE")
-        if not os.getenv(v)
+        v for v in ("CORS_ORIGINS", "RATE_LIMIT_PER_MINUTE") if not os.getenv(v)
     ]
     if _missing_recommended:
-        logger.info(f"[CONFIG] Optional env vars not set (using defaults): {', '.join(_missing_recommended)}")
+        logger.info(
+            f"[CONFIG] Optional env vars not set (using defaults): {', '.join(_missing_recommended)}"
+        )
 
     # Initialize database connection
     if DATABASE_AVAILABLE:
@@ -170,6 +180,7 @@ async def lifespan(app: FastAPI):
     try:
         if DATABASE_AVAILABLE:
             from database.connection import get_seeded_db
+
             db = get_seeded_db()
     except Exception as e:
         logger.error(f"[AGENTS] get_seeded_db failed: {e}", exc_info=True)
@@ -177,6 +188,7 @@ async def lifespan(app: FastAPI):
     # Step 1: seed configs — never blocks registry/scheduler
     try:
         from agents.config import AgentConfigManager
+
         AgentConfigManager(db=db).seed_configs()
         logger.info("[AGENTS] Agent configs seeded")
     except Exception as e:
@@ -185,9 +197,12 @@ async def lifespan(app: FastAPI):
     # Step 2: register agents — the big one, wrapped independently
     try:
         from agents.registry import initialize_registry, AGENT_REGISTRY as _reg
+
         initialize_registry(db=db)
         AGENT_REGISTRY = _reg
-        logger.info(f"[AGENTS] Registry initialized — {len(AGENT_REGISTRY)} agents registered")
+        logger.info(
+            f"[AGENTS] Registry initialized — {len(AGENT_REGISTRY)} agents registered"
+        )
     except Exception as e:
         logger.error(
             f"[AGENTS] Registry init CATASTROPHIC failure: {e}. No agents will run this worker.",
@@ -198,6 +213,7 @@ async def lifespan(app: FastAPI):
     # Step 3: event bus — depends on registry for subscriptions, but fail-soft
     try:
         from agents.event_bus import get_event_bus
+
         _event_bus = get_event_bus(db=db)
         await _event_bus.start()
         logger.info(
@@ -210,10 +226,14 @@ async def lifespan(app: FastAPI):
     # Step 4: scheduler — only meaningful if registry has agents
     try:
         from agents.scheduler import AgentScheduler
+
         _scheduler = AgentScheduler(db=db)
         await _scheduler.start(AGENT_REGISTRY or {})
-        logger.info(f"[AGENTS] Scheduler started with {len(AGENT_REGISTRY or {})} agents")
+        logger.info(
+            f"[AGENTS] Scheduler started with {len(AGENT_REGISTRY or {})} agents"
+        )
         import agents as _agents_pkg
+
         _agents_pkg._scheduler_instance = _scheduler
     except Exception as e:
         logger.error(f"[AGENTS] Scheduler start failed (non-fatal): {e}", exc_info=True)
@@ -375,9 +395,8 @@ async def global_rate_limiter(request: Request, call_next):
     if os.getenv("PYTEST_CURRENT_TEST") or os.getenv("ENVIRONMENT") == "test":
         return await call_next(request)
 
-    client_ip = (
-        request.headers.get("x-forwarded-for", "").split(",")[0].strip()
-        or (request.client.host if request.client else "unknown")
+    client_ip = request.headers.get("x-forwarded-for", "").split(",")[0].strip() or (
+        request.client.host if request.client else "unknown"
     )
     now = time.time()
     cutoff = now - _GLOBAL_RATE_WINDOW
@@ -387,7 +406,9 @@ async def global_rate_limiter(request: Request, call_next):
     if len(_request_log[client_ip]) >= _GLOBAL_RATE_LIMIT:
         return JSONResponse(
             status_code=429,
-            content={"detail": f"Rate limit exceeded. Max {_GLOBAL_RATE_LIMIT} requests per minute."},
+            content={
+                "detail": f"Rate limit exceeded. Max {_GLOBAL_RATE_LIMIT} requests per minute."
+            },
         )
     _request_log[client_ip].append(now)
     return await call_next(request)
@@ -406,8 +427,12 @@ async def add_security_headers(request: Request, call_next):
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["X-XSS-Protection"] = "1; mode=block"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
-    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=(self)"
-    response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    response.headers["Permissions-Policy"] = (
+        "camera=(), microphone=(), geolocation=(self)"
+    )
+    response.headers["Strict-Transport-Security"] = (
+        "max-age=31536000; includeSubDomains"
+    )
     # CSP: allow self + Vercel preview domains for the frontend
     response.headers["Content-Security-Policy"] = (
         "default-src 'self'; "
@@ -466,7 +491,9 @@ async def dynamic_cors_handler(request: Request, call_next):
         response.headers["Access-Control-Expose-Headers"] = _CORS_EXPOSE_HEADERS
         # Prevent cache poisoning across origins.
         existing_vary = response.headers.get("Vary", "")
-        response.headers["Vary"] = (existing_vary + ", Origin").strip(", ") if existing_vary else "Origin"
+        response.headers["Vary"] = (
+            (existing_vary + ", Origin").strip(", ") if existing_vary else "Origin"
+        )
     return response
 
 
@@ -535,6 +562,7 @@ async def block_investor_writes(request: Request, call_next):
     token = auth_header.split(" ", 1)[1].strip()
     try:
         from .routers.auth import decode_token
+
         payload = decode_token(token)
         roles = payload.get("roles", [])
     except Exception:
@@ -584,7 +612,10 @@ async def http_exception_handler(request: Request, exc: HTTPException):
 # Global exception handler for unexpected errors
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
-    logger.error(f"Unhandled exception on {request.method} {request.url.path}: {exc}", exc_info=True)
+    logger.error(
+        f"Unhandled exception on {request.method} {request.url.path}: {exc}",
+        exc_info=True,
+    )
     response = JSONResponse(
         status_code=500, content={"detail": "Internal server error"}
     )
@@ -646,7 +677,10 @@ async def seed_database(secret: str = "", force: str = ""):
 
     try:
         import sys as _sys, os as _os
-        _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+
+        _sys.path.insert(
+            0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+        )
         from database.seed_data import get_all_seed_data
 
         seed_data = get_all_seed_data()
@@ -680,7 +714,9 @@ async def seed_database(secret: str = "", force: str = ""):
 # Include routers
 # Dashboard widgets FIRST — its exact paths must resolve before any
 # domain router's /{id} catch-all could shadow them.
-app.include_router(dashboard_widgets_router, prefix="/api/v1", tags=["Dashboard Widgets"])
+app.include_router(
+    dashboard_widgets_router, prefix="/api/v1", tags=["Dashboard Widgets"]
+)
 app.include_router(auth_router, prefix="/api/v1/auth", tags=["Authentication"])
 app.include_router(users_router, prefix="/api/v1/users", tags=["Users"])
 app.include_router(stores_router, prefix="/api/v1/stores", tags=["Stores"])
@@ -693,7 +729,9 @@ app.include_router(
     prescriptions_router, prefix="/api/v1/prescriptions", tags=["Prescriptions"]
 )
 app.include_router(vendors_router, prefix="/api/v1/vendors", tags=["Vendors"])
-app.include_router(vendor_returns_router, prefix="/api/v1/vendor-returns", tags=["Vendor Returns"])
+app.include_router(
+    vendor_returns_router, prefix="/api/v1/vendor-returns", tags=["Vendor Returns"]
+)
 app.include_router(tasks_router, prefix="/api/v1/tasks", tags=["Tasks"])
 app.include_router(expenses_router, prefix="/api/v1/expenses", tags=["Expenses"])
 app.include_router(finance_router, prefix="/api/v1/finance", tags=["Finance"])
@@ -703,8 +741,12 @@ app.include_router(reports_router, prefix="/api/v1/reports", tags=["Reports"])
 app.include_router(settings_router, prefix="/api/v1/settings", tags=["Settings"])
 app.include_router(clinical_router, prefix="/api/v1/clinical", tags=["Clinical"])
 app.include_router(admin_router, prefix="/api/v1/admin", tags=["Admin"])
-app.include_router(admin_catalog_router, prefix="/api/v1/admin", tags=["Admin · Catalog"])
-app.include_router(admin_extras_router, prefix="/api/v1/admin", tags=["Admin · Discounts & System"])
+app.include_router(
+    admin_catalog_router, prefix="/api/v1/admin", tags=["Admin · Catalog"]
+)
+app.include_router(
+    admin_extras_router, prefix="/api/v1/admin", tags=["Admin · Discounts & System"]
+)
 app.include_router(handoffs_router, prefix="/api/v1/handoffs", tags=["Handoffs"])
 app.include_router(
     transfers_router, prefix="/api/v1/transfers", tags=["Stock Transfers"]
@@ -719,10 +761,14 @@ app.include_router(
 app.include_router(follow_ups_router, prefix="/api/v1/follow-ups", tags=["Follow-ups"])
 app.include_router(payroll_router, prefix="/api/v1/payroll", tags=["Payroll"])
 app.include_router(marketing_router, prefix="/api/v1/marketing", tags=["Marketing"])
-app.include_router(analytics_v2_router, prefix="/api/v1/analytics-v2", tags=["Analytics V2"])
+app.include_router(
+    analytics_v2_router, prefix="/api/v1/analytics-v2", tags=["Analytics V2"]
+)
 app.include_router(agents_router, prefix="/api/v1/jarvis", tags=["Agents"])
 app.include_router(walkouts_router, prefix="/api/v1/walkouts", tags=["Walkouts"])
-app.include_router(points_router, prefix="/api/v1/incentive/points", tags=["Daily Points"])
+app.include_router(
+    points_router, prefix="/api/v1/incentive/points", tags=["Daily Points"]
+)
 app.include_router(payout_router, prefix="/api/v1/payout", tags=["Payout"])
 app.include_router(webhooks_router, prefix="/api/v1/webhooks", tags=["Webhooks"])
 app.include_router(loyalty_router, prefix="/api/v1/loyalty", tags=["Loyalty"])

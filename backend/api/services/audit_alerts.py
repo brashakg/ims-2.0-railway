@@ -32,6 +32,7 @@ Action codes are short, machine-readable strings. Examples:
   order.cancelled · order.edited · order.item.deleted · order.refund.large
   pnl.deviation · discount.over_cap · price.override
 """
+
 from __future__ import annotations
 
 import logging
@@ -98,6 +99,7 @@ async def emit_audit_alert(
     # 1. Persist to audit_logs (single source of truth for compliance)
     try:
         from ..dependencies import get_audit_repository
+
         audit_repo = get_audit_repository()
         if audit_repo is not None:
             saved = audit_repo.create(audit_row)
@@ -107,7 +109,8 @@ async def emit_audit_alert(
 
     # 2. Dispatch the event so SENTINEL/CORTEX can react in real time
     try:
-        from ...agents.registry import dispatch_event
+        from agents.registry import dispatch_event
+
         await dispatch_event(
             "audit.alert",
             {

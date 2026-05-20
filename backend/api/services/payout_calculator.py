@@ -15,6 +15,7 @@ Decisions baked in (per docs/PUNE_INCENTIVE_BUILD_PLAN.md):
   - Manager bonus: STACKS with the manager's individual payout
     (decision §3) — pool × bonus_pct × manager's eligibility
 """
+
 from __future__ import annotations
 
 import math
@@ -52,9 +53,7 @@ def compute_multiplier(
     if avg_discount_pct > kill_threshold + 1e-9:
         return 0.0
     floored = math.floor(avg_discount_pct * 100) / 100.0
-    sorted_mult = sorted(
-        multipliers or [], key=lambda t: float(t.get("max_pct", 0))
-    )
+    sorted_mult = sorted(multipliers or [], key=lambda t: float(t.get("max_pct", 0)))
     for tier in sorted_mult:
         try:
             cap = float(tier.get("max_pct"))
@@ -122,19 +121,19 @@ def compute_individual_payouts(
         eligibility = float(slot.get("eligibility") or 0.0)
         per_level: Dict[str, float] = {}
         for lvl, pool in pools.items():
-            per_level[lvl] = round(
-                float(pool) * float(weightage) * eligibility, 2
-            )
+            per_level[lvl] = round(float(pool) * float(weightage) * eligibility, 2)
         total_payout = round(sum(per_level.values()), 2)
-        out.append({
-            "user_id": user_id,
-            "name": (name_lookup or {}).get(user_id) or slot.get("name"),
-            "weightage": float(weightage),
-            "mtd_avg_total": slot.get("mtd_avg_total"),
-            "eligibility": eligibility,
-            "payout_by_level": per_level,
-            "total_payout": total_payout,
-        })
+        out.append(
+            {
+                "user_id": user_id,
+                "name": (name_lookup or {}).get(user_id) or slot.get("name"),
+                "weightage": float(weightage),
+                "mtd_avg_total": slot.get("mtd_avg_total"),
+                "eligibility": eligibility,
+                "payout_by_level": per_level,
+                "total_payout": total_payout,
+            }
+        )
     return out
 
 
@@ -160,15 +159,17 @@ def compute_manager_bonuses(
             pct = float(bonus_pct.get(lvl) or 0)
             bonus_by_level[lvl] = round(float(pool) * pct * eligibility, 2)
         total_bonus = round(sum(bonus_by_level.values()), 2)
-        out.append({
-            "user_id": uid,
-            "role": sup.get("role"),
-            "name": (name_lookup or {}).get(uid) or slot.get("name"),
-            "eligibility": eligibility,
-            "bonus_pct": dict(bonus_pct),
-            "bonus_by_level": bonus_by_level,
-            "total_bonus": total_bonus,
-        })
+        out.append(
+            {
+                "user_id": uid,
+                "role": sup.get("role"),
+                "name": (name_lookup or {}).get(uid) or slot.get("name"),
+                "eligibility": eligibility,
+                "bonus_pct": dict(bonus_pct),
+                "bonus_by_level": bonus_by_level,
+                "total_bonus": total_bonus,
+            }
+        )
     return out
 
 
@@ -180,11 +181,11 @@ def assemble_payout(
     name_lookup: Optional[Dict[str, Optional[str]]] = None,
 ) -> Dict[str, Any]:
     """One-call orchestrator. Inputs:
-      inputs: { last_year_sale, this_year_sale, avg_discount_pct,
-                visufit_usage_pct }
-      settings: store-level incentive_settings doc
-      mtd_data: { user_id: { eligibility, mtd_avg_total, name? } }
-      name_lookup: optional id→name override (router resolves from users repo)
+    inputs: { last_year_sale, this_year_sale, avg_discount_pct,
+              visufit_usage_pct }
+    settings: store-level incentive_settings doc
+    mtd_data: { user_id: { eligibility, mtd_avg_total, name? } }
+    name_lookup: optional id→name override (router resolves from users repo)
     """
     last_year = float(inputs.get("last_year_sale") or 0)
     this_year = float(inputs.get("this_year_sale") or 0)
@@ -213,10 +214,16 @@ def assemble_payout(
     discount_kill_active = avg_disc > kill_threshold + 1e-9
 
     individuals = compute_individual_payouts(
-        pools, weightages, mtd_data, name_lookup=name_lookup,
+        pools,
+        weightages,
+        mtd_data,
+        name_lookup=name_lookup,
     )
     managers = compute_manager_bonuses(
-        pools, supervisor_bonuses, mtd_data, name_lookup=name_lookup,
+        pools,
+        supervisor_bonuses,
+        mtd_data,
+        name_lookup=name_lookup,
     )
 
     total_team_pool = round(sum(pools.values()), 2)

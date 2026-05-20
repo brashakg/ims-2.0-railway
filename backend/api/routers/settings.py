@@ -31,14 +31,28 @@ router = APIRouter()
 # Encrypts API keys at rest using AES-like XOR with HMAC-derived key.
 # For production, replace with Fernet (cryptography lib) or cloud KMS.
 
-_CRED_SECRET = os.getenv("CREDENTIAL_ENCRYPTION_KEY", os.getenv("JWT_SECRET_KEY", "ims2-default-key-change-me"))
+_CRED_SECRET = os.getenv(
+    "CREDENTIAL_ENCRYPTION_KEY",
+    os.getenv("JWT_SECRET_KEY", "ims2-default-key-change-me"),
+)
 
 # Sensitive config field names that must be encrypted at rest & masked on read
 _SENSITIVE_FIELDS = {
-    "api_key", "api_secret", "secret_key", "secret", "password", "token",
-    "access_token", "refresh_token", "private_key", "webhook_secret",
-    "razorpay_key_secret", "shopify_api_secret", "whatsapp_api_key",
-    "tally_password", "shiprocket_password",
+    "api_key",
+    "api_secret",
+    "secret_key",
+    "secret",
+    "password",
+    "token",
+    "access_token",
+    "refresh_token",
+    "private_key",
+    "webhook_secret",
+    "razorpay_key_secret",
+    "shopify_api_secret",
+    "whatsapp_api_key",
+    "tally_password",
+    "shiprocket_password",
 }
 
 
@@ -86,7 +100,11 @@ def _encrypt_config(config: dict) -> dict:
     for k, v in config.items():
         if isinstance(v, dict):
             encrypted[k] = _encrypt_config(v)
-        elif isinstance(v, str) and k.lower() in _SENSITIVE_FIELDS and not v.startswith("enc:"):
+        elif (
+            isinstance(v, str)
+            and k.lower() in _SENSITIVE_FIELDS
+            and not v.startswith("enc:")
+        ):
             encrypted[k] = _encrypt_value(v)
         else:
             encrypted[k] = v
@@ -345,12 +363,15 @@ class AuditLogEntry(BaseModel):
 # ============================================================================
 
 
-
 @router.get("")
 @router.get("/")
 async def get_settings_root():
     """Root endpoint for system settings"""
-    return {"module": "settings", "status": "active", "message": "settings overview endpoint ready"}
+    return {
+        "module": "settings",
+        "status": "active",
+        "message": "settings overview endpoint ready",
+    }
 
 
 @router.get("/profile")
@@ -358,7 +379,7 @@ async def get_profile(current_user: dict = Depends(get_current_user)):
     """Get current user's profile"""
     # Try to fetch full user data from database
     user_data = _get_user_from_db(current_user["user_id"])
-    
+
     if user_data:
         # Merge database fields with JWT data
         return {
@@ -371,7 +392,7 @@ async def get_profile(current_user: dict = Depends(get_current_user)):
             "email": user_data.get("email"),
             "phone": user_data.get("phone"),
         }
-    
+
     # Fallback to JWT data if database is unavailable
     return {
         "user_id": current_user["user_id"],
@@ -507,7 +528,9 @@ async def update_tax_settings(
     settings: TaxSettings, current_user: dict = Depends(get_current_user)
 ):
     """Update tax settings (SUPERADMIN/ADMIN/ACCOUNTANT)"""
-    if not any(role in current_user["roles"] for role in ["SUPERADMIN", "ADMIN", "ACCOUNTANT"]):
+    if not any(
+        role in current_user["roles"] for role in ["SUPERADMIN", "ADMIN", "ACCOUNTANT"]
+    ):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
     return {"message": "Tax settings updated", "settings": settings.model_dump()}
 
@@ -532,7 +555,9 @@ async def update_invoice_settings(
     settings: InvoiceSettings, current_user: dict = Depends(get_current_user)
 ):
     """Update invoice settings (SUPERADMIN/ADMIN/ACCOUNTANT)"""
-    if not any(role in current_user["roles"] for role in ["SUPERADMIN", "ADMIN", "ACCOUNTANT"]):
+    if not any(
+        role in current_user["roles"] for role in ["SUPERADMIN", "ADMIN", "ACCOUNTANT"]
+    ):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
     return {"message": "Invoice settings updated", "settings": settings.model_dump()}
 
@@ -549,6 +574,7 @@ async def get_notification_providers(current_user: dict = Depends(get_current_us
     `notification_providers` singleton; falls back to env-driven
     defaults so the Settings → Notifications tab always renders."""
     import os
+
     coll = _get_settings_collection("notification_providers")
     defaults = {
         "whatsapp": {
@@ -719,7 +745,10 @@ async def update_discount_rules(
     rules: Dict[str, Dict[str, int]], current_user: dict = Depends(get_current_user)
 ):
     """Update discount rules (SUPERADMIN/ADMIN/AREA_MANAGER)"""
-    if not any(role in current_user["roles"] for role in ["SUPERADMIN", "ADMIN", "AREA_MANAGER"]):
+    if not any(
+        role in current_user["roles"]
+        for role in ["SUPERADMIN", "ADMIN", "AREA_MANAGER"]
+    ):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
     return {"message": "Discount rules updated", "rules": rules}
 
@@ -729,7 +758,10 @@ async def set_discount_rule(
     rule: DiscountSettings, current_user: dict = Depends(get_current_user)
 ):
     """Set individual discount rule"""
-    if not any(role in current_user["roles"] for role in ["SUPERADMIN", "ADMIN", "AREA_MANAGER"]):
+    if not any(
+        role in current_user["roles"]
+        for role in ["SUPERADMIN", "ADMIN", "AREA_MANAGER"]
+    ):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
     return {"message": "Discount rule updated"}
 
@@ -1083,10 +1115,13 @@ async def get_feature_toggles(
     is_super = "SUPERADMIN" in roles
     is_store_mgr = "STORE_MANAGER" in roles and store_id in user_stores
     if not is_super and not is_store_mgr:
-        raise HTTPException(status_code=403, detail="Superadmin or store manager access required")
+        raise HTTPException(
+            status_code=403, detail="Superadmin or store manager access required"
+        )
 
     # Check cache first
     from ..services.cache import cache
+
     cache_key = f"feature_toggles:{store_id}"
     cached = cache.get(cache_key)
     if cached is not None:
@@ -1097,7 +1132,10 @@ async def get_feature_toggles(
         doc = collection.find_one({"_id": store_id})
         if doc:
             doc.pop("_id", None)
-            result = {"store_id": store_id, "features": doc.get("features", DEFAULT_FEATURE_TOGGLES)}
+            result = {
+                "store_id": store_id,
+                "features": doc.get("features", DEFAULT_FEATURE_TOGGLES),
+            }
             cache.set(cache_key, result, ttl=cache.TTL_LONG)
             return result
     result = {"store_id": store_id, "features": DEFAULT_FEATURE_TOGGLES}
@@ -1117,16 +1155,31 @@ async def update_feature_toggles_put(
     is_super = "SUPERADMIN" in roles
     is_store_mgr = "STORE_MANAGER" in roles and store_id in user_stores
     if not is_super and not is_store_mgr:
-        raise HTTPException(status_code=403, detail="Superadmin or store manager access required")
+        raise HTTPException(
+            status_code=403, detail="Superadmin or store manager access required"
+        )
     collection = _get_settings_collection("feature_toggles")
     if collection:
         collection.update_one(
             {"_id": store_id},
-            {"$set": {"features": payload.features, "updated_at": datetime.utcnow().isoformat()}},
+            {
+                "$set": {
+                    "features": payload.features,
+                    "updated_at": datetime.utcnow().isoformat(),
+                }
+            },
             upsert=True,
         )
-        return {"message": "Feature toggles updated successfully", "store_id": store_id, "features": payload.features}
-    return {"message": "Feature toggles saved (no DB)", "store_id": store_id, "features": payload.features}
+        return {
+            "message": "Feature toggles updated successfully",
+            "store_id": store_id,
+            "features": payload.features,
+        }
+    return {
+        "message": "Feature toggles saved (no DB)",
+        "store_id": store_id,
+        "features": payload.features,
+    }
 
 
 @router.patch("/feature-toggles/{store_id}")
@@ -1141,16 +1194,31 @@ async def update_feature_toggles_patch(
     is_super = "SUPERADMIN" in roles
     is_store_mgr = "STORE_MANAGER" in roles and store_id in user_stores
     if not is_super and not is_store_mgr:
-        raise HTTPException(status_code=403, detail="Superadmin or store manager access required")
+        raise HTTPException(
+            status_code=403, detail="Superadmin or store manager access required"
+        )
     collection = _get_settings_collection("feature_toggles")
     if collection:
         collection.update_one(
             {"_id": store_id},
-            {"$set": {"features": payload.features, "updated_at": datetime.utcnow().isoformat()}},
+            {
+                "$set": {
+                    "features": payload.features,
+                    "updated_at": datetime.utcnow().isoformat(),
+                }
+            },
             upsert=True,
         )
-        return {"message": "Feature toggles updated successfully", "store_id": store_id, "features": payload.features}
-    return {"message": "Feature toggles saved (no DB)", "store_id": store_id, "features": payload.features}
+        return {
+            "message": "Feature toggles updated successfully",
+            "store_id": store_id,
+            "features": payload.features,
+        }
+    return {
+        "message": "Feature toggles saved (no DB)",
+        "store_id": store_id,
+        "features": payload.features,
+    }
 
 
 @router.get("/audit-logs/summary")

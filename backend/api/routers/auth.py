@@ -28,8 +28,13 @@ def _haversine_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> f
     phi1, phi2 = math.radians(lat1), math.radians(lat2)
     d_phi = math.radians(lat2 - lat1)
     d_lambda = math.radians(lon2 - lon1)
-    a = math.sin(d_phi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(d_lambda / 2) ** 2
+    a = (
+        math.sin(d_phi / 2) ** 2
+        + math.cos(phi1) * math.cos(phi2) * math.sin(d_lambda / 2) ** 2
+    )
     return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+
 # HTTPBearer with auto_error=False allows us to handle missing credentials gracefully
 security = HTTPBearer(auto_error=False)
 
@@ -55,6 +60,7 @@ ACCESS_TOKEN_EXPIRE_MINUTES = 480  # 8 hours
 # Per-IP: 5 failed attempts in 15 minutes → 15 minute lockout
 # Per-username: 10 failed attempts in 30 minutes → 30 minute lockout
 
+
 class LoginRateLimiter:
     """In-memory sliding-window rate limiter for login attempts."""
 
@@ -77,7 +83,9 @@ class LoginRateLimiter:
         ip_key = f"ip:{ip}"
         if ip_key in self._lockouts and now < self._lockouts[ip_key]:
             remaining = int(self._lockouts[ip_key] - now)
-            return f"Too many login attempts. Try again in {remaining // 60 + 1} minutes."
+            return (
+                f"Too many login attempts. Try again in {remaining // 60 + 1} minutes."
+            )
 
         # Check username lockout
         user_key = f"user:{username.lower().strip()}"
@@ -90,7 +98,9 @@ class LoginRateLimiter:
         ip_failures = sum(1 for _, ok in self._attempts[ip_key] if not ok)
         if ip_failures >= 5:
             self._lockouts[ip_key] = now + 900  # 15 min lockout
-            return "Too many login attempts from this location. Try again in 15 minutes."
+            return (
+                "Too many login attempts from this location. Try again in 15 minutes."
+            )
 
         # Check username failures (10 in 30 min)
         self._cleanup(user_key, 1800)
@@ -122,6 +132,7 @@ _login_limiter = LoginRateLimiter()
 # In-memory blacklist with auto-cleanup. Tokens expire after ACCESS_TOKEN_EXPIRE_MINUTES
 # anyway, so we only need to hold revoked tokens until they'd naturally expire.
 # For multi-instance production, replace with Redis SET + TTL.
+
 
 class TokenBlacklist:
     """In-memory token blacklist with periodic cleanup of expired entries."""
@@ -209,6 +220,7 @@ class RefreshTokenRequest(BaseModel):
 def hash_password(password: str) -> str:
     """Hash password using bcrypt directly"""
     import bcrypt as _bc
+
     return _bc.hashpw(password.encode(), _bc.gensalt(rounds=12)).decode()
 
 
@@ -217,6 +229,7 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
     # Try bcrypt first (seed data and new users)
     if hashed_password.startswith("$2b$") or hashed_password.startswith("$2a$"):
         import bcrypt as _bc
+
         try:
             return _bc.checkpw(plain_password.encode(), hashed_password.encode())
         except Exception:
@@ -295,18 +308,24 @@ async def login(request: LoginRequest, req: Request = None):
     # Rate limiting check
     client_ip = "unknown"
     if req:
-        client_ip = req.headers.get("x-forwarded-for", "").split(",")[0].strip() or req.client.host if req.client else "unknown"
+        client_ip = (
+            req.headers.get("x-forwarded-for", "").split(",")[0].strip()
+            or req.client.host
+            if req.client
+            else "unknown"
+        )
     rate_err = _login_limiter.check(client_ip, request.username)
     if rate_err:
         raise HTTPException(status_code=429, detail=rate_err)
 
     # Look up user from MongoDB (real database)
     from ..dependencies import get_user_repository
+
     user_repo = get_user_repository()
-    
+
     login_input = request.username.lower().strip()
     user = None
-    
+
     if user_repo:
         # Try database lookup first
         try:
@@ -319,10 +338,11 @@ async def login(request: LoginRequest, req: Request = None):
                 user = db_user
         except Exception as e:
             logger.warning("DB user lookup error: %s", e)
-    
+
     # Emergency access via environment variable only (no hardcoded credentials)
     if user is None and os.getenv("EMERGENCY_ADMIN_HASH"):
         import bcrypt as _bc
+
         emergency_hash = os.getenv("EMERGENCY_ADMIN_HASH")
         if login_input == "admin":
             try:
@@ -334,7 +354,14 @@ async def login(request: LoginRequest, req: Request = None):
                         "password_hash": emergency_hash,
                         "full_name": "Emergency Admin",
                         "roles": ["SUPERADMIN"],
-                        "store_ids": ["BV-BOK-01", "BV-BOK-02", "BV-DHN-01", "BV-DHN-02", "WO-DHN-01", "BV-PUN-01"],
+                        "store_ids": [
+                            "BV-BOK-01",
+                            "BV-BOK-02",
+                            "BV-DHN-01",
+                            "BV-DHN-02",
+                            "WO-DHN-01",
+                            "BV-PUN-01",
+                        ],
                         "is_active": True,
                     }
             except Exception:
@@ -356,7 +383,7 @@ async def login(request: LoginRequest, req: Request = None):
         if request.latitude is None or request.longitude is None:
             raise HTTPException(
                 status_code=403,
-                detail="Location access required. Please enable location services and try again."
+                detail="Location access required. Please enable location services and try again.",
             )
         allowed = user["allowed_coordinates"]
         within_fence = False
@@ -365,18 +392,22 @@ async def login(request: LoginRequest, req: Request = None):
             c_lng = coord.get("lng")
             radius = coord.get("radius_meters", 500)  # default 500m
             if c_lat is not None and c_lng is not None:
-                dist = _haversine_distance(request.latitude, request.longitude, c_lat, c_lng)
+                dist = _haversine_distance(
+                    request.latitude, request.longitude, c_lat, c_lng
+                )
                 if dist <= radius:
                     within_fence = True
                     break
         if not within_fence:
             logger.warning(
                 "Geo-fence rejection: user=%s lat=%.6f lng=%.6f",
-                user.get("username"), request.latitude, request.longitude
+                user.get("username"),
+                request.latitude,
+                request.longitude,
             )
             raise HTTPException(
                 status_code=403,
-                detail="Login not permitted from this location. Please log in from an authorized store."
+                detail="Login not permitted from this location. Please log in from an authorized store.",
             )
 
     # Validate store access if store_id provided
@@ -476,6 +507,7 @@ async def change_password(
     Change user password
     """
     from ..dependencies import get_user_repository
+
     user_repo = get_user_repository()
 
     if user_repo is None:
@@ -497,7 +529,12 @@ async def change_password(
     new_hash = hash_password(request.new_password)
     user_repo.collection.update_one(
         {"_id": user["_id"]},
-        {"$set": {"password_hash": new_hash, "updated_at": datetime.utcnow().isoformat()}}
+        {
+            "$set": {
+                "password_hash": new_hash,
+                "updated_at": datetime.utcnow().isoformat(),
+            }
+        },
     )
 
     return {"message": "Password changed successfully"}

@@ -199,12 +199,15 @@ class LifecyclePhase(BaseModel):
 # ============================================================================
 
 
-
 @router.get("")
 @router.get("/")
 async def get_crm_root():
     """Root endpoint for customer CRM overview"""
-    return {"module": "crm", "status": "active", "message": "CRM overview endpoint ready"}
+    return {
+        "module": "crm",
+        "status": "active",
+        "message": "CRM overview endpoint ready",
+    }
 
 
 @router.get("/customers/360/{customer_id}", response_model=Customer360Response)
@@ -263,7 +266,9 @@ async def get_customer_360(
         raise
     except Exception as e:
         logger.error("CRM operation failed: %s", e)
-        raise HTTPException(status_code=500, detail="An internal error occurred. Please try again.")
+        raise HTTPException(
+            status_code=500, detail="An internal error occurred. Please try again."
+        )
 
 
 @router.get("/customers/{customer_id}/lifecycle", response_model=LifecyclePhase)
@@ -293,7 +298,9 @@ async def get_customer_lifecycle_phase(
         raise
     except Exception as e:
         logger.error("CRM operation failed: %s", e)
-        raise HTTPException(status_code=500, detail="An internal error occurred. Please try again.")
+        raise HTTPException(
+            status_code=500, detail="An internal error occurred. Please try again."
+        )
 
 
 @router.get("/customers/segment/rfm", response_model=List[CustomerSegmentResponse])
@@ -316,7 +323,9 @@ async def get_rfm_segmentation(
         return segments
     except Exception as e:
         logger.error("CRM operation failed: %s", e)
-        raise HTTPException(status_code=500, detail="An internal error occurred. Please try again.")
+        raise HTTPException(
+            status_code=500, detail="An internal error occurred. Please try again."
+        )
 
 
 @router.get(
@@ -346,7 +355,9 @@ async def get_customer_interactions(
         return interactions
     except Exception as e:
         logger.error("CRM operation failed: %s", e)
-        raise HTTPException(status_code=500, detail="An internal error occurred. Please try again.")
+        raise HTTPException(
+            status_code=500, detail="An internal error occurred. Please try again."
+        )
 
 
 @router.post("/customers/{customer_id}/interactions", response_model=InteractionRecord)
@@ -373,7 +384,9 @@ async def create_customer_interaction(
         raise
     except Exception as e:
         logger.error("CRM operation failed: %s", e)
-        raise HTTPException(status_code=500, detail="An internal error occurred. Please try again.")
+        raise HTTPException(
+            status_code=500, detail="An internal error occurred. Please try again."
+        )
 
 
 @router.get(
@@ -390,7 +403,9 @@ async def get_customer_prescriptions(
         return [_add_prescription_status(rx) for rx in prescriptions]
     except Exception as e:
         logger.error("CRM operation failed: %s", e)
-        raise HTTPException(status_code=500, detail="An internal error occurred. Please try again.")
+        raise HTTPException(
+            status_code=500, detail="An internal error occurred. Please try again."
+        )
 
 
 @router.get("/customers/churn-risk/list", response_model=List[dict])
@@ -410,21 +425,25 @@ async def get_churn_risk_customers(
     try:
         store_id = current_user.get("active_store_id")
         # Filter customers by store to prevent cross-store data leakage
-        if store_id and hasattr(db, 'query_customers_by_store'):
+        if store_id and hasattr(db, "query_customers_by_store"):
             all_customers = db.query_customers_by_store(store_id)
         else:
             all_customers = db.query_all_customers()
             # Fallback: filter in-memory if store_id is available
             if store_id:
                 all_customers = [
-                    c for c in all_customers
-                    if store_id in (c.get("store_ids", []) + [c.get("primary_store_id", "")])
+                    c
+                    for c in all_customers
+                    if store_id
+                    in (c.get("store_ids", []) + [c.get("primary_store_id", "")])
                 ]
         at_risk = _identify_churn_risk_customers(all_customers, risk_level)
         return at_risk[:limit]
     except Exception as e:
         logger.error("Churn risk query failed: %s", e)
-        raise HTTPException(status_code=500, detail="Failed to retrieve churn risk data")
+        raise HTTPException(
+            status_code=500, detail="Failed to retrieve churn risk data"
+        )
 
 
 @router.post(
@@ -452,7 +471,8 @@ async def add_loyalty_points(
         if repo.update(customer_id, {"loyalty_points": new_points}):
             updated_customer = repo.find_by_id(customer_id)
             return _calculate_loyalty_tier(
-                updated_customer.get("loyalty_points", 0), updated_customer.get("created_at", "")
+                updated_customer.get("loyalty_points", 0),
+                updated_customer.get("created_at", ""),
             )
 
         raise HTTPException(status_code=500, detail="Failed to update loyalty points")
@@ -460,7 +480,9 @@ async def add_loyalty_points(
         raise
     except Exception as e:
         logger.error("CRM operation failed: %s", e)
-        raise HTTPException(status_code=500, detail="An internal error occurred. Please try again.")
+        raise HTTPException(
+            status_code=500, detail="An internal error occurred. Please try again."
+        )
 
 
 # ============================================================================

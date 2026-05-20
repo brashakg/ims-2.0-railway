@@ -36,12 +36,23 @@ CATEGORY_DISCOUNT_CAPS = {
 # spectacle lenses / contact lenses, 18% otherwise). Mirrors the
 # frontend's getGSTRateByCategory.
 LOW_GST_CATEGORIES = {
-    "FRAMES", "FRAME", "EYEGLASS_FRAME", "SPECTACLE_FRAME",
-    "RX_LENSES", "LENS", "LENSES", "EYEGLASS_LENS",
-    "OPTICAL_LENS", "OPTICAL_LENSES",
-    "SPECTACLE_LENS", "SPECTACLE_LENSES",
-    "CONTACT_LENS", "CONTACT_LENSES", "COLOUR_CONTACTS",
-    "SPECTACLE", "COMPLETE_SPECTACLE",
+    "FRAMES",
+    "FRAME",
+    "EYEGLASS_FRAME",
+    "SPECTACLE_FRAME",
+    "RX_LENSES",
+    "LENS",
+    "LENSES",
+    "EYEGLASS_LENS",
+    "OPTICAL_LENS",
+    "OPTICAL_LENSES",
+    "SPECTACLE_LENS",
+    "SPECTACLE_LENSES",
+    "CONTACT_LENS",
+    "CONTACT_LENSES",
+    "COLOUR_CONTACTS",
+    "SPECTACLE",
+    "COMPLETE_SPECTACLE",
 }
 
 
@@ -81,7 +92,9 @@ def _compute_per_category_gst(items: list, cart_discount_pct: float) -> dict:
         rate = _gst_rate_for_category(cat)
         line_taxable = round(line_subtotal * cart_factor, 2)
         line_tax = round(line_taxable * (rate / 100.0), 2)
-        per_rate_taxable[rate] = round(per_rate_taxable.get(rate, 0.0) + line_taxable, 2)
+        per_rate_taxable[rate] = round(
+            per_rate_taxable.get(rate, 0.0) + line_taxable, 2
+        )
         per_rate_tax[rate] = round(per_rate_tax.get(rate, 0.0) + line_tax, 2)
         it["gst_rate"] = rate
         it["taxable_value"] = line_taxable
@@ -92,8 +105,7 @@ def _compute_per_category_gst(items: list, cart_discount_pct: float) -> dict:
         round(subtotal - taxable, 2) if cart_discount_pct > 0 else 0.0
     )
     dominant_rate = (
-        max(per_rate_taxable, key=per_rate_taxable.get)
-        if per_rate_taxable else 18.0
+        max(per_rate_taxable, key=per_rate_taxable.get) if per_rate_taxable else 18.0
     )
     total_discount = round(item_discount_sum + cart_discount_amount, 2)
     return {
@@ -173,7 +185,7 @@ def order_to_frontend(order: dict) -> dict:
                 history_entry = {
                     "status": entry.get("status"),
                     "timestamp": entry.get("timestamp"),
-                    "changedBy": entry.get("changed_by")
+                    "changedBy": entry.get("changed_by"),
                 }
                 result["statusHistory"].append(history_entry)
         elif key in key_map:
@@ -249,12 +261,16 @@ class OrderStatus(str, Enum):
 
 # Valid state transitions — only these moves are allowed
 VALID_TRANSITIONS = {
-    "DRAFT":      {"CONFIRMED", "CANCELLED"},
-    "CONFIRMED":  {"PROCESSING", "READY", "CANCELLED"},   # READY for quick-sale (no workshop)
+    "DRAFT": {"CONFIRMED", "CANCELLED"},
+    "CONFIRMED": {
+        "PROCESSING",
+        "READY",
+        "CANCELLED",
+    },  # READY for quick-sale (no workshop)
     "PROCESSING": {"READY", "CANCELLED"},
-    "READY":      {"DELIVERED", "CANCELLED"},
-    "DELIVERED":  set(),       # Terminal
-    "CANCELLED":  set(),       # Terminal
+    "READY": {"DELIVERED", "CANCELLED"},
+    "DELIVERED": set(),  # Terminal
+    "CANCELLED": set(),  # Terminal
 }
 
 
@@ -321,8 +337,10 @@ class OrderCreate(BaseModel):
     expected_delivery_days: int = Field(default=7, ge=1)
     # Phase 6.7 — delivery scheduling + order-level discount
     delivery_date: Optional[date] = None
-    delivery_time_slot: Optional[str] = None   # e.g. "10:00-12:00"
-    delivery_priority: Optional[str] = Field(default="NORMAL")  # NORMAL | EXPRESS | URGENT
+    delivery_time_slot: Optional[str] = None  # e.g. "10:00-12:00"
+    delivery_priority: Optional[str] = Field(
+        default="NORMAL"
+    )  # NORMAL | EXPRESS | URGENT
     cart_discount_percent: float = Field(default=0.0, ge=0.0, le=100.0)
     cart_discount_amount: float = Field(default=0.0, ge=0.0)
     cart_discount_reason: Optional[str] = None
@@ -377,13 +395,19 @@ async def list_orders(
 
         # Convert to frontend format (camelCase)
         from ..utils.pagination import paginate
+
         orders_formatted = [order_to_frontend(o) for o in orders]
         page = (skip // limit) + 1 if limit > 0 else 1
         result = paginate(orders_formatted, page=page, page_size=limit)
         result["orders"] = result["data"]  # backward compat
         return result
 
-    return {"orders": [], "total": 0, "data": [], "pagination": {"total": 0, "page": 1, "page_size": limit, "total_pages": 0}}
+    return {
+        "orders": [],
+        "total": 0,
+        "data": [],
+        "pagination": {"total": 0, "page": 1, "page_size": limit, "total_pages": 0},
+    }
 
 
 # NOTE: Specific routes MUST come before /{order_id} to avoid being matched as order_id
@@ -539,7 +563,11 @@ async def create_order(
     # explicit POS picker value; fall back to the logged-in user so older
     # clients (and quick sales) still attribute somewhere.
     salesperson_id = order.salesperson_id or current_user.get("user_id")
-    salesperson_name = order.salesperson_name or current_user.get("full_name") or current_user.get("name")
+    salesperson_name = (
+        order.salesperson_name
+        or current_user.get("full_name")
+        or current_user.get("name")
+    )
 
     # Validate items
     if not order.items:
@@ -549,7 +577,7 @@ async def create_order(
     if len(order.items) > MAX_CART_ITEMS:
         raise HTTPException(
             status_code=400,
-            detail=f"Cart exceeds maximum of {MAX_CART_ITEMS} items. Split into multiple orders."
+            detail=f"Cart exceeds maximum of {MAX_CART_ITEMS} items. Split into multiple orders.",
         )
 
     # Validate product_ids exist.
@@ -574,7 +602,7 @@ async def create_order(
             if product is None:
                 raise HTTPException(
                     status_code=400,
-                    detail=f"Product not found: {pid} ({item.product_name or 'unknown'})"
+                    detail=f"Product not found: {pid} ({item.product_name or 'unknown'})",
                 )
 
     # Validate: offer_price cannot exceed MRP
@@ -584,7 +612,7 @@ async def create_order(
         if offer_price > 0 and mrp > 0 and offer_price > mrp:
             raise HTTPException(
                 status_code=400,
-                detail=f"Offer price (₹{offer_price}) cannot exceed MRP (₹{mrp}) for {getattr(item, 'product_name', 'item')}"
+                detail=f"Offer price (₹{offer_price}) cannot exceed MRP (₹{mrp}) for {getattr(item, 'product_name', 'item')}",
             )
 
     if order_repo is not None and customer_repo is not None:
@@ -595,9 +623,11 @@ async def create_order(
         )
         if not customer and not is_walkin:
             raise HTTPException(status_code=404, detail="Customer not found")
-        
+
         customer_name = customer.get("name") if customer else "Walk-in Customer"
-        customer_phone = customer.get("phone") or customer.get("mobile") if customer else ""
+        customer_phone = (
+            customer.get("phone") or customer.get("mobile") if customer else ""
+        )
 
         # Calculate totals
         items_data = []
@@ -606,7 +636,9 @@ async def create_order(
         # Retrieve user discount cap for enforcement
         user_discount_cap = current_user.get("discount_cap", 10.0)
         user_roles = current_user.get("roles", [])
-        is_admin = any(r in user_roles for r in ["SUPERADMIN", "ADMIN", "STORE_MANAGER"])
+        is_admin = any(
+            r in user_roles for r in ["SUPERADMIN", "ADMIN", "STORE_MANAGER"]
+        )
 
         for item in order.items:
             item_total = item.unit_price * item.quantity
@@ -620,10 +652,20 @@ async def create_order(
                 # returned None, leaving effective_cap = user's full cap).
                 try:
                     pr = get_product_repository()
-                    if pr is not None and item.product_id and not item.product_id.startswith(("custom-", "lens-", "lens-sug-")):
+                    if (
+                        pr is not None
+                        and item.product_id
+                        and not item.product_id.startswith(
+                            ("custom-", "lens-", "lens-sug-")
+                        )
+                    ):
                         product = pr.find_by_id(item.product_id)
                         if product:
-                            cat = product.get("discount_category") or product.get("category") or "MASS"
+                            cat = (
+                                product.get("discount_category")
+                                or product.get("category")
+                                or "MASS"
+                            )
                             category_cap = CATEGORY_DISCOUNT_CAPS.get(cat, 10.0)
                             effective_cap = min(user_discount_cap, category_cap)
                 except Exception:
@@ -633,7 +675,7 @@ async def create_order(
                     raise HTTPException(
                         status_code=403,
                         detail=f"Discount {item.discount_percent}% on {item.product_name or item.product_id} "
-                               f"exceeds your limit of {effective_cap}%. Contact a manager for approval."
+                        f"exceeds your limit of {effective_cap}%. Contact a manager for approval.",
                     )
 
             discount_amount = item_total * (item.discount_percent / 100)
@@ -646,66 +688,83 @@ async def create_order(
             # Replaces the manual PRODUCT_INCENTIVE Excel entirely
             # ============================================================
             INCENTIVE_BRANDS = {
-                'ZEISS': 'ZEISS', 'SAFILO': 'SAFILO', 'CARRERA': 'SAFILO', 
-                'POLAROID': 'SAFILO', 'MARC JACOB': 'SAFILO', 'HUGO': 'SAFILO',
-                'SEVENTH STREET': 'SAFILO', 'BOSS': 'SAFILO', 'TOMMY HILFIGER': 'SAFILO',
-                'PIERRE CARDIN': 'SAFILO', 'UNDER ARMOUR': 'SAFILO',
+                "ZEISS": "ZEISS",
+                "SAFILO": "SAFILO",
+                "CARRERA": "SAFILO",
+                "POLAROID": "SAFILO",
+                "MARC JACOB": "SAFILO",
+                "HUGO": "SAFILO",
+                "SEVENTH STREET": "SAFILO",
+                "BOSS": "SAFILO",
+                "TOMMY HILFIGER": "SAFILO",
+                "PIERRE CARDIN": "SAFILO",
+                "UNDER ARMOUR": "SAFILO",
             }
-            brand_upper = (item.brand or '').upper()
-            subbrand_upper = (item.subbrand or '').upper()
-            product_name_upper = (item.product_name or '').upper()
-            
+            brand_upper = (item.brand or "").upper()
+            subbrand_upper = (item.subbrand or "").upper()
+            product_name_upper = (item.product_name or "").upper()
+
             # Check brand, subbrand, AND product name for matches
             # (lens details like "1.5 ZEISS PROGRESSIVE LIGHT..." appear in product name)
             incentive_brand = None
             matched_key = None
             for key, group in INCENTIVE_BRANDS.items():
-                if key in brand_upper or key in subbrand_upper or key in product_name_upper:
+                if (
+                    key in brand_upper
+                    or key in subbrand_upper
+                    or key in product_name_upper
+                ):
                     incentive_brand = group
                     matched_key = key
                     break
-            
+
             # Detect kicker type from lens_details, subbrand, or product name
             incentive_kicker = None
             incentive_lens_type = None
             incentive_addon = None
-            
-            if incentive_brand == 'ZEISS':
+
+            if incentive_brand == "ZEISS":
                 # Check lens_details dict first (structured data from LensDetailsModal)
-                lens_type_str = ''
+                lens_type_str = ""
                 if item.lens_details:
-                    lens_type_str = (item.lens_details.get('type', '') or '').upper()
-                    lens_material = (item.lens_details.get('material', '') or '').upper()
-                    lens_coatings = ' '.join(item.lens_details.get('coatings', []) or []).upper()
+                    lens_type_str = (item.lens_details.get("type", "") or "").upper()
+                    lens_material = (
+                        item.lens_details.get("material", "") or ""
+                    ).upper()
+                    lens_coatings = " ".join(
+                        item.lens_details.get("coatings", []) or []
+                    ).upper()
                     lens_type_str = f"{lens_type_str} {lens_material} {lens_coatings}"
-                
+
                 # Also check product name (e.g., "1.5 ZEISS PROGRESSIVE LIGHT 2 3D DVP UV")
                 full_check = f"{lens_type_str} {product_name_upper} {subbrand_upper}"
-                
-                if 'SMARTLIFE' in full_check or 'SMART LIFE' in full_check:
-                    incentive_kicker = 'ZEISS_SMARTLIFE'
-                    incentive_lens_type = 'PAL' if 'PROGRESS' in full_check else 'SV'
-                    incentive_addon = 'SMART LIFE'
-                elif 'PHOTOFUSION' in full_check or 'PFX' in full_check:
-                    incentive_kicker = 'ZEISS_PHOTOFUSION'
-                    incentive_lens_type = 'PAL' if 'PROGRESS' in full_check else 'SV'
-                    incentive_addon = 'PFX'
-                elif 'PROGRESSIVE' in full_check or 'PAL' in full_check:
-                    incentive_kicker = 'ZEISS_PROGRESSIVE'
-                    incentive_lens_type = 'PAL'
-                elif 'FSV' in full_check or 'SINGLE' in full_check:
-                    incentive_kicker = 'ZEISS_SV'
-                    incentive_lens_type = 'SV'
+
+                if "SMARTLIFE" in full_check or "SMART LIFE" in full_check:
+                    incentive_kicker = "ZEISS_SMARTLIFE"
+                    incentive_lens_type = "PAL" if "PROGRESS" in full_check else "SV"
+                    incentive_addon = "SMART LIFE"
+                elif "PHOTOFUSION" in full_check or "PFX" in full_check:
+                    incentive_kicker = "ZEISS_PHOTOFUSION"
+                    incentive_lens_type = "PAL" if "PROGRESS" in full_check else "SV"
+                    incentive_addon = "PFX"
+                elif "PROGRESSIVE" in full_check or "PAL" in full_check:
+                    incentive_kicker = "ZEISS_PROGRESSIVE"
+                    incentive_lens_type = "PAL"
+                elif "FSV" in full_check or "SINGLE" in full_check:
+                    incentive_kicker = "ZEISS_SV"
+                    incentive_lens_type = "SV"
                 else:
-                    incentive_kicker = 'ZEISS_OTHER'
-                    
-            elif incentive_brand == 'SAFILO':
-                if item.item_type in ('FRAME',):
-                    incentive_kicker = 'SAFILO_FRAME'
-                elif item.item_type in ('SUNGLASS',) or (item.category and 'SG' in item.category.upper()):
-                    incentive_kicker = 'SAFILO_SG'
+                    incentive_kicker = "ZEISS_OTHER"
+
+            elif incentive_brand == "SAFILO":
+                if item.item_type in ("FRAME",):
+                    incentive_kicker = "SAFILO_FRAME"
+                elif item.item_type in ("SUNGLASS",) or (
+                    item.category and "SG" in item.category.upper()
+                ):
+                    incentive_kicker = "SAFILO_SG"
                 else:
-                    incentive_kicker = 'SAFILO_OTHER'
+                    incentive_kicker = "SAFILO_OTHER"
 
             # Build incentive tag (None if not qualifying)
             incentive_tag = None
@@ -754,9 +813,7 @@ async def create_order(
         # because the loop read `it.get("subtotal")` while the dict was
         # built with key "item_total". The per-category math is now in
         # `_compute_per_category_gst`, used by create + add + remove.
-        cart_discount_percent = max(
-            0.0, min(100.0, order.cart_discount_percent or 0.0)
-        )
+        cart_discount_percent = max(0.0, min(100.0, order.cart_discount_percent or 0.0))
         gst = _compute_per_category_gst(items_data, cart_discount_percent)
         taxable_after_cart_discount = gst["taxable"]
         tax_amount = gst["tax"]
@@ -767,9 +824,13 @@ async def create_order(
 
         # Resolve delivery date — explicit date > expected_delivery_days
         if order.delivery_date:
-            expected_delivery = datetime.combine(order.delivery_date, datetime.min.time())
+            expected_delivery = datetime.combine(
+                order.delivery_date, datetime.min.time()
+            )
         else:
-            expected_delivery = datetime.now() + timedelta(days=order.expected_delivery_days)
+            expected_delivery = datetime.now() + timedelta(
+                days=order.expected_delivery_days
+            )
 
         order_data = {
             "order_number": generate_order_number(store_id),
@@ -822,6 +883,7 @@ async def create_order(
             # is logged but never blocks the order response).
             try:
                 from .loyalty import earn_for_order_internal
+
                 # Skip walk-ins: they have no real customer_id to credit.
                 if order.customer_id and not order.customer_id.startswith(
                     ("walkin-", "walk-in")
@@ -898,12 +960,18 @@ async def update_order(
             # Audit alert (May 2026) — fire-and-forget, never blocks order edit
             try:
                 from ..services.audit_alerts import alert_order_edited
+
                 fresh = repo.find_by_id(order_id) or {}
                 import asyncio as _aio
-                _aio.create_task(alert_order_edited(
-                    order_id, before=existing, after=fresh,
-                    user_id=current_user.get("user_id"),
-                ))
+
+                _aio.create_task(
+                    alert_order_edited(
+                        order_id,
+                        before=existing,
+                        after=fresh,
+                        user_id=current_user.get("user_id"),
+                    )
+                )
             except Exception:
                 pass
             return {"order_id": order_id, "message": "Order updated"}
@@ -924,7 +992,7 @@ async def add_order_item(
     if offer_price > 0 and mrp > 0 and offer_price > mrp:
         raise HTTPException(
             status_code=400,
-            detail=f"Offer price (₹{offer_price}) cannot exceed MRP (₹{mrp})"
+            detail=f"Offer price (₹{offer_price}) cannot exceed MRP (₹{mrp})",
         )
 
     repo = get_order_repository()
@@ -1029,15 +1097,20 @@ async def remove_order_item(
         try:
             from ..services.audit_alerts import alert_item_deleted
             import asyncio as _aio
+
             removed = next(
                 (i for i in order.get("items", []) if i.get("item_id") == item_id),
                 {"item_id": item_id},
             )
-            _aio.create_task(alert_item_deleted(
-                order_id, item_id, item_data=removed,
-                user_id=current_user.get("user_id"),
-                order_status=order.get("status", "DRAFT"),
-            ))
+            _aio.create_task(
+                alert_item_deleted(
+                    order_id,
+                    item_id,
+                    item_data=removed,
+                    user_id=current_user.get("user_id"),
+                    order_status=order.get("status", "DRAFT"),
+                )
+            )
         except Exception:
             pass
 
@@ -1058,7 +1131,8 @@ async def confirm_order(order_id: str, current_user: dict = Depends(get_current_
 
         if not validate_status_transition(order.get("status", ""), "CONFIRMED"):
             raise HTTPException(
-                status_code=400, detail=f"Cannot confirm order — current status is {order.get('status')}"
+                status_code=400,
+                detail=f"Cannot confirm order — current status is {order.get('status')}",
             )
 
         if not order.get("items"):
@@ -1108,18 +1182,26 @@ async def add_payment(
         emi_details = None
         if payment.method == PaymentMethod.EMI:
             if not payment.emi_months:
-                raise HTTPException(status_code=400, detail="EMI tenure (emi_months) is required for EMI payments")
+                raise HTTPException(
+                    status_code=400,
+                    detail="EMI tenure (emi_months) is required for EMI payments",
+                )
             # Fetch configurable EMI rate from store settings (default 12% annual)
             emi_annual_rate = 12.0  # fallback
             try:
                 from ..dependencies import get_seeded_db
+
                 db = get_seeded_db()
                 if db:
-                    store_settings = db.get_collection("settings").find_one({
-                        "store_id": current_user.get("active_store_id"),
-                        "key": "emi_config"
-                    })
-                    if store_settings and store_settings.get("value", {}).get("annual_rate"):
+                    store_settings = db.get_collection("settings").find_one(
+                        {
+                            "store_id": current_user.get("active_store_id"),
+                            "key": "emi_config",
+                        }
+                    )
+                    if store_settings and store_settings.get("value", {}).get(
+                        "annual_rate"
+                    ):
                         emi_annual_rate = float(store_settings["value"]["annual_rate"])
             except Exception:
                 pass  # use default
@@ -1127,7 +1209,12 @@ async def add_payment(
             monthly_rate = emi_annual_rate / 12 / 100
             months = payment.emi_months
             if monthly_rate > 0:
-                emi_amount = payment.amount * monthly_rate * (1 + monthly_rate) ** months / ((1 + monthly_rate) ** months - 1)
+                emi_amount = (
+                    payment.amount
+                    * monthly_rate
+                    * (1 + monthly_rate) ** months
+                    / ((1 + monthly_rate) ** months - 1)
+                )
             else:
                 emi_amount = payment.amount / months
 
@@ -1162,10 +1249,17 @@ async def add_payment(
 
             return {
                 "payment_id": payment_data["payment_id"],
-                "message": "Payment recorded" + (" — order auto-confirmed" if auto_confirmed else ""),
+                "message": "Payment recorded"
+                + (" — order auto-confirmed" if auto_confirmed else ""),
                 "amount": payment.amount,
-                "order_status": "CONFIRMED" if auto_confirmed else refreshed.get("status") if refreshed else "DRAFT",
-                "payment_status": refreshed.get("payment_status") if refreshed else "PARTIAL",
+                "order_status": (
+                    "CONFIRMED"
+                    if auto_confirmed
+                    else refreshed.get("status") if refreshed else "DRAFT"
+                ),
+                "payment_status": (
+                    refreshed.get("payment_status") if refreshed else "PARTIAL"
+                ),
             }
 
         raise HTTPException(status_code=500, detail="Failed to add payment")
@@ -1213,7 +1307,8 @@ async def deliver_order(order_id: str, current_user: dict = Depends(get_current_
 
         if not validate_status_transition(order.get("status", ""), "DELIVERED"):
             raise HTTPException(
-                status_code=400, detail=f"Cannot deliver — current status is {order.get('status')}. Must be READY."
+                status_code=400,
+                detail=f"Cannot deliver — current status is {order.get('status')}. Must be READY.",
             )
 
         # Check payment status (allow partial for B2B customers)
@@ -1273,11 +1368,15 @@ async def cancel_order(
         try:
             from ..services.audit_alerts import alert_order_cancelled
             import asyncio as _aio
-            _aio.create_task(alert_order_cancelled(
-                order_id, before=order,
-                user_id=current_user.get("user_id"),
-                reason=reason,
-            ))
+
+            _aio.create_task(
+                alert_order_cancelled(
+                    order_id,
+                    before=order,
+                    user_id=current_user.get("user_id"),
+                    reason=reason,
+                )
+            )
         except Exception:
             pass
 
@@ -1310,6 +1409,7 @@ async def get_invoice(order_id: str, current_user: dict = Depends(get_current_us
         if store_id:
             try:
                 from ..dependencies import get_store_repository
+
                 store_repo = get_store_repository()
                 if store_repo:
                     store = store_repo.find_by_id(store_id)
@@ -1317,7 +1417,7 @@ async def get_invoice(order_id: str, current_user: dict = Depends(get_current_us
                         raise HTTPException(
                             status_code=400,
                             detail="Cannot generate invoice: store GSTIN is not configured. "
-                                   "Update store settings with a valid GSTIN first."
+                            "Update store settings with a valid GSTIN first.",
                         )
             except HTTPException:
                 raise

@@ -24,6 +24,7 @@ The function is PURE — no I/O. The router is responsible for fetching
 the masters (ranges, exact-pricing, brand, index, coatings) and
 passing them in. This makes unit tests trivial.
 """
+
 from __future__ import annotations
 
 from typing import Dict, List, Optional, Any
@@ -142,7 +143,9 @@ def resolve_price(
     # 1. Exact match (highest precedence)
     exact = find_exact_match(
         exact_pricing or [],
-        brand_id=brand_id, index_id=index_id, category=category,
+        brand_id=brand_id,
+        index_id=index_id,
+        category=category,
     )
     if exact is not None:
         try:
@@ -154,8 +157,11 @@ def resolve_price(
     # 2. Range match — only if no exact-match base_price yet
     if base_price is None:
         matched_ranges = find_matching_ranges(
-            rx, ranges or [],
-            brand_id=brand_id, index_id=index_id, category=category,
+            rx,
+            ranges or [],
+            brand_id=brand_id,
+            index_id=index_id,
+            category=category,
         )
         if matched_ranges:
             try:
@@ -264,7 +270,12 @@ def detect_overlap(
         if r.get("range_id") == new_range.get("range_id"):
             # Same row (mid-update) — ignore self
             continue
-        if (r.get("brand_id"), r.get("index_id"), r.get("category"), r.get("parameter")) != (nb, ni, nc, np):
+        if (
+            r.get("brand_id"),
+            r.get("index_id"),
+            r.get("category"),
+            r.get("parameter"),
+        ) != (nb, ni, nc, np):
             continue
         try:
             r_mn = _abs(r.get("min_value"))

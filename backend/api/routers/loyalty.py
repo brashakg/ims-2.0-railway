@@ -17,6 +17,7 @@ Side-effect on order create:
   earn_for_order_internal() is invoked by orders.py inside a try/except
   so a loyalty failure NEVER blocks POS.
 """
+
 from __future__ import annotations
 
 from datetime import datetime
@@ -79,7 +80,7 @@ class RedeemRequest(BaseModel):
 
 class AdjustRequest(BaseModel):
     customer_id: str
-    points: int                  # signed: + credit, - debit
+    points: int  # signed: + credit, - debit
     reason: str = Field(..., min_length=2, max_length=500)
 
 
@@ -122,26 +123,31 @@ def _settings_safe() -> Dict[str, Any]:
     # No DB -- import the defaults dict directly so callers always get a
     # usable settings shape.
     from database.repositories.loyalty_repository import DEFAULT_SETTINGS
+
     out: Dict[str, Any] = {}
     for k, v in DEFAULT_SETTINGS.items():
         out[k] = dict(v) if isinstance(v, dict) else v
     return out
 
 
-def _audit(action: str, user: Dict[str, Any], detail: Dict[str, Any], entity_id: str) -> None:
+def _audit(
+    action: str, user: Dict[str, Any], detail: Dict[str, Any], entity_id: str
+) -> None:
     repo = get_audit_repository()
     if repo is None:
         return
     try:
-        repo.create({
-            "action": action,
-            "entity_type": "loyalty",
-            "entity_id": entity_id,
-            "store_id": user.get("active_store_id"),
-            "user_id": user.get("user_id"),
-            "username": user.get("username"),
-            "detail": detail,
-        })
+        repo.create(
+            {
+                "action": action,
+                "entity_type": "loyalty",
+                "entity_id": entity_id,
+                "store_id": user.get("active_store_id"),
+                "user_id": user.get("user_id"),
+                "username": user.get("username"),
+                "detail": detail,
+            }
+        )
     except Exception:
         # audit must never block business logic
         logger.warning("loyalty audit write failed", exc_info=True)
@@ -213,7 +219,10 @@ async def get_ledger(
     if txns is None:
         return {"items": [], "total": 0, "limit": limit, "skip": skip}
     items = txns.find_for_customer(
-        customer_id, limit=limit, skip=skip, type_filter=type,
+        customer_id,
+        limit=limit,
+        skip=skip,
+        type_filter=type,
     )
     total = txns.count_for_customer(customer_id, type_filter=type)
     return {"items": items, "total": total, "limit": limit, "skip": skip}
@@ -248,7 +257,10 @@ async def earn(
     account = accounts.find_or_create(body.customer_id)
     items = [i.model_dump(exclude_none=True) for i in (body.items or [])]
     earn_result = calc_earn_points(
-        body.rupee_value, items, account.get("tier", "BRONZE"), settings,
+        body.rupee_value,
+        items,
+        account.get("tier", "BRONZE"),
+        settings,
     )
 
     points = int(earn_result.get("points") or 0)
@@ -256,22 +268,23 @@ async def earn(
         return {"awarded": 0, "skipped_reason": earn_result.get("skipped_reason")}
 
     txn_id = str(uuid.uuid4())
-    txns.create({
-        "txn_id": txn_id,
-        "customer_id": body.customer_id,
-        "type": "EARN",
-        "points": points,
-        "rupee_value": float(body.rupee_value or 0.0),
-        "order_id": body.order_id,
-        "reason": body.reason or (
-            f"Order {body.order_id}" if body.order_id else "Loyalty earn"
-        ),
-        "expires_at": expiry_for_earn(settings),
-        "tier_at_earn": earn_result.get("tier_at_earn"),
-        "tier_multiplier": earn_result.get("tier_multiplier"),
-        "created_by": current_user.get("user_id"),
-        "created_at": datetime.now(),
-    })
+    txns.create(
+        {
+            "txn_id": txn_id,
+            "customer_id": body.customer_id,
+            "type": "EARN",
+            "points": points,
+            "rupee_value": float(body.rupee_value or 0.0),
+            "order_id": body.order_id,
+            "reason": body.reason
+            or (f"Order {body.order_id}" if body.order_id else "Loyalty earn"),
+            "expires_at": expiry_for_earn(settings),
+            "tier_at_earn": earn_result.get("tier_at_earn"),
+            "tier_multiplier": earn_result.get("tier_multiplier"),
+            "created_by": current_user.get("user_id"),
+            "created_at": datetime.now(),
+        }
+    )
 
     new_lifetime = int(account.get("lifetime_earned", 0)) + points
     new_tier = compute_tier(new_lifetime, settings)
@@ -283,7 +296,8 @@ async def earn(
     )
 
     _audit(
-        "loyalty.earn", current_user,
+        "loyalty.earn",
+        current_user,
         {
             "points": points,
             "order_id": body.order_id,
@@ -318,8 +332,10 @@ async def redeem(
     account = accounts.find_or_create(body.customer_id)
 
     result = calc_redeem(
-        body.points, account.get("balance_points", 0),
-        body.order_value, settings,
+        body.points,
+        account.get("balance_points", 0),
+        body.order_value,
+        settings,
     )
     if not result.get("ok"):
         raise HTTPException(status_code=400, detail=result)
@@ -328,21 +344,23 @@ async def redeem(
     rupee_value = float(result["rupee_value"])
 
     txn_id = str(uuid.uuid4())
-    txns.create({
-        "txn_id": txn_id,
-        "customer_id": body.customer_id,
-        "type": "REDEEM",
-        "points": capped_points,
-        "rupee_value": rupee_value,
-        "order_id": body.order_id,
-        "reason": (
-            f"Redeem on order {body.order_id}" if body.order_id else "Manual redeem"
-        ),
-        "expires_at": None,
-        "was_capped": result.get("was_capped", False),
-        "created_by": current_user.get("user_id"),
-        "created_at": datetime.now(),
-    })
+    txns.create(
+        {
+            "txn_id": txn_id,
+            "customer_id": body.customer_id,
+            "type": "REDEEM",
+            "points": capped_points,
+            "rupee_value": rupee_value,
+            "order_id": body.order_id,
+            "reason": (
+                f"Redeem on order {body.order_id}" if body.order_id else "Manual redeem"
+            ),
+            "expires_at": None,
+            "was_capped": result.get("was_capped", False),
+            "created_by": current_user.get("user_id"),
+            "created_at": datetime.now(),
+        }
+    )
 
     accounts.adjust_balance(
         body.customer_id,
@@ -351,7 +369,8 @@ async def redeem(
     )
 
     _audit(
-        "loyalty.redeem", current_user,
+        "loyalty.redeem",
+        current_user,
         {
             "requested_points": result.get("requested_points"),
             "capped_points": capped_points,
@@ -390,23 +409,26 @@ async def adjust(
     points = int(body.points)
     if points < 0 and abs(points) > int(account.get("balance_points", 0)):
         raise HTTPException(
-            status_code=400, detail="cannot debit below zero balance",
+            status_code=400,
+            detail="cannot debit below zero balance",
         )
 
     txn_id = str(uuid.uuid4())
-    txns.create({
-        "txn_id": txn_id,
-        "customer_id": body.customer_id,
-        "type": "ADJUST",
-        "points": abs(points),
-        "delta": points,           # signed copy for clarity
-        "rupee_value": 0.0,
-        "order_id": None,
-        "reason": body.reason,
-        "expires_at": None,
-        "created_by": current_user.get("user_id"),
-        "created_at": datetime.now(),
-    })
+    txns.create(
+        {
+            "txn_id": txn_id,
+            "customer_id": body.customer_id,
+            "type": "ADJUST",
+            "points": abs(points),
+            "delta": points,  # signed copy for clarity
+            "rupee_value": 0.0,
+            "order_id": None,
+            "reason": body.reason,
+            "expires_at": None,
+            "created_by": current_user.get("user_id"),
+            "created_at": datetime.now(),
+        }
+    )
 
     delta_lifetime_earned = points if points > 0 else 0
     new_lifetime = int(account.get("lifetime_earned", 0)) + delta_lifetime_earned
@@ -419,7 +441,8 @@ async def adjust(
     )
 
     _audit(
-        "loyalty.adjust", current_user,
+        "loyalty.adjust",
+        current_user,
         {"delta": points, "reason": body.reason},
         body.customer_id,
     )
@@ -498,26 +521,29 @@ async def expire_sweep(
             if expirable <= 0:
                 continue
             txn_id = str(uuid.uuid4())
-            txns.create({
-                "txn_id": txn_id,
-                "customer_id": customer_id,
-                "type": "EXPIRE",
-                "points": expirable,
-                "rupee_value": 0.0,
-                "order_id": None,
-                "reason": f"Auto-expire of {row.get('txn_id')}",
-                "source_earn_txn_id": row.get("txn_id"),
-                "expires_at": None,
-                "created_by": current_user.get("user_id"),
-                "created_at": datetime.now(),
-            })
+            txns.create(
+                {
+                    "txn_id": txn_id,
+                    "customer_id": customer_id,
+                    "type": "EXPIRE",
+                    "points": expirable,
+                    "rupee_value": 0.0,
+                    "order_id": None,
+                    "reason": f"Auto-expire of {row.get('txn_id')}",
+                    "source_earn_txn_id": row.get("txn_id"),
+                    "expires_at": None,
+                    "created_by": current_user.get("user_id"),
+                    "created_at": datetime.now(),
+                }
+            )
             accounts.adjust_balance(customer_id, delta_points=-expirable)
             balance -= expirable
             expired_txns += 1
             total_points += expirable
 
     _audit(
-        "loyalty.expire", current_user,
+        "loyalty.expire",
+        current_user,
         {"expired_txns": expired_txns, "points_expired": total_points},
         "system",
     )
@@ -560,28 +586,33 @@ def earn_for_order_internal(
 
         account = accounts.find_or_create(customer_id)
         result = calc_earn_points(
-            rupee_value, items or [], account.get("tier", "BRONZE"), settings,
+            rupee_value,
+            items or [],
+            account.get("tier", "BRONZE"),
+            settings,
         )
         points = int(result.get("points") or 0)
         if points <= 0:
             return {"awarded": 0, "skipped_reason": result.get("skipped_reason")}
 
         txn_id = str(uuid.uuid4())
-        txns.create({
-            "txn_id": txn_id,
-            "customer_id": customer_id,
-            "type": "EARN",
-            "points": points,
-            "rupee_value": float(rupee_value or 0.0),
-            "order_id": order_id,
-            "reason": f"Order {order_id}",
-            "expires_at": expiry_for_earn(settings),
-            "tier_at_earn": result.get("tier_at_earn"),
-            "tier_multiplier": result.get("tier_multiplier"),
-            "store_id": store_id,
-            "created_by": user_id,
-            "created_at": datetime.now(),
-        })
+        txns.create(
+            {
+                "txn_id": txn_id,
+                "customer_id": customer_id,
+                "type": "EARN",
+                "points": points,
+                "rupee_value": float(rupee_value or 0.0),
+                "order_id": order_id,
+                "reason": f"Order {order_id}",
+                "expires_at": expiry_for_earn(settings),
+                "tier_at_earn": result.get("tier_at_earn"),
+                "tier_multiplier": result.get("tier_multiplier"),
+                "store_id": store_id,
+                "created_by": user_id,
+                "created_at": datetime.now(),
+            }
+        )
         new_lifetime = int(account.get("lifetime_earned", 0)) + points
         new_tier = compute_tier(new_lifetime, settings)
         accounts.adjust_balance(

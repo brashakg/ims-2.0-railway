@@ -39,6 +39,8 @@ def _check_notification_rate(user_id: str) -> Optional[str]:
         return f"Rate limit exceeded: max {_NOTIFICATION_LIMIT} notifications per {_NOTIFICATION_WINDOW // 60} minutes."
     _notification_rate[user_id].append(now)
     return None
+
+
 from ..dependencies import get_db as _dep_get_db
 from ..services.notification_service import send_notification, populate_template
 
@@ -48,6 +50,7 @@ router = APIRouter()
 def _get_db():
     try:
         from database.connection import get_db
+
         return get_db().db
     except Exception:
         return _dep_get_db()
@@ -56,6 +59,7 @@ def _get_db():
 # ============================================================================
 # SCHEMAS
 # ============================================================================
+
 
 class SendNotificationRequest(BaseModel):
     customer_id: str
@@ -66,21 +70,25 @@ class SendNotificationRequest(BaseModel):
     variables: dict = {}
     category: str = "SERVICE"
 
+
 class WalkinRequest(BaseModel):
     phone: str = Field(..., pattern=r"^\d{10}$")
     name: Optional[str] = None
     interest: str = "frames"
     notes: Optional[str] = None
 
+
 class WalkoutRequest(BaseModel):
     frames_tried: List[str] = []
     reason: Optional[str] = None
     notes: Optional[str] = None
 
+
 class NpsResponseRequest(BaseModel):
     nps_id: str
     score: int = Field(..., ge=0, le=10)
     feedback: Optional[str] = None
+
 
 class RxSnoozeRequest(BaseModel):
     days: int = 7
@@ -89,6 +97,7 @@ class RxSnoozeRequest(BaseModel):
 # ============================================================================
 # FEATURE 1: NOTIFICATION SENDING & LOGS
 # ============================================================================
+
 
 @router.post("/notifications/send")
 async def send_marketing_notification(
@@ -196,6 +205,7 @@ async def get_notification_logs(
 # FEATURE 2: GOOGLE REVIEW AUTOMATION
 # ============================================================================
 
+
 @router.post("/review-request/{order_id}")
 async def send_review_request(
     order_id: str,
@@ -214,7 +224,9 @@ async def send_review_request(
         raise HTTPException(status_code=404, detail="Order not found")
 
     customer_id = order.get("customer_id", "")
-    customer = db.get_collection("customers").find_one({"customer_id": customer_id}) or {}
+    customer = (
+        db.get_collection("customers").find_one({"customer_id": customer_id}) or {}
+    )
 
     result = await send_notification(
         store_id=order.get("store_id", current_user.get("active_store_id", "")),
@@ -238,6 +250,7 @@ async def send_review_request(
 # ============================================================================
 # FEATURE 3: PRESCRIPTION EXPIRY RECALL
 # ============================================================================
+
 
 @router.get("/rx-expiry-alerts")
 async def get_rx_expiry_alerts(
@@ -314,7 +327,9 @@ async def send_rx_reminder(
     if not db:
         raise HTTPException(status_code=503, detail="Database unavailable")
 
-    customer = db.get_collection("customers").find_one({"customer_id": customer_id}) or {}
+    customer = (
+        db.get_collection("customers").find_one({"customer_id": customer_id}) or {}
+    )
     if not customer:
         raise HTTPException(status_code=404, detail="Customer not found")
 
@@ -357,12 +372,16 @@ async def snooze_rx_alert(
         {"customer_id": customer_id, "template_id": "PRESCRIPTION_EXPIRY"},
         {"$set": {"snooze_until": snooze_until}},
     )
-    return {"message": f"Alert snoozed for {req.days} days", "snooze_until": snooze_until}
+    return {
+        "message": f"Alert snoozed for {req.days} days",
+        "snooze_until": snooze_until,
+    }
 
 
 # ============================================================================
 # FEATURE 4: REFERRAL PROGRAM
 # ============================================================================
+
 
 @router.post("/referral-invite/{customer_id}")
 async def send_referral_invite(
@@ -374,7 +393,9 @@ async def send_referral_invite(
     if not db:
         raise HTTPException(status_code=503, detail="Database unavailable")
 
-    customer = db.get_collection("customers").find_one({"customer_id": customer_id}) or {}
+    customer = (
+        db.get_collection("customers").find_one({"customer_id": customer_id}) or {}
+    )
     if not customer:
         raise HTTPException(status_code=404, detail="Customer not found")
 
@@ -382,7 +403,9 @@ async def send_referral_invite(
 
     # Generate or get existing referral code
     ref_coll = db.get_collection("referrals")
-    existing = ref_coll.find_one({"referrer_customer_id": customer_id, "store_id": store_id, "status": "INVITED"})
+    existing = ref_coll.find_one(
+        {"referrer_customer_id": customer_id, "store_id": store_id, "status": "INVITED"}
+    )
 
     if existing:
         referral_code = existing["referral_code"]
@@ -425,7 +448,11 @@ async def send_referral_invite(
         related_entity_type="referral",
         related_entity_id=referral_code,
     )
-    return {"message": "Referral invite sent", "referral_code": referral_code, "notification": result}
+    return {
+        "message": "Referral invite sent",
+        "referral_code": referral_code,
+        "notification": result,
+    }
 
 
 @router.get("/referrals")
@@ -472,12 +499,17 @@ async def redeem_referral(
     reward = referral.get("reward_amount", 500)
     db.get_collection("customers").update_one(
         {"customer_id": referral["referrer_customer_id"]},
-        {"$inc": {"store_credit": reward, "loyalty_points": int(reward / 10)}}
+        {"$inc": {"store_credit": reward, "loyalty_points": int(reward / 10)}},
     )
 
     coll.update_one(
         {"referral_id": referral_id},
-        {"$set": {"status": "REWARD_CREDITED", "reward_credited_at": datetime.now().isoformat()}}
+        {
+            "$set": {
+                "status": "REWARD_CREDITED",
+                "reward_credited_at": datetime.now().isoformat(),
+            }
+        },
     )
 
     return {"message": f"Reward of Rs.{reward} credited", "referral_id": referral_id}
@@ -486,6 +518,7 @@ async def redeem_referral(
 # ============================================================================
 # FEATURE 5: NPS SURVEY
 # ============================================================================
+
 
 @router.post("/nps-survey/{order_id}")
 async def send_nps_survey(
@@ -497,11 +530,18 @@ async def send_nps_survey(
     if not db:
         raise HTTPException(status_code=503, detail="Database unavailable")
 
-    order = db.get_collection("orders").find_one({"order_id": order_id}) or db.get_collection("orders").find_one({"_id": order_id})
+    order = db.get_collection("orders").find_one(
+        {"order_id": order_id}
+    ) or db.get_collection("orders").find_one({"_id": order_id})
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
 
-    customer = db.get_collection("customers").find_one({"customer_id": order.get("customer_id")}) or {}
+    customer = (
+        db.get_collection("customers").find_one(
+            {"customer_id": order.get("customer_id")}
+        )
+        or {}
+    )
     store_id = order.get("store_id", current_user.get("active_store_id", ""))
 
     nps_id = f"NPS-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:8].upper()}"
@@ -557,28 +597,32 @@ async def submit_nps_response(
     coll = db.get_collection("nps_responses")
     result = coll.update_one(
         {"nps_id": req.nps_id},
-        {"$set": {
-            "score": req.score,
-            "feedback": req.feedback,
-            "status": "RESPONDED",
-            "responded_at": datetime.now().isoformat(),
-        }}
+        {
+            "$set": {
+                "score": req.score,
+                "feedback": req.feedback,
+                "status": "RESPONDED",
+                "responded_at": datetime.now().isoformat(),
+            }
+        },
     )
 
     # If detractor (score <= 6), create follow-up task for manager
     if req.score <= 6:
         nps = coll.find_one({"nps_id": req.nps_id}) or {}
-        db.get_collection("follow_ups").insert_one({
-            "follow_up_id": f"FU-{uuid.uuid4().hex[:8].upper()}",
-            "store_id": nps.get("store_id", ""),
-            "customer_id": nps.get("customer_id", ""),
-            "customer_name": nps.get("customer_name", ""),
-            "type": "general",
-            "reason": f"NPS detractor (score: {req.score}): {req.feedback or 'No feedback'}",
-            "due_date": (datetime.now() + timedelta(days=1)).isoformat(),
-            "status": "pending",
-            "created_at": datetime.now().isoformat(),
-        })
+        db.get_collection("follow_ups").insert_one(
+            {
+                "follow_up_id": f"FU-{uuid.uuid4().hex[:8].upper()}",
+                "store_id": nps.get("store_id", ""),
+                "customer_id": nps.get("customer_id", ""),
+                "customer_name": nps.get("customer_name", ""),
+                "type": "general",
+                "reason": f"NPS detractor (score: {req.score}): {req.feedback or 'No feedback'}",
+                "due_date": (datetime.now() + timedelta(days=1)).isoformat(),
+                "status": "pending",
+                "created_at": datetime.now().isoformat(),
+            }
+        )
 
     return {"message": "NPS response recorded", "score": req.score}
 
@@ -592,10 +636,19 @@ async def get_nps_dashboard(
     active_store = store_id or current_user.get("active_store_id", "")
     db = _get_db()
     if not db:
-        return {"avg_score": 0, "promoters": 0, "passives": 0, "detractors": 0, "response_rate": 0, "responses": []}
+        return {
+            "avg_score": 0,
+            "promoters": 0,
+            "passives": 0,
+            "detractors": 0,
+            "response_rate": 0,
+            "responses": [],
+        }
 
     coll = db.get_collection("nps_responses")
-    all_surveys = list(coll.find({"store_id": active_store}).sort("created_at", -1).limit(200))
+    all_surveys = list(
+        coll.find({"store_id": active_store}).sort("created_at", -1).limit(200)
+    )
 
     responded = [s for s in all_surveys if s.get("score") is not None]
     scores = [s["score"] for s in responded]
@@ -604,7 +657,9 @@ async def get_nps_dashboard(
     passives = len([s for s in scores if 7 <= s <= 8])
     detractors = len([s for s in scores if s <= 6])
     avg_score = round(sum(scores) / len(scores), 1) if scores else 0
-    response_rate = round(len(responded) / len(all_surveys) * 100, 1) if all_surveys else 0
+    response_rate = (
+        round(len(responded) / len(all_surveys) * 100, 1) if all_surveys else 0
+    )
 
     recent = responded[:20]
     for r in recent:
@@ -618,7 +673,11 @@ async def get_nps_dashboard(
         "response_rate": response_rate,
         "total_surveys": len(all_surveys),
         "total_responses": len(responded),
-        "nps_score": round(((promoters - detractors) / len(responded) * 100), 1) if responded else 0,
+        "nps_score": (
+            round(((promoters - detractors) / len(responded) * 100), 1)
+            if responded
+            else 0
+        ),
         "responses": recent,
     }
 
@@ -626,6 +685,7 @@ async def get_nps_dashboard(
 # ============================================================================
 # FEATURE 6: WALK-IN CAPTURE
 # ============================================================================
+
 
 @router.post("/walkin")
 async def create_walkin(
@@ -639,7 +699,9 @@ async def create_walkin(
     if not db:
         raise HTTPException(status_code=503, detail="Database unavailable")
 
-    walkin_id = f"WLK-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:8].upper()}"
+    walkin_id = (
+        f"WLK-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:8].upper()}"
+    )
 
     # Check if phone matches existing customer
     existing_customer = db.get_collection("customers").find_one({"mobile": req.phone})
@@ -648,10 +710,13 @@ async def create_walkin(
         "walkin_id": walkin_id,
         "store_id": active_store,
         "phone": req.phone,
-        "name": req.name or (existing_customer.get("name") if existing_customer else None),
+        "name": req.name
+        or (existing_customer.get("name") if existing_customer else None),
         "interest": req.interest,
         "notes": req.notes,
-        "existing_customer_id": existing_customer.get("customer_id") if existing_customer else None,
+        "existing_customer_id": (
+            existing_customer.get("customer_id") if existing_customer else None
+        ),
         "follow_up_created": True,
         "converted": False,
         "created_at": datetime.now().isoformat(),
@@ -661,17 +726,21 @@ async def create_walkin(
     db.get_collection("walkins").insert_one(walkin)
 
     # Auto-create follow-up for next day
-    db.get_collection("follow_ups").insert_one({
-        "follow_up_id": f"FU-{uuid.uuid4().hex[:8].upper()}",
-        "store_id": active_store,
-        "customer_id": existing_customer.get("customer_id") if existing_customer else walkin_id,
-        "customer_name": req.name or req.phone,
-        "type": "general",
-        "reason": f"Walk-in follow-up (Interest: {req.interest})",
-        "due_date": (datetime.now() + timedelta(days=1)).isoformat(),
-        "status": "pending",
-        "created_at": datetime.now().isoformat(),
-    })
+    db.get_collection("follow_ups").insert_one(
+        {
+            "follow_up_id": f"FU-{uuid.uuid4().hex[:8].upper()}",
+            "store_id": active_store,
+            "customer_id": (
+                existing_customer.get("customer_id") if existing_customer else walkin_id
+            ),
+            "customer_name": req.name or req.phone,
+            "type": "general",
+            "reason": f"Walk-in follow-up (Interest: {req.interest})",
+            "due_date": (datetime.now() + timedelta(days=1)).isoformat(),
+            "status": "pending",
+            "created_at": datetime.now().isoformat(),
+        }
+    )
 
     walkin.pop("_id", None)
     return {"message": "Walk-in registered", "walkin": walkin}
@@ -713,6 +782,7 @@ async def get_walkins(
 # FEATURE 7: WALKOUT RECOVERY
 # ============================================================================
 
+
 @router.post("/walkout/{customer_id}")
 async def record_walkout(
     customer_id: str,
@@ -726,9 +796,13 @@ async def record_walkout(
     if not db:
         raise HTTPException(status_code=503, detail="Database unavailable")
 
-    customer = db.get_collection("customers").find_one({"customer_id": customer_id}) or {}
+    customer = (
+        db.get_collection("customers").find_one({"customer_id": customer_id}) or {}
+    )
 
-    walkout_id = f"WKO-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:8].upper()}"
+    walkout_id = (
+        f"WKO-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:8].upper()}"
+    )
     store = db.get_collection("stores").find_one({"store_id": active_store}) or {}
 
     walkout = {
@@ -772,7 +846,10 @@ async def record_walkout(
     )
 
     walkout.pop("_id", None)
-    return {"message": "Walkout recorded, recovery message scheduled", "walkout": walkout}
+    return {
+        "message": "Walkout recorded, recovery message scheduled",
+        "walkout": walkout,
+    }
 
 
 @router.get("/walkout-recoveries")
@@ -788,11 +865,18 @@ async def get_walkout_recoveries(
         return {"walkouts": [], "total": 0, "recovered": 0, "recovery_rate": 0}
 
     coll = db.get_collection("walkouts")
-    walkouts = list(coll.find({"store_id": active_store}).sort("created_at", -1).limit(limit))
+    walkouts = list(
+        coll.find({"store_id": active_store}).sort("created_at", -1).limit(limit)
+    )
     for w in walkouts:
         w.pop("_id", None)
 
     recovered = len([w for w in walkouts if w.get("recovered")])
     rate = round(recovered / len(walkouts) * 100, 1) if walkouts else 0
 
-    return {"walkouts": walkouts, "total": len(walkouts), "recovered": recovered, "recovery_rate": rate}
+    return {
+        "walkouts": walkouts,
+        "total": len(walkouts),
+        "recovered": recovered,
+        "recovery_rate": rate,
+    }

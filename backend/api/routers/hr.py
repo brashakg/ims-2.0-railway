@@ -45,7 +45,6 @@ class AttendanceMarkRequest(BaseModel):
 # ============================================================================
 
 
-
 @router.get("")
 @router.get("/")
 async def get_hr_root():
@@ -86,16 +85,18 @@ async def get_attendance(
     # Convert to camelCase for frontend
     camel_records = []
     for r in records:
-        camel_records.append({
-            "attendanceId": r.get("attendance_id", ""),
-            "employeeId": r.get("employee_id", ""),
-            "employeeName": r.get("employee_name", ""),
-            "date": r.get("date", ""),
-            "status": r.get("status", ""),
-            "checkIn": r.get("check_in"),
-            "checkOut": r.get("check_out"),
-            "storeId": r.get("store_id", ""),
-        })
+        camel_records.append(
+            {
+                "attendanceId": r.get("attendance_id", ""),
+                "employeeId": r.get("employee_id", ""),
+                "employeeName": r.get("employee_name", ""),
+                "date": r.get("date", ""),
+                "status": r.get("status", ""),
+                "checkIn": r.get("check_in"),
+                "checkOut": r.get("check_out"),
+                "storeId": r.get("store_id", ""),
+            }
+        )
 
     return {"records": camel_records, "total": len(camel_records)}
 
@@ -131,12 +132,14 @@ async def check_out_by_id(
             "message": "Check-out recorded",
             "checkOutTime": datetime.now().isoformat(),
         }
-    existing = repo.find_one({
-        "$or": [
-            {"attendance_id": attendance_id},
-            {"_id": attendance_id},
-        ]
-    })
+    existing = repo.find_one(
+        {
+            "$or": [
+                {"attendance_id": attendance_id},
+                {"_id": attendance_id},
+            ]
+        }
+    )
     if existing is None:
         raise HTTPException(status_code=404, detail="Attendance record not found")
     now_iso = datetime.now().isoformat()

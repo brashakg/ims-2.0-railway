@@ -17,6 +17,7 @@ read-time-backfill — treat top-level as `versions.final`.
 
 Pure functions live here; the router (`prescriptions.py`) handles I/O.
 """
+
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
@@ -29,9 +30,9 @@ VALID_VERSION_NAMES = ("before_testing", "after_testing", "manual", "final")
 # enum so the optometrist can extend with custom sources later.
 VALID_SOURCES = {
     "before_testing": {"auto_ref", "patient_brought_old_rx", "walk_in_estimate"},
-    "after_testing":  {"subjective_refraction", "cycloplegic", "retinoscopy"},
-    "manual":         {"manual_override", "past_rx_reuse"},
-    "final":          {"optometrist_signoff", "patient_request"},
+    "after_testing": {"subjective_refraction", "cycloplegic", "retinoscopy"},
+    "manual": {"manual_override", "past_rx_reuse"},
+    "final": {"optometrist_signoff", "patient_request"},
 }
 
 
@@ -40,7 +41,9 @@ def is_legacy_single_rx(doc: Dict[str, Any]) -> bool:
     eye fields but no `versions` block."""
     if not doc:
         return False
-    has_top_level = any(doc.get(k) for k in ("right_eye", "left_eye", "rightEye", "leftEye"))
+    has_top_level = any(
+        doc.get(k) for k in ("right_eye", "left_eye", "rightEye", "leftEye")
+    )
     return has_top_level and not doc.get("versions")
 
 
@@ -86,15 +89,19 @@ def merge_version(
         raise ValueError("Prescription is finalized; cannot patch versions")
 
     out = dict(doc)
-    versions = dict(out.get("versions") or {
-        "before_testing": None,
-        "after_testing": None,
-        "manual": None,
-        "final": None,
-    })
+    versions = dict(
+        out.get("versions")
+        or {
+            "before_testing": None,
+            "after_testing": None,
+            "manual": None,
+            "final": None,
+        }
+    )
 
     # Stamp captured_at if not already present in payload
     from datetime import datetime, timezone
+
     payload = dict(version_payload)
     payload.setdefault("captured_at", datetime.now(timezone.utc))
     if captured_by and "captured_by" not in payload:
@@ -134,6 +141,7 @@ def mirror_final_to_top_level(doc: Dict[str, Any]) -> Dict[str, Any]:
         out["pd"] = final["pd"]
     out["status"] = "finalized"
     from datetime import datetime, timezone
+
     out["finalized_at"] = datetime.now(timezone.utc)
     return out
 
@@ -167,14 +175,20 @@ def progression_diffs(rx_history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     )
     out: List[Dict[str, Any]] = []
     for prev, curr in zip(sorted_rx[:-1], sorted_rx[1:]):
-        out.append({
-            "from_visit_at": prev.get("visit_at") or prev.get("created_at"),
-            "to_visit_at": curr.get("visit_at") or curr.get("created_at"),
-            "from_prescription_id": prev.get("prescription_id"),
-            "to_prescription_id": curr.get("prescription_id"),
-            "right_eye": _eye_delta(prev.get("right_eye") or {}, curr.get("right_eye") or {}),
-            "left_eye": _eye_delta(prev.get("left_eye") or {}, curr.get("left_eye") or {}),
-        })
+        out.append(
+            {
+                "from_visit_at": prev.get("visit_at") or prev.get("created_at"),
+                "to_visit_at": curr.get("visit_at") or curr.get("created_at"),
+                "from_prescription_id": prev.get("prescription_id"),
+                "to_prescription_id": curr.get("prescription_id"),
+                "right_eye": _eye_delta(
+                    prev.get("right_eye") or {}, curr.get("right_eye") or {}
+                ),
+                "left_eye": _eye_delta(
+                    prev.get("left_eye") or {}, curr.get("left_eye") or {}
+                ),
+            }
+        )
     return out
 
 

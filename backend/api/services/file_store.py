@@ -20,6 +20,7 @@ Design notes:
 - Fail-soft contract: when the underlying store is unavailable, the
   call returns None / False rather than raising. Callers must check.
 """
+
 from __future__ import annotations
 
 import logging
@@ -30,15 +31,17 @@ logger = logging.getLogger(__name__)
 
 
 # Allowed mime types for handoffs (images + PDF, per user direction)
-ALLOWED_MIME_TYPES = frozenset({
-    "image/jpeg",
-    "image/jpg",
-    "image/png",
-    "image/heic",
-    "image/heif",
-    "image/webp",
-    "application/pdf",
-})
+ALLOWED_MIME_TYPES = frozenset(
+    {
+        "image/jpeg",
+        "image/jpg",
+        "image/png",
+        "image/heic",
+        "image/heif",
+        "image/webp",
+        "application/pdf",
+    }
+)
 
 # 25 MB cap (per user direction)
 MAX_FILE_SIZE_BYTES = 25 * 1024 * 1024
@@ -47,8 +50,14 @@ MAX_FILE_SIZE_BYTES = 25 * 1024 * 1024
 class FileStore:
     """Abstract file-store interface."""
 
-    def put(self, *, content: bytes, filename: str, mime_type: str,
-            metadata: Optional[dict] = None) -> Optional[str]:
+    def put(
+        self,
+        *,
+        content: bytes,
+        filename: str,
+        mime_type: str,
+        metadata: Optional[dict] = None,
+    ) -> Optional[str]:
         """Store bytes; return a file_id string or None on failure."""
         raise NotImplementedError
 
@@ -93,7 +102,8 @@ class InMemoryFileStore(FileStore):
 
     def list_ids_with_metadata_key(self, key: str) -> list:
         return [
-            fid for fid, rec in self._files.items()
+            fid
+            for fid, rec in self._files.items()
             if isinstance(rec.get("metadata"), dict) and key in rec["metadata"]
         ]
 
@@ -110,6 +120,7 @@ class GridFSFileStore(FileStore):
         if self._fs is None:
             try:
                 import gridfs
+
                 self._fs = gridfs.GridFS(self._db)
             except Exception as e:
                 logger.warning(f"[FILESTORE] GridFS unavailable: {e}")
@@ -138,8 +149,13 @@ class GridFSFileStore(FileStore):
             return None
         try:
             from bson import ObjectId
+
             grid_out = fs.get(ObjectId(file_id))
-            return (grid_out.read(), grid_out.filename or "", grid_out.content_type or "application/octet-stream")
+            return (
+                grid_out.read(),
+                grid_out.filename or "",
+                grid_out.content_type or "application/octet-stream",
+            )
         except Exception as e:
             logger.debug(f"[FILESTORE] get failed for {file_id}: {e}")
             return None
@@ -150,6 +166,7 @@ class GridFSFileStore(FileStore):
             return False
         try:
             from bson import ObjectId
+
             fs.delete(ObjectId(file_id))
             return True
         except Exception as e:
@@ -184,6 +201,7 @@ def get_file_store() -> Optional[FileStore]:
         return _INSTANCE
     try:
         from database.connection import get_db
+
         db = get_db()
         if db is not None and db.is_connected:
             # Reach down to the underlying pymongo Database
