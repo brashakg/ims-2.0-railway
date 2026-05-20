@@ -312,10 +312,11 @@ CUSTOMERS = [
 
 
 def get_all_seed_data():
-    """Return all seed data as a dict of collection_name -> list of documents"""
+    """Return bootstrap seed data — real stores + admin/staff user
+    accounts only. Demo products and customers are intentionally NOT
+    seeded: operators enter real catalog + customer data via the app, so
+    a fresh install never shows fake/sample records."""
     return {
         "stores": STORES,
         "users": USERS,
-        "products": PRODUCTS,
-        "customers": CUSTOMERS,
     }
