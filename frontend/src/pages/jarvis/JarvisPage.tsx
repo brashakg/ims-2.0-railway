@@ -102,7 +102,13 @@ export function JarvisPage() {
   const [inputValue, setInputValue] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   // LLM model selector — populated from /jarvis/models (local OSS / Claude / …)
-  const [llmModels, setLlmModels] = useState<Array<{ id: string; label: string }>>([]);
+  // `tier` is "free" | "standard" | "premium"; the dropdown shows a confirm
+  // modal before switching TO a premium model so users opt-in to the cost.
+  const [llmModels, setLlmModels] = useState<Array<{
+    id: string;
+    label: string;
+    tier?: 'free' | 'standard' | 'premium';
+  }>>([]);
   const [selectedModel, setSelectedModel] = useState<string>('');
   const [insights, setInsights] = useState<QuickInsight | null>(null);
   const [recommendations, setRecommendations] = useState<Recommendation[]>([]);
@@ -130,7 +136,10 @@ export function JarvisPage() {
 
   // Load the available LLM models for the chat selector
   useEffect(() => {
-    api.get<{ models: Array<{ id: string; label: string }>; default: string | null }>('/jarvis/models')
+    api.get<{
+      models: Array<{ id: string; label: string; tier?: 'free' | 'standard' | 'premium' }>;
+      default: string | null;
+    }>('/jarvis/models')
       .then(({ data }) => {
         setLlmModels(data.models || []);
         if (data.default) setSelectedModel(data.default);
@@ -138,6 +147,25 @@ export function JarvisPage() {
       })
       .catch(() => setLlmModels([]));
   }, []);
+
+  // Gated model switching — premium models (Opus etc.) trigger a confirm
+  // modal that surfaces the rough cost so users opt in deliberately.
+  const handleModelChange = (newId: string) => {
+    if (newId === selectedModel) return;
+    const next = llmModels.find((m) => m.id === newId);
+    if (next?.tier === 'premium') {
+      const ok = window.confirm(
+        `${next.label} is significantly pricier per query than the other models.\n\n` +
+        `Approximate cost: ~$15 / 1M input tokens, ~$75 / 1M output tokens — ` +
+        `roughly 20× the price of Haiku. A single complex business analysis can run ₹40-80.\n\n` +
+        `Best for: deep multi-step analysis, strategy questions, anything ` +
+        `where reasoning quality matters more than cost.\n\n` +
+        `Continue with ${next.label}?`
+      );
+      if (!ok) return;
+    }
+    setSelectedModel(newId);
+  };
 
   // Load initial insights + live agent list + activity feed
   useEffect(() => {
@@ -1015,14 +1043,16 @@ Is there a specific aspect you'd like me to dive deeper into? I can provide deta
               {llmModels.length > 1 && (
                 <select
                   value={selectedModel}
-                  onChange={(e) => setSelectedModel(e.target.value)}
+                  onChange={(e) => handleModelChange(e.target.value)}
                   className="input sm"
-                  style={{ maxWidth: 180 }}
-                  title="Choose which model answers"
+                  style={{ maxWidth: 200 }}
+                  title="Choose which model answers — premium models prompt before switching"
                   aria-label="LLM model"
                 >
                   {llmModels.map((m) => (
-                    <option key={m.id} value={m.id}>{m.label}</option>
+                    <option key={m.id} value={m.id}>
+                      {m.tier === 'premium' ? `$$ ${m.label}` : m.label}
+                    </option>
                   ))}
                 </select>
               )}

@@ -99,6 +99,7 @@ def _registry() -> Dict[str, Dict[str, Any]]:
             "base_url": local_url.rstrip("/"),
             "model": os.getenv("LLM_LOCAL_MODEL", "qwen2.5:3b-instruct"),
             "api_key": os.getenv("LLM_LOCAL_API_KEY", ""),
+            "tier": "free",
         }
 
     if os.getenv("ANTHROPIC_API_KEY"):
@@ -109,7 +110,22 @@ def _registry() -> Dict[str, Dict[str, Any]]:
             "model": os.getenv("AGENT_CLAUDE_MODEL", "claude-haiku-4-5"),
             "api_key": os.getenv("ANTHROPIC_API_KEY"),
             "api_url": os.getenv("ANTHROPIC_API_URL", "https://api.anthropic.com/v1/messages"),
+            "tier": "standard",
         }
+        # Opus as a third option — same API key, different model. Marked
+        # premium so the UI can warn before users opt into the pricier
+        # tier (roughly 20× Haiku per query). Flip LLM_OPUS_ENABLED=false
+        # to hide it.
+        if os.getenv("LLM_OPUS_ENABLED", "true").lower() == "true":
+            models["claude-opus"] = {
+                "id": "claude-opus",
+                "label": os.getenv("LLM_OPUS_LABEL", "Claude Opus 4.7 (premium)"),
+                "provider": "anthropic",
+                "model": os.getenv("LLM_OPUS_MODEL", "claude-opus-4-7"),
+                "api_key": os.getenv("ANTHROPIC_API_KEY"),
+                "api_url": os.getenv("ANTHROPIC_API_URL", "https://api.anthropic.com/v1/messages"),
+                "tier": "premium",
+            }
 
     extra_url = os.getenv("LLM_EXTRA_BASE_URL")
     if extra_url:
@@ -120,15 +136,26 @@ def _registry() -> Dict[str, Dict[str, Any]]:
             "base_url": extra_url.rstrip("/"),
             "model": os.getenv("LLM_EXTRA_MODEL", "llama-3.3-70b-versatile"),
             "api_key": os.getenv("LLM_EXTRA_API_KEY", ""),
+            "tier": "standard",
         }
 
     return models
 
 
 def list_models() -> List[Dict[str, str]]:
-    """Public list for the UI selector — id + label + provider only."""
+    """Public list for the UI selector — id + label + provider + tier.
+
+    `tier` is one of "free" / "standard" / "premium" so the UI can warn
+    users before switching to the pricier models. Defaults to "standard"
+    for back-compat with any registry entries that haven't been tagged.
+    """
     return [
-        {"id": m["id"], "label": m["label"], "provider": m["provider"]}
+        {
+            "id": m["id"],
+            "label": m["label"],
+            "provider": m["provider"],
+            "tier": m.get("tier", "standard"),
+        }
         for m in _registry().values()
     ]
 
