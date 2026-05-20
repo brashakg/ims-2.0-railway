@@ -2,12 +2,33 @@
 // Replaces the old module-aware sidebar with a flat top-level nav.
 // Ported from design_handoff_ims_2_0/shell/shell.jsx → Rail
 
-import { NavLink } from 'react-router-dom';
-import { useMemo } from 'react';
+import { NavLink, useLocation } from 'react-router-dom';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { useAppearance } from '../../context/AppearanceContext';
 import { Icon, type IconName } from './Icon';
 import type { UserRole } from '../../types';
+
+const COLLAPSED_GROUPS_KEY = 'ims_rail_collapsed_groups';
+
+function loadCollapsedGroups(): Set<string> {
+  try {
+    const raw = localStorage.getItem(COLLAPSED_GROUPS_KEY);
+    if (!raw) return new Set();
+    const parsed = JSON.parse(raw);
+    return new Set(Array.isArray(parsed) ? parsed.filter((x) => typeof x === 'string') : []);
+  } catch {
+    return new Set();
+  }
+}
+
+function saveCollapsedGroups(set: Set<string>): void {
+  try {
+    localStorage.setItem(COLLAPSED_GROUPS_KEY, JSON.stringify(Array.from(set)));
+  } catch {
+    /* localStorage full or disabled — collapse state stays in-memory only */
+  }
+}
 
 interface NavItem {
   id: string;
@@ -96,6 +117,7 @@ function hasAnyRole(userRoles: readonly UserRole[] | undefined, required: UserRo
 export function Rail({ brand = 'bv' }: { brand?: 'bv' | 'wizopt' }) {
   const { user } = useAuth();
   const { railExpanded, toggleRailExpanded } = useAppearance();
+  const { pathname } = useLocation();
   const userRoles = user?.roles;
   const activeRole = user?.activeRole;
 
@@ -110,6 +132,42 @@ export function Rail({ brand = 'bv' }: { brand?: 'bv' | 'wizopt' }) {
       }),
     })).filter((group) => group.items.length > 0);
   }, [userRoles, activeRole]);
+
+  // Which group titles are collapsed. Untitled (Hub) groups can't collapse.
+  // Persisted to localStorage so the user's choice survives refresh. The
+  // group containing the active route is force-expanded on every navigation
+  // so the user is never one click away from an invisible nav item.
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(loadCollapsedGroups);
+
+  const activeGroupTitle = useMemo(() => {
+    for (const g of visibleGroups) {
+      if (!g.title) continue;
+      const match = g.items.some((i) => pathname === i.to || pathname.startsWith(i.to + '/'));
+      if (match) return g.title;
+    }
+    return null;
+  }, [pathname, visibleGroups]);
+
+  useEffect(() => {
+    if (!activeGroupTitle) return;
+    setCollapsedGroups((prev) => {
+      if (!prev.has(activeGroupTitle)) return prev;
+      const next = new Set(prev);
+      next.delete(activeGroupTitle);
+      saveCollapsedGroups(next);
+      return next;
+    });
+  }, [activeGroupTitle]);
+
+  const toggleGroup = useCallback((title: string) => {
+    setCollapsedGroups((prev) => {
+      const next = new Set(prev);
+      if (next.has(title)) next.delete(title);
+      else next.add(title);
+      saveCollapsedGroups(next);
+      return next;
+    });
+  }, []);
 
   const glyph = brand === 'wizopt' ? 'W' : 'B';
   const wordmark = brand === 'wizopt' ? 'WizOpt' : 'Better Vision';
@@ -144,28 +202,44 @@ export function Rail({ brand = 'bv' }: { brand?: 'bv' | 'wizopt' }) {
         </button>
       </div>
 
-      {visibleGroups.map((group, gi) => (
-        <div key={gi} className="rail-group">
-          {railExpanded && group.title && (
-            <div className="rail-group-title" aria-hidden="true">{group.title}</div>
-          )}
-          {group.items.map((item) => {
-            const IconCmp = Icon[item.icon];
-            return (
-              <NavLink
-                key={item.id}
-                to={item.to}
-                className={({ isActive }) => 'rail-item' + (isActive ? ' active' : '')}
-                title={item.label}
+      {visibleGroups.map((group, gi) => {
+        const isCollapsible = railExpanded && !!group.title;
+        const isCollapsed = isCollapsible && collapsedGroups.has(group.title!);
+        const itemsHidden = isCollapsed;
+        return (
+          <div key={gi} className="rail-group">
+            {isCollapsible && (
+              <button
+                type="button"
+                className={'rail-group-title' + (isCollapsed ? ' collapsed' : '')}
+                onClick={() => toggleGroup(group.title!)}
+                aria-expanded={!isCollapsed}
+                aria-controls={`rail-group-${gi}-items`}
               >
-                <IconCmp />
-                <span className="rail-label">{item.label}</span>
-              </NavLink>
-            );
-          })}
-          {gi < visibleGroups.length - 1 && !railExpanded && <div className="rail-sep" />}
-        </div>
-      ))}
+                <span className="rail-group-title-label">{group.title}</span>
+                <GroupChevron expanded={!isCollapsed} />
+              </button>
+            )}
+            <div id={`rail-group-${gi}-items`} hidden={itemsHidden}>
+              {group.items.map((item) => {
+                const IconCmp = Icon[item.icon];
+                return (
+                  <NavLink
+                    key={item.id}
+                    to={item.to}
+                    className={({ isActive }) => 'rail-item' + (isActive ? ' active' : '')}
+                    title={item.label}
+                  >
+                    <IconCmp />
+                    <span className="rail-label">{item.label}</span>
+                  </NavLink>
+                );
+              })}
+            </div>
+            {gi < visibleGroups.length - 1 && !railExpanded && <div className="rail-sep" />}
+          </div>
+        );
+      })}
       <div className="rail-spacer" />
       <div className="rail-avatar" title={user?.name ? `${user.name} • ${activeRole}` : 'User'}>
         <span className="rail-avatar-initials">{userInitials}</span>
@@ -187,6 +261,21 @@ function ChevronIcon({ flipped }: { flipped: boolean }) {
       fill="none" stroke="currentColor" strokeWidth={1.6}
       strokeLinecap="round" strokeLinejoin="round"
       style={{ transform: flipped ? 'rotate(180deg)' : 'none', transition: 'transform .15s' }}
+    >
+      <path d="M9 6l6 6-6 6" />
+    </svg>
+  );
+}
+
+function GroupChevron({ expanded }: { expanded: boolean }) {
+  // Down chevron when expanded (group is open), right chevron when collapsed.
+  return (
+    <svg
+      viewBox="0 0 24 24" width={12} height={12}
+      fill="none" stroke="currentColor" strokeWidth={2}
+      strokeLinecap="round" strokeLinejoin="round"
+      style={{ transform: expanded ? 'rotate(90deg)' : 'none', transition: 'transform .15s', flexShrink: 0 }}
+      aria-hidden="true"
     >
       <path d="M9 6l6 6-6 6" />
     </svg>

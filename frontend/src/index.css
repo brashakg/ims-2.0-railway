@@ -796,16 +796,34 @@
 }
 
 /* Group titles — render in expanded mode only, separating nav clusters
-   like "Sales floor", "Stock & supply", "Ops", etc. */
+   like "Sales floor", "Stock & supply", "Ops", etc. Clickable in expanded
+   mode to collapse/expand the group; choice persists in localStorage. */
 .rail .rail-group-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: calc(100% - 16px);
+  margin: 4px 8px 0;
+  padding: 10px 14px 6px;
   font-family: var(--font-mono, ui-monospace, monospace);
   font-size: 10px;
   font-weight: 600;
   letter-spacing: 0.08em;
   text-transform: uppercase;
   color: #6f6f68;
-  padding: 14px 22px 6px;
+  background: transparent;
+  border: 0;
+  border-radius: 8px;
+  cursor: pointer;
+  text-align: left;
+  transition: background .12s, color .12s;
 }
+.rail .rail-group-title:hover { background: #1f1f1d; color: #cfcfc7; }
+.rail .rail-group-title:focus-visible {
+  outline: 2px solid var(--bv, #d4422a);
+  outline-offset: -2px;
+}
+.rail .rail-group-title.collapsed { color: #5a5a55; }
 .rail .rail-group { display: contents; }
 .rail .rail-item {
   position: relative;
