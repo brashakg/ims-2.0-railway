@@ -116,9 +116,143 @@ class JarvisAnalyticsEngine:
     """Core analytics engine for JARVIS - Queries real database"""
 
     @staticmethod
+    def _compute_overview_live() -> Optional[Dict]:
+        """Aggregate a live business overview straight from the real
+        operational collections. Returns None if the DB is unavailable so
+        the caller can fall back. Chain-wide (all stores) — JARVIS is a
+        SUPERADMIN tool."""
+        orders_col = get_db_collection("orders")
+        if orders_col is None:
+            return None
+        try:
+            from datetime import datetime as _dt, timedelta as _td
+            now = _dt.now()
+            today = now.strftime("%Y-%m-%d")
+            month_start = now.strftime("%Y-%m-01")
+            ly_month_start = f"{now.year - 1:04d}-{now.month:02d}-01"
+            ly_month_end = f"{now.year - 1:04d}-{now.month:02d}-31"
+            counted = {"CONFIRMED", "PROCESSING", "READY", "DELIVERED"}
+
+            rev_today = rev_month = rev_lastyear = 0.0
+            orders_today = orders_month = 0
+            pending = in_progress = ready = 0
+            for o in orders_col.find({}):
+                status = (o.get("status") or "").upper()
+                created = str(o.get("created_at") or "")[:10]
+                gt = float(o.get("grand_total") or 0)
+                if status in counted:
+                    if created >= month_start:
+                        rev_month += gt
+                        orders_month += 1
+                    if created == today:
+                        rev_today += gt
+                        orders_today += 1
+                    if ly_month_start <= created <= ly_month_end:
+                        rev_lastyear += gt
+                if status == "CONFIRMED":
+                    pending += 1
+                elif status == "PROCESSING":
+                    in_progress += 1
+                elif status == "READY":
+                    ready += 1
+
+            growth = round(((rev_month - rev_lastyear) / rev_lastyear * 100), 1) if rev_lastyear > 0 else 0.0
+            aov = round(rev_month / orders_month, 2) if orders_month else 0.0
+
+            # Inventory
+            products_col = get_db_collection("products")
+            total_products = low_stock = out_of_stock = 0
+            inv_value = 0.0
+            if products_col is not None:
+                for p in products_col.find({}):
+                    total_products += 1
+                    qty = int(p.get("stock_quantity") or p.get("quantity") or 0)
+                    reorder = int(p.get("reorder_point") or 0)
+                    price = float(p.get("offer_price") or p.get("mrp") or 0)
+                    inv_value += qty * price
+                    if qty <= 0:
+                        out_of_stock += 1
+                    elif reorder and qty <= reorder:
+                        low_stock += 1
+
+            # Customers
+            customers_col = get_db_collection("customers")
+            total_cust = new_cust = 0
+            if customers_col is not None:
+                total_cust = customers_col.count_documents({})
+                new_cust = customers_col.count_documents({"created_at": {"$gte": month_start}})
+
+            # Staff
+            users_col = get_db_collection("users")
+            total_staff = 0
+            if users_col is not None:
+                total_staff = users_col.count_documents({"is_active": {"$ne": False}})
+
+            return {
+                "revenue": {
+                    "today": round(rev_today, 2),
+                    "yesterday": 0,
+                    "this_week": 0,
+                    "this_month": round(rev_month, 2),
+                    "last_month": round(rev_lastyear, 2),
+                    "growth_percentage": growth,
+                    "target": 0,
+                    "achievement_percent": 0,
+                    "trend": "up" if growth > 0 else ("down" if growth < 0 else "stable"),
+                },
+                "orders": {
+                    "today": orders_today,
+                    "pending": pending,
+                    "in_progress": in_progress,
+                    "ready_for_delivery": ready,
+                    "average_order_value": aov,
+                    "conversion_rate": 0,
+                },
+                "inventory": {
+                    "total_products": total_products,
+                    "low_stock_items": low_stock,
+                    "out_of_stock": out_of_stock,
+                    "inventory_value": round(inv_value, 2),
+                    "fast_moving_count": 0,
+                    "slow_moving_count": 0,
+                    "expiring_soon": 0,
+                    "turnover_rate": 0,
+                },
+                "customers": {
+                    "total": total_cust,
+                    "new_this_month": new_cust,
+                    "returning_rate": 0,
+                    "average_lifetime_value": 0,
+                    "nps_score": 0,
+                    "top_segment": "N/A",
+                },
+                "staff": {
+                    "total_employees": total_staff,
+                    "present_today": 0,
+                    "on_leave": 0,
+                    "top_performer": "N/A",
+                    "average_sales_per_staff": round(rev_month / total_staff, 2) if total_staff else 0,
+                    "attendance_rate": 0,
+                },
+            }
+        except Exception as e:
+            logger.warning("JARVIS live overview failed: %s", e)
+            return None
+
+    @staticmethod
     def get_business_overview() -> Dict:
-        """Get comprehensive business overview from database"""
-        # Try to get metrics from database
+        """Get comprehensive business overview from database.
+
+        Primary path computes live from the real operational collections
+        (orders / products / customers / users) so JARVIS reflects actual
+        data regardless of store. Falls back to the legacy
+        business_metrics stub doc, then to an empty envelope.
+        """
+        live = JarvisAnalyticsEngine._compute_overview_live()
+        if live is not None:
+            return live
+
+        # Legacy: pre-seeded metrics doc (kept for back-compat)
         metrics_col = get_db_collection("business_metrics")
         if metrics_col:
             metrics = metrics_col.find_one({"store_id": "store-001"})
