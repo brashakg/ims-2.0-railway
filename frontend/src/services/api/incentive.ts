@@ -132,6 +132,44 @@ export const incentiveApi = {
     );
     return r.data;
   },
+
+  /** Module iii — patch the payout calculator inputs (SUPERADMIN-only).
+   *  Only the fields you pass are written; unset fields keep their current value. */
+  updatePayoutSettings: async (
+    payload: {
+      growth_targets?: Record<string, number>;
+      base_rates?: Record<string, number>;
+      discount_kill_threshold?: number;
+      discount_multipliers?: Array<{ max_pct: number; multiplier: number }>;
+      staff_weightages?: Record<string, number>;
+      supervisor_bonuses?: Array<{
+        user_id: string;
+        role: string;
+        bonus_pct: Record<string, number>;
+      }>;
+    },
+    storeId?: string,
+  ): Promise<IncentiveSettings> => {
+    const r = await api.patch(
+      '/incentive/points/settings/payout',
+      payload,
+      { params: storeId ? { store_id: storeId } : undefined },
+    );
+    return r.data;
+  },
+
+  /** Module iii — set the per-(store, year, month) manual last_year_sale input. */
+  setLastYearSale: async (
+    payload: { year: number; month: number; last_year_sale: number },
+    storeId?: string,
+  ): Promise<{ store_id: string; year: number; month: number; last_year_sale: number }> => {
+    const r = await api.post(
+      '/incentive/points/inputs/last-year-sale',
+      payload,
+      { params: storeId ? { store_id: storeId } : undefined },
+    );
+    return r.data;
+  },
 };
 
 export default incentiveApi;

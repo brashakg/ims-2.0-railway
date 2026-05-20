@@ -177,6 +177,9 @@ export function PayoutDashboardPage() {
         <div className="flex items-center gap-2">
           <PeriodPicker year={year} month={month} onChange={(y, m) => { setYear(y); setMonth(m); }} />
           <Link to="/incentive/payouts" className="btn-secondary text-sm">All snapshots</Link>
+          <Link to="/incentive/settings" className="btn-secondary text-sm inline-flex items-center gap-1.5">
+            <Settings className="w-4 h-4" /> Settings
+          </Link>
           <button onClick={refresh} disabled={loading} className="btn-secondary inline-flex items-center gap-2">
             <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} /> Refresh
           </button>

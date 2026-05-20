@@ -691,6 +691,12 @@ export interface LeaderboardResponse {
   items: MTDStaffEntry[];
 }
 
+export interface SupervisorBonus {
+  user_id: string;
+  role: string;
+  bonus_pct: Record<string, number>;
+}
+
 export interface IncentiveSettings {
   store_id: string;
   staff_weightages: Record<string, number>;
@@ -701,7 +707,7 @@ export interface IncentiveSettings {
   discount_multipliers: Array<{ max_pct: number; multiplier: number }>;
   visufit_gate_threshold: number;
   visufit_gate_enabled: boolean;
-  supervisor_bonuses: Array<any>;
+  supervisor_bonuses: SupervisorBonus[];
   updated_at: string | null;
   updated_by: string | null;
 }
