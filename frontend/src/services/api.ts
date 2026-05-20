@@ -27,7 +27,6 @@ export {
   reportsApi,
   analyticsApi,
   hrApi,
-  incentivesApi,
   tasksApi,
   clinicalApi,
   settingsApi,

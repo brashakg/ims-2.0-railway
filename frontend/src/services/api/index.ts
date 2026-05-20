@@ -29,7 +29,7 @@ export { customerApi } from './customers';
 export { reportsApi, analyticsApi } from './reports';
 
 // HR / Payroll / Incentives / Tasks
-export { hrApi, incentivesApi, tasksApi } from './hr';
+export { hrApi, tasksApi } from './hr';
 
 // Clinical / Eye Tests
 export { clinicalApi } from './clinical';
@@ -50,7 +50,6 @@ export { analyticsV2Api } from './analytics';
 export { walkoutsApi } from './walkouts';
 
 // Daily Points (Pune Incentive Module ii) — distinct from the older
-// `incentivesApi` (sales-targets/kickers domain) re-exported via ./hr.
 export { incentiveApi } from './incentive';
 
 // Payout (Pune Incentive Module iii)
