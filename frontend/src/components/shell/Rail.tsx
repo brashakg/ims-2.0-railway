@@ -11,14 +11,18 @@ import type { UserRole } from '../../types';
 
 const COLLAPSED_GROUPS_KEY = 'ims_rail_collapsed_groups';
 
-function loadCollapsedGroups(): Set<string> {
+/** Load saved collapsed-group state from localStorage. Returns null when
+ *  no key is present so the caller can apply the closed-by-default rule
+ *  (all titled groups collapsed) on first visit. An empty array stored
+ *  in localStorage is treated as a real user choice — all expanded. */
+function loadCollapsedGroups(): Set<string> | null {
   try {
     const raw = localStorage.getItem(COLLAPSED_GROUPS_KEY);
-    if (!raw) return new Set();
+    if (raw === null) return null;
     const parsed = JSON.parse(raw);
     return new Set(Array.isArray(parsed) ? parsed.filter((x) => typeof x === 'string') : []);
   } catch {
-    return new Set();
+    return null;
   }
 }
 
@@ -137,7 +141,17 @@ export function Rail({ brand = 'bv' }: { brand?: 'bv' | 'wizopt' }) {
   // Persisted to localStorage so the user's choice survives refresh. The
   // group containing the active route is force-expanded on every navigation
   // so the user is never one click away from an invisible nav item.
-  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(loadCollapsedGroups);
+  //
+  // First-time users (no localStorage key) see ALL titled groups collapsed
+  // for a compact starting view; the active-route effect below opens the
+  // relevant group, and individual clicks pin a group's state.
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(() => {
+    const saved = loadCollapsedGroups();
+    if (saved !== null) return saved;
+    return new Set(
+      RAIL_GROUPS.map((g) => g.title).filter((t): t is string => !!t),
+    );
+  });
 
   const activeGroupTitle = useMemo(() => {
     for (const g of visibleGroups) {
