@@ -247,7 +247,7 @@ async def create_prescription(
         raise HTTPException(
             status_code=403,
             detail="Only optometrists and managers can create prescriptions. "
-                   "Your role does not have clinical access."
+            "Your role does not have clinical access.",
         )
 
     is_admin = any(r in user_roles for r in ["SUPERADMIN", "ADMIN", "STORE_MANAGER"])
@@ -265,19 +265,32 @@ async def create_prescription(
             try:
                 sph_val = float(eye.sph)
                 if sph_val < -20.0 or sph_val > 20.0:
-                    raise HTTPException(status_code=422, detail=f"{eye_label} SPH must be between -20.00 and +20.00")
+                    raise HTTPException(
+                        status_code=422,
+                        detail=f"{eye_label} SPH must be between -20.00 and +20.00",
+                    )
             except ValueError:
-                raise HTTPException(status_code=422, detail=f"{eye_label} SPH must be a valid number")
+                raise HTTPException(
+                    status_code=422, detail=f"{eye_label} SPH must be a valid number"
+                )
         if eye.cyl:
             try:
                 cyl_val = float(eye.cyl)
                 if cyl_val < -10.0 or cyl_val > 10.0:
-                    raise HTTPException(status_code=422, detail=f"{eye_label} CYL must be between -10.00 and +10.00")
+                    raise HTTPException(
+                        status_code=422,
+                        detail=f"{eye_label} CYL must be between -10.00 and +10.00",
+                    )
             except ValueError:
-                raise HTTPException(status_code=422, detail=f"{eye_label} CYL must be a valid number")
+                raise HTTPException(
+                    status_code=422, detail=f"{eye_label} CYL must be a valid number"
+                )
         if eye.axis is not None:
             if not isinstance(eye.axis, int) or eye.axis < 1 or eye.axis > 180:
-                raise HTTPException(status_code=422, detail=f"{eye_label} AXIS must be whole number between 1 and 180")
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"{eye_label} AXIS must be whole number between 1 and 180",
+                )
 
     _validate_power("Right eye", rx.right_eye)
     _validate_power("Left eye", rx.left_eye)
@@ -356,7 +369,12 @@ async def validate_prescription(
     Returns {valid, expired, issues:[...]}."""
     repo = get_prescription_repository()
     if repo is None:
-        return {"prescription_id": prescription_id, "valid": True, "expired": False, "issues": []}
+        return {
+            "prescription_id": prescription_id,
+            "valid": True,
+            "expired": False,
+            "issues": [],
+        }
     rx = repo.find_by_id(prescription_id)
     if rx is None:
         raise HTTPException(status_code=404, detail="Prescription not found")
@@ -389,6 +407,7 @@ async def validate_prescription(
     expired = False
     try:
         from datetime import datetime as _dt
+
         test_date = rx.get("test_date") or rx.get("testDate") or rx.get("created_at")
         months = int(rx.get("validity_months") or rx.get("validityMonths") or 12)
         if test_date:
@@ -504,7 +523,10 @@ class PrescriptionVersionPayload(BaseModel):
     right_eye: Optional[VersionEyeData] = None
     left_eye: Optional[VersionEyeData] = None
     pd: Optional[float] = None
-    source: Optional[str] = Field(None, description="auto_ref | subjective_refraction | manual_override | optometrist_signoff | etc")
+    source: Optional[str] = Field(
+        None,
+        description="auto_ref | subjective_refraction | manual_override | optometrist_signoff | etc",
+    )
     override_reason: Optional[str] = None
     signed_off_by: Optional[str] = None  # Required for the `final` version
 
@@ -519,8 +541,11 @@ async def patch_prescription_version(
     """Write or overwrite one of the 4 Rx versions. Only writable
     while status='in_progress'. Use POST /finalize to lock the record."""
     from ..services.prescription_versions import (
-        VALID_VERSION_NAMES, merge_version, backfill_versions_from_top_level,
+        VALID_VERSION_NAMES,
+        merge_version,
+        backfill_versions_from_top_level,
     )
+
     if version_name not in VALID_VERSION_NAMES:
         raise HTTPException(
             status_code=400,
@@ -548,10 +573,13 @@ async def patch_prescription_version(
             raise HTTPException(status_code=409, detail=str(e))
         raise HTTPException(status_code=400, detail=str(e))
 
-    repo.update(prescription_id, {
-        "versions": new_doc["versions"],
-        "status": new_doc["status"],
-    })
+    repo.update(
+        prescription_id,
+        {
+            "versions": new_doc["versions"],
+            "status": new_doc["status"],
+        },
+    )
     return {"prescription_id": prescription_id, "versions": new_doc["versions"]}
 
 
@@ -564,8 +592,10 @@ async def finalize_prescription(
     right_eye/left_eye/pd for backwards-compat. Only optometrist /
     superadmin / admin can finalize."""
     from ..services.prescription_versions import (
-        can_finalize, mirror_final_to_top_level,
+        can_finalize,
+        mirror_final_to_top_level,
     )
+
     roles = current_user.get("roles") or []
     if not any(r in {"OPTOMETRIST", "SUPERADMIN", "ADMIN"} for r in roles):
         raise HTTPException(
@@ -588,13 +618,16 @@ async def finalize_prescription(
         )
 
     new_doc = mirror_final_to_top_level(doc)
-    repo.update(prescription_id, {
-        "right_eye": new_doc.get("right_eye"),
-        "left_eye": new_doc.get("left_eye"),
-        "pd": new_doc.get("pd"),
-        "status": "finalized",
-        "finalized_at": new_doc.get("finalized_at"),
-    })
+    repo.update(
+        prescription_id,
+        {
+            "right_eye": new_doc.get("right_eye"),
+            "left_eye": new_doc.get("left_eye"),
+            "pd": new_doc.get("pd"),
+            "status": "finalized",
+            "finalized_at": new_doc.get("finalized_at"),
+        },
+    )
     return {"prescription_id": prescription_id, "status": "finalized"}
 
 
@@ -606,6 +639,7 @@ async def get_prescription_versions(
     """Return all 4 versions for a prescription. Auto-backfills for
     legacy single-Rx docs."""
     from ..services.prescription_versions import backfill_versions_from_top_level
+
     repo = get_prescription_repository()
     if repo is None:
         raise HTTPException(status_code=503, detail="Database not available")
@@ -630,6 +664,7 @@ async def get_prescription_progression(
     for the clinical dashboard's progression chart ('is this myopia
     accelerating?')."""
     from ..services.prescription_versions import progression_diffs
+
     repo = get_prescription_repository()
     if repo is None:
         return {"customer_id": customer_id, "deltas": []}

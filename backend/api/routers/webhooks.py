@@ -66,18 +66,20 @@ router = APIRouter()
 # a wall of vendor cookies / x-forwarded-for chains. Lower-cased on read.
 # ============================================================================
 
-_KEEP_HEADERS = frozenset({
-    "content-type",
-    "user-agent",
-    "x-razorpay-signature",
-    "x-razorpay-event-id",
-    "x-shopify-hmac-sha256",
-    "x-shopify-topic",
-    "x-shopify-shop-domain",
-    "x-shopify-webhook-id",
-    "x-shiprocket-signature",
-    "x-shiprocket-event",
-})
+_KEEP_HEADERS = frozenset(
+    {
+        "content-type",
+        "user-agent",
+        "x-razorpay-signature",
+        "x-razorpay-event-id",
+        "x-shopify-hmac-sha256",
+        "x-shopify-topic",
+        "x-shopify-shop-domain",
+        "x-shopify-webhook-id",
+        "x-shiprocket-signature",
+        "x-shiprocket-event",
+    }
+)
 
 
 def _filter_headers(request: Request) -> Dict[str, str]:
@@ -97,6 +99,7 @@ def _get_db():
     """Same pattern as the rest of the routers."""
     try:
         from database.connection import get_db as _gd
+
         d = _gd()
         if d is None:
             return None
@@ -172,13 +175,17 @@ async def _ingest(
       8. 200.
     """
     raw_body = await request.body()
-    sig = request.headers.get(signature_header_name) or request.headers.get(signature_header_name.lower())
+    sig = request.headers.get(signature_header_name) or request.headers.get(
+        signature_header_name.lower()
+    )
 
     secret = _load_secret(vendor)
     if not secret:
         # Vendor's perspective: 200 OK, don't retry. Operator's perspective:
         # plain log line they'll grep for.
-        logger.info(f"[WEBHOOKS] {vendor}: no webhook_secret configured — skipping verification")
+        logger.info(
+            f"[WEBHOOKS] {vendor}: no webhook_secret configured — skipping verification"
+        )
         return {"status": "skipped", "reason": "secret_not_configured"}
 
     if not sig:
@@ -194,7 +201,9 @@ async def _ingest(
     except (UnicodeDecodeError, ValueError):
         # Signature was good but body isn't JSON. Persist the raw bytes as
         # a string so NEXUS / forensics can still see what came in.
-        payload = {"_unparseable_body": raw_body[:1024].decode("utf-8", errors="replace")}
+        payload = {
+            "_unparseable_body": raw_body[:1024].decode("utf-8", errors="replace")
+        }
 
     # Replay window — purely best-effort. Vendors don't always set a
     # consistent timestamp field; we look in three common spots.
@@ -211,7 +220,9 @@ async def _ingest(
     except Exception:
         replay_flag = False
     if replay_flag:
-        logger.warning(f"[WEBHOOKS] {vendor}: stale event timestamp {ts} — outside replay window")
+        logger.warning(
+            f"[WEBHOOKS] {vendor}: stale event timestamp {ts} — outside replay window"
+        )
         return {"status": "skipped", "reason": "replay_window_exceeded"}
 
     webhook_id = str(uuid.uuid4())
@@ -240,6 +251,7 @@ async def _ingest(
     # Dispatch the event so NEXUS picks it up on its next tick / immediately.
     try:
         from agents.registry import dispatch_event
+
         await dispatch_event(
             "webhook.received",
             {"webhook_id": webhook_id, "vendor": vendor},
@@ -303,4 +315,8 @@ async def receive_shiprocket(request: Request):
 
 @router.get("/health")
 async def webhooks_health():
-    return {"status": "ok", "module": "webhooks", "ts": datetime.now(timezone.utc).isoformat()}
+    return {
+        "status": "ok",
+        "module": "webhooks",
+        "ts": datetime.now(timezone.utc).isoformat(),
+    }

@@ -94,18 +94,12 @@ def validate_store_access(store_id: str, current_user: dict) -> str:
         user_store_ids = current_user.get("store_ids", [])
         if store_id in user_store_ids:
             return store_id
-        raise HTTPException(
-            status_code=403,
-            detail=f"No access to store {store_id}"
-        )
+        raise HTTPException(status_code=403, detail=f"No access to store {store_id}")
 
     # Other roles: must be in their store_ids list
     user_store_ids = current_user.get("store_ids", [])
     if store_id not in user_store_ids:
-        raise HTTPException(
-            status_code=403,
-            detail=f"No access to store {store_id}"
-        )
+        raise HTTPException(status_code=403, detail=f"No access to store {store_id}")
     return store_id
 
 
@@ -344,7 +338,9 @@ def get_vendor_portal_token_repository():
     db = get_db()
     if db is not None and db.is_connected:
         try:
-            return VendorPortalTokenRepository(db.get_collection("vendor_portal_tokens"))
+            return VendorPortalTokenRepository(
+                db.get_collection("vendor_portal_tokens")
+            )
         except Exception:
             return VendorPortalTokenRepository(db.vendor_portal_tokens)
     return None

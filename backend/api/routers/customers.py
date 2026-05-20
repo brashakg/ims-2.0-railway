@@ -18,10 +18,12 @@ def _sanitize_text(value: str) -> str:
     if not value:
         return value
     # Remove HTML tags
-    clean = re.sub(r'<[^>]+>', '', value)
+    clean = re.sub(r"<[^>]+>", "", value)
     # Remove control characters except newline/tab
-    clean = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', clean)
+    clean = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", clean)
     return clean.strip()
+
+
 from ..dependencies import get_customer_repository, validate_store_access
 
 router = APIRouter()
@@ -111,7 +113,9 @@ async def list_customers(
 
         # Store scoping: non-admin users only see customers from their store
         user_roles = current_user.get("roles", [])
-        is_hq_list = any(r in user_roles for r in ["SUPERADMIN", "ADMIN", "AREA_MANAGER"])
+        is_hq_list = any(
+            r in user_roles for r in ["SUPERADMIN", "ADMIN", "AREA_MANAGER"]
+        )
         if not is_hq_list:
             active_store = current_user.get("active_store_id")
             if active_store:
@@ -121,13 +125,16 @@ async def list_customers(
         if search:
             # Admins/Superadmins search all stores, others only their store
             user_roles = current_user.get("roles", [])
-            is_hq = any(r in user_roles for r in ["SUPERADMIN", "ADMIN", "AREA_MANAGER"])
+            is_hq = any(
+                r in user_roles for r in ["SUPERADMIN", "ADMIN", "AREA_MANAGER"]
+            )
             store_filter = None if is_hq else current_user.get("active_store_id")
             customers = repo.search_customers(search, store_filter)
         else:
             customers = repo.find_many(filter_dict, skip=skip, limit=limit)
 
         from ..utils.pagination import paginate
+
         total = repo.count(filter_dict) if not search else len(customers)
         page = (skip // limit) + 1 if limit > 0 else 1
         result = paginate(customers, page=page, page_size=limit, total=total)
@@ -161,7 +168,9 @@ async def create_customer(
             "mobile": customer.mobile,
             "email": customer.email,
             "dob": customer.dob.isoformat() if customer.dob else None,
-            "anniversary": customer.anniversary.isoformat() if customer.anniversary else None,
+            "anniversary": (
+                customer.anniversary.isoformat() if customer.anniversary else None
+            ),
             "gstin": customer.gstin,
             "billing_address": customer.billing_address,
             "marketing_consent": customer.marketing_consent,
@@ -263,7 +272,7 @@ async def search_customer_by_phone(
 @router.get("/mobile/{mobile}")
 async def get_customer_by_mobile(
     mobile: str = Path(..., description="Mobile number"),
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
     """Get customer by mobile number"""
     repo = get_customer_repository()
@@ -279,7 +288,7 @@ async def get_customer_by_mobile(
 @router.get("/{customer_id}")
 async def get_customer(
     customer_id: str = Path(..., description="Customer ID"),
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
     """Get customer by ID"""
     repo = get_customer_repository()
@@ -409,7 +418,7 @@ async def add_patient(
 @router.get("/{customer_id}/orders")
 async def get_customer_orders(
     customer_id: str = Path(..., description="Customer ID"),
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
     """Get orders for a customer"""
     # This will be implemented when we connect OrderRepository
@@ -419,7 +428,7 @@ async def get_customer_orders(
 @router.get("/{customer_id}/prescriptions")
 async def get_customer_prescriptions(
     customer_id: str = Path(..., description="Customer ID"),
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
     """Get prescriptions for a customer"""
     # This will be implemented when we connect PrescriptionRepository

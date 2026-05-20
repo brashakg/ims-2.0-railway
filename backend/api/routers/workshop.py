@@ -61,25 +61,28 @@ class FittingDetails(BaseModel):
     the workshop to accept the job (sales explicitly confirming that
     power + product details are correct).
     """
-    dia: Optional[str] = None            # Lens diameter (e.g. "65", "70")
-    fh: Optional[str] = None             # Fitting height (for progressive/bifocal)
-    b_size: Optional[str] = None         # Lens vertical measurement
-    dbl: Optional[str] = None            # Distance between lenses (bridge width)
-    tint: Optional[str] = None           # Tint colour / percentage
-    base_curve: Optional[str] = None     # Base curve (e.g. "6", "8")
-    coating: Optional[str] = None        # Coating name (redundant with lens_details.coating but captured here for sales confirmation)
-    other: Optional[str] = None          # Free-text notes
-    order_date: Optional[str] = None     # ISO date (auto-filled on save)
-    order_time: Optional[str] = None     # HH:MM (auto-filled on save)
-    ordered_by: Optional[str] = None     # User id of sales staff
+
+    dia: Optional[str] = None  # Lens diameter (e.g. "65", "70")
+    fh: Optional[str] = None  # Fitting height (for progressive/bifocal)
+    b_size: Optional[str] = None  # Lens vertical measurement
+    dbl: Optional[str] = None  # Distance between lenses (bridge width)
+    tint: Optional[str] = None  # Tint colour / percentage
+    base_curve: Optional[str] = None  # Base curve (e.g. "6", "8")
+    coating: Optional[str] = (
+        None  # Coating name (redundant with lens_details.coating but captured here for sales confirmation)
+    )
+    other: Optional[str] = None  # Free-text notes
+    order_date: Optional[str] = None  # ISO date (auto-filled on save)
+    order_time: Optional[str] = None  # HH:MM (auto-filled on save)
+    ordered_by: Optional[str] = None  # User id of sales staff
     ordered_by_name: Optional[str] = None
     expected_lens_receive_date: Optional[date] = None
     # Phase 6.8 — vendor (lens supplier) PO reference. Sales enters the ID
     # issued when the lens was ordered from Zeiss / Essilor / etc; workshop
     # + finance use it to reconcile incoming lens stock.
     vendor_order_id: Optional[str] = None
-    confirmed_by_sales: bool = False     # Must be True to submit
-    confirmed_at: Optional[str] = None   # ISO timestamp
+    confirmed_by_sales: bool = False  # Must be True to submit
+    confirmed_at: Optional[str] = None  # ISO timestamp
 
 
 class WorkshopJobCreate(BaseModel):
@@ -103,6 +106,7 @@ class WorkshopJobUpdate(BaseModel):
 
 class FittingDetailsUpdate(BaseModel):
     """Payload for PATCH /workshop/jobs/{id}/fitting-details."""
+
     fitting_details: FittingDetails
 
 
@@ -111,6 +115,7 @@ class WorkshopVendorPatch(BaseModel):
     the lens lab handling this job. All fields are individually optional;
     we only update what's supplied (so a partial form save doesn't blow
     away tracking_url, etc.)."""
+
     vendor_id: Optional[str] = None
     vendor_order_id: Optional[str] = None
     vendor_tracking_url: Optional[str] = None
@@ -122,6 +127,7 @@ class WorkshopVendorStatusBody(BaseModel):
     """Payload for POST /workshop/jobs/{id}/vendor-status — admin (IMS user)
     logging a vendor-status update on behalf of the lab (e.g. lab phoned
     them). Source on the resulting history row is `ims_user`."""
+
     status: str
     note: Optional[str] = None
 
@@ -134,7 +140,9 @@ class WorkshopVendorStatusBody(BaseModel):
 def generate_job_number(repo=None) -> str:
     """Generate unique workshop job number with collision retry."""
     for _ in range(5):
-        candidate = f"WS-{datetime.now().strftime('%y%m%d')}-{uuid.uuid4().hex[:8].upper()}"
+        candidate = (
+            f"WS-{datetime.now().strftime('%y%m%d')}-{uuid.uuid4().hex[:8].upper()}"
+        )
         if repo is not None:
             try:
                 existing = repo.collection.find_one({"job_number": candidate})
@@ -198,11 +206,16 @@ def job_to_frontend(job: dict) -> dict:
 
 # NOTE: Specific routes MUST come before /jobs/{job_id}
 
+
 @router.get("")
 @router.get("/")
 async def get_workshop_root():
     """Root endpoint for workshop job list"""
-    return {"module": "workshop", "status": "active", "message": "workshop jobs endpoint ready"}
+    return {
+        "module": "workshop",
+        "status": "active",
+        "message": "workshop jobs endpoint ready",
+    }
 
 
 @router.get("/pending")
@@ -376,7 +389,11 @@ async def get_dashboard_kpis(
         # DELIVERED, so the "what shipped today" number is always live.
         completed_at = job.get("completed_at")
         if completed_at:
-            ca_str = completed_at if isinstance(completed_at, str) else completed_at.isoformat()
+            ca_str = (
+                completed_at
+                if isinstance(completed_at, str)
+                else completed_at.isoformat()
+            )
             if ca_str.startswith(today_str):
                 completed_today += 1
 
@@ -393,8 +410,16 @@ async def get_dashboard_kpis(
             cr = job.get("created_at")
             if ca and cr:
                 try:
-                    ca_dt = ca if isinstance(ca, datetime) else datetime.fromisoformat(str(ca).replace("Z", "+00:00"))
-                    cr_dt = cr if isinstance(cr, datetime) else datetime.fromisoformat(str(cr).replace("Z", "+00:00"))
+                    ca_dt = (
+                        ca
+                        if isinstance(ca, datetime)
+                        else datetime.fromisoformat(str(ca).replace("Z", "+00:00"))
+                    )
+                    cr_dt = (
+                        cr
+                        if isinstance(cr, datetime)
+                        else datetime.fromisoformat(str(cr).replace("Z", "+00:00"))
+                    )
                     days = (ca_dt - cr_dt).total_seconds() / 86400.0
                     if days >= 0:
                         turnaround_samples.append(days)
@@ -410,7 +435,7 @@ async def get_dashboard_kpis(
         avg_turnaround = None
 
     return {
-        "pending": pending,                   # PENDING + IN_PROGRESS
+        "pending": pending,  # PENDING + IN_PROGRESS
         "in_progress": in_progress,
         "qc_failed": qc_failed,
         "ready_for_pickup": ready,
@@ -447,9 +472,10 @@ async def list_jobs_by_vendor(
     if not include_delivered:
         filter_dict["status"] = {"$nin": ["DELIVERED", "CANCELLED"]}
 
-    jobs = repo.find_many(
-        filter_dict, skip=skip, limit=limit, sort=[("expected_date", 1)]
-    ) or []
+    jobs = (
+        repo.find_many(filter_dict, skip=skip, limit=limit, sort=[("expected_date", 1)])
+        or []
+    )
 
     return {
         "vendor_id": vendor_id,
@@ -515,7 +541,9 @@ async def create_job(
             "special_notes": job.special_notes,
             "expected_date": job.expected_date.isoformat(),
             "fitting_details": (
-                job.fitting_details.model_dump(mode="json") if job.fitting_details else None
+                job.fitting_details.model_dump(mode="json")
+                if job.fitting_details
+                else None
             ),
             "status": "PENDING",
             "created_by": current_user.get("user_id"),
@@ -638,7 +666,7 @@ async def update_job_status(
             raise HTTPException(
                 status_code=400,
                 detail=f"Cannot transition from {current_status} to {status}. "
-                       f"Allowed: {', '.join(sorted(allowed)) if allowed else 'none (terminal state)'}."
+                f"Allowed: {', '.join(sorted(allowed)) if allowed else 'none (terminal state)'}.",
             )
 
         if repo.update_status(job_id, status, current_user.get("user_id"), notes):
@@ -678,16 +706,22 @@ async def assign_job(
 
         # Validate technician exists and has WORKSHOP_STAFF role
         from ..dependencies import get_user_repository
+
         user_repo = get_user_repository()
         if user_repo:
             tech_user = user_repo.find_by_id(technician_id)
             if tech_user is None:
-                raise HTTPException(status_code=404, detail=f"Technician {technician_id} not found")
+                raise HTTPException(
+                    status_code=404, detail=f"Technician {technician_id} not found"
+                )
             tech_roles = tech_user.get("roles", [])
-            if not any(r in tech_roles for r in ["WORKSHOP_STAFF", "STORE_MANAGER", "ADMIN", "SUPERADMIN"]):
+            if not any(
+                r in tech_roles
+                for r in ["WORKSHOP_STAFF", "STORE_MANAGER", "ADMIN", "SUPERADMIN"]
+            ):
                 raise HTTPException(
                     status_code=400,
-                    detail=f"User {tech_user.get('full_name', technician_id)} is not a workshop technician"
+                    detail=f"User {tech_user.get('full_name', technician_id)} is not a workshop technician",
                 )
 
         if repo.assign_technician(job_id, technician_id):
@@ -800,14 +834,18 @@ async def rework_job(
 
         if job.get("status") != "QC_FAILED":
             raise HTTPException(
-                status_code=400,
-                detail="Only QC_FAILED jobs can be sent for rework"
+                status_code=400, detail="Only QC_FAILED jobs can be sent for rework"
             )
 
         rework_count = job.get("rework_count", 0) + 1
         repo.update(job_id, {"rework_count": rework_count})
 
-        if repo.update_status(job_id, "IN_PROGRESS", current_user.get("user_id"), notes or f"Rework #{rework_count}"):
+        if repo.update_status(
+            job_id,
+            "IN_PROGRESS",
+            current_user.get("user_id"),
+            notes or f"Rework #{rework_count}",
+        ):
             return {
                 "job_id": job_id,
                 "status": "IN_PROGRESS",
@@ -851,8 +889,19 @@ async def patch_job_vendor(
     # Only admin / store-manager / workshop-staff can assign vendors. Sales
     # staff can see jobs but shouldn't be touching vendor IDs.
     user_roles = current_user.get("roles", [])
-    if not any(r in user_roles for r in ["SUPERADMIN", "ADMIN", "AREA_MANAGER", "STORE_MANAGER", "WORKSHOP_STAFF"]):
-        raise HTTPException(status_code=403, detail="Not authorized to manage vendor assignment")
+    if not any(
+        r in user_roles
+        for r in [
+            "SUPERADMIN",
+            "ADMIN",
+            "AREA_MANAGER",
+            "STORE_MANAGER",
+            "WORKSHOP_STAFF",
+        ]
+    ):
+        raise HTTPException(
+            status_code=403, detail="Not authorized to manage vendor assignment"
+        )
 
     update = payload.model_dump(exclude_unset=True, exclude_none=True)
     if not update:
@@ -878,14 +927,16 @@ async def patch_job_vendor(
     try:
         audit = get_audit_repository()
         if audit is not None:
-            audit.create({
-                "action": "workshop.vendor_assign",
-                "entity_type": "workshop_job",
-                "entity_id": job_id,
-                "store_id": job.get("store_id"),
-                "user_id": current_user.get("user_id"),
-                "detail": update,
-            })
+            audit.create(
+                {
+                    "action": "workshop.vendor_assign",
+                    "entity_type": "workshop_job",
+                    "entity_id": job_id,
+                    "store_id": job.get("store_id"),
+                    "user_id": current_user.get("user_id"),
+                    "detail": update,
+                }
+            )
     except Exception as e:
         logger.warning(f"workshop vendor_assign audit failed: {e}")
 
@@ -948,19 +999,21 @@ async def post_admin_vendor_status(
     try:
         audit = get_audit_repository()
         if audit is not None:
-            audit.create({
-                "action": "workshop.vendor_status",
-                "entity_type": "workshop_job",
-                "entity_id": job_id,
-                "store_id": job.get("store_id"),
-                "user_id": current_user.get("user_id"),
-                "detail": {
-                    "vendor_id": job.get("vendor_id"),
-                    "status": payload.status,
-                    "source": "ims_user",
-                    "note": payload.note,
-                },
-            })
+            audit.create(
+                {
+                    "action": "workshop.vendor_status",
+                    "entity_type": "workshop_job",
+                    "entity_id": job_id,
+                    "store_id": job.get("store_id"),
+                    "user_id": current_user.get("user_id"),
+                    "detail": {
+                        "vendor_id": job.get("vendor_id"),
+                        "status": payload.status,
+                        "source": "ims_user",
+                        "note": payload.note,
+                    },
+                }
+            )
     except Exception as e:
         logger.warning(f"workshop vendor_status (ims) audit failed: {e}")
 

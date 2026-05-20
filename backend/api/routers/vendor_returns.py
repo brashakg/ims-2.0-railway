@@ -51,9 +51,9 @@ def _get_db():
     """Get raw MongoDB database for collections without a dedicated repository"""
     try:
         conn = get_db()
-        if conn is not None and hasattr(conn, 'db'):
+        if conn is not None and hasattr(conn, "db"):
             return conn.db
-        elif hasattr(conn, 'client'):
+        elif hasattr(conn, "client"):
             return conn.client.ims_db
     except Exception:
         pass
@@ -109,10 +109,7 @@ async def list_vendor_returns(
 
         # Get paginated results
         returns = list(
-            collection.find(filter_dict)
-            .sort("created_at", -1)
-            .skip(skip)
-            .limit(limit)
+            collection.find(filter_dict).sort("created_at", -1).skip(skip).limit(limit)
         )
 
         # Clean up MongoDB _id field for response
@@ -123,7 +120,10 @@ async def list_vendor_returns(
         return {"returns": returns, "total": total}
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail="A database error occurred. Please try again or contact support.")
+        raise HTTPException(
+            status_code=500,
+            detail="A database error occurred. Please try again or contact support.",
+        )
 
 
 @router.post("", status_code=201)
@@ -186,7 +186,9 @@ async def create_vendor_return(
         }
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail="Failed to create return. Please try again.")
+        raise HTTPException(
+            status_code=500, detail="Failed to create return. Please try again."
+        )
 
 
 @router.get("/{return_id}")
@@ -214,7 +216,10 @@ async def get_vendor_return(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail="A database error occurred. Please try again or contact support.")
+        raise HTTPException(
+            status_code=500,
+            detail="A database error occurred. Please try again or contact support.",
+        )
 
 
 @router.patch("/{return_id}/status")
@@ -300,4 +305,7 @@ async def update_return_status(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail="A database error occurred. Please try again or contact support.")
+        raise HTTPException(
+            status_code=500,
+            detail="A database error occurred. Please try again or contact support.",
+        )

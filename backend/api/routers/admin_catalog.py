@@ -42,10 +42,12 @@ router = APIRouter(dependencies=[Depends(_require_admin_role)])
 # DB HELPERS
 # ============================================================================
 
+
 def _coll(name: str):
     """Return the named Mongo collection or None if DB is offline."""
     try:
         from database.connection import get_db
+
         db = get_db()
         if db and db.is_connected:
             return db.get_collection(name)
@@ -70,7 +72,12 @@ def _new_id() -> str:
     return str(uuid.uuid4())
 
 
-def _list_envelope(coll_name: str, plural_key: str, filter_: Optional[Dict] = None, sort_field: str = "name") -> Dict:
+def _list_envelope(
+    coll_name: str,
+    plural_key: str,
+    filter_: Optional[Dict] = None,
+    sort_field: str = "name",
+) -> Dict:
     """Standard list-response shape for any master-data collection."""
     coll = _coll(coll_name)
     if coll is None:
@@ -141,8 +148,11 @@ def _get_doc(coll_name: str, id_field: str, doc_id: str) -> Dict:
 # are physical SKU-prefix codes (FRAME, LENS, ...). These are the ADMIN
 # editable category masters with HSN code, GST rate, and discount cap.
 
+
 class CategoryCreate(BaseModel):
-    code: str = Field(..., min_length=2, max_length=24, description="SKU/HSN prefix code")
+    code: str = Field(
+        ..., min_length=2, max_length=24, description="SKU/HSN prefix code"
+    )
     name: str = Field(..., min_length=2, max_length=80)
     hsnCode: str = Field(..., min_length=4, max_length=12)
     gstRate: float = Field(..., ge=0, le=28)
@@ -174,13 +184,20 @@ async def get_category(category_id: str):
 async def create_category(payload: CategoryCreate):
     coll = _coll("category_masters")
     if coll is not None and coll.find_one({"code": payload.code}):
-        raise HTTPException(status_code=409, detail=f"Category code '{payload.code}' already exists")
+        raise HTTPException(
+            status_code=409, detail=f"Category code '{payload.code}' already exists"
+        )
     return _create_doc("category_masters", payload.model_dump(), "category_id")
 
 
 @router.put("/categories/{category_id}")
 async def update_category(category_id: str, payload: CategoryUpdate):
-    return _update_doc("category_masters", "category_id", category_id, payload.model_dump(exclude_unset=True))
+    return _update_doc(
+        "category_masters",
+        "category_id",
+        category_id,
+        payload.model_dump(exclude_unset=True),
+    )
 
 
 @router.delete("/categories/{category_id}")
@@ -192,10 +209,13 @@ async def delete_category(category_id: str):
 # BRANDS — /api/v1/admin/brands  (and brand subbrands)
 # ============================================================================
 
+
 class BrandCreate(BaseModel):
     name: str = Field(..., min_length=2, max_length=80)
     code: str = Field(..., min_length=2, max_length=24)
-    categories: List[str] = Field(default_factory=list, description="Category codes this brand applies to")
+    categories: List[str] = Field(
+        default_factory=list, description="Category codes this brand applies to"
+    )
     tier: str = Field(..., description="MASS | PREMIUM | LUXURY")
     warranty: Optional[int] = Field(None, ge=0, le=120, description="Warranty months")
     description: Optional[str] = None
@@ -231,15 +251,21 @@ async def get_brand(brand_id: str):
 async def create_brand(payload: BrandCreate):
     coll = _coll("brand_masters")
     if coll is not None and coll.find_one({"code": payload.code}):
-        raise HTTPException(status_code=409, detail=f"Brand code '{payload.code}' already exists")
+        raise HTTPException(
+            status_code=409, detail=f"Brand code '{payload.code}' already exists"
+        )
     if payload.tier not in {"MASS", "PREMIUM", "LUXURY"}:
-        raise HTTPException(status_code=400, detail="tier must be MASS, PREMIUM, or LUXURY")
+        raise HTTPException(
+            status_code=400, detail="tier must be MASS, PREMIUM, or LUXURY"
+        )
     return _create_doc("brand_masters", payload.model_dump(), "brand_id")
 
 
 @router.put("/brands/{brand_id}")
 async def update_brand(brand_id: str, payload: BrandUpdate):
-    return _update_doc("brand_masters", "brand_id", brand_id, payload.model_dump(exclude_unset=True))
+    return _update_doc(
+        "brand_masters", "brand_id", brand_id, payload.model_dump(exclude_unset=True)
+    )
 
 
 @router.delete("/brands/{brand_id}")
@@ -249,6 +275,7 @@ async def delete_brand(brand_id: str):
 
 # Subbrands are nested under brands. Stored in their own collection
 # with a `brand_id` foreign key for index efficiency.
+
 
 class SubbrandCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=80)
@@ -260,7 +287,9 @@ class SubbrandCreate(BaseModel):
 async def list_subbrands(brand_id: str):
     # Verify the parent brand exists (404 early if not)
     _get_doc("brand_masters", "brand_id", brand_id)
-    return _list_envelope("subbrand_masters", "subbrands", filter_={"brand_id": brand_id})
+    return _list_envelope(
+        "subbrand_masters", "subbrands", filter_={"brand_id": brand_id}
+    )
 
 
 @router.post("/brands/{brand_id}/subbrands", status_code=201)
@@ -268,7 +297,10 @@ async def create_subbrand(brand_id: str, payload: SubbrandCreate):
     _get_doc("brand_masters", "brand_id", brand_id)
     coll = _coll("subbrand_masters")
     if coll is not None and coll.find_one({"brand_id": brand_id, "code": payload.code}):
-        raise HTTPException(status_code=409, detail=f"Subbrand code '{payload.code}' already exists for this brand")
+        raise HTTPException(
+            status_code=409,
+            detail=f"Subbrand code '{payload.code}' already exists for this brand",
+        )
     body = payload.model_dump()
     body["brand_id"] = brand_id
     return _create_doc("subbrand_masters", body, "subbrand_id")
@@ -291,6 +323,7 @@ async def delete_subbrand(brand_id: str, subbrand_id: str):
 # Five collections; the pricing matrix is keyed on (brandId, indexId, category)
 # so it sits over the others.
 
+
 class LensBrandCreate(BaseModel):
     name: str = Field(..., min_length=2, max_length=80)
     code: str = Field(..., min_length=2, max_length=24)
@@ -305,7 +338,9 @@ class LensBrandUpdate(BaseModel):
 
 class LensIndexCreate(BaseModel):
     value: str = Field(..., description="e.g. 1.50, 1.56, 1.60, 1.67, 1.74")
-    multiplier: float = Field(..., gt=0, le=10, description="Pricing multiplier vs base")
+    multiplier: float = Field(
+        ..., gt=0, le=10, description="Pricing multiplier vs base"
+    )
     description: Optional[str] = None
 
 
@@ -348,11 +383,14 @@ class LensAddonUpdate(BaseModel):
 class LensPricingCreate(BaseModel):
     brandId: str
     indexId: str
-    category: str = Field(..., description="Lens category, e.g. SINGLE_VISION, BIFOCAL, PROGRESSIVE")
+    category: str = Field(
+        ..., description="Lens category, e.g. SINGLE_VISION, BIFOCAL, PROGRESSIVE"
+    )
     basePrice: float = Field(..., ge=0)
 
 
 # ---------------- Lens brands ----------------
+
 
 @router.get("/lens/brands")
 async def list_lens_brands():
@@ -363,13 +401,20 @@ async def list_lens_brands():
 async def create_lens_brand(payload: LensBrandCreate):
     coll = _coll("lens_brand_masters")
     if coll is not None and coll.find_one({"code": payload.code}):
-        raise HTTPException(status_code=409, detail=f"Lens brand code '{payload.code}' already exists")
+        raise HTTPException(
+            status_code=409, detail=f"Lens brand code '{payload.code}' already exists"
+        )
     return _create_doc("lens_brand_masters", payload.model_dump(), "brand_id")
 
 
 @router.put("/lens/brands/{brand_id}")
 async def update_lens_brand(brand_id: str, payload: LensBrandUpdate):
-    return _update_doc("lens_brand_masters", "brand_id", brand_id, payload.model_dump(exclude_unset=True))
+    return _update_doc(
+        "lens_brand_masters",
+        "brand_id",
+        brand_id,
+        payload.model_dump(exclude_unset=True),
+    )
 
 
 @router.delete("/lens/brands/{brand_id}")
@@ -378,6 +423,7 @@ async def delete_lens_brand(brand_id: str):
 
 
 # ---------------- Lens indices ----------------
+
 
 @router.get("/lens/indices")
 async def list_lens_indices():
@@ -388,13 +434,20 @@ async def list_lens_indices():
 async def create_lens_index(payload: LensIndexCreate):
     coll = _coll("lens_index_masters")
     if coll is not None and coll.find_one({"value": payload.value}):
-        raise HTTPException(status_code=409, detail=f"Lens index '{payload.value}' already exists")
+        raise HTTPException(
+            status_code=409, detail=f"Lens index '{payload.value}' already exists"
+        )
     return _create_doc("lens_index_masters", payload.model_dump(), "index_id")
 
 
 @router.put("/lens/indices/{index_id}")
 async def update_lens_index(index_id: str, payload: LensIndexUpdate):
-    return _update_doc("lens_index_masters", "index_id", index_id, payload.model_dump(exclude_unset=True))
+    return _update_doc(
+        "lens_index_masters",
+        "index_id",
+        index_id,
+        payload.model_dump(exclude_unset=True),
+    )
 
 
 @router.delete("/lens/indices/{index_id}")
@@ -403,6 +456,7 @@ async def delete_lens_index(index_id: str):
 
 
 # ---------------- Lens coatings ----------------
+
 
 @router.get("/lens/coatings")
 async def list_lens_coatings():
@@ -413,13 +467,20 @@ async def list_lens_coatings():
 async def create_lens_coating(payload: LensCoatingCreate):
     coll = _coll("lens_coating_masters")
     if coll is not None and coll.find_one({"code": payload.code}):
-        raise HTTPException(status_code=409, detail=f"Lens coating code '{payload.code}' already exists")
+        raise HTTPException(
+            status_code=409, detail=f"Lens coating code '{payload.code}' already exists"
+        )
     return _create_doc("lens_coating_masters", payload.model_dump(), "coating_id")
 
 
 @router.put("/lens/coatings/{coating_id}")
 async def update_lens_coating(coating_id: str, payload: LensCoatingUpdate):
-    return _update_doc("lens_coating_masters", "coating_id", coating_id, payload.model_dump(exclude_unset=True))
+    return _update_doc(
+        "lens_coating_masters",
+        "coating_id",
+        coating_id,
+        payload.model_dump(exclude_unset=True),
+    )
 
 
 @router.delete("/lens/coatings/{coating_id}")
@@ -428,6 +489,7 @@ async def delete_lens_coating(coating_id: str):
 
 
 # ---------------- Lens add-ons ----------------
+
 
 @router.get("/lens/addons")
 async def list_lens_addons():
@@ -438,13 +500,20 @@ async def list_lens_addons():
 async def create_lens_addon(payload: LensAddonCreate):
     coll = _coll("lens_addon_masters")
     if coll is not None and coll.find_one({"code": payload.code}):
-        raise HTTPException(status_code=409, detail=f"Lens addon code '{payload.code}' already exists")
+        raise HTTPException(
+            status_code=409, detail=f"Lens addon code '{payload.code}' already exists"
+        )
     return _create_doc("lens_addon_masters", payload.model_dump(), "addon_id")
 
 
 @router.put("/lens/addons/{addon_id}")
 async def update_lens_addon(addon_id: str, payload: LensAddonUpdate):
-    return _update_doc("lens_addon_masters", "addon_id", addon_id, payload.model_dump(exclude_unset=True))
+    return _update_doc(
+        "lens_addon_masters",
+        "addon_id",
+        addon_id,
+        payload.model_dump(exclude_unset=True),
+    )
 
 
 @router.delete("/lens/addons/{addon_id}")
@@ -456,12 +525,15 @@ async def delete_lens_addon(addon_id: str):
 # Uniqueness composite key: (brand_id, index_id, category). POST is upsert
 # semantics — re-posting the same triple replaces the basePrice.
 
+
 @router.get("/lens/pricing")
 async def list_lens_pricing(brand_id: Optional[str] = None):
     filter_: Dict = {}
     if brand_id:
         filter_["brandId"] = brand_id
-    return _list_envelope("lens_pricing_masters", "pricing", filter_=filter_, sort_field="basePrice")
+    return _list_envelope(
+        "lens_pricing_masters", "pricing", filter_=filter_, sort_field="basePrice"
+    )
 
 
 @router.post("/lens/pricing", status_code=201)
@@ -503,10 +575,16 @@ async def upsert_lens_pricing(payload: LensPricingCreate):
 class LensPricingRangeCreate(BaseModel):
     brand_id: str
     index_id: str
-    category: str = Field(..., description="SINGLE_VISION | BIFOCAL | PROGRESSIVE | OFFICE")
+    category: str = Field(
+        ..., description="SINGLE_VISION | BIFOCAL | PROGRESSIVE | OFFICE"
+    )
     parameter: str = Field(..., description="sphere | cylinder | addition")
-    min_value: float = Field(..., description="Inclusive (signed; absolute value used for matching)")
-    max_value: float = Field(..., description="Inclusive (signed; absolute value used for matching)")
+    min_value: float = Field(
+        ..., description="Inclusive (signed; absolute value used for matching)"
+    )
+    max_value: float = Field(
+        ..., description="Inclusive (signed; absolute value used for matching)"
+    )
     base_price: float = Field(..., ge=0)
 
 
@@ -554,11 +632,18 @@ async def list_lens_pricing_ranges(
 @router.post("/lens/pricing-ranges", status_code=201)
 async def create_lens_pricing_range(payload: LensPricingRangeCreate):
     if payload.parameter not in _VALID_PARAMS:
-        raise HTTPException(status_code=400, detail=f"parameter must be one of {sorted(_VALID_PARAMS)}")
+        raise HTTPException(
+            status_code=400, detail=f"parameter must be one of {sorted(_VALID_PARAMS)}"
+        )
     if payload.category not in _VALID_CATEGORIES:
-        raise HTTPException(status_code=400, detail=f"category must be one of {sorted(_VALID_CATEGORIES)}")
+        raise HTTPException(
+            status_code=400,
+            detail=f"category must be one of {sorted(_VALID_CATEGORIES)}",
+        )
     if abs(payload.min_value) > abs(payload.max_value):
-        raise HTTPException(status_code=400, detail="abs(min_value) must be ≤ abs(max_value)")
+        raise HTTPException(
+            status_code=400, detail="abs(min_value) must be ≤ abs(max_value)"
+        )
 
     coll = _coll("lens_pricing_ranges")
     if coll is None:
@@ -566,12 +651,17 @@ async def create_lens_pricing_range(payload: LensPricingRangeCreate):
 
     # Overlap detection — same key + overlapping bracket = 409
     from ..services.lens_pricing import detect_overlap
-    existing = list(coll.find({
-        "brand_id": payload.brand_id,
-        "index_id": payload.index_id,
-        "category": payload.category,
-        "parameter": payload.parameter,
-    }))
+
+    existing = list(
+        coll.find(
+            {
+                "brand_id": payload.brand_id,
+                "index_id": payload.index_id,
+                "category": payload.category,
+                "parameter": payload.parameter,
+            }
+        )
+    )
     body = payload.model_dump()
     overlap = detect_overlap(body, [_scrub(dict(r)) for r in existing if r])
     if overlap is not None:
@@ -586,7 +676,10 @@ async def create_lens_pricing_range(payload: LensPricingRangeCreate):
 @router.put("/lens/pricing-ranges/{range_id}")
 async def update_lens_pricing_range(range_id: str, payload: LensPricingRangeUpdate):
     return _update_doc(
-        "lens_pricing_ranges", "range_id", range_id, payload.model_dump(exclude_unset=True)
+        "lens_pricing_ranges",
+        "range_id",
+        range_id,
+        payload.model_dump(exclude_unset=True),
     )
 
 
@@ -599,7 +692,9 @@ async def delete_lens_pricing_range(range_id: str):
         raise HTTPException(status_code=503, detail="Database not available")
     if not coll.find_one({"range_id": range_id}):
         raise HTTPException(status_code=404, detail=f"Range {range_id} not found")
-    coll.update_one({"range_id": range_id}, {"$set": {"is_active": False, "updated_at": _now()}})
+    coll.update_one(
+        {"range_id": range_id}, {"$set": {"is_active": False, "updated_at": _now()}}
+    )
     return {"deactivated": True, "range_id": range_id}
 
 
@@ -614,9 +709,15 @@ async def bulk_create_lens_pricing_ranges(payload: List[LensPricingRangeCreate])
     created: List[Dict] = []
     for item in payload:
         if item.parameter not in _VALID_PARAMS:
-            raise HTTPException(status_code=400, detail=f"parameter must be one of {sorted(_VALID_PARAMS)}")
+            raise HTTPException(
+                status_code=400,
+                detail=f"parameter must be one of {sorted(_VALID_PARAMS)}",
+            )
         if item.category not in _VALID_CATEGORIES:
-            raise HTTPException(status_code=400, detail=f"category must be one of {sorted(_VALID_CATEGORIES)}")
+            raise HTTPException(
+                status_code=400,
+                detail=f"category must be one of {sorted(_VALID_CATEGORIES)}",
+            )
         body = item.model_dump()
         body["range_id"] = _new_id()
         body["_id"] = body["range_id"]
@@ -644,10 +745,20 @@ async def quote_lens_price(payload: LensPriceQuoteInput):
     coll_index = _coll("lens_index_masters")
     coll_coatings = _coll("lens_coating_masters")
 
-    ranges = list(coll_ranges.find({"is_active": True})) if coll_ranges is not None else []
+    ranges = (
+        list(coll_ranges.find({"is_active": True})) if coll_ranges is not None else []
+    )
     exact_pricing = list(coll_exact.find({})) if coll_exact is not None else []
-    brand = coll_brand.find_one({"brand_id": payload.brand_id}) if coll_brand is not None else None
-    index_master = coll_index.find_one({"index_id": payload.index_id}) if coll_index is not None else None
+    brand = (
+        coll_brand.find_one({"brand_id": payload.brand_id})
+        if coll_brand is not None
+        else None
+    )
+    index_master = (
+        coll_index.find_one({"index_id": payload.index_id})
+        if coll_index is not None
+        else None
+    )
     coating_masters = list(coll_coatings.find({})) if coll_coatings is not None else []
 
     rx = {
@@ -684,6 +795,7 @@ async def quote_lens_price(payload: LensPriceQuoteInput):
 # generate-sku is pure utility: builds an SKU string from category +
 # brand + model_no without persisting anything.
 
+
 class GenerateSkuInput(BaseModel):
     category: str
     brand: str
@@ -701,7 +813,12 @@ async def generate_product_sku(payload: GenerateSkuInput):
     model = (payload.model_no or "").upper().strip().replace(" ", "")[:8]
     rand = uuid.uuid4().hex[:4].upper()
     sku = "-".join(p for p in (cat, brand, model, rand) if p)
-    return {"sku": sku, "category": payload.category, "brand": payload.brand, "model_no": payload.model_no}
+    return {
+        "sku": sku,
+        "category": payload.category,
+        "brand": payload.brand,
+        "model_no": payload.model_no,
+    }
 
 
 @router.post("/products/bulk-import", status_code=202)
@@ -755,6 +872,7 @@ async def bulk_import_products(
 # These thin aliases route admin-prefixed calls to the same `products`
 # Mongo collection so the catalog page works end-to-end.
 
+
 @router.get("/products")
 async def list_products(
     search: Optional[str] = None,
@@ -799,7 +917,13 @@ async def create_product(payload: Dict[str, Any]):
     if coll is None:
         raise HTTPException(status_code=503, detail="Database not available")
     pid = _new_id()
-    body = {**payload, "product_id": pid, "_id": pid, "created_at": _now(), "updated_at": _now()}
+    body = {
+        **payload,
+        "product_id": pid,
+        "_id": pid,
+        "created_at": _now(),
+        "updated_at": _now(),
+    }
     body.setdefault("is_active", True)
     coll.insert_one(body)
     return _scrub(body) or {}
@@ -814,7 +938,9 @@ async def update_product(product_id: str, updates: Dict[str, Any]):
         raise HTTPException(status_code=404, detail="Product not found")
     updates = {k: v for k, v in updates.items() if k not in ("_id", "product_id")}
     updates["updated_at"] = _now()
-    coll.update_one({"$or": [{"product_id": product_id}, {"_id": product_id}]}, {"$set": updates})
+    coll.update_one(
+        {"$or": [{"product_id": product_id}, {"_id": product_id}]}, {"$set": updates}
+    )
     doc = coll.find_one({"$or": [{"product_id": product_id}, {"_id": product_id}]})
     return _scrub(doc) or {}
 

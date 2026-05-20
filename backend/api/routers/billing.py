@@ -83,10 +83,20 @@ def get_gst_rate_by_category(category: str) -> float:
     """
     category_upper = (category or "").upper().strip()
     five_percent_categories = {
-        "FRAMES", "FRAME", "EYEGLASS_FRAME",
-        "LENSES", "LENS", "RX_LENSES", "EYEGLASS_LENS", "OPTICAL_LENS",
-        "CONTACT_LENSES", "CONTACT_LENS", "COLOUR_CONTACTS",
-        "SPECTACLES", "SPECTACLE", "COMPLETE_SPECTACLE",
+        "FRAMES",
+        "FRAME",
+        "EYEGLASS_FRAME",
+        "LENSES",
+        "LENS",
+        "RX_LENSES",
+        "EYEGLASS_LENS",
+        "OPTICAL_LENS",
+        "CONTACT_LENSES",
+        "CONTACT_LENS",
+        "COLOUR_CONTACTS",
+        "SPECTACLES",
+        "SPECTACLE",
+        "COMPLETE_SPECTACLE",
     }
     if category_upper in five_percent_categories:
         return 0.05
@@ -123,7 +133,11 @@ def calculate_bill(
     for item in items:
         gst_rate = get_gst_rate_by_category(item.category)
         item_total = item.unit_price * item.quantity
-        item_discount = item_total * (item.discount_percent / 100) if item.discount_percent > 0 else 0
+        item_discount = (
+            item_total * (item.discount_percent / 100)
+            if item.discount_percent > 0
+            else 0
+        )
         item_after_discount = item_total - item_discount
         # Apply order-level discount proportionally
         if bill.subtotal_after_discount > 0:
@@ -155,12 +169,15 @@ def calculate_bill(
 # ============================================================================
 
 
-
 @router.get("")
 @router.get("/")
 async def get_billing_root():
     """Root endpoint for billing/invoice list"""
-    return {"module": "billing", "status": "active", "message": "billing records endpoint ready"}
+    return {
+        "module": "billing",
+        "status": "active",
+        "message": "billing records endpoint ready",
+    }
 
 
 @router.post("/create-invoice")
@@ -193,7 +210,7 @@ async def create_invoice(
                         raise HTTPException(
                             status_code=400,
                             detail="Cannot generate invoice: store GSTIN is not configured. "
-                                   "Update store settings with a valid GSTIN first."
+                            "Update store settings with a valid GSTIN first.",
                         )
                 except HTTPException:
                     raise
@@ -215,10 +232,13 @@ async def create_invoice(
 
         # Validate: offer_price cannot exceed MRP (FIX 3)
         for item in items:
-            if item.get("offer_price", 0) > item.get("mrp", 0) and item.get("mrp", 0) > 0:
+            if (
+                item.get("offer_price", 0) > item.get("mrp", 0)
+                and item.get("mrp", 0) > 0
+            ):
                 raise HTTPException(
                     status_code=400,
-                    detail=f"Offer price (₹{item['offer_price']}) cannot exceed MRP (₹{item['mrp']}) for {item.get('name', 'item')}"
+                    detail=f"Offer price (₹{item['offer_price']}) cannot exceed MRP (₹{item['mrp']}) for {item.get('name', 'item')}",
                 )
 
         # Calculate bill
@@ -286,7 +306,9 @@ async def create_invoice(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail="Error creating invoice. Please try again.")
+        raise HTTPException(
+            status_code=500, detail="Error creating invoice. Please try again."
+        )
 
 
 @router.post("/apply-discount")
@@ -312,7 +334,7 @@ async def apply_discount(
             if discount_value > user_discount_cap:
                 raise HTTPException(
                     status_code=403,
-                    detail=f"Discount {discount_value}% exceeds your cap of {user_discount_cap}%"
+                    detail=f"Discount {discount_value}% exceeds your cap of {user_discount_cap}%",
                 )
 
             # Enforce category-based discount cap if product_id provided
@@ -322,13 +344,20 @@ async def apply_discount(
                     try:
                         product = db["products"].find_one({"product_id": product_id})
                         if product:
-                            category_caps = {"LUXURY": 2.0, "PREMIUM": 5.0, "MASS": 10.0, "NON_DISCOUNTABLE": 0.0}
-                            category_cap = category_caps.get(product.get("discount_category", "MASS"), 10.0)
+                            category_caps = {
+                                "LUXURY": 2.0,
+                                "PREMIUM": 5.0,
+                                "MASS": 10.0,
+                                "NON_DISCOUNTABLE": 0.0,
+                            }
+                            category_cap = category_caps.get(
+                                product.get("discount_category", "MASS"), 10.0
+                            )
                             effective_cap = min(user_discount_cap, category_cap)
                             if discount_value > effective_cap:
                                 raise HTTPException(
                                     status_code=403,
-                                    detail=f"Discount {discount_value}% exceeds limit of {effective_cap}% for this product category"
+                                    detail=f"Discount {discount_value}% exceeds limit of {effective_cap}% for this product category",
                                 )
                     except HTTPException:
                         raise
@@ -343,11 +372,13 @@ async def apply_discount(
             if db is not None:
                 try:
                     collection = db["discount_rules"]
-                    coupon_doc = collection.find_one({"code": coupon_code, "active": True})
+                    coupon_doc = collection.find_one(
+                        {"code": coupon_code, "active": True}
+                    )
                     if coupon_doc:
                         coupon_info = {
                             "type": coupon_doc.get("discount_type", "percent"),
-                            "value": coupon_doc.get("discount_value", 0)
+                            "value": coupon_doc.get("discount_value", 0),
                         }
                 except Exception:
                     pass
@@ -454,20 +485,34 @@ async def get_gst_summary(
                             "total_igst": {"$sum": "$igst_amount"},
                             "total_taxable": {"$sum": "$taxable_amount"},
                         }
-                    }
+                    },
                 ]
 
                 result = list(collection.aggregate(pipeline))
                 if result and result[0]:
                     agg = result[0]
-                    summary_response["summary"]["total_cgst"] = agg.get("total_cgst", 0.0)
-                    summary_response["summary"]["total_sgst"] = agg.get("total_sgst", 0.0)
-                    summary_response["summary"]["total_igst"] = agg.get("total_igst", 0.0)
-                    summary_response["summary"]["total_taxable"] = agg.get("total_taxable", 0.0)
+                    summary_response["summary"]["total_cgst"] = agg.get(
+                        "total_cgst", 0.0
+                    )
+                    summary_response["summary"]["total_sgst"] = agg.get(
+                        "total_sgst", 0.0
+                    )
+                    summary_response["summary"]["total_igst"] = agg.get(
+                        "total_igst", 0.0
+                    )
+                    summary_response["summary"]["total_taxable"] = agg.get(
+                        "total_taxable", 0.0
+                    )
 
-                    total_gst = agg.get("total_cgst", 0.0) + agg.get("total_sgst", 0.0) + agg.get("total_igst", 0.0)
+                    total_gst = (
+                        agg.get("total_cgst", 0.0)
+                        + agg.get("total_sgst", 0.0)
+                        + agg.get("total_igst", 0.0)
+                    )
                     summary_response["summary"]["total_gst"] = total_gst
-                    summary_response["summary"]["total_revenue"] = agg.get("total_taxable", 0.0) + total_gst
+                    summary_response["summary"]["total_revenue"] = (
+                        agg.get("total_taxable", 0.0) + total_gst
+                    )
 
                 # Aggregate by category
                 category_pipeline = [
@@ -476,12 +521,60 @@ async def get_gst_summary(
                     {
                         "$group": {
                             "_id": "$items.category",
-                            "cgst": {"$sum": {"$multiply": ["$cgst_amount", {"$divide": ["$items.unit_price", "$taxable_amount"]}]}},
-                            "sgst": {"$sum": {"$multiply": ["$sgst_amount", {"$divide": ["$items.unit_price", "$taxable_amount"]}]}},
-                            "igst": {"$sum": {"$multiply": ["$igst_amount", {"$divide": ["$items.unit_price", "$taxable_amount"]}]}},
-                            "taxable": {"$sum": {"$multiply": ["$taxable_amount", {"$divide": ["$items.unit_price", "$taxable_amount"]}]}},
+                            "cgst": {
+                                "$sum": {
+                                    "$multiply": [
+                                        "$cgst_amount",
+                                        {
+                                            "$divide": [
+                                                "$items.unit_price",
+                                                "$taxable_amount",
+                                            ]
+                                        },
+                                    ]
+                                }
+                            },
+                            "sgst": {
+                                "$sum": {
+                                    "$multiply": [
+                                        "$sgst_amount",
+                                        {
+                                            "$divide": [
+                                                "$items.unit_price",
+                                                "$taxable_amount",
+                                            ]
+                                        },
+                                    ]
+                                }
+                            },
+                            "igst": {
+                                "$sum": {
+                                    "$multiply": [
+                                        "$igst_amount",
+                                        {
+                                            "$divide": [
+                                                "$items.unit_price",
+                                                "$taxable_amount",
+                                            ]
+                                        },
+                                    ]
+                                }
+                            },
+                            "taxable": {
+                                "$sum": {
+                                    "$multiply": [
+                                        "$taxable_amount",
+                                        {
+                                            "$divide": [
+                                                "$items.unit_price",
+                                                "$taxable_amount",
+                                            ]
+                                        },
+                                    ]
+                                }
+                            },
                         }
-                    }
+                    },
                 ]
 
                 category_results = list(collection.aggregate(category_pipeline))
@@ -495,9 +588,13 @@ async def get_gst_summary(
                     }
 
                 # Count inter-state sales (IGST > 0)
-                igst_count = collection.count_documents({"store_id": store_id, "igst_amount": {"$gt": 0}})
+                igst_count = collection.count_documents(
+                    {"store_id": store_id, "igst_amount": {"$gt": 0}}
+                )
                 summary_response["inter_state_sales"]["count"] = igst_count
-                summary_response["inter_state_sales"]["igst_collected"] = summary_response["summary"]["total_igst"]
+                summary_response["inter_state_sales"]["igst_collected"] = (
+                    summary_response["summary"]["total_igst"]
+                )
 
             except Exception as e:
                 # Fall back to empty summary if query fails
@@ -532,14 +629,16 @@ async def get_held_bills(
                 bills = collection.find({"store_id": store_id, "status": "held"})
 
                 for bill in bills:
-                    held_bills.append({
-                        "bill_id": bill.get("bill_id"),
-                        "bill_number": bill.get("bill_number"),
-                        "created_at": bill.get("created_at"),
-                        "customer_id": bill.get("customer_id"),
-                        "items_count": len(bill.get("items", [])),
-                        "total_amount": bill.get("total_amount", 0.0),
-                    })
+                    held_bills.append(
+                        {
+                            "bill_id": bill.get("bill_id"),
+                            "bill_number": bill.get("bill_number"),
+                            "created_at": bill.get("created_at"),
+                            "customer_id": bill.get("customer_id"),
+                            "items_count": len(bill.get("items", [])),
+                            "total_amount": bill.get("total_amount", 0.0),
+                        }
+                    )
                     total_held_amount += bill.get("total_amount", 0.0)
             except Exception:
                 pass
@@ -608,7 +707,9 @@ async def hold_bill(
         }
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail="Error holding bill. Please try again.")
+        raise HTTPException(
+            status_code=500, detail="Error holding bill. Please try again."
+        )
 
 
 @router.post("/recall-held-bill")
@@ -635,7 +736,12 @@ async def recall_held_bill(
                 if held_bill:
                     collection.update_one(
                         {"bill_id": bill_id},
-                        {"$set": {"status": "recalled", "recalled_at": datetime.utcnow()}}
+                        {
+                            "$set": {
+                                "status": "recalled",
+                                "recalled_at": datetime.utcnow(),
+                            }
+                        },
                     )
             except Exception:
                 pass
@@ -658,7 +764,9 @@ async def recall_held_bill(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail="Error recalling bill. Please try again.")
+        raise HTTPException(
+            status_code=500, detail="Error recalling bill. Please try again."
+        )
 
 
 @router.post("/process-payment")
@@ -712,7 +820,7 @@ async def process_payment(
                             "payment_method": payment_method,
                             "payment_date": now,
                         }
-                    }
+                    },
                 )
             except Exception:
                 # Log but continue - return success even if DB save fails

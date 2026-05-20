@@ -4,6 +4,7 @@ IMS 2.0 — Points Calculator (Module ii)
 Pure functions for daily-points scoring. No side effects, no DB access.
 Keeps the router skinny and the tests fast.
 """
+
 from __future__ import annotations
 
 from typing import Dict, List, Optional, Tuple
@@ -24,8 +25,15 @@ CATEGORY_MAX = {
 TOTAL_MAX = sum(CATEGORY_MAX.values())  # 100
 
 CATEGORIES_FOR_TOTAL = [
-    "attendance", "conversion", "task", "visufit", "punctuality",
-    "behaviour", "kicker_1", "kicker_2", "reviews",
+    "attendance",
+    "conversion",
+    "task",
+    "visufit",
+    "punctuality",
+    "behaviour",
+    "kicker_1",
+    "kicker_2",
+    "reviews",
 ]
 
 

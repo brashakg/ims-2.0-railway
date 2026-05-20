@@ -127,6 +127,7 @@ class JarvisAnalyticsEngine:
             return None
         try:
             from datetime import datetime as _dt, timedelta as _td
+
             now = _dt.now()
             today = now.strftime("%Y-%m-%d")
             month_start = now.strftime("%Y-%m-01")
@@ -157,7 +158,11 @@ class JarvisAnalyticsEngine:
                 elif status == "READY":
                     ready += 1
 
-            growth = round(((rev_month - rev_lastyear) / rev_lastyear * 100), 1) if rev_lastyear > 0 else 0.0
+            growth = (
+                round(((rev_month - rev_lastyear) / rev_lastyear * 100), 1)
+                if rev_lastyear > 0
+                else 0.0
+            )
             aov = round(rev_month / orders_month, 2) if orders_month else 0.0
 
             # Inventory
@@ -181,7 +186,9 @@ class JarvisAnalyticsEngine:
             total_cust = new_cust = 0
             if customers_col is not None:
                 total_cust = customers_col.count_documents({})
-                new_cust = customers_col.count_documents({"created_at": {"$gte": month_start}})
+                new_cust = customers_col.count_documents(
+                    {"created_at": {"$gte": month_start}}
+                )
 
             # Staff
             users_col = get_db_collection("users")
@@ -199,7 +206,9 @@ class JarvisAnalyticsEngine:
                     "growth_percentage": growth,
                     "target": 0,
                     "achievement_percent": 0,
-                    "trend": "up" if growth > 0 else ("down" if growth < 0 else "stable"),
+                    "trend": (
+                        "up" if growth > 0 else ("down" if growth < 0 else "stable")
+                    ),
                 },
                 "orders": {
                     "today": orders_today,
@@ -232,7 +241,9 @@ class JarvisAnalyticsEngine:
                     "present_today": 0,
                     "on_leave": 0,
                     "top_performer": "N/A",
-                    "average_sales_per_staff": round(rev_month / total_staff, 2) if total_staff else 0,
+                    "average_sales_per_staff": (
+                        round(rev_month / total_staff, 2) if total_staff else 0
+                    ),
                     "attendance_rate": 0,
                 },
             }
@@ -248,18 +259,51 @@ class JarvisAnalyticsEngine:
         if live is not None:
             return live
         return {
-            "revenue": {"today": 0, "yesterday": 0, "this_week": 0, "this_month": 0,
-                        "last_month": 0, "growth_percentage": 0, "target": 0,
-                        "achievement_percent": 0, "trend": "stable"},
-            "orders": {"today": 0, "pending": 0, "in_progress": 0,
-                       "ready_for_delivery": 0, "average_order_value": 0, "conversion_rate": 0},
-            "inventory": {"total_products": 0, "low_stock_items": 0, "out_of_stock": 0,
-                          "inventory_value": 0, "fast_moving_count": 0, "slow_moving_count": 0,
-                          "expiring_soon": 0, "turnover_rate": 0},
-            "customers": {"total": 0, "new_this_month": 0, "returning_rate": 0,
-                          "average_lifetime_value": 0, "nps_score": 0, "top_segment": "N/A"},
-            "staff": {"total_employees": 0, "present_today": 0, "on_leave": 0,
-                      "top_performer": "N/A", "average_sales_per_staff": 0, "attendance_rate": 0},
+            "revenue": {
+                "today": 0,
+                "yesterday": 0,
+                "this_week": 0,
+                "this_month": 0,
+                "last_month": 0,
+                "growth_percentage": 0,
+                "target": 0,
+                "achievement_percent": 0,
+                "trend": "stable",
+            },
+            "orders": {
+                "today": 0,
+                "pending": 0,
+                "in_progress": 0,
+                "ready_for_delivery": 0,
+                "average_order_value": 0,
+                "conversion_rate": 0,
+            },
+            "inventory": {
+                "total_products": 0,
+                "low_stock_items": 0,
+                "out_of_stock": 0,
+                "inventory_value": 0,
+                "fast_moving_count": 0,
+                "slow_moving_count": 0,
+                "expiring_soon": 0,
+                "turnover_rate": 0,
+            },
+            "customers": {
+                "total": 0,
+                "new_this_month": 0,
+                "returning_rate": 0,
+                "average_lifetime_value": 0,
+                "nps_score": 0,
+                "top_segment": "N/A",
+            },
+            "staff": {
+                "total_employees": 0,
+                "present_today": 0,
+                "on_leave": 0,
+                "top_performer": "N/A",
+                "average_sales_per_staff": 0,
+                "attendance_rate": 0,
+            },
         }
 
     @staticmethod
@@ -270,6 +314,7 @@ class JarvisAnalyticsEngine:
             return None
         try:
             from datetime import datetime as _dt
+
             month_start = _dt.now().strftime("%Y-%m-01")
             counted = {"CONFIRMED", "PROCESSING", "READY", "DELIVERED"}
             cat_sales: Dict[str, float] = {}
@@ -280,14 +325,27 @@ class JarvisAnalyticsEngine:
                 if (o.get("status") or "").upper() not in counted:
                     continue
                 total_rev += float(o.get("grand_total") or 0)
-                for it in (o.get("items") or []):
+                for it in o.get("items") or []:
                     cat = (it.get("category") or it.get("item_type") or "OTHER").upper()
                     val = float(it.get("item_total") or it.get("item_value") or 0)
                     qty = int(it.get("quantity") or 1)
                     cat_sales[cat] = cat_sales.get(cat, 0) + val
                     cat_units[cat] = cat_units.get(cat, 0) + qty
-                    key = it.get("sku") or it.get("product_id") or it.get("product_name") or "?"
-                    slot = prod_rev.setdefault(key, {"name": it.get("product_name") or key, "sku": it.get("sku") or "", "sales": 0, "revenue": 0.0})
+                    key = (
+                        it.get("sku")
+                        or it.get("product_id")
+                        or it.get("product_name")
+                        or "?"
+                    )
+                    slot = prod_rev.setdefault(
+                        key,
+                        {
+                            "name": it.get("product_name") or key,
+                            "sku": it.get("sku") or "",
+                            "sales": 0,
+                            "revenue": 0.0,
+                        },
+                    )
                     slot["sales"] += qty
                     slot["revenue"] += val
             if not cat_sales and total_rev == 0:
@@ -296,11 +354,21 @@ class JarvisAnalyticsEngine:
             top_prods = sorted(prod_rev.values(), key=lambda p: -p["revenue"])[:5]
             return {
                 "top_selling_categories": [
-                    {"category": c.title(), "sales": round(s, 2), "units": cat_units.get(c, 0), "growth": 0}
+                    {
+                        "category": c.title(),
+                        "sales": round(s, 2),
+                        "units": cat_units.get(c, 0),
+                        "growth": 0,
+                    }
                     for c, s in top_cats
                 ],
                 "top_selling_products": [
-                    {"name": p["name"], "sku": p["sku"], "sales": p["sales"], "revenue": round(p["revenue"], 2)}
+                    {
+                        "name": p["name"],
+                        "sku": p["sku"],
+                        "sales": p["sales"],
+                        "revenue": round(p["revenue"], 2),
+                    }
                     for p in top_prods
                 ],
                 "sales_by_store": [],
@@ -341,27 +409,45 @@ class JarvisAnalyticsEngine:
                 total += 1
                 qty = int(p.get("stock_quantity") or p.get("quantity") or 0)
                 reorder = int(p.get("reorder_point") or 0)
-                price = float(p.get("offer_price") or p.get("mrp") or p.get("cost_price") or 0)
+                price = float(
+                    p.get("offer_price") or p.get("mrp") or p.get("cost_price") or 0
+                )
                 total_value += qty * price
                 name = p.get("name") or p.get("product_name") or "Unknown"
                 sku = p.get("sku") or p.get("product_id") or ""
                 if qty <= 0:
                     oos += 1
-                    critical_alerts.append({
-                        "type": "out_of_stock", "sku": sku, "product": name,
-                        "last_sold": "—", "demand": "unknown",
-                    })
+                    critical_alerts.append(
+                        {
+                            "type": "out_of_stock",
+                            "sku": sku,
+                            "product": name,
+                            "last_sold": "—",
+                            "demand": "unknown",
+                        }
+                    )
                 elif reorder and qty <= reorder:
                     low += 1
-                    critical_alerts.append({
-                        "type": "low_stock", "sku": sku, "product": name,
-                        "quantity": qty, "reorder_point": reorder,
-                    })
-                    reorder_recs.append({
-                        "sku": sku, "product": name, "current": qty,
-                        "recommended_order": max(int(p.get("reorder_quantity") or 0), reorder * 2, 20),
-                        "supplier": p.get("vendor") or p.get("brand") or "—",
-                    })
+                    critical_alerts.append(
+                        {
+                            "type": "low_stock",
+                            "sku": sku,
+                            "product": name,
+                            "quantity": qty,
+                            "reorder_point": reorder,
+                        }
+                    )
+                    reorder_recs.append(
+                        {
+                            "sku": sku,
+                            "product": name,
+                            "current": qty,
+                            "recommended_order": max(
+                                int(p.get("reorder_quantity") or 0), reorder * 2, 20
+                            ),
+                            "supplier": p.get("vendor") or p.get("brand") or "—",
+                        }
+                    )
             if total == 0:
                 return None
             healthy = max(0, total - low - oos)
@@ -373,8 +459,12 @@ class JarvisAnalyticsEngine:
                 "inventory_health_score": health,
                 "turnover_ratio": 0,
                 "dead_stock_value": 0,
-                "totals": {"products": total, "low_stock": low, "out_of_stock": oos,
-                           "inventory_value": round(total_value, 2)},
+                "totals": {
+                    "products": total,
+                    "low_stock": low,
+                    "out_of_stock": oos,
+                    "inventory_value": round(total_value, 2),
+                },
             }
         except Exception as e:
             logger.warning("JARVIS live inventory failed: %s", e)
@@ -401,25 +491,55 @@ class JarvisAnalyticsEngine:
         """Customer insights — live counts from the customers collection."""
         col = get_db_collection("customers")
         if col is None:
-            return {"segments": [], "loyalty_metrics": {}, "churn_risk": [], "upcoming_eye_tests": []}
+            return {
+                "segments": [],
+                "loyalty_metrics": {},
+                "churn_risk": [],
+                "upcoming_eye_tests": [],
+            }
         try:
             from datetime import datetime as _dt
+
             month_start = _dt.now().strftime("%Y-%m-01")
             total = col.count_documents({})
             new_this_month = col.count_documents({"created_at": {"$gte": month_start}})
             b2b = col.count_documents({"customer_type": "B2B"})
             return {
                 "segments": [
-                    {"name": "All customers", "count": total, "avg_spend": 0, "characteristics": ""},
-                    {"name": "New this month", "count": new_this_month, "avg_spend": 0, "characteristics": ""},
-                    {"name": "B2B", "count": b2b, "avg_spend": 0, "characteristics": ""},
+                    {
+                        "name": "All customers",
+                        "count": total,
+                        "avg_spend": 0,
+                        "characteristics": "",
+                    },
+                    {
+                        "name": "New this month",
+                        "count": new_this_month,
+                        "avg_spend": 0,
+                        "characteristics": "",
+                    },
+                    {
+                        "name": "B2B",
+                        "count": b2b,
+                        "avg_spend": 0,
+                        "characteristics": "",
+                    },
                 ],
-                "loyalty_metrics": {"repeat_purchase_rate": 0, "referral_rate": 0, "nps_score": 0},
+                "loyalty_metrics": {
+                    "repeat_purchase_rate": 0,
+                    "referral_rate": 0,
+                    "nps_score": 0,
+                },
                 "churn_risk": [],
                 "upcoming_eye_tests": [],
             }
         except Exception:
-            return {"segments": [], "loyalty_metrics": {}, "churn_risk": [], "upcoming_eye_tests": []}
+            return {
+                "segments": [],
+                "loyalty_metrics": {},
+                "churn_risk": [],
+                "upcoming_eye_tests": [],
+            }
 
     @staticmethod
     def get_staff_insights() -> Dict:
@@ -435,8 +555,11 @@ class JarvisAnalyticsEngine:
         return {
             "performance_ranking": [],
             "attendance_summary": {
-                "total_staff": total, "present_today": 0, "on_leave": 0,
-                "present_rate": 0, "late_arrivals_today": 0,
+                "total_staff": total,
+                "present_today": 0,
+                "on_leave": 0,
+                "present_rate": 0,
+                "late_arrivals_today": 0,
             },
             "orders_per_staff": 0,
         }
@@ -459,16 +582,34 @@ class JarvisAnalyticsEngine:
         recs: List[Dict] = []
         inv = JarvisAnalyticsEngine._compute_inventory_live()
         if inv:
-            oos = sum(1 for a in inv.get("critical_alerts", []) if a.get("type") == "out_of_stock")
-            low = sum(1 for a in inv.get("critical_alerts", []) if a.get("type") == "low_stock")
+            oos = sum(
+                1
+                for a in inv.get("critical_alerts", [])
+                if a.get("type") == "out_of_stock"
+            )
+            low = sum(
+                1
+                for a in inv.get("critical_alerts", [])
+                if a.get("type") == "low_stock"
+            )
             if oos:
-                recs.append({"priority": "high", "category": "inventory",
-                             "title": f"{oos} product(s) out of stock",
-                             "action": "Reorder to avoid lost sales"})
+                recs.append(
+                    {
+                        "priority": "high",
+                        "category": "inventory",
+                        "title": f"{oos} product(s) out of stock",
+                        "action": "Reorder to avoid lost sales",
+                    }
+                )
             if low:
-                recs.append({"priority": "medium", "category": "inventory",
-                             "title": f"{low} product(s) below reorder point",
-                             "action": "Raise purchase orders"})
+                recs.append(
+                    {
+                        "priority": "medium",
+                        "category": "inventory",
+                        "title": f"{low} product(s) below reorder point",
+                        "action": "Raise purchase orders",
+                    }
+                )
         return recs
 
 
@@ -742,8 +883,11 @@ Current date and time: {current_datetime}
 
     @classmethod
     async def call_claude(
-        cls, message: str, business_data: Dict,
-        conversation_history: List[Dict] = None, model_id: str = None,
+        cls,
+        message: str,
+        business_data: Dict,
+        conversation_history: List[Dict] = None,
+        model_id: str = None,
     ) -> str:
         """Run a JARVIS chat completion through the pluggable LLM provider
         (local OSS and/or Claude). `model_id` selects which configured
@@ -785,11 +929,14 @@ class Jarvis:
         """True if any LLM (local OSS or Claude) is configured."""
         try:
             from agents import llm_provider
+
             return llm_provider.any_available()
         except Exception:
             return bool(ANTHROPIC_API_KEY)
 
-    async def process_query_async(self, query: str, context: Dict = None, model_id: str = None) -> Dict:
+    async def process_query_async(
+        self, query: str, context: Dict = None, model_id: str = None
+    ) -> Dict:
         """Process a natural language query via the selected LLM (or the
         deterministic template fallback)."""
         intent = self.nlp.detect_intent(query)
@@ -827,6 +974,7 @@ class Jarvis:
                 self.conversation_history = self.conversation_history[-20:]
 
             from agents import llm_provider
+
             used_model = model_id or llm_provider.default_model_id() or "llm"
             return {
                 "response": claude_response,
@@ -1058,20 +1206,23 @@ class Jarvis:
         # This one CAN work — create a real task via the tasks collection
         try:
             from database.connection import get_seeded_db
+
             db = get_seeded_db()
             if db:
                 task_id = f"TSK-{uuid.uuid4().hex[:8].upper()}"
-                db.get_collection("tasks").insert_one({
-                    "task_id": task_id,
-                    "title": params.get("title", "JARVIS-created task"),
-                    "description": params.get("description", ""),
-                    "assigned_to": params.get("assignee"),
-                    "due_date": params.get("due_date"),
-                    "status": "OPEN",
-                    "priority": params.get("priority", "MEDIUM"),
-                    "source": "JARVIS",
-                    "created_at": datetime.now().isoformat(),
-                })
+                db.get_collection("tasks").insert_one(
+                    {
+                        "task_id": task_id,
+                        "title": params.get("title", "JARVIS-created task"),
+                        "description": params.get("description", ""),
+                        "assigned_to": params.get("assignee"),
+                        "due_date": params.get("due_date"),
+                        "status": "OPEN",
+                        "priority": params.get("priority", "MEDIUM"),
+                        "source": "JARVIS",
+                        "created_at": datetime.now().isoformat(),
+                    }
+                )
                 return {
                     "success": True,
                     "message": "Task created successfully",
@@ -1081,7 +1232,11 @@ class Jarvis:
                 }
         except Exception as e:
             return {"success": False, "message": f"Failed to create task: {str(e)}"}
-        return {"success": False, "status": "NOT_IMPLEMENTED", "message": "Task creation unavailable — database not connected."}
+        return {
+            "success": False,
+            "status": "NOT_IMPLEMENTED",
+            "message": "Task creation unavailable — database not connected.",
+        }
 
     def _cmd_analyze_store(self, params: Dict) -> Dict:
         # This is a read-only command — OK to return analytics summary
@@ -1116,12 +1271,15 @@ jarvis_instance = Jarvis()
 # ============================================================================
 
 
-
 @router.get("")
 @router.get("/")
 async def get_jarvis_root():
     """Root endpoint for AI assistant status"""
-    return {"module": "jarvis", "status": "active", "message": "JARVIS status endpoint ready"}
+    return {
+        "module": "jarvis",
+        "status": "active",
+        "message": "JARVIS status endpoint ready",
+    }
 
 
 @router.get("/status")
@@ -1162,6 +1320,7 @@ async def list_jarvis_models(current_user: dict = Depends(require_superadmin)):
     configured via env (local OSS, Claude, extra). Empty list = JARVIS
     runs on the deterministic template fallback only."""
     from agents import llm_provider
+
     return {
         "models": llm_provider.list_models(),
         "default": llm_provider.default_model_id(),
@@ -1289,6 +1448,7 @@ async def get_quick_insights(current_user: dict = Depends(require_superadmin)):
 # SUBAGENT INTELLIGENCE — Specialized domain agents
 # ============================================================================
 
+
 @router.post("/analyze")
 async def subagent_analyze(
     query: JarvisQuery, current_user: dict = Depends(require_superadmin)
@@ -1348,7 +1508,10 @@ async def subagent_analyze(
 async def run_all(current_user: dict = Depends(require_superadmin)):
     """Run all subagents and return combined intelligence report"""
     try:
-        from core.subagents import run_all_agents  # pylint: disable=import-outside-toplevel
+        from core.subagents import (
+            run_all_agents,
+        )  # pylint: disable=import-outside-toplevel
+
         db = get_db_collection("__db__")  # Get the database reference
         if db is None:
             return {"error": "Database not available"}
@@ -1364,10 +1527,13 @@ async def run_all(current_user: dict = Depends(require_superadmin)):
 
 
 @router.post("/agents/{agent_id}/run")
-async def run_single_agent(agent_id: str, current_user: dict = Depends(require_superadmin)):
+async def run_single_agent(
+    agent_id: str, current_user: dict = Depends(require_superadmin)
+):
     """Run a specific subagent"""
     try:
         from core.subagents import run_agent  # pylint: disable=import-outside-toplevel
+
         db = get_db_collection("__db__")
         if db is None:
             return {"error": "Database not available"}

@@ -78,21 +78,21 @@ def should_escalate(task: dict) -> tuple[bool, str]:
     """
     if task.get("status") == "completed":
         return False, ""
-    
+
     created_at = task.get("created_at")
     due_date = task.get("due_date")
     now = datetime.now()
-    
+
     # Check if not acknowledged within 2 hours (if in OPEN status)
     if task.get("status") == "open" and created_at:
         time_since_created = now - created_at
         if time_since_created > timedelta(hours=2):
             return True, "Not acknowledged within 2 hours"
-    
+
     # Check if overdue
     if due_date and now > due_date:
         return True, "Task overdue"
-    
+
     return False, ""
 
 
@@ -119,12 +119,12 @@ async def list_tasks(
 ):
     """List tasks with filters (status, priority, assigned_to, type)"""
     repo = get_task_repository()
-    
+
     if repo is None:
         return {"tasks": [], "total": 0}
-    
+
     filters = {}
-    
+
     if status:
         filters["status"] = status
     if priority:
@@ -137,10 +137,10 @@ async def list_tasks(
         filters["store_id"] = store_id
     else:
         filters["store_id"] = current_user.get("active_store_id")
-    
+
     tasks = repo.find_many(filters, skip=skip, limit=limit)
     total = repo.count(filters)
-    
+
     return {"tasks": tasks, "total": total}
 
 
@@ -155,10 +155,10 @@ async def create_task(
 ):
     """Create a new task (P0-P4 priority, manual/sop/system type)"""
     repo = get_task_repository()
-    
+
     if repo is None:
         return {"task_id": generate_task_id(), "message": "Task created"}
-    
+
     task_data = {
         "task_id": generate_task_id(),
         "title": task.title,
@@ -172,22 +172,24 @@ async def create_task(
         "due_date": task.due_date,
         "created_at": datetime.now(),
         "escalation_level": 0,
-        "history": [{
-            "status": "open",
-            "timestamp": datetime.now(),
-            "by": current_user.get("user_id"),
-            "notes": "Task created"
-        }]
+        "history": [
+            {
+                "status": "open",
+                "timestamp": datetime.now(),
+                "by": current_user.get("user_id"),
+                "notes": "Task created",
+            }
+        ],
     }
-    
+
     result = repo.create(task_data)
-    
+
     if result:
         return {
             "task_id": result.get("task_id"),
-            "message": "Task created successfully"
+            "message": "Task created successfully",
         }
-    
+
     raise HTTPException(status_code=500, detail="Failed to create task")
 
 
@@ -198,20 +200,20 @@ async def get_my_tasks(
 ):
     """Get current user's assigned tasks"""
     repo = get_task_repository()
-    
+
     if repo is None:
         return {"tasks": []}
-    
+
     filters = {"assigned_to": current_user.get("user_id")}
-    
+
     if status:
         filters["status"] = status
     else:
         # By default, exclude completed
         filters["status"] = {"$in": ["open", "in_progress", "escalated"]}
-    
+
     tasks = repo.find_many(filters, sort=[("priority", 1), ("due_date", 1)])
-    
+
     return {"tasks": tasks, "total": len(tasks)}
 
 
@@ -222,22 +224,22 @@ async def get_overdue_tasks(
 ):
     """Get overdue tasks for escalation"""
     repo = get_task_repository()
-    
+
     if repo is None:
         return {"tasks": []}
-    
+
     active_store = store_id or current_user.get("active_store_id")
-    
+
     filters = {
         "status": {"$in": ["open", "in_progress"]},
-        "due_date": {"$lt": datetime.now()}
+        "due_date": {"$lt": datetime.now()},
     }
-    
+
     if active_store:
         filters["store_id"] = active_store
-    
+
     tasks = repo.find_many(filters, sort=[("due_date", 1)])
-    
+
     return {"tasks": tasks, "total": len(tasks)}
 
 
@@ -274,17 +276,17 @@ async def update_task(
 ):
     """Update task (status, notes, reassign)"""
     repo = get_task_repository()
-    
+
     if repo is None:
         return {"task_id": task_id, "message": "Task updated"}
-    
+
     existing = repo.find_by_id(task_id)
-    
+
     if not existing:
         raise HTTPException(status_code=404, detail="Task not found")
-    
+
     update_data = {}
-    
+
     if update.title:
         update_data["title"] = update.title
     if update.description is not None:
@@ -297,11 +299,11 @@ async def update_task(
         update_data["notes"] = update.notes
     if update.assigned_to:
         update_data["assigned_to"] = update.assigned_to
-    
+
     if update_data:
         if repo.update(task_id, update_data):
             return {"task_id": task_id, "message": "Task updated"}
-    
+
     return {"task_id": task_id, "message": "No changes made"}
 
 
@@ -313,32 +315,31 @@ async def complete_task(
 ):
     """Complete a task with completion notes"""
     repo = get_task_repository()
-    
+
     if repo is None:
         return {"task_id": task_id, "status": "completed"}
-    
+
     task = repo.find_by_id(task_id)
-    
+
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
-    
+
     if task.get("status") == "completed":
         raise HTTPException(status_code=400, detail="Task already completed")
-    
-    result = repo.update(task_id, {
-        "status": "completed",
-        "completed_at": datetime.now(),
-        "completion_notes": completion.completion_notes,
-        "completed_by": current_user.get("user_id")
-    })
-    
-    if result:
-        return {
-            "task_id": task_id,
+
+    result = repo.update(
+        task_id,
+        {
             "status": "completed",
-            "message": "Task completed"
-        }
-    
+            "completed_at": datetime.now(),
+            "completion_notes": completion.completion_notes,
+            "completed_by": current_user.get("user_id"),
+        },
+    )
+
+    if result:
+        return {"task_id": task_id, "status": "completed", "message": "Task completed"}
+
     raise HTTPException(status_code=500, detail="Failed to complete task")
 
 
@@ -355,36 +356,28 @@ async def get_daily_checklists(
 ):
     """Get daily checklists (opening, closing, stock count)"""
     repo = get_task_repository()
-    
+
     if repo is None:
         return {
             "type": checklist_type,
             "items": [],
             "completed_items": [],
-            "progress": 0
+            "progress": 0,
         }
-    
+
     active_store = store_id or current_user.get("active_store_id")
-    
+
     # Get SOP template for this checklist type
-    filters = {
-        "type": checklist_type,
-        "store_id": active_store,
-        "active": True
-    }
-    
+    filters = {"type": checklist_type, "store_id": active_store, "active": True}
+
     # This would query sop_templates collection
     # For now, return structure
     return {
         "type": checklist_type,
         "store_id": active_store,
-        "items": [
-            "Check inventory",
-            "Verify stock count",
-            "Update system"
-        ],
+        "items": ["Check inventory", "Verify stock count", "Update system"],
         "completed_items": [False, False, False],
-        "progress": "0/3"
+        "progress": "0/3",
     }
 
 
@@ -397,12 +390,12 @@ async def complete_checklist_item(
 ):
     """Mark a checklist item as done"""
     active_store = store_id or current_user.get("active_store_id")
-    
+
     return {
         "checklist_type": checklist_type,
         "item_index": completion.item_index,
         "completed": completion.completed,
-        "message": "Checklist item updated"
+        "message": "Checklist item updated",
     }
 
 
@@ -419,10 +412,10 @@ async def auto_generate_daily_tasks(
     """Auto-generate daily tasks from SOP templates"""
     repo = get_task_repository()
     active_store = store_id or current_user.get("active_store_id")
-    
+
     if repo is None:
         return {"generated": 0, "message": "Auto-generate failed"}
-    
+
     # Default SOP templates for optical retail
     sop_templates = [
         {
@@ -434,8 +427,8 @@ async def auto_generate_daily_tasks(
                 "Check cash register float",
                 "Clean display cases",
                 "Boot up POS system",
-                "Verify network connectivity"
-            ]
+                "Verify network connectivity",
+            ],
         },
         {
             "name": "Closing Checklist",
@@ -446,8 +439,8 @@ async def auto_generate_daily_tasks(
                 "Update daily sales",
                 "Lock cash in safe",
                 "Clean store",
-                "Set security system"
-            ]
+                "Set security system",
+            ],
         },
         {
             "name": "Stock Count",
@@ -457,13 +450,13 @@ async def auto_generate_daily_tasks(
                 "Count lenses in inventory",
                 "Check expiry dates",
                 "Verify low stock items",
-                "Update stock report"
-            ]
-        }
+                "Update stock report",
+            ],
+        },
     ]
-    
+
     generated_count = 0
-    
+
     for template in sop_templates:
         task_data = {
             "task_id": generate_task_id(),
@@ -479,16 +472,18 @@ async def auto_generate_daily_tasks(
             "created_at": datetime.now(),
             "escalation_level": 0,
             "sop_type": template["type"],
-            "checklist_items": [{"text": item, "completed": False} for item in template["items"]]
+            "checklist_items": [
+                {"text": item, "completed": False} for item in template["items"]
+            ],
         }
-        
+
         result = repo.create(task_data)
         if result:
             generated_count += 1
-    
+
     return {
         "generated": generated_count,
-        "message": f"Generated {generated_count} daily tasks from SOP templates"
+        "message": f"Generated {generated_count} daily tasks from SOP templates",
     }
 
 
@@ -504,26 +499,29 @@ async def acknowledge_task(
 ):
     """Acknowledge a task (prevent escalation)"""
     repo = get_task_repository()
-    
+
     if repo is None:
         return {"task_id": task_id, "message": "Task acknowledged"}
-    
+
     task = repo.find_by_id(task_id)
-    
+
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
-    
-    if repo.update(task_id, {
-        "status": "in_progress",
-        "acknowledged_at": datetime.now(),
-        "acknowledged_by": current_user.get("user_id")
-    }):
+
+    if repo.update(
+        task_id,
+        {
+            "status": "in_progress",
+            "acknowledged_at": datetime.now(),
+            "acknowledged_by": current_user.get("user_id"),
+        },
+    ):
         return {
             "task_id": task_id,
             "status": "in_progress",
-            "message": "Task acknowledged"
+            "message": "Task acknowledged",
         }
-    
+
     raise HTTPException(status_code=500, detail="Failed to acknowledge task")
 
 
@@ -535,31 +533,34 @@ async def escalate_task(
 ):
     """Manually escalate task"""
     repo = get_task_repository()
-    
+
     if repo is None:
         return {"task_id": task_id, "status": "escalated"}
-    
+
     task = repo.find_by_id(task_id)
-    
+
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
-    
+
     current_level = task.get("escalation_level", 0)
-    
-    if repo.update(task_id, {
-        "status": "escalated",
-        "escalated_to": escalate_to,
-        "escalated_at": datetime.now(),
-        "escalation_level": current_level + 1,
-        "escalated_by": current_user.get("user_id")
-    }):
+
+    if repo.update(
+        task_id,
+        {
+            "status": "escalated",
+            "escalated_to": escalate_to,
+            "escalated_at": datetime.now(),
+            "escalation_level": current_level + 1,
+            "escalated_by": current_user.get("user_id"),
+        },
+    ):
         return {
             "task_id": task_id,
             "status": "escalated",
             "escalation_level": current_level + 1,
-            "message": "Task escalated"
+            "message": "Task escalated",
         }
-    
+
     raise HTTPException(status_code=500, detail="Failed to escalate task")
 
 
@@ -570,43 +571,48 @@ async def auto_escalate_overdue_tasks(
 ):
     """Trigger auto-escalation of overdue tasks (admin endpoint)"""
     repo = get_task_repository()
-    
+
     if repo is None:
         return {"escalated": 0, "message": "Auto-escalation failed"}
-    
+
     active_store = store_id or current_user.get("active_store_id")
-    
+
     filters = {
         "status": {"$in": ["open", "in_progress"]},
         "due_date": {"$lt": datetime.now()},
-        "escalation_level": {"$lt": 2}  # Don't escalate beyond level 2
+        "escalation_level": {"$lt": 2},  # Don't escalate beyond level 2
     }
-    
+
     if active_store:
         filters["store_id"] = active_store
-    
+
     overdue_tasks = repo.find_many(filters)
     escalated_count = 0
-    
+
     for task in overdue_tasks:
         should_escalate_flag, reason = should_escalate(task)
-        
+
         if should_escalate_flag:
             current_level = task.get("escalation_level", 0)
-            escalate_to = current_user.get("user_id")  # In real app, determine based on level
-            
-            if repo.update(task["task_id"], {
-                "status": "escalated",
-                "escalated_to": escalate_to,
-                "escalated_at": datetime.now(),
-                "escalation_level": current_level + 1,
-                "escalation_reason": reason
-            }):
+            escalate_to = current_user.get(
+                "user_id"
+            )  # In real app, determine based on level
+
+            if repo.update(
+                task["task_id"],
+                {
+                    "status": "escalated",
+                    "escalated_to": escalate_to,
+                    "escalated_at": datetime.now(),
+                    "escalation_level": current_level + 1,
+                    "escalation_reason": reason,
+                },
+            ):
                 escalated_count += 1
-    
+
     return {
         "escalated": escalated_count,
-        "message": f"Auto-escalated {escalated_count} overdue tasks"
+        "message": f"Auto-escalated {escalated_count} overdue tasks",
     }
 
 
@@ -622,41 +628,39 @@ async def get_task_summary(
 ):
     """Get task summary by status"""
     repo = get_task_repository()
-    
+
     if repo is None:
-        return {
-            "summary": {},
-            "overdue_count": 0,
-            "escalated_count": 0
-        }
-    
+        return {"summary": {}, "overdue_count": 0, "escalated_count": 0}
+
     active_store = store_id or current_user.get("active_store_id")
-    
+
     filters = {}
     if active_store:
         filters["store_id"] = active_store
-    
+
     # Count by status
     summary = {}
     for status in ["open", "in_progress", "completed", "escalated"]:
         count = repo.count({**filters, "status": status})
         summary[status] = count
-    
+
     # Count overdue
-    overdue_count = repo.count({
-        **filters,
-        "status": {"$in": ["open", "in_progress"]},
-        "due_date": {"$lt": datetime.now()}
-    })
-    
+    overdue_count = repo.count(
+        {
+            **filters,
+            "status": {"$in": ["open", "in_progress"]},
+            "due_date": {"$lt": datetime.now()},
+        }
+    )
+
     # Count escalated
     escalated_count = repo.count({**filters, "status": "escalated"})
-    
+
     return {
         "summary": summary,
         "overdue_count": overdue_count,
         "escalated_count": escalated_count,
-        "total": sum(summary.values())
+        "total": sum(summary.values()),
     }
 
 
@@ -679,8 +683,8 @@ class SopStep(BaseModel):
 class SopTemplateCreate(BaseModel):
     title: str = Field(..., min_length=3)
     description: Optional[str] = None
-    category: str = "Operations"          # Operations | Finance | Sales | Clinical | Workshop
-    frequency: str = "DAILY"              # DAILY | WEEKLY | MONTHLY | AD_HOC
+    category: str = "Operations"  # Operations | Finance | Sales | Clinical | Workshop
+    frequency: str = "DAILY"  # DAILY | WEEKLY | MONTHLY | AD_HOC
     estimated_time: int = Field(15, ge=1, le=480)  # minutes
     steps: List[SopStep] = []
     assigned_roles: List[str] = []
@@ -817,11 +821,14 @@ async def update_sop_template(
     if col is None:
         raise HTTPException(status_code=503, detail="DB unavailable")
 
-    update_data = {k: v for k, v in updates.model_dump(exclude_unset=True).items() if v is not None}
+    update_data = {
+        k: v for k, v in updates.model_dump(exclude_unset=True).items() if v is not None
+    }
     # Serialize nested steps
     if "steps" in update_data and update_data["steps"] is not None:
         update_data["steps"] = [
-            s.model_dump() if hasattr(s, "model_dump") else s for s in update_data["steps"]
+            s.model_dump() if hasattr(s, "model_dump") else s
+            for s in update_data["steps"]
         ]
     update_data["updated_at"] = datetime.now()
     update_data["updated_by"] = current_user.get("user_id")
@@ -852,8 +859,13 @@ async def delete_sop_template(
 
     result = col.update_one(
         {"template_id": template_id},
-        {"$set": {"is_active": False, "archived_at": datetime.now(),
-                  "archived_by": current_user.get("user_id")}},
+        {
+            "$set": {
+                "is_active": False,
+                "archived_at": datetime.now(),
+                "archived_by": current_user.get("user_id"),
+            }
+        },
     )
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="SOP template not found")
@@ -883,7 +895,10 @@ async def assign_sop(
     if col is None:
         raise HTTPException(status_code=503, detail="DB unavailable")
 
-    update: dict = {"updated_at": datetime.now(), "updated_by": current_user.get("user_id")}
+    update: dict = {
+        "updated_at": datetime.now(),
+        "updated_by": current_user.get("user_id"),
+    }
     if payload.assigned_roles is not None:
         update["assigned_roles"] = payload.assigned_roles
     if payload.assigned_users is not None:
@@ -894,8 +909,11 @@ async def assign_sop(
         raise HTTPException(status_code=404, detail="SOP template not found")
 
     tpl = col.find_one({"template_id": template_id}, {"_id": 0})
-    return {"template_id": template_id, "template": tpl, "message": "SOP assignment updated"}
-
+    return {
+        "template_id": template_id,
+        "template": tpl,
+        "message": "SOP assignment updated",
+    }
 
 
 # ============================================================================
@@ -912,6 +930,7 @@ router.add_api_route("/{task_id}", get_task, methods=["GET"])
 # `PUT /tasks/{id}` was 404'ing because only PATCH is decorated above.
 # `POST /tasks/{id}/start` and `/reassign` likewise didn't exist.
 # Thin wrappers so the task UI works end-to-end without touching FE.
+
 
 class TaskReassign(BaseModel):
     assigned_to: str
@@ -941,14 +960,21 @@ async def start_task(
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
     if task.get("status") == "in_progress":
-        return {"task_id": task_id, "status": "in_progress", "message": "Already in progress"}
+        return {
+            "task_id": task_id,
+            "status": "in_progress",
+            "message": "Already in progress",
+        }
     if task.get("status") == "completed":
         raise HTTPException(status_code=400, detail="Task already completed")
-    repo.update(task_id, {
-        "status": "in_progress",
-        "started_at": datetime.now(),
-        "started_by": current_user.get("user_id"),
-    })
+    repo.update(
+        task_id,
+        {
+            "status": "in_progress",
+            "started_at": datetime.now(),
+            "started_by": current_user.get("user_id"),
+        },
+    )
     return {"task_id": task_id, "status": "in_progress", "message": "Task started"}
 
 
@@ -975,10 +1001,17 @@ async def reassign_task(
         "by": current_user.get("user_id"),
         "at": datetime.now(),
     }
-    repo.update(task_id, {
+    repo.update(
+        task_id,
+        {
+            "assigned_to": body.assigned_to,
+            "reassigned_at": datetime.now(),
+            "reassigned_by": current_user.get("user_id"),
+            "history": (task.get("history") or []) + [history_entry],
+        },
+    )
+    return {
+        "task_id": task_id,
         "assigned_to": body.assigned_to,
-        "reassigned_at": datetime.now(),
-        "reassigned_by": current_user.get("user_id"),
-        "history": (task.get("history") or []) + [history_entry],
-    })
-    return {"task_id": task_id, "assigned_to": body.assigned_to, "message": "Task reassigned"}
+        "message": "Task reassigned",
+    }

@@ -18,6 +18,7 @@ Settings PATCH endpoints live on the points router (already mounted
 under /api/v1/incentive/points/settings/...) since they share the
 incentive_settings collection.
 """
+
 from __future__ import annotations
 
 import csv as _csv
@@ -134,6 +135,7 @@ def _month_window(year: int, month: int) -> tuple:
     pair drives Mongo `created_at` range matches; the str pair is for
     legacy `date_str` fallbacks if any caller wants them."""
     from datetime import timedelta
+
     start_dt = datetime(year, month, 1)
     if month == 12:
         next_first = datetime(year + 1, 1, 1)
@@ -165,18 +167,26 @@ def _aggregate_sales(store_id: str, year: int, month: int) -> Dict[str, float]:
     # Two paths: try $aggregate (real Mongo); fall back to find()
     docs: List[Dict] = []
     try:
-        docs = list(orders.aggregate([
-            {"$match": {
-                "store_id": store_id,
-                "status": {"$nin": ["CANCELLED", "DRAFT"]},
-                "created_at": {"$gte": start_dt, "$lt": next_first},
-            }},
-            {"$group": {
-                "_id": None,
-                "total_revenue": {"$sum": "$grand_total"},
-                "total_discount": {"$sum": "$total_discount"},
-            }},
-        ]))
+        docs = list(
+            orders.aggregate(
+                [
+                    {
+                        "$match": {
+                            "store_id": store_id,
+                            "status": {"$nin": ["CANCELLED", "DRAFT"]},
+                            "created_at": {"$gte": start_dt, "$lt": next_first},
+                        }
+                    },
+                    {
+                        "$group": {
+                            "_id": None,
+                            "total_revenue": {"$sum": "$grand_total"},
+                            "total_discount": {"$sum": "$total_discount"},
+                        }
+                    },
+                ]
+            )
+        )
         if docs:
             row = docs[0]
             out["sales"] = float(row.get("total_revenue") or 0)
@@ -213,9 +223,13 @@ def _last_year_sale(store_id: str, year: int, month: int) -> float:
         return 0.0
     inputs = None
     try:
-        inputs = db.get_collection("incentive_inputs").find_one({
-            "store_id": store_id, "year": year, "month": month,
-        })
+        inputs = db.get_collection("incentive_inputs").find_one(
+            {
+                "store_id": store_id,
+                "year": year,
+                "month": month,
+            }
+        )
     except Exception:
         inputs = None
     if inputs and inputs.get("last_year_sale") is not None:
@@ -249,7 +263,9 @@ def _build_mtd_data(store_id: str, year: int, month: int) -> Dict[str, Dict]:
     return out
 
 
-def _name_lookup_for(store_id: str, mtd_data: Dict[str, Dict]) -> Dict[str, Optional[str]]:
+def _name_lookup_for(
+    store_id: str, mtd_data: Dict[str, Dict]
+) -> Dict[str, Optional[str]]:
     """Resolve user_id → display name via the user repo. Falls back to
     whatever's already on the MTD slot."""
     out: Dict[str, Optional[str]] = {}
@@ -263,8 +279,7 @@ def _name_lookup_for(store_id: str, mtd_data: Dict[str, Dict]) -> Dict[str, Opti
                 u = ur.find_by_id(uid) or ur.find_one({"user_id": uid})
                 if u:
                     out[uid] = (
-                        u.get("name") or u.get("full_name")
-                        or u.get("username") or uid
+                        u.get("name") or u.get("full_name") or u.get("username") or uid
                     )
                     continue
             except Exception:
@@ -290,17 +305,19 @@ def _audit(
     if audit_repo is None:
         return
     try:
-        audit_repo.create({
-            "log_id": uuid.uuid4().hex,
-            "timestamp": datetime.now(),
-            "user_id": current_user.get("user_id"),
-            "action": action,
-            "entity_type": "payout_snapshot",
-            "entity_id": snapshot_id,
-            "store_id": store_id,
-            "severity": "info",
-            "detail": detail,
-        })
+        audit_repo.create(
+            {
+                "log_id": uuid.uuid4().hex,
+                "timestamp": datetime.now(),
+                "user_id": current_user.get("user_id"),
+                "action": action,
+                "entity_type": "payout_snapshot",
+                "entity_id": snapshot_id,
+                "store_id": store_id,
+                "severity": "info",
+                "detail": detail,
+            }
+        )
     except Exception as e:
         logger.warning(f"[PAYOUT] audit failed: {e}")
 
@@ -351,24 +368,38 @@ def _compute_payout(
     overrides: PreviewOverrides,
 ) -> Dict[str, Any]:
     settings_repo = _settings_repo()
-    settings = (settings_repo.get_for_store(store_id) if settings_repo else
-                IncentiveSettingsRepository.__new__(IncentiveSettingsRepository)._defaults(store_id))  # type: ignore
+    settings = (
+        settings_repo.get_for_store(store_id)
+        if settings_repo
+        else IncentiveSettingsRepository.__new__(IncentiveSettingsRepository)._defaults(
+            store_id
+        )
+    )  # type: ignore
 
     # Inputs
     if overrides.this_year_sale is not None:
         sales = float(overrides.this_year_sale)
-        avg_disc = (overrides.avg_discount_pct
-                    if overrides.avg_discount_pct is not None
-                    else _aggregate_sales(store_id, year, month).get("avg_discount_pct", 0.0))
+        avg_disc = (
+            overrides.avg_discount_pct
+            if overrides.avg_discount_pct is not None
+            else _aggregate_sales(store_id, year, month).get("avg_discount_pct", 0.0)
+        )
     else:
         agg = _aggregate_sales(store_id, year, month)
         sales = agg["sales"]
-        avg_disc = (overrides.avg_discount_pct if overrides.avg_discount_pct is not None
-                    else agg["avg_discount_pct"])
-    last_year = (overrides.last_year_sale if overrides.last_year_sale is not None
-                 else _last_year_sale(store_id, year, month))
-    visufit = (overrides.visufit_usage_pct if overrides.visufit_usage_pct is not None
-               else 0.0)
+        avg_disc = (
+            overrides.avg_discount_pct
+            if overrides.avg_discount_pct is not None
+            else agg["avg_discount_pct"]
+        )
+    last_year = (
+        overrides.last_year_sale
+        if overrides.last_year_sale is not None
+        else _last_year_sale(store_id, year, month)
+    )
+    visufit = (
+        overrides.visufit_usage_pct if overrides.visufit_usage_pct is not None else 0.0
+    )
 
     inputs = {
         "last_year_sale": last_year,
@@ -381,8 +412,10 @@ def _compute_payout(
     name_lookup = _name_lookup_for(store_id, mtd_data)
 
     envelope = assemble_payout(
-        inputs=inputs, settings=settings,
-        mtd_data=mtd_data, name_lookup=name_lookup,
+        inputs=inputs,
+        settings=settings,
+        mtd_data=mtd_data,
+        name_lookup=name_lookup,
     )
     envelope["store_id"] = store_id
     envelope["year"] = year
@@ -415,12 +448,19 @@ async def preview(
     yr = year or now.year
     mo = month or now.month
     overrides = PreviewOverrides(
-        last_year_sale=last_year_sale, this_year_sale=this_year_sale,
-        avg_discount_pct=avg_discount_pct, visufit_usage_pct=visufit_usage_pct,
+        last_year_sale=last_year_sale,
+        this_year_sale=this_year_sale,
+        avg_discount_pct=avg_discount_pct,
+        visufit_usage_pct=visufit_usage_pct,
     )
-    return _serialize(_compute_payout(
-        store_id=store, year=yr, month=mo, overrides=overrides,
-    ))
+    return _serialize(
+        _compute_payout(
+            store_id=store,
+            year=yr,
+            month=mo,
+            overrides=overrides,
+        )
+    )
 
 
 @router.post("/lock", status_code=201)
@@ -442,12 +482,16 @@ async def lock(
         raise HTTPException(status_code=503, detail="Database unavailable")
 
     envelope = _compute_payout(
-        store_id=store, year=payload.year, month=payload.month,
+        store_id=store,
+        year=payload.year,
+        month=payload.month,
         overrides=payload,
     )
     doc = {
         **envelope,
-        "store_id": store, "year": payload.year, "month": payload.month,
+        "store_id": store,
+        "year": payload.year,
+        "month": payload.month,
         "created_by": current_user.get("user_id"),
         "locked_by": current_user.get("user_id"),
     }
@@ -469,7 +513,8 @@ async def lock(
         store_id=store,
         current_user=current_user,
         detail={
-            "year": payload.year, "month": payload.month,
+            "year": payload.year,
+            "month": payload.month,
             "grand_total": saved.get("grand_total"),
             "best_level": saved.get("best_level_achieved"),
         },
@@ -492,7 +537,8 @@ async def list_snapshots(
     items = repo.list_for_store_year(store, yr)
     return {
         "items": [_serialize(i) for i in items],
-        "store_id": store, "year": yr,
+        "store_id": store,
+        "year": yr,
     }
 
 
@@ -535,7 +581,8 @@ async def mark_paid(
             detail=f"Snapshot is {existing.get('status')}, not LOCKED",
         )
     updated = repo.mark_paid(
-        snapshot_id, paid_by=current_user.get("user_id") or "",
+        snapshot_id,
+        paid_by=current_user.get("user_id") or "",
     )
     if updated is None:
         raise HTTPException(status_code=500, detail="mark_paid failed")
@@ -567,11 +614,13 @@ async def export_csv(
     buf = io.StringIO()
     w = _csv.writer(buf)
     w.writerow(["IMS 2.0 Pune Incentive Payout"])
-    w.writerow([
-        f"Store: {doc.get('store_id')}",
-        f"Period: {doc.get('year')}-{doc.get('month'):02d}",
-        f"Status: {doc.get('status')}",
-    ])
+    w.writerow(
+        [
+            f"Store: {doc.get('store_id')}",
+            f"Period: {doc.get('year')}-{doc.get('month'):02d}",
+            f"Status: {doc.get('status')}",
+        ]
+    )
     w.writerow([])
     w.writerow(["Inputs"])
     inp = doc.get("inputs") or {}
@@ -587,41 +636,78 @@ async def export_csv(
     w.writerow(["Total team pool", doc.get("total_team_pool")])
     w.writerow([])
     w.writerow(["Per-staff payouts"])
-    w.writerow([
-        "User ID", "Name", "Weightage", "MTD avg total",
-        "Eligibility", "L1", "L2", "L3", "Total payout",
-    ])
+    w.writerow(
+        [
+            "User ID",
+            "Name",
+            "Weightage",
+            "MTD avg total",
+            "Eligibility",
+            "L1",
+            "L2",
+            "L3",
+            "Total payout",
+        ]
+    )
     for s in doc.get("staff_payouts") or []:
         plv = s.get("payout_by_level") or {}
-        w.writerow([
-            s.get("user_id"), s.get("name"), s.get("weightage"),
-            s.get("mtd_avg_total"), s.get("eligibility"),
-            plv.get("L1"), plv.get("L2"), plv.get("L3"),
-            s.get("total_payout"),
-        ])
+        w.writerow(
+            [
+                s.get("user_id"),
+                s.get("name"),
+                s.get("weightage"),
+                s.get("mtd_avg_total"),
+                s.get("eligibility"),
+                plv.get("L1"),
+                plv.get("L2"),
+                plv.get("L3"),
+                s.get("total_payout"),
+            ]
+        )
     w.writerow([])
     w.writerow(["Manager bonuses"])
-    w.writerow([
-        "User ID", "Name", "Role", "Eligibility",
-        "L1 bonus", "L2 bonus", "L3 bonus", "Total bonus",
-    ])
+    w.writerow(
+        [
+            "User ID",
+            "Name",
+            "Role",
+            "Eligibility",
+            "L1 bonus",
+            "L2 bonus",
+            "L3 bonus",
+            "Total bonus",
+        ]
+    )
     for m in doc.get("manager_bonuses") or []:
         blv = m.get("bonus_by_level") or {}
-        w.writerow([
-            m.get("user_id"), m.get("name"), m.get("role"), m.get("eligibility"),
-            blv.get("L1"), blv.get("L2"), blv.get("L3"),
-            m.get("total_bonus"),
-        ])
+        w.writerow(
+            [
+                m.get("user_id"),
+                m.get("name"),
+                m.get("role"),
+                m.get("eligibility"),
+                blv.get("L1"),
+                blv.get("L2"),
+                blv.get("L3"),
+                m.get("total_bonus"),
+            ]
+        )
     w.writerow([])
     g = doc.get("grand_total") or {}
-    w.writerow(["Grand totals", "Staff", g.get("staff"),
-                "Manager", g.get("manager"), "All", g.get("all")])
+    w.writerow(
+        [
+            "Grand totals",
+            "Staff",
+            g.get("staff"),
+            "Manager",
+            g.get("manager"),
+            "All",
+            g.get("all"),
+        ]
+    )
     buf.seek(0)
     return StreamingResponse(
         iter([buf.getvalue()]),
         media_type="text/csv",
-        headers={
-            "Content-Disposition":
-                f"attachment; filename={snapshot_id}.csv"
-        },
+        headers={"Content-Disposition": f"attachment; filename={snapshot_id}.csv"},
     )

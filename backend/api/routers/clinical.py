@@ -10,7 +10,12 @@ from typing import List, Optional
 from datetime import datetime, date
 import uuid
 from .auth import get_current_user
-from ..dependencies import get_eye_test_queue_repository, get_eye_test_repository, get_prescription_repository, get_customer_repository
+from ..dependencies import (
+    get_eye_test_queue_repository,
+    get_eye_test_repository,
+    get_prescription_repository,
+    get_customer_repository,
+)
 
 router = APIRouter()
 
@@ -95,12 +100,15 @@ def _get_empty_tests() -> List[dict]:
 # ============================================================================
 
 
-
 @router.get("")
 @router.get("/")
 async def get_clinical_root():
     """Root endpoint for clinical/eye test queue"""
-    return {"module": "clinical", "status": "active", "message": "clinical queue endpoint ready"}
+    return {
+        "module": "clinical",
+        "status": "active",
+        "message": "clinical queue endpoint ready",
+    }
 
 
 @router.get("/queue")
@@ -334,8 +342,11 @@ async def complete_test(
             rx_repo = get_prescription_repository()
             if rx_repo is not None and test:
                 from datetime import timedelta
+
                 now = datetime.utcnow()
-                rx_number = f"RX-{now.strftime('%y%m%d')}-{str(uuid.uuid4())[:6].upper()}"
+                rx_number = (
+                    f"RX-{now.strftime('%y%m%d')}-{str(uuid.uuid4())[:6].upper()}"
+                )
                 customer_id = test.get("customer_id", "")
                 store_id = test.get("store_id", "")
 
@@ -347,18 +358,30 @@ async def complete_test(
                     "store_id": store_id,
                     "source": "TESTED_AT_STORE",
                     "optometrist_id": current_user.get("user_id", ""),
-                    "optometrist_name": current_user.get("full_name", current_user.get("username", "")),
+                    "optometrist_name": current_user.get(
+                        "full_name", current_user.get("username", "")
+                    ),
                     "eye_test_id": test_id,
                     "right_eye": {
-                        "sph": str(data.right_eye.get("sphere", data.right_eye.get("sph", "0"))),
-                        "cyl": str(data.right_eye.get("cylinder", data.right_eye.get("cyl", "0"))),
+                        "sph": str(
+                            data.right_eye.get("sphere", data.right_eye.get("sph", "0"))
+                        ),
+                        "cyl": str(
+                            data.right_eye.get(
+                                "cylinder", data.right_eye.get("cyl", "0")
+                            )
+                        ),
                         "axis": data.right_eye.get("axis", 180),
                         "add": str(data.right_eye.get("add", "0")),
                         "pd": str(data.right_eye.get("pd", "")),
                     },
                     "left_eye": {
-                        "sph": str(data.left_eye.get("sphere", data.left_eye.get("sph", "0"))),
-                        "cyl": str(data.left_eye.get("cylinder", data.left_eye.get("cyl", "0"))),
+                        "sph": str(
+                            data.left_eye.get("sphere", data.left_eye.get("sph", "0"))
+                        ),
+                        "cyl": str(
+                            data.left_eye.get("cylinder", data.left_eye.get("cyl", "0"))
+                        ),
                         "axis": data.left_eye.get("axis", 180),
                         "add": str(data.left_eye.get("add", "0")),
                         "pd": str(data.left_eye.get("pd", "")),
@@ -380,7 +403,10 @@ async def complete_test(
                 except Exception as e:
                     # Log but don't fail the test completion
                     import logging
-                    logging.getLogger(__name__).warning(f"Auto-prescription creation failed: {e}")
+
+                    logging.getLogger(__name__).warning(
+                        f"Auto-prescription creation failed: {e}"
+                    )
 
             return {
                 "message": "Test completed",

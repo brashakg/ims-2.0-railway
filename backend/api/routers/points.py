@@ -18,6 +18,7 @@ Mounted at /api/v1/incentive/points (singular `incentive`) — note
 the existing /api/v1/incentives router (sales targets/kickers) is a
 separate, unrelated domain.
 """
+
 from __future__ import annotations
 
 from datetime import date as date_type, datetime, timedelta
@@ -82,9 +83,7 @@ def _resolve_store(current_user: dict, override: Optional[str]) -> str:
         return override
     store = _user_store_id(current_user)
     if not store:
-        raise HTTPException(
-            status_code=400, detail="No active store on this session"
-        )
+        raise HTTPException(status_code=400, detail="No active store on this session")
     return store
 
 
@@ -114,7 +113,9 @@ class CreateDailyPointsRequest(BaseModel):
     staff_id: str = Field(..., min_length=1)
     scores: DailyScores
     visufit_usage_pct_mtd: Optional[float] = Field(
-        None, ge=0.0, le=1.0,
+        None,
+        ge=0.0,
+        le=1.0,
         description="Caller-provided MTD Visufit usage. If absent, "
         "the gate is not applied (fail-soft) until the clinical "
         "endpoint lands.",
@@ -172,9 +173,7 @@ def _settings_repo() -> Optional[IncentiveSettingsRepository]:
     if db is None or not getattr(db, "is_connected", True):
         return None
     try:
-        return IncentiveSettingsRepository(
-            db.get_collection("incentive_settings")
-        )
+        return IncentiveSettingsRepository(db.get_collection("incentive_settings"))
     except Exception:
         return None
 
@@ -187,15 +186,12 @@ def _resolve_staff_name(staff_id: str) -> Optional[str]:
         u = ur.find_by_id(staff_id) or ur.find_one({"user_id": staff_id})
         if not u:
             return None
-        return (u.get("name") or u.get("full_name")
-                or u.get("username") or staff_id)
+        return u.get("name") or u.get("full_name") or u.get("username") or staff_id
     except Exception:
         return None
 
 
-def _conversion_score_for(
-    store_id: str, date_str: str, staff_id: str
-) -> Optional[int]:
+def _conversion_score_for(store_id: str, date_str: str, staff_id: str) -> Optional[int]:
     """Pull conversion_score from Module (i)'s feed math, in-process
     (no HTTP self-call). Returns None on any failure — caller should
     treat that as "no auto-fill"."""
@@ -205,7 +201,10 @@ def _conversion_score_for(
         return None
     try:
         walkouts_today = repo.list_walkouts(
-            store_id=store_id, date_from=date_str, date_to=date_str, limit=5000,
+            store_id=store_id,
+            date_from=date_str,
+            date_to=date_str,
+            limit=5000,
         )
     except Exception:
         walkouts_today = []
@@ -219,7 +218,9 @@ def _conversion_score_for(
         window_from = (target_d - timedelta(days=90)).isoformat()
         window_to = (target_d - timedelta(days=1)).isoformat()
         prior = repo.list_walkouts(
-            store_id=store_id, date_from=window_from, date_to=window_to,
+            store_id=store_id,
+            date_from=window_from,
+            date_to=window_to,
             limit=5000,
         )
     except Exception:
@@ -231,8 +232,10 @@ def _conversion_score_for(
         if w.get("sales_person_id") != staff_id:
             continue
         rsa = w.get("result_set_at")
-        rsa_str = rsa[:10] if isinstance(rsa, str) else (
-            rsa.date().isoformat() if isinstance(rsa, datetime) else ""
+        rsa_str = (
+            rsa[:10]
+            if isinstance(rsa, str)
+            else (rsa.date().isoformat() if isinstance(rsa, datetime) else "")
         )
         if rsa_str != date_str:
             continue
@@ -242,9 +245,7 @@ def _conversion_score_for(
     if walkin_repo is not None:
         try:
             today_doc = walkin_repo.get_today(store_id, date_str=date_str)
-            walk_ins = int(
-                (today_doc.get("per_staff") or {}).get(staff_id, 0)
-            )
+            walk_ins = int((today_doc.get("per_staff") or {}).get(staff_id, 0))
         except Exception:
             pass
     if walk_ins <= 0:
@@ -265,17 +266,19 @@ def _audit(
     if audit_repo is None:
         return
     try:
-        audit_repo.create({
-            "log_id": uuid.uuid4().hex,
-            "timestamp": datetime.now(),
-            "user_id": current_user.get("user_id"),
-            "action": action,
-            "entity_type": "points_log",
-            "entity_id": log_id,
-            "store_id": store_id,
-            "severity": "info",
-            "detail": detail,
-        })
+        audit_repo.create(
+            {
+                "log_id": uuid.uuid4().hex,
+                "timestamp": datetime.now(),
+                "user_id": current_user.get("user_id"),
+                "action": action,
+                "entity_type": "points_log",
+                "entity_id": log_id,
+                "store_id": store_id,
+                "severity": "info",
+                "detail": detail,
+            }
+        )
     except Exception as e:
         logger.warning(f"[POINTS] audit failed: {e}")
 
@@ -425,11 +428,18 @@ async def create_daily(
     if repo is None:
         raise HTTPException(status_code=503, detail="Database unavailable")
     settings_repo = _settings_repo()
-    settings = settings_repo.get_for_store(store) if settings_repo else \
-        IncentiveSettingsRepository.__new__(IncentiveSettingsRepository)._defaults(store)  # type: ignore
+    settings = (
+        settings_repo.get_for_store(store)
+        if settings_repo
+        else IncentiveSettingsRepository.__new__(IncentiveSettingsRepository)._defaults(
+            store
+        )
+    )  # type: ignore
 
     row = _build_row(
-        payload=payload, store_id=store, settings=settings,
+        payload=payload,
+        store_id=store,
+        settings=settings,
         user_id=current_user.get("user_id"),
     )
     saved = _save_row(repo, row, current_user)
@@ -449,8 +459,13 @@ async def create_daily_bulk(
     if repo is None:
         raise HTTPException(status_code=503, detail="Database unavailable")
     settings_repo = _settings_repo()
-    settings = (settings_repo.get_for_store(store) if settings_repo else
-                IncentiveSettingsRepository.__new__(IncentiveSettingsRepository)._defaults(store))  # type: ignore
+    settings = (
+        settings_repo.get_for_store(store)
+        if settings_repo
+        else IncentiveSettingsRepository.__new__(IncentiveSettingsRepository)._defaults(
+            store
+        )
+    )  # type: ignore
 
     saved_rows: List[Dict] = []
     failures: List[Dict] = []
@@ -458,25 +473,33 @@ async def create_daily_bulk(
         try:
             _check_write_permission(current_user, r.staff_id)
         except HTTPException as e:
-            failures.append({
-                "staff_id": r.staff_id,
-                "date": r.date.isoformat(),
-                "status_code": e.status_code, "detail": e.detail,
-            })
+            failures.append(
+                {
+                    "staff_id": r.staff_id,
+                    "date": r.date.isoformat(),
+                    "status_code": e.status_code,
+                    "detail": e.detail,
+                }
+            )
             continue
         try:
             row = _build_row(
-                payload=r, store_id=store, settings=settings,
+                payload=r,
+                store_id=store,
+                settings=settings,
                 user_id=current_user.get("user_id"),
             )
             saved = _save_row(repo, row, current_user)
             saved_rows.append(_serialize(saved))
         except HTTPException as e:
-            failures.append({
-                "staff_id": r.staff_id,
-                "date": r.date.isoformat(),
-                "status_code": e.status_code, "detail": e.detail,
-            })
+            failures.append(
+                {
+                    "staff_id": r.staff_id,
+                    "date": r.date.isoformat(),
+                    "status_code": e.status_code,
+                    "detail": e.detail,
+                }
+            )
     return {
         "saved": saved_rows,
         "failures": failures,
@@ -496,7 +519,11 @@ async def list_daily(
     store = _resolve_store(current_user, store_id)
     repo = _points_repo()
     if repo is None:
-        return {"items": [], "store_id": store, "date_str": date or datetime.now().date().isoformat()}
+        return {
+            "items": [],
+            "store_id": store,
+            "date_str": date or datetime.now().date().isoformat(),
+        }
     date_str = date or datetime.now().date().isoformat()
     rows = repo.list_by_date(store, date_str)
     return {
@@ -533,11 +560,14 @@ async def delete_daily(
     if "STORE_MANAGER" in roles and not (roles & {"SUPERADMIN"}):
         if existing.get("store_id") != _user_store_id(current_user):
             raise HTTPException(
-                status_code=403, detail="Cross-store deletion not allowed",
+                status_code=403,
+                detail="Cross-store deletion not allowed",
             )
 
     ok = repo.soft_delete(
-        log_id, deleted_by=current_user.get("user_id") or "", reason=payload.reason,
+        log_id,
+        deleted_by=current_user.get("user_id") or "",
+        reason=payload.reason,
     )
     if not ok:
         raise HTTPException(status_code=500, detail="Delete failed")
@@ -579,8 +609,11 @@ async def get_mtd(
     items = list(by_staff.values())
     items.sort(key=leaderboard_sort_key)
     return {
-        "store_id": store, "year": yr, "month": mo,
-        "date_from": date_from, "date_to": date_to,
+        "store_id": store,
+        "year": yr,
+        "month": mo,
+        "date_from": date_from,
+        "date_to": date_to,
         "items": items,
     }
 
@@ -604,8 +637,10 @@ async def get_leaderboard(
     items = list(by_staff.values())
     items.sort(key=leaderboard_sort_key)
     return {
-        "store_id": store, "days": days,
-        "date_from": date_from, "date_to": date_to,
+        "store_id": store,
+        "days": days,
+        "date_from": date_from,
+        "date_to": date_to,
         "items": items,
     }
 
@@ -629,8 +664,10 @@ async def staff_history(
     dt = date_to or today.isoformat()
     rows = repo.list_by_staff_range(store, staff_id, df, dt)
     return {
-        "store_id": store, "staff_id": staff_id,
-        "date_from": df, "date_to": dt,
+        "store_id": store,
+        "staff_id": staff_id,
+        "date_from": df,
+        "date_to": dt,
         "items": [_serialize(r) for r in rows],
     }
 
@@ -672,7 +709,9 @@ async def update_eligibility(
         raise HTTPException(status_code=503, detail="Database unavailable")
     bands = [b.model_dump() for b in payload.bands]
     updated = settings_repo.update_eligibility_bands(
-        store, bands, updated_by=current_user.get("user_id") or "",
+        store,
+        bands,
+        updated_by=current_user.get("user_id") or "",
     )
     _audit(
         action="incentive.settings.update",
@@ -727,7 +766,8 @@ async def update_payout_settings(
     incoming = payload.model_dump(exclude_unset=True)
     if not incoming:
         raise HTTPException(
-            status_code=400, detail="At least one field must be provided",
+            status_code=400,
+            detail="At least one field must be provided",
         )
 
     db = get_db()
@@ -778,37 +818,52 @@ async def set_last_year_sale(
         raise HTTPException(status_code=503, detail="Database unavailable")
     coll = db.get_collection("incentive_inputs")
     now = datetime.now()
-    existing = coll.find_one({
-        "store_id": store, "year": payload.year, "month": payload.month,
-    })
+    existing = coll.find_one(
+        {
+            "store_id": store,
+            "year": payload.year,
+            "month": payload.month,
+        }
+    )
     if existing:
         coll.update_one(
             {"store_id": store, "year": payload.year, "month": payload.month},
-            {"$set": {
-                "last_year_sale": payload.last_year_sale,
-                "updated_at": now,
-                "updated_by": current_user.get("user_id"),
-            }},
+            {
+                "$set": {
+                    "last_year_sale": payload.last_year_sale,
+                    "updated_at": now,
+                    "updated_by": current_user.get("user_id"),
+                }
+            },
         )
     else:
-        coll.insert_one({
-            "store_id": store, "year": payload.year, "month": payload.month,
-            "last_year_sale": payload.last_year_sale,
-            "created_at": now, "created_by": current_user.get("user_id"),
-            "updated_at": now, "updated_by": current_user.get("user_id"),
-        })
+        coll.insert_one(
+            {
+                "store_id": store,
+                "year": payload.year,
+                "month": payload.month,
+                "last_year_sale": payload.last_year_sale,
+                "created_at": now,
+                "created_by": current_user.get("user_id"),
+                "updated_at": now,
+                "updated_by": current_user.get("user_id"),
+            }
+        )
     _audit(
         action="incentive.inputs.update",
         log_id=f"inputs:{store}:{payload.year}-{payload.month:02d}",
         store_id=store,
         current_user=current_user,
         detail={
-            "year": payload.year, "month": payload.month,
+            "year": payload.year,
+            "month": payload.month,
             "last_year_sale": payload.last_year_sale,
         },
     )
     return {
-        "store_id": store, "year": payload.year, "month": payload.month,
+        "store_id": store,
+        "year": payload.year,
+        "month": payload.month,
         "last_year_sale": payload.last_year_sale,
     }
 
@@ -827,14 +882,17 @@ async def update_visufit_gate(
         )
     if payload.threshold is None and payload.enabled is None:
         raise HTTPException(
-            status_code=400, detail="Provide threshold and/or enabled",
+            status_code=400,
+            detail="Provide threshold and/or enabled",
         )
     store = _resolve_store(current_user, store_id)
     settings_repo = _settings_repo()
     if settings_repo is None:
         raise HTTPException(status_code=503, detail="Database unavailable")
     updated = settings_repo.update_visufit_gate(
-        store, threshold=payload.threshold, enabled=payload.enabled,
+        store,
+        threshold=payload.threshold,
+        enabled=payload.enabled,
         updated_by=current_user.get("user_id") or "",
     )
     _audit(

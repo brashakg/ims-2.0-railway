@@ -21,6 +21,7 @@ Side effects on POST:
      `customer_id` is linked back onto the walkout.
   2. An audit-log row is written (`action: "walkout.create"`).
 """
+
 from datetime import datetime, date as date_type
 from enum import Enum
 from typing import Any, Dict, List, Optional
@@ -274,8 +275,12 @@ class SetResultRequest(BaseModel):
 # RBAC
 # ============================================================================
 _ALLOWED_CREATE_ROLES = {
-    "SUPERADMIN", "ADMIN", "STORE_MANAGER",
-    "SALES_STAFF", "SALES_CASHIER", "CASHIER",
+    "SUPERADMIN",
+    "ADMIN",
+    "STORE_MANAGER",
+    "SALES_STAFF",
+    "SALES_CASHIER",
+    "CASHIER",
 }
 # Roles that can edit any walkout in their store (or any store, for
 # the global ones). Sales staff can only edit walkouts they own.
@@ -286,9 +291,7 @@ _DELETE_ROLES = {"SUPERADMIN", "STORE_MANAGER"}
 # Roles that can attribute a walkout to a salesperson other than
 # themselves (per UX spec: managers / admin / accountant + above can
 # pick from a dropdown; everyone below is auto-locked to self).
-_REATTRIBUTE_ROLES = (
-    _GLOBAL_EDIT_ROLES | _STORE_EDIT_ROLES | {"ACCOUNTANT"}
-)
+_REATTRIBUTE_ROLES = _GLOBAL_EDIT_ROLES | _STORE_EDIT_ROLES | {"ACCOUNTANT"}
 
 
 def _user_role_set(current_user: dict) -> set:
@@ -312,10 +315,10 @@ def _check_create_permission(current_user: dict) -> None:
 
 def _check_edit_permission(walkout: Dict, current_user: dict) -> None:
     """Edit allowed when:
-      - SUPERADMIN/ADMIN: any walkout
-      - STORE_MANAGER: walkouts in their store
-      - SALES_STAFF/SALES_CASHIER/CASHIER: only walkouts they own
-        (sales_person_id == current_user.user_id)
+    - SUPERADMIN/ADMIN: any walkout
+    - STORE_MANAGER: walkouts in their store
+    - SALES_STAFF/SALES_CASHIER/CASHIER: only walkouts they own
+      (sales_person_id == current_user.user_id)
     """
     roles = _user_role_set(current_user)
     if roles & _GLOBAL_EDIT_ROLES:
@@ -337,7 +340,9 @@ def _check_delete_permission(walkout: Dict, current_user: dict) -> None:
     roles = _user_role_set(current_user)
     if roles & {"SUPERADMIN"}:
         return
-    if (roles & _STORE_EDIT_ROLES) and walkout.get("store_id") == _user_store_id(current_user):
+    if (roles & _STORE_EDIT_ROLES) and walkout.get("store_id") == _user_store_id(
+        current_user
+    ):
         return
     raise HTTPException(
         status_code=403,
@@ -371,6 +376,7 @@ def _walkout_repo():
         return None
     # Local import keeps the router importable even if repos break.
     from database.repositories.walkout_repository import WalkoutRepository
+
     return WalkoutRepository(col)
 
 
@@ -446,17 +452,19 @@ def _ensure_customer(
     audit_repo = get_audit_repository()
     if audit_repo is not None:
         try:
-            audit_repo.create({
-                "log_id": uuid.uuid4().hex,
-                "timestamp": datetime.now(),
-                "user_id": current_user.get("user_id"),
-                "action": "customer.create",
-                "entity_type": "customer",
-                "entity_id": new_id,
-                "store_id": store_id,
-                "severity": "info",
-                "detail": {"via_walkout": True, "mobile": mobile},
-            })
+            audit_repo.create(
+                {
+                    "log_id": uuid.uuid4().hex,
+                    "timestamp": datetime.now(),
+                    "user_id": current_user.get("user_id"),
+                    "action": "customer.create",
+                    "entity_type": "customer",
+                    "entity_id": new_id,
+                    "store_id": store_id,
+                    "severity": "info",
+                    "detail": {"via_walkout": True, "mobile": mobile},
+                }
+            )
         except Exception:
             pass
 
@@ -475,20 +483,22 @@ def _audit_walkout_create(
     if audit_repo is None:
         return
     try:
-        audit_repo.create({
-            "log_id": uuid.uuid4().hex,
-            "timestamp": datetime.now(),
-            "user_id": current_user.get("user_id"),
-            "action": "walkout.create",
-            "entity_type": "walkout",
-            "entity_id": walkout_id,
-            "store_id": store_id,
-            "severity": "info",
-            "detail": {
-                "mobile": mobile,
-                "sales_person": sales_person_name or "",
-            },
-        })
+        audit_repo.create(
+            {
+                "log_id": uuid.uuid4().hex,
+                "timestamp": datetime.now(),
+                "user_id": current_user.get("user_id"),
+                "action": "walkout.create",
+                "entity_type": "walkout",
+                "entity_id": walkout_id,
+                "store_id": store_id,
+                "severity": "info",
+                "detail": {
+                    "mobile": mobile,
+                    "sales_person": sales_person_name or "",
+                },
+            }
+        )
     except Exception as e:
         logger.warning(f"[WALKOUT] audit-log failed (non-fatal): {e}")
 
@@ -506,17 +516,19 @@ def _audit_walkout_action(
     if audit_repo is None:
         return
     try:
-        audit_repo.create({
-            "log_id": uuid.uuid4().hex,
-            "timestamp": datetime.now(),
-            "user_id": current_user.get("user_id"),
-            "action": action,
-            "entity_type": "walkout",
-            "entity_id": walkout_id,
-            "store_id": store_id,
-            "severity": "info",
-            "detail": detail,
-        })
+        audit_repo.create(
+            {
+                "log_id": uuid.uuid4().hex,
+                "timestamp": datetime.now(),
+                "user_id": current_user.get("user_id"),
+                "action": action,
+                "entity_type": "walkout",
+                "entity_id": walkout_id,
+                "store_id": store_id,
+                "severity": "info",
+                "detail": detail,
+            }
+        )
     except Exception as e:
         logger.warning(f"[WALKOUT] audit-log failed (non-fatal): {e}")
 
@@ -589,7 +601,8 @@ async def create_walkout(
         "primary_walkout_reason": payload.primary_walkout_reason.value,
         "secondary_walkout_reason": (
             payload.secondary_walkout_reason.value
-            if payload.secondary_walkout_reason else None
+            if payload.secondary_walkout_reason
+            else None
         ),
         "brand_interest": payload.brand_interest,
         "competitor_mentioned": payload.competitor_mentioned,
@@ -624,8 +637,12 @@ async def create_walkout(
 @router.get("/", include_in_schema=False)
 async def list_walkouts(
     current_user: dict = Depends(get_current_user),
-    date_from: Optional[str] = Query(None, description="ISO date (YYYY-MM-DD), inclusive"),
-    date_to: Optional[str] = Query(None, description="ISO date (YYYY-MM-DD), inclusive"),
+    date_from: Optional[str] = Query(
+        None, description="ISO date (YYYY-MM-DD), inclusive"
+    ),
+    date_to: Optional[str] = Query(
+        None, description="ISO date (YYYY-MM-DD), inclusive"
+    ),
     sales_person_id: Optional[str] = Query(None),
     primary_walkout_reason: Optional[str] = Query(None),
     result: Optional[str] = Query(
@@ -634,7 +651,7 @@ async def list_walkouts(
     store_id: Optional[str] = Query(
         None,
         description="Cross-store filter — only honored for SUPERADMIN/ADMIN; "
-                    "everyone else is scoped to their active store.",
+        "everyone else is scoped to their active store.",
     ),
     skip: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=200),
@@ -804,9 +821,7 @@ async def escalate_overdue_followups(
             except Exception as e:
                 logger.warning(f"[WALKOUT] task create failed: {e}")
                 continue
-        repo.stamp_followup_escalation(
-            row.get("walkout_id"), round_num, task_id
-        )
+        repo.stamp_followup_escalation(row.get("walkout_id"), round_num, task_id)
         _audit_walkout_action(
             action="walkout.followup.escalate",
             walkout_id=row.get("walkout_id"),
@@ -819,13 +834,15 @@ async def escalate_overdue_followups(
                 "assignee": assignee,
             },
         )
-        created.append({
-            "walkout_id": row.get("walkout_id"),
-            "round": round_num,
-            "task_id": task_id,
-            "priority": priority,
-            "assignee": assignee,
-        })
+        created.append(
+            {
+                "walkout_id": row.get("walkout_id"),
+                "round": round_num,
+                "task_id": task_id,
+                "priority": priority,
+                "assignee": assignee,
+            }
+        )
 
     return {
         "escalated": len(created),
@@ -855,9 +872,7 @@ def _resolve_dashboard_store(current_user: dict, store_override: Optional[str]) 
         return store_override
     store = _user_store_id(current_user)
     if not store:
-        raise HTTPException(
-            status_code=400, detail="No active store on this session"
-        )
+        raise HTTPException(status_code=400, detail="No active store on this session")
     return store
 
 
@@ -871,8 +886,12 @@ async def walkins_today(
     repo = get_walkin_counter_repository()
     if repo is None:
         return {
-            "store_id": store, "date_str": datetime.now().date().isoformat(),
-            "pos_auto_count": 0, "manual_topup": 0, "total": 0, "per_staff": {},
+            "store_id": store,
+            "date_str": datetime.now().date().isoformat(),
+            "pos_auto_count": 0,
+            "manual_topup": 0,
+            "total": 0,
+            "per_staff": {},
         }
     return _serialize_value(repo.get_today(store))
 
@@ -892,9 +911,14 @@ async def walkins_mtd(
     repo = get_walkin_counter_repository()
     if repo is None:
         return {
-            "store_id": store, "year": yr, "month": mo,
-            "pos_auto_count": 0, "manual_topup": 0, "total": 0,
-            "per_staff": {}, "days_with_data": 0,
+            "store_id": store,
+            "year": yr,
+            "month": mo,
+            "pos_auto_count": 0,
+            "manual_topup": 0,
+            "total": 0,
+            "per_staff": {},
+            "days_with_data": 0,
         }
     return _serialize_value(repo.get_mtd(store, yr, mo))
 
@@ -941,12 +965,17 @@ async def walkins_manual_topup(
 # Roles allowed to tap the POS "+1 walk-in" button — every customer-
 # facing in-store role, not just managers (unlike manual-topup, which
 # can inflate the count and stays manager-gated).
-_WALKIN_POS_ROLES = _ALLOWED_CREATE_ROLES | {"OPTOMETRIST", "AREA_MANAGER", "ACCOUNTANT"}
+_WALKIN_POS_ROLES = _ALLOWED_CREATE_ROLES | {
+    "OPTOMETRIST",
+    "AREA_MANAGER",
+    "ACCOUNTANT",
+}
 
 
 class PosWalkinRequest(BaseModel):
     """POS "+1 walk-in" tap. Attributes the footfall to a salesperson and
     deduplicates per (mobile, day) when a mobile is supplied."""
+
     sales_person_id: str = Field(..., min_length=1)
     mobile: Optional[str] = None
 
@@ -996,11 +1025,15 @@ async def dashboard_per_staff(
 
     # Walkouts MTD by sales_person (built from list — small N per store).
     mtd_walkouts = walkout_repo.list_walkouts(
-        store_id=store, date_from=mtd_from, date_to=today, limit=2000,
+        store_id=store,
+        date_from=mtd_from,
+        date_to=today,
+        limit=2000,
     )
     today_walkouts = [w for w in mtd_walkouts if w.get("date_str") == today]
 
     per_staff: Dict[str, Dict[str, Any]] = {}
+
     def _slot(sp: str) -> Dict[str, Any]:
         if sp not in per_staff:
             per_staff[sp] = {
@@ -1018,7 +1051,9 @@ async def dashboard_per_staff(
     for w in mtd_walkouts:
         sp = w.get("sales_person_id") or ""
         slot = _slot(sp)
-        slot["sales_person_name"] = w.get("sales_person_name") or slot["sales_person_name"]
+        slot["sales_person_name"] = (
+            w.get("sales_person_name") or slot["sales_person_name"]
+        )
         slot["walkouts_mtd"] += 1
         if w.get("result") == "CONVERTED":
             slot["converted_mtd"] += 1
@@ -1067,11 +1102,14 @@ async def dashboard_top_reasons(
     if repo is None:
         return {"store_id": store, "items": []}
     from datetime import timedelta
+
     today = datetime.now().date()
     date_from = (today - timedelta(days=days - 1)).isoformat()
     walkouts = repo.list_walkouts(
-        store_id=store, date_from=date_from,
-        date_to=today.isoformat(), limit=5000,
+        store_id=store,
+        date_from=date_from,
+        date_to=today.isoformat(),
+        limit=5000,
     )
     counts: Dict[str, int] = {}
     for w in walkouts:
@@ -1080,7 +1118,9 @@ async def dashboard_top_reasons(
     items = [{"reason": k, "count": v} for k, v in counts.items()]
     items.sort(key=lambda x: (-x["count"], x["reason"]))
     return {
-        "store_id": store, "days": days, "items": items[:limit],
+        "store_id": store,
+        "days": days,
+        "items": items[:limit],
     }
 
 
@@ -1096,11 +1136,14 @@ async def dashboard_result_breakdown(
     if repo is None:
         return {"store_id": store, "buckets": {}}
     from datetime import timedelta
+
     today = datetime.now().date()
     date_from = (today - timedelta(days=days - 1)).isoformat()
     walkouts = repo.list_walkouts(
-        store_id=store, date_from=date_from,
-        date_to=today.isoformat(), limit=5000,
+        store_id=store,
+        date_from=date_from,
+        date_to=today.isoformat(),
+        limit=5000,
     )
     buckets = {"DUE": 0, "NEGATIVE": 0, "CONVERTED": 0, "no_result": 0}
     for w in walkouts:
@@ -1110,7 +1153,9 @@ async def dashboard_result_breakdown(
         else:
             buckets["no_result"] += 1
     return {
-        "store_id": store, "days": days, "total": len(walkouts),
+        "store_id": store,
+        "days": days,
+        "total": len(walkouts),
         "buckets": buckets,
     }
 
@@ -1144,7 +1189,10 @@ async def conversion_feed(
 
     # Walkouts logged that day
     walkouts_today = repo.list_walkouts(
-        store_id=store, date_from=target_date, date_to=target_date, limit=5000,
+        store_id=store,
+        date_from=target_date,
+        date_to=target_date,
+        limit=5000,
     )
     walkouts_count: Dict[str, int] = {}
     name_by_id: Dict[str, str] = {}
@@ -1158,11 +1206,15 @@ async def conversion_feed(
     # result_set_at falls on `target_date`. Pull the last 90 days as a
     # window — the spec doesn't bound it but Phase 6 can paginate.
     from datetime import timedelta, date as _d
+
     target_d = _d.fromisoformat(target_date)
     window_from = (target_d - timedelta(days=90)).isoformat()
     window_to = (target_d - timedelta(days=1)).isoformat()
     prior_window = repo.list_walkouts(
-        store_id=store, date_from=window_from, date_to=window_to, limit=5000,
+        store_id=store,
+        date_from=window_from,
+        date_to=window_to,
+        limit=5000,
     )
     retro_count: Dict[str, int] = {}
     for w in prior_window:
@@ -1171,8 +1223,10 @@ async def conversion_feed(
         rsa = w.get("result_set_at")
         if not rsa:
             continue
-        rsa_str = rsa[:10] if isinstance(rsa, str) else (
-            rsa.date().isoformat() if isinstance(rsa, datetime) else ""
+        rsa_str = (
+            rsa[:10]
+            if isinstance(rsa, str)
+            else (rsa.date().isoformat() if isinstance(rsa, datetime) else "")
         )
         if rsa_str != target_date:
             continue
@@ -1200,14 +1254,16 @@ async def conversion_feed(
             score = round(max(0.0, min(20.0, raw)), 2)
         else:
             score = 0.0
-        out.append({
-            "sales_person_id": sp,
-            "name": name_by_id.get(sp),
-            "walk_ins_today": walk_ins,
-            "walkouts_today": walkouts,
-            "retro_conversions_today": retro,
-            "conversion_score": score,
-        })
+        out.append(
+            {
+                "sales_person_id": sp,
+                "name": name_by_id.get(sp),
+                "walk_ins_today": walk_ins,
+                "walkouts_today": walkouts,
+                "retro_conversions_today": retro,
+                "conversion_score": score,
+            }
+        )
     return out
 
 
@@ -1223,17 +1279,22 @@ async def dashboard_fu_status(
     if repo is None:
         return {"store_id": store, "fu1": {}, "fu2": {}}
     from datetime import timedelta
+
     today = datetime.now().date()
     date_from = (today - timedelta(days=days - 1)).isoformat()
     walkouts = repo.list_walkouts(
-        store_id=store, date_from=date_from,
-        date_to=today.isoformat(), limit=5000,
+        store_id=store,
+        date_from=date_from,
+        date_to=today.isoformat(),
+        limit=5000,
     )
     out: Dict[str, Dict[str, int]] = {"fu1": {}, "fu2": {}}
     for w in walkouts:
-        for fu in (w.get("followups") or []):
-            key = "fu1" if fu.get("round") == 1 else (
-                "fu2" if fu.get("round") == 2 else None
+        for fu in w.get("followups") or []:
+            key = (
+                "fu1"
+                if fu.get("round") == 1
+                else ("fu2" if fu.get("round") == 2 else None)
             )
             if not key:
                 continue
@@ -1272,14 +1333,13 @@ async def append_followup(
 
     supervisor_name = (
         _resolve_sales_person_name(payload.supervisor_id)
-        if payload.supervisor_id else None
+        if payload.supervisor_id
+        else None
     )
 
     fu_doc = {
         "round": payload.round,
-        "scheduled_date": datetime.combine(
-            payload.scheduled_date, datetime.min.time()
-        ),
+        "scheduled_date": datetime.combine(payload.scheduled_date, datetime.min.time()),
         "scheduled_time": payload.scheduled_time,
         "mode": payload.mode.value,
         "supervisor_id": payload.supervisor_id,
@@ -1332,8 +1392,11 @@ async def update_followup(
     _check_edit_permission(existing, current_user)
 
     existing_fu = next(
-        (fu for fu in (existing.get("followups") or [])
-         if fu.get("round") == round_num),
+        (
+            fu
+            for fu in (existing.get("followups") or [])
+            if fu.get("round") == round_num
+        ),
         None,
     )
     if not existing_fu:
@@ -1409,9 +1472,7 @@ async def set_walkout_result(
                 orders_coll = db.get_collection("orders")
                 order = orders_coll.find_one(
                     {"order_id": payload.converted_order_id}
-                ) or orders_coll.find_one(
-                    {"order_number": payload.converted_order_id}
-                )
+                ) or orders_coll.find_one({"order_number": payload.converted_order_id})
                 if not order:
                     raise HTTPException(
                         status_code=422,
@@ -1577,9 +1638,7 @@ async def delete_walkout(
         reason=payload.reason,
     )
     if not ok:
-        raise HTTPException(
-            status_code=500, detail="Failed to delete walkout"
-        )
+        raise HTTPException(status_code=500, detail="Failed to delete walkout")
 
     _audit_walkout_action(
         action="walkout.delete",

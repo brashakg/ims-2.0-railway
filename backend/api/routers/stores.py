@@ -10,7 +10,11 @@ from typing import List, Optional
 import uuid
 
 from .auth import get_current_user
-from ..dependencies import get_store_repository, get_user_repository, get_order_repository
+from ..dependencies import (
+    get_store_repository,
+    get_user_repository,
+    get_order_repository,
+)
 
 router = APIRouter()
 
@@ -93,7 +97,9 @@ async def create_store(
 ):
     """Create a new store (SUPERADMIN/ADMIN only)"""
     # RBAC: Only admins can create stores
-    if not any(role in current_user.get("roles", []) for role in ["SUPERADMIN", "ADMIN"]):
+    if not any(
+        role in current_user.get("roles", []) for role in ["SUPERADMIN", "ADMIN"]
+    ):
         raise HTTPException(status_code=403, detail="Only admins can create stores")
 
     repo = get_store_repository()
@@ -148,7 +154,9 @@ async def get_store(store_id: str, current_user: dict = Depends(get_current_user
 
 
 @router.get("/{store_id}/stats")
-async def get_store_stats(store_id: str, current_user: dict = Depends(get_current_user)):
+async def get_store_stats(
+    store_id: str, current_user: dict = Depends(get_current_user)
+):
     """Quick store KPIs — order count + revenue + staff count. The
     frontend's storeApi.getStoreStats was 404'ing (no such route).
     Two-segment path, so it isn't shadowed by GET /{store_id}."""
@@ -180,20 +188,27 @@ async def get_store_stats(store_id: str, current_user: dict = Depends(get_curren
 
 
 @router.get("/{store_id}/users")
-async def get_store_users(store_id: str, current_user: dict = Depends(get_current_user)):
+async def get_store_users(
+    store_id: str, current_user: dict = Depends(get_current_user)
+):
     """List users with access to this store. Frontend storeApi.getStoreUsers
     was 404'ing."""
     user_repo = get_user_repository()
     if user_repo is None:
         return {"users": [], "total": 0}
     # Match either the home store or the multi-store access list
-    users = user_repo.find_many({
-        "$or": [
-            {"store_ids": store_id},
-            {"home_store_id": store_id},
-            {"active_store_id": store_id},
-        ]
-    }) or []
+    users = (
+        user_repo.find_many(
+            {
+                "$or": [
+                    {"store_ids": store_id},
+                    {"home_store_id": store_id},
+                    {"active_store_id": store_id},
+                ]
+            }
+        )
+        or []
+    )
     # Strip password hashes defensively
     safe = []
     for u in users:
@@ -241,11 +256,14 @@ async def delete_store(store_id: str, current_user: dict = Depends(get_current_u
     existing = repo.find_by_id(store_id)
     if existing is None:
         raise HTTPException(status_code=404, detail="Store not found")
-    repo.update(store_id, {
-        "is_active": False,
-        "deactivated_at": __import__("datetime").datetime.now().isoformat(),
-        "deactivated_by": current_user.get("user_id"),
-    })
+    repo.update(
+        store_id,
+        {
+            "is_active": False,
+            "deactivated_at": __import__("datetime").datetime.now().isoformat(),
+            "deactivated_by": current_user.get("user_id"),
+        },
+    )
     return {"store_id": store_id, "message": "Store deactivated"}
 
 

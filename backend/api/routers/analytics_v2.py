@@ -31,6 +31,7 @@ router = APIRouter()
 def _get_db():
     try:
         from database.connection import get_db
+
         return get_db().db
     except Exception:
         return _dep_get_db()
@@ -54,15 +55,18 @@ def _safe_div(a, b, ndigits=2):
 # SCHEMAS
 # ============================================================================
 
+
 class LoyaltyEarnRequest(BaseModel):
     customer_id: str
     order_id: str
     amount: float
 
+
 class LoyaltyRedeemRequest(BaseModel):
     customer_id: str
     points: int
     redemption_type: str = "discount"
+
 
 class EyeCampCreateRequest(BaseModel):
     name: str
@@ -71,6 +75,7 @@ class EyeCampCreateRequest(BaseModel):
     type: str = "community"  # school / corporate / community
     target_attendees: int = 0
     staff_assigned: List[str] = []
+
 
 class EyeCampUpdateRequest(BaseModel):
     actual_attendees: Optional[int] = None
@@ -82,6 +87,7 @@ class EyeCampUpdateRequest(BaseModel):
 # ============================================================================
 # 10. DISCOUNT ANALYSIS DASHBOARD
 # ============================================================================
+
 
 @router.get("/discount-analysis")
 async def discount_analysis(
@@ -95,8 +101,10 @@ async def discount_analysis(
     db = _get_db()
     if not db:
         return {
-            "total_discount_amount": 0, "avg_discount_pct": 0,
-            "by_staff": [], "excessive_discounts": [],
+            "total_discount_amount": 0,
+            "avg_discount_pct": 0,
+            "by_staff": [],
+            "excessive_discounts": [],
             "period_comparison": {"current": 0, "previous": 0, "change_pct": 0},
         }
 
@@ -123,7 +131,9 @@ async def discount_analysis(
     for o in orders:
         disc_amt = float(o.get("discount_amount", 0) or 0)
         total_amt = float(o.get("total_amount", 0) or o.get("grand_total", 0) or 0)
-        disc_pct = _safe_div(disc_amt * 100, total_amt + disc_amt) if disc_amt > 0 else 0
+        disc_pct = (
+            _safe_div(disc_amt * 100, total_amt + disc_amt) if disc_amt > 0 else 0
+        )
 
         total_discount += disc_amt
         if disc_amt > 0:
@@ -132,18 +142,25 @@ async def discount_analysis(
         staff_id = o.get("sales_staff_id") or o.get("created_by") or "unknown"
         staff_name = o.get("sales_staff_name") or o.get("created_by_name") or staff_id
         if staff_id not in staff_map:
-            staff_map[staff_id] = {"name": staff_name, "total_discount": 0, "pcts": [], "order_count": 0}
+            staff_map[staff_id] = {
+                "name": staff_name,
+                "total_discount": 0,
+                "pcts": [],
+                "order_count": 0,
+            }
         if disc_amt > 0:
             staff_map[staff_id]["total_discount"] += disc_amt
             staff_map[staff_id]["pcts"].append(disc_pct)
             staff_map[staff_id]["order_count"] += 1
 
         if disc_pct > 15:
-            excessive.append({
-                "order_id": o.get("order_id", str(o.get("_id", ""))),
-                "discount_pct": round(disc_pct, 2),
-                "staff_name": staff_name,
-            })
+            excessive.append(
+                {
+                    "order_id": o.get("order_id", str(o.get("_id", ""))),
+                    "discount_pct": round(disc_pct, 2),
+                    "staff_name": staff_name,
+                }
+            )
 
     by_staff = [
         {
@@ -152,14 +169,17 @@ async def discount_analysis(
             "avg_pct": _safe_div(sum(v["pcts"]), len(v["pcts"])),
             "order_count": v["order_count"],
         }
-        for v in staff_map.values() if v["order_count"] > 0
+        for v in staff_map.values()
+        if v["order_count"] > 0
     ]
     by_staff.sort(key=lambda x: x["total_discount"], reverse=True)
 
     # Period comparison: compare to same-length previous period
     current_total = total_discount
     period_days = (dt_to - dt_from).days if dt_from and dt_to else 30
-    prev_from = (dt_from or (now - timedelta(days=period_days))) - timedelta(days=period_days)
+    prev_from = (dt_from or (now - timedelta(days=period_days))) - timedelta(
+        days=period_days
+    )
     prev_to = dt_from or (now - timedelta(days=period_days))
     prev_query: dict = {
         "store_id": active_store,
@@ -167,11 +187,17 @@ async def discount_analysis(
     }
     prev_orders = list(db.get_collection("orders").find(prev_query).limit(5000))
     previous_total = sum(float(o.get("discount_amount", 0) or 0) for o in prev_orders)
-    change_pct = _safe_div((current_total - previous_total) * 100, previous_total) if previous_total else 0
+    change_pct = (
+        _safe_div((current_total - previous_total) * 100, previous_total)
+        if previous_total
+        else 0
+    )
 
     return {
         "total_discount_amount": round(total_discount, 2),
-        "avg_discount_pct": _safe_div(sum(discount_pcts), len(discount_pcts)) if discount_pcts else 0,
+        "avg_discount_pct": (
+            _safe_div(sum(discount_pcts), len(discount_pcts)) if discount_pcts else 0
+        ),
         "by_staff": by_staff,
         "excessive_discounts": excessive[:50],
         "period_comparison": {
@@ -185,6 +211,7 @@ async def discount_analysis(
 # ============================================================================
 # 11. DEMAND FORECASTING (SUPERADMIN)
 # ============================================================================
+
 
 @router.get("/demand-forecast")
 async def demand_forecast(
@@ -204,7 +231,10 @@ async def demand_forecast(
     now = datetime.now()
     ninety_days_ago = (now - timedelta(days=90)).isoformat()
 
-    order_query: dict = {"store_id": active_store, "created_at": {"$gte": ninety_days_ago}}
+    order_query: dict = {
+        "store_id": active_store,
+        "created_at": {"$gte": ninety_days_ago},
+    }
     orders = list(db.get_collection("orders").find(order_query).limit(10000))
 
     # Tally sales per product
@@ -229,13 +259,17 @@ async def demand_forecast(
             qty = int(item.get("quantity", 1) or 1)
             product_sales[pid]["qty"] += qty
             day_key = (o.get("created_at") or "")[:10]
-            product_sales[pid]["daily_counts"][day_key] = product_sales[pid]["daily_counts"].get(day_key, 0) + qty
+            product_sales[pid]["daily_counts"][day_key] = (
+                product_sales[pid]["daily_counts"].get(day_key, 0) + qty
+            )
 
     # Get current stock levels
     products_coll = db.get_collection("products")
 
     # Sort by total qty, take top 20
-    top_products = sorted(product_sales.items(), key=lambda x: x[1]["qty"], reverse=True)[:20]
+    top_products = sorted(
+        product_sales.items(), key=lambda x: x[1]["qty"], reverse=True
+    )[:20]
 
     forecasts = []
     for pid, data in top_products:
@@ -255,19 +289,23 @@ async def demand_forecast(
 
         # Lookup current stock
         prod_doc = products_coll.find_one({"product_id": pid}) or {}
-        current_stock = int(prod_doc.get("quantity", 0) or prod_doc.get("stock", 0) or 0)
+        current_stock = int(
+            prod_doc.get("quantity", 0) or prod_doc.get("stock", 0) or 0
+        )
         reorder = max(0, predicted_30 - current_stock)
 
-        forecasts.append({
-            "product_id": pid,
-            "product_name": data["product_name"],
-            "brand": data["brand"],
-            "avg_daily_sales": round(avg_daily, 2),
-            "trend": trend,
-            "predicted_30_day": predicted_30,
-            "current_stock": current_stock,
-            "reorder_recommended": reorder,
-        })
+        forecasts.append(
+            {
+                "product_id": pid,
+                "product_name": data["product_name"],
+                "brand": data["brand"],
+                "avg_daily_sales": round(avg_daily, 2),
+                "trend": trend,
+                "predicted_30_day": predicted_30,
+                "current_stock": current_stock,
+                "reorder_recommended": reorder,
+            }
+        )
 
     return {"forecasts": forecasts}
 
@@ -275,6 +313,7 @@ async def demand_forecast(
 # ============================================================================
 # 12. DEAD STOCK IDENTIFICATION
 # ============================================================================
+
 
 @router.get("/dead-stock")
 async def dead_stock(
@@ -292,13 +331,21 @@ async def dead_stock(
     threshold_date = (now - timedelta(days=days_threshold)).isoformat()
 
     # Get all products for this store
-    products = list(db.get_collection("products").find({"store_id": active_store}).limit(5000))
+    products = list(
+        db.get_collection("products").find({"store_id": active_store}).limit(5000)
+    )
 
     # Get orders in the threshold period to find which products sold
-    orders = list(db.get_collection("orders").find({
-        "store_id": active_store,
-        "created_at": {"$gte": threshold_date},
-    }).limit(10000))
+    orders = list(
+        db.get_collection("orders")
+        .find(
+            {
+                "store_id": active_store,
+                "created_at": {"$gte": threshold_date},
+            }
+        )
+        .limit(10000)
+    )
 
     sold_product_ids: set = set()
     last_sold_map: dict = {}
@@ -314,12 +361,23 @@ async def dead_stock(
 
     # Also check older orders for last_sold_date of dead stock
     if products:
-        unsold_pids = [p.get("product_id", "") for p in products if p.get("product_id", "") not in sold_product_ids]
+        unsold_pids = [
+            p.get("product_id", "")
+            for p in products
+            if p.get("product_id", "") not in sold_product_ids
+        ]
         if unsold_pids:
-            older_orders = list(db.get_collection("orders").find({
-                "store_id": active_store,
-                "items.product_id": {"$in": unsold_pids[:200]},
-            }).sort("created_at", -1).limit(5000))
+            older_orders = list(
+                db.get_collection("orders")
+                .find(
+                    {
+                        "store_id": active_store,
+                        "items.product_id": {"$in": unsold_pids[:200]},
+                    }
+                )
+                .sort("created_at", -1)
+                .limit(5000)
+            )
             for o in older_orders:
                 items = o.get("items") or o.get("order_items") or []
                 for item in items:
@@ -360,16 +418,18 @@ async def dead_stock(
         else:
             suggestion = "transfer_to_other_store"
 
-        dead_items.append({
-            "product_id": pid,
-            "name": p.get("name", p.get("product_name", "")),
-            "brand": p.get("brand", ""),
-            "qty": qty,
-            "cost_value": round(value, 2),
-            "last_sold_date": last_sold,
-            "days_since_last_sale": days_since,
-            "suggestion": suggestion,
-        })
+        dead_items.append(
+            {
+                "product_id": pid,
+                "name": p.get("name", p.get("product_name", "")),
+                "brand": p.get("brand", ""),
+                "qty": qty,
+                "cost_value": round(value, 2),
+                "last_sold_date": last_sold,
+                "days_since_last_sale": days_since,
+                "suggestion": suggestion,
+            }
+        )
 
     dead_items.sort(key=lambda x: x["cost_value"], reverse=True)
 
@@ -404,14 +464,20 @@ async def loyalty_tiers(
     if not db:
         return {"tiers": [], "total_customers": 0, "total_points_circulation": 0}
 
-    customers = list(db.get_collection("customers").find({"store_id": active_store}).limit(10000))
+    customers = list(
+        db.get_collection("customers").find({"store_id": active_store}).limit(10000)
+    )
 
-    tier_counts = {t["name"]: {"customer_count": 0, "total_points": 0} for t in LOYALTY_TIERS}
+    tier_counts = {
+        t["name"]: {"customer_count": 0, "total_points": 0} for t in LOYALTY_TIERS
+    }
     total_points = 0
 
     # Calculate points redeemed this month
     now = datetime.now()
-    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0).isoformat()
+    month_start = now.replace(
+        day=1, hour=0, minute=0, second=0, microsecond=0
+    ).isoformat()
 
     for c in customers:
         total_spend = float(c.get("total_spend", 0) or c.get("lifetime_value", 0) or 0)
@@ -463,18 +529,23 @@ async def loyalty_earn(
         raise HTTPException(status_code=404, detail="Customer not found")
 
     # Log the earn event
-    db.get_collection("loyalty_transactions").insert_one({
-        "transaction_id": f"LTX-{uuid.uuid4().hex[:8].upper()}",
-        "customer_id": req.customer_id,
-        "order_id": req.order_id,
-        "type": "earn",
-        "points": points_earned,
-        "amount": req.amount,
-        "created_at": datetime.now().isoformat(),
-        "created_by": current_user.get("user_id", "unknown"),
-    })
+    db.get_collection("loyalty_transactions").insert_one(
+        {
+            "transaction_id": f"LTX-{uuid.uuid4().hex[:8].upper()}",
+            "customer_id": req.customer_id,
+            "order_id": req.order_id,
+            "type": "earn",
+            "points": points_earned,
+            "amount": req.amount,
+            "created_at": datetime.now().isoformat(),
+            "created_by": current_user.get("user_id", "unknown"),
+        }
+    )
 
-    return {"message": f"{points_earned} points awarded", "points_earned": points_earned}
+    return {
+        "message": f"{points_earned} points awarded",
+        "points_earned": points_earned,
+    }
 
 
 @router.post("/loyalty/redeem")
@@ -493,7 +564,9 @@ async def loyalty_redeem(
 
     current_points = int(customer.get("loyalty_points", 0) or 0)
     if req.points > current_points:
-        raise HTTPException(status_code=400, detail=f"Insufficient points. Available: {current_points}")
+        raise HTTPException(
+            status_code=400, detail=f"Insufficient points. Available: {current_points}"
+        )
 
     discount_value = req.points  # 100 points = Rs.100
 
@@ -502,16 +575,18 @@ async def loyalty_redeem(
         {"$inc": {"loyalty_points": -req.points}},
     )
 
-    db.get_collection("loyalty_transactions").insert_one({
-        "transaction_id": f"LTX-{uuid.uuid4().hex[:8].upper()}",
-        "customer_id": req.customer_id,
-        "type": "redeem",
-        "points": -req.points,
-        "discount_value": discount_value,
-        "redemption_type": req.redemption_type,
-        "created_at": datetime.now().isoformat(),
-        "created_by": current_user.get("user_id", "unknown"),
-    })
+    db.get_collection("loyalty_transactions").insert_one(
+        {
+            "transaction_id": f"LTX-{uuid.uuid4().hex[:8].upper()}",
+            "customer_id": req.customer_id,
+            "type": "redeem",
+            "points": -req.points,
+            "discount_value": discount_value,
+            "redemption_type": req.redemption_type,
+            "created_at": datetime.now().isoformat(),
+            "created_by": current_user.get("user_id", "unknown"),
+        }
+    )
 
     return {
         "message": f"{req.points} points redeemed for Rs.{discount_value} discount",
@@ -524,6 +599,7 @@ async def loyalty_redeem(
 # ============================================================================
 # 14. CONTACT LENS SUBSCRIPTION
 # ============================================================================
+
 
 @router.get("/cl-subscriptions")
 async def cl_subscriptions(
@@ -539,9 +615,16 @@ async def cl_subscriptions(
     now = datetime.now()
 
     # Find orders with contact lens items
-    orders = list(db.get_collection("orders").find({
-        "store_id": active_store,
-    }).sort("created_at", -1).limit(10000))
+    orders = list(
+        db.get_collection("orders")
+        .find(
+            {
+                "store_id": active_store,
+            }
+        )
+        .sort("created_at", -1)
+        .limit(10000)
+    )
 
     customer_cl: dict = {}
     for o in orders:
@@ -554,7 +637,8 @@ async def cl_subscriptions(
                 if cid and cid not in customer_cl:
                     customer_cl[cid] = {
                         "last_purchase_date": o.get("created_at", ""),
-                        "lens_type": item.get("product_name") or item.get("name", "Contact Lens"),
+                        "lens_type": item.get("product_name")
+                        or item.get("name", "Contact Lens"),
                     }
 
     subscriptions = []
@@ -563,7 +647,11 @@ async def cl_subscriptions(
         customer = cust_coll.find_one({"customer_id": cid}) or {}
         last_date = cl_data["last_purchase_date"]
         try:
-            last_dt = datetime.fromisoformat(last_date.replace("Z", "+00:00")) if last_date else now
+            last_dt = (
+                datetime.fromisoformat(last_date.replace("Z", "+00:00"))
+                if last_date
+                else now
+            )
         except Exception:
             last_dt = now
 
@@ -576,15 +664,17 @@ async def cl_subscriptions(
         else:
             status = "active"
 
-        subscriptions.append({
-            "customer_id": cid,
-            "name": customer.get("name", ""),
-            "phone": customer.get("mobile", ""),
-            "last_purchase_date": last_date,
-            "lens_type": cl_data["lens_type"],
-            "reorder_due_date": reorder_due.isoformat(),
-            "status": status,
-        })
+        subscriptions.append(
+            {
+                "customer_id": cid,
+                "name": customer.get("name", ""),
+                "phone": customer.get("mobile", ""),
+                "last_purchase_date": last_date,
+                "lens_type": cl_data["lens_type"],
+                "reorder_due_date": reorder_due.isoformat(),
+                "status": status,
+            }
+        )
 
     subscriptions.sort(key=lambda x: x["reorder_due_date"])
 
@@ -631,6 +721,7 @@ async def cl_subscription_reminder(
 # 18. EYE CAMP MANAGEMENT
 # ============================================================================
 
+
 @router.get("/eye-camps")
 async def list_eye_camps(
     store_id: Optional[str] = Query(None),
@@ -642,7 +733,12 @@ async def list_eye_camps(
     if not db:
         return {"eye_camps": [], "total": 0}
 
-    camps = list(db.get_collection("eye_camps").find({"store_id": active_store}).sort("date", -1).limit(200))
+    camps = list(
+        db.get_collection("eye_camps")
+        .find({"store_id": active_store})
+        .sort("date", -1)
+        .limit(200)
+    )
     for c in camps:
         c.pop("_id", None)
 
@@ -724,6 +820,7 @@ async def update_eye_camp(
 # 19. FAMILY PACKAGE DEALS
 # ============================================================================
 
+
 @router.get("/family-deals")
 async def family_deals(
     store_id: Optional[str] = Query(None),
@@ -735,7 +832,9 @@ async def family_deals(
     if not db:
         return {"families": []}
 
-    customers = list(db.get_collection("customers").find({"store_id": active_store}).limit(10000))
+    customers = list(
+        db.get_collection("customers").find({"store_id": active_store}).limit(10000)
+    )
     rx_coll = db.get_collection("prescriptions")
 
     # Group by phone or family linkage
@@ -774,14 +873,16 @@ async def family_deals(
         else:
             deal = "Duo Deal - 15% off for 2 pairs"
 
-        families.append({
-            "customer_id": primary.get("customer_id", ""),
-            "customer_name": primary.get("name", ""),
-            "family_size": len(members),
-            "members_with_rx": members_with_rx,
-            "total_potential_value": total_potential,
-            "suggested_deal": deal,
-        })
+        families.append(
+            {
+                "customer_id": primary.get("customer_id", ""),
+                "customer_name": primary.get("name", ""),
+                "family_size": len(members),
+                "members_with_rx": members_with_rx,
+                "total_potential_value": total_potential,
+                "suggested_deal": deal,
+            }
+        )
 
     families.sort(key=lambda x: x["members_with_rx"], reverse=True)
 
@@ -791,6 +892,7 @@ async def family_deals(
 # ============================================================================
 # 20. STAFF PERFORMANCE GAMIFICATION
 # ============================================================================
+
 
 @router.get("/staff-leaderboard")
 async def staff_leaderboard(
@@ -808,23 +910,42 @@ async def staff_leaderboard(
     if period == "today":
         from_date = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
     elif period == "week":
-        from_date = (now - timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+        from_date = (
+            (now - timedelta(days=now.weekday()))
+            .replace(hour=0, minute=0, second=0, microsecond=0)
+            .isoformat()
+        )
     else:
-        from_date = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0).isoformat()
+        from_date = now.replace(
+            day=1, hour=0, minute=0, second=0, microsecond=0
+        ).isoformat()
 
-    orders = list(db.get_collection("orders").find({
-        "store_id": active_store,
-        "created_at": {"$gte": from_date},
-    }).limit(10000))
+    orders = list(
+        db.get_collection("orders")
+        .find(
+            {
+                "store_id": active_store,
+                "created_at": {"$gte": from_date},
+            }
+        )
+        .limit(10000)
+    )
 
     staff_stats: dict = {}
     for o in orders:
         sid = o.get("sales_staff_id") or o.get("created_by") or "unknown"
         sname = o.get("sales_staff_name") or o.get("created_by_name") or sid
         if sid not in staff_stats:
-            staff_stats[sid] = {"name": sname, "sales_count": 0, "revenue": 0, "with_addons": 0}
+            staff_stats[sid] = {
+                "name": sname,
+                "sales_count": 0,
+                "revenue": 0,
+                "with_addons": 0,
+            }
         staff_stats[sid]["sales_count"] += 1
-        staff_stats[sid]["revenue"] += float(o.get("total_amount", 0) or o.get("grand_total", 0) or 0)
+        staff_stats[sid]["revenue"] += float(
+            o.get("total_amount", 0) or o.get("grand_total", 0) or 0
+        )
 
         # Check for upsells / add-ons
         items = o.get("items") or o.get("order_items") or []
@@ -836,16 +957,18 @@ async def staff_leaderboard(
         avg_txn = _safe_div(stats["revenue"], stats["sales_count"])
         upsell_rate = _safe_div(stats["with_addons"] * 100, stats["sales_count"])
 
-        leaderboard.append({
-            "staff_id": sid,
-            "name": stats["name"],
-            "sales_count": stats["sales_count"],
-            "revenue": round(stats["revenue"], 2),
-            "avg_txn": round(avg_txn, 2),
-            "upsell_rate": round(upsell_rate, 1),
-            "rank": 0,
-            "badge": "",
-        })
+        leaderboard.append(
+            {
+                "staff_id": sid,
+                "name": stats["name"],
+                "sales_count": stats["sales_count"],
+                "revenue": round(stats["revenue"], 2),
+                "avg_txn": round(avg_txn, 2),
+                "upsell_rate": round(upsell_rate, 1),
+                "rank": 0,
+                "badge": "",
+            }
+        )
 
     leaderboard.sort(key=lambda x: x["revenue"], reverse=True)
 
@@ -870,6 +993,7 @@ async def staff_leaderboard(
 # 22. CUSTOMER CHURN PREDICTION (SUPERADMIN)
 # ============================================================================
 
+
 @router.get("/churn-prediction")
 async def churn_prediction(
     store_id: Optional[str] = Query(None),
@@ -882,10 +1006,19 @@ async def churn_prediction(
     active_store = store_id or current_user.get("active_store_id", "")
     db = _get_db()
     if not db:
-        return {"at_risk": [], "summary": {"at_risk_count": 0, "churned_count": 0, "total_at_risk_value": 0}}
+        return {
+            "at_risk": [],
+            "summary": {
+                "at_risk_count": 0,
+                "churned_count": 0,
+                "total_at_risk_value": 0,
+            },
+        }
 
     now = datetime.now()
-    customers = list(db.get_collection("customers").find({"store_id": active_store}).limit(10000))
+    customers = list(
+        db.get_collection("customers").find({"store_id": active_store}).limit(10000)
+    )
 
     at_risk_list = []
     churned_count = 0
@@ -893,7 +1026,11 @@ async def churn_prediction(
     total_value = 0.0
 
     for c in customers:
-        last_purchase = c.get("last_purchase_date") or c.get("last_visit_date") or c.get("updated_at")
+        last_purchase = (
+            c.get("last_purchase_date")
+            or c.get("last_visit_date")
+            or c.get("updated_at")
+        )
         if not last_purchase:
             continue
 
@@ -925,16 +1062,22 @@ async def churn_prediction(
 
         total_value += ltv
 
-        at_risk_list.append({
-            "customer_id": c.get("customer_id", ""),
-            "name": c.get("name", ""),
-            "phone": c.get("mobile", ""),
-            "last_purchase_date": last_purchase if isinstance(last_purchase, str) else last_purchase.isoformat(),
-            "days_inactive": days_inactive,
-            "lifetime_value": round(ltv, 2),
-            "churn_probability": round(churn_prob, 2),
-            "status": status,
-        })
+        at_risk_list.append(
+            {
+                "customer_id": c.get("customer_id", ""),
+                "name": c.get("name", ""),
+                "phone": c.get("mobile", ""),
+                "last_purchase_date": (
+                    last_purchase
+                    if isinstance(last_purchase, str)
+                    else last_purchase.isoformat()
+                ),
+                "days_inactive": days_inactive,
+                "lifetime_value": round(ltv, 2),
+                "churn_probability": round(churn_prob, 2),
+                "status": status,
+            }
+        )
 
     at_risk_list.sort(key=lambda x: x["lifetime_value"], reverse=True)
 
@@ -951,6 +1094,7 @@ async def churn_prediction(
 # ============================================================================
 # 23. FRAUD / THEFT ANOMALY DETECTION (SUPERADMIN)
 # ============================================================================
+
 
 @router.get("/anomaly-detection")
 async def anomaly_detection(
@@ -972,10 +1116,16 @@ async def anomaly_detection(
     dt_from = _parse_date(date_from) or (now - timedelta(days=30))
     dt_to = _parse_date(date_to) or now
 
-    orders = list(db.get_collection("orders").find({
-        "store_id": active_store,
-        "created_at": {"$gte": dt_from.isoformat(), "$lte": dt_to.isoformat()},
-    }).limit(10000))
+    orders = list(
+        db.get_collection("orders")
+        .find(
+            {
+                "store_id": active_store,
+                "created_at": {"$gte": dt_from.isoformat(), "$lte": dt_to.isoformat()},
+            }
+        )
+        .limit(10000)
+    )
 
     anomalies = []
 
@@ -1000,7 +1150,9 @@ async def anomaly_detection(
 
         # 2. Unusual refund patterns
         if status in ("refunded", "refund"):
-            staff_refunds.setdefault(sid, {"name": sname, "count": 0, "total": 0, "order_ids": []})
+            staff_refunds.setdefault(
+                sid, {"name": sname, "count": 0, "total": 0, "order_ids": []}
+            )
             staff_refunds[sid]["count"] += 1
             staff_refunds[sid]["total"] += float(o.get("total_amount", 0) or 0)
             staff_refunds[sid]["order_ids"].append(oid)
@@ -1012,65 +1164,90 @@ async def anomaly_detection(
             disc_pct = _safe_div(disc_amt * 100, total_amt + disc_amt)
             if disc_pct > 20:
                 staff_discounts.setdefault(sid, {"name": sname, "orders": []})
-                staff_discounts[sid]["orders"].append({"order_id": oid, "disc_pct": disc_pct})
+                staff_discounts[sid]["orders"].append(
+                    {"order_id": oid, "disc_pct": disc_pct}
+                )
 
         # 4. Same-day void-and-recreate patterns
         day_key = f"{sid}_{order_date}"
-        daily_orders.setdefault(day_key, {"sid": sid, "name": sname, "date": order_date, "statuses": []})
+        daily_orders.setdefault(
+            day_key, {"sid": sid, "name": sname, "date": order_date, "statuses": []}
+        )
         daily_orders[day_key]["statuses"].append(status)
 
     # Generate anomaly records
     for sid, data in staff_voids.items():
         if data["count"] >= 3:
-            anomalies.append({
-                "type": "excessive_voids",
-                "severity": "critical" if data["count"] >= 5 else "warning",
-                "staff_id": sid,
-                "staff_name": data["name"],
-                "description": f"{data['count']} voided/cancelled orders",
-                "order_ids": data["order_ids"][:10],
-                "date": dt_from.strftime("%Y-%m-%d") + " to " + dt_to.strftime("%Y-%m-%d"),
-            })
+            anomalies.append(
+                {
+                    "type": "excessive_voids",
+                    "severity": "critical" if data["count"] >= 5 else "warning",
+                    "staff_id": sid,
+                    "staff_name": data["name"],
+                    "description": f"{data['count']} voided/cancelled orders",
+                    "order_ids": data["order_ids"][:10],
+                    "date": dt_from.strftime("%Y-%m-%d")
+                    + " to "
+                    + dt_to.strftime("%Y-%m-%d"),
+                }
+            )
 
     for sid, data in staff_refunds.items():
         if data["count"] >= 3:
-            anomalies.append({
-                "type": "unusual_refunds",
-                "severity": "critical" if data["count"] >= 5 else "warning",
-                "staff_id": sid,
-                "staff_name": data["name"],
-                "description": f"{data['count']} refunds totaling Rs.{round(data['total'], 2)}",
-                "order_ids": data["order_ids"][:10],
-                "date": dt_from.strftime("%Y-%m-%d") + " to " + dt_to.strftime("%Y-%m-%d"),
-            })
+            anomalies.append(
+                {
+                    "type": "unusual_refunds",
+                    "severity": "critical" if data["count"] >= 5 else "warning",
+                    "staff_id": sid,
+                    "staff_name": data["name"],
+                    "description": f"{data['count']} refunds totaling Rs.{round(data['total'], 2)}",
+                    "order_ids": data["order_ids"][:10],
+                    "date": dt_from.strftime("%Y-%m-%d")
+                    + " to "
+                    + dt_to.strftime("%Y-%m-%d"),
+                }
+            )
 
     for sid, data in staff_discounts.items():
         if len(data["orders"]) >= 2:
-            anomalies.append({
-                "type": "excessive_discounts",
-                "severity": "warning",
-                "staff_id": sid,
-                "staff_name": data["name"],
-                "description": f"{len(data['orders'])} orders with >20% discount",
-                "order_ids": [o["order_id"] for o in data["orders"][:10]],
-                "date": dt_from.strftime("%Y-%m-%d") + " to " + dt_to.strftime("%Y-%m-%d"),
-            })
+            anomalies.append(
+                {
+                    "type": "excessive_discounts",
+                    "severity": "warning",
+                    "staff_id": sid,
+                    "staff_name": data["name"],
+                    "description": f"{len(data['orders'])} orders with >20% discount",
+                    "order_ids": [o["order_id"] for o in data["orders"][:10]],
+                    "date": dt_from.strftime("%Y-%m-%d")
+                    + " to "
+                    + dt_to.strftime("%Y-%m-%d"),
+                }
+            )
 
     # Same-day void-and-recreate
     for key, data in daily_orders.items():
         statuses = data["statuses"]
-        voided = sum(1 for s in statuses if s in ("void", "voided", "cancelled", "canceled"))
-        active = sum(1 for s in statuses if s not in ("void", "voided", "cancelled", "canceled", "refunded", "refund"))
+        voided = sum(
+            1 for s in statuses if s in ("void", "voided", "cancelled", "canceled")
+        )
+        active = sum(
+            1
+            for s in statuses
+            if s
+            not in ("void", "voided", "cancelled", "canceled", "refunded", "refund")
+        )
         if voided >= 1 and active >= 1 and voided + active >= 3:
-            anomalies.append({
-                "type": "void_and_recreate",
-                "severity": "critical",
-                "staff_id": data["sid"],
-                "staff_name": data["name"],
-                "description": f"Same-day void ({voided}) and create ({active}) pattern on {data['date']}",
-                "order_ids": [],
-                "date": data["date"],
-            })
+            anomalies.append(
+                {
+                    "type": "void_and_recreate",
+                    "severity": "critical",
+                    "staff_id": data["sid"],
+                    "staff_name": data["name"],
+                    "description": f"Same-day void ({voided}) and create ({active}) pattern on {data['date']}",
+                    "order_ids": [],
+                    "date": data["date"],
+                }
+            )
 
     critical_count = sum(1 for a in anomalies if a["severity"] == "critical")
 
@@ -1087,6 +1264,7 @@ async def anomaly_detection(
 # 25. VENDOR MARGIN INSIGHTS (SUPERADMIN)
 # ============================================================================
 
+
 @router.get("/vendor-margins")
 async def vendor_margins(
     store_id: Optional[str] = Query(None),
@@ -1101,7 +1279,9 @@ async def vendor_margins(
     if not db:
         return {"vendors": [], "best_margin_products": [], "worst_margin_products": []}
 
-    products = list(db.get_collection("products").find({"store_id": active_store}).limit(10000))
+    products = list(
+        db.get_collection("products").find({"store_id": active_store}).limit(10000)
+    )
 
     vendor_map: dict = {}
     all_margins: list = []
@@ -1113,7 +1293,12 @@ async def vendor_margins(
             continue
 
         margin_pct = round((sell - cost) / sell * 100, 2)
-        vendor = p.get("vendor_name") or p.get("vendor", "") or p.get("supplier", "") or "Unknown"
+        vendor = (
+            p.get("vendor_name")
+            or p.get("vendor", "")
+            or p.get("supplier", "")
+            or "Unknown"
+        )
         brand = p.get("brand", "") or "Unknown"
         vkey = f"{vendor}|{brand}"
 
@@ -1131,14 +1316,16 @@ async def vendor_margins(
         vendor_map[vkey]["product_count"] += 1
         vendor_map[vkey]["margins"].append(margin_pct)
 
-        all_margins.append({
-            "product_id": p.get("product_id", ""),
-            "name": p.get("name", p.get("product_name", "")),
-            "brand": brand,
-            "cost_price": cost,
-            "selling_price": sell,
-            "margin_pct": margin_pct,
-        })
+        all_margins.append(
+            {
+                "product_id": p.get("product_id", ""),
+                "name": p.get("name", p.get("product_name", "")),
+                "brand": brand,
+                "cost_price": cost,
+                "selling_price": sell,
+                "margin_pct": margin_pct,
+            }
+        )
 
     vendors_out = [
         {

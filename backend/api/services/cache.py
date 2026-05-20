@@ -101,10 +101,10 @@ class CacheService:
     """Unified cache interface — Redis if available, else in-memory."""
 
     # Default TTLs by category (seconds)
-    TTL_SHORT = 60        # 1 min — frequently changing data
-    TTL_MEDIUM = 300      # 5 min — product listings, inventory counts
-    TTL_LONG = 900        # 15 min — store settings, feature toggles
-    TTL_STATIC = 3600     # 1 hour — rarely changing reference data
+    TTL_SHORT = 60  # 1 min — frequently changing data
+    TTL_MEDIUM = 300  # 5 min — product listings, inventory counts
+    TTL_LONG = 900  # 15 min — store settings, feature toggles
+    TTL_STATIC = 3600  # 1 hour — rarely changing reference data
 
     @property
     def backend(self) -> str:
@@ -151,7 +151,9 @@ class CacheService:
             if _redis_client:
                 cursor = 0
                 while True:
-                    cursor, keys = _redis_client.scan(cursor, match=f"ims:{pattern}", count=100)
+                    cursor, keys = _redis_client.scan(
+                        cursor, match=f"ims:{pattern}", count=100
+                    )
                     if keys:
                         _redis_client.delete(*keys)
                     if cursor == 0:
