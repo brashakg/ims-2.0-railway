@@ -9,10 +9,15 @@ from pydantic import BaseModel
 from typing import Optional
 from datetime import date, datetime
 import uuid
-from .auth import get_current_user
+from .auth import get_current_user, require_roles
 from ..dependencies import get_expense_repository, get_advance_repository
 
 router = APIRouter()
+
+# Roles permitted to approve / reject / disburse / settle expenses and advances.
+# Mirrors the finance/expenses frontend route guard. SUPERADMIN auto-passes
+# inside require_roles, so it is intentionally omitted from this tuple.
+_APPROVAL_ROLES = ("ADMIN", "AREA_MANAGER", "STORE_MANAGER", "ACCOUNTANT")
 
 
 # ============================================================================
@@ -163,7 +168,8 @@ async def submit_expense(
 
 @router.post("/{expense_id}/approve")
 async def approve_expense(
-    expense_id: str, current_user: dict = Depends(get_current_user)
+    expense_id: str,
+    current_user: dict = Depends(require_roles(*_APPROVAL_ROLES)),
 ):
     """Approve an expense"""
     expense_repo = get_expense_repository()
@@ -194,7 +200,7 @@ async def approve_expense(
 async def reject_expense(
     expense_id: str,
     reason: str = Query(...),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_roles(*_APPROVAL_ROLES)),
 ):
     """Reject an expense"""
     expense_repo = get_expense_repository()
@@ -287,7 +293,8 @@ async def request_advance(
 
 @router.post("/advances/{advance_id}/approve")
 async def approve_advance(
-    advance_id: str, current_user: dict = Depends(get_current_user)
+    advance_id: str,
+    current_user: dict = Depends(require_roles(*_APPROVAL_ROLES)),
 ):
     """Approve an advance request"""
     advance_repo = get_advance_repository()
@@ -318,7 +325,7 @@ async def approve_advance(
 async def disburse_advance(
     advance_id: str,
     reference: str = Query(...),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_roles(*_APPROVAL_ROLES)),
 ):
     """Mark advance as disbursed"""
     advance_repo = get_advance_repository()
@@ -352,7 +359,8 @@ async def disburse_advance(
 
 @router.post("/advances/{advance_id}/settle")
 async def settle_advance(
-    advance_id: str, current_user: dict = Depends(get_current_user)
+    advance_id: str,
+    current_user: dict = Depends(require_roles(*_APPROVAL_ROLES)),
 ):
     """Mark advance as settled"""
     advance_repo = get_advance_repository()
