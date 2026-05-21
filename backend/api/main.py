@@ -114,6 +114,7 @@ from .routers import (
     webhooks_router,
     loyalty_router,
     vendor_portal_router,
+    techcherry_import_router,
 )
 
 
@@ -777,6 +778,16 @@ app.include_router(loyalty_router, prefix="/api/v1/loyalty", tags=["Loyalty"])
 # without an IMS user account.
 app.include_router(
     vendor_portal_router, prefix="/api/v1/vendor-portal", tags=["Vendor Portal"]
+)
+
+# TechCherry one-time migration — SUPERADMIN-only batch upsert endpoint.
+# Mounted under /admin/techcherry so it sits in the operator namespace
+# without inheriting the broader admin router (which is ADMIN+SUPERADMIN;
+# this needs strictly SUPERADMIN). Routes: POST /import, GET /status.
+app.include_router(
+    techcherry_import_router,
+    prefix="/api/v1/admin/techcherry",
+    tags=["TechCherry Migration"],
 )
 
 
