@@ -6,7 +6,13 @@ import api from './client';
 
 export const customerApi = {
   getCustomers: async (params?: { search?: string; page?: number; pageSize?: number; storeId?: string; limit?: number; skip?: number }) => {
-    const response = await api.get('/customers', { params });
+    // Convert camelCase storeId → snake_case store_id for the FastAPI Query.
+    // Pre-fix, this passed `storeId` through as-is and the backend silently
+    // dropped it (FastAPI Query param name didn't match), so every "Pune"
+    // store-switch on /customers still returned Bokaro's seed customers.
+    const { storeId, ...rest } = params ?? {};
+    const apiParams = { ...rest, ...(storeId ? { store_id: storeId } : {}) };
+    const response = await api.get('/customers', { params: apiParams });
     return response.data;
   },
 

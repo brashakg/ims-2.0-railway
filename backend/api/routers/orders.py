@@ -170,6 +170,16 @@ def order_to_frontend(order: dict) -> dict:
     # Status field needs special handling - backend uses 'status', frontend uses 'orderStatus'
     result = {}
     for key, value in order.items():
+        # Drop MongoDB's auto-generated BSON ObjectId — it's not JSON-serialisable
+        # via Pydantic/FastAPI's default encoder and the TechCherry import
+        # leaves these in place because insert_one() auto-mints them. Orders
+        # have their own `order_id` / `order_number` for client-side keys, so
+        # `_id` is never needed in the API response.
+        # This was the root cause of "GET /api/v1/orders?store_id=BV-PUN-01"
+        # 500ing after the May 2026 TechCherry migration:
+        #   ValueError: [TypeError("'ObjectId' object is not iterable")...]
+        if key == "_id":
+            continue
         if key == "status":
             result["orderStatus"] = value
         elif key == "items" and isinstance(value, list):
