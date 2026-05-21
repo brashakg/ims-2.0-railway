@@ -190,7 +190,8 @@ def patched_payout(monkeypatch):
 
 
 PUNE_FIXTURE = json.load(open(
-    os.path.join(os.path.dirname(__file__), "fixtures", "pune_may26_cross_check.json")
+    os.path.join(os.path.dirname(__file__), "fixtures", "pune_may26_cross_check.json"),
+    encoding="utf-8",
 ))
 
 
