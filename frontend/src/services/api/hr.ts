@@ -38,6 +38,11 @@ export const hrApi = {
     const response = await api.post(`/hr/leaves/${leaveId}/approve`, { approved, remarks });
     return response.data;
   },
+
+  getLatestPayslip: async (employeeId: string) => {
+    const response = await api.get(`/payroll/payslip/${employeeId}`);
+    return response.data;
+  },
 };
 
 // ============================================================================
