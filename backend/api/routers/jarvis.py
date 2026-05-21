@@ -1877,11 +1877,15 @@ class Jarvis:
         response += f"👥 Staff Present: {overview['staff']['present_today']}/{overview['staff']['total_employees']}\n\n"
 
         if recommendations:
-            high_priority = [r for r in recommendations if r["priority"] == "high"]
+            high_priority = [r for r in recommendations if r.get("priority") == "high"]
             if high_priority:
                 response += "**🔴 Requires Immediate Attention:**\n"
                 for rec in high_priority[:2]:
-                    response += f"• {rec['title']}: {rec['description']}\n"
+                    # `description` is optional — fall back to `action` text
+                    # (the recommendations from get_recommendations() only
+                    # carry title + action, not description).
+                    detail = rec.get("description") or rec.get("action") or ""
+                    response += f"• {rec.get('title', '?')}: {detail}\n"
 
         response += "\n*Ask me anything - sales, inventory, customers, staff, predictions, or recommendations.*"
         return response

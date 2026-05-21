@@ -122,7 +122,7 @@ class AgentConfigManager:
     @property
     def collection(self):
         """Get the agent_config collection."""
-        if self._db:
+        if self._db is not None:
             try:
                 return self._db.get_collection("agent_config")
             except Exception:
@@ -135,7 +135,7 @@ class AgentConfigManager:
         Called during FastAPI startup.
         """
         col = self.collection
-        if not col:
+        if col is None:
             logger.warning("[CONFIG] No DB available — cannot seed agent configs")
             return
 
@@ -166,7 +166,7 @@ class AgentConfigManager:
     def get_all_configs(self) -> List[Dict[str, Any]]:
         """Get all agent configs."""
         col = self.collection
-        if not col:
+        if col is None:
             return [c.copy() for c in DEFAULT_AGENT_CONFIGS]
         try:
             configs = list(col.find({}, {"_id": 0}))
@@ -178,7 +178,7 @@ class AgentConfigManager:
     def get_config(self, agent_id: str) -> Optional[Dict[str, Any]]:
         """Get a single agent's config."""
         col = self.collection
-        if not col:
+        if col is None:
             for c in DEFAULT_AGENT_CONFIGS:
                 if c["agent_id"] == agent_id:
                     return c.copy()
@@ -191,7 +191,7 @@ class AgentConfigManager:
     def toggle_agent(self, agent_id: str, enabled: bool, toggled_by: str = "system") -> bool:
         """Toggle an agent ON/OFF."""
         col = self.collection
-        if not col:
+        if col is None:
             return False
 
         # Check if agent is toggleable
@@ -217,7 +217,7 @@ class AgentConfigManager:
     def update_config(self, agent_id: str, updates: Dict[str, Any]) -> bool:
         """Update agent config fields (schedule, overrides, etc.)."""
         col = self.collection
-        if not col:
+        if col is None:
             return False
 
         # Don't allow updating protected fields
