@@ -18,7 +18,7 @@ import hashlib
 import os
 import base64
 import logging
-from .auth import get_current_user, hash_password, verify_password
+from .auth import get_current_user, hash_password, verify_password, require_roles
 from ..dependencies import get_audit_repository
 
 logger = logging.getLogger(__name__)
@@ -568,7 +568,9 @@ async def update_invoice_settings(
 
 
 @router.get("/notifications/providers")
-async def get_notification_providers(current_user: dict = Depends(get_current_user)):
+async def get_notification_providers(
+    current_user: dict = Depends(require_roles("ADMIN")),
+):
     """Channel provider config (SMS / WhatsApp / Email). Frontend
     settingsApi.getNotificationProviders was 404'ing. Reads the
     `notification_providers` singleton; falls back to env-driven
@@ -600,7 +602,8 @@ async def get_notification_providers(current_user: dict = Depends(get_current_us
 
 @router.put("/notifications/providers")
 async def update_notification_providers(
-    providers: dict, current_user: dict = Depends(get_current_user)
+    providers: dict,
+    current_user: dict = Depends(require_roles("ADMIN")),
 ):
     coll = _get_settings_collection("notification_providers")
     if coll is None:
