@@ -18,6 +18,15 @@ interface GRNLineItem {
   inspection_status: 'pending' | 'passed' | 'failed';
 }
 
+interface GRNDiscrepancyItem {
+  product_id: string;
+  product_name?: string;
+  received_qty: number;
+  accepted_qty: number;
+  rejected_qty: number;
+  rejection_reason?: string;
+}
+
 interface GRN {
   id: string;
   grn_number: string;
@@ -25,8 +34,41 @@ interface GRN {
   po_number: string;
   received_at: string;
   items_received: number;
+  total_received: number;
+  total_accepted: number;
+  total_rejected: number;
+  items: GRNDiscrepancyItem[];
   quality_status: 'passed' | 'failed' | 'conditional';
   created_by: string;
+}
+
+// Normalise a raw GRN doc from the API into the shape the UI needs. The
+// backend stores items + total_received/accepted/rejected and created_at;
+// quality_status is derived from the real accept/reject totals rather than a
+// (non-existent) stored field.
+function transformGRN(grn: any): GRN {
+  const items: GRNDiscrepancyItem[] = Array.isArray(grn.items) ? grn.items : [];
+  const totalReceived =
+    grn.total_received ?? items.reduce((s, i) => s + (i.received_qty || 0), 0);
+  const totalAccepted =
+    grn.total_accepted ?? items.reduce((s, i) => s + (i.accepted_qty || 0), 0);
+  const totalRejected =
+    grn.total_rejected ?? items.reduce((s, i) => s + (i.rejected_qty || 0), 0);
+  return {
+    id: grn.grn_id || grn.id || grn._id,
+    grn_number: grn.grn_number,
+    po_id: grn.po_id,
+    po_number: grn.po_number || 'Unknown PO',
+    received_at: grn.received_at || grn.created_at,
+    items_received: grn.items_received ?? totalReceived,
+    total_received: totalReceived,
+    total_accepted: totalAccepted,
+    total_rejected: totalRejected,
+    items,
+    quality_status:
+      totalRejected === 0 ? 'passed' : totalAccepted === 0 ? 'failed' : 'conditional',
+    created_by: grn.created_by || 'Unknown',
+  };
 }
 
 
@@ -72,18 +114,10 @@ export function GoodsReceiptNote() {
         setIsLoading(true);
         const storeId = user?.activeStoreId || '';
         const response = await vendorsApi.getGRNs({ store_id: storeId });
-        const grnList = Array.isArray(response) ? response : response.data || [];
-        const transformedGRNs = grnList.map((grn: any) => ({
-          id: grn.id || grn._id,
-          grn_number: grn.grn_number,
-          po_id: grn.po_id,
-          po_number: grn.po_number || 'Unknown PO',
-          received_at: grn.received_at,
-          items_received: grn.items_received || 0,
-          quality_status: grn.quality_status || 'passed',
-          created_by: grn.created_by || 'Unknown',
-        }));
-        setGrns(transformedGRNs);
+        const grnList = Array.isArray(response)
+          ? response
+          : response.grns || response.data || [];
+        setGrns(grnList.map(transformGRN));
       } catch (error) {
         toast.error('Failed to load GRNs');
       } finally {
@@ -321,17 +355,10 @@ export function GoodsReceiptNote() {
                 // Reload GRNs
                 const storeId = user?.activeStoreId || '';
                 const response = await vendorsApi.getGRNs({ store_id: storeId });
-                const grnList = Array.isArray(response) ? response : response.data || [];
-                setGrns(grnList.map((grn: any) => ({
-                  id: grn.id || grn._id,
-                  grn_number: grn.grn_number,
-                  po_id: grn.po_id,
-                  po_number: grn.po_number || 'Unknown PO',
-                  received_at: grn.received_at,
-                  items_received: grn.items_received || 0,
-                  quality_status: grn.quality_status || 'passed',
-                  created_by: grn.created_by || 'Unknown',
-                })));
+                const grnList = Array.isArray(response)
+                  ? response
+                  : response.grns || response.data || [];
+                setGrns(grnList.map(transformGRN));
               } catch (err) {
                 toast.error('Failed to create GRN');
               }
@@ -397,33 +424,82 @@ export function GoodsReceiptNote() {
             </div>
           </div>
 
-          <div className="space-y-3">
-            <div className="bg-orange-50/30 border border-orange-700 rounded-lg p-4">
-              <div className="flex items-start justify-between mb-2">
-                <div>
-                  <p className="text-orange-700 font-semibold">GRN-2024-002 - Frame Model A</p>
-                  <p className="text-gray-500 text-sm">Against PO-2024-001</p>
+          {(() => {
+            // Real discrepancies: GRNs that rejected units, or where not every
+            // received unit was accepted (a quantity/quality shortfall).
+            const discrepant = grns.filter(
+              (g) => g.total_rejected > 0 || g.total_received !== g.total_accepted
+            );
+            if (discrepant.length === 0) {
+              return (
+                <div className="bg-white border border-gray-200 rounded-lg p-8 text-center text-gray-500">
+                  No discrepancies — all received goods matched their POs and passed inspection.
                 </div>
-                <span className="px-2 py-1 bg-orange-50 text-orange-700 rounded text-xs font-semibold">
-                  Quantity Variance
-                </span>
+              );
+            }
+            return (
+              <div className="space-y-3">
+                {discrepant.map((g) => {
+                  const isQualityFail = g.total_rejected > 0;
+                  const rejectedItems = g.items.filter((i) => (i.rejected_qty || 0) > 0);
+                  return (
+                    <div
+                      key={g.id}
+                      className={clsx(
+                        'border rounded-lg p-4',
+                        isQualityFail
+                          ? 'bg-red-50 border-red-700'
+                          : 'bg-orange-50/30 border-orange-700'
+                      )}
+                    >
+                      <div className="flex items-start justify-between mb-2">
+                        <div>
+                          <p
+                            className={clsx(
+                              'font-semibold',
+                              isQualityFail ? 'text-red-700' : 'text-orange-700'
+                            )}
+                          >
+                            {g.grn_number}
+                          </p>
+                          <p className="text-gray-500 text-sm">Against {g.po_number}</p>
+                        </div>
+                        <span
+                          className={clsx(
+                            'px-2 py-1 rounded text-xs font-semibold',
+                            isQualityFail
+                              ? 'bg-red-50 text-red-700'
+                              : 'bg-orange-50 text-orange-700'
+                          )}
+                        >
+                          {isQualityFail ? 'Quality Rejection' : 'Quantity Variance'}
+                        </span>
+                      </div>
+                      <p
+                        className={clsx(
+                          'text-sm',
+                          isQualityFail ? 'text-red-700' : 'text-orange-700'
+                        )}
+                      >
+                        Received: {g.total_received} | Accepted: {g.total_accepted} | Rejected:{' '}
+                        {g.total_rejected}
+                      </p>
+                      {rejectedItems.length > 0 && (
+                        <ul className="mt-2 space-y-1">
+                          {rejectedItems.map((i, idx) => (
+                            <li key={idx} className="text-xs text-red-600">
+                              {i.product_name || i.product_id}: {i.rejected_qty} rejected
+                              {i.rejection_reason ? ` — ${i.rejection_reason}` : ''}
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
-              <p className="text-orange-700 text-sm">Expected: 100 units | Received: 95 units | Variance: -5 units</p>
-            </div>
-
-            <div className="bg-red-50 border border-red-700 rounded-lg p-4">
-              <div className="flex items-start justify-between mb-2">
-                <div>
-                  <p className="text-red-700 font-semibold">GRN-2024-003 - Lens Coating</p>
-                  <p className="text-gray-500 text-sm">Against PO-2024-002</p>
-                </div>
-                <span className="px-2 py-1 bg-red-50 text-red-700 rounded text-xs font-semibold">
-                  Quality Failure
-                </span>
-              </div>
-              <p className="text-red-700 text-sm">Defect: Packaging damaged, 12 units affected, return authorization issued.</p>
-            </div>
-          </div>
+            );
+          })()}
         </div>
       )}
     </div>
