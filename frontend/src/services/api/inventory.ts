@@ -62,6 +62,17 @@ export const inventoryApi = {
     return response.data;
   },
 
+  // Unified Stock Alerts (dead stock / low stock / reorder / overstock / fast-moving)
+  getStockAlerts: async (
+    storeId?: string,
+    params?: { dead_days?: number; lead_time_days?: number; limit?: number }
+  ) => {
+    const response = await api.get('/inventory/alerts', {
+      params: { ...(storeId ? { store_id: storeId } : {}), ...params },
+    });
+    return response.data;
+  },
+
   // Stock Count / Physical Verification
   getStockCounts: async (storeId: string, status?: string) => {
     const response = await api.get('/inventory/stock-count', { params: { store_id: storeId, status } });
