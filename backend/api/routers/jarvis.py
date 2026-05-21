@@ -1257,39 +1257,137 @@ class JarvisAnalyticsEngine:
 
     @staticmethod
     def get_recommendations() -> List[Dict]:
-        """Actionable recommendations derived from live inventory — real
-        low/out-of-stock reorder prompts, no canned suggestions."""
+        """Actionable recommendations derived from live state across
+        inventory, staffing, marketing, and finance. Each entry has:
+          - priority: high | medium | low
+          - category: inventory | staffing | marketing | finance | ops
+          - title:    short headline
+          - description: 1-2 sentence detail (load-bearing for the UI)
+          - action:   imperative the operator can take
+          - impact:   estimated ₹ or % impact when computable, else ""
+          - link:     optional in-app path the "Take action" button can
+                      deep-link to (e.g. /inventory?filter=low-stock)
+
+        Fail-soft — any sub-source raising returns [] for that section,
+        the others still run.
+        """
         recs: List[Dict] = []
-        inv = JarvisAnalyticsEngine._compute_inventory_live()
-        if inv:
-            oos = sum(
-                1
-                for a in inv.get("critical_alerts", [])
-                if a.get("type") == "out_of_stock"
-            )
-            low = sum(
-                1
-                for a in inv.get("critical_alerts", [])
-                if a.get("type") == "low_stock"
-            )
-            if oos:
-                recs.append(
-                    {
+
+        # --- INVENTORY: out-of-stock + low-stock alerts -------------------
+        try:
+            inv = JarvisAnalyticsEngine._compute_inventory_live() or {}
+            alerts = inv.get("critical_alerts") or []
+            oos_count = sum(1 for a in alerts if a.get("type") == "out_of_stock")
+            low_count = sum(1 for a in alerts if a.get("type") == "low_stock")
+            oos_names = [a.get("product_name") for a in alerts if a.get("type") == "out_of_stock" and a.get("product_name")][:3]
+            if oos_count:
+                detail_names = (", ".join(oos_names) + ("…" if oos_count > 3 else "")) if oos_names else ""
+                recs.append({
+                    "priority": "high",
+                    "category": "inventory",
+                    "title": f"{oos_count} SKU(s) out of stock",
+                    "description": (
+                        f"{detail_names} are at zero stock. Every walk-in asking for these is a lost sale."
+                        if detail_names else
+                        f"{oos_count} products show zero stock. Lost-sale risk grows by the hour."
+                    ),
+                    "action": "Reorder critical SKUs",
+                    "impact": "Prevents lost sales",
+                    "link": "/inventory?filter=out-of-stock",
+                })
+            if low_count:
+                recs.append({
+                    "priority": "medium",
+                    "category": "inventory",
+                    "title": f"{low_count} SKU(s) below reorder point",
+                    "description": (
+                        f"{low_count} products are at or under their reorder threshold. "
+                        "Acting now avoids a stock-out in the next 7-14 days."
+                    ),
+                    "action": "Raise purchase orders",
+                    "impact": "Avoids future stock-outs",
+                    "link": "/inventory?filter=low-stock",
+                })
+        except Exception:
+            pass
+
+        # --- STAFFING: open POs / understaffed signal ---------------------
+        try:
+            users_col = get_db_collection("users")
+            attendance_col = get_db_collection("attendance")
+            if users_col is not None and attendance_col is not None:
+                today = datetime.now().strftime("%Y-%m-%d")
+                total_active = users_col.count_documents({"is_active": {"$ne": False}})
+                present = attendance_col.count_documents({"date": today, "status": {"$in": ["PRESENT", "present", "PARTIAL"]}})
+                if total_active > 0 and present / total_active < 0.5:
+                    recs.append({
                         "priority": "high",
-                        "category": "inventory",
-                        "title": f"{oos} product(s) out of stock",
-                        "action": "Reorder to avoid lost sales",
-                    }
-                )
-            if low:
-                recs.append(
-                    {
+                        "category": "staffing",
+                        "title": "Low attendance today",
+                        "description": (
+                            f"Only {present} of {total_active} active staff marked present. "
+                            "Customer-facing roles may be uncovered."
+                        ),
+                        "action": "Check store rosters & call backups",
+                        "impact": "Protects service quality",
+                        "link": "/hr/attendance",
+                    })
+        except Exception:
+            pass
+
+        # --- MARKETING: re-engagement opportunity -------------------------
+        try:
+            cust_col = get_db_collection("customers")
+            orders_col = get_db_collection("orders")
+            if cust_col is not None and orders_col is not None:
+                six_months_ago = (datetime.now() - timedelta(days=180)).isoformat()
+                # Customers who haven't ordered in 6 months (cap query small)
+                recent_buyer_ids = set()
+                for o in orders_col.find(
+                    {"created_at": {"$gte": six_months_ago}},
+                    {"customer_id": 1},
+                ).limit(5000):
+                    cid = o.get("customer_id")
+                    if cid:
+                        recent_buyer_ids.add(str(cid))
+                total_customers = cust_col.count_documents({})
+                lapsed = max(0, total_customers - len(recent_buyer_ids))
+                if total_customers >= 20 and lapsed >= max(5, total_customers // 5):
+                    recs.append({
                         "priority": "medium",
-                        "category": "inventory",
-                        "title": f"{low} product(s) below reorder point",
-                        "action": "Raise purchase orders",
-                    }
-                )
+                        "category": "marketing",
+                        "title": f"{lapsed} lapsed customers (6+ months)",
+                        "description": (
+                            f"{lapsed} of {total_customers} customers haven't purchased in 6+ months. "
+                            "A targeted WhatsApp campaign typically wins back 5-10%."
+                        ),
+                        "action": "Launch reactivation campaign via MEGAPHONE",
+                        "impact": "Recovers latent revenue",
+                        "link": "/customers/campaigns",
+                    })
+        except Exception:
+            pass
+
+        # --- FINANCE: open vendor returns / outstanding handoffs ----------
+        try:
+            vr_col = get_db_collection("vendor_returns")
+            if vr_col is not None:
+                open_returns = vr_col.count_documents({"status": {"$in": ["OPEN", "PENDING"]}})
+                if open_returns >= 3:
+                    recs.append({
+                        "priority": "low",
+                        "category": "finance",
+                        "title": f"{open_returns} open vendor returns",
+                        "description": (
+                            f"{open_returns} vendor returns are open. Each one ties up cash + shelf space."
+                        ),
+                        "action": "Close vendor returns or escalate",
+                        "impact": "Frees working capital",
+                        "link": "/inventory/vendor-returns",
+                    })
+        except Exception:
+            pass
+
         return recs
 
 
@@ -1503,15 +1601,24 @@ class JarvisResponseGenerator:
         response = "**My Recommendations:**\n\n"
 
         for i, rec in enumerate(recommendations[:5], 1):
+            priority = rec.get("priority", "low")
             priority_emoji = (
                 "🔴"
-                if rec["priority"] == "high"
-                else "🟡" if rec["priority"] == "medium" else "🟢"
+                if priority == "high"
+                else "🟡" if priority == "medium" else "🟢"
             )
-            response += f"{i}. {priority_emoji} **{rec['title']}**\n"
-            response += f"   {rec['description']}\n"
-            response += f"   💡 *Action:* {rec['action']}\n"
-            response += f"   📈 *Impact:* {rec['impact']}\n\n"
+            title = rec.get("title", "")
+            description = rec.get("description") or rec.get("action") or ""
+            action = rec.get("action", "")
+            impact = rec.get("impact", "")
+            response += f"{i}. {priority_emoji} **{title}**\n"
+            if description:
+                response += f"   {description}\n"
+            if action:
+                response += f"   💡 *Action:* {action}\n"
+            if impact:
+                response += f"   📈 *Impact:* {impact}\n"
+            response += "\n"
 
         return response
 
@@ -2220,6 +2327,31 @@ async def get_quick_insights(current_user: dict = Depends(require_superadmin)):
         "staff_present": f"{overview['staff']['present_today']}/{overview['staff']['total_employees']}",
         "top_recommendation": recommendations[0] if recommendations else None,
         "greeting": JarvisResponseGenerator.generate_greeting(),
+    }
+
+
+@router.get("/recommendations")
+async def get_jarvis_recommendations(
+    limit: int = 10,
+    priority: Optional[str] = None,
+    current_user: dict = Depends(require_superadmin),
+):
+    """Full list of actionable recommendations across inventory,
+    staffing, marketing, and finance. SUPERADMIN ONLY.
+
+    Each rec has: priority, category, title, description, action,
+    impact, optional link (deep-link for the UI Take-action button).
+
+    Filter via `priority=high` to only get critical items.
+    """
+    recs = jarvis_instance.analytics.get_recommendations() or []
+    if priority:
+        recs = [r for r in recs if r.get("priority") == priority.lower()]
+    limit = max(1, min(int(limit), 50))
+    return {
+        "recommendations": recs[:limit],
+        "total": len(recs),
+        "as_of": datetime.now().isoformat(),
     }
 
 
