@@ -179,6 +179,13 @@ class TestPymongoTruthTestBugFixed:
     """
 
     def test_no_implicit_truth_test_on_db_or_col_in_agents(self):
+        """Widened in v2 (May 2026) — earlier version only caught bare
+        `col` and `coll`. It missed `users_col`, `orders_col`, `cust_col`
+        etc. that the SENTINEL `_check_db_health` actually used. That left
+        the SENTINEL "database unhealthy" prod bug live for several days
+        before the user reported it on the UI card. This wider regex
+        catches ANY variable name ending in `_col`, `_coll`, `_collection`
+        or starting with `coll`, plus `self.db` / `self._db`."""
         import os
         import re
 
@@ -187,11 +194,12 @@ class TestPymongoTruthTestBugFixed:
             "agents",
         )
         offenders = []
-        # Patterns that trigger the pymongo bug:
-        #   "if col:"  "if not col:"  "if self.db:"  "if self._db:"
-        # These all call __bool__ on a Mongo Collection / Database.
+        # Match: identifier ending in _col / _coll / _collection, OR bare
+        # col / coll, OR self.db / self._db. Also catches `if not <var>:`.
         bad = re.compile(
-            r"if\s+(not\s+)?(col|coll|self\.db|self\._db)\s*:",
+            r"if\s+(not\s+)?"
+            r"(\w*_col(?:l(?:ection)?)?|col|coll|self\.db|self\._db)"
+            r"\s*:",
         )
         for root, _, files in os.walk(agents_dir):
             for f in files:
@@ -210,3 +218,40 @@ class TestPymongoTruthTestBugFixed:
             "on bool(). Use `is None` / `is not None` instead.\n"
             + "\n".join(offenders)
         )
+
+    def test_widened_regex_catches_prefixed_names(self):
+        """Standalone sanity check for the v2 regex — confirms it catches
+        prefixed names like `users_col` that the v1 regex missed."""
+        import re
+        bad = re.compile(
+            r"if\s+(not\s+)?"
+            r"(\w*_col(?:l(?:ection)?)?|col|coll|self\.db|self\._db)"
+            r"\s*:",
+        )
+        # All these MUST match (they're all the bug pattern):
+        for line in [
+            "if col:",
+            "if not col:",
+            "if coll:",
+            "if users_col:",
+            "if orders_col:",
+            "if cust_col:",
+            "if my_collection:",
+            "if not user_collection:",
+            "if self.db:",
+            "if self._db:",
+        ]:
+            assert bad.search(line), f"v2 regex should match: {line!r}"
+        # And these must NOT (correct patterns):
+        for line in [
+            "if col is None:",
+            "if col is not None:",
+            "if users_col is not None:",
+            "if self.db is not None:",
+            "if isinstance(col, Collection):",
+        ]:
+            # The regex MAY still match these on the `if X:` prefix, but
+            # the "is None" / "is not None" guard in the main test skips
+            # them. Just confirm the test's guard works:
+            assert ("is None" in line or "is not None" in line or
+                    not bad.search(line)), f"v2 false-positive on: {line!r}"

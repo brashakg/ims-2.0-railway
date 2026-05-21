@@ -211,13 +211,13 @@ class SentinelAgent(JarvisAgent):
 
             # Test users collection
             users_col = self.get_collection("users")
-            if users_col:
+            if users_col is not None:
                 user_count = users_col.count_documents({})
                 result["checks"]["users_count"] = user_count
 
             # Test orders collection
             orders_col = self.get_collection("orders")
-            if orders_col:
+            if orders_col is not None:
                 order_count = orders_col.count_documents({})
                 result["checks"]["orders_count"] = order_count
 
