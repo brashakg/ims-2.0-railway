@@ -10,7 +10,17 @@ import api from './client';
 
 export const orderApi = {
   getOrders: async (params?: { storeId?: string; status?: string; date?: string; customerId?: string; limit?: number; skip?: number }) => {
-    const response = await api.get('/orders', { params });
+    // Convert camelCase storeId/customerId → snake_case for the FastAPI Query
+    // params. Without this the backend silently ignored ?storeId and fell
+    // back to the user's token store, so the topbar store-switch never
+    // changed the orders list (always showed the admin's home store).
+    const { storeId, customerId, ...rest } = params ?? {};
+    const apiParams = {
+      ...rest,
+      ...(storeId ? { store_id: storeId } : {}),
+      ...(customerId ? { customer_id: customerId } : {}),
+    };
+    const response = await api.get('/orders', { params: apiParams });
     return response.data;
   },
 
