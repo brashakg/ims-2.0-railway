@@ -55,4 +55,10 @@ start_frontend.*
 # Claude Code harness internals (per-machine state, never source-of-truth).
 # Includes the .claude/worktrees/ folder the harness creates when running
 # parallel sub-agents in isolated worktrees.
-.claude/
+.claude/*
+# ...but DO version these shared dev-tooling files (team-wide config):
+!.claude/settings.json
+!.claude/commands/
+!.claude/hooks/
+# Keep personal/local overrides out of git:
+.claude/settings.local.json
