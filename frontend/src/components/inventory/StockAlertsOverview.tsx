@@ -17,6 +17,7 @@ import {
   Target,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
+import { inventoryApi } from '../../services/api/inventory';
 import clsx from 'clsx';
 
 interface StockAlert {
@@ -76,13 +77,23 @@ export function StockAlertsOverview() {
   const loadAlerts = async () => {
     setIsLoading(true);
     try {
-      // No dedicated stock-alerts API exists yet. Previously this component
-      // rendered a hardcoded list (Vogue Cat Eye, Prada Baroque, Ray-Ban
-      // Aviator Classic etc.) with fabricated "₹22,500 dead stock" /
-      // "₹18,000 reorder" cost impacts. With the TechCherry import landing
-      // 10,805 real Pune SKUs, that mock data was misleading — managers
-      // would have acted on phantom alerts. Show an empty state instead
-      // until /api/v1/inventory/alerts exists.
+      // Real alerts derived from the products collection (stock-on-hand)
+      // joined to orders.items by barcode for sales velocity. The endpoint
+      // fail-soft returns an empty envelope, so the "No Alerts" state below
+      // renders cleanly when there's nothing actionable.
+      const data = await inventoryApi.getStockAlerts(user?.activeStoreId);
+      setAlerts(Array.isArray(data?.alerts) ? data.alerts : []);
+      setStats(data?.stats ?? {
+        totalAlerts: 0,
+        critical: 0,
+        high: 0,
+        medium: 0,
+        low: 0,
+        deadStockValue: 0,
+        recommendedRestockValue: 0,
+      });
+    } catch (error) {
+      // Network/server error — show empty state rather than a broken page
       setAlerts([]);
       setStats({
         totalAlerts: 0,
@@ -93,8 +104,6 @@ export function StockAlertsOverview() {
         deadStockValue: 0,
         recommendedRestockValue: 0,
       });
-    } catch (error) {
-      // silently handle error
     } finally {
       setIsLoading(false);
     }
