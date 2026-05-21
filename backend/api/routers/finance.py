@@ -360,46 +360,55 @@ async def get_vendor_payments(current_user: dict = Depends(get_current_user)):
 @router.get("/cash-flow")
 async def get_cash_flow(
     period: str = Query("month"),
+    store_id: Optional[str] = Query(None),
     current_user: dict = Depends(get_current_user),
 ):
     db = _get_db()
     now = datetime.utcnow()
     start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
 
-    # Inflows (from orders)
+    active_store = store_id or current_user.get("active_store_id")
+
+    # Inflows (from orders) — scoped to the active store
+    inflow_match = {
+        "created_at": {"$gte": start.isoformat()},
+        "payment_status": "paid",
+    }
+    if active_store:
+        inflow_match["store_id"] = active_store
     inflow = list(
         db.get_collection("orders").aggregate(
             [
-                {
-                    "$match": {
-                        "created_at": {"$gte": start.isoformat()},
-                        "payment_status": "paid",
-                    }
-                },
+                {"$match": inflow_match},
                 {"$group": {"_id": None, "total": {"$sum": "$total"}}},
             ]
         )
     )
     total_inflow = inflow[0]["total"] if inflow else 0
 
-    # Outflows (expenses + purchase orders)
+    # Outflows (expenses + purchase orders) — scoped to the active store.
+    # NOTE: POs store the store as `delivery_store_id`, expenses as `store_id`.
+    exp_match = {"date": {"$gte": start.isoformat()}, "status": "approved"}
+    if active_store:
+        exp_match["store_id"] = active_store
     exp_out = list(
         db.get_collection("expenses").aggregate(
             [
-                {"$match": {"date": {"$gte": start.isoformat()}, "status": "approved"}},
+                {"$match": exp_match},
                 {"$group": {"_id": None, "total": {"$sum": "$amount"}}},
             ]
         )
     )
+    po_match = {
+        "date": {"$gte": start.isoformat()},
+        "payment_status": "paid",
+    }
+    if active_store:
+        po_match["delivery_store_id"] = active_store
     po_out = list(
         db.get_collection("purchase_orders").aggregate(
             [
-                {
-                    "$match": {
-                        "date": {"$gte": start.isoformat()},
-                        "payment_status": "paid",
-                    }
-                },
+                {"$match": po_match},
                 {"$group": {"_id": None, "total": {"$sum": "$total"}}},
             ]
         )

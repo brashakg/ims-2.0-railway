@@ -202,7 +202,7 @@ export default function FinanceDashboard() {
         financeApi.getPnl({ store_id: storeId, from_date: dateFrom, to_date: dateTo }),
         financeApi.getGstSummary(),
         financeApi.getOutstanding({ store_id: storeId }),
-        financeApi.getCashFlow({ period: 'month' }),
+        financeApi.getCashFlow({ period: 'month', store_id: storeId }),
         financeApi.getBudget(),
         financeApi.getVendorPayments(),
         financeApi.getReconciliation(),
