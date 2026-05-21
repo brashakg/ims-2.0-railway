@@ -160,8 +160,10 @@ export function RecallManager() {
   const [showBulkActions, setShowBulkActions] = useState(false);
 
   useEffect(() => {
+    // Refetch when the active store changes so recalls follow the store
+    // switcher (the fetch already passes user.activeStoreId as storeId).
     loadRecalls();
-  }, []);
+  }, [user?.activeStoreId]);
 
   const loadRecalls = async () => {
     setIsLoading(true);
