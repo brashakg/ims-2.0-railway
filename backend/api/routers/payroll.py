@@ -16,7 +16,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-from .auth import get_current_user
+from .auth import get_current_user, require_roles
 
 # Import database connection
 import sys
@@ -296,16 +296,17 @@ def _calculate_salary(
 
 @router.post("/config", status_code=201)
 async def create_salary_config(
-    config: SalaryConfig, current_user: dict = Depends(get_current_user)
+    config: SalaryConfig,
+    current_user: dict = Depends(require_roles("ADMIN")),
 ):
-    """Create salary configuration for an employee"""
+    """Create salary configuration for an employee (admin-only).
+
+    Sets highly sensitive fields (basic salary, PAN, Aadhar, bank account),
+    so it is restricted to ADMIN; SUPERADMIN auto-passes via require_roles.
+    """
     db = _get_db()
     if not db:
         raise HTTPException(status_code=503, detail="Database not available")
-
-    # Check authorization - only admins can create salary configs
-    if "ADMIN" not in current_user.get("roles", []):
-        raise HTTPException(status_code=403, detail="Admin access required")
 
     try:
         salary_config_coll = db.get_collection("salary_config")
