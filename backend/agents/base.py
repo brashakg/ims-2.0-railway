@@ -156,7 +156,7 @@ class JarvisAgent(ABC):
 
     def get_collection(self, name: str):
         """Get a MongoDB collection by name."""
-        if self.db:
+        if self.db is not None:
             try:
                 return self.db.get_collection(name)
             except Exception:
@@ -310,7 +310,7 @@ class JarvisAgent(ABC):
         }
         try:
             col = self.get_collection("agent_audit_log")
-            if col:
+            if col is not None:
                 col.insert_one(log_entry)
         except Exception as e:
             logger.error(f"[{self.agent_id}] Failed to log action: {e}")
@@ -321,7 +321,7 @@ class JarvisAgent(ABC):
         """Read this agent's config from agent_config collection."""
         try:
             col = self.get_collection("agent_config")
-            if col:
+            if col is not None:
                 config = col.find_one({"agent_id": self.agent_id})
                 return config
         except Exception as e:
@@ -332,7 +332,7 @@ class JarvisAgent(ABC):
         """Update last_run, last_status, run_count in agent_config."""
         try:
             col = self.get_collection("agent_config")
-            if col:
+            if col is not None:
                 update = {
                     "$set": {
                         "last_run": datetime.now(timezone.utc),

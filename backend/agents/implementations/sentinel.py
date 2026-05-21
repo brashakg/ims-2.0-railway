@@ -195,14 +195,14 @@ class SentinelAgent(JarvisAgent):
         result = {"status": "unknown", "checks": {}}
 
         try:
-            if not self.db:
+            if self.db is None:
                 result["status"] = "unhealthy"
                 result["error"] = "No database connection"
                 return result
 
             # Test basic read
             col = self.get_collection("stores")
-            if col:
+            if col is not None:
                 store_count = col.count_documents({})
                 result["checks"]["stores_count"] = store_count
                 result["checks"]["read_ok"] = True
@@ -445,7 +445,7 @@ class SentinelAgent(JarvisAgent):
         """Store health check results in MongoDB."""
         try:
             col = self.get_collection("health_checks")
-            if col:
+            if col is not None:
                 col.insert_one({
                     "timestamp": datetime.now(timezone.utc),
                     "score": self._health_score,
@@ -475,7 +475,7 @@ class SentinelAgent(JarvisAgent):
         # Store in MongoDB
         try:
             col = self.get_collection("alert_history")
-            if col:
+            if col is not None:
                 col.insert_one(alert)
         except Exception as e:
             logger.warning(f"[SENTINEL] Failed to store alert: {e}")

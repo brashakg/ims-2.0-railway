@@ -161,3 +161,52 @@ class TestSentinelEndpoint:
             headers=auth_headers,
         )
         assert r.status_code == 200
+
+
+class TestPymongoTruthTestBugFixed:
+    """REGRESSION: pymongo Collection / Database objects raise on `bool()`
+    (NotImplementedError "Collection objects do not implement truth value
+    testing"). The agent code originally used `if col:` and `if self.db:`
+    everywhere — every one of those silently raised, the surrounding
+    try/except swallowed it, and writes to `health_checks`, `alert_history`,
+    `agent_audit_log` etc. were skipped.
+
+    Symptom in prod: SENTINEL ran successfully but `health_checks` stayed
+    empty; PIXEL's run_count never incremented past 0.
+
+    Fix: every check uses explicit `is None` / `is not None`. This test
+    scans the agent tree to make sure nobody re-introduces the pattern.
+    """
+
+    def test_no_implicit_truth_test_on_db_or_col_in_agents(self):
+        import os
+        import re
+
+        agents_dir = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "agents",
+        )
+        offenders = []
+        # Patterns that trigger the pymongo bug:
+        #   "if col:"  "if not col:"  "if self.db:"  "if self._db:"
+        # These all call __bool__ on a Mongo Collection / Database.
+        bad = re.compile(
+            r"if\s+(not\s+)?(col|coll|self\.db|self\._db)\s*:",
+        )
+        for root, _, files in os.walk(agents_dir):
+            for f in files:
+                if not f.endswith(".py"):
+                    continue
+                path = os.path.join(root, f)
+                with open(path, encoding="utf-8") as fh:
+                    for lineno, line in enumerate(fh, 1):
+                        # Skip explicit "is None" / "is not None" — those are fine
+                        if "is None" in line or "is not None" in line:
+                            continue
+                        if bad.search(line):
+                            offenders.append(f"{path}:{lineno}: {line.strip()}")
+        assert not offenders, (
+            "Implicit truth-test on Mongo Collection/Database — pymongo raises "
+            "on bool(). Use `is None` / `is not None` instead.\n"
+            + "\n".join(offenders)
+        )
