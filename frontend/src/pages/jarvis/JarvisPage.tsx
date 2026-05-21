@@ -58,6 +58,7 @@ interface Recommendation {
   description: string;
   action: string;
   impact: string;
+  link?: string;
 }
 
 // Unified activity feed envelope from GET /api/v1/jarvis/agents/activity
@@ -342,52 +343,57 @@ export function JarvisPage() {
   };
 
   const loadInsights = async () => {
-    // Simulated data - would come from API
-    setInsights({
-      revenue_today: 145000,
-      revenue_growth: 9.1,
-      orders_today: 28,
-      pending_orders: 12,
-      low_stock_count: 23,
-      staff_present: '42/45',
-      top_recommendation: {
-        priority: 'high',
-        title: 'Urgent Reorder Required',
-        description: '5 high-demand products are critically low',
-        action: 'Generate purchase order',
-        impact: 'Prevent ₹2.5L potential lost sales',
-      },
-      greeting: getGreeting(),
-    });
+    try {
+      const { data } = await api.get<QuickInsight>('/jarvis/quick-insights');
+      setInsights(data);
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.error('[JARVIS] quick-insights failed:', e);
+      setInsights(null);
+    }
   };
 
   const loadRecommendations = async () => {
-    setRecommendations([
-      {
-        priority: 'high',
-        category: 'inventory',
-        title: 'Urgent Reorder Required',
-        description: '5 high-demand products are critically low. Immediate reorder recommended.',
-        action: 'Generate purchase order for critical items',
-        impact: 'Prevent ₹2.5L potential lost sales',
-      },
-      {
-        priority: 'high',
-        category: 'staffing',
-        title: 'GK Delhi Store Understaffed',
-        description: 'Orders per staff ratio is 54% above optimal.',
-        action: 'Transfer 2 staff from Noida to GK Delhi',
-        impact: 'Improve customer service',
-      },
-      {
-        priority: 'medium',
-        category: 'marketing',
-        title: 'Re-engagement Campaign Needed',
-        description: '234 high-value customers haven\'t purchased in 6+ months.',
-        action: 'Launch personalized WhatsApp campaign',
-        impact: 'Potential ₹8L in recovered revenue',
-      },
-    ]);
+    try {
+      const { data } = await api.get<{ recommendations: Recommendation[]; total: number }>(
+        '/jarvis/recommendations',
+        { params: { limit: 10 } },
+      );
+      setRecommendations(data.recommendations ?? []);
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.error('[JARVIS] recommendations failed:', e);
+      setRecommendations([]);
+    }
+  };
+
+  // "Take action" — feed the recommendation's action into JARVIS chat
+  // so the model produces a concrete step-by-step plan. If the rec has
+  // a deep-link, also navigate so the operator lands on the right page
+  // with the chat already running.
+  const handleTakeAction = (rec: Recommendation & { link?: string }) => {
+    const prompt = (
+      `For the recommendation "${rec.title}" (category: ${rec.category}): ` +
+      `${rec.description || ''} ` +
+      `Suggested action: ${rec.action || 'none'}. ` +
+      `Walk me through the next 3 concrete steps I should take today, grounded in the live data.`
+    ).trim();
+    // Stuff the chat input and immediately send by invoking handleSend's path
+    setInputValue(prompt);
+    // Scroll the chat into view if it's offscreen
+    setTimeout(() => {
+      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }, 100);
+    // Trigger send on next tick so React has applied the input update
+    setTimeout(() => {
+      const fakeEvent = { key: 'Enter' } as React.KeyboardEvent<HTMLInputElement>;
+      void fakeEvent;  // ensure React isn't optimised away
+      handleSend();
+    }, 50);
+    // Optionally deep-link to the relevant page (in a new tab so chat stays open)
+    if (rec.link) {
+      window.open(rec.link, '_blank');
+    }
   };
 
   const formatCurrency = (amount: number) => {
@@ -738,6 +744,284 @@ Is there a specific aspect you'd like me to dive deeper into? I can provide deta
           </button>
         </div>
       </section>
+
+      {/* ── Jarvis conversation + Live insights/recommendations ──
+          Moved to TOP of /jarvis (per user direction) so the chat +
+          recommendations are the first thing the operator sees after
+          the hero. Agent toggles, activity feed, SENTINEL/PIXEL cards
+          render below. */}
+      <div className="eyebrow" style={{ marginBottom: 10 }}>Ask intelligence</div>
+      <div
+        style={{
+          display: 'grid',
+          gridTemplateColumns: '1fr 320px',
+          gap: 14,
+          background: 'var(--surface)',
+          border: '1px solid var(--line)',
+          borderRadius: 'var(--r-lg)',
+          overflow: 'hidden',
+          minHeight: 480,
+          marginBottom: 24,
+        }}
+      >
+        {/* Chat pane */}
+        <div style={{ display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+          {/* Messages */}
+          <div style={{ flex: 1, overflowY: 'auto', padding: 16, display: 'flex', flexDirection: 'column', gap: 12 }}>
+            {messages.map((message) => (
+              <div
+                key={message.id}
+                style={{
+                  display: 'flex',
+                  justifyContent: message.type === 'user' ? 'flex-end' : 'flex-start',
+                }}
+              >
+                <div
+                  style={{
+                    maxWidth: '80%',
+                    borderRadius: 14,
+                    padding: '10px 14px',
+                    background: message.type === 'user' ? 'var(--ink)' : 'var(--bg-sunk)',
+                    color: message.type === 'user' ? '#fff' : 'var(--ink)',
+                    border: message.type === 'user' ? '1px solid var(--ink)' : '1px solid var(--line)',
+                  }}
+                >
+                  {message.type === 'jarvis' && (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
+                      <Bot className="w-3.5 h-3.5" style={{ color: 'var(--bv)' }} />
+                      <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--bv)', textTransform: 'uppercase', letterSpacing: '.08em' }}>
+                        JARVIS
+                      </span>
+                      {(message.data as { ai_powered?: boolean })?.ai_powered && (
+                        <span className="chip accent" style={{ height: 18, fontSize: 9.5 }}>
+                          Claude AI
+                        </span>
+                      )}
+                    </div>
+                  )}
+                  <div
+                    style={{
+                      fontSize: 13,
+                      lineHeight: 1.5,
+                      whiteSpace: 'pre-wrap',
+                    }}
+                    dangerouslySetInnerHTML={{
+                      __html: message.content
+                        .replace(/&/g, '&amp;')
+                        .replace(/</g, '&lt;')
+                        .replace(/>/g, '&gt;')
+                        .replace(/"/g, '&quot;')
+                        .replace(/'/g, '&#x27;')
+                        .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+                        .replace(/\n/g, '<br />'),
+                    }}
+                  />
+                  <div style={{ fontSize: 10.5, marginTop: 6, color: message.type === 'user' ? 'rgba(255,255,255,.55)' : 'var(--ink-4)', fontFamily: 'var(--font-mono)' }}>
+                    {message.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                  </div>
+                </div>
+              </div>
+            ))}
+
+            {isLoading && (
+              <div style={{ display: 'flex', justifyContent: 'flex-start' }}>
+                <div style={{ background: 'var(--bg-sunk)', borderRadius: 14, padding: '10px 14px', border: '1px solid var(--line)' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+                    <Bot className="w-3.5 h-3.5" style={{ color: 'var(--bv)' }} />
+                    <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--bv)', textTransform: 'uppercase', letterSpacing: '.08em' }}>
+                      JARVIS
+                    </span>
+                  </div>
+                  <div style={{ display: 'flex', gap: 4, paddingTop: 4 }}>
+                    <div style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--ink-4)', animation: 'bounce 1s infinite', animationDelay: '0ms' }} />
+                    <div style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--ink-4)', animation: 'bounce 1s infinite', animationDelay: '150ms' }} />
+                    <div style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--ink-4)', animation: 'bounce 1s infinite', animationDelay: '300ms' }} />
+                  </div>
+                </div>
+              </div>
+            )}
+
+            <div ref={messagesEndRef} />
+          </div>
+
+          {/* Quick queries chip row */}
+          <div style={{ padding: '10px 14px', borderTop: '1px solid var(--line)', background: 'var(--surface-2)' }}>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+              {quickQueries.map((q) => (
+                <button
+                  key={q.label}
+                  type="button"
+                  onClick={() => handleQuickQuery(q.query)}
+                  className="btn sm ghost"
+                  style={{ fontSize: 11 }}
+                >
+                  {q.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Input bar */}
+          <div style={{ padding: 14, borderTop: '1px solid var(--line)', background: 'var(--surface)' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <button
+                type="button"
+                onClick={() => setIsListening(!isListening)}
+                className="btn icon ghost"
+                style={{
+                  background: isListening ? 'var(--err)' : 'var(--bg-sunk)',
+                  color: isListening ? '#fff' : 'var(--ink-3)',
+                  borderColor: isListening ? 'var(--err)' : 'var(--line-strong)',
+                }}
+                aria-label={isListening ? 'Stop listening' : 'Start voice input'}
+              >
+                {isListening ? <MicOff className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
+              </button>
+              <input
+                type="text"
+                value={inputValue}
+                onChange={(e) => setInputValue(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && handleSend()}
+                placeholder="Ask JARVIS anything…"
+                className="input"
+                style={{ flex: 1 }}
+              />
+              {llmModels.length > 1 && (
+                <select
+                  value={selectedModel}
+                  onChange={(e) => handleModelChange(e.target.value)}
+                  className="input sm"
+                  style={{ maxWidth: 200 }}
+                  title="Choose which model answers — premium models prompt before switching"
+                  aria-label="LLM model"
+                >
+                  {llmModels.map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {m.tier === 'premium' ? `$$ ${m.label}` : m.label}
+                    </option>
+                  ))}
+                </select>
+              )}
+              <button
+                type="button"
+                onClick={handleSend}
+                disabled={!inputValue.trim() || isLoading}
+                className="btn sm primary"
+              >
+                <Send className="w-4 h-4" /> Send
+              </button>
+            </div>
+          </div>
+        </div>
+
+        {/* Right rail — live insights */}
+        <aside
+          style={{
+            borderLeft: '1px solid var(--line)',
+            background: 'var(--surface-2)',
+            padding: 16,
+            overflowY: 'auto',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 14,
+          }}
+        >
+          <div className="eyebrow" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <Zap className="w-3 h-3" /> Live insights
+          </div>
+
+          {insights && (
+            <>
+              <div style={{ background: 'var(--surface)', border: '1px solid var(--line)', borderRadius: 'var(--r-lg)', padding: 14 }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+                  <span style={{ fontSize: 11, color: 'var(--ink-4)', fontFamily: 'var(--font-mono)', textTransform: 'uppercase', letterSpacing: '.08em' }}>Today's revenue</span>
+                  {insights.revenue_growth >= 0 ? (
+                    <ArrowUpRight className="w-4 h-4" style={{ color: 'var(--ok)' }} />
+                  ) : (
+                    <ArrowDownRight className="w-4 h-4" style={{ color: 'var(--err)' }} />
+                  )}
+                </div>
+                <div className="figure" style={{ fontSize: 26, color: 'var(--ink)' }}>
+                  {formatCurrency(insights.revenue_today)}
+                </div>
+                <div style={{ fontSize: 12, color: insights.revenue_growth >= 0 ? 'var(--ok)' : 'var(--err)', marginTop: 3, fontFamily: 'var(--font-mono)' }}>
+                  {insights.revenue_growth >= 0 ? '+' : ''}{insights.revenue_growth}% vs yesterday
+                </div>
+              </div>
+
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 8 }}>
+                <div style={{ background: 'var(--surface)', border: '1px solid var(--line)', borderRadius: 8, padding: 10 }}>
+                  <ShoppingCart className="w-3.5 h-3.5" style={{ color: 'var(--info)', marginBottom: 4 }} />
+                  <div className="figure" style={{ fontSize: 18 }}>{insights.orders_today}</div>
+                  <div style={{ fontSize: 10.5, color: 'var(--ink-4)', fontFamily: 'var(--font-mono)', textTransform: 'uppercase', letterSpacing: '.06em' }}>Orders</div>
+                </div>
+                <div style={{ background: 'var(--surface)', border: '1px solid var(--line)', borderRadius: 8, padding: 10 }}>
+                  <Clock className="w-3.5 h-3.5" style={{ color: 'var(--warn)', marginBottom: 4 }} />
+                  <div className="figure" style={{ fontSize: 18 }}>{insights.pending_orders}</div>
+                  <div style={{ fontSize: 10.5, color: 'var(--ink-4)', fontFamily: 'var(--font-mono)', textTransform: 'uppercase', letterSpacing: '.06em' }}>Pending</div>
+                </div>
+                <div style={{ background: 'var(--surface)', border: '1px solid var(--line)', borderRadius: 8, padding: 10 }}>
+                  <Package className="w-3.5 h-3.5" style={{ color: 'var(--err)', marginBottom: 4 }} />
+                  <div className="figure" style={{ fontSize: 18 }}>{insights.low_stock_count}</div>
+                  <div style={{ fontSize: 10.5, color: 'var(--ink-4)', fontFamily: 'var(--font-mono)', textTransform: 'uppercase', letterSpacing: '.06em' }}>Low stock</div>
+                </div>
+                <div style={{ background: 'var(--surface)', border: '1px solid var(--line)', borderRadius: 8, padding: 10 }}>
+                  <Users className="w-3.5 h-3.5" style={{ color: 'var(--info)', marginBottom: 4 }} />
+                  <div className="figure" style={{ fontSize: 18 }}>{insights.staff_present}</div>
+                  <div style={{ fontSize: 10.5, color: 'var(--ink-4)', fontFamily: 'var(--font-mono)', textTransform: 'uppercase', letterSpacing: '.06em' }}>Staff</div>
+                </div>
+              </div>
+            </>
+          )}
+
+          {/* Recommendations */}
+          <div style={{ paddingTop: 12, borderTop: '1px solid var(--line)' }}>
+            <div className="eyebrow" style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10 }}>
+              <Target className="w-3 h-3" /> Recommendations
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {recommendations.length === 0 && (
+                <div style={{ fontSize: 11, color: 'var(--ink-4)', fontStyle: 'italic' }}>
+                  No active recommendations — nothing needs immediate attention.
+                </div>
+              )}
+              {recommendations.map((rec, index) => (
+                <div
+                  key={index}
+                  style={{
+                    padding: 10,
+                    borderRadius: 8,
+                    background: 'var(--surface)',
+                    borderLeft: `3px solid ${rec.priority === 'high' ? 'var(--err)' : rec.priority === 'medium' ? 'var(--warn)' : 'var(--ok)'}`,
+                    border: '1px solid var(--line)',
+                  }}
+                >
+                  <div style={{ fontSize: 12.5, fontWeight: 500, color: 'var(--ink)' }}>{rec.title}</div>
+                  <div style={{ fontSize: 11, color: 'var(--ink-4)', marginTop: 2, lineHeight: 1.45 }}>{rec.description}</div>
+                  {rec.impact && (
+                    <div style={{ fontSize: 10.5, color: 'var(--ink-3)', marginTop: 4, fontFamily: 'var(--font-mono)' }}>
+                      → {rec.impact}
+                    </div>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => handleTakeAction(rec)}
+                    className="btn sm ghost"
+                    style={{ marginTop: 6, fontSize: 11, padding: '0 8px', height: 22 }}
+                    title={rec.action ? `Ask JARVIS: ${rec.action}` : 'Ask JARVIS to expand'}
+                  >
+                    Take action <ChevronRight className="w-3 h-3" />
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div style={{ marginTop: 'auto', paddingTop: 10, fontSize: 10, color: 'var(--ink-4)', lineHeight: 1.5, fontFamily: 'var(--font-mono)' }}>
+            Activity signal. For agent toggles, see docs/reference/IMS2_Agent_Architecture.html.
+          </div>
+        </aside>
+      </div>
 
       {/* ── Agent grid ── */}
       <div className="eyebrow" style={{ marginBottom: 10, display: 'flex', alignItems: 'center', gap: 10 }}>
@@ -1325,262 +1609,7 @@ Is there a specific aspect you'd like me to dive deeper into? I can provide deta
         )}
       </div>
 
-      {/* ── Jarvis conversation (preserves original chat logic) ── */}
-      <div className="eyebrow" style={{ marginBottom: 10 }}>Ask intelligence</div>
-      <div
-        style={{
-          display: 'grid',
-          gridTemplateColumns: '1fr 320px',
-          gap: 14,
-          background: 'var(--surface)',
-          border: '1px solid var(--line)',
-          borderRadius: 'var(--r-lg)',
-          overflow: 'hidden',
-          minHeight: 480,
-        }}
-      >
-        {/* Chat pane */}
-        <div style={{ display: 'flex', flexDirection: 'column', minHeight: 0 }}>
-          {/* Messages */}
-          <div style={{ flex: 1, overflowY: 'auto', padding: 16, display: 'flex', flexDirection: 'column', gap: 12 }}>
-            {messages.map((message) => (
-              <div
-                key={message.id}
-                style={{
-                  display: 'flex',
-                  justifyContent: message.type === 'user' ? 'flex-end' : 'flex-start',
-                }}
-              >
-                <div
-                  style={{
-                    maxWidth: '80%',
-                    borderRadius: 14,
-                    padding: '10px 14px',
-                    background: message.type === 'user' ? 'var(--ink)' : 'var(--bg-sunk)',
-                    color: message.type === 'user' ? '#fff' : 'var(--ink)',
-                    border: message.type === 'user' ? '1px solid var(--ink)' : '1px solid var(--line)',
-                  }}
-                >
-                  {message.type === 'jarvis' && (
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
-                      <Bot className="w-3.5 h-3.5" style={{ color: 'var(--bv)' }} />
-                      <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--bv)', textTransform: 'uppercase', letterSpacing: '.08em' }}>
-                        JARVIS
-                      </span>
-                      {(message.data as { ai_powered?: boolean })?.ai_powered && (
-                        <span className="chip accent" style={{ height: 18, fontSize: 9.5 }}>
-                          Claude AI
-                        </span>
-                      )}
-                    </div>
-                  )}
-                  <div
-                    style={{
-                      fontSize: 13,
-                      lineHeight: 1.5,
-                      whiteSpace: 'pre-wrap',
-                    }}
-                    dangerouslySetInnerHTML={{
-                      __html: message.content
-                        .replace(/&/g, '&amp;')
-                        .replace(/</g, '&lt;')
-                        .replace(/>/g, '&gt;')
-                        .replace(/"/g, '&quot;')
-                        .replace(/'/g, '&#x27;')
-                        .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
-                        .replace(/\n/g, '<br />'),
-                    }}
-                  />
-                  <div style={{ fontSize: 10.5, marginTop: 6, color: message.type === 'user' ? 'rgba(255,255,255,.55)' : 'var(--ink-4)', fontFamily: 'var(--font-mono)' }}>
-                    {message.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                  </div>
-                </div>
-              </div>
-            ))}
-
-            {isLoading && (
-              <div style={{ display: 'flex', justifyContent: 'flex-start' }}>
-                <div style={{ background: 'var(--bg-sunk)', borderRadius: 14, padding: '10px 14px', border: '1px solid var(--line)' }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
-                    <Bot className="w-3.5 h-3.5" style={{ color: 'var(--bv)' }} />
-                    <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--bv)', textTransform: 'uppercase', letterSpacing: '.08em' }}>
-                      JARVIS
-                    </span>
-                  </div>
-                  <div style={{ display: 'flex', gap: 4, paddingTop: 4 }}>
-                    <div style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--ink-4)', animation: 'bounce 1s infinite', animationDelay: '0ms' }} />
-                    <div style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--ink-4)', animation: 'bounce 1s infinite', animationDelay: '150ms' }} />
-                    <div style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--ink-4)', animation: 'bounce 1s infinite', animationDelay: '300ms' }} />
-                  </div>
-                </div>
-              </div>
-            )}
-
-            <div ref={messagesEndRef} />
-          </div>
-
-          {/* Quick queries chip row */}
-          <div style={{ padding: '10px 14px', borderTop: '1px solid var(--line)', background: 'var(--surface-2)' }}>
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-              {quickQueries.map((q) => (
-                <button
-                  key={q.label}
-                  type="button"
-                  onClick={() => handleQuickQuery(q.query)}
-                  className="btn sm ghost"
-                  style={{ fontSize: 11 }}
-                >
-                  {q.label}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          {/* Input bar */}
-          <div style={{ padding: 14, borderTop: '1px solid var(--line)', background: 'var(--surface)' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <button
-                type="button"
-                onClick={() => setIsListening(!isListening)}
-                className="btn icon ghost"
-                style={{
-                  background: isListening ? 'var(--err)' : 'var(--bg-sunk)',
-                  color: isListening ? '#fff' : 'var(--ink-3)',
-                  borderColor: isListening ? 'var(--err)' : 'var(--line-strong)',
-                }}
-                aria-label={isListening ? 'Stop listening' : 'Start voice input'}
-              >
-                {isListening ? <MicOff className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
-              </button>
-              <input
-                type="text"
-                value={inputValue}
-                onChange={(e) => setInputValue(e.target.value)}
-                onKeyDown={(e) => e.key === 'Enter' && handleSend()}
-                placeholder="Ask JARVIS anything…"
-                className="input"
-                style={{ flex: 1 }}
-              />
-              {llmModels.length > 1 && (
-                <select
-                  value={selectedModel}
-                  onChange={(e) => handleModelChange(e.target.value)}
-                  className="input sm"
-                  style={{ maxWidth: 200 }}
-                  title="Choose which model answers — premium models prompt before switching"
-                  aria-label="LLM model"
-                >
-                  {llmModels.map((m) => (
-                    <option key={m.id} value={m.id}>
-                      {m.tier === 'premium' ? `$$ ${m.label}` : m.label}
-                    </option>
-                  ))}
-                </select>
-              )}
-              <button
-                type="button"
-                onClick={handleSend}
-                disabled={!inputValue.trim() || isLoading}
-                className="btn sm primary"
-              >
-                <Send className="w-4 h-4" /> Send
-              </button>
-            </div>
-          </div>
-        </div>
-
-        {/* Right rail — live insights */}
-        <aside
-          style={{
-            borderLeft: '1px solid var(--line)',
-            background: 'var(--surface-2)',
-            padding: 16,
-            overflowY: 'auto',
-            display: 'flex',
-            flexDirection: 'column',
-            gap: 14,
-          }}
-        >
-          <div className="eyebrow" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-            <Zap className="w-3 h-3" /> Live insights
-          </div>
-
-          {insights && (
-            <>
-              <div style={{ background: 'var(--surface)', border: '1px solid var(--line)', borderRadius: 'var(--r-lg)', padding: 14 }}>
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
-                  <span style={{ fontSize: 11, color: 'var(--ink-4)', fontFamily: 'var(--font-mono)', textTransform: 'uppercase', letterSpacing: '.08em' }}>Today's revenue</span>
-                  {insights.revenue_growth >= 0 ? (
-                    <ArrowUpRight className="w-4 h-4" style={{ color: 'var(--ok)' }} />
-                  ) : (
-                    <ArrowDownRight className="w-4 h-4" style={{ color: 'var(--err)' }} />
-                  )}
-                </div>
-                <div className="figure" style={{ fontSize: 26, color: 'var(--ink)' }}>
-                  {formatCurrency(insights.revenue_today)}
-                </div>
-                <div style={{ fontSize: 12, color: insights.revenue_growth >= 0 ? 'var(--ok)' : 'var(--err)', marginTop: 3, fontFamily: 'var(--font-mono)' }}>
-                  {insights.revenue_growth >= 0 ? '+' : ''}{insights.revenue_growth}% vs yesterday
-                </div>
-              </div>
-
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 8 }}>
-                <div style={{ background: 'var(--surface)', border: '1px solid var(--line)', borderRadius: 8, padding: 10 }}>
-                  <ShoppingCart className="w-3.5 h-3.5" style={{ color: 'var(--info)', marginBottom: 4 }} />
-                  <div className="figure" style={{ fontSize: 18 }}>{insights.orders_today}</div>
-                  <div style={{ fontSize: 10.5, color: 'var(--ink-4)', fontFamily: 'var(--font-mono)', textTransform: 'uppercase', letterSpacing: '.06em' }}>Orders</div>
-                </div>
-                <div style={{ background: 'var(--surface)', border: '1px solid var(--line)', borderRadius: 8, padding: 10 }}>
-                  <Clock className="w-3.5 h-3.5" style={{ color: 'var(--warn)', marginBottom: 4 }} />
-                  <div className="figure" style={{ fontSize: 18 }}>{insights.pending_orders}</div>
-                  <div style={{ fontSize: 10.5, color: 'var(--ink-4)', fontFamily: 'var(--font-mono)', textTransform: 'uppercase', letterSpacing: '.06em' }}>Pending</div>
-                </div>
-                <div style={{ background: 'var(--surface)', border: '1px solid var(--line)', borderRadius: 8, padding: 10 }}>
-                  <Package className="w-3.5 h-3.5" style={{ color: 'var(--err)', marginBottom: 4 }} />
-                  <div className="figure" style={{ fontSize: 18 }}>{insights.low_stock_count}</div>
-                  <div style={{ fontSize: 10.5, color: 'var(--ink-4)', fontFamily: 'var(--font-mono)', textTransform: 'uppercase', letterSpacing: '.06em' }}>Low stock</div>
-                </div>
-                <div style={{ background: 'var(--surface)', border: '1px solid var(--line)', borderRadius: 8, padding: 10 }}>
-                  <Users className="w-3.5 h-3.5" style={{ color: 'var(--info)', marginBottom: 4 }} />
-                  <div className="figure" style={{ fontSize: 18 }}>{insights.staff_present}</div>
-                  <div style={{ fontSize: 10.5, color: 'var(--ink-4)', fontFamily: 'var(--font-mono)', textTransform: 'uppercase', letterSpacing: '.06em' }}>Staff</div>
-                </div>
-              </div>
-            </>
-          )}
-
-          {/* Recommendations */}
-          <div style={{ paddingTop: 12, borderTop: '1px solid var(--line)' }}>
-            <div className="eyebrow" style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10 }}>
-              <Target className="w-3 h-3" /> Recommendations
-            </div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-              {recommendations.map((rec, index) => (
-                <div
-                  key={index}
-                  style={{
-                    padding: 10,
-                    borderRadius: 8,
-                    background: 'var(--surface)',
-                    borderLeft: `3px solid ${rec.priority === 'high' ? 'var(--err)' : rec.priority === 'medium' ? 'var(--warn)' : 'var(--ok)'}`,
-                    border: '1px solid var(--line)',
-                  }}
-                >
-                  <div style={{ fontSize: 12.5, fontWeight: 500, color: 'var(--ink)' }}>{rec.title}</div>
-                  <div style={{ fontSize: 11, color: 'var(--ink-4)', marginTop: 2, lineHeight: 1.45 }}>{rec.description}</div>
-                  <button type="button" className="btn sm ghost" style={{ marginTop: 6, fontSize: 11, padding: '0 6px', height: 22 }}>
-                    Take action <ChevronRight className="w-3 h-3" />
-                  </button>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          <div style={{ marginTop: 'auto', paddingTop: 10, fontSize: 10, color: 'var(--ink-4)', lineHeight: 1.5, fontFamily: 'var(--font-mono)' }}>
-            Activity signal. For agent toggles, see docs/reference/IMS2_Agent_Architecture.html.
-          </div>
-        </aside>
-      </div>
+      {/* Chat + insights/recommendations moved to top of page (see above). */}
     </div>
   );
 }
