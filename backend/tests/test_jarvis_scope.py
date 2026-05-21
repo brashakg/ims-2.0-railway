@@ -136,3 +136,82 @@ def test_staff_insights_shape_no_db():
     assert isinstance(out["roster"], list)
     assert "attendance_summary" in out
     assert out["attendance_summary"]["total_staff"] == 0
+
+
+# ----- wide-lens data endpoint --------------------------------------------
+
+def test_jarvis_data_allow_list_includes_owner_collections():
+    """The /jarvis/data/{collection} allow-list must include the
+    high-value owner collections (expenses, payroll, audit_logs etc.)
+    even if no caller is currently reading them — the contract is the
+    set of collections JARVIS is permitted to inspect."""
+    from api.routers.jarvis import _JARVIS_QUERYABLE_COLLECTIONS
+
+    must_have = {
+        # Operational
+        "orders", "products", "stock", "purchase_orders", "tasks",
+        "workshop_jobs", "prescriptions", "eye_tests",
+        # Finance
+        "expenses", "budgets", "salary_records", "payroll",
+        "incentives", "incentive_settings", "payout_snapshots",
+        "targets", "period_locks",
+        # Loyalty
+        "loyalty_accounts",
+        # Agent infra
+        "agent_config", "agent_events", "anomalies", "ui_audits",
+        "audit_logs", "health_checks",
+        # Integrations
+        "integrations", "sync_runs", "webhook_inbox",
+    }
+    missing = must_have - _JARVIS_QUERYABLE_COLLECTIONS
+    assert not missing, f"Missing from allow-list: {missing}"
+
+
+def test_jarvis_data_customer_pii_collections_marked():
+    """Customer-PII collections must be on the customer-scrub list so
+    the ad-hoc endpoint redacts before returning."""
+    from api.routers.jarvis import _CUSTOMER_PII_COLLECTIONS
+
+    assert "customers" in _CUSTOMER_PII_COLLECTIONS
+    assert "prescriptions" in _CUSTOMER_PII_COLLECTIONS
+
+
+def test_coerce_mongo_value_parses_json():
+    from api.routers.jarvis import _coerce_mongo_value
+
+    assert _coerce_mongo_value('{"status":"OPEN"}') == {"status": "OPEN"}
+    assert _coerce_mongo_value("OPEN") == "OPEN"
+    assert _coerce_mongo_value("") == ""
+    assert _coerce_mongo_value("42") == 42  # ints parse fine via json
+    assert _coerce_mongo_value("not-json-just-string") == "not-json-just-string"
+
+
+# ----- PIXEL audit history endpoint contract -----------------------------
+
+def test_extended_context_includes_ui_audit_keys_when_data_present():
+    """If ui_audits has at least one PIXEL doc, the extended context
+    surfaces ui_audit_latest + ui_audits_total."""
+    from api.routers import jarvis as jarvis_router
+
+    class _FakeUiAudits:
+        def find_one(self, _flt, **_kw):
+            return {
+                "ran_at": "2026-05-21T02:00:00+00:00",
+                "summary": {"overall_min_perf": 0.84, "overall_min_a11y": 0.92,
+                            "total_a11y_violations": 3, "pages_audited": 9},
+                "regressions": [{"url": "/pos", "metric": "performance"}],
+            }
+        def count_documents(self, _flt):
+            return 42
+
+    original = jarvis_router.get_db_collection
+    jarvis_router.get_db_collection = lambda name: _FakeUiAudits() if name == "ui_audits" else None
+    try:
+        ctx = jarvis_router.JarvisAnalyticsEngine.get_extended_context()
+    finally:
+        jarvis_router.get_db_collection = original
+
+    assert "ui_audit_latest" in ctx
+    assert ctx["ui_audit_latest"]["summary"]["overall_min_perf"] == 0.84
+    assert ctx["ui_audit_latest"]["regressions_count"] == 1
+    assert ctx["ui_audits_total"] == 42

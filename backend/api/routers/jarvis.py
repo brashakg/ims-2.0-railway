@@ -889,6 +889,359 @@ class JarvisAnalyticsEngine:
         except Exception:
             pass
 
+        # ==============================================================
+        # WIDE LENS — every operational collection JARVIS can read.
+        # Compact roll-ups only (counts + small samples) so we stay under
+        # the context budget. Each block fail-soft so one missing
+        # collection doesn't take out the rest.
+        # ==============================================================
+
+        # FINANCE: expenses, budgets, advances
+        try:
+            col = get_db_collection("expenses")
+            if col is not None:
+                month_start = datetime.now().strftime("%Y-%m-01")
+                total_month = 0.0
+                category_breakdown: Dict[str, float] = {}
+                for e in col.find({"date": {"$gte": month_start}}, {
+                    "amount": 1, "category": 1, "vendor": 1,
+                }).limit(500):
+                    amt = float(e.get("amount") or 0)
+                    total_month += amt
+                    cat = e.get("category") or "OTHER"
+                    category_breakdown[cat] = category_breakdown.get(cat, 0) + amt
+                ctx["expenses_mtd"] = {
+                    "total_this_month": round(total_month, 2),
+                    "by_category": [
+                        {"category": k, "amount": round(v, 2)}
+                        for k, v in sorted(category_breakdown.items(), key=lambda kv: -kv[1])
+                    ][:10],
+                }
+        except Exception:
+            pass
+
+        try:
+            col = get_db_collection("budgets")
+            if col is not None:
+                ctx["budgets"] = [
+                    {
+                        "category": b.get("category") or b.get("name") or "",
+                        "period": b.get("period") or "",
+                        "allocated": float(b.get("allocated") or 0),
+                        "spent": float(b.get("spent") or 0),
+                    }
+                    for b in col.find({}).limit(30)
+                ]
+        except Exception:
+            pass
+
+        # PAYROLL: salary records + advances + payslips signal
+        try:
+            col = get_db_collection("salary_records")
+            if col is not None:
+                month_start = datetime.now().strftime("%Y-%m-01")
+                ctx["payroll_mtd"] = {
+                    "records_this_month": col.count_documents({"month": {"$gte": month_start[:7]}}),
+                    "total_paid_this_month": round(sum(
+                        float(r.get("net_pay") or 0)
+                        for r in col.find({"month": {"$gte": month_start[:7]}}).limit(500)
+                    ), 2),
+                }
+        except Exception:
+            pass
+        try:
+            col = get_db_collection("advances") or get_db_collection("salary_advances")
+            if col is not None:
+                ctx["salary_advances_open"] = col.count_documents({
+                    "status": {"$in": ["OPEN", "open", "ACTIVE", "OUTSTANDING"]},
+                })
+        except Exception:
+            pass
+
+        # INCENTIVES (Pune model — Modules i/ii/iii)
+        try:
+            col = get_db_collection("payout_snapshots")
+            if col is not None:
+                ctx["incentive_payouts_recent"] = [
+                    {
+                        "period": s.get("period") or "",
+                        "employee_id": s.get("employee_id") or "",
+                        "employee_name": s.get("employee_name") or "",
+                        "module_i": float(s.get("module_i") or 0),
+                        "module_ii": float(s.get("module_ii") or 0),
+                        "module_iii": float(s.get("module_iii") or 0),
+                        "total": float(s.get("total_payout") or s.get("total") or 0),
+                    }
+                    for s in col.find({}).sort("period", -1).limit(20)
+                ]
+        except Exception:
+            pass
+        try:
+            col = get_db_collection("incentive_settings")
+            if col is not None:
+                s = col.find_one({}) or {}
+                ctx["incentive_settings_active"] = {
+                    "module_i_weight": s.get("module_i_weight"),
+                    "module_ii_weight": s.get("module_ii_weight"),
+                    "module_iii_weight": s.get("module_iii_weight"),
+                    "walkout_penalty_per": s.get("walkout_penalty_per"),
+                    "fy": s.get("fy"),
+                }
+        except Exception:
+            pass
+
+        # STOCK detail — counts, transfers, returns
+        try:
+            col = get_db_collection("stock_counts")
+            if col is not None:
+                today = datetime.now().strftime("%Y-%m-%d")
+                ctx["stock_counts"] = {
+                    "today": col.count_documents({"count_date": today}),
+                    "open_discrepancies": col.count_documents({"has_discrepancy": True}),
+                }
+        except Exception:
+            pass
+        try:
+            col = get_db_collection("stock_transfers")
+            if col is not None:
+                ctx["stock_transfers"] = {
+                    "in_transit": col.count_documents({"status": {"$in": ["IN_TRANSIT", "DISPATCHED"]}}),
+                    "received_this_week": col.count_documents({
+                        "received_at": {"$gte": (datetime.now() - timedelta(days=7)).isoformat()},
+                    }),
+                }
+        except Exception:
+            pass
+        try:
+            col = get_db_collection("vendor_returns")
+            if col is not None:
+                ctx["vendor_returns"] = {
+                    "open": col.count_documents({"status": {"$in": ["OPEN", "PENDING"]}}),
+                    "this_month": col.count_documents({
+                        "created_at": {"$gte": datetime.now().strftime("%Y-%m-01")},
+                    }),
+                }
+        except Exception:
+            pass
+
+        # LOYALTY
+        try:
+            col = get_db_collection("loyalty_accounts")
+            if col is not None:
+                ctx["loyalty"] = {
+                    "active_accounts": col.count_documents({"status": {"$ne": "INACTIVE"}}),
+                    "total_points_outstanding": sum(
+                        int(a.get("points_balance") or 0)
+                        for a in col.find({}, {"points_balance": 1}).limit(2000)
+                    ),
+                }
+        except Exception:
+            pass
+
+        # TARGETS — sales targets
+        try:
+            col = get_db_collection("targets")
+            if col is not None:
+                month_key = datetime.now().strftime("%Y-%m")
+                ctx["targets"] = [
+                    {
+                        "store_id": t.get("store_id") or "",
+                        "period": t.get("period") or "",
+                        "target_amount": float(t.get("target_amount") or 0),
+                        "achievement": float(t.get("achievement") or 0),
+                        "target_type": t.get("target_type") or "",
+                    }
+                    for t in col.find({"period": month_key}).limit(30)
+                ]
+        except Exception:
+            pass
+
+        # AGENT ACTIVITY — recent events + recent anomalies + audit log
+        try:
+            col = get_db_collection("agent_events")
+            if col is not None:
+                ctx["agent_events_recent"] = [
+                    {
+                        "event": e.get("event") or e.get("event_type") or "",
+                        "source": e.get("source") or e.get("agent_id") or "",
+                        "at": str(e.get("created_at") or e.get("at") or "")[:19],
+                    }
+                    for e in col.find({}).sort("created_at", -1).limit(20)
+                ]
+        except Exception:
+            pass
+        try:
+            col = get_db_collection("anomalies")
+            if col is not None:
+                ctx["anomalies_open"] = [
+                    {
+                        "kind": a.get("kind") or a.get("type") or "",
+                        "severity": a.get("severity") or "",
+                        "summary": (a.get("summary") or a.get("message") or "")[:200],
+                        "detected_at": str(a.get("detected_at") or a.get("created_at") or "")[:19],
+                    }
+                    for a in col.find(
+                        {"status": {"$nin": ["RESOLVED", "DISMISSED"]}}
+                    ).sort("detected_at", -1).limit(15)
+                ]
+        except Exception:
+            pass
+        try:
+            col = get_db_collection("alert_history")
+            if col is not None:
+                ctx["alerts_last_7d"] = col.count_documents({
+                    "created_at": {"$gte": (datetime.now() - timedelta(days=7)).isoformat()},
+                })
+        except Exception:
+            pass
+        try:
+            col = get_db_collection("audit_logs")
+            if col is not None:
+                ctx["audit_log_recent"] = [
+                    {
+                        "action": a.get("action") or "",
+                        "user": a.get("username") or a.get("user_id") or "",
+                        "entity": a.get("entity_type") or a.get("resource") or "",
+                        "at": str(a.get("created_at") or "")[:19],
+                    }
+                    for a in col.find({}).sort("created_at", -1).limit(20)
+                ]
+        except Exception:
+            pass
+
+        # PIXEL audit history — surface UI quality summary
+        try:
+            col = get_db_collection("ui_audits")
+            if col is not None:
+                latest = col.find_one(
+                    {"agent_id": "pixel", "kind": "scheduled_audit"},
+                    sort=[("ran_at", -1)],
+                )
+                if latest:
+                    ctx["ui_audit_latest"] = {
+                        "ran_at": latest.get("ran_at"),
+                        "summary": latest.get("summary") or {},
+                        "regressions_count": len(latest.get("regressions") or []),
+                    }
+                ctx["ui_audits_total"] = col.count_documents({"agent_id": "pixel"})
+        except Exception:
+            pass
+
+        # HEALTH CHECKS — SENTINEL output
+        try:
+            col = get_db_collection("health_checks")
+            if col is not None:
+                ctx["health_checks_recent"] = [
+                    {
+                        "service": h.get("service") or h.get("target") or "",
+                        "status": h.get("status") or "",
+                        "checked_at": str(h.get("checked_at") or h.get("created_at") or "")[:19],
+                    }
+                    for h in col.find({}).sort("checked_at", -1).limit(10)
+                ]
+        except Exception:
+            pass
+
+        # INTEGRATIONS / sync runs / webhook inbox — NEXUS output
+        try:
+            col = get_db_collection("integrations")
+            if col is not None:
+                ctx["integrations"] = [
+                    {
+                        "name": i.get("name") or i.get("provider") or "",
+                        "status": i.get("status") or "",
+                        "last_sync_at": str(i.get("last_sync_at") or "")[:19],
+                        "enabled": i.get("enabled", False),
+                    }
+                    for i in col.find({}).limit(20)
+                ]
+        except Exception:
+            pass
+        try:
+            col = get_db_collection("sync_runs")
+            if col is not None:
+                ctx["sync_runs_recent"] = [
+                    {
+                        "provider": s.get("provider") or "",
+                        "status": s.get("status") or "",
+                        "records": s.get("records_synced") or 0,
+                        "at": str(s.get("started_at") or s.get("created_at") or "")[:19],
+                    }
+                    for s in col.find({}).sort("started_at", -1).limit(10)
+                ]
+        except Exception:
+            pass
+        try:
+            col = get_db_collection("webhook_inbox")
+            if col is not None:
+                ctx["webhook_inbox_recent"] = col.count_documents({
+                    "received_at": {"$gte": (datetime.now() - timedelta(days=1)).isoformat()},
+                })
+        except Exception:
+            pass
+
+        # TALLY exports
+        try:
+            col = get_db_collection("tally_exports")
+            if col is not None:
+                ctx["tally_exports_recent"] = col.count_documents({
+                    "exported_at": {"$gte": (datetime.now() - timedelta(days=7)).isoformat()},
+                })
+        except Exception:
+            pass
+
+        # SETTINGS — surface non-secret config (single doc usually)
+        try:
+            col = get_db_collection("settings")
+            if col is not None:
+                s = col.find_one({}) or {}
+                # Strip any obvious secret fields before exposing
+                safe_keys = {
+                    k: v for k, v in s.items()
+                    if not any(token in str(k).lower() for token in (
+                        "secret", "key", "password", "token", "private",
+                    )) and k != "_id"
+                }
+                if safe_keys:
+                    ctx["settings"] = safe_keys
+        except Exception:
+            pass
+
+        # SOP templates
+        try:
+            col = get_db_collection("sop_templates")
+            if col is not None:
+                ctx["sop_templates"] = [
+                    {"id": str(t.get("_id"))[-6:], "title": t.get("title") or "", "active": t.get("active", True)}
+                    for t in col.find({}).limit(20)
+                ]
+        except Exception:
+            pass
+
+        # EYE CAMPS
+        try:
+            col = get_db_collection("eye_camps")
+            if col is not None:
+                today = datetime.now().strftime("%Y-%m-%d")
+                ctx["eye_camps"] = {
+                    "upcoming": col.count_documents({"camp_date": {"$gte": today}}),
+                    "this_month": col.count_documents({
+                        "camp_date": {"$gte": datetime.now().strftime("%Y-%m-01")},
+                    }),
+                }
+        except Exception:
+            pass
+
+        # HANDOFFS (shift / inventory handoffs)
+        try:
+            col = get_db_collection("handoffs")
+            if col is not None:
+                ctx["handoffs_open"] = col.count_documents({
+                    "status": {"$in": ["OPEN", "PENDING", "DRAFT"]},
+                })
+        except Exception:
+            pass
+
         return ctx
 
     @staticmethod
@@ -1181,32 +1534,61 @@ class ClaudeClient:
 - Never apologise for limits — if data is missing, say so plainly and tell the owner where to look
 
 ## Your Access (this is important):
-You have **full read access to the entire IMS 2.0 database** as the Superadmin's agent. The BUSINESS DATA section below is a live snapshot extracted moments ago across these collections:
+You have **full read access to the entire IMS 2.0 database** as the Superadmin's agent. The BUSINESS DATA section below is a live snapshot extracted moments ago across the operational surface. The snapshot is grouped into these sections — when you reference a number, prefer naming the section so the owner knows what view it came from:
 
+**Sales + customers**
 - `overview` — revenue (today / month / YoY), orders, inventory, customers, staff KPI
-- `sales_insights` — sales trends and per-channel split
-- `inventory_insights` — critical alerts, reorder list, slow movers
+- `sales_insights` — trends, per-channel split
 - `customer_insights` — segments, loyalty, churn risk
-- `staff_insights.roster` — every active employee by **name, role, store, phone, join date**. You may reference them by name (e.g. "Ravi", "Priya"). You have explicit authority to discuss own-staff performance.
+- `top_skus_30d` — top 20 SKUs by units sold last 30 days
+
+**Staff + operations**
+- `staff_insights.roster` — every active employee by **name, role, store, phone, join date**. You may reference them by name.
 - `staff_insights.attendance_summary` — today's present / on-leave counts
-- `stores` — every retail location with city + active flag
-- `vendors` — supplier roster (name, GSTIN, city, category)
-- `purchases.open_pos_sample` — open purchase orders + vendor names
-- `grns_last_30d` — goods receipts in last 30 days
-- `tasks.open_sample` — open + overdue task list with assignee names
+- `stores` — every retail location
+- `tasks.open_sample` — open + overdue tasks with assignee names
 - `workshop` — job pipeline (pending / in_progress / overdue / ready)
-- `prescriptions` — Rx volume this month
-- `eye_tests` — today's queue + pending eye-tests
+- `prescriptions`, `eye_tests`, `eye_camps` — clinical pipeline
 - `walkouts` — footfall today + this week
-- `marketing.sent_today/sent_this_week` — outbound WhatsApp/SMS volume
-- `agents` — live status of all 8 Jarvis agents (last run, run count, errors)
-- `top_skus_30d` — top 20 SKUs by units sold in last 30 days
+- `sop_templates`, `handoffs_open` — SOP coverage + open handoffs
+
+**Inventory + procurement**
+- `inventory_insights` — critical alerts, reorder list, slow movers
+- `vendors` — supplier roster (name, GSTIN, city, category)
+- `purchases.open_pos_sample` — open POs by vendor
+- `grns_last_30d` — goods receipts
+- `stock_counts`, `stock_transfers`, `vendor_returns` — stock movement signals
+
+**Finance + payroll + incentives**
+- `expenses_mtd` — month-to-date expense total + category breakdown
+- `budgets` — allocated vs spent
+- `payroll_mtd` — month-to-date payroll spend + record count
+- `salary_advances_open` — outstanding advances
+- `incentive_payouts_recent` — Pune model (Module i/ii/iii) payout snapshots
+- `incentive_settings_active` — current weightages + walkout penalty
+- `targets` — sales targets for current month
 - `period_locks` — accounting period status
-- `predictions`, `recommendations` — forward-looking signal
+
+**Loyalty + marketing**
+- `loyalty.active_accounts`, `loyalty.total_points_outstanding`
+- `marketing.sent_today/sent_this_week` — outbound WhatsApp/SMS volume
+
+**System / agents**
+- `agents` — live status of all 8 Jarvis agents (last_run, run_count, errors)
+- `agent_events_recent` — last 20 cross-agent events
+- `anomalies_open` — open anomalies from ORACLE
+- `alerts_last_7d` — alert volume signal
+- `audit_log_recent` — last 20 audit log entries (action, user, entity)
+- `ui_audit_latest` + `ui_audits_total` — PIXEL's most recent UI/UX audit summary + total audits on record
+- `health_checks_recent` — SENTINEL output
+- `integrations`, `sync_runs_recent`, `webhook_inbox_recent`, `tally_exports_recent` — NEXUS surface
+- `settings` — non-secret system config
+
+You also have an on-demand reader at `GET /api/v1/jarvis/data/{collection}` that the operator can hit for any collection in the allow-list when they want the full table (e.g. "show me all expenses for May"). The list of available collections is at `/jarvis/data/collections`.
 
 **Customer/patient PII (names, phones, emails, addresses) is automatically redacted before you see it — that is by design, not a limit on your authority.** You may refer to customers in aggregate ("23 new customers this month", "8 churn-risk accounts") without naming individuals.
 
-If a specific data point isn't in the snapshot, do NOT say "I'm restricted" or "ask the Superadmin for access". Instead, give your best read of what IS there, and tell the owner what other view or report would surface the rest.
+If a specific data point isn't in the snapshot, do NOT say "I'm restricted" or "ask the Superadmin for access". Instead, give your best read of what IS there, and tell the owner where to look for the rest (mention the relevant /reports or /finance / /agents page).
 
 ## Response Guidelines:
 - Markdown for clarity (headers, bullet points, bold for emphasis)
@@ -1895,3 +2277,233 @@ async def run_single_agent(
     except Exception as e:
         logger.error(f"Run agent {agent_id} error: {e}")
         return {"error": str(e)}
+
+
+# ============================================================================
+# JARVIS "wide-lens" data endpoints
+# ============================================================================
+
+# Collections that ARE allowed via the ad-hoc /jarvis/data/{collection}
+# endpoint. This is an explicit allow-list rather than a deny-list — the
+# alternative is leaking sensitive collections (vendor_portal_tokens,
+# session secrets, etc.) the moment anyone adds one without thinking.
+_JARVIS_QUERYABLE_COLLECTIONS = frozenset({
+    # Operational
+    "orders", "products", "stock", "stock_units", "stock_counts",
+    "stock_transfers", "purchase_orders", "grns", "vendor_returns",
+    "prescriptions", "eye_tests", "eye_camps", "workshop_jobs",
+    "walkouts", "walk_in_counters",
+    # People (own-data, no customer PII fields shown)
+    "users", "stores", "vendors",
+    "attendance", "leaves",
+    # Finance
+    "expenses", "budgets", "advances", "salary_advances",
+    "salary_records", "salary_config", "payslips", "payroll",
+    "incentives", "incentive_inputs", "incentive_settings",
+    "points_log", "payout_snapshots",
+    "targets", "period_locks",
+    # Tasks + SOP
+    "tasks", "sop_templates", "handoffs",
+    # Loyalty (aggregate; customer name still PII-scrubbed)
+    "loyalty_accounts", "loyalty_transactions", "loyalty_settings",
+    # Agent infra
+    "agent_config", "agent_events", "agent_audit_log",
+    "anomalies", "alert_history", "health_checks", "ui_audits",
+    "audit_logs",
+    # Integrations
+    "integrations", "sync_runs", "webhook_inbox", "tally_exports",
+    "notification_logs", "notifications",
+    # Settings
+    "settings",
+})
+
+# Collections that MUST be customer-PII-scrubbed before going to the LLM
+# even though they're queryable. customer/patient names + phones are
+# scrubbed; aggregate counts + IDs remain.
+_CUSTOMER_PII_COLLECTIONS = frozenset({
+    "customers", "loyalty_accounts", "loyalty_transactions",
+    "prescriptions", "eye_tests",
+})
+
+
+def _coerce_mongo_value(s: str) -> Any:
+    """Best-effort JSON parse; falls back to string if it isn't JSON.
+    Lets ?filter={"status":"OPEN"} work without forcing the caller to
+    URL-encode the JSON when they pass it via the structured params."""
+    import json as _json
+    if not s:
+        return s
+    try:
+        return _json.loads(s)
+    except (ValueError, TypeError):
+        return s
+
+
+@router.get("/data/collections", summary="List collections JARVIS can read")
+async def list_queryable_collections(
+    current_user: dict = Depends(require_superadmin),
+):
+    """Return the allow-list of collections JARVIS can query via
+    `/jarvis/data/{collection}`. Used by the UI to populate a picker
+    and by JARVIS itself when answering "what data do you have?".
+    """
+    return {
+        "collections": sorted(_JARVIS_QUERYABLE_COLLECTIONS),
+        "customer_pii_collections": sorted(_CUSTOMER_PII_COLLECTIONS),
+        "as_of": datetime.now().isoformat(),
+    }
+
+
+@router.get(
+    "/data/{collection}",
+    summary="Ad-hoc read of any collection JARVIS is permitted to see",
+    description=(
+        "Read-only paginated dump of a single collection for JARVIS / "
+        "the operator. SUPERADMIN-only. The `collection` must be on the "
+        "allow-list (see `/jarvis/data/collections`). Customer-PII "
+        "collections have name/phone/email fields stripped before return. "
+        "Write operations are NOT exposed — this endpoint never mutates."
+    ),
+)
+async def jarvis_read_collection(
+    collection: str,
+    limit: int = 50,
+    skip: int = 0,
+    sort_by: Optional[str] = None,
+    sort_desc: bool = True,
+    filter_field: Optional[str] = None,
+    filter_value: Optional[str] = None,
+    current_user: dict = Depends(require_superadmin),
+):
+    """Generic read endpoint — JARVIS or the UI can use this to fetch
+    any allow-listed collection on demand."""
+    if collection not in _JARVIS_QUERYABLE_COLLECTIONS:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"Collection '{collection}' is not on the JARVIS allow-list. "
+                f"Hit /jarvis/data/collections to see what's available."
+            ),
+        )
+    limit = max(1, min(int(limit), 500))
+    skip = max(0, int(skip))
+
+    col = get_db_collection(collection)
+    if col is None:
+        return {
+            "collection": collection,
+            "rows": [],
+            "total": 0,
+            "limit": limit,
+            "skip": skip,
+            "as_of": datetime.now().isoformat(),
+        }
+
+    flt: Dict[str, Any] = {}
+    if filter_field and filter_value is not None:
+        flt[filter_field] = _coerce_mongo_value(filter_value)
+
+    try:
+        total = col.count_documents(flt)
+    except Exception:
+        total = 0
+
+    try:
+        cursor = col.find(flt, {"_id": 0})
+        if sort_by:
+            cursor = cursor.sort(sort_by, -1 if sort_desc else 1)
+        rows = list(cursor.skip(skip).limit(limit))
+    except Exception as e:
+        logger.warning("[JARVIS-DATA] read %s failed: %s", collection, e)
+        rows = []
+
+    # Apply customer-PII scrub for sensitive collections
+    if collection in _CUSTOMER_PII_COLLECTIONS:
+        from agents.llm_provider import scrub_pii
+        rows = [scrub_pii(r, level="customer") for r in rows]
+
+    return {
+        "collection": collection,
+        "rows": rows,
+        "total": total,
+        "limit": limit,
+        "skip": skip,
+        "filter": flt,
+        "as_of": datetime.now().isoformat(),
+    }
+
+
+# ============================================================================
+# PIXEL audit history
+# ============================================================================
+
+@router.get(
+    "/agents/pixel/audits",
+    summary="Recent PIXEL UI/UX audit runs",
+    description=(
+        "Returns the last N PIXEL audit runs from `ui_audits` plus "
+        "the latest summary (overall scores, regression count). Used by "
+        "the JARVIS page's PIXEL card to render audit history. "
+        "SUPERADMIN-only. If PIXEL has never run, returns an empty list "
+        "and a `pagespeed_ready` flag indicating whether the API key is "
+        "provisioned."
+    ),
+)
+async def pixel_audit_history(
+    limit: int = 7,
+    current_user: dict = Depends(require_superadmin),
+):
+    """Return PIXEL audit history + readiness signal."""
+    import os as _os
+    limit = max(1, min(int(limit), 50))
+    col = get_db_collection("ui_audits")
+    pagespeed_ready = bool(_os.getenv("PAGESPEED_API_KEY"))
+    frontend_url = _os.getenv("FRONTEND_BASE_URL", "https://ims-2-0-railway.vercel.app")
+
+    if col is None:
+        return {
+            "audits": [],
+            "latest": None,
+            "pagespeed_ready": pagespeed_ready,
+            "frontend_url": frontend_url,
+            "audits_total": 0,
+            "as_of": datetime.now().isoformat(),
+        }
+
+    try:
+        audits = list(
+            col.find(
+                {"agent_id": "pixel", "kind": "scheduled_audit"},
+                {"_id": 0},
+            ).sort("ran_at", -1).limit(limit)
+        )
+    except Exception as e:
+        logger.warning("[JARVIS] pixel audits read failed: %s", e)
+        audits = []
+
+    latest = audits[0] if audits else None
+
+    # Compute trend deltas for the latest vs the previous audit
+    deltas = {}
+    if len(audits) >= 2:
+        prev = audits[1]
+        for key in ("overall_min_perf", "overall_min_a11y", "total_a11y_violations"):
+            cur_v = (latest or {}).get("summary", {}).get(key)
+            prev_v = (prev or {}).get("summary", {}).get(key)
+            if cur_v is not None and prev_v is not None:
+                deltas[key] = round(cur_v - prev_v, 3)
+
+    try:
+        audits_total = col.count_documents({"agent_id": "pixel"})
+    except Exception:
+        audits_total = len(audits)
+
+    return {
+        "audits": audits,
+        "latest": latest,
+        "deltas_vs_previous": deltas,
+        "pagespeed_ready": pagespeed_ready,
+        "frontend_url": frontend_url,
+        "audits_total": audits_total,
+        "as_of": datetime.now().isoformat(),
+    }
