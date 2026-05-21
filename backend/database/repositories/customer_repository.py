@@ -29,11 +29,20 @@ class CustomerRepository(BaseRepository):
         return self.find_one({"gstin": gstin})
     
     def search_customers(self, query: str, store_id: str = None) -> List[Dict]:
-        # Customers store the phone number in `mobile`, not `phone`.
-        # The previous list here used `phone`, so digit queries hit the
-        # generic search route and silently returned nothing.
-        filter = {"primary_store_id": store_id} if store_id else None
-        return self.search(query, ["name", "mobile", "email"], filter)
+        # Match name + both phone fields + email. Native docs store the number
+        # in `mobile`; TechCherry-imported docs store it in `phone` — so search
+        # both. Store scope matches either home_store_id (native) or
+        # preferred_store_id (TechCherry). The old `primary_store_id` filter
+        # matched no document, so every store-scoped search returned nothing.
+        store_filter = None
+        if store_id:
+            store_filter = {
+                "$or": [
+                    {"home_store_id": store_id},
+                    {"preferred_store_id": store_id},
+                ]
+            }
+        return self.search(query, ["name", "mobile", "phone", "email"], store_filter)
     
     def find_b2b_customers(self, store_id: str = None) -> List[Dict]:
         filter = {"customer_type": "B2B"}
