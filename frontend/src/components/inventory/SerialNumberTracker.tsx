@@ -20,6 +20,7 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
+import { inventoryApi } from '../../services/api/inventory';
 import { SerialNumberModal, type SerialNumberData } from './SerialNumberModal';
 
 interface SerializedItem extends SerialNumberData {
@@ -51,14 +52,13 @@ export function SerialNumberTracker() {
   const loadSerializedItems = async () => {
     setIsLoading(true);
     try {
-      // No serial-number API endpoint exists yet. Previously this rendered
-      // a hardcoded mock list (Phonak/Apple Watch/Starkey/Samsung/Ray-Ban
-      // with names like "Mr. Rajesh Kumar") that user reasonably mistook
-      // for real warehouse data. Now we surface an honest empty state so
-      // the UI accurately reflects "no serial tracking yet" until the
-      // /api/v1/inventory/serials endpoint exists.
-      setItems([]);
+      // Real serialized units from /inventory/serials, enriched server-side
+      // with product details + warranty status. Empty list renders the
+      // existing "No serialized items found" state.
+      const data = await inventoryApi.getSerials(user?.activeStoreId);
+      setItems(Array.isArray(data?.items) ? data.items : []);
     } catch (error: any) {
+      setItems([]);
       toast.error('Failed to load serialized items');
     } finally {
       setIsLoading(false);
@@ -67,27 +67,35 @@ export function SerialNumberTracker() {
 
   const handleSaveSerial = async (data: SerialNumberData) => {
     try {
-      // No serial-number save API exists yet; update local state only
-      // Update local state
       if (data.id) {
-        // Edit existing
-        setItems(
-          items.map((item) =>
-            item.id === data.id
-              ? {
-                  ...item,
-                  ...data,
-                  warrantyStatus:
-                    data.warrantyExpiryDate && new Date(data.warrantyExpiryDate) > new Date()
-                      ? 'ACTIVE'
-                      : 'EXPIRED',
-                }
-              : item
-          )
-        );
+        // Edit existing — serial number itself is immutable server-side
+        await inventoryApi.updateSerial(data.id, {
+          status: data.status,
+          locationCode: data.locationCode,
+          purchaseDate: data.purchaseDate,
+          warrantyMonths: data.warrantyMonths,
+          warrantyExpiryDate: data.warrantyExpiryDate,
+          supplierBatch: data.supplierBatch,
+          notes: data.notes,
+          soldTo: data.soldTo,
+          soldDate: data.soldDate,
+        });
       } else {
-        // Add new - would need full product details from API
-        toast.success('Serial number added successfully');
+        // Register a new serialized unit
+        await inventoryApi.createSerial({
+          productId: data.productId,
+          serialNumber: data.serialNumber,
+          status: data.status,
+          locationCode: data.locationCode,
+          purchaseDate: data.purchaseDate,
+          warrantyMonths: data.warrantyMonths,
+          warrantyExpiryDate: data.warrantyExpiryDate,
+          supplierBatch: data.supplierBatch,
+          notes: data.notes,
+          soldTo: data.soldTo,
+          soldDate: data.soldDate,
+          storeId: user?.activeStoreId,
+        });
       }
 
       await loadSerializedItems();
