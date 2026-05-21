@@ -75,6 +75,14 @@ class CustomerUpdate(BaseModel):
     # to replace the existing patient list (see endpoint logic).
     name: Optional[str] = None
     email: Optional[str] = None
+    # `phone`/`mobile` + flat `address` are accepted because the edit form
+    # (and TechCherry-imported docs) use these top-level keys. Before this,
+    # CustomerUpdate had neither, so phone/address edits were silently
+    # dropped (model_dump excluded the unknown fields) and the change never
+    # persisted even though the request returned 200.
+    phone: Optional[str] = None
+    mobile: Optional[str] = None
+    address: Optional[str] = None
     dob: Optional[date] = None
     anniversary: Optional[date] = None
     customer_type: Optional[str] = None
@@ -355,6 +363,14 @@ async def update_customer(
             if key in update_data and update_data[key] is not None:
                 v = update_data[key]
                 update_data[key] = v.isoformat() if hasattr(v, "isoformat") else v
+
+        # Keep phone/mobile in sync: TechCherry-imported docs read `phone`,
+        # natively-created docs read `mobile`. Whichever the edit form sends,
+        # mirror it onto the other so every reader sees the update.
+        if update_data.get("phone") and not update_data.get("mobile"):
+            update_data["mobile"] = update_data["phone"]
+        elif update_data.get("mobile") and not update_data.get("phone"):
+            update_data["phone"] = update_data["mobile"]
 
         # Handle patients additively
         if "patients" in update_data:
