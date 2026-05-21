@@ -190,6 +190,12 @@ def job_to_frontend(job: dict) -> dict:
 
     result = {}
     for key, value in job.items():
+        # Drop MongoDB's BSON ObjectId — same reasoning as
+        # orders.order_to_frontend: Pydantic/FastAPI's default JSON
+        # encoder can't serialise ObjectId, and workshop_jobs carry
+        # their own job_id/job_number so `_id` isn't needed in responses.
+        if key == "_id":
+            continue
         if key in key_map:
             result[key_map[key]] = value
         else:

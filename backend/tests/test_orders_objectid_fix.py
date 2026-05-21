@@ -33,6 +33,52 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # ----- order_to_frontend: ObjectId handling -------------------------------
 
 
+class TestItemAndPaymentToFrontendObjectIdFix:
+    """Regression for item/payment/job_to_frontend — same ObjectId leak
+    pattern as order_to_frontend. PR-API-fixes May 2026."""
+
+    def test_item_to_frontend_drops_objectid(self):
+        from api.routers.orders import item_to_frontend
+        item = {
+            "_id": "raw-objectid-stand-in",
+            "item_id": "item-001",
+            "product_name": "Frame",
+            "unit_price": 100,
+        }
+        result = item_to_frontend(item)
+        assert "_id" not in result
+        assert result["id"] == "item-001"
+        assert result["productName"] == "Frame"
+
+    def test_payment_to_frontend_drops_objectid(self):
+        from api.routers.orders import payment_to_frontend
+        payment = {
+            "_id": "raw-objectid-stand-in",
+            "payment_id": "pay-001",
+            "method": "CASH",
+            "amount": 100,
+        }
+        result = payment_to_frontend(payment)
+        assert "_id" not in result
+        assert result["id"] == "pay-001"
+        assert result["method"] == "CASH"
+
+    def test_workshop_job_to_frontend_drops_objectid(self):
+        from api.routers.workshop import job_to_frontend
+        job = {
+            "_id": "raw-objectid-stand-in",
+            "job_id": "job-001",
+            "job_number": "WS-001",
+            "store_id": "BV-PUN-01",
+            "customer_name": "Anita",
+        }
+        result = job_to_frontend(job)
+        assert "_id" not in result
+        assert result["id"] == "job-001"
+        assert result["jobNumber"] == "WS-001"
+        assert result["storeId"] == "BV-PUN-01"
+
+
 class TestOrderToFrontendObjectIdFix:
     def test_drops_mongodb_objectid(self):
         """Raw `_id` BSON ObjectId must NOT appear in the response —
