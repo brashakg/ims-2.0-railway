@@ -4,7 +4,7 @@
 // NO MOCK DATA - All data from API
 
 import { useState, useEffect } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { useSearchParams, useNavigate } from 'react-router-dom';
 import {
   BarChart3,
   TrendingUp,
@@ -18,6 +18,7 @@ import {
   RefreshCw,
   AlertTriangle,
   X,
+  Sparkles,
 } from 'lucide-react';
 import { reportsApi } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
@@ -104,6 +105,7 @@ const REPORT_CARDS = [
 
 export function ReportsPage() {
   const { user, hasRole } = useAuth();
+  const navigate = useNavigate();
   const toast = useToast();
   const [searchParams] = useSearchParams();
 
@@ -473,6 +475,16 @@ export function ReportsPage() {
             {isLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
             Refresh
           </button>
+          {hasRole(['SUPERADMIN']) && (
+            <button
+              onClick={() => navigate('/reports/blueprint')}
+              className="btn-primary sm flex items-center gap-1"
+              title="Open the JARVIS-narrated 12-section consultant blueprint"
+            >
+              <Sparkles className="w-4 h-4" />
+              Growth Blueprint
+            </button>
+          )}
         </div>
       </div>
 

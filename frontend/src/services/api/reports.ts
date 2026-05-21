@@ -336,6 +336,33 @@ export const reportsApi = {
       as_of: string;
     };
   },
+
+  // R3 — Growth Blueprint (LLM-narrated)
+  getGrowthBlueprint: async (
+    storeId?: string,
+    opts?: { model_id?: string; nocache?: boolean },
+  ) => {
+    const r = await api.get('/reports/blueprint', {
+      params: {
+        ...(storeId ? { store_id: storeId } : {}),
+        ...(opts?.model_id ? { model_id: opts.model_id } : {}),
+        ...(opts?.nocache ? { nocache: true } : {}),
+      },
+      // LLM call can take 30-90s — bump axios timeout
+      timeout: 180_000,
+    });
+    return r.data as {
+      narrative_markdown: string;
+      sections: string[];
+      model_used: string | null;
+      store_id: string;
+      month: string;
+      generated_at: string;
+      from_cache: boolean;
+      cache_age_hours?: number;
+      error?: string;
+    };
+  },
 };
 
 // ============================================================================
