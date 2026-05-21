@@ -284,20 +284,22 @@ async def get_dashboard_summary(
             "revenue_change": metrics["revenue_change"],
             "avg_order_value": metrics["avg_order_value"],
             "total_orders": metrics["total_orders"],
-            # Gross margin (placeholder - would be calculated from actual order line items)
-            "gross_margin_percent": 40.5,
+            # Gross margin needs per-line-item COGS (order items don't carry
+            # cost yet). Return null rather than a fabricated constant — the
+            # frontend renders "—" for null.
+            "gross_margin_percent": None,
             "margin_target": 42,
             # Inventory metrics
             "inventory_value": float(total_inventory_value),
             "low_stock_items": low_stock_items,
             "out_of_stock_items": out_of_stock,
-            "inventory_turnover_ratio": 8.5,  # Would be calculated from COGS and avg inventory
+            "inventory_turnover_ratio": None,  # needs COGS + avg inventory
             # Customer metrics
             "total_customers": len(customers),
             "new_customers": new_customers,
             "customer_acquisition_rate": new_customers,
             # Optical-specific metrics
-            "prescription_renewals_pending": 32,  # Placeholder
+            "prescription_renewals_pending": None,  # not computed yet (no fabricated value)
             # Performance indicators
             "stores_count": 1,
         }
@@ -494,10 +496,10 @@ async def get_store_performance(
                 for i in inventory
             )
 
-            # Staff count (placeholder - would come from actual staff table)
-            staff_count = 10  # Placeholder
-
-            # Metrics calculation
+            # Metrics calculation. margin_percent / revenue_per_sqft /
+            # staff_count are null rather than fabricated — margin needs
+            # per-item COGS, sqft isn't stored, and staff headcount isn't
+            # sourced here. (Were hardcoded 40.5 / revenue/1000 / 10.)
             store_metrics.append(
                 {
                     "store_id": store_id,
@@ -505,12 +507,10 @@ async def get_store_performance(
                     "revenue": float(revenue),
                     "orders": order_count,
                     "avg_order_value": float(avg_order_value),
-                    "margin_percent": 40.5,  # Placeholder
+                    "margin_percent": None,
                     "stock_value": float(stock_value),
-                    "staff_count": staff_count,
-                    "revenue_per_sqft": (
-                        float(revenue / 1000) if revenue > 0 else 0
-                    ),  # Placeholder
+                    "staff_count": None,
+                    "revenue_per_sqft": None,
                     "revenue_trend": float(revenue_change),
                 }
             )
@@ -527,7 +527,7 @@ async def get_store_performance(
                     if stores
                     else 0
                 ),
-                "avg_margin": 40.5,  # Placeholder
+                "avg_margin": None,  # needs per-item COGS (was fabricated 40.5)
             },
         }
 
@@ -880,9 +880,12 @@ async def get_enterprise_kpis(
 
         # ===== CASH REGISTER SUMMARY =====
         # Opening balance (from previous day closing or default 0)
-        opening_balance = 5000.0  # Placeholder - should fetch from actual cash register
+        # No cash-register opening balance or per-period expense source is
+        # wired here yet — use 0 rather than the old fabricated 5000 / 500 so
+        # closing_balance reflects real sales only.
+        opening_balance = 0.0
         sales_amount = total_revenue
-        expenses_amount = 500.0  # Placeholder - should fetch actual expenses
+        expenses_amount = 0.0
         closing_balance = opening_balance + sales_amount - expenses_amount
 
         # ===== STORE COMPARISON (if applicable) =====
