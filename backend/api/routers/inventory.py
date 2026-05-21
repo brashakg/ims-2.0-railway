@@ -807,7 +807,7 @@ async def get_non_moving_stock(
         orders = orders_coll.find(
             {
                 "created_at": {"$gte": cutoff_date},
-                "status": {"$in": ["completed", "delivered"]},
+                "status": {"$in": _SOLD_STATUSES},
             },
             {"items": 1},
         )
@@ -1091,7 +1091,7 @@ async def get_sell_through_analysis(
         orders = orders_coll.find(
             {
                 "created_at": {"$gte": cutoff_date},
-                "status": {"$in": ["completed", "delivered"]},
+                "status": {"$in": _SOLD_STATUSES},
             }
         )
 
@@ -1178,7 +1178,7 @@ async def get_overstock_analysis(
         orders = orders_coll.find(
             {
                 "created_at": {"$gte": cutoff_date},
-                "status": {"$in": ["completed", "delivered"]},
+                "status": {"$in": _SOLD_STATUSES},
             }
         )
 
@@ -1249,9 +1249,10 @@ async def get_overstock_analysis(
 #
 # NOTE on order status: TechCherry historic orders are stamped status
 # "DELIVERED" (uppercase); live IMS orders use mixed case. We match a broad
-# set of "sold" statuses so imported sales actually count — the existing
-# /non-moving endpoint matches only lowercase ["completed","delivered"] and
-# therefore silently misses every imported order.
+# set of "sold" statuses so imported sales actually count. The same
+# _SOLD_STATUSES set is now also used by /non-moving, /overstock-analysis
+# and /sell-through-analysis (previously lowercase-only, so they silently
+# missed every imported sale).
 
 
 # Broad "this order represents a real sale" status set (both cases seen in DB)
