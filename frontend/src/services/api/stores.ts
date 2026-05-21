@@ -83,7 +83,11 @@ export const adminStoreApi = {
 
 export const adminUserApi = {
   getUsers: async (params?: { storeId?: string; role?: string; status?: string }) => {
-    const response = await api.get('/users', { params });
+    // Convert camelCase storeId -> snake_case store_id; the backend Query param
+    // is store_id, so passing storeId raw silently dropped the store filter.
+    const { storeId, ...rest } = params ?? {};
+    const apiParams = { ...rest, ...(storeId ? { store_id: storeId } : {}) };
+    const response = await api.get('/users', { params: apiParams });
     return response.data;
   },
 

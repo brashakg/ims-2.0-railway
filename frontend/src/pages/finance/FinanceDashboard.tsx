@@ -186,7 +186,9 @@ export default function FinanceDashboard() {
 
   useEffect(() => {
     loadFinanceData();
-  }, [activeTab, dateFrom, dateTo, selectedYear]);
+    // user?.activeStoreId is load-bearing — without it the topbar store-switch
+    // updates AuthContext but the finance data stays pinned to the old store.
+  }, [activeTab, dateFrom, dateTo, selectedYear, user?.activeStoreId]);
 
   const loadFinanceData = async () => {
     setIsLoading(true);
