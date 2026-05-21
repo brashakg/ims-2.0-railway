@@ -11,7 +11,7 @@ from datetime import date, datetime, timedelta
 import uuid
 import logging
 
-from .auth import get_current_user
+from .auth import get_current_user, require_roles
 from ..dependencies import (
     get_stock_repository,
     get_product_repository,
@@ -20,6 +20,19 @@ from ..dependencies import (
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+# Roles permitted to mutate stock (add / count / scan / transfer / serials).
+# Mirrors the inventory page route guard — the broadest role set any inventory
+# write is reachable from in the UI — so this is zero-regression while still
+# blocking the non-inventory roles (SALES_STAFF, SALES_CASHIER, CASHIER,
+# OPTOMETRIST, ACCOUNTANT) from stock mutations. SUPERADMIN auto-passes.
+_INVENTORY_ROLES = (
+    "ADMIN",
+    "AREA_MANAGER",
+    "STORE_MANAGER",
+    "CATALOG_MANAGER",
+    "WORKSHOP_STAFF",
+)
 
 
 # ============================================================================
@@ -193,7 +206,8 @@ async def get_stock_by_barcode(
 
 @router.post("/stock/add")
 async def add_stock(
-    request: StockAddRequest, current_user: dict = Depends(get_current_user)
+    request: StockAddRequest,
+    current_user: dict = Depends(require_roles(*_INVENTORY_ROLES)),
 ):
     """Add stock to inventory"""
     stock_repo = get_stock_repository()
@@ -477,7 +491,7 @@ async def list_stock_counts(
 @router.post("/stock-count/start")
 async def start_stock_count(
     request: StartStockCountRequest,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_roles(*_INVENTORY_ROLES)),
 ):
     """Start a new physical stock count session"""
     active_store = validate_store_access(None, current_user)
@@ -544,7 +558,7 @@ async def start_stock_count(
 async def record_count_item(
     count_id: str,
     item: StockCountItem,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_roles(*_INVENTORY_ROLES)),
 ):
     """Record a counted item in an active stock count session"""
     db = _get_db()
@@ -609,7 +623,7 @@ async def record_count_item(
 async def complete_stock_count(
     count_id: str,
     request: Optional[CompleteStockCountRequest] = None,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_roles(*_INVENTORY_ROLES)),
 ):
     """Complete stock count — calculates variances between system and physical count"""
     db = _get_db()
@@ -742,7 +756,8 @@ async def list_transfers(
 
 @router.post("/transfers")
 async def create_transfer(
-    request: StockTransferRequest, current_user: dict = Depends(get_current_user)
+    request: StockTransferRequest,
+    current_user: dict = Depends(require_roles(*_INVENTORY_ROLES)),
 ):
     """Create a stock transfer — delegates to /transfers for full workflow"""
     return {
@@ -754,7 +769,7 @@ async def create_transfer(
 
 @router.post("/transfers/{transfer_id}/send")
 async def send_transfer(
-    transfer_id: str, current_user: dict = Depends(get_current_user)
+    transfer_id: str, current_user: dict = Depends(require_roles(*_INVENTORY_ROLES))
 ):
     """Mark transfer as sent"""
     return {"message": "Transfer sent", "transfer_id": transfer_id}
@@ -762,7 +777,9 @@ async def send_transfer(
 
 @router.post("/transfers/{transfer_id}/receive")
 async def receive_transfer(
-    transfer_id: str, items: List[dict], current_user: dict = Depends(get_current_user)
+    transfer_id: str,
+    items: List[dict],
+    current_user: dict = Depends(require_roles(*_INVENTORY_ROLES)),
 ):
     """Receive a stock transfer"""
     return {"message": "Transfer received", "transfer_id": transfer_id}
@@ -873,7 +890,7 @@ class BarcodeScanRequest(BaseModel):
 async def scan_barcode_for_count(
     request: BarcodeScanRequest,
     store_id: Optional[str] = Query(None),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_roles(*_INVENTORY_ROLES)),
 ):
     """
     Scan barcode and record physical count.
@@ -1738,7 +1755,7 @@ async def list_serials(
 @router.post("/serials")
 async def create_serial(
     req: SerialCreate,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_roles(*_INVENTORY_ROLES)),
 ):
     """Register a new serialized unit. Serial numbers are unique within a store."""
     db = _get_db()
@@ -1795,7 +1812,7 @@ async def create_serial(
 async def update_serial(
     serial_id: str,
     req: SerialUpdate,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_roles(*_INVENTORY_ROLES)),
 ):
     """Update a serialized unit (status / location / warranty / sold-to).
     The serial number itself is immutable once created."""
