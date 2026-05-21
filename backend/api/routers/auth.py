@@ -293,6 +293,31 @@ async def get_current_user(
         )
 
 
+def require_roles(*allowed_roles: str):
+    """Reusable RBAC dependency factory. Returns a dependency that 403s unless
+    the user holds one of `allowed_roles`. SUPERADMIN always passes.
+
+    Usage (per-endpoint):   current_user: dict = Depends(require_roles("ADMIN"))
+    Usage (whole router):   include_router(r, dependencies=[Depends(require_roles(...))])
+
+    Most sensitive backend routers historically had NO server-side role check
+    (only frontend route guards), so any authenticated user could call them
+    directly. This is the shared enforcement primitive.
+    """
+    allowed = set(allowed_roles)
+
+    async def _dep(current_user: dict = Depends(get_current_user)) -> dict:
+        roles = set(current_user.get("roles", []) or [])
+        if "SUPERADMIN" in roles or (roles & allowed):
+            return current_user
+        raise HTTPException(
+            status_code=403,
+            detail="Your role does not have access to this resource",
+        )
+
+    return _dep
+
+
 # ============================================================================
 # ENDPOINTS
 # ============================================================================
