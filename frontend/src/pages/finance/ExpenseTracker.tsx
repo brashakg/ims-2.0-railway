@@ -90,7 +90,9 @@ export default function ExpenseTracker() {
   useEffect(() => {
     loadExpenses();
     loadSummary();
-  }, [activeTab, statusFilter, dateFrom, dateTo]);
+    // user?.activeStoreId is load-bearing — without it, topbar store switch
+    // doesn't trigger a re-fetch and expenses stay pinned to the old store.
+  }, [activeTab, statusFilter, dateFrom, dateTo, user?.activeStoreId]);
 
   const loadExpenses = async () => {
     setIsLoading(true);

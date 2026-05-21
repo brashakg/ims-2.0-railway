@@ -109,10 +109,12 @@ export function CustomersPage() {
     setCurrentPage(1);
   }, [searchQuery, filterType]);
 
-  // Load customers on mount and when page changes
+  // Load customers on mount and when page or SELECTED STORE changes.
+  // user?.activeStoreId is load-bearing — without it, topbar store switch
+  // updates AuthContext but the visible customer list stays pinned.
   useEffect(() => {
     loadCustomers();
-  }, [currentPage]);
+  }, [currentPage, user?.activeStoreId]);
 
   const loadCustomers = async () => {
     setIsLoading(true);

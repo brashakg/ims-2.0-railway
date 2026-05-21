@@ -109,7 +109,9 @@ export function ExecutiveDashboard() {
 
   useEffect(() => {
     loadDashboardData();
-  }, [timeRange]);
+    // user?.activeStoreId in deps so the dashboard re-fetches when the
+    // topbar's store-switcher changes the active store.
+  }, [timeRange, user?.activeStoreId]);
 
   const loadDashboardData = async () => {
     setIsLoading(true);

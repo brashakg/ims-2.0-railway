@@ -633,9 +633,15 @@ async def create_order(
         items_data = []
         subtotal = 0.0
 
-        # Retrieve user discount cap for enforcement
-        user_discount_cap = current_user.get("discount_cap", 10.0)
+        # Retrieve user discount cap for enforcement.
+        # Use the role-aware effective cap helper rather than the raw user
+        # document field — that one defaults to 10% even for SUPERADMIN,
+        # which was the long-standing "why is my cap 10%" bug.
+        from api.services.role_caps import effective_discount_cap
         user_roles = current_user.get("roles", [])
+        user_discount_cap = effective_discount_cap(
+            user_roles, current_user.get("discount_cap")
+        )
         is_admin = any(
             r in user_roles for r in ["SUPERADMIN", "ADMIN", "STORE_MANAGER"]
         )

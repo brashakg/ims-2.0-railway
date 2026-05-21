@@ -328,9 +328,16 @@ async def apply_discount(
         coupon_code = discount_data.get("coupon_code")
         product_id = discount_data.get("product_id")
 
-        # Enforce user discount cap (FIX 2)
+        # Enforce user discount cap (FIX 2).
+        # Use role-aware effective cap helper — raw user.discount_cap defaults
+        # to 10% even for SUPERADMIN, which is the long-standing "why am I
+        # limited to 10%" bug.
         if discount_type in ("item", "order") and discount_value > 0:
-            user_discount_cap = current_user.get("discount_cap", 10.0)
+            from api.services.role_caps import effective_discount_cap
+            user_discount_cap = effective_discount_cap(
+                current_user.get("roles", []),
+                current_user.get("discount_cap"),
+            )
             if discount_value > user_discount_cap:
                 raise HTTPException(
                     status_code=403,

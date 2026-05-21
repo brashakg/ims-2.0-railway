@@ -278,11 +278,13 @@ export default function DashboardPage() {
   const [monthlyTarget, setMonthlyTarget] = useState(1500000);
   const [showWalkinModal, setShowWalkinModal] = useState(false);
 
-  // Load KPIs and targets when period changes
+  // Load KPIs and targets when period or SELECTED STORE changes.
+  // user?.activeStoreId is load-bearing — without it, topbar store switch
+  // updates AuthContext but dashboard data stays pinned.
   useEffect(() => {
     loadKpis();
     loadTargets();
-  }, [period]);
+  }, [period, user?.activeStoreId]);
 
   const loadTargets = async () => {
     setTargetsLoading(true);
