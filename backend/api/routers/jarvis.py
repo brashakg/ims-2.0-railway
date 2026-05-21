@@ -2507,3 +2507,62 @@ async def pixel_audit_history(
         "audits_total": audits_total,
         "as_of": datetime.now().isoformat(),
     }
+
+
+# ============================================================================
+# SENTINEL health history
+# ============================================================================
+
+@router.get(
+    "/agents/sentinel/health",
+    summary="SENTINEL latest health checks + active alerts",
+    description=(
+        "Returns SENTINEL's latest scored health check, the last 60 minutes "
+        "of score history for sparkline rendering, and the most recent "
+        "alert_history rows. SUPERADMIN-only."
+    ),
+)
+async def sentinel_health(
+    history_limit: int = 60,
+    alerts_limit: int = 10,
+    current_user: dict = Depends(require_superadmin),
+):
+    """Return SENTINEL operational data for the UI card."""
+    history_limit = max(1, min(int(history_limit), 240))
+    alerts_limit = max(1, min(int(alerts_limit), 50))
+
+    health_col = get_db_collection("health_checks")
+    alerts_col = get_db_collection("alert_history")
+
+    latest = None
+    history: List[Dict[str, Any]] = []
+    if health_col is not None:
+        try:
+            history = list(
+                health_col.find({"agent_id": "sentinel"}, {"_id": 0})
+                .sort("timestamp", -1)
+                .limit(history_limit)
+            )
+            if history:
+                latest = history[0]
+        except Exception as e:
+            logger.warning("[JARVIS] sentinel health read failed: %s", e)
+
+    alerts: List[Dict[str, Any]] = []
+    if alerts_col is not None:
+        try:
+            alerts = list(
+                alerts_col.find({}, {"_id": 0})
+                .sort("timestamp", -1)
+                .limit(alerts_limit)
+            )
+        except Exception:
+            pass
+
+    return {
+        "latest": latest,
+        "history": list(reversed(history)),  # oldest → newest for the sparkline
+        "alerts": alerts,
+        "history_count": len(history),
+        "as_of": datetime.now().isoformat(),
+    }
