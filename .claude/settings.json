@@ -1,0 +1,35 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git branch:*)",
+      "Bash(git fetch:*)",
+      "Bash(gh pr view:*)",
+      "Bash(gh pr list:*)",
+      "Bash(gh run list:*)",
+      "Bash(gh run view:*)",
+      "Bash(railway status:*)",
+      "Bash(railway logs:*)",
+      "Bash(railway variables:*)",
+      "Bash(railway list:*)",
+      "Bash(railway whoami:*)",
+      "Bash(npx tsc:*)",
+      "Bash(npx vite build:*)"
+    ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"$CLAUDE_PROJECT_DIR/.claude/hooks/autolint.py\""
+          }
+        ]
+      }
+    ]
+  }
+}
