@@ -299,6 +299,7 @@ async def demand_forecast(
                 "product_id": pid,
                 "product_name": data["product_name"],
                 "brand": data["brand"],
+                "category": data["category"],
                 "avg_daily_sales": round(avg_daily, 2),
                 "trend": trend,
                 "predicted_30_day": predicted_30,

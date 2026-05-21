@@ -1,11 +1,12 @@
 // ============================================================================
 // IMS 2.0 - AI-Powered Demand Forecasting Dashboard
 // ============================================================================
-// Intelligent demand forecasting for Indian optical retail.
-// Generates plausible forecasts from simulated data patterns with seasonal
-// adjustments specific to the Indian optical market.
+// Demand forecasting for Indian optical retail.
+// Forecasts are computed from the real GET /analytics-v2/demand-forecast endpoint
+// (90-day sales velocity per store). The Seasonal Trends tab is a static planning
+// reference, not applied to the numeric forecasts.
 
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect, useCallback } from 'react';
 import {
   TrendingUp,
   TrendingDown,
@@ -27,6 +28,8 @@ import {
   Calendar,
 } from 'lucide-react';
 import { exportToCSV } from '../../utils/exportUtils';
+import { analyticsV2Api } from '../../services/api/analytics';
+import { useAuth } from '../../context/AuthContext';
 
 // ============================================================================
 // Types
@@ -71,6 +74,23 @@ interface ReorderSuggestion {
 
 type ForecastRange = 30 | 60 | 90;
 
+// Shape returned by GET /analytics-v2/demand-forecast (one row per top product).
+interface ApiForecast {
+  product_id: string;
+  product_name: string;
+  brand: string;
+  category: string;
+  avg_daily_sales: number;
+  trend: 'increasing' | 'decreasing' | 'stable';
+  predicted_30_day: number;
+  current_stock: number;
+  reorder_recommended: number;
+}
+
+function mapTrend(t: string): 'UP' | 'DOWN' | 'STABLE' {
+  return t === 'increasing' ? 'UP' : t === 'decreasing' ? 'DOWN' : 'STABLE';
+}
+
 // ============================================================================
 // Helpers
 // ============================================================================
@@ -80,18 +100,6 @@ function getCurrentSeason(month: number): string {
   if (month >= 6 && month <= 8) return 'Monsoon';
   if (month >= 9 && month <= 11) return 'Festival';
   return 'Winter';
-}
-
-function getSeasonalMultiplier(category: string, season: string): number {
-  const multipliers: Record<string, Record<string, number>> = {
-    'Sunglasses':        { Summer: 1.40, Monsoon: 0.85, Festival: 1.10, Winter: 0.70 },
-    'Frames':            { Summer: 1.00, Monsoon: 0.90, Festival: 1.25, Winter: 1.05 },
-    'Contact Lenses':    { Summer: 1.10, Monsoon: 0.80, Festival: 1.05, Winter: 0.95 },
-    'Lenses':            { Summer: 0.95, Monsoon: 1.00, Festival: 1.10, Winter: 1.20 },
-    'Accessories':       { Summer: 1.15, Monsoon: 1.10, Festival: 1.20, Winter: 0.90 },
-    'Lens Solutions':    { Summer: 1.00, Monsoon: 1.35, Festival: 1.00, Winter: 0.95 },
-  };
-  return multipliers[category]?.[season] ?? 1.0;
 }
 
 function getConfidenceBadge(confidence: 'HIGH' | 'MEDIUM' | 'LOW') {
@@ -132,201 +140,98 @@ function getTrendIcon(trend: 'UP' | 'DOWN' | 'STABLE') {
 // Mock Data Generation
 // ============================================================================
 
-function generateCategoryForecasts(days: ForecastRange): ForecastItem[] {
-  const now = new Date();
-  const currentMonth = now.getMonth();
-  const season = getCurrentSeason(currentMonth);
-
-  const baseData: {
-    category: string;
-    stock: number;
-    baseDailySales: number;
-    confidence: 'HIGH' | 'MEDIUM' | 'LOW';
-  }[] = [
-    { category: 'Frames',          stock: 342, baseDailySales: 8.5,  confidence: 'HIGH' },
-    { category: 'Sunglasses',      stock: 185, baseDailySales: 5.2,  confidence: 'HIGH' },
-    { category: 'Contact Lenses',  stock: 520, baseDailySales: 12.0, confidence: 'MEDIUM' },
-    { category: 'Lenses',          stock: 275, baseDailySales: 6.8,  confidence: 'HIGH' },
-    { category: 'Accessories',     stock: 430, baseDailySales: 4.3,  confidence: 'MEDIUM' },
-    { category: 'Lens Solutions',  stock: 210, baseDailySales: 7.1,  confidence: 'LOW' },
-  ];
-
-  return baseData.map(item => {
-    const multiplier = getSeasonalMultiplier(item.category, season);
-    const adjustedDailySales = Math.round(item.baseDailySales * multiplier * 10) / 10;
-    const projectedDemand = Math.round(adjustedDailySales * days);
-    const daysUntilStockout = adjustedDailySales > 0
-      ? Math.round(item.stock / adjustedDailySales)
-      : 999;
-    // Reorder qty covers the forecast period plus 15-day safety buffer
-    const reorderQty = Math.max(0, projectedDemand - item.stock + Math.round(adjustedDailySales * 15));
-
-    let trend: 'UP' | 'DOWN' | 'STABLE' = 'STABLE';
-    if (multiplier > 1.1) trend = 'UP';
-    else if (multiplier < 0.9) trend = 'DOWN';
-
-    return {
-      category: item.category,
-      currentStock: item.stock,
-      avgDailySales: adjustedDailySales,
-      projectedDemand,
-      daysUntilStockout,
-      reorderQty,
-      confidence: item.confidence,
-      trend,
-    };
-  });
+function deriveCategoryForecasts(apiForecasts: ApiForecast[], days: ForecastRange): ForecastItem[] {
+  const byCat: Record<
+    string,
+    { stock: number; daily: number; up: number; down: number; n: number }
+  > = {};
+  for (const f of apiForecasts) {
+    const cat = f.category || 'Uncategorised';
+    const c = (byCat[cat] ??= { stock: 0, daily: 0, up: 0, down: 0, n: 0 });
+    c.stock += f.current_stock || 0;
+    c.daily += f.avg_daily_sales || 0;
+    if (f.trend === 'increasing') c.up += 1;
+    else if (f.trend === 'decreasing') c.down += 1;
+    c.n += 1;
+  }
+  return Object.entries(byCat)
+    .map(([category, c]) => {
+      const avgDailySales = Math.round(c.daily * 10) / 10;
+      const projectedDemand = Math.round(c.daily * days);
+      const daysUntilStockout = c.daily > 0 ? Math.round(c.stock / c.daily) : 999;
+      // Reorder qty covers the forecast period plus a 15-day safety buffer.
+      const reorderQty = Math.max(0, projectedDemand - c.stock + Math.round(c.daily * 15));
+      const trend: 'UP' | 'DOWN' | 'STABLE' =
+        c.up > c.down ? 'UP' : c.down > c.up ? 'DOWN' : 'STABLE';
+      const confidence: 'HIGH' | 'MEDIUM' | 'LOW' =
+        c.n >= 5 ? 'HIGH' : c.n >= 2 ? 'MEDIUM' : 'LOW';
+      return {
+        category,
+        currentStock: c.stock,
+        avgDailySales,
+        projectedDemand,
+        daysUntilStockout,
+        reorderQty,
+        confidence,
+        trend,
+      };
+    })
+    .sort((a, b) => b.projectedDemand - a.projectedDemand);
 }
 
-function generateReorderSuggestions(): ReorderSuggestion[] {
-  const now = new Date();
-  const season = getCurrentSeason(now.getMonth());
+function deriveReorderSuggestions(apiForecasts: ApiForecast[]): ReorderSuggestion[] {
+  const actionOrder: Record<ReorderSuggestion['suggestedAction'], number> = {
+    URGENT_REORDER: 0,
+    INCREASE_ORDER: 1,
+    MONITOR: 2,
+    REDUCE_ORDER: 3,
+  };
+  return apiForecasts
+    .map((f) => {
+      const avgDailySales = Math.round((f.avg_daily_sales || 0) * 10) / 10;
+      const currentStock = f.current_stock || 0;
+      const daysUntilStockout = avgDailySales > 0 ? Math.round(currentStock / avgDailySales) : 999;
+      const trend = mapTrend(f.trend);
+      const reorderQty = f.reorder_recommended || 0;
 
-  const suggestions: ReorderSuggestion[] = [
-    {
-      productName: 'Ray-Ban Aviator Classic',
-      sku: 'RB-AVI-001',
-      category: 'Sunglasses',
-      currentStock: 8,
-      avgDailySales: 2.3 * getSeasonalMultiplier('Sunglasses', season),
-      daysUntilStockout: Math.round(8 / (2.3 * getSeasonalMultiplier('Sunglasses', season))),
-      suggestedAction: 'URGENT_REORDER',
-      suggestedQty: 50,
-      reason: 'Stock will run out within a week. Best-selling sunglasses model.',
-      confidence: 'HIGH',
-      trend: getSeasonalMultiplier('Sunglasses', season) > 1.1 ? 'UP' : 'STABLE',
-    },
-    {
-      productName: 'Titan Full-Rim Rectangle',
-      sku: 'TIT-FR-045',
-      category: 'Frames',
-      currentStock: 12,
-      avgDailySales: 1.8 * getSeasonalMultiplier('Frames', season),
-      daysUntilStockout: Math.round(12 / (1.8 * getSeasonalMultiplier('Frames', season))),
-      suggestedAction: 'URGENT_REORDER',
-      suggestedQty: 36,
-      reason: 'Popular frame with growing demand. Current stock critically low.',
-      confidence: 'HIGH',
-      trend: 'UP',
-    },
-    {
-      productName: 'Bausch & Lomb SofLens Daily',
-      sku: 'BL-SDL-090',
-      category: 'Contact Lenses',
-      currentStock: 45,
-      avgDailySales: 3.5 * getSeasonalMultiplier('Contact Lenses', season),
-      daysUntilStockout: Math.round(45 / (3.5 * getSeasonalMultiplier('Contact Lenses', season))),
-      suggestedAction: 'URGENT_REORDER',
-      suggestedQty: 120,
-      reason: 'High-volume daily disposable. Needs consistent restocking.',
-      confidence: 'HIGH',
-      trend: 'STABLE',
-    },
-    {
-      productName: 'Essilor Crizal Prevencia',
-      sku: 'ESS-CP-022',
-      category: 'Lenses',
-      currentStock: 65,
-      avgDailySales: 2.1 * getSeasonalMultiplier('Lenses', season),
-      daysUntilStockout: Math.round(65 / (2.1 * getSeasonalMultiplier('Lenses', season))),
-      suggestedAction: 'INCREASE_ORDER',
-      suggestedQty: 80,
-      reason: 'Blue-light filter lenses seeing 18% growth in demand. Increase buffer stock.',
-      confidence: 'MEDIUM',
-      trend: 'UP',
-    },
-    {
-      productName: 'Zeiss Progressive SmartLife',
-      sku: 'ZS-PSL-015',
-      category: 'Lenses',
-      currentStock: 38,
-      avgDailySales: 1.2 * getSeasonalMultiplier('Lenses', season),
-      daysUntilStockout: Math.round(38 / (1.2 * getSeasonalMultiplier('Lenses', season))),
-      suggestedAction: 'INCREASE_ORDER',
-      suggestedQty: 45,
-      reason: season === 'Winter'
-        ? 'Winter season: progressive lens demand rises with older customer visits.'
-        : 'Premium progressive lenses with steady demand growth.',
-      confidence: 'MEDIUM',
-      trend: season === 'Winter' ? 'UP' : 'STABLE',
-    },
-    {
-      productName: 'Vincent Chase Round Frames',
-      sku: 'VC-RND-078',
-      category: 'Frames',
-      currentStock: 85,
-      avgDailySales: 0.8,
-      daysUntilStockout: Math.round(85 / 0.8),
-      suggestedAction: 'REDUCE_ORDER',
-      suggestedQty: 15,
-      reason: 'Sales declining 22% over last quarter. Reduce next order quantity.',
-      confidence: 'MEDIUM',
-      trend: 'DOWN',
-    },
-    {
-      productName: 'Fastrack Wayfarers',
-      sku: 'FT-WAY-033',
-      category: 'Sunglasses',
-      currentStock: 62,
-      avgDailySales: 1.1,
-      daysUntilStockout: Math.round(62 / 1.1),
-      suggestedAction: 'REDUCE_ORDER',
-      suggestedQty: 20,
-      reason: 'Budget segment slowing. Reduce reorder to avoid overstock.',
-      confidence: 'LOW',
-      trend: 'DOWN',
-    },
-    {
-      productName: 'Microfiber Cleaning Cloth (Premium)',
-      sku: 'ACC-MCF-005',
-      category: 'Accessories',
-      currentStock: 150,
-      avgDailySales: 3.8 * getSeasonalMultiplier('Accessories', season),
-      daysUntilStockout: Math.round(150 / (3.8 * getSeasonalMultiplier('Accessories', season))),
-      suggestedAction: 'MONITOR',
-      suggestedQty: 0,
-      reason: 'Adequate stock for now. Monitor and reorder in 3 weeks.',
-      confidence: 'HIGH',
-      trend: 'STABLE',
-    },
-    {
-      productName: 'ReNu MultiPlus Solution 360ml',
-      sku: 'BL-RNU-120',
-      category: 'Lens Solutions',
-      currentStock: 28,
-      avgDailySales: 2.4 * getSeasonalMultiplier('Lens Solutions', season),
-      daysUntilStockout: Math.round(28 / (2.4 * getSeasonalMultiplier('Lens Solutions', season))),
-      suggestedAction: 'URGENT_REORDER',
-      suggestedQty: 72,
-      reason: season === 'Monsoon'
-        ? 'Monsoon season: lens solution demand surges with eye infection prevention.'
-        : 'Essential consumable running low. Pair with contact lens sales.',
-      confidence: 'HIGH',
-      trend: season === 'Monsoon' ? 'UP' : 'STABLE',
-    },
-    {
-      productName: 'Oakley Holbrook Mix',
-      sku: 'OAK-HBM-011',
-      category: 'Sunglasses',
-      currentStock: 22,
-      avgDailySales: 0.6 * getSeasonalMultiplier('Sunglasses', season),
-      daysUntilStockout: Math.round(22 / (0.6 * getSeasonalMultiplier('Sunglasses', season))),
-      suggestedAction: 'MONITOR',
-      suggestedQty: 0,
-      reason: 'Premium segment with moderate demand. Sufficient stock for now.',
-      confidence: 'LOW',
-      trend: 'STABLE',
-    },
-  ];
+      let suggestedAction: ReorderSuggestion['suggestedAction'];
+      let reason: string;
+      if (reorderQty > 0 && daysUntilStockout <= 7) {
+        suggestedAction = 'URGENT_REORDER';
+        reason = `Projected to stock out in ~${daysUntilStockout} day(s); reorder ${reorderQty} to cover 30-day demand.`;
+      } else if (trend === 'UP' && reorderQty > 0) {
+        suggestedAction = 'INCREASE_ORDER';
+        reason = `Demand trending up; current stock covers ~${daysUntilStockout} day(s).`;
+      } else if (trend === 'DOWN') {
+        suggestedAction = 'REDUCE_ORDER';
+        reason = `Demand trending down; ~${daysUntilStockout} day(s) of stock on hand.`;
+      } else {
+        suggestedAction = 'MONITOR';
+        reason = `Stable demand; ~${daysUntilStockout} day(s) of stock on hand.`;
+      }
 
-  // Round avgDailySales
-  return suggestions.map(s => ({
-    ...s,
-    avgDailySales: Math.round(s.avgDailySales * 10) / 10,
-    daysUntilStockout: s.avgDailySales > 0
-      ? Math.round(s.currentStock / s.avgDailySales)
-      : 999,
-  }));
+      const confidence: 'HIGH' | 'MEDIUM' | 'LOW' =
+        avgDailySales >= 2 ? 'HIGH' : avgDailySales >= 0.5 ? 'MEDIUM' : 'LOW';
+
+      return {
+        productName: f.product_name || f.product_id,
+        sku: f.product_id,
+        category: f.category || 'Uncategorised',
+        currentStock,
+        avgDailySales,
+        daysUntilStockout,
+        suggestedAction,
+        suggestedQty: reorderQty,
+        reason,
+        confidence,
+        trend,
+      };
+    })
+    .sort(
+      (a, b) =>
+        actionOrder[a.suggestedAction] - actionOrder[b.suggestedAction] ||
+        a.daysUntilStockout - b.daysUntilStockout
+    );
 }
 
 // ============================================================================
@@ -405,19 +310,46 @@ const SEASONAL_TRENDS: SeasonalTrend[] = [
 // ============================================================================
 
 export function DemandForecast() {
+  const { user } = useAuth();
+  const isSuperadmin = (user?.roles || []).includes('SUPERADMIN');
   const [forecastRange, setForecastRange] = useState<ForecastRange>(30);
   const [activeSection, setActiveSection] = useState<'category' | 'seasonal' | 'reorder'>('category');
+  const [apiForecasts, setApiForecasts] = useState<ApiForecast[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const loadForecast = useCallback(async () => {
+    if (!isSuperadmin) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await analyticsV2Api.getDemandForecast({ store_id: user?.activeStoreId || undefined });
+      setApiForecasts(Array.isArray(res?.forecasts) ? res.forecasts : []);
+    } catch {
+      setError('Failed to load demand forecast');
+      setApiForecasts([]);
+    } finally {
+      setLoading(false);
+    }
+  }, [isSuperadmin, user?.activeStoreId]);
+
+  useEffect(() => {
+    loadForecast();
+  }, [loadForecast]);
 
   const now = new Date();
   const currentMonth = now.getMonth();
   const currentSeason = getCurrentSeason(currentMonth);
 
   const categoryForecasts = useMemo(
-    () => generateCategoryForecasts(forecastRange),
-    [forecastRange]
+    () => deriveCategoryForecasts(apiForecasts, forecastRange),
+    [apiForecasts, forecastRange]
   );
 
-  const reorderSuggestions = useMemo(() => generateReorderSuggestions(), []);
+  const reorderSuggestions = useMemo(
+    () => deriveReorderSuggestions(apiForecasts),
+    [apiForecasts]
+  );
 
   // Summary stats
   const totalProjectedDemand = categoryForecasts.reduce((sum, f) => sum + f.projectedDemand, 0);
@@ -798,6 +730,17 @@ export function DemandForecast() {
   // Main render
   // ------------------------------------------------------------------
 
+  if (!isSuperadmin) {
+    return (
+      <div className="card text-center text-gray-500 py-10">
+        Demand forecasting is available to Superadmin only.
+      </div>
+    );
+  }
+  if (loading && apiForecasts.length === 0) {
+    return <div className="card text-center text-gray-500 py-10">Loading demand forecast…</div>;
+  }
+
   return (
     <div className="space-y-4">
       {/* Header */}
@@ -819,8 +762,25 @@ export function DemandForecast() {
           <span className="text-xs font-medium px-2 py-0.5 rounded-full bg-bv-red-50 text-bv-red-700">
             {currentSeason} Season
           </span>
+          <button
+            onClick={loadForecast}
+            disabled={loading}
+            className="flex items-center gap-1 px-2 py-1 rounded-lg text-sm text-gray-600 hover:bg-gray-100 disabled:opacity-50"
+          >
+            <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
+            Refresh
+          </button>
         </div>
       </div>
+
+      {error && (
+        <div className="card bg-red-50 border-red-200 text-sm text-red-700">{error}</div>
+      )}
+      {!error && !loading && apiForecasts.length === 0 && (
+        <div className="card bg-gray-50 border-gray-200 text-sm text-gray-600">
+          No sales in the last 90 days for this store yet — forecasts will appear once there is order history.
+        </div>
+      )}
 
       {/* Summary Cards */}
       <div className="grid grid-cols-1 tablet:grid-cols-4 gap-4">
@@ -957,10 +917,11 @@ export function DemandForecast() {
           <div className="text-sm text-gray-600">
             <p className="font-medium text-gray-700 mb-1">Forecasting Methodology</p>
             <ul className="list-disc list-inside space-y-1 text-gray-500">
-              <li>Forecasts are based on historical sales velocity, seasonal multipliers, and trend analysis</li>
-              <li>Indian optical retail seasonality (summer sunglasses, monsoon lens care, festival premiums, winter progressives) is factored in</li>
-              <li>Confidence levels reflect data quality: <strong>High</strong> = 90+ days of data, <strong>Medium</strong> = 30-90 days, <strong>Low</strong> = under 30 days or volatile patterns</li>
-              <li>Reorder quantities include a 15-day safety buffer above projected demand</li>
+              <li>Forecasts are computed from this store's real sales over the last 90 days (per-product daily velocity, projected forward).</li>
+              <li>Trend compares the most recent 45 days against the prior 45 days.</li>
+              <li>Confidence reflects how many products contributed: <strong>High</strong> = 5+, <strong>Medium</strong> = 2-4, <strong>Low</strong> = 1.</li>
+              <li>Reorder quantities include a 15-day safety buffer above projected demand.</li>
+              <li>The Seasonal Trends tab is a static planning reference for Indian optical retail and is <strong>not</strong> applied to the numeric forecasts above.</li>
             </ul>
           </div>
         </div>
