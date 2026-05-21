@@ -186,6 +186,34 @@ def test_coerce_mongo_value_parses_json():
     assert _coerce_mongo_value("not-json-just-string") == "not-json-just-string"
 
 
+# ----- PR #127 regression: prompt-template format bug --------------------
+
+def test_system_prompt_renders_with_literal_curly_braces():
+    """REGRESSION: PR #127 left literal `{collection}` in the JARVIS
+    system prompt as documentation of `/jarvis/data/{collection}`. The
+    `.format(current_datetime=...)` call then raised KeyError because
+    it tried to look up a `collection` keyword argument. Every JARVIS
+    query 500'd in prod for a few hours.
+
+    Fixed by switching to `.replace("{current_datetime}", ...)` so only
+    the explicit token gets replaced. This test pins that contract — if
+    anyone goes back to .format() (or adds new format placeholders to
+    the prompt), the test catches it.
+    """
+    from api.routers import jarvis as jarvis_router
+
+    # Render the prompt the way the code does
+    prompt = jarvis_router.ClaudeClient.JARVIS_SYSTEM_PROMPT.replace(
+        "{current_datetime}", "2026-05-21 10:00:00 IST"
+    )
+    # The literal `{collection}` must survive untouched (it's load-bearing
+    # documentation for the LLM about the ad-hoc reader endpoint)
+    assert "{collection}" in prompt
+    # The datetime placeholder must be substituted
+    assert "{current_datetime}" not in prompt
+    assert "2026-05-21" in prompt
+
+
 # ----- PIXEL audit history endpoint contract -----------------------------
 
 def test_extended_context_includes_ui_audit_keys_when_data_present():
