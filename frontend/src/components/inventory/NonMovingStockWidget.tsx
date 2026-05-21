@@ -6,6 +6,7 @@
 import { useState, useEffect } from 'react';
 import { TrendingDown } from 'lucide-react';
 import api from '../../services/api';
+import { useAuth } from '../../context/AuthContext';
 
 interface NonMovingProduct {
   product_id: string;
@@ -17,18 +18,20 @@ interface NonMovingProduct {
 }
 
 export function NonMovingStockWidget() {
+  const { user } = useAuth();
   const [products, setProducts] = useState<NonMovingProduct[]>([]);
   const [loading, setLoading] = useState(true);
   const [days, setDays] = useState(90);
 
   useEffect(() => {
     loadData();
-  }, [days]);
+  }, [days, user?.activeStoreId]);
 
   const loadData = async () => {
     setLoading(true);
     try {
-      const response = await api.get(`/inventory/non-moving?days=${days}`);
+      const storeParam = user?.activeStoreId ? `&store_id=${user.activeStoreId}` : '';
+      const response = await api.get(`/inventory/non-moving?days=${days}${storeParam}`);
       setProducts(response.data?.products || []);
     } catch (error) {
       // silently handle error

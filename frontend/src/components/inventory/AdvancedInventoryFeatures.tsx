@@ -6,6 +6,7 @@
 import { useState, useEffect } from 'react';
 import { AlertTriangle, TrendingUp, Package, Grid3x3 } from 'lucide-react';
 import api from '../../services/api';
+import { useAuth } from '../../context/AuthContext';
 import clsx from 'clsx';
 
 // ============================================================================
@@ -23,6 +24,7 @@ interface ContactLensProduct {
 }
 
 export function ContactLensExpiryWidget() {
+  const { user } = useAuth();
   const [expired, setExpired] = useState<ContactLensProduct[]>([]);
   const [expiringSoon, setExpiringSoon] = useState<ContactLensProduct[]>([]);
   const [loading, setLoading] = useState(true);
@@ -30,13 +32,14 @@ export function ContactLensExpiryWidget() {
 
   useEffect(() => {
     loadData();
-  }, [daysThreshold]);
+  }, [daysThreshold, user?.activeStoreId]);
 
   const loadData = async () => {
     setLoading(true);
     try {
+      const storeParam = user?.activeStoreId ? `&store_id=${user.activeStoreId}` : '';
       const response = await api.get(
-        `/inventory/contact-lenses/expiry-status?expiring_within_days=${daysThreshold}`
+        `/inventory/contact-lenses/expiry-status?expiring_within_days=${daysThreshold}${storeParam}`
       );
       setExpired(response.data?.expired || []);
       setExpiringSoon(response.data?.expiring_soon || []);
@@ -133,6 +136,7 @@ interface PowerGridCell {
 }
 
 export function LensPowerGridWidget() {
+  const { user } = useAuth();
   const [grid, setGrid] = useState<Record<string, Record<string, PowerGridCell>>>({});
   const [sphValues, setSphValues] = useState<string[]>([]);
   const [cylValues, setCylValues] = useState<string[]>([]);
@@ -140,12 +144,13 @@ export function LensPowerGridWidget() {
 
   useEffect(() => {
     loadData();
-  }, []);
+  }, [user?.activeStoreId]);
 
   const loadData = async () => {
     setLoading(true);
     try {
-      const response = await api.get('/inventory/lenses/power-grid');
+      const storeParam = user?.activeStoreId ? `?store_id=${user.activeStoreId}` : '';
+      const response = await api.get(`/inventory/lenses/power-grid${storeParam}`);
       setGrid(response.data?.grid || {});
       setSphValues(response.data?.sph_range || []);
       setCylValues(response.data?.cyl_range || []);
@@ -239,17 +244,19 @@ interface BrandSellThrough {
 }
 
 export function SellThroughAnalysisWidget({ days = 30 }: { days?: number }) {
+  const { user } = useAuth();
   const [brands, setBrands] = useState<BrandSellThrough[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     loadData();
-  }, [days]);
+  }, [days, user?.activeStoreId]);
 
   const loadData = async () => {
     setLoading(true);
     try {
-      const response = await api.get(`/inventory/sell-through-analysis?days=${days}`);
+      const storeParam = user?.activeStoreId ? `&store_id=${user.activeStoreId}` : '';
+      const response = await api.get(`/inventory/sell-through-analysis?days=${days}${storeParam}`);
       setBrands(response.data?.brands || []);
     } catch (error) {
       // silently handle error
@@ -343,19 +350,21 @@ interface OverstockItem {
 }
 
 export function OverstockAnalysisWidget() {
+  const { user } = useAuth();
   const [items, setItems] = useState<OverstockItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [threshold, setThreshold] = useState(3.0);
 
   useEffect(() => {
     loadData();
-  }, [threshold]);
+  }, [threshold, user?.activeStoreId]);
 
   const loadData = async () => {
     setLoading(true);
     try {
+      const storeParam = user?.activeStoreId ? `&store_id=${user.activeStoreId}` : '';
       const response = await api.get(
-        `/inventory/overstock-analysis?overstocking_threshold=${threshold}`
+        `/inventory/overstock-analysis?overstocking_threshold=${threshold}${storeParam}`
       );
       setItems(response.data?.items || []);
     } catch (error) {
