@@ -20,7 +20,131 @@ import type {
   VendorPaymentData,
   ReconciliationData,
 } from './financeTypes';
-import { generateSampleData } from './financeUtils';
+import { financeApi } from '../../services/api/finance';
+
+// ---- Mappers: real finance.py responses -> dashboard panel types ----------
+// The backend returns aggregate/summary shapes; the panels expect these
+// normalised types. Each mapper is defensive (handles missing fields) so a
+// thin/empty response renders an honest empty panel rather than crashing.
+function mapRevenue(d: any): RevenueData[] {
+  if (!d) return [];
+  const net = Number(d.total_revenue || 0);
+  const deductions = Number(d.total_discount || 0);
+  if (!net && !deductions && !d.total_tax) return [];
+  return [{
+    period: `Current ${d.period || 'month'}`,
+    gross_sales: net + deductions,
+    deductions,
+    net_revenue: net,
+    gst_collected: Number(d.total_tax || 0),
+  }];
+}
+
+function mapPnl(d: any, from: string, to: string): ProfitLossStatement | null {
+  if (!d) return null;
+  const revenue = Number(d.revenue || 0);
+  const cogs = Number(d.cogs || 0);
+  const grossProfit = Number(d.gross_profit ?? revenue - cogs);
+  const opex = Number(d.total_expenses || 0);
+  const netProfit = Number(d.net_profit ?? grossProfit - opex);
+  return {
+    revenue,
+    cost_of_goods: cogs,
+    gross_profit: grossProfit,
+    operating_expenses: opex,
+    operating_profit: grossProfit - opex,
+    tax_expense: 0,
+    net_profit: netProfit,
+    profit_margin: Number(d.net_margin ?? (revenue ? (netProfit / revenue) * 100 : 0)),
+    period_start: from,
+    period_end: to,
+  };
+}
+
+function mapGst(d: any): GSTSummaryData | null {
+  if (!d) return null;
+  return {
+    period: `${d.month ?? ''}/${d.year ?? ''}`,
+    cgst_collected: Number(d.cgst || 0),
+    sgst_collected: Number(d.sgst || 0),
+    igst_collected: 0,
+    total_gst: Number(d.gst_collected || 0),
+    gst_payable: Number(d.net_gst_payable || 0),
+    input_tax_credit: Number(d.gst_input_credit || 0),
+    gst_type: 'CGST_SGST',
+  };
+}
+
+function mapOutstanding(d: any): OutstandingReceivable[] {
+  const items = Array.isArray(d?.items) ? d.items : [];
+  return items.map((o: any) => ({
+    id: o.order_id || '',
+    customer_name: o.customer_name || 'Unknown',
+    amount: Number(o.amount || 0),
+    gst_amount: 0,
+    due_date: '',
+    days_overdue: Number(o.days_overdue || 0),
+    status: (Number(o.days_overdue || 0) > 30 ? 'overdue' : 'active') as OutstandingReceivable['status'],
+  }));
+}
+
+function mapCashFlow(d: any): CashFlowData[] {
+  if (!d) return [];
+  const inflow = Number(d.inflows || 0);
+  const outflow = Number(d.outflows || 0);
+  if (!inflow && !outflow) return [];
+  return [{
+    period: d.period || 'This month',
+    opening_balance: 0,
+    cash_inflows: inflow,
+    cash_outflows: outflow,
+    closing_balance: Number(d.net_cash_flow ?? inflow - outflow),
+    free_cash_flow: Number(d.net_cash_flow ?? inflow - outflow),
+  }];
+}
+
+function mapBudget(d: any): BudgetData[] {
+  const cats = d?.categories || {};
+  return Object.entries(cats).map(([category, v]: [string, any]) => {
+    const allocated = Number(v?.budget || 0);
+    const spent = Number(v?.actual || 0);
+    return {
+      category,
+      allocated,
+      spent,
+      remaining: allocated - spent,
+      variance: allocated - spent,
+      variance_percent: allocated ? ((allocated - spent) / allocated) * 100 : 0,
+    };
+  });
+}
+
+function mapVendorPayments(d: any): VendorPaymentData[] {
+  const list = Array.isArray(d) ? d : [];
+  return list.map((v: any) => {
+    const due = Number(v.balance || 0);
+    return {
+      id: v.vendor_id || '',
+      vendor_name: v.vendor_name || '',
+      amount_due: due,
+      due_date: '',
+      days_overdue: 0,
+      status: (due <= 0 ? 'paid' : Number(v.total_paid || 0) > 0 ? 'partial' : 'pending') as VendorPaymentData['status'],
+    };
+  });
+}
+
+function mapReconciliation(d: any): ReconciliationData[] {
+  const list = Array.isArray(d?.transfers) ? d.transfers : [];
+  return list.map((t: any) => ({
+    id: t.transfer_id || '',
+    date: t.created_at || '',
+    bank_amount: 0,
+    system_amount: 0,
+    difference: 0,
+    status: 'pending' as ReconciliationData['status'],
+  }));
+}
 
 import FinanceFilters from './FinanceFilters';
 import FinanceSummary from './FinanceSummary';
@@ -66,22 +190,33 @@ export default function FinanceDashboard() {
 
   const loadFinanceData = async () => {
     setIsLoading(true);
+    const storeId = user?.activeStoreId;
     try {
-      // Mock data initialization - in production, fetch from API
-      setTimeout(() => {
-        const data = generateSampleData(dateFrom, dateTo);
-        setRevenueData(data.revenueData);
-        setPLStatement(data.plStatement);
-        setGSTSummary(data.gstSummary);
-        setOutstanding(data.outstanding);
-        setCashFlow(data.cashFlow);
-        setBudgets(data.budgets);
-        setVendorPayments(data.vendorPayments);
-        setReconciliation(data.reconciliation);
-        setIsLoading(false);
-      }, 500);
+      // Real finance.py endpoints, fetched in parallel. Each section
+      // fail-soft independently so one slow/empty endpoint doesn't blank
+      // the whole dashboard.
+      const [rev, pnl, gst, out, cf, bud, vend, recon] = await Promise.allSettled([
+        financeApi.getRevenue({ period: 'month', store_id: storeId }),
+        financeApi.getPnl({ store_id: storeId, from_date: dateFrom, to_date: dateTo }),
+        financeApi.getGstSummary(),
+        financeApi.getOutstanding({ store_id: storeId }),
+        financeApi.getCashFlow({ period: 'month' }),
+        financeApi.getBudget(),
+        financeApi.getVendorPayments(),
+        financeApi.getReconciliation(),
+      ]);
+
+      setRevenueData(rev.status === 'fulfilled' ? mapRevenue(rev.value) : []);
+      setPLStatement(pnl.status === 'fulfilled' ? mapPnl(pnl.value, dateFrom, dateTo) : null);
+      setGSTSummary(gst.status === 'fulfilled' ? mapGst(gst.value) : null);
+      setOutstanding(out.status === 'fulfilled' ? mapOutstanding(out.value) : []);
+      setCashFlow(cf.status === 'fulfilled' ? mapCashFlow(cf.value) : []);
+      setBudgets(bud.status === 'fulfilled' ? mapBudget(bud.value) : []);
+      setVendorPayments(vend.status === 'fulfilled' ? mapVendorPayments(vend.value) : []);
+      setReconciliation(recon.status === 'fulfilled' ? mapReconciliation(recon.value) : []);
     } catch (error) {
       toast.error('Failed to load financial data');
+    } finally {
       setIsLoading(false);
     }
   };
