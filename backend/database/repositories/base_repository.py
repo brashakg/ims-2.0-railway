@@ -48,6 +48,28 @@ class BaseRepository(ABC, Generic[T]):
             data["created_at"] = now
         data["updated_at"] = now
         return data
+
+    @staticmethod
+    def _clean_id(doc: Optional[Dict]) -> Optional[Dict]:
+        """Stringify a BSON ObjectId `_id` so FastAPI can JSON-serialise it.
+
+        Docs created through this repo get a string `_id` (== id_field, see
+        create()), but docs inserted directly via `insert_one` — e.g. the
+        May 2026 TechCherry migration of 5,022 customers / 10,805 products /
+        322 orders — carry a real MongoDB ObjectId. Returning that raw to a
+        FastAPI endpoint 500s with
+            ValueError: [TypeError("'ObjectId' object is not iterable")]
+        which is exactly what made the Customers page fail to load once a
+        TechCherry store (BV-PUN-01) was in scope. Converting to str here
+        fixes every read path at once instead of per-endpoint. Lookups use
+        the business id_field (customer_id, order_id, ...), never `_id`, so
+        stringifying is safe.
+        """
+        if doc is not None:
+            _id = doc.get("_id")
+            if _id is not None and not isinstance(_id, str):
+                doc["_id"] = str(_id)
+        return doc
     
     # =========================================================================
     # CRUD Operations
@@ -91,7 +113,7 @@ class BaseRepository(ABC, Generic[T]):
             Document or None
         """
         try:
-            return self.collection.find_one({self.id_field: id})
+            return self._clean_id(self.collection.find_one({self.id_field: id}))
         except Exception as e:
             print(f"Error finding {self.entity_name}: {e}")
             return None
@@ -107,7 +129,7 @@ class BaseRepository(ABC, Generic[T]):
             Document or None
         """
         try:
-            return self.collection.find_one(filter)
+            return self._clean_id(self.collection.find_one(filter))
         except Exception as e:
             print(f"Error finding {self.entity_name}: {e}")
             return None
@@ -140,8 +162,8 @@ class BaseRepository(ABC, Generic[T]):
                 cursor = cursor.skip(skip)
             if limit:
                 cursor = cursor.limit(limit)
-            
-            return list(cursor)
+
+            return [self._clean_id(doc) for doc in cursor]
         except Exception as e:
             print(f"Error finding {self.entity_name}s: {e}")
             return []
@@ -321,7 +343,7 @@ class BaseRepository(ABC, Generic[T]):
             Aggregation results
         """
         try:
-            return list(self.collection.aggregate(pipeline))
+            return [self._clean_id(doc) for doc in self.collection.aggregate(pipeline)]
         except Exception as e:
             print(f"Error aggregating {self.entity_name}s: {e}")
             return []

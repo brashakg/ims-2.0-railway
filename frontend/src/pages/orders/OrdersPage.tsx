@@ -48,7 +48,7 @@ const PAYMENT_STATUS_CONFIG: Record<PaymentStatus, { label: string; color: strin
 };
 
 export function OrdersPage() {
-  const { user, hasRole } = useAuth();
+  const { user } = useAuth();
   const toast = useToast();
   const [searchParams] = useSearchParams();
 
@@ -93,9 +93,6 @@ export function OrdersPage() {
   const [deliverOrder, setDeliverOrder] = useState<Order | null>(null);
   const [isDeliveringOrder, setIsDeliveringOrder] = useState(false);
 
-  // Role-based permissions
-  const canViewAllStores = hasRole(['SUPERADMIN', 'ADMIN', 'AREA_MANAGER']);
-
   // Reset page when filters change
   useEffect(() => {
     setCurrentPage(1);
@@ -114,7 +111,12 @@ export function OrdersPage() {
     setError(null);
     try {
       const params: { storeId?: string; status?: string; date?: string; skip?: number; limit?: number } = {};
-      if (!canViewAllStores && user?.activeStoreId) {
+      // Always scope to the topbar-selected store. The selection lives in
+      // user.activeStoreId for every role (HQ admins included) — previously
+      // this was gated to non-HQ roles, so an admin switching the topbar to
+      // Pune still saw their home store's orders (the backend fell back to
+      // the token's active_store_id).
+      if (user?.activeStoreId) {
         params.storeId = user.activeStoreId;
       }
       if (statusFilter !== 'ALL') {
