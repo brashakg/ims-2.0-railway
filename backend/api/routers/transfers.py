@@ -106,15 +106,80 @@ class TransferApproval(BaseModel):
 
 
 # ============================================================================
-# IN-MEMORY STORAGE
+# PERSISTENCE  (MongoDB `stock_transfers`, with in-memory fallback)
 # ============================================================================
+# Stock transfers used to live in a module-level dict, so they vanished on
+# every redeploy and were invisible across Railway workers — even though the
+# transfer feature is live in the UI. They now persist to the
+# `stock_transfers` collection. The in-memory dict is kept only as a
+# fail-soft fallback when the DB is unavailable (local dev / tests), which
+# preserves the previous behavior there.
 
 STOCK_TRANSFERS: Dict[str, Dict] = {}
 TRANSFER_COUNTER = {"count": 1000}
 
 
+def _get_db():
+    try:
+        from ..dependencies import get_db
+
+        conn = get_db()
+        if conn is not None and conn.is_connected:
+            return conn.db
+    except Exception:
+        pass
+    return None
+
+
+def _transfers_coll():
+    db = _get_db()
+    return db.get_collection("stock_transfers") if db is not None else None
+
+
+def _coerce(value):
+    """Recursively convert Enum members to their string values so the doc is
+    cleanly BSON-serialisable (statuses/types/priorities are str-Enums)."""
+    if isinstance(value, Enum):
+        return value.value
+    if isinstance(value, dict):
+        return {k: _coerce(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_coerce(v) for v in value]
+    return value
+
+
+def _save_transfer(transfer: Dict) -> None:
+    """Upsert a transfer by its `id`. Falls back to the in-memory dict when
+    the DB is unavailable."""
+    doc = _coerce(transfer)
+    coll = _transfers_coll()
+    if coll is not None:
+        coll.update_one({"id": doc["id"]}, {"$set": doc}, upsert=True)
+    else:
+        STOCK_TRANSFERS[doc["id"]] = doc
+
+
+def _get_transfer(transfer_id: str) -> Optional[Dict]:
+    coll = _transfers_coll()
+    if coll is not None:
+        return coll.find_one({"id": transfer_id}, {"_id": 0})
+    return STOCK_TRANSFERS.get(transfer_id)
+
+
+def _all_transfers() -> List[Dict]:
+    coll = _transfers_coll()
+    if coll is not None:
+        return list(coll.find({}, {"_id": 0}))
+    return list(STOCK_TRANSFERS.values())
+
+
 def generate_transfer_number() -> str:
-    """Generate unique transfer number"""
+    """Generate a unique transfer number — DB-count-based when persistent,
+    else the in-memory counter."""
+    coll = _transfers_coll()
+    if coll is not None:
+        seq = coll.count_documents({}) + 1001
+        return f"TRF-{datetime.now().strftime('%Y%m')}-{seq}"
     TRANSFER_COUNTER["count"] += 1
     return f"TRF-{datetime.now().strftime('%Y%m')}-{TRANSFER_COUNTER['count']}"
 
@@ -148,7 +213,7 @@ async def list_transfers(
     current_user: dict = Depends(get_current_user),
 ):
     """List all stock transfers with filtering"""
-    transfers = list(STOCK_TRANSFERS.values())
+    transfers = _all_transfers()
 
     # Apply filters
     if status:
@@ -205,7 +270,7 @@ async def get_pending_transfers(
     location_id: Optional[str] = None, current_user: dict = Depends(get_current_user)
 ):
     """Get transfers pending approval or action"""
-    transfers = list(STOCK_TRANSFERS.values())
+    transfers = _all_transfers()
 
     pending_statuses = [
         TransferStatus.PENDING_APPROVAL,
@@ -245,7 +310,7 @@ async def get_transfer(
     transfer_id: str, current_user: dict = Depends(get_current_user)
 ):
     """Get a single transfer with full details"""
-    transfer = STOCK_TRANSFERS.get(transfer_id)
+    transfer = _get_transfer(transfer_id)
     if not transfer:
         raise HTTPException(status_code=404, detail="Transfer not found")
 
@@ -350,7 +415,7 @@ async def create_transfer(
         # In production, would call Shiprocket API
         transfer_data["shiprocket_order_id"] = f"SR_{uuid.uuid4().hex[:8].upper()}"
 
-    STOCK_TRANSFERS[transfer_id] = transfer_data
+    _save_transfer(transfer_data)
 
     return {
         "transfer": transfer_data,
@@ -371,7 +436,7 @@ async def update_transfer(
     ):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
-    transfer = STOCK_TRANSFERS.get(transfer_id)
+    transfer = _get_transfer(transfer_id)
     if not transfer:
         raise HTTPException(status_code=404, detail="Transfer not found")
 
@@ -385,6 +450,7 @@ async def update_transfer(
     transfer.update(update_data)
     transfer["updated_at"] = datetime.now().isoformat()
 
+    _save_transfer(transfer)
     return {"transfer": transfer, "message": "Transfer updated successfully"}
 
 
@@ -401,7 +467,7 @@ async def approve_transfer(
     ):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
-    transfer = STOCK_TRANSFERS.get(transfer_id)
+    transfer = _get_transfer(transfer_id)
     if not transfer:
         raise HTTPException(status_code=404, detail="Transfer not found")
 
@@ -433,6 +499,7 @@ async def approve_transfer(
         }
     )
 
+    _save_transfer(transfer)
     return {"transfer": transfer, "message": message}
 
 
@@ -447,7 +514,7 @@ async def start_picking(
     ):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
-    transfer = STOCK_TRANSFERS.get(transfer_id)
+    transfer = _get_transfer(transfer_id)
     if not transfer:
         raise HTTPException(status_code=404, detail="Transfer not found")
 
@@ -471,6 +538,7 @@ async def start_picking(
         }
     )
 
+    _save_transfer(transfer)
     return {"transfer": transfer, "message": "Picking started"}
 
 
@@ -487,7 +555,7 @@ async def complete_picking(
     ):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
-    transfer = STOCK_TRANSFERS.get(transfer_id)
+    transfer = _get_transfer(transfer_id)
     if not transfer:
         raise HTTPException(status_code=404, detail="Transfer not found")
 
@@ -519,6 +587,7 @@ async def complete_picking(
         }
     )
 
+    _save_transfer(transfer)
     return {"transfer": transfer, "message": "Picking completed, ready for shipment"}
 
 
@@ -538,7 +607,7 @@ async def ship_transfer(
     ):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
-    transfer = STOCK_TRANSFERS.get(transfer_id)
+    transfer = _get_transfer(transfer_id)
     if not transfer:
         raise HTTPException(status_code=404, detail="Transfer not found")
 
@@ -581,6 +650,7 @@ async def ship_transfer(
         }
     )
 
+    _save_transfer(transfer)
     return {
         "transfer": transfer,
         "message": "Transfer shipped",
@@ -604,7 +674,7 @@ async def receive_transfer(
     ):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
-    transfer = STOCK_TRANSFERS.get(transfer_id)
+    transfer = _get_transfer(transfer_id)
     if not transfer:
         raise HTTPException(status_code=404, detail="Transfer not found")
 
@@ -659,6 +729,7 @@ async def receive_transfer(
         }
     )
 
+    _save_transfer(transfer)
     return {
         "transfer": transfer,
         "message": "Items received",
@@ -683,7 +754,7 @@ async def complete_transfer(
     ):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
-    transfer = STOCK_TRANSFERS.get(transfer_id)
+    transfer = _get_transfer(transfer_id)
     if not transfer:
         raise HTTPException(status_code=404, detail="Transfer not found")
 
@@ -711,6 +782,7 @@ async def complete_transfer(
         }
     )
 
+    _save_transfer(transfer)
     return {"transfer": transfer, "message": "Transfer completed"}
 
 
@@ -725,7 +797,7 @@ async def cancel_transfer(
     ):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
-    transfer = STOCK_TRANSFERS.get(transfer_id)
+    transfer = _get_transfer(transfer_id)
     if not transfer:
         raise HTTPException(status_code=404, detail="Transfer not found")
 
@@ -756,6 +828,7 @@ async def cancel_transfer(
         }
     )
 
+    _save_transfer(transfer)
     return {"transfer": transfer, "message": "Transfer cancelled"}
 
 
@@ -772,7 +845,7 @@ async def get_transfer_analytics(
     current_user: dict = Depends(get_current_user),
 ):
     """Get transfer analytics summary"""
-    transfers = list(STOCK_TRANSFERS.values())
+    transfers = _all_transfers()
 
     if location_id:
         transfers = [
@@ -825,7 +898,7 @@ async def get_location_transfer_analytics(
     location_id: str, current_user: dict = Depends(get_current_user)
 ):
     """Get transfer analytics for a specific location"""
-    transfers = list(STOCK_TRANSFERS.values())
+    transfers = _all_transfers()
 
     outgoing = [t for t in transfers if t.get("from_location_id") == location_id]
     incoming = [t for t in transfers if t.get("to_location_id") == location_id]
@@ -880,7 +953,7 @@ async def bulk_approve_transfers(
     errors = []
 
     for tid in transfer_ids:
-        transfer = STOCK_TRANSFERS.get(tid)
+        transfer = _get_transfer(tid)
         if not transfer:
             errors.append({"id": tid, "error": "Not found"})
             continue
@@ -904,6 +977,7 @@ async def bulk_approve_transfers(
             }
         )
 
+        _save_transfer(transfer)
         approved += 1
 
     return {
@@ -931,7 +1005,7 @@ async def create_shiprocket_shipment_for_transfer(
     ):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
-    transfer = STOCK_TRANSFERS.get(transfer_id)
+    transfer = _get_transfer(transfer_id)
     if not transfer:
         raise HTTPException(status_code=404, detail="Transfer not found")
 
@@ -950,6 +1024,7 @@ async def create_shiprocket_shipment_for_transfer(
     transfer["courier_name"] = courier_code or "Delhivery"
     transfer["updated_at"] = datetime.now().isoformat()
 
+    _save_transfer(transfer)
     return {
         "transfer_id": transfer_id,
         "shiprocket_shipment_id": shipment_id,
@@ -965,7 +1040,7 @@ async def get_transfer_tracking(
     transfer_id: str, current_user: dict = Depends(get_current_user)
 ):
     """Get tracking information for a transfer"""
-    transfer = STOCK_TRANSFERS.get(transfer_id)
+    transfer = _get_transfer(transfer_id)
     if not transfer:
         raise HTTPException(status_code=404, detail="Transfer not found")
 
