@@ -68,7 +68,7 @@ export default function HubPage() {
     let cancelled = false;
 
     analyticsApi
-      .getDashboardSummary('today')
+      .getDashboardSummary('today', user?.activeStoreId)
       .then((r: any) => {
         if (cancelled) return;
         const rev = r?.revenue?.total ?? r?.total_revenue ?? r?.revenue;

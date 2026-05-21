@@ -370,8 +370,17 @@ export const reportsApi = {
 // ============================================================================
 
 export const analyticsApi = {
-  getDashboardSummary: async (period: string = 'month') => {
-    const response = await api.get('/analytics/dashboard-summary', { params: { period } });
+  getDashboardSummary: async (period: string = 'month', storeId?: string) => {
+    const response = await api.get('/analytics/dashboard-summary', {
+      params: { period, ...(storeId ? { store_id: storeId } : {}) },
+    });
+    return response.data;
+  },
+
+  getEnterpriseKpis: async (period: string = 'today', storeId?: string) => {
+    const response = await api.get('/analytics/enterprise-kpis', {
+      params: { period, ...(storeId ? { store_id: storeId } : {}) },
+    });
     return response.data;
   },
 

@@ -305,9 +305,12 @@ export default function DashboardPage() {
     setIsLoading(true);
     setHasError(false);
     try {
-      const response = await api.get(
-        `/analytics/enterprise-kpis?period=${period}`
-      );
+      const response = await api.get('/analytics/enterprise-kpis', {
+        params: {
+          period,
+          ...(user?.activeStoreId ? { store_id: user.activeStoreId } : {}),
+        },
+      });
       setKpis(response.data);
     } catch (error) {
       setHasError(true);
