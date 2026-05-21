@@ -22,7 +22,7 @@ from collections import defaultdict
 
 logger = logging.getLogger(__name__)
 
-from .auth import get_current_user
+from .auth import get_current_user, require_roles
 
 # Simple per-user notification rate limiter: max 20 sends per 10 minutes
 _notification_rate: dict = defaultdict(list)
@@ -45,6 +45,11 @@ from ..dependencies import get_db as _dep_get_db
 from ..services.notification_service import send_notification, populate_template
 
 router = APIRouter()
+
+# Roles permitted to fan out bulk notifications to customers (mass WhatsApp /
+# SMS — spammy + metered). Mirrors the campaign-management roles. SUPERADMIN
+# auto-passes via require_roles.
+_BULK_SEND_ROLES = ("ADMIN", "AREA_MANAGER", "STORE_MANAGER")
 
 
 def _get_db():
@@ -143,7 +148,7 @@ class SendBulkRequest(BaseModel):
 async def send_bulk_notifications(
     req: SendBulkRequest,
     store_id: Optional[str] = Query(None),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_roles(*_BULK_SEND_ROLES)),
 ):
     """Fan-out a template to many recipients. Frontend
     settingsApi.sendBulkNotifications was 404'ing. Honors the same

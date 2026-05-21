@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 from typing import List, Optional
 from datetime import datetime, date
 import uuid
-from .auth import get_current_user
+from .auth import get_current_user, require_roles
 from ..dependencies import (
     get_eye_test_queue_repository,
     get_eye_test_repository,
@@ -18,6 +18,10 @@ from ..dependencies import (
 )
 
 router = APIRouter()
+
+# Roles permitted to mutate the optometry queue + eye-test records. Mirrors the
+# frontend Clinical route guard. SUPERADMIN auto-passes via require_roles.
+_CLINICAL_ROLES = ("ADMIN", "STORE_MANAGER", "OPTOMETRIST")
 
 
 # ============================================================================
@@ -135,7 +139,8 @@ async def get_queue(
 
 @router.post("/queue")
 async def add_to_queue(
-    item: QueueItemCreate, current_user: dict = Depends(get_current_user)
+    item: QueueItemCreate,
+    current_user: dict = Depends(require_roles(*_CLINICAL_ROLES)),
 ):
     """Add a patient to the eye test queue"""
     queue_repo = get_eye_test_queue_repository()
@@ -174,7 +179,9 @@ async def add_to_queue(
 
 @router.patch("/queue/{queue_id}/status")
 async def update_queue_status(
-    queue_id: str, body: StatusUpdate, current_user: dict = Depends(get_current_user)
+    queue_id: str,
+    body: StatusUpdate,
+    current_user: dict = Depends(require_roles(*_CLINICAL_ROLES)),
 ):
     """Update queue item status"""
     queue_repo = get_eye_test_queue_repository()
@@ -191,7 +198,7 @@ async def update_queue_status(
 
 @router.delete("/queue/{queue_id}")
 async def remove_from_queue(
-    queue_id: str, current_user: dict = Depends(get_current_user)
+    queue_id: str, current_user: dict = Depends(require_roles(*_CLINICAL_ROLES))
 ):
     """Remove a patient from the queue"""
     queue_repo = get_eye_test_queue_repository()
@@ -203,7 +210,9 @@ async def remove_from_queue(
 
 
 @router.post("/queue/{queue_id}/start-test")
-async def start_test(queue_id: str, current_user: dict = Depends(get_current_user)):
+async def start_test(
+    queue_id: str, current_user: dict = Depends(require_roles(*_CLINICAL_ROLES))
+):
     """Start an eye test for a queue item"""
     queue_repo = get_eye_test_queue_repository()
     test_repo = get_eye_test_repository()
@@ -311,7 +320,9 @@ async def get_test(test_id: str, current_user: dict = Depends(get_current_user))
 
 @router.post("/tests/{test_id}/complete")
 async def complete_test(
-    test_id: str, data: EyeTestData, current_user: dict = Depends(get_current_user)
+    test_id: str,
+    data: EyeTestData,
+    current_user: dict = Depends(require_roles(*_CLINICAL_ROLES)),
 ):
     """Complete an eye test with prescription data"""
     test_repo = get_eye_test_repository()
