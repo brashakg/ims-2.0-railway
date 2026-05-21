@@ -9,7 +9,7 @@ from pydantic import BaseModel
 from typing import List, Optional
 from datetime import datetime
 import uuid
-from .auth import get_current_user
+from .auth import get_current_user, require_roles
 from ..dependencies import (
     get_vendor_repository,
     get_purchase_order_repository,
@@ -20,6 +20,10 @@ from ..dependencies import (
 )
 
 router = APIRouter()
+
+# Roles permitted to mutate vendors, purchase orders and goods-receipt notes.
+# Mirrors the frontend /purchase/* route guards. SUPERADMIN auto-passes.
+_VENDOR_ROLES = ("ADMIN", "AREA_MANAGER", "STORE_MANAGER", "ACCOUNTANT")
 
 
 # ============================================================================
@@ -144,7 +148,8 @@ async def list_vendors(
 @router.post("", status_code=201)
 @router.post("/", status_code=201)
 async def create_vendor(
-    vendor: VendorCreate, current_user: dict = Depends(get_current_user)
+    vendor: VendorCreate,
+    current_user: dict = Depends(require_roles(*_VENDOR_ROLES)),
 ):
     """Create a new vendor"""
     vendor_repo = get_vendor_repository()
@@ -207,7 +212,7 @@ async def get_vendor(vendor_id: str, current_user: dict = Depends(get_current_us
 async def update_vendor(
     vendor_id: str,
     updates: VendorUpdate,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_roles(*_VENDOR_ROLES)),
 ):
     """Update vendor details"""
     vendor_repo = get_vendor_repository()
@@ -261,7 +266,9 @@ async def list_pos(
 
 
 @router.post("/purchase-orders", status_code=201)
-async def create_po(po: POCreate, current_user: dict = Depends(get_current_user)):
+async def create_po(
+    po: POCreate, current_user: dict = Depends(require_roles(*_VENDOR_ROLES))
+):
     """Create a new purchase order"""
     po_repo = get_purchase_order_repository()
     vendor_repo = get_vendor_repository()
@@ -328,7 +335,9 @@ async def get_po(po_id: str, current_user: dict = Depends(get_current_user)):
 
 
 @router.post("/purchase-orders/{po_id}/send")
-async def send_po(po_id: str, current_user: dict = Depends(get_current_user)):
+async def send_po(
+    po_id: str, current_user: dict = Depends(require_roles(*_VENDOR_ROLES))
+):
     """Send PO to vendor (mark as sent)"""
     po_repo = get_purchase_order_repository()
 
@@ -354,7 +363,9 @@ async def send_po(po_id: str, current_user: dict = Depends(get_current_user)):
 
 @router.post("/purchase-orders/{po_id}/cancel")
 async def cancel_po(
-    po_id: str, reason: str = Query(...), current_user: dict = Depends(get_current_user)
+    po_id: str,
+    reason: str = Query(...),
+    current_user: dict = Depends(require_roles(*_VENDOR_ROLES)),
 ):
     """Cancel a purchase order"""
     po_repo = get_purchase_order_repository()
@@ -415,7 +426,9 @@ async def list_grns(
 
 
 @router.post("/grn", status_code=201)
-async def create_grn(grn: GRNCreate, current_user: dict = Depends(get_current_user)):
+async def create_grn(
+    grn: GRNCreate, current_user: dict = Depends(require_roles(*_VENDOR_ROLES))
+):
     """Create a new GRN"""
     grn_repo = get_grn_repository()
     po_repo = get_purchase_order_repository()
@@ -487,7 +500,9 @@ async def get_grn(grn_id: str, current_user: dict = Depends(get_current_user)):
 
 
 @router.post("/grn/{grn_id}/accept")
-async def accept_grn(grn_id: str, current_user: dict = Depends(get_current_user)):
+async def accept_grn(
+    grn_id: str, current_user: dict = Depends(require_roles(*_VENDOR_ROLES))
+):
     """Accept GRN and add stock"""
     grn_repo = get_grn_repository()
     stock_repo = get_stock_repository()
@@ -546,7 +561,9 @@ async def accept_grn(grn_id: str, current_user: dict = Depends(get_current_user)
 
 @router.post("/grn/{grn_id}/escalate")
 async def escalate_grn(
-    grn_id: str, note: str = Query(...), current_user: dict = Depends(get_current_user)
+    grn_id: str,
+    note: str = Query(...),
+    current_user: dict = Depends(require_roles(*_VENDOR_ROLES)),
 ):
     """Escalate GRN to HQ for review"""
     grn_repo = get_grn_repository()
