@@ -32,7 +32,7 @@ export const financeApi = {
     return response.data;
   },
 
-  getCashFlow: async (params?: { period?: string }) => {
+  getCashFlow: async (params?: { period?: string; store_id?: string }) => {
     const response = await api.get('/finance/cash-flow', { params });
     return response.data;
   },
