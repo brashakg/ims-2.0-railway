@@ -455,6 +455,90 @@ async def adjust(
     }
 
 
+@router.get("/program-stats")
+async def program_stats(current_user: Dict[str, Any] = Depends(get_current_user)):
+    """Chain-wide loyalty program summary: total members, tier mix, and points
+    issued / redeemed / outstanding with the redemption rate.
+
+    Loyalty accounts are global (no store_id), so this reflects the whole
+    program. Aggregated in a single pass over loyalty_accounts; fail-soft to an
+    empty envelope when the store is unavailable.
+    """
+    empty: Dict[str, Any] = {
+        "total_members": 0,
+        "by_tier": {},
+        "active_points_balance": 0,
+        "points_issued": 0,
+        "points_redeemed": 0,
+        "redemption_rate": 0.0,
+        "avg_points_per_member": 0,
+    }
+    repo = get_loyalty_account_repository()
+    if repo is None:
+        return empty
+    try:
+        pipeline = [
+            {
+                "$facet": {
+                    "totals": [
+                        {
+                            "$group": {
+                                "_id": None,
+                                "total_members": {"$sum": 1},
+                                "active_points_balance": {
+                                    "$sum": {"$ifNull": ["$balance_points", 0]}
+                                },
+                                "points_issued": {
+                                    "$sum": {"$ifNull": ["$lifetime_earned", 0]}
+                                },
+                                "points_redeemed": {
+                                    "$sum": {"$ifNull": ["$lifetime_redeemed", 0]}
+                                },
+                            }
+                        }
+                    ],
+                    "by_tier": [
+                        {
+                            "$group": {
+                                "_id": {"$ifNull": ["$tier", "BRONZE"]},
+                                "count": {"$sum": 1},
+                            }
+                        }
+                    ],
+                }
+            }
+        ]
+        agg = list(repo.collection.aggregate(pipeline))
+    except Exception:
+        logger.warning("loyalty program-stats aggregation failed", exc_info=True)
+        return empty
+
+    if not agg:
+        return empty
+    facet = agg[0]
+    totals_list = facet.get("totals") or []
+    totals = totals_list[0] if totals_list else {}
+    by_tier = {
+        str(row.get("_id") or "BRONZE").upper(): int(row.get("count", 0) or 0)
+        for row in (facet.get("by_tier") or [])
+    }
+    total_members = int(totals.get("total_members", 0) or 0)
+    active_balance = int(totals.get("active_points_balance", 0) or 0)
+    issued = int(totals.get("points_issued", 0) or 0)
+    redeemed = int(totals.get("points_redeemed", 0) or 0)
+    return {
+        "total_members": total_members,
+        "by_tier": by_tier,
+        "active_points_balance": active_balance,
+        "points_issued": issued,
+        "points_redeemed": redeemed,
+        "redemption_rate": round(redeemed / issued * 100, 1) if issued else 0.0,
+        "avg_points_per_member": round(active_balance / total_members)
+        if total_members
+        else 0,
+    }
+
+
 @router.get("/settings")
 async def read_settings(current_user: Dict[str, Any] = Depends(get_current_user)):
     return _settings_safe()
