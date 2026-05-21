@@ -120,7 +120,8 @@ export function PurchaseManagementPage() {
 
   useEffect(() => {
     loadData();
-  }, [activeTab]);
+    // Refetch POs when the topbar store changes (loadData scopes by activeStoreId).
+  }, [activeTab, user?.activeStoreId]);
 
   const loadData = async () => {
     setIsLoading(true);
