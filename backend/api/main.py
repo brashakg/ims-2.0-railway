@@ -4,7 +4,7 @@ IMS 2.0 - FastAPI Main Application
 Main entry point for the API server
 """
 
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
 from collections import defaultdict
@@ -116,6 +116,11 @@ from .routers import (
     vendor_portal_router,
     techcherry_import_router,
 )
+from .routers.auth import require_roles
+
+# Roles allowed to see company financials / payroll (mirrors the frontend
+# Finance + Payroll route guards — managers + accountant; SUPERADMIN auto).
+_FINANCE_ROLES = ("ADMIN", "AREA_MANAGER", "STORE_MANAGER", "ACCOUNTANT")
 
 
 # Lifespan context manager for startup/shutdown
@@ -739,7 +744,12 @@ app.include_router(
 )
 app.include_router(tasks_router, prefix="/api/v1/tasks", tags=["Tasks"])
 app.include_router(expenses_router, prefix="/api/v1/expenses", tags=["Expenses"])
-app.include_router(finance_router, prefix="/api/v1/finance", tags=["Finance"])
+app.include_router(
+    finance_router,
+    prefix="/api/v1/finance",
+    tags=["Finance"],
+    dependencies=[Depends(require_roles(*_FINANCE_ROLES))],
+)
 app.include_router(hr_router, prefix="/api/v1/hr", tags=["HR"])
 app.include_router(workshop_router, prefix="/api/v1/workshop", tags=["Workshop"])
 app.include_router(reports_router, prefix="/api/v1/reports", tags=["Reports"])
@@ -764,7 +774,12 @@ app.include_router(
     supply_chain_router, prefix="/api/v1/supply-chain", tags=["Supply Chain"]
 )
 app.include_router(follow_ups_router, prefix="/api/v1/follow-ups", tags=["Follow-ups"])
-app.include_router(payroll_router, prefix="/api/v1/payroll", tags=["Payroll"])
+app.include_router(
+    payroll_router,
+    prefix="/api/v1/payroll",
+    tags=["Payroll"],
+    dependencies=[Depends(require_roles(*_FINANCE_ROLES))],
+)
 app.include_router(marketing_router, prefix="/api/v1/marketing", tags=["Marketing"])
 app.include_router(
     analytics_v2_router, prefix="/api/v1/analytics-v2", tags=["Analytics V2"]
