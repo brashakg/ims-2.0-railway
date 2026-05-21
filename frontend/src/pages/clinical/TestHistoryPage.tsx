@@ -49,9 +49,11 @@ export function TestHistoryPage() {
   const [error, setError] = useState<string | null>(null);
   const [selectedTest, setSelectedTest] = useState<CompletedTest | null>(null);
 
+  // user?.activeStoreId in deps so topbar store-switch triggers re-fetch
+  // (loadTests reads user.activeStoreId for the per-store eye-test list).
   useEffect(() => {
     loadTests();
-  }, [dateFilter]);
+  }, [dateFilter, user?.activeStoreId]);
 
   const loadTests = async () => {
     setIsLoading(true);

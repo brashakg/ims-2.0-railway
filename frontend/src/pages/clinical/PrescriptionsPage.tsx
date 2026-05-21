@@ -54,10 +54,12 @@ export function PrescriptionsPage() {
   const [printPrescription, setPrintPrescription] = useState<PrescriptionPrintData | null>(null);
   const [storeInfo, setStoreInfo] = useState<StoreInfo | null>(null);
 
+  // user?.activeStoreId in deps so topbar store-switch triggers re-fetch.
+  // Both loadPrescriptions and loadStoreInfo read user.activeStoreId.
   useEffect(() => {
     loadPrescriptions();
     loadStoreInfo();
-  }, []);
+  }, [user?.activeStoreId]);
 
   const loadStoreInfo = async () => {
     try {
