@@ -10,7 +10,7 @@ import {
   CheckCircle, AlertTriangle, XCircle, Eye, RefreshCw,
   Users, Search, ChevronDown, Loader2,
 } from 'lucide-react';
-import { customerApi } from '../../services/api';
+import { marketingApi } from '../../services/api/marketing';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 
@@ -68,79 +68,33 @@ const STATUS_CONFIG: Record<RecallStatus, { label: string; color: string; bgColo
 };
 
 // ---------------------------------------------------------------------------
-// Helper - Generate mock recall data from customer list
+// Map real Rx-expiry alerts (GET /marketing/rx-expiry-alerts) -> RecallItem[]
 // ---------------------------------------------------------------------------
 
-function generateRecalls(customers: Array<{ id: string; name: string; phone: string; createdAt: string }>): RecallItem[] {
-  const now = new Date();
-  const recalls: RecallItem[] = [];
+interface RxAlert {
+  prescription_id: string;
+  customer_id: string;
+  customer_name: string;
+  customer_phone: string;
+  expiry_date: string;
+  days_until_expiry: number;
+  prescription_date?: string;
+}
 
-  customers.forEach((cust, idx) => {
-    const createdDate = new Date(cust.createdAt);
-    const daysSinceCreated = Math.floor((now.getTime() - createdDate.getTime()) / (1000 * 60 * 60 * 24));
-
-    // Annual checkup if customer > 300 days
-    if (daysSinceCreated > 300) {
-      const dueDate = new Date(createdDate);
-      dueDate.setFullYear(dueDate.getFullYear() + 1);
-      const daysPast = Math.floor((now.getTime() - dueDate.getTime()) / (1000 * 60 * 60 * 24));
-
-      recalls.push({
-        id: `recall-annual-${cust.id}`,
-        customerId: cust.id,
-        customerName: cust.name,
-        customerPhone: cust.phone,
-        type: 'ANNUAL_CHECKUP',
-        reason: `Last visit was ${daysSinceCreated} days ago. Annual eye test recommended.`,
-        dueDate: dueDate.toISOString().split('T')[0],
-        daysPast,
-        status: 'PENDING',
-        priority: daysPast > 30 ? 'HIGH' : daysPast > 0 ? 'MEDIUM' : 'LOW',
-      });
-    }
-
-    // Prescription expiry (simulate ~6 months)
-    if (daysSinceCreated > 150 && idx % 3 === 0) {
-      const expiryDate = new Date(createdDate);
-      expiryDate.setMonth(expiryDate.getMonth() + 6);
-      const daysPast = Math.floor((now.getTime() - expiryDate.getTime()) / (1000 * 60 * 60 * 24));
-
-      recalls.push({
-        id: `recall-rx-${cust.id}`,
-        customerId: cust.id,
-        customerName: cust.name,
-        customerPhone: cust.phone,
-        type: 'PRESCRIPTION_EXPIRY',
-        reason: 'Prescription validity period ending. New eye test recommended.',
-        dueDate: expiryDate.toISOString().split('T')[0],
-        daysPast,
-        status: 'PENDING',
-        priority: daysPast > 14 ? 'HIGH' : daysPast > 0 ? 'MEDIUM' : 'LOW',
-      });
-    }
-
-    // Follow-up for recent customers
-    if (daysSinceCreated > 7 && daysSinceCreated < 30 && idx % 2 === 0) {
-      const followUpDate = new Date(createdDate);
-      followUpDate.setDate(followUpDate.getDate() + 14);
-      const daysPast = Math.floor((now.getTime() - followUpDate.getTime()) / (1000 * 60 * 60 * 24));
-
-      recalls.push({
-        id: `recall-fu-${cust.id}`,
-        customerId: cust.id,
-        customerName: cust.name,
-        customerPhone: cust.phone,
-        type: 'FOLLOW_UP',
-        reason: 'Post-purchase follow-up. Check if customer is satisfied.',
-        dueDate: followUpDate.toISOString().split('T')[0],
-        daysPast,
-        status: 'PENDING',
-        priority: 'LOW',
-      });
-    }
-  });
-
-  return recalls.sort((a, b) => b.daysPast - a.daysPast);
+function alertToRecall(a: RxAlert, priority: 'HIGH' | 'MEDIUM' | 'LOW'): RecallItem {
+  const d = Number(a.days_until_expiry) || 0;
+  return {
+    id: `rx-${a.prescription_id || a.customer_id}`,
+    customerId: a.customer_id,
+    customerName: a.customer_name || 'Unknown',
+    customerPhone: a.customer_phone || '',
+    type: 'PRESCRIPTION_EXPIRY',
+    reason: `Prescription expires in ${d} day(s) (on ${a.expiry_date}). Recommend a fresh eye test.`,
+    dueDate: a.expiry_date,
+    daysPast: -d, // endpoint returns days UNTIL expiry (future) => negative daysPast
+    status: 'PENDING',
+    priority,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -168,13 +122,13 @@ export function RecallManager() {
   const loadRecalls = async () => {
     setIsLoading(true);
     try {
-      const response = await customerApi.getCustomers({
-        storeId: user?.activeStoreId,
-        limit: 200,
-      });
-      const customers = response.customers || response || [];
-      const generated = generateRecalls(customers);
-      setRecalls(generated);
+      const res = await marketingApi.getRxExpiryAlerts(user?.activeStoreId);
+      const mapped: RecallItem[] = [
+        ...(res?.urgent || []).map((a: RxAlert) => alertToRecall(a, 'HIGH')),
+        ...(res?.soon || []).map((a: RxAlert) => alertToRecall(a, 'MEDIUM')),
+        ...(res?.upcoming || []).map((a: RxAlert) => alertToRecall(a, 'LOW')),
+      ].sort((x, y) => y.daysPast - x.daysPast);
+      setRecalls(mapped);
     } catch {
       setRecalls([]);
       toast.error('Failed to load recall data');
@@ -218,12 +172,23 @@ export function RecallManager() {
     }
   };
 
+  const sendReminder = async (recall: RecallItem, channel: ChannelType) => {
+    handleMarkStatus(recall.id, 'SENT');
+    try {
+      await marketingApi.sendRxReminder(recall.customerId);
+      toast.success(`Reminder sent to ${recall.customerName} via ${channel}`);
+    } catch {
+      toast.error(`Failed to send reminder to ${recall.customerName}`);
+    }
+  };
+
   const handleBulkSend = (channel: ChannelType) => {
-    const count = selectedRecalls.size;
+    const targets = recalls.filter((r) => selectedRecalls.has(r.id));
+    const count = targets.length;
     if (count === 0) return;
 
-    setRecalls(prev =>
-      prev.map(r =>
+    setRecalls((prev) =>
+      prev.map((r) =>
         selectedRecalls.has(r.id)
           ? { ...r, status: 'SENT' as RecallStatus, channel, lastContactDate: new Date().toISOString() }
           : r
@@ -231,6 +196,10 @@ export function RecallManager() {
     );
     setSelectedRecalls(new Set());
     setShowBulkActions(false);
+    // Fire real reminders (best-effort) for SMS/WhatsApp; CALL is mark-only.
+    if (channel !== 'CALL') {
+      Promise.allSettled(targets.map((r) => marketingApi.sendRxReminder(r.customerId)));
+    }
     toast.success(`${count} recall${count !== 1 ? 's' : ''} sent via ${channel}`);
   };
 
@@ -251,7 +220,7 @@ export function RecallManager() {
             Customer Recalls & Reminders
           </h2>
           <p className="text-sm text-gray-500 mt-1">
-            Automated recall system for eye tests, prescription renewals, and follow-ups
+            Prescription renewals due in the next 90 days
           </p>
         </div>
         <button
@@ -460,20 +429,14 @@ export function RecallManager() {
                     {recall.status === 'PENDING' && (
                       <>
                         <button
-                          onClick={() => {
-                            handleMarkStatus(recall.id, 'SENT');
-                            toast.success(`SMS reminder sent to ${recall.customerName}`);
-                          }}
+                          onClick={() => sendReminder(recall, 'SMS')}
                           className="p-1.5 hover:bg-blue-50 rounded text-blue-600"
                           title="Send SMS"
                         >
                           <MessageSquare className="w-4 h-4" />
                         </button>
                         <button
-                          onClick={() => {
-                            handleMarkStatus(recall.id, 'SENT');
-                            toast.success(`WhatsApp reminder sent to ${recall.customerName}`);
-                          }}
+                          onClick={() => sendReminder(recall, 'WHATSAPP')}
                           className="p-1.5 hover:bg-green-50 rounded text-green-600"
                           title="Send WhatsApp"
                         >
@@ -509,7 +472,7 @@ export function RecallManager() {
               <Users className="w-3 h-3" />
               Showing {filtered.length} of {recalls.length} recalls
             </span>
-            <span>Auto-generated from customer purchase history</span>
+            <span>From prescriptions expiring within 90 days</span>
           </div>
         </div>
       )}
