@@ -6,7 +6,7 @@ Customer and patient management endpoints
 
 from fastapi import APIRouter, HTTPException, Depends, Query, Path, Body
 from pydantic import BaseModel, Field, field_validator
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 from datetime import date
 import uuid
 import re
@@ -98,38 +98,64 @@ class CustomerUpdate(BaseModel):
 async def list_customers(
     search: Optional[str] = Query(None),
     customer_type: Optional[str] = Query(None),
+    store_id: Optional[str] = Query(
+        None,
+        description=(
+            "Filter customers by store. SUPERADMIN/ADMIN can pass any store_id "
+            "to scope the view (used by the topbar store-switcher). Lower roles "
+            "ignore this and always get their own active store."
+        ),
+    ),
     skip: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=100),
     current_user: dict = Depends(get_current_user),
 ):
-    """List customers with optional filtering"""
+    """List customers with optional filtering.
+
+    Store scoping rules:
+      - SUPERADMIN/ADMIN/AREA_MANAGER: see ALL customers by default; can
+        narrow to a single store via ?store_id=<>. This is the path the
+        topbar store-switcher uses.
+      - Lower roles: always pinned to their own active_store_id; the
+        ?store_id query param is ignored.
+
+    The store filter matches BOTH `home_store_id` (legacy field) AND
+    `preferred_store_id` (newer field used by TechCherry-imported
+    customers). Before May 2026 only home_store_id was checked, which
+    silently hid the 5,022 TechCherry-imported customers from /customers
+    even when filtered by BV-PUN-01.
+    """
     repo = get_customer_repository()
 
     if repo is not None:
         # Build filter
-        filter_dict = {}
+        filter_dict: Dict[str, Any] = {}
         if customer_type:
             filter_dict["customer_type"] = customer_type
 
-        # Store scoping: non-admin users only see customers from their store
+        # Determine the effective store filter
         user_roles = current_user.get("roles", [])
-        is_hq_list = any(
+        is_hq = any(
             r in user_roles for r in ["SUPERADMIN", "ADMIN", "AREA_MANAGER"]
         )
-        if not is_hq_list:
-            active_store = current_user.get("active_store_id")
-            if active_store:
-                filter_dict["home_store_id"] = active_store
+        if is_hq:
+            # HQ roles: honour explicit ?store_id, otherwise no scope.
+            effective_store = store_id
+        else:
+            # Store-level roles: always pinned to active_store_id.
+            effective_store = current_user.get("active_store_id")
 
-        # If search provided, use search method
+        if effective_store:
+            # Match either home_store_id (seed/old) or preferred_store_id
+            # (TechCherry import + future inserts).
+            filter_dict["$or"] = [
+                {"home_store_id": effective_store},
+                {"preferred_store_id": effective_store},
+            ]
+
+        # If search provided, use search method (also respects store filter)
         if search:
-            # Admins/Superadmins search all stores, others only their store
-            user_roles = current_user.get("roles", [])
-            is_hq = any(
-                r in user_roles for r in ["SUPERADMIN", "ADMIN", "AREA_MANAGER"]
-            )
-            store_filter = None if is_hq else current_user.get("active_store_id")
-            customers = repo.search_customers(search, store_filter)
+            customers = repo.search_customers(search, effective_store)
         else:
             customers = repo.find_many(filter_dict, skip=skip, limit=limit)
 
