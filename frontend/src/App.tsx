@@ -425,8 +425,13 @@ function App() {
                   <Route
                     path="incentive/settings"
                     element={
+                      // SUPERADMIN-only to match the backend: the
+                      // /incentive/points/settings/* PATCH endpoints are
+                      // SUPERADMIN-only by design (points.py), so other roles
+                      // previously saw a fully editable page where every Save
+                      // 403'd. (Widen the backend if ADMIN should manage these.)
                       <ProtectedRoute
-                        allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT']}
+                        allowedRoles={['SUPERADMIN']}
                       >
                         <IncentiveSettingsPage />
                       </ProtectedRoute>
