@@ -268,6 +268,85 @@ def test_system_prompt_renders_with_literal_curly_braces():
 
 # ----- PIXEL audit history endpoint contract -----------------------------
 
+def test_extended_context_surfaces_product_catalog_analytics():
+    """Regression for the "JARVIS asks for more data instead of answering"
+    bug. The user asked for the most expensive product in Pune and JARVIS
+    requested "IMS Reports" — because the previous context only had
+    top_skus_30d (by units sold), no price-sorted catalog data.
+
+    Now `top_products_by_price` + `catalog_by_store` are pre-computed
+    in extended_context so the LLM can answer per-store price questions
+    without any tool calls."""
+    from api.routers import jarvis as jarvis_router
+
+    class _FakeAggregateCursor:
+        def __init__(self, payload):
+            self.payload = payload
+        def __iter__(self):
+            return iter(self.payload)
+
+    class _FakeProductsCollection:
+        # The aggregations are called in a known order:
+        #   1. top_products_by_price
+        #   2. top_stock_value
+        #   3. catalog_by_category
+        #   4. catalog_by_brand
+        #   5. catalog_by_store
+        #   6. low_stock_value_at_risk
+        # Return canned data per call index — simpler than pipeline matching.
+        def __init__(self):
+            self._calls = 0
+            self._responses = [
+                # 1. top_by_price
+                [{"name": "RAYBAN MAYBACH", "brand": "MAYBACH", "category": "FRAME",
+                  "store_id": "BV-PUN-01", "mrp": 297990, "price": 297990,
+                  "stock_quantity": 1, "barcode": "2512239"}],
+                # 2. top_stock_value
+                [],
+                # 3. catalog_by_category
+                [{"_id": "FRAME", "sku_count": 4000, "total_units": 5000,
+                  "avg_price": 5200.0, "max_price": 297990.0}],
+                # 4. catalog_by_brand
+                [{"_id": "RAYBAN", "sku_count": 850, "total_units": 1200, "avg_price": 8500.0}],
+                # 5. catalog_by_store
+                [{"_id": "BV-PUN-01", "sku_count": 10805, "total_stock_value": 1234567.0}],
+                # 6. low_stock_value_at_risk
+                [],
+            ]
+        def aggregate(self, _pipeline):
+            i = self._calls
+            self._calls += 1
+            data = self._responses[i] if i < len(self._responses) else []
+            return _FakeAggregateCursor(data)
+
+    original = jarvis_router.get_db_collection
+    jarvis_router.get_db_collection = lambda name: (
+        _FakeProductsCollection() if name == "products" else None
+    )
+    try:
+        ctx = jarvis_router.JarvisAnalyticsEngine.get_extended_context()
+    finally:
+        jarvis_router.get_db_collection = original
+
+    # All five new keys must be present (even if empty for some)
+    assert "top_products_by_price" in ctx
+    assert "top_stock_value" in ctx
+    assert "catalog_by_category" in ctx
+    assert "catalog_by_brand" in ctx
+    assert "catalog_by_store" in ctx
+    assert "low_stock_value_at_risk" in ctx
+
+    # Most-expensive entry comes through with store_id so per-store
+    # filtering in the LLM works
+    top = ctx["top_products_by_price"]
+    assert top and top[0]["store_id"] == "BV-PUN-01"
+    assert top[0]["price"] == 297990
+
+    # Catalog by store gives total SKU count per store
+    by_store = ctx["catalog_by_store"]
+    assert any(s["store_id"] == "BV-PUN-01" and s["sku_count"] == 10805 for s in by_store)
+
+
 def test_extended_context_includes_ui_audit_keys_when_data_present():
     """If ui_audits has at least one PIXEL doc, the extended context
     surfaces ui_audit_latest + ui_audits_total."""

@@ -878,6 +878,169 @@ class JarvisAnalyticsEngine:
         except Exception as e:
             logger.warning("[JARVIS] top SKUs ctx failed: %s", e)
 
+        # PRODUCT CATALOG ANALYTICS — answers "most expensive product",
+        # "biggest stock value at risk", "how many SKUs per category", etc.
+        # These read from the products collection, NOT the orders, so they
+        # work even when there's no sales history yet (e.g. fresh
+        # TechCherry import where all 10,805 products exist but no orders).
+        try:
+            prod_col = get_db_collection("products")
+            if prod_col is not None:
+                # Top 20 most expensive — sorted by mrp/offer_price desc.
+                # Includes store_id so JARVIS can answer per-store queries.
+                top_by_price = list(prod_col.aggregate([
+                    {"$match": {"is_active": {"$ne": False}}},
+                    {"$addFields": {
+                        "_price": {"$ifNull": ["$offer_price", "$mrp"]},
+                    }},
+                    {"$match": {"_price": {"$gt": 0}}},
+                    {"$sort": {"_price": -1}},
+                    {"$limit": 20},
+                    {"$project": {
+                        "_id": 0, "name": 1, "brand": 1, "category": 1,
+                        "barcode": 1, "store_id": 1,
+                        "mrp": 1, "offer_price": 1, "cost_price": 1,
+                        "stock_quantity": 1,
+                        "price": "$_price",
+                    }},
+                ]))
+                ctx["top_products_by_price"] = top_by_price
+
+                # Top 20 by stock value (price * quantity_on_hand) —
+                # surfaces "which SKUs hold the most working capital".
+                top_by_value = list(prod_col.aggregate([
+                    {"$match": {"is_active": {"$ne": False}}},
+                    {"$addFields": {
+                        "_price": {"$ifNull": ["$offer_price", "$mrp"]},
+                        "_qty": {"$ifNull": ["$stock_quantity", 0]},
+                    }},
+                    {"$addFields": {
+                        "_stock_value": {"$multiply": ["$_price", "$_qty"]},
+                    }},
+                    {"$match": {"_stock_value": {"$gt": 0}}},
+                    {"$sort": {"_stock_value": -1}},
+                    {"$limit": 20},
+                    {"$project": {
+                        "_id": 0, "name": 1, "brand": 1, "category": 1,
+                        "store_id": 1,
+                        "price": "$_price",
+                        "stock_quantity": "$_qty",
+                        "stock_value": "$_stock_value",
+                    }},
+                ]))
+                ctx["top_stock_value"] = top_by_value
+
+                # Catalog summary by category + brand, plus a per-store
+                # roll-up so JARVIS knows what each store's inventory
+                # looks like at a glance.
+                by_category = list(prod_col.aggregate([
+                    {"$match": {"is_active": {"$ne": False}}},
+                    {"$group": {
+                        "_id": "$category",
+                        "sku_count": {"$sum": 1},
+                        "total_units": {"$sum": {"$ifNull": ["$stock_quantity", 0]}},
+                        "avg_price": {"$avg": {"$ifNull": ["$offer_price", "$mrp"]}},
+                        "max_price": {"$max": {"$ifNull": ["$offer_price", "$mrp"]}},
+                    }},
+                    {"$sort": {"sku_count": -1}},
+                    {"$limit": 30},
+                ]))
+                ctx["catalog_by_category"] = [
+                    {
+                        "category": str(r.get("_id") or "UNCATEGORISED"),
+                        "sku_count": int(r.get("sku_count") or 0),
+                        "total_units_on_hand": int(r.get("total_units") or 0),
+                        "avg_price": round(float(r.get("avg_price") or 0), 2),
+                        "max_price": round(float(r.get("max_price") or 0), 2),
+                    }
+                    for r in by_category
+                ]
+
+                by_brand = list(prod_col.aggregate([
+                    {"$match": {
+                        "is_active": {"$ne": False},
+                        "brand": {"$ne": "", "$ne": None},
+                    }},
+                    {"$group": {
+                        "_id": "$brand",
+                        "sku_count": {"$sum": 1},
+                        "total_units": {"$sum": {"$ifNull": ["$stock_quantity", 0]}},
+                        "avg_price": {"$avg": {"$ifNull": ["$offer_price", "$mrp"]}},
+                    }},
+                    {"$sort": {"sku_count": -1}},
+                    {"$limit": 30},
+                ]))
+                ctx["catalog_by_brand"] = [
+                    {
+                        "brand": str(r.get("_id") or "UNBRANDED"),
+                        "sku_count": int(r.get("sku_count") or 0),
+                        "total_units_on_hand": int(r.get("total_units") or 0),
+                        "avg_price": round(float(r.get("avg_price") or 0), 2),
+                    }
+                    for r in by_brand
+                ]
+
+                # Per-store catalog roll-up — answers "how many SKUs in
+                # Pune?" without JARVIS having to count.
+                by_store = list(prod_col.aggregate([
+                    {"$match": {"is_active": {"$ne": False}}},
+                    {"$group": {
+                        "_id": "$store_id",
+                        "sku_count": {"$sum": 1},
+                        "total_stock_value": {"$sum": {
+                            "$multiply": [
+                                {"$ifNull": ["$offer_price", "$mrp", 0]},
+                                {"$ifNull": ["$stock_quantity", 0]},
+                            ],
+                        }},
+                        "max_price_sku_name": {"$first": "$name"},
+                    }},
+                ]))
+                ctx["catalog_by_store"] = [
+                    {
+                        "store_id": str(r.get("_id") or "UNASSIGNED"),
+                        "sku_count": int(r.get("sku_count") or 0),
+                        "total_stock_value": round(float(r.get("total_stock_value") or 0), 2),
+                    }
+                    for r in by_store
+                ]
+
+                # Low-stock items, sorted by value at risk (price * gap).
+                # More actionable than just "X items low" since it tells
+                # the operator WHICH stockouts hurt the most.
+                low_stock = list(prod_col.aggregate([
+                    {"$match": {
+                        "is_active": {"$ne": False},
+                        "$expr": {"$lte": [
+                            {"$ifNull": ["$stock_quantity", 0]},
+                            {"$ifNull": ["$reorder_point", 0]},
+                        ]},
+                        "reorder_point": {"$gt": 0},
+                    }},
+                    {"$addFields": {
+                        "_price": {"$ifNull": ["$offer_price", "$mrp"]},
+                        "_gap": {"$subtract": [
+                            {"$ifNull": ["$reorder_point", 0]},
+                            {"$ifNull": ["$stock_quantity", 0]},
+                        ]},
+                    }},
+                    {"$addFields": {
+                        "_at_risk": {"$multiply": ["$_price", "$_gap"]},
+                    }},
+                    {"$sort": {"_at_risk": -1}},
+                    {"$limit": 15},
+                    {"$project": {
+                        "_id": 0, "name": 1, "brand": 1, "category": 1,
+                        "store_id": 1,
+                        "stock_quantity": 1, "reorder_point": 1,
+                        "price": "$_price",
+                        "value_at_risk": "$_at_risk",
+                    }},
+                ]))
+                ctx["low_stock_value_at_risk"] = low_stock
+        except Exception as e:
+            logger.warning("[JARVIS] catalog analytics ctx failed: %s", e)
+
         # Period locks + settings — answers "is March locked?"
         try:
             col = get_db_collection("period_locks")
@@ -1679,10 +1842,18 @@ You have **full read access to the entire IMS 2.0 database** as the Superadmin's
 
 **Inventory + procurement**
 - `inventory_insights` — critical alerts, reorder list, slow movers
+- `top_products_by_price` — **20 most-expensive SKUs** with brand, category, MRP, stock, store_id. Use this to answer "what's our most expensive product" / "most expensive in Pune" — filter by store_id when the user names a store.
+- `top_stock_value` — 20 SKUs holding the most working capital (price × on-hand). Useful for "where's our cash tied up".
+- `catalog_by_category` — SKU count + total units + avg/max price per category (top 30). Answers "how many frame SKUs do we have" / "which category has the most expensive items".
+- `catalog_by_brand` — SKU count + total units + avg price per brand (top 30). Answers "how many Ray-Ban SKUs" / "which brand have we stocked the most of".
+- `catalog_by_store` — per-store SKU count + total stock value. Answers "how many products in Pune" / "which store has the highest inventory value".
+- `low_stock_value_at_risk` — SKUs at/below reorder point, ranked by revenue at risk (price × stock gap). Answers "what are our most urgent reorders".
 - `vendors` — supplier roster (name, GSTIN, city, category)
 - `purchases.open_pos_sample` — open POs by vendor
 - `grns_last_30d` — goods receipts
 - `stock_counts`, `stock_transfers`, `vendor_returns` — stock movement signals
+
+**For per-store questions** (e.g. "most expensive product in Pune"): use `top_products_by_price` and filter the list by `store_id == "BV-PUN-01"` (or whichever the user named). Each entry carries its `store_id` so this is a one-line filter, no extra query needed.
 
 **Finance + payroll + incentives**
 - `expenses_mtd` — month-to-date expense total + category breakdown
