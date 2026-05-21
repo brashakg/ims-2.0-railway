@@ -51,92 +51,13 @@ export function SerialNumberTracker() {
   const loadSerializedItems = async () => {
     setIsLoading(true);
     try {
-      // No serial-number API endpoint exists yet; display placeholder data
-      const mockItems: SerializedItem[] = [
-        {
-          id: '1',
-          productId: 'p1',
-          productName: 'Phonak Audeo Paradise P90-R',
-          productSku: 'HA-001',
-          productBrand: 'Phonak',
-          productCategory: 'Hearing Aids',
-          serialNumber: 'PHA-2025-001234',
-          status: 'SOLD',
-          soldDate: '2025-01-15',
-          soldToCustomer: 'Mr. Rajesh Kumar',
-          purchaseDate: '2024-12-01',
-          warrantyMonths: 24,
-          warrantyExpiryDate: '2026-12-01',
-          warrantyStatus: 'ACTIVE',
-          supplierBatch: 'BATCH-2024-Q4',
-        },
-        {
-          id: '2',
-          productId: 'p2',
-          productName: 'Apple Watch Series 9 GPS 45mm',
-          productSku: 'SMTWT-002',
-          productBrand: 'Apple',
-          productCategory: 'Smart Watches',
-          serialNumber: 'AW-2025-567890',
-          status: 'IN_STOCK',
-          locationCode: 'C2-05',
-          purchaseDate: '2025-01-01',
-          warrantyMonths: 12,
-          warrantyExpiryDate: '2026-01-01',
-          warrantyStatus: 'ACTIVE',
-          supplierBatch: 'BATCH-2025-001',
-        },
-        {
-          id: '3',
-          productId: 'p3',
-          productName: 'Starkey Livio Edge AI 2400',
-          productSku: 'HA-015',
-          productBrand: 'Starkey',
-          productCategory: 'Hearing Aids',
-          serialNumber: 'STK-2024-998877',
-          status: 'WARRANTY_CLAIM',
-          soldDate: '2024-08-10',
-          soldToCustomer: 'Mrs. Priya Sharma',
-          purchaseDate: '2024-07-15',
-          warrantyMonths: 36,
-          warrantyExpiryDate: '2027-07-15',
-          warrantyStatus: 'ACTIVE',
-          notes: 'Customer reported intermittent connectivity issues',
-        },
-        {
-          id: '4',
-          productId: 'p4',
-          productName: 'Samsung Galaxy Watch 6 Classic',
-          productSku: 'SMTWT-008',
-          productBrand: 'Samsung',
-          productCategory: 'Smart Watches',
-          serialNumber: 'GW6-2025-112233',
-          status: 'IN_STOCK',
-          locationCode: 'C2-08',
-          purchaseDate: '2025-01-20',
-          warrantyMonths: 12,
-          warrantyExpiryDate: '2026-01-20',
-          warrantyStatus: 'ACTIVE',
-        },
-        {
-          id: '5',
-          productId: 'p5',
-          productName: 'Ray-Ban Meta Smart Glasses',
-          productSku: 'SMTSG-003',
-          productBrand: 'Ray-Ban',
-          productCategory: 'Smart Sunglasses',
-          serialNumber: 'RBM-2024-445566',
-          status: 'DAMAGED',
-          locationCode: 'DAMAGED-A',
-          purchaseDate: '2024-11-10',
-          warrantyMonths: 12,
-          warrantyExpiryDate: '2025-11-10',
-          warrantyStatus: 'EXPIRED',
-          notes: 'Dropped by customer during trial, lens cracked',
-        },
-      ];
-
-      setItems(mockItems);
+      // No serial-number API endpoint exists yet. Previously this rendered
+      // a hardcoded mock list (Phonak/Apple Watch/Starkey/Samsung/Ray-Ban
+      // with names like "Mr. Rajesh Kumar") that user reasonably mistook
+      // for real warehouse data. Now we surface an honest empty state so
+      // the UI accurately reflects "no serial tracking yet" until the
+      // /api/v1/inventory/serials endpoint exists.
+      setItems([]);
     } catch (error: any) {
       toast.error('Failed to load serialized items');
     } finally {

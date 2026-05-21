@@ -76,136 +76,23 @@ export function StockAlertsOverview() {
   const loadAlerts = async () => {
     setIsLoading(true);
     try {
-      // No dedicated stock-alerts API exists yet; display computed placeholder data
-      const mockAlerts: StockAlert[] = [
-        {
-          id: '1',
-          sku: 'SG-078',
-          productName: 'Vogue Cat Eye Sunglasses',
-          brand: 'Vogue',
-          category: 'Sunglasses',
-          currentStock: 15,
-          reorderPoint: 5,
-          safetyStock: 10,
-          projectedDaysToStockout: 180,
-          alertType: 'DEAD_STOCK',
-          severity: 'CRITICAL',
-          actionRequired: 'Consider markdown or clearance sale',
-          lastMovementDate: '2024-11-10',
-          daysWithoutMovement: 91,
-          costImpact: 22500,
-          recommendedOrder: 0,
-        },
-        {
-          id: '2',
-          sku: 'FR-112',
-          productName: 'Prada Baroque Frame',
-          brand: 'Prada',
-          category: 'Frames',
-          currentStock: 3,
-          reorderPoint: 5,
-          safetyStock: 8,
-          projectedDaysToStockout: 10,
-          alertType: 'LOW_STOCK',
-          severity: 'HIGH',
-          actionRequired: 'Urgent reorder required',
-          lastMovementDate: '2024-12-20',
-          daysWithoutMovement: 51,
-          salesVelocity: 0.3,
-          recommendedOrder: 12,
-          costImpact: 18000,
-        },
-        {
-          id: '3',
-          sku: 'FR-001',
-          productName: 'Ray-Ban Aviator Classic',
-          brand: 'Ray-Ban',
-          category: 'Frames',
-          currentStock: 5,
-          reorderPoint: 8,
-          safetyStock: 12,
-          projectedDaysToStockout: 2,
-          alertType: 'REORDER_ALERT',
-          severity: 'CRITICAL',
-          actionRequired: 'Place reorder immediately',
-          lastMovementDate: '2025-02-06',
-          salesVelocity: 2.5,
-          recommendedOrder: 24,
-          costImpact: 48000,
-        },
-        {
-          id: '4',
-          sku: 'CL-023',
-          productName: 'Bausch & Lomb SofLens Daily',
-          brand: 'Bausch & Lomb',
-          category: 'Contact Lenses',
-          currentStock: 120,
-          reorderPoint: 50,
-          safetyStock: 80,
-          projectedDaysToStockout: 3,
-          alertType: 'FAST_MOVING',
-          severity: 'HIGH',
-          actionRequired: 'High velocity item - maintain adequate stock',
-          lastMovementDate: '2025-02-06',
-          salesVelocity: 5.8,
-          recommendedOrder: 60,
-          costImpact: 60000,
-        },
-        {
-          id: '5',
-          sku: 'LS-156',
-          productName: 'Crizal UV Protective Lens',
-          brand: 'Essilor',
-          category: 'Optical Lenses',
-          currentStock: 200,
-          reorderPoint: 100,
-          safetyStock: 150,
-          projectedDaysToStockout: 45,
-          alertType: 'OVERSTOCK',
-          severity: 'MEDIUM',
-          actionRequired: 'Reduce procurement - excess inventory',
-          lastMovementDate: '2025-02-05',
-          salesVelocity: 4.4,
-          recommendedOrder: 0,
-          costImpact: 180000,
-        },
-        {
-          id: '6',
-          sku: 'ACC-045',
-          productName: 'Lens Cleaning Kit Premium',
-          brand: 'Opticare',
-          category: 'Accessories',
-          currentStock: 2,
-          reorderPoint: 10,
-          safetyStock: 15,
-          projectedDaysToStockout: 0.25,
-          alertType: 'LOW_STOCK',
-          severity: 'CRITICAL',
-          actionRequired: 'Reorder urgently - likely to stockout today',
-          lastMovementDate: '2025-02-06',
-          salesVelocity: 8,
-          recommendedOrder: 30,
-          costImpact: 7500,
-        },
-      ];
-
-      // Calculate statistics
-      const alertStats: AlertStats = {
-        totalAlerts: mockAlerts.length,
-        critical: mockAlerts.filter(a => a.severity === 'CRITICAL').length,
-        high: mockAlerts.filter(a => a.severity === 'HIGH').length,
-        medium: mockAlerts.filter(a => a.severity === 'MEDIUM').length,
-        low: mockAlerts.filter(a => a.severity === 'LOW').length,
-        deadStockValue: mockAlerts
-          .filter(a => a.alertType === 'DEAD_STOCK')
-          .reduce((sum, a) => sum + (a.costImpact || 0), 0),
-        recommendedRestockValue: mockAlerts
-          .filter(a => a.recommendedOrder && a.recommendedOrder > 0)
-          .reduce((sum, a) => sum + ((a.recommendedOrder || 0) * (a.costImpact || 0) / a.currentStock), 0),
-      };
-
-      setAlerts(mockAlerts);
-      setStats(alertStats);
+      // No dedicated stock-alerts API exists yet. Previously this component
+      // rendered a hardcoded list (Vogue Cat Eye, Prada Baroque, Ray-Ban
+      // Aviator Classic etc.) with fabricated "₹22,500 dead stock" /
+      // "₹18,000 reorder" cost impacts. With the TechCherry import landing
+      // 10,805 real Pune SKUs, that mock data was misleading — managers
+      // would have acted on phantom alerts. Show an empty state instead
+      // until /api/v1/inventory/alerts exists.
+      setAlerts([]);
+      setStats({
+        totalAlerts: 0,
+        critical: 0,
+        high: 0,
+        medium: 0,
+        low: 0,
+        deadStockValue: 0,
+        recommendedRestockValue: 0,
+      });
     } catch (error) {
       // silently handle error
     } finally {
