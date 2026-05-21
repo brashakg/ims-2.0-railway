@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, Query
 from typing import Any, Dict, Optional
 from datetime import date, datetime, timedelta
 from calendar import monthrange
-from .auth import get_current_user
+from .auth import get_current_user, require_roles
 from ..dependencies import (
     get_order_repository,
     get_stock_repository,
@@ -19,6 +19,12 @@ from ..dependencies import (
 )
 
 router = APIRouter()
+
+# Roles allowed to view financial reports (P&L, GST returns, outstanding,
+# margins, discount analysis). Mirrors the frontend Reports route guard;
+# SUPERADMIN auto-passes. NOTE: /dashboard, /targets and the operational
+# reports stay OPEN — the Hub uses /dashboard + /targets for every role.
+_REPORT_FINANCE_ROLES = ("ADMIN", "AREA_MANAGER", "STORE_MANAGER", "ACCOUNTANT")
 
 
 # ============================================================================
@@ -617,7 +623,7 @@ async def attendance_report(
 @router.get("/finance/outstanding")
 async def outstanding_report(
     store_id: Optional[str] = Query(None),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_roles(*_REPORT_FINANCE_ROLES)),
 ):
     """Get outstanding payments report"""
     active_store = store_id or current_user.get("active_store_id")
@@ -721,7 +727,7 @@ async def gst_report(
     from_date: date = Query(...),
     to_date: date = Query(...),
     store_id: Optional[str] = Query(None),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_roles(*_REPORT_FINANCE_ROLES)),
 ):
     """Get GST report for date range"""
     active_store = store_id or current_user.get("active_store_id")
@@ -967,7 +973,7 @@ async def profit_by_category(
     store_id: Optional[str] = Query(None),
     from_date: date = Query(...),
     to_date: date = Query(...),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_roles(*_REPORT_FINANCE_ROLES)),
 ):
     """Profit by product category"""
     active_store = store_id or current_user.get("active_store_id")
@@ -1026,7 +1032,7 @@ async def profit_by_category(
 async def profit_by_store(
     from_date: date = Query(...),
     to_date: date = Query(...),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_roles(*_REPORT_FINANCE_ROLES)),
 ):
     """Profit by store (if multi-store)"""
     order_repo = get_order_repository()
@@ -1080,7 +1086,7 @@ async def discount_analysis(
     store_id: Optional[str] = Query(None),
     from_date: date = Query(...),
     to_date: date = Query(...),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_roles(*_REPORT_FINANCE_ROLES)),
 ):
     """Discount average by category and store"""
     active_store = store_id or current_user.get("active_store_id")
@@ -1458,7 +1464,7 @@ async def expense_vs_revenue(
     store_id: Optional[str] = Query(None),
     from_date: date = Query(...),
     to_date: date = Query(...),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_roles(*_REPORT_FINANCE_ROLES)),
 ):
     """Expense vs revenue comparison"""
     active_store = store_id or current_user.get("active_store_id")
@@ -1707,7 +1713,7 @@ def _get_raw_db():
 async def gstr1_report(
     month: str = Query(..., description="Tax period in YYYY-MM format"),
     store_id: Optional[str] = Query(None),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_roles(*_REPORT_FINANCE_ROLES)),
 ):
     """
     GSTR-1 report: outward supplies aggregated from the orders collection.
@@ -1989,7 +1995,7 @@ async def gstr1_report(
 async def gstr3b_report(
     month: str = Query(..., description="Tax period in YYYY-MM format"),
     store_id: Optional[str] = Query(None),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_roles(*_REPORT_FINANCE_ROLES)),
 ):
     """
     GSTR-3B summary return: aggregates output tax from the orders collection.
