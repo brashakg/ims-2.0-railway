@@ -798,15 +798,19 @@ async def receive_transfer(
 async def get_non_moving_stock(
     days: int = Query(90, ge=1, le=365),
     category: Optional[str] = Query(None),
+    store_id: Optional[str] = Query(None),
     current_user: dict = Depends(get_current_user),
 ):
     """
     Identify products with 0 sales in the last N days.
     GET /inventory/non-moving?days=90
+    Scoped to the active store unless an explicit store_id is supplied.
     """
     db = _get_db()
     if db is None:
         raise HTTPException(status_code=500, detail="Database connection error")
+
+    active_store = store_id or current_user.get("active_store_id")
 
     try:
         products_coll = db.get_collection("products")
@@ -817,17 +821,17 @@ async def get_non_moving_stock(
         query = {} if not category else {"category": category}
         products = list(products_coll.find(query, {"_id": 1, "name": 1, "sku": 1}))
 
-        # Get products with sales in last N days
+        # Get products with sales in last N days (at the active store)
         cutoff_date = datetime.utcnow() - timedelta(days=days)
         sold_products = set()
 
-        orders = orders_coll.find(
-            {
-                "created_at": {"$gte": cutoff_date},
-                "status": {"$in": _SOLD_STATUSES},
-            },
-            {"items": 1},
-        )
+        orders_filter = {
+            "created_at": {"$gte": cutoff_date},
+            "status": {"$in": _SOLD_STATUSES},
+        }
+        if active_store:
+            orders_filter["store_id"] = active_store
+        orders = orders_coll.find(orders_filter, {"items": 1})
 
         for order in orders:
             for item in order.get("items", []):
@@ -838,13 +842,19 @@ async def get_non_moving_stock(
         for product in products:
             product_id = str(product.get("_id"))
             if product_id not in sold_products:
-                # Get current stock
-                stock = stock_coll.find({"product_id": product_id})
+                # Get current stock (at the active store)
+                stock_filter = {"product_id": product_id}
+                if active_store:
+                    stock_filter["store_id"] = active_store
+                stock = stock_coll.find(stock_filter)
                 total_qty = sum(s.get("quantity", 0) for s in stock)
 
-                # Get last sold date
+                # Get last sold date (at the active store)
+                last_order_filter = {"items.product_id": product_id}
+                if active_store:
+                    last_order_filter["store_id"] = active_store
                 last_order = orders_coll.find_one(
-                    {"items.product_id": product_id},
+                    last_order_filter,
                     {"created_at": 1},
                     sort=[("created_at", -1)],
                 )
