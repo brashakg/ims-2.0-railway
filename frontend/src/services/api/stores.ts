@@ -153,29 +153,10 @@ export const adminSystemApi = {
     return response.data;
   },
 
-  restoreBackup: async (backupId: string) => {
-    const response = await api.post(`/admin/system/backups/${backupId}/restore`);
-    return response.data;
-  },
-
-  downloadBackup: async (backupId: string) => {
-    const response = await api.get(`/admin/system/backups/${backupId}/download`, { responseType: 'blob' });
-    return response.data;
-  },
-
-  exportData: async (type: 'products' | 'customers' | 'orders' | 'inventory' | 'all') => {
-    const response = await api.get(`/admin/system/export/${type}`, { responseType: 'blob' });
-    return response.data;
-  },
-
-  importData: async (type: string, file: File) => {
-    const formData = new FormData();
-    formData.append('file', file);
-    const response = await api.post(`/admin/system/import/${type}`, formData, {
-      headers: { 'Content-Type': 'multipart/form-data' },
-    });
-    return response.data;
-  },
+  // restoreBackup / downloadBackup / exportData / importData removed —
+  // the backend routes are either missing (404) or hardcoded 501 stubs, and
+  // nothing renders these. The Settings Import/Export buttons were removed
+  // too. Re-add with real implementations when bulk import/export is built.
 
   getAuditLogs: async (params?: { userId?: string; action?: string; startDate?: string; endDate?: string }) => {
     const response = await api.get('/admin/system/audit-logs', { params });
