@@ -14,7 +14,7 @@ import { useSearchParams } from 'react-router-dom';
 import {
   Store, Users, Tag, Percent, Database,
   ChevronRight, Plus, AlertCircle,
-  RefreshCw, ToggleLeft, ToggleRight, Upload, Download,
+  RefreshCw, ToggleLeft, ToggleRight,
   Link, Boxes, CircleDot,
   User, Building2, Receipt, Bell, History, Printer, Save,
   Search, Calendar, Filter, X, Shield, LogOut, Bot, Award,
@@ -1029,67 +1029,12 @@ function SystemSection({ systemStatus }: { systemStatus: { database: string; api
       <div className="card">
         <h2 className="text-lg font-semibold text-gray-900 mb-4">Data Management</h2>
         <div className="space-y-3">
-          <button
-            onClick={() => {
-              const input = document.createElement('input');
-              input.type = 'file';
-              input.accept = '.csv,.xlsx,.xls';
-              input.onchange = async (e) => {
-                const file = (e.target as HTMLInputElement).files?.[0];
-                if (file) {
-                  try {
-                    const type = prompt('Import type (products, customers, inventory):');
-                    if (type) {
-                      await adminSystemApi.importData(type, file);
-                      toast.success('Data imported successfully');
-                    }
-                  } catch {
-                    toast.error('Failed to import data');
-                  }
-                }
-              };
-              input.click();
-            }}
-            className="w-full p-4 bg-gray-50 rounded-lg text-left hover:bg-gray-200 transition-colors flex items-center justify-between"
-          >
-            <div className="flex items-center gap-3">
-              <Upload className="w-5 h-5 text-gray-500" />
-              <div>
-                <p className="font-medium text-gray-900">Import Data</p>
-                <p className="text-sm text-gray-500">Import products, customers from CSV/Excel</p>
-              </div>
-            </div>
-            <ChevronRight className="w-5 h-5 text-gray-500" />
-          </button>
-          <button
-            onClick={async () => {
-              const type = prompt('Export type (products, customers, orders, inventory, all):');
-              if (type) {
-                try {
-                  const blob = await adminSystemApi.exportData(type as any);
-                  const url = URL.createObjectURL(blob);
-                  const a = document.createElement('a');
-                  a.href = url;
-                  a.download = `ims_export_${type}_${new Date().toISOString().split('T')[0]}.xlsx`;
-                  a.click();
-                  URL.revokeObjectURL(url);
-                  toast.success('Data exported successfully');
-                } catch {
-                  toast.error('Failed to export data');
-                }
-              }
-            }}
-            className="w-full p-4 bg-gray-50 rounded-lg text-left hover:bg-gray-200 transition-colors flex items-center justify-between"
-          >
-            <div className="flex items-center gap-3">
-              <Download className="w-5 h-5 text-gray-500" />
-              <div>
-                <p className="font-medium text-gray-900">Export Data</p>
-                <p className="text-sm text-gray-500">Export reports and data to Excel</p>
-              </div>
-            </div>
-            <ChevronRight className="w-5 h-5 text-gray-500" />
-          </button>
+          {/* Import Data (POST /admin/system/import/{type}) and Export Data
+              (GET /admin/system/export/{type}) buttons were removed: the
+              import route doesn't exist (404) and export is a hardcoded 501
+              stub. Bulk data import/export is a sensitive operation worth
+              building properly (with format + permission handling) rather
+              than shipping broken buttons. Backup Database below works. */}
           <button
             onClick={async () => {
               if (window.confirm('Create a full system backup?')) {
