@@ -3404,7 +3404,10 @@ async def growth_blueprint(
 
     # 3. Compose the user prompt with the analytics brief
     sections_list = "\n".join(f"{i+1}. {s}" for i, s in enumerate(_BLUEPRINT_SECTIONS))
-    system = _BLUEPRINT_SYSTEM_PROMPT.format(sections_list=sections_list)
+    # .replace() rather than .format() — defensive against future edits
+    # adding curly-braced literals (e.g. JSON shape examples) to the
+    # prompt. .format() would treat them as missing placeholders.
+    system = _BLUEPRINT_SYSTEM_PROMPT.replace("{sections_list}", sections_list)
     user_msg = (
         f"Store: {active_store}\n"
         f"As-of: {datetime.now().strftime('%Y-%m-%d %H:%M IST')}\n\n"

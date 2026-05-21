@@ -1623,8 +1623,14 @@ Current date and time: {current_datetime}
         """
         from agents import llm_provider
 
-        system_prompt = cls.JARVIS_SYSTEM_PROMPT.format(
-            current_datetime=datetime.now().strftime("%Y-%m-%d %H:%M:%S IST")
+        # Use .replace() rather than .format() — the prompt contains lots
+        # of literal `{collection}`, `{...}` and other curly braces as
+        # documentation of API paths and JSON keys, which .format() would
+        # interpret as missing placeholders → KeyError. .replace() only
+        # touches the explicit `{current_datetime}` token.
+        system_prompt = cls.JARVIS_SYSTEM_PROMPT.replace(
+            "{current_datetime}",
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S IST"),
         )
         return await llm_provider.complete(
             system_prompt,
