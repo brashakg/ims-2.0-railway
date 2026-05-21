@@ -48,6 +48,7 @@ const TasksDashboard = lazy(() => import('./pages/tasks/TasksDashboard').then(m 
 const HRPage = lazy(() => import('./pages/hr/HRPage').then(m => ({ default: m.HRPage })));
 const PayrollDashboard = lazy(() => import('./pages/hr/PayrollDashboard').then(m => ({ default: m.PayrollDashboard })));
 const ReportsPage = lazy(() => import('./pages/reports/ReportsPage').then(m => ({ default: m.ReportsPage })));
+const GrowthBlueprintPage = lazy(() => import('./pages/reports/GrowthBlueprintPage').then(m => ({ default: m.GrowthBlueprintPage })));
 const SettingsPage = lazy(() => import('./pages/settings/SettingsPage').then(m => ({ default: m.SettingsPage })));
 const DayEndReport = lazy(() => import('./pages/reports/DayEndReport'));
 const OutstandingPaymentsReport = lazy(() => import('./pages/reports/OutstandingPaymentsReport'));
@@ -623,6 +624,16 @@ function App() {
                         allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT']}
                       >
                         <ReportsPage />
+                      </ProtectedRoute>
+                    }
+                  />
+
+                  {/* R3 — Growth Blueprint (SUPERADMIN-only — uses LLM tokens) */}
+                  <Route
+                    path="reports/blueprint"
+                    element={
+                      <ProtectedRoute allowedRoles={['SUPERADMIN']}>
+                        <GrowthBlueprintPage />
                       </ProtectedRoute>
                     }
                   />
