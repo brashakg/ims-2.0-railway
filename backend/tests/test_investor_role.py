@@ -133,9 +133,11 @@ def test_non_investor_users_unaffected(client):
 
 
 def test_investor_role_enum_exists():
-    """Schema enum (database/schemas.py) and rbac.Role enum both
-    include INVESTOR — drift between the two role lists has burned us
-    before (see CLAUDE.md notes)."""
-    from api.security.rbac import Role
-    assert hasattr(Role, "INVESTOR")
-    assert Role.INVESTOR.value == "INVESTOR"
+    """The canonical role enum (database/schemas.py USER_SCHEMA) includes
+    INVESTOR — drift between role lists has burned us before (see CLAUDE.md
+    notes). This is the actual MongoDB validator, so it's the source of truth
+    for which roles are accepted."""
+    from database.schemas import USER_SCHEMA
+
+    role_enum = USER_SCHEMA["properties"]["roles"]["items"]["enum"]
+    assert "INVESTOR" in role_enum
