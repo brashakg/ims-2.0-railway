@@ -9,6 +9,7 @@ from fastapi import APIRouter, HTTPException, Depends, Query, Path, Body
 from pydantic import BaseModel, Field
 from typing import List, Optional, Literal
 from datetime import datetime, date, timedelta
+import re
 import uuid
 import logging
 
@@ -637,46 +638,160 @@ def _determine_lifecycle_phase(customer: dict, orders: list) -> dict:
     }
 
 
-def _perform_rfm_segmentation(customers: list) -> list:
-    """Perform RFM segmentation on all customers"""
-    segments = [
+_SEGMENT_DEFS = [
+    ("champions", "Champions", "Recent, frequent, high-value purchases. VIP tier customers."),
+    ("loyal", "Loyal Customers", "Consistent, regular purchases. Repeat buyers."),
+    ("big_spenders", "Big Spenders", "High lifetime value regardless of recency."),
+    ("at_risk", "At Risk", "Were regular, now declining engagement."),
+    ("lost", "Lost Customers", "No activity in 12+ months."),
+]
+
+# Order statuses that count as a real sale (both cases — TechCherry uses
+# uppercase "DELIVERED"). Mirrors inventory._SOLD_STATUSES.
+_SOLD_STATUSES = [
+    "DELIVERED", "delivered", "Delivered",
+    "COMPLETED", "completed", "Completed",
+    "PAID", "paid", "Paid",
+    "FULFILLED", "fulfilled", "Fulfilled",
+]
+
+
+def _crm_get_db():
+    try:
+        from ..dependencies import get_db
+
+        conn = get_db()
+        if conn is not None and conn.is_connected:
+            return conn.db
+    except Exception:
+        pass
+    return None
+
+
+def _norm_phone(v) -> str:
+    if not v:
+        return ""
+    digits = re.sub(r"\D", "", str(v))
+    return digits[-10:] if len(digits) >= 10 else digits
+
+
+def _empty_segments() -> list:
+    return [
         {
-            "segment_id": "champions",
-            "segment_name": "Champions",
+            "segment_id": k,
+            "segment_name": n,
             "customer_count": 0,
             "avg_lifetime_value": 0,
-            "description": "Recent, frequent, high-value purchases. VIP tier customers.",
-        },
-        {
-            "segment_id": "loyal",
-            "segment_name": "Loyal Customers",
-            "customer_count": 0,
-            "avg_lifetime_value": 0,
-            "description": "Consistent, regular purchases. Repeat buyers.",
-        },
-        {
-            "segment_id": "big_spenders",
-            "segment_name": "Big Spenders",
-            "customer_count": 0,
-            "avg_lifetime_value": 0,
-            "description": "High lifetime value regardless of recency.",
-        },
-        {
-            "segment_id": "at_risk",
-            "segment_name": "At Risk",
-            "customer_count": 0,
-            "avg_lifetime_value": 0,
-            "description": "Were regular, now declining engagement.",
-        },
-        {
-            "segment_id": "lost",
-            "segment_name": "Lost Customers",
-            "customer_count": 0,
-            "avg_lifetime_value": 0,
-            "description": "No activity in 12+ months.",
-        },
+            "description": d,
+        }
+        for k, n, d in _SEGMENT_DEFS
     ]
-    return segments
+
+
+def _perform_rfm_segmentation(customers: list) -> list:
+    """Real RFM segmentation computed from the orders collection.
+
+    Each customer is matched to their orders by customer_id (native) or by
+    normalised phone (TechCherry orders carry customer_phone, not id). We
+    derive Recency (days since last order), Frequency (order count) and
+    Monetary (total spend) and bucket purchasers into the five segments.
+    Customers with no matched orders are prospects, not an RFM segment, so
+    they are excluded rather than padding "Lost". Returns honest zero counts
+    when the DB is unavailable. Previously this returned all-zeros (a stub).
+    """
+    db_conn = _crm_get_db()
+    if db_conn is None or not customers:
+        return _empty_segments()
+
+    by_cid: dict = {}
+    by_phone: dict = {}
+    try:
+        orders_coll = db_conn.get_collection("orders")
+        cursor = orders_coll.find(
+            {"status": {"$in": _SOLD_STATUSES}},
+            {
+                "_id": 0,
+                "customer_id": 1,
+                "customer_phone": 1,
+                "grand_total": 1,
+                "total_amount": 1,
+                "created_at": 1,
+            },
+        ).limit(50000)
+        for o in cursor:
+            amt = float(o.get("grand_total") or o.get("total_amount") or 0)
+            dt = o.get("created_at")
+            for key_map, key in (
+                (by_cid, o.get("customer_id")),
+                (by_phone, _norm_phone(o.get("customer_phone"))),
+            ):
+                if not key:
+                    continue
+                rec = key_map.setdefault(key, {"count": 0, "monetary": 0.0, "last": None})
+                rec["count"] += 1
+                rec["monetary"] += amt
+                if dt and (rec["last"] is None or dt > rec["last"]):
+                    rec["last"] = dt
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.warning("RFM order aggregation failed: %s", exc)
+        return _empty_segments()
+
+    now = datetime.utcnow()
+
+    def _recency_days(last):
+        if not last:
+            return None
+        try:
+            if isinstance(last, str):
+                last = datetime.fromisoformat(last.replace("Z", "+00:00"))
+            if getattr(last, "tzinfo", None) is not None:
+                last = last.replace(tzinfo=None)
+            return (now - last).days
+        except Exception:
+            return None
+
+    buckets = {k: {"count": 0, "ltv_sum": 0.0} for k, _, _ in _SEGMENT_DEFS}
+
+    for c in customers:
+        stats = by_cid.get(c.get("customer_id"))
+        if not stats:
+            ph = _norm_phone(c.get("mobile") or c.get("phone"))
+            stats = by_phone.get(ph) if ph else None
+        if not stats or stats["count"] == 0:
+            continue  # no purchase history → prospect, not an RFM segment
+
+        freq = stats["count"]
+        monetary = stats["monetary"]
+        rdays = _recency_days(stats["last"])
+        rdays = rdays if rdays is not None else 99999
+
+        if rdays <= 90 and freq >= 3:
+            seg = "champions"
+        elif freq >= 3:
+            seg = "loyal"
+        elif monetary >= 25000:
+            seg = "big_spenders"
+        elif rdays <= 365:
+            seg = "at_risk"
+        else:
+            seg = "lost"
+        buckets[seg]["count"] += 1
+        buckets[seg]["ltv_sum"] += monetary
+
+    return [
+        {
+            "segment_id": k,
+            "segment_name": n,
+            "customer_count": buckets[k]["count"],
+            "avg_lifetime_value": (
+                round(buckets[k]["ltv_sum"] / buckets[k]["count"], 2)
+                if buckets[k]["count"]
+                else 0
+            ),
+            "description": d,
+        }
+        for k, n, d in _SEGMENT_DEFS
+    ]
 
 
 def _identify_churn_risk_customers(customers: list, risk_level: str) -> list:
