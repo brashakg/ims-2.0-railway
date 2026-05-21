@@ -1,117 +1,58 @@
 // ============================================================================
 // IMS 2.0 - Customer Segmentation Page
 // ============================================================================
-// RFM Analysis: Champions, Loyal, Big Spenders, At Risk, Lost customer segments
+// RFM Analysis: Champions, Loyal, Big Spenders, At Risk, Lost customer segments.
+// Data is REAL — computed by GET /crm/customers/segment/rfm from the orders
+// collection (recency / frequency / monetary). This page previously rendered a
+// hardcoded SEGMENTS array with fabricated counts (145 Champions, 94% retention,
+// 320% ROI, etc.) and a fake store filter — all removed.
 
-import { useState } from 'react';
-import { Users, Target, Mail, Filter } from 'lucide-react';
+import { useState, useEffect } from 'react';
+import { Users, Loader2, BarChart3 } from 'lucide-react';
 import clsx from 'clsx';
+import api from '../../services/api/client';
 
-interface Segment {
-  id: string;
-  name: string;
-  color: string;
-  bgColor: string;
-  customerCount: number;
-  avgLifetimeValue: number;
-  avgOrderValue: number;
+interface RfmSegment {
+  segment_id: string;
+  segment_name: string;
+  customer_count: number;
+  avg_lifetime_value: number;
   description: string;
-  actionLabel: string;
-  metrics: {
-    label: string;
-    value: string;
-  }[];
 }
 
-const SEGMENTS: Segment[] = [
-  {
-    id: 'champions',
-    name: 'Champions',
-    color: 'text-green-600',
-    bgColor: 'bg-green-50 border-green-200',
-    customerCount: 145,
-    avgLifetimeValue: 85000,
-    avgOrderValue: 8500,
-    description: 'Recent, frequent, high-value customers. Top priorities.',
-    actionLabel: 'VIP Engagement',
-    metrics: [
-      { label: 'Frequency', value: '4.2x/month' },
-      { label: 'Retention', value: '94%' },
-      { label: 'ROI', value: '320%' },
-    ],
-  },
-  {
-    id: 'loyal',
-    name: 'Loyal Customers',
-    color: 'text-blue-600',
-    bgColor: 'bg-blue-50 border-blue-200',
-    customerCount: 312,
-    avgLifetimeValue: 42000,
-    avgOrderValue: 4200,
-    description: 'Consistent repeat buyers with steady engagement.',
-    actionLabel: 'Retention Program',
-    metrics: [
-      { label: 'Frequency', value: '2.1x/month' },
-      { label: 'Retention', value: '87%' },
-      { label: 'Churn Risk', value: '8%' },
-    ],
-  },
-  {
-    id: 'big_spenders',
-    name: 'Big Spenders',
-    color: 'text-yellow-600',
-    bgColor: 'bg-yellow-50 border-yellow-200',
-    customerCount: 89,
-    avgLifetimeValue: 125000,
-    avgOrderValue: 12500,
-    description: 'High-value customers regardless of recency.',
-    actionLabel: 'Premium Services',
-    metrics: [
-      { label: 'Avg Order', value: '₹12,500' },
-      { label: 'LTV', value: '₹125K' },
-      { label: 'Growth', value: '15%' },
-    ],
-  },
-  {
-    id: 'at_risk',
-    name: 'At Risk',
-    color: 'text-orange-600',
-    bgColor: 'bg-orange-50 border-orange-200',
-    customerCount: 234,
-    avgLifetimeValue: 18000,
-    avgOrderValue: 1800,
-    description: 'Were regular, now declining engagement.',
-    actionLabel: 'Win-Back Campaign',
-    metrics: [
-      { label: 'Days Inactive', value: '120+' },
-      { label: 'Churn Risk', value: '72%' },
-      { label: 'Recovery', value: '35%' },
-    ],
-  },
-  {
-    id: 'lost',
-    name: 'Lost Customers',
-    color: 'text-red-600',
-    bgColor: 'bg-red-50 border-red-200',
-    customerCount: 156,
-    avgLifetimeValue: 5200,
-    avgOrderValue: 520,
-    description: 'No activity in 12+ months.',
-    actionLabel: 'Re-activation',
-    metrics: [
-      { label: 'Inactivity', value: '300+ days' },
-      { label: 'LTV', value: '₹5.2K' },
-      { label: 'Revival Rate', value: '12%' },
-    ],
-  },
-];
+// Visual config only (not data). Keyed by the backend segment_id.
+const SEGMENT_STYLE: Record<string, { color: string; bar: string }> = {
+  champions: { color: 'text-green-600', bar: 'bg-green-500' },
+  loyal: { color: 'text-blue-600', bar: 'bg-blue-500' },
+  big_spenders: { color: 'text-yellow-600', bar: 'bg-yellow-500' },
+  at_risk: { color: 'text-orange-600', bar: 'bg-orange-500' },
+  lost: { color: 'text-red-600', bar: 'bg-red-500' },
+};
+const styleFor = (id: string) =>
+  SEGMENT_STYLE[id] || { color: 'text-gray-600', bar: 'bg-gray-400' };
 
 export function CustomerSegmentation() {
-  const [selectedSegment, setSelectedSegment] = useState<string | null>(null);
-  const [filterStore, setFilterStore] = useState('all');
+  const [segments, setSegments] = useState<RfmSegment[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
 
-  const totalCustomers = SEGMENTS.reduce((sum, s) => sum + s.customerCount, 0);
-  const totalValue = SEGMENTS.reduce((sum, s) => sum + (s.avgLifetimeValue * s.customerCount), 0);
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await api.get('/crm/customers/segment/rfm');
+        setSegments(Array.isArray(res.data) ? res.data : []);
+      } catch {
+        setSegments([]);
+      } finally {
+        setIsLoading(false);
+      }
+    })();
+  }, []);
+
+  const totalCustomers = segments.reduce((s, x) => s + (x.customer_count || 0), 0);
+  const totalValue = segments.reduce(
+    (s, x) => s + (x.avg_lifetime_value || 0) * (x.customer_count || 0),
+    0
+  );
 
   return (
     <div className="inv-body">
@@ -120,144 +61,98 @@ export function CustomerSegmentation() {
         <div>
           <div className="eyebrow" style={{ marginBottom: 6 }}>CRM · Segmentation</div>
           <h1>Who to talk to, about what.</h1>
-          <div className="hint">RFM-based segments: Champions, Loyal, At-Risk, Hibernating, Lost. Feed campaigns and follow-up priority.</div>
+          <div className="hint">RFM segments computed from real purchase history: Champions, Loyal, Big Spenders, At Risk, Lost.</div>
         </div>
       </div>
 
-      {/* Summary Stats */}
-      <div className="grid grid-cols-3 gap-4">
-        <div className="bg-white border border-gray-200 rounded-lg p-4">
-          <p className="text-gray-500 text-sm mb-1">Total Customers</p>
-          <p className="text-2xl font-bold text-gray-900">{totalCustomers}</p>
+      {isLoading ? (
+        <div className="flex items-center justify-center py-16">
+          <Loader2 className="w-8 h-8 text-blue-500 animate-spin" />
         </div>
-        <div className="bg-white border border-gray-200 rounded-lg p-4">
-          <p className="text-gray-500 text-sm mb-1">Total Value</p>
-          <p className="text-2xl font-bold text-green-600">₹{(totalValue / 100000).toFixed(1)}L</p>
+      ) : totalCustomers === 0 ? (
+        <div className="bg-white border border-gray-200 rounded-lg p-10 text-center text-gray-500">
+          <BarChart3 className="w-12 h-12 mx-auto mb-3 opacity-40" />
+          <p className="font-medium text-gray-700">No segmented customers yet</p>
+          <p className="text-sm">RFM segments appear once customers have recorded purchases.</p>
         </div>
-        <div className="bg-white border border-gray-200 rounded-lg p-4">
-          <p className="text-gray-500 text-sm mb-1">Avg Customer LTV</p>
-          <p className="text-2xl font-bold text-blue-600">₹{(totalValue / totalCustomers).toLocaleString('en-IN', { maximumFractionDigits: 0 })}</p>
-        </div>
-      </div>
-
-      {/* Filters */}
-      <div className="flex items-center gap-3">
-        <Filter className="w-5 h-5 text-gray-500" />
-        <select
-          value={filterStore}
-          onChange={(e) => setFilterStore(e.target.value)}
-          className="bg-white border border-gray-300 rounded px-3 py-2 text-gray-900 text-sm"
-        >
-          <option value="all">All Stores</option>
-          <option value="main">Main Store</option>
-          <option value="downtown">Downtown</option>
-          <option value="mall">Mall Location</option>
-        </select>
-      </div>
-
-      {/* Segment Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        {SEGMENTS.map((segment) => (
-          <div
-            key={segment.id}
-            onClick={() => setSelectedSegment(selectedSegment === segment.id ? null : segment.id)}
-            className={clsx(
-              'rounded-lg p-6 border transition-all cursor-pointer',
-              selectedSegment === segment.id
-                ? `${segment.bgColor} ring-2 ring-offset-2 ring-offset-white`
-                : 'bg-white border border-gray-200 border-gray-200 hover:border-gray-300'
-            )}
-          >
-            {/* Header */}
-            <div className="flex items-start justify-between mb-4">
-              <div>
-                <h3 className={clsx('text-xl font-bold mb-1', segment.color)}>{segment.name}</h3>
-                <p className="text-gray-500 text-sm">{segment.description}</p>
-              </div>
-              <Users className={clsx('w-6 h-6', segment.color)} />
+      ) : (
+        <>
+          {/* Summary Stats */}
+          <div className="grid grid-cols-3 gap-4">
+            <div className="bg-white border border-gray-200 rounded-lg p-4">
+              <p className="text-gray-500 text-sm mb-1">Segmented Customers</p>
+              <p className="text-2xl font-bold text-gray-900">{totalCustomers}</p>
             </div>
-
-            {/* Main Metrics */}
-            <div className="grid grid-cols-2 gap-4 mb-4 pb-4 border-b border-gray-200">
-              <div>
-                <p className="text-gray-500 text-xs mb-1">Customers</p>
-                <p className="text-2xl font-bold text-gray-900">{segment.customerCount}</p>
-                <p className={clsx('text-xs', segment.color)}>
-                  {((segment.customerCount / totalCustomers) * 100).toFixed(1)}% of total
-                </p>
-              </div>
-              <div>
-                <p className="text-gray-500 text-xs mb-1">Avg LTV</p>
-                <p className="text-2xl font-bold text-green-600">₹{(segment.avgLifetimeValue / 1000).toFixed(0)}K</p>
-                <p className="text-xs text-gray-500">per customer</p>
-              </div>
+            <div className="bg-white border border-gray-200 rounded-lg p-4">
+              <p className="text-gray-500 text-sm mb-1">Total Value</p>
+              <p className="text-2xl font-bold text-green-600">₹{(totalValue / 100000).toFixed(1)}L</p>
             </div>
-
-            {/* Sub-metrics */}
-            <div className="space-y-2 mb-4">
-              {segment.metrics.map((metric, idx) => (
-                <div key={idx} className="flex items-center justify-between">
-                  <span className="text-gray-500 text-sm">{metric.label}</span>
-                  <span className="text-gray-900 font-semibold">{metric.value}</span>
-                </div>
-              ))}
+            <div className="bg-white border border-gray-200 rounded-lg p-4">
+              <p className="text-gray-500 text-sm mb-1">Avg Customer LTV</p>
+              <p className="text-2xl font-bold text-blue-600">
+                ₹{(totalValue / totalCustomers).toLocaleString('en-IN', { maximumFractionDigits: 0 })}
+              </p>
             </div>
-
-            {/* Actions */}
-            {selectedSegment === segment.id && (
-              <div className="space-y-2 pt-4 border-t border-gray-200">
-                <button className={clsx(
-                  'w-full py-2 rounded text-sm font-semibold flex items-center justify-center gap-2 transition-colors',
-                  segment.id === 'champions' ? 'bg-green-600 hover:bg-green-700 text-white' :
-                  segment.id === 'loyal' ? 'bg-blue-600 hover:bg-blue-700 text-white' :
-                  segment.id === 'big_spenders' ? 'bg-yellow-600 hover:bg-yellow-700 text-gray-900' :
-                  segment.id === 'at_risk' ? 'bg-orange-600 hover:bg-orange-700 text-white' :
-                  'bg-red-600 hover:bg-red-700 text-white'
-                )}>
-                  <Target className="w-4 h-4" />
-                  {segment.actionLabel}
-                </button>
-                <button className="w-full py-2 rounded bg-gray-100 hover:bg-gray-200 text-gray-700 text-sm font-semibold flex items-center justify-center gap-2">
-                  <Mail className="w-4 h-4" />
-                  View Customers
-                </button>
-              </div>
-            )}
           </div>
-        ))}
-      </div>
 
-      {/* Segment Distribution Chart */}
-      <div className="bg-white border border-gray-200 rounded-lg p-6">
-        <h3 className="text-lg font-semibold text-gray-900 mb-4">Customer Distribution</h3>
-        <div className="space-y-3">
-          {SEGMENTS.map((segment) => {
-            const percentage = (segment.customerCount / totalCustomers) * 100;
-            return (
-              <div key={segment.id}>
-                <div className="flex items-center justify-between mb-1">
-                  <span className="text-sm text-gray-500">{segment.name}</span>
-                  <span className={clsx('text-sm font-semibold', segment.color)}>
-                    {segment.customerCount} ({percentage.toFixed(1)}%)
-                  </span>
+          {/* Segment Cards */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {segments.map((segment) => {
+              const st = styleFor(segment.segment_id);
+              const pct = totalCustomers ? (segment.customer_count / totalCustomers) * 100 : 0;
+              return (
+                <div key={segment.segment_id} className="rounded-lg p-6 border bg-white border-gray-200">
+                  <div className="flex items-start justify-between mb-4">
+                    <div>
+                      <h3 className={clsx('text-xl font-bold mb-1', st.color)}>{segment.segment_name}</h3>
+                      <p className="text-gray-500 text-sm">{segment.description}</p>
+                    </div>
+                    <Users className={clsx('w-6 h-6', st.color)} />
+                  </div>
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <p className="text-gray-500 text-xs mb-1">Customers</p>
+                      <p className="text-2xl font-bold text-gray-900">{segment.customer_count}</p>
+                      <p className={clsx('text-xs', st.color)}>{pct.toFixed(1)}% of segmented</p>
+                    </div>
+                    <div>
+                      <p className="text-gray-500 text-xs mb-1">Avg LTV</p>
+                      <p className="text-2xl font-bold text-green-600">
+                        ₹{(segment.avg_lifetime_value / 1000).toFixed(1)}K
+                      </p>
+                      <p className="text-xs text-gray-500">per customer</p>
+                    </div>
+                  </div>
                 </div>
-                <div className="w-full bg-gray-100 rounded-full h-2 overflow-hidden">
-                  <div
-                    className={clsx('h-full',
-                      segment.id === 'champions' ? 'bg-green-500' :
-                      segment.id === 'loyal' ? 'bg-blue-500' :
-                      segment.id === 'big_spenders' ? 'bg-yellow-500' :
-                      segment.id === 'at_risk' ? 'bg-orange-500' :
-                      'bg-red-500'
-                    )}
-                    style={{ width: `${percentage}%` }}
-                  />
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      </div>
+              );
+            })}
+          </div>
+
+          {/* Segment Distribution Chart */}
+          <div className="bg-white border border-gray-200 rounded-lg p-6">
+            <h3 className="text-lg font-semibold text-gray-900 mb-4">Customer Distribution</h3>
+            <div className="space-y-3">
+              {segments.map((segment) => {
+                const st = styleFor(segment.segment_id);
+                const percentage = totalCustomers ? (segment.customer_count / totalCustomers) * 100 : 0;
+                return (
+                  <div key={segment.segment_id}>
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="text-sm text-gray-500">{segment.segment_name}</span>
+                      <span className={clsx('text-sm font-semibold', st.color)}>
+                        {segment.customer_count} ({percentage.toFixed(1)}%)
+                      </span>
+                    </div>
+                    <div className="w-full bg-gray-100 rounded-full h-2 overflow-hidden">
+                      <div className={clsx('h-full', st.bar)} style={{ width: `${percentage}%` }} />
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </>
+      )}
     </div>
   );
 }
