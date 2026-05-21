@@ -3,9 +3,10 @@
 // ============================================================================
 // 5-tier loyalty system: Bronze/Silver/Gold/Platinum/Diamond
 
-import { useState } from 'react';
-import { Gift, Edit, Plus, Settings } from 'lucide-react';
+import { useState, useEffect } from 'react';
+import { Plus, Settings } from 'lucide-react';
 import clsx from 'clsx';
+import { loyaltyApi, type LoyaltyProgramStats } from '../../services/api/loyalty';
 
 interface LoyaltyTier {
   name: string;
@@ -16,8 +17,6 @@ interface LoyaltyTier {
   badge: string;
   benefits: string[];
   pointsMultiplier: number;
-  customerCount: number;
-  totalMembers: number;
 }
 
 const LOYALTY_TIERS: LoyaltyTier[] = [
@@ -30,8 +29,6 @@ const LOYALTY_TIERS: LoyaltyTier[] = [
     badge: '🥉',
     benefits: ['1x points per purchase', 'Monthly newsletter', 'Email promotions'],
     pointsMultiplier: 1,
-    customerCount: 342,
-    totalMembers: 342,
   },
   {
     name: 'Silver',
@@ -42,8 +39,6 @@ const LOYALTY_TIERS: LoyaltyTier[] = [
     badge: '🥈',
     benefits: ['1.25x points', 'Birthday offer', 'Priority support', 'Free shipping'],
     pointsMultiplier: 1.25,
-    customerCount: 156,
-    totalMembers: 156,
   },
   {
     name: 'Gold',
@@ -54,8 +49,6 @@ const LOYALTY_TIERS: LoyaltyTier[] = [
     badge: '🥇',
     benefits: ['1.5x points', 'Exclusive sales', '10% loyalty discount', 'VIP support'],
     pointsMultiplier: 1.5,
-    customerCount: 78,
-    totalMembers: 78,
   },
   {
     name: 'Platinum',
@@ -66,8 +59,6 @@ const LOYALTY_TIERS: LoyaltyTier[] = [
     badge: '💎',
     benefits: ['2x points', '15% loyalty discount', 'Personal account manager', 'Event invites'],
     pointsMultiplier: 2,
-    customerCount: 32,
-    totalMembers: 32,
   },
   {
     name: 'Diamond',
@@ -78,26 +69,31 @@ const LOYALTY_TIERS: LoyaltyTier[] = [
     badge: '👑',
     benefits: ['3x points', '20% loyalty discount', 'Concierge service', 'Exclusive products'],
     pointsMultiplier: 3,
-    customerCount: 12,
-    totalMembers: 12,
   },
 ];
 
-const REWARDS = [
-  { id: 1, name: 'Frame Discount', pointsCost: 500, discount: '10% off frames' },
-  { id: 2, name: 'Lens Upgrade', pointsCost: 750, discount: 'Free premium lens upgrade' },
-  { id: 3, name: 'Accessories Pack', pointsCost: 250, discount: 'Free accessories' },
-  { id: 4, name: 'Eye Test', pointsCost: 1000, discount: 'Free comprehensive eye test' },
-  { id: 5, name: 'Extended Warranty', pointsCost: 600, discount: '1 year warranty extension' },
-  { id: 6, name: 'Home Delivery', pointsCost: 200, discount: 'Free home delivery' },
-];
+const fmtCompact = (n: number) =>
+  new Intl.NumberFormat('en-IN', { notation: 'compact', maximumFractionDigits: 1 }).format(n || 0);
+const tierCount = (stats: LoyaltyProgramStats | null, tierName: string) =>
+  stats?.by_tier?.[tierName.toUpperCase()] ?? 0;
 
 export function LoyaltyProgram() {
   const [activeTab, setActiveTab] = useState<'overview' | 'tiers' | 'rewards' | 'promotions'>('overview');
-  const totalCustomers = LOYALTY_TIERS.reduce((sum, t) => sum + t.customerCount, 0);
+  const [stats, setStats] = useState<LoyaltyProgramStats | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let alive = true;
+    loyaltyApi
+      .getProgramStats()
+      .then((s) => { if (alive) setStats(s); })
+      .catch(() => { if (alive) setStats(null); })
+      .finally(() => { if (alive) setLoading(false); });
+    return () => { alive = false; };
+  }, []);
 
   return (
-    <div className="inv-body">
+    <div className="inv-body" aria-busy={loading}>
       {/* Editorial header */}
       <div className="inv-head">
         <div>
@@ -114,19 +110,19 @@ export function LoyaltyProgram() {
       <div className="grid grid-cols-4 gap-4">
         <div className="bg-white border border-gray-200 rounded-lg p-4">
           <p className="text-gray-500 text-sm mb-1">Total Members</p>
-          <p className="text-2xl font-bold text-gray-900">{totalCustomers}</p>
+          <p className="text-2xl font-bold text-gray-900">{(stats?.total_members ?? 0).toLocaleString('en-IN')}</p>
         </div>
         <div className="bg-white border border-gray-200 rounded-lg p-4">
           <p className="text-gray-500 text-sm mb-1">Points Issued</p>
-          <p className="text-2xl font-bold text-green-600">2.4M</p>
+          <p className="text-2xl font-bold text-green-600">{fmtCompact(stats?.points_issued ?? 0)}</p>
         </div>
         <div className="bg-white border border-gray-200 rounded-lg p-4">
           <p className="text-gray-500 text-sm mb-1">Points Redeemed</p>
-          <p className="text-2xl font-bold text-orange-600">680K</p>
+          <p className="text-2xl font-bold text-orange-600">{fmtCompact(stats?.points_redeemed ?? 0)}</p>
         </div>
         <div className="bg-white border border-gray-200 rounded-lg p-4">
           <p className="text-gray-500 text-sm mb-1">Redemption Rate</p>
-          <p className="text-2xl font-bold text-blue-600">28%</p>
+          <p className="text-2xl font-bold text-blue-600">{stats?.redemption_rate ?? 0}%</p>
         </div>
       </div>
 
@@ -156,14 +152,16 @@ export function LoyaltyProgram() {
             <h3 className="text-lg font-semibold text-gray-900 mb-4">Member Distribution</h3>
             <div className="space-y-4">
               {LOYALTY_TIERS.map((tier) => {
-                const percentage = (tier.customerCount / totalCustomers) * 100;
+                const count = tierCount(stats, tier.name);
+                const total = stats?.total_members ?? 0;
+                const percentage = total > 0 ? (count / total) * 100 : 0;
                 return (
                   <div key={tier.name}>
                     <div className="flex items-center justify-between mb-1">
                       <span className="text-sm">
                         {tier.badge} <span className={clsx('font-semibold', tier.color)}>{tier.name}</span>
                       </span>
-                      <span className="text-sm text-gray-500">{tier.customerCount}</span>
+                      <span className="text-sm text-gray-500">{count}</span>
                     </div>
                     <div className="w-full bg-gray-100 rounded-full h-2 overflow-hidden">
                       <div
@@ -182,20 +180,20 @@ export function LoyaltyProgram() {
             <h3 className="text-lg font-semibold text-gray-900 mb-4">Points Overview</h3>
             <div className="space-y-4">
               <div className="flex items-center justify-between pb-3 border-b border-gray-200">
-                <span className="text-gray-500">Points Issued (30 days)</span>
-                <span className="text-gray-900 font-semibold">458K</span>
+                <span className="text-gray-500">Points Issued (lifetime)</span>
+                <span className="text-gray-900 font-semibold">{fmtCompact(stats?.points_issued ?? 0)}</span>
               </div>
               <div className="flex items-center justify-between pb-3 border-b border-gray-200">
-                <span className="text-gray-500">Points Redeemed (30 days)</span>
-                <span className="text-gray-900 font-semibold">142K</span>
+                <span className="text-gray-500">Points Redeemed (lifetime)</span>
+                <span className="text-gray-900 font-semibold">{fmtCompact(stats?.points_redeemed ?? 0)}</span>
               </div>
               <div className="flex items-center justify-between pb-3 border-b border-gray-200">
                 <span className="text-gray-500">Active Points Balance</span>
-                <span className="text-green-600 font-semibold">1.72M</span>
+                <span className="text-green-600 font-semibold">{fmtCompact(stats?.active_points_balance ?? 0)}</span>
               </div>
               <div className="flex items-center justify-between">
                 <span className="text-gray-500">Avg Points/Member</span>
-                <span className="text-blue-600 font-semibold">14,200</span>
+                <span className="text-blue-600 font-semibold">{(stats?.avg_points_per_member ?? 0).toLocaleString('en-IN')}</span>
               </div>
             </div>
           </div>
@@ -221,7 +219,7 @@ export function LoyaltyProgram() {
               <div className="space-y-2">
                 <div className="flex items-center justify-between text-xs">
                   <span className="text-gray-500">Members</span>
-                  <span className="text-gray-900 font-semibold">{tier.customerCount}</span>
+                  <span className="text-gray-900 font-semibold">{tierCount(stats, tier.name)}</span>
                 </div>
                 <div className="flex items-center justify-between text-xs">
                   <span className="text-gray-500">Points 3x</span>
@@ -242,54 +240,22 @@ export function LoyaltyProgram() {
               Add Reward
             </button>
           </div>
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {REWARDS.map((reward) => (
-              <div key={reward.id} className="bg-white border border-gray-200 rounded-lg p-4 hover:border-gray-300 cursor-pointer">
-                <div className="flex items-start justify-between mb-3">
-                  <h4 className="text-gray-900 font-semibold">{reward.name}</h4>
-                  <Gift className="w-5 h-5 text-yellow-600" />
-                </div>
-                <p className="text-gray-500 text-sm mb-4">{reward.discount}</p>
-                <div className="flex items-center justify-between">
-                  <span className="text-2xl font-bold text-green-600">{reward.pointsCost}</span>
-                  <span className="text-xs text-gray-500">points</span>
-                </div>
-              </div>
-            ))}
+          <div className="bg-white border border-gray-200 rounded-lg p-8 text-center text-gray-500">
+            No rewards configured yet. Reward catalog management is coming soon.
           </div>
         </div>
       )}
 
       {activeTab === 'promotions' && (
-        <div className="bg-white border border-gray-200 rounded-lg p-6">
+        <div>
           <div className="flex items-center justify-between mb-4">
             <h3 className="text-lg font-semibold text-gray-900">Active Promotions</h3>
             <button className="px-3 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded text-sm font-semibold">
               Create Campaign
             </button>
           </div>
-          <div className="space-y-3">
-            {[
-              { name: 'Double Points - Valentine', status: 'Active', ends: 'Feb 14' },
-              { name: 'Tier Up Challenge', status: 'Active', ends: 'Mar 1' },
-              { name: 'Refer & Earn', status: 'Scheduled', ends: 'Mar 15' },
-            ].map((promo, idx) => (
-              <div key={idx} className="flex items-center justify-between p-3 bg-gray-100 rounded">
-                <div>
-                  <p className="text-gray-900 font-semibold">{promo.name}</p>
-                  <p className="text-xs text-gray-500">Ends {promo.ends}</p>
-                </div>
-                <div className="flex items-center gap-3">
-                  <span className={clsx(
-                    'px-2 py-1 rounded text-xs font-semibold',
-                    promo.status === 'Active' ? 'bg-green-100 text-green-700' : 'bg-blue-100 text-blue-700'
-                  )}>
-                    {promo.status}
-                  </span>
-                  <Edit className="w-4 h-4 text-gray-500 cursor-pointer hover:text-gray-600" />
-                </div>
-              </div>
-            ))}
+          <div className="bg-white border border-gray-200 rounded-lg p-8 text-center text-gray-500">
+            No active promotions. Loyalty promotions are coming soon.
           </div>
         </div>
       )}

@@ -112,6 +112,16 @@ export interface AdjustRequest {
   reason: string;
 }
 
+export interface LoyaltyProgramStats {
+  total_members: number;
+  by_tier: Record<string, number>;
+  active_points_balance: number;
+  points_issued: number;
+  points_redeemed: number;
+  redemption_rate: number; // percent
+  avg_points_per_member: number;
+}
+
 export const loyaltyApi = {
   /** Account snapshot + last 20 ledger rows + engine config. */
   getAccount: async (customerId: string): Promise<LoyaltyAccountResponse> => {
@@ -154,6 +164,12 @@ export const loyaltyApi = {
   /** Engine config — readable by anyone, writable by SUPERADMIN. */
   getSettings: async (): Promise<LoyaltySettings> => {
     const r = await api.get('/loyalty/settings');
+    return r.data;
+  },
+
+  /** Chain-wide program summary: members, tier mix, points issued/redeemed. */
+  getProgramStats: async (): Promise<LoyaltyProgramStats> => {
+    const r = await api.get('/loyalty/program-stats');
     return r.data;
   },
 
