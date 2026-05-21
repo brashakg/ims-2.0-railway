@@ -60,6 +60,7 @@ interface ModuleContextType {
 // Module Configurations
 // ============================================================================
 
+// eslint-disable-next-line react-refresh/only-export-components
 export const MODULE_CONFIGS: ModuleConfig[] = [
   {
     id: 'pos',
@@ -300,6 +301,7 @@ export function ModuleProvider({ children }: { children: ReactNode }) {
 // Hook
 // ============================================================================
 
+// eslint-disable-next-line react-refresh/only-export-components
 export function useModule() {
   const context = useContext(ModuleContext);
   if (!context) {

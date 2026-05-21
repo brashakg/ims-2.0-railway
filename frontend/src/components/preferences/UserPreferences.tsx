@@ -4,6 +4,7 @@
 // Save and manage user preferences including dashboard layouts
 
 declare global {
+  // eslint-disable-next-line @typescript-eslint/no-namespace
   namespace Intl {
     function supportedValuesOf(key: string): string[];
   }
@@ -46,6 +47,7 @@ export interface UserPreferences {
 /**
  * User preferences hook
  */
+// eslint-disable-next-line react-refresh/only-export-components
 export function useUserPreferences(userId: string) {
   const storageKey = `user_preferences_${userId}`;
 
@@ -54,7 +56,7 @@ export function useUserPreferences(userId: string) {
     if (stored) {
       try {
         return JSON.parse(stored);
-      } catch (error) {
+      } catch (_error) {
         // silently handle parse error
       }
     }

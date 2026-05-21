@@ -206,7 +206,7 @@ export function StockAlertsOverview() {
 
       setAlerts(mockAlerts);
       setStats(alertStats);
-    } catch (error) {
+    } catch (_error) {
       // silently handle error
     } finally {
       setIsLoading(false);

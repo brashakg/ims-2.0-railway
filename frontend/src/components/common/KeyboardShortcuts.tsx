@@ -14,6 +14,7 @@ export interface Shortcut {
   category: string;
 }
 
+// eslint-disable-next-line react-refresh/only-export-components
 export function useKeyboardShortcuts(shortcuts: Shortcut[]) {
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -188,6 +189,7 @@ export function KeyboardShortcutsModal() {
 /**
  * Keyboard shortcut handler hook for custom shortcuts
  */
+// eslint-disable-next-line react-refresh/only-export-components
 export function useCustomShortcut(key: string, callback: () => void, enabled = true) {
   useEffect(() => {
     if (!enabled) return;

@@ -371,6 +371,7 @@ function polarToCartesian(centerX: number, centerY: number, radius: number, angl
   };
 }
 
+// eslint-disable-next-line react-refresh/only-export-components
 export function formatChartValue(value: number): string {
   if (value >= 10000000) return `₹${(value / 10000000).toFixed(1)}Cr`;
   if (value >= 100000) return `₹${(value / 100000).toFixed(1)}L`;

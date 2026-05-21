@@ -44,7 +44,7 @@ export function QuickFiltersSaver({
     if (stored) {
       try {
         setPresets(JSON.parse(stored));
-      } catch (error) {
+      } catch (_error) {
         // silently handle parse error
       }
     }

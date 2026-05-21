@@ -80,7 +80,7 @@ export default function FinanceDashboard() {
         setReconciliation(data.reconciliation);
         setIsLoading(false);
       }, 500);
-    } catch (error) {
+    } catch (_error) {
       toast.error('Failed to load financial data');
       setIsLoading(false);
     }

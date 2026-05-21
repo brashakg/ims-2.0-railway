@@ -159,7 +159,7 @@ export function SopEditorModal({ isOpen, onClose, initial, onSaved }: SopEditorM
       onSaved();
       onClose();
     } catch (e) {
-      // eslint-disable-next-line no-console
+       
       console.error('[SOP] save failed:', e);
       const msg = (e as any)?.response?.data?.detail || (e as Error)?.message || 'Could not save SOP';
       toast.error(typeof msg === 'string' ? msg : 'Could not save SOP');
@@ -178,7 +178,7 @@ export function SopEditorModal({ isOpen, onClose, initial, onSaved }: SopEditorM
       onSaved();
       onClose();
     } catch (e) {
-      // eslint-disable-next-line no-console
+       
       console.error('[SOP] delete failed:', e);
       toast.error('Could not archive SOP');
     } finally {

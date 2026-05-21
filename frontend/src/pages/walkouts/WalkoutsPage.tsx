@@ -19,7 +19,7 @@ import {
 import { WalkoutIntakeModal } from './WalkoutIntakeModal';
 import { WalkoutResultBadge } from './ResultPanel';
 
-const RESULT_OPTIONS = ['DUE', 'NEGATIVE', 'CONVERTED', 'none'] as const;
+const _RESULT_OPTIONS = ['DUE', 'NEGATIVE', 'CONVERTED', 'none'] as const;
 const PAGE_SIZE = 50;
 
 export function WalkoutsPage() {
@@ -36,7 +36,7 @@ export function WalkoutsPage() {
   const [dateTo, setDateTo] = useState('');
   const [salesPersonId, setSalesPersonId] = useState('');
   const [reason, setReason] = useState<WalkoutReason | ''>('');
-  const [resultFilter, setResultFilter] = useState<typeof RESULT_OPTIONS[number] | ''>('');
+  const [resultFilter, setResultFilter] = useState<typeof _RESULT_OPTIONS[number] | ''>('');
 
   const params: ListWalkoutsParams = useMemo(() => {
     const p: ListWalkoutsParams = { skip, limit: PAGE_SIZE };

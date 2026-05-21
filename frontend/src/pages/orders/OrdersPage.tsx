@@ -267,7 +267,7 @@ export function OrdersPage() {
       setSelectedOrder(null);
       await loadOrders();
     } catch (e) {
-      // eslint-disable-next-line no-console
+       
       console.error('[Orders] addPayment failed:', e);
       const msg = (e as any)?.response?.data?.detail || (e as Error)?.message || 'Failed to process payment';
       toast.error(typeof msg === 'string' ? msg : 'Failed to process payment');

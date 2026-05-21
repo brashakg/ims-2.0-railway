@@ -349,7 +349,7 @@ export default function EnterpriseAnalyticsDashboard() {
       }
 
       setError(null);
-    } catch (err) {
+    } catch (_err) {
       setError('Failed to load dashboard data');
     } finally {
       setIsLoading(false);

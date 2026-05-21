@@ -158,11 +158,6 @@ export function JarvisPage() {
   // STRICT ACCESS CONTROL - SUPERADMIN ONLY
   const isSuperAdmin = hasRole(['SUPERADMIN']);
 
-  // If not superadmin, render nothing (404-like behavior)
-  if (!isSuperAdmin) {
-    return null;
-  }
-
   // Auto-scroll to bottom
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -226,7 +221,7 @@ export function JarvisPage() {
       const { data } = await api.get('/jarvis/agents/pixel/audits', { params: { limit: 7 } });
       setPixelAudits(data);
     } catch (e) {
-      // eslint-disable-next-line no-console
+       
       console.error('[JARVIS] PIXEL audits fetch failed:', e);
       setPixelAudits(null);
     } finally {
@@ -243,7 +238,7 @@ export function JarvisPage() {
       );
       setActivity(data.events ?? []);
     } catch (e) {
-      // eslint-disable-next-line no-console
+       
       console.error('[JARVIS] activity fetch failed:', e);
       setActivity(null);
     }
@@ -258,7 +253,7 @@ export function JarvisPage() {
       setLiveAgents(data.agents ?? []);
       setAgentsErr(null);
     } catch (e) {
-      // eslint-disable-next-line no-console
+       
       console.error('[JARVIS] Failed to load agents:', e);
       setAgentsErr(e instanceof Error ? e.message : 'Could not load agents');
       setLiveAgents(null);
@@ -276,7 +271,7 @@ export function JarvisPage() {
       // Refetch in the background for authoritative truth
       loadAgents().catch(() => {});
     } catch (e) {
-      // eslint-disable-next-line no-console
+       
       console.error(`[JARVIS] Toggle failed for ${agentId}:`, e);
     } finally {
       setTogglingId(null);
@@ -292,7 +287,7 @@ export function JarvisPage() {
         loadAgents().catch(() => {});
       }, 1500);
     } catch (e) {
-      // eslint-disable-next-line no-console
+       
       console.error(`[JARVIS] Run-now failed for ${agentId}:`, e);
     } finally {
       setTogglingId(null);
@@ -422,7 +417,7 @@ export function JarvisPage() {
       // (network error). 4xx/5xx with a body get logged below and a short
       // apology surfaces so the user knows something's off — vs the old
       // behavior that silently served canned text on any failure.
-      // eslint-disable-next-line no-console
+       
       console.error('[JARVIS] query failed:', err);
       const fallbackResponse = generateResponse(queryText);
       setMessages((prev) => [
@@ -637,6 +632,11 @@ Is there a specific aspect you'd like me to dive deeper into? I can provide deta
   const enabledCount = agentsForGrid.filter((a) => a.enabled).length;
   const totalActs24h = agentsForGrid.reduce((s, a) => s + (a.run_count || 0), 0);
   const awaitingApproval = 0; // Phase 4: count from agent_audit_log where tier=2 requires_approval=true
+
+  // Guard: render nothing for non-superadmin (hooks must be above this line)
+  if (!isSuperAdmin) {
+    return null;
+  }
 
   return (
     <div style={{ padding: '24px 28px 60px', background: 'var(--bg)', minHeight: 'calc(100vh - 52px)', overflowY: 'auto' }}>

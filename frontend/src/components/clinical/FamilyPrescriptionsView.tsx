@@ -79,7 +79,7 @@ export function FamilyPrescriptionsView({
       setNewMemberName('');
       setNewMemberRelationship('');
       setShowAddMember(false);
-    } catch (err) {
+    } catch (_err) {
       setAddError('Failed to add family member. Please try again.');
     } finally {
       setIsAdding(false);

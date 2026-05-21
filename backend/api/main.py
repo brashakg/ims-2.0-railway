@@ -665,7 +665,8 @@ async def seed_database(secret: str = "", force: str = ""):
     Requires secret key. Only inserts into empty collections.
     Use force=users to drop and re-seed users (fixes password hashes).
     """
-    if secret != "bv-seed-2026":
+    expected = os.getenv("SEED_SECRET", "bv-seed-2026")
+    if secret != expected:
         raise HTTPException(status_code=403, detail="Invalid seed secret")
 
     if not DATABASE_AVAILABLE:

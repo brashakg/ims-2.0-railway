@@ -316,7 +316,7 @@ export function ClinicalPage() {
           await customerApi.updateCustomer(customerId as string, updatePayload);
         } catch {
           // Don't block the queue add if the amend fails — log + continue.
-          // eslint-disable-next-line no-console
+           
           console.warn('[Clinical] updateCustomer failed; proceeding with queue add anyway');
         }
       } else {
@@ -822,7 +822,7 @@ export function ClinicalPage() {
             setShowQueueExistingModal(false);
             await loadData();
           } catch (e) {
-            // eslint-disable-next-line no-console
+             
             console.error('[Clinical] addToQueue failed:', e);
             toast.error('Could not add to queue. Try again.');
           }

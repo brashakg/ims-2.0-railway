@@ -319,7 +319,7 @@ export function TaskManagementPage() {
         }  // end empty-templates else-branch
       } catch (sopErr) {
         // API unavailable — keep current sops state (may be previous page load).
-        // eslint-disable-next-line no-console
+         
         console.warn('[TaskManagement] SOP load failed:', sopErr);
       }
 
@@ -328,7 +328,7 @@ export function TaskManagementPage() {
       // Amit / Sneha placeholders were misleading because they showed
       // even when there were zero real tasks).
 
-    } catch (err: any) {
+    } catch (_err) {
       setError('Failed to load task data. Please try again.');
       toast.error('Failed to load task data');
     } finally {
@@ -851,7 +851,7 @@ export function TaskManagementPage() {
               })),
             })));
           } catch (e) {
-            // eslint-disable-next-line no-console
+             
             console.warn('[TaskManagement] SOP reload failed:', e);
           }
         }}

@@ -133,7 +133,7 @@ export function AddCustomerModal({ isOpen, onClose, onSave, initialName }: AddCu
     // modal so existing matches surface immediately instead of forcing
     // them to re-type.
     setSearchQuery(trimmed);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+     
   }, [isOpen, initialName]);
   const [showAddPatient, setShowAddPatient] = useState(false);
   const [newPatient, setNewPatient] = useState<PatientFormData>({

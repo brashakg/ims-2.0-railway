@@ -203,7 +203,7 @@ export default function SetupPage() {
                 }
                 setShowStoreForm(false);
                 toast.success(editStore ? 'Store updated' : 'Store created');
-              } catch (err) {
+              } catch (_err) {
                 toast.error('Failed to save store');
               }
             }}

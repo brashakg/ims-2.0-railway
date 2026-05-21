@@ -171,7 +171,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
               dispatch({ type: 'LOGOUT' });
             }
           }
-        } catch (error) {
+        } catch (_error) {
           // JSON parsing or token format error
           localStorage.removeItem('ims_token');
           localStorage.removeItem('ims_user');
@@ -371,6 +371,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
 // Hook
 // ============================================================================
 
+// eslint-disable-next-line react-refresh/only-export-components
 export function useAuth(): AuthContextType {
   const context = useContext(AuthContext);
   if (context === undefined) {

@@ -30,7 +30,7 @@ export function NonMovingStockWidget() {
     try {
       const response = await api.get(`/inventory/non-moving?days=${days}`);
       setProducts(response.data?.products || []);
-    } catch (error) {
+    } catch (_error) {
       // silently handle error
     } finally {
       setLoading(false);

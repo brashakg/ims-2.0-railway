@@ -91,7 +91,7 @@ export function VendorManagement() {
           contract_expiry: v.contract_expiry || new Date().toISOString().split('T')[0],
         }));
         setVendors(transformedVendors);
-      } catch (error) {
+      } catch (_error) {
         toast.error('Failed to load vendors');
       } finally {
         setIsLoading(false);

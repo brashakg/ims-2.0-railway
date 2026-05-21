@@ -91,7 +91,7 @@ export function StockTransferModal({ isOpen, onClose, onTransferCreated }: Stock
       // Filter out current store
       const otherStores = mockStores.filter(s => s.id !== user?.activeStoreId);
       setStores(otherStores);
-    } catch (error: any) {
+    } catch (_error) {
       toast.error('Failed to load stores');
     }
   };
@@ -130,7 +130,7 @@ export function StockTransferModal({ isOpen, onClose, onTransferCreated }: Stock
       });
 
       setSearchResults(availableStock);
-    } catch (error: any) {
+    } catch (_error) {
       toast.error('Failed to search products');
     } finally {
       setIsSearching(false);

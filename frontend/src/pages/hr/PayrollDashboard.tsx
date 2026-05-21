@@ -146,7 +146,7 @@ export function PayrollDashboard() {
         user?.activeStoreId
       );
       setSalarySheet(data?.salaries || []);
-    } catch (err) {
+    } catch (_err) {
       setError('Failed to load salary sheet');
     } finally {
       setIsLoading(false);
@@ -159,7 +159,7 @@ export function PayrollDashboard() {
     try {
       const data = await payrollApi.getAdvances(employeeId);
       setAdvances(data?.advances || []);
-    } catch (err) {
+    } catch (_err) {
       setError('Failed to load advances');
     } finally {
       setIsLoading(false);
@@ -172,7 +172,7 @@ export function PayrollDashboard() {
     try {
       const data = await payrollApi.getPayslip(employeeId, selectedMonth, selectedYear);
       setPayslip(data?.payslip || null);
-    } catch (err) {
+    } catch (_err) {
       setError('Failed to load payslip');
     } finally {
       setIsLoading(false);
@@ -193,7 +193,7 @@ export function PayrollDashboard() {
       setShowAdvanceForm(false);
       setAdvanceForm({ amount: '', reason: '' });
       await loadAdvances(employeeId);
-    } catch (err) {
+    } catch (_err) {
       setError('Failed to record advance');
     }
   };

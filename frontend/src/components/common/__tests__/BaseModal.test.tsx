@@ -178,7 +178,7 @@ describe('BaseModal', () => {
 
   describe('Variants', () => {
     it('should apply correct styling for danger variant', () => {
-      const { container } = render(
+      const { container: _container } = render(
         <BaseModal
           {...defaultProps}
           variant="danger"

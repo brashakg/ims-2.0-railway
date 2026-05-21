@@ -123,7 +123,7 @@ export function ReorderDashboard() {
       });
 
       setProducts(mapped);
-    } catch (error: any) {
+    } catch (_error) {
       toast.error('Failed to load products');
     } finally {
       setIsLoading(false);

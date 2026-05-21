@@ -86,7 +86,7 @@ export function StockReplenishment() {
           stock_status: item.stock_status || 'normal',
         }));
         setSuggestions(transformedSuggestions);
-      } catch (error) {
+      } catch (_error) {
         toast.error('Failed to load replenishment suggestions');
       } finally {
         setIsLoading(false);

@@ -84,7 +84,7 @@ export function GoodsReceiptNote() {
           created_by: grn.created_by || 'Unknown',
         }));
         setGrns(transformedGRNs);
-      } catch (error) {
+      } catch (_error) {
         toast.error('Failed to load GRNs');
       } finally {
         setIsLoading(false);
@@ -332,7 +332,7 @@ export function GoodsReceiptNote() {
                   quality_status: grn.quality_status || 'passed',
                   created_by: grn.created_by || 'Unknown',
                 })));
-              } catch (err) {
+              } catch (_err) {
                 toast.error('Failed to create GRN');
               }
             }}

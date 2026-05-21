@@ -395,7 +395,7 @@ export function POSLayout() {
           } catch (e) {
             // Non-fatal — the order IS created. Surface a warning so staff
             // can manually create the workshop job / call IT if necessary.
-            // eslint-disable-next-line no-console
+             
             console.warn('[POS] Workshop job auto-create failed:', e);
             setErrorMsg(
               'Order saved, but workshop job auto-create failed — please add it manually from the Workshop page.',
@@ -690,9 +690,11 @@ export function POSLayout() {
                 type="button"
                 onClick={() => {
                   setErrorMsg(null);
-                  store.current_step === 'payment'
-                    ? handleCreateOrder()
-                    : startTransition(() => store.nextStep());
+                  if (store.current_step === 'payment') {
+                    handleCreateOrder();
+                  } else {
+                    startTransition(() => store.nextStep());
+                  }
                 }}
                 disabled={!canProceed || store.is_processing}
                 className={'btn sm ' + (store.current_step === 'payment' ? 'accent' : 'primary')}
@@ -861,7 +863,7 @@ export function POSLayout() {
             } catch (e) {
               // Keep the modal open so sales can retry; surface the error.
               // Rest of the order is already persisted — no revenue at risk.
-              // eslint-disable-next-line no-console
+               
               console.error('[POS] Save fitting details failed:', e);
               setErrorMsg('Could not save fitting details — please try again or skip for now.');
             } finally {

@@ -292,7 +292,7 @@ export default function DashboardPage() {
       const response = await reportsApi.getTargets(user?.activeStoreId);
       setDailyTarget(response.daily_target || 50000);
       setMonthlyTarget(response.monthly_target || 1500000);
-    } catch (error) {
+    } catch (_error) {
       setTargetsError(true);
     } finally {
       setTargetsLoading(false);
@@ -307,7 +307,7 @@ export default function DashboardPage() {
         `/analytics/enterprise-kpis?period=${period}`
       );
       setKpis(response.data);
-    } catch (error) {
+    } catch (_error) {
       setHasError(true);
     } finally {
       setIsLoading(false);

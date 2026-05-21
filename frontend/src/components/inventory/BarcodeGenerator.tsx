@@ -47,7 +47,7 @@ export function BarcodeGenerator({
         if (onGenerate) {
           onGenerate(value);
         }
-      } catch (error) {
+      } catch (_error) {
         // silently handle error
       }
     }

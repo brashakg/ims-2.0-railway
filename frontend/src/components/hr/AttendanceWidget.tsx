@@ -78,7 +78,7 @@ export function AttendanceWidget() {
         location: loc || undefined,
         late: isLate,
       });
-    } catch (err) {
+    } catch (_err) {
       // silently handle error — local state already saved
     }
 
@@ -103,7 +103,7 @@ export function AttendanceWidget() {
         storeId: user?.activeStoreId,
         checkOutTime: checkOutTime,
       });
-    } catch (err) {
+    } catch (_err) {
       // silently handle error — local state already saved
     }
 

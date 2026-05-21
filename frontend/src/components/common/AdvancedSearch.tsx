@@ -66,7 +66,7 @@ export function AdvancedSearch({
           const searchResults = await onSearch(searchQuery, searchFilters);
           setResults(searchResults);
           setShowResults(true);
-        } catch (error) {
+        } catch (_error) {
           setResults([]);
         } finally {
           setIsLoading(false);

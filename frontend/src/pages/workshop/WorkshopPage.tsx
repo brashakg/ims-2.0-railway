@@ -144,7 +144,7 @@ const loadJobs = async () => {
         // behaviour threw, which set the error state but only AFTER the
         // first render cycle, and a status-config crash could catch the
         // throw mid-render.
-        // eslint-disable-next-line no-console
+         
         console.warn('[Workshop] getJobs failed:', jobsResp.reason);
         setJobs([]);
         setError('Workshop jobs unavailable right now. Other functionality still works.');
@@ -152,7 +152,7 @@ const loadJobs = async () => {
       if (kpisResp.status === 'fulfilled') {
         setKpis(kpisResp.value);
       } else {
-        // eslint-disable-next-line no-console
+         
         console.warn('[Workshop] getDashboardKpis failed (non-fatal):', kpisResp.reason);
       }
 

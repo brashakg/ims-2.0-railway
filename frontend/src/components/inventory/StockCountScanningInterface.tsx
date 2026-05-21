@@ -53,7 +53,7 @@ export function StockCountScanningInterface() {
       setBarcode('');
       setPhysicalCount('');
       setNotes('');
-    } catch (err) {
+    } catch (_err) {
       setError('Barcode not found or error processing scan');
       setResult(null);
     } finally {

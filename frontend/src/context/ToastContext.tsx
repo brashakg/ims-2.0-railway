@@ -147,6 +147,7 @@ export function ToastProvider({ children }: ToastProviderProps) {
 // Hook
 // ============================================================================
 
+// eslint-disable-next-line react-refresh/only-export-components
 export function useToast(): ToastContextType {
   const context = useContext(ToastContext);
   if (context === undefined) {

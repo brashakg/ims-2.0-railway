@@ -103,7 +103,7 @@ export default function ExpenseTracker() {
       });
       const list = response?.expenses || response || [];
       setExpenses(Array.isArray(list) ? list : []);
-    } catch (error) {
+    } catch (_error) {
       toast.error('Failed to load expenses');
       setExpenses([]);
     } finally {
@@ -137,7 +137,7 @@ export default function ExpenseTracker() {
         average_daily: expenseList.length > 0 ? Math.round(total / 30) : 0,
         by_category: byCategory,
       });
-    } catch (error) {
+    } catch (_error) {
       toast.error('Failed to load summary');
     }
   };
@@ -163,7 +163,7 @@ export default function ExpenseTracker() {
       setFormCategory('utilities');
       await loadExpenses();
       await loadSummary();
-    } catch (error) {
+    } catch (_error) {
       toast.error('Failed to submit expense');
     }
   };
@@ -174,7 +174,7 @@ export default function ExpenseTracker() {
       toast.success('Expense approved');
       await loadExpenses();
       await loadSummary();
-    } catch (error) {
+    } catch (_error) {
       toast.error('Failed to approve expense');
     }
   };
@@ -195,7 +195,7 @@ export default function ExpenseTracker() {
       setSelectedExpense(null);
       await loadExpenses();
       await loadSummary();
-    } catch (error) {
+    } catch (_error) {
       toast.error('Failed to reject expense');
     }
   };

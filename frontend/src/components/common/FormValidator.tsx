@@ -25,7 +25,7 @@ export interface FieldError {
 const validators = {
   required: (value: any) => value !== undefined && value !== null && value !== '',
   email: (value: string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value),
-  phone: (value: string) => /^[\d\s\-\+\(\)]{10,}$/.test(value),
+  phone: (value: string) => /^[\d\s\-+()]{10,}$/.test(value),
   url: (value: string) => {
     try {
       new URL(value);
@@ -41,6 +41,7 @@ const validators = {
   match: (value: any, matchValue: any) => value === matchValue,
 };
 
+// eslint-disable-next-line react-refresh/only-export-components
 export function useFormValidator(fieldConfigs: Record<string, ValidationConfig[]>) {
   const [errors, setErrors] = useState<FieldError[]>([]);
   const [touched, setTouched] = useState<Set<string>>(new Set());

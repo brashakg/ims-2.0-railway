@@ -28,9 +28,7 @@ export function PendingDeliveriesWidget() {
       try {
         const response = await api.get('/orders?status=pending&limit=1');
         setCount(response.data?.total || 0);
-      } catch (error) {
-
-      } finally {
+      } catch { /* silently ignore */ } finally {
         setLoading(false);
       }
     };
@@ -67,9 +65,7 @@ export function RemindersWidget() {
       try {
         const response = await api.get('/tasks?status=pending&dueToday=true');
         setCount(response.data?.total || 0);
-      } catch (error) {
-
-      } finally {
+      } catch { /* silently ignore */ } finally {
         setLoading(false);
       }
     };
@@ -110,9 +106,7 @@ export function StockCountStatusWidget() {
           total: response.data?.total_categories || 0,
           percent: response.data?.completion_percent || 0,
         });
-      } catch (error) {
-
-      } finally {
+      } catch { /* silently ignore */ } finally {
         setLoading(false);
       }
     };
@@ -158,9 +152,7 @@ export function TaskCompletionWidget() {
       try {
         const response = await api.get('/tasks/completion-stats');
         setPercent(response.data?.completion_percent || 0);
-      } catch (error) {
-
-      } finally {
+      } catch { /* silently ignore */ } finally {
         setLoading(false);
       }
     };
@@ -194,9 +186,7 @@ export function EyeTestCountWidget() {
       try {
         const response = await api.get('/clinical/eye-tests?status=completed&date=today');
         setCount(response.data?.total || 0);
-      } catch (error) {
-
-      } finally {
+      } catch { /* silently ignore */ } finally {
         setLoading(false);
       }
     };
@@ -237,9 +227,7 @@ export function StoreVsTargetWidget() {
           target: response.data?.target || 0,
           percent: response.data?.achievement_percent || 0,
         });
-      } catch (error) {
-
-      } finally {
+      } catch { /* silently ignore */ } finally {
         setLoading(false);
       }
     };
@@ -299,9 +287,7 @@ export function StaffAttendanceWidget() {
       try {
         const response = await api.get('/hr/attendance-compliance');
         setData(response.data?.stores || []);
-      } catch (error) {
-
-      } finally {
+      } catch { /* silently ignore */ } finally {
         setLoading(false);
       }
     };
@@ -355,9 +341,7 @@ export function EscalationsWidget() {
       try {
         const response = await api.get('/tasks/escalations?status=open');
         setCount(response.data?.total || 0);
-      } catch (error) {
-
-      } finally {
+      } catch { /* silently ignore */ } finally {
         setLoading(false);
       }
     };
@@ -394,9 +378,7 @@ export function HQEscalationsWidget() {
       try {
         const response = await api.get('/admin/escalations?level=hq');
         setCount(response.data?.total || 0);
-      } catch (error) {
-
-      } finally {
+      } catch { /* silently ignore */ } finally {
         setLoading(false);
       }
     };
@@ -441,9 +423,7 @@ export function HRSummaryWidget() {
           leave: response.data?.on_leave || 0,
           pending: response.data?.pending_leaves || 0,
         });
-      } catch (error) {
-
-      } finally {
+      } catch { /* silently ignore */ } finally {
         setLoading(false);
       }
     };
@@ -574,9 +554,7 @@ export function FinancialSummaryWidget() {
           gstCollected: response.data?.gst_collected || 0,
           gstPaid: response.data?.gst_paid || 0,
         });
-      } catch (error) {
-
-      } finally {
+      } catch { /* silently ignore */ } finally {
         setLoading(false);
       }
     };
@@ -637,9 +615,7 @@ export function GSTFilingStatusWidget() {
       try {
         const response = await api.get('/finance/gst-status');
         setDaysUntilDue(response.data?.days_until_due || 15);
-      } catch (error) {
-
-      } finally {
+      } catch { /* silently ignore */ } finally {
         setLoading(false);
       }
     };
@@ -675,9 +651,7 @@ export function PendingReconciliationsWidget() {
       try {
         const response = await api.get('/finance/pending-reconciliations');
         setCount(response.data?.total || 0);
-      } catch (error) {
-
-      } finally {
+      } catch { /* silently ignore */ } finally {
         setLoading(false);
       }
     };
@@ -717,9 +691,7 @@ export function PatientQueueWidget() {
           waiting: response.data?.waiting_count || 0,
           estimatedWait: response.data?.estimated_wait_minutes || 0,
         });
-      } catch (error) {
-
-      } finally {
+      } catch { /* silently ignore */ } finally {
         setLoading(false);
       }
     };
@@ -759,9 +731,7 @@ export function PrescriptionRedoRateWidget() {
       try {
         const response = await api.get('/clinical/prescription-redo-rate');
         setPercent(response.data?.redo_rate_percent || 0);
-      } catch (error) {
-
-      } finally {
+      } catch { /* silently ignore */ } finally {
         setLoading(false);
       }
     };
@@ -803,9 +773,7 @@ export function CatalogSKUCountWidget() {
           active: response.data?.active || 0,
           pending: response.data?.pending_activation || 0,
         });
-      } catch (error) {
-
-      } finally {
+      } catch { /* silently ignore */ } finally {
         setLoading(false);
       }
     };
@@ -854,9 +822,7 @@ export function PriceChangeRequestsWidget() {
       try {
         const response = await api.get('/catalog/price-change-requests?status=pending');
         setCount(response.data?.total || 0);
-      } catch (error) {
-
-      } finally {
+      } catch { /* silently ignore */ } finally {
         setLoading(false);
       }
     };
@@ -893,9 +859,7 @@ export function RecentActivityWidget() {
       try {
         const response = await api.get('/catalog/recent-activity?limit=5');
         setActivities(response.data?.activities || []);
-      } catch (error) {
-
-      } finally {
+      } catch { /* silently ignore */ } finally {
         setLoading(false);
       }
     };

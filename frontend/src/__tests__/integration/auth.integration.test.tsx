@@ -3,11 +3,9 @@
 // ============================================================================
 // End-to-end authentication flow testing
 
-import { renderHook, waitFor } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import axios from 'axios';
-import { AuthContext } from '../../context/AuthContext';
-import { mockUsers, mockApiResponses } from '../../utils/test-fixtures';
+import { mockUsers } from '../../utils/test-fixtures';
 
 jest.mock('axios');
 
@@ -24,7 +22,7 @@ describe('Authentication Integration', () => {
     jest.clearAllMocks();
   });
 
-  const wrapper = ({ children }: { children: React.ReactNode }) => (
+  const _wrapper = ({ children }: { children: React.ReactNode }) => (
     <QueryClientProvider client={queryClient}>
       {children}
     </QueryClientProvider>

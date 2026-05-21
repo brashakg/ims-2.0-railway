@@ -100,7 +100,7 @@ export function BulkActionsToolbar({
     try {
       await Promise.resolve(onAction(action, selectedIds));
       onDeselectAll?.();
-    } catch (error) {
+    } catch (_error) {
       toast.error(`Failed to perform ${action}`);
     } finally {
       setActionLoading(false);

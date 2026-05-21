@@ -109,6 +109,7 @@ export function BarcodeManagementModal({
       case 'CODE39':
         return /^[A-Z0-9]{4,}$/.test(value);
       case 'CODE128':
+        // eslint-disable-next-line no-control-regex
         return /^[\x00-\x7F]{4,}$/.test(value); // Any ASCII, min 4 chars
       default:
         return value.length >= 4;

@@ -266,8 +266,13 @@ export function NotificationPanel({
 /**
  * Notification center hook for managing notifications
  */
+// eslint-disable-next-line react-refresh/only-export-components
 export function useNotifications(maxNotifications = 50) {
   const [notifications, setNotifications] = useState<Notification[]>([]);
+
+  const dismissNotification = useCallback((id: string) => {
+    setNotifications(prev => prev.filter(n => n.id !== id));
+  }, []);
 
   const addNotification = useCallback((
     notification: Omit<Notification, 'id' | 'timestamp' | 'read'>
@@ -293,11 +298,7 @@ export function useNotifications(maxNotifications = 50) {
 
       return () => clearTimeout(timer);
     }
-  }, [maxNotifications]);
-
-  const dismissNotification = useCallback((id: string) => {
-    setNotifications(prev => prev.filter(n => n.id !== id));
-  }, []);
+  }, [maxNotifications, dismissNotification]);
 
   const markAsRead = useCallback((id: string) => {
     setNotifications(prev =>

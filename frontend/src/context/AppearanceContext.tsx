@@ -89,6 +89,7 @@ export function AppearanceProvider({ children }: { children: ReactNode }) {
   );
 }
 
+// eslint-disable-next-line react-refresh/only-export-components
 export function useAppearance(): AppearanceContextType {
   const ctx = useContext(AppearanceContext);
   if (!ctx) throw new Error('useAppearance must be used within AppearanceProvider');

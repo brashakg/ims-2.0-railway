@@ -100,7 +100,7 @@ export function PurchaseOrderDashboard() {
           approved_at: po.approved_at,
         }));
         setPurchaseOrders(transformedPOs);
-      } catch (error) {
+      } catch (_error) {
         toast.error('Failed to load purchase orders');
       } finally {
         setIsLoading(false);

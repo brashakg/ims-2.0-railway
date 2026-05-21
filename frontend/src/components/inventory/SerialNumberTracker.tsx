@@ -137,7 +137,7 @@ export function SerialNumberTracker() {
       ];
 
       setItems(mockItems);
-    } catch (error: any) {
+    } catch (_error) {
       toast.error('Failed to load serialized items');
     } finally {
       setIsLoading(false);

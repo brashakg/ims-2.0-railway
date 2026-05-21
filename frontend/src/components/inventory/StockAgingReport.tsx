@@ -81,7 +81,7 @@ export function StockAgingReport() {
         ageCategory: p.ageCategory || '0-30',
       }));
       setProducts(items);
-    } catch (error: any) {
+    } catch (_error) {
       toast.error('Failed to load aging data');
       setProducts([]);
     } finally {

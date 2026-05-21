@@ -1056,7 +1056,7 @@ export function CustomersPage() {
               setShowRxForm(false);
               await loadPrescriptions(selectedPatient.id);
             } catch (e) {
-              // eslint-disable-next-line no-console
+               
               console.error('[Customers] createPrescription failed:', e);
               const msg = (e as any)?.response?.data?.detail || (e as Error)?.message || 'Could not save prescription';
               toast.error(typeof msg === 'string' ? msg : 'Could not save prescription');

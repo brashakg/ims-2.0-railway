@@ -87,7 +87,7 @@ export function QueueExistingCustomerModal({
         }));
         setResults(normalized);
       } catch (e) {
-        // eslint-disable-next-line no-console
+         
         console.error('[Clinical] customer search failed:', e);
         setSearchErr('Search failed. Try again.');
         setResults([]);
@@ -98,7 +98,7 @@ export function QueueExistingCustomerModal({
     return () => {
       if (debounceRef.current) clearTimeout(debounceRef.current);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+     
   }, [query, isOpen, storeId]);
 
   // Reset on open/close

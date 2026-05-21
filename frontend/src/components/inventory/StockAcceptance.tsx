@@ -98,7 +98,7 @@ export function StockAcceptance() {
       }
 
       setPendingItems(items);
-    } catch (err) {
+    } catch (_err) {
       setError('Failed to load pending stock');
       setPendingItems([]);
     } finally {
@@ -164,7 +164,7 @@ export function StockAcceptance() {
             : i
         )
       );
-    } catch (err) {
+    } catch (_err) {
       toast.error('Failed to accept stock. Please try again.');
     }
   };

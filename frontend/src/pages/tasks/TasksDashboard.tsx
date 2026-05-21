@@ -127,7 +127,7 @@ export function TasksDashboard() {
       // Load summary
       const summaryRes = await tasksApi.getTaskSummary();
       setSummary(summaryRes || { total: 0, overdue: 0, escalated: 0, open: 0, completed: 0 });
-    } catch (error) {
+    } catch (_error) {
       toast.error('Failed to load tasks');
     } finally {
       setIsLoading(false);
@@ -154,7 +154,7 @@ export function TasksDashboard() {
       await tasksApi.completeTask(taskId, 'Completed');
       toast.success('Task completed');
       loadData();
-    } catch (error) {
+    } catch (_error) {
       toast.error('Failed to complete task');
     }
   };
@@ -164,7 +164,7 @@ export function TasksDashboard() {
       await tasksApi.acknowledgeTask(taskId);
       toast.success('Task acknowledged');
       loadData();
-    } catch (error) {
+    } catch (_error) {
       toast.error('Failed to acknowledge task');
     }
   };
@@ -196,7 +196,7 @@ export function TasksDashboard() {
         type: 'manual',
       });
       loadData();
-    } catch (error) {
+    } catch (_error) {
       toast.error('Failed to create task');
     }
   };

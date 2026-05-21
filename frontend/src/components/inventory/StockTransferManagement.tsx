@@ -84,7 +84,7 @@ export function StockTransferManagement() {
         data = await inventoryApi.getTransfers(user.activeStoreId, direction);
       }
       setTransfers(data);
-    } catch (error: any) {
+    } catch (_error) {
       toast.error('Failed to load transfers');
     } finally {
       setIsLoading(false);

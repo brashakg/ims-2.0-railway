@@ -75,21 +75,13 @@ export function FollowUpDashboard() {
   const { user } = useAuth();
   const storeId = user?.activeStoreId;
 
-  if (!storeId) {
-    return <div className="p-8 text-center text-red-600">No store selected. Please select a store from the header.</div>;
-  }
-
-  useEffect(() => {
-    loadFollowUps();
-    loadSummary();
-  }, []);
-
   const loadFollowUps = async () => {
+    if (!storeId) return;
     try {
       setLoading(true);
       const { data } = await api.get('/follow-ups/', { params: { store_id: storeId } });
       setFollowUps(data);
-    } catch (error) {
+    } catch (_error) {
       // silently handle error
     } finally {
       setLoading(false);
@@ -97,20 +89,32 @@ export function FollowUpDashboard() {
   };
 
   const loadSummary = async () => {
+    if (!storeId) return;
     try {
       const { data } = await api.get('/follow-ups/summary', { params: { store_id: storeId } });
       setSummary(data);
-    } catch (error) {
+    } catch (_error) {
       // silently handle error
     }
   };
+
+  useEffect(() => {
+    if (!storeId) return;
+    loadFollowUps();
+    loadSummary();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [storeId]);
+
+  if (!storeId) {
+    return <div className="p-8 text-center text-red-600">No store selected. Please select a store from the header.</div>;
+  }
 
   const handleAutoGenerate = async () => {
     try {
       await api.post('/follow-ups/auto-generate', null, { params: { store_id: storeId } });
       await loadFollowUps();
       await loadSummary();
-    } catch (error) {
+    } catch (_error) {
       // silently handle error
     }
   };
@@ -134,7 +138,7 @@ export function FollowUpDashboard() {
           return newState;
         });
       }
-    } catch (error) {
+    } catch (_error) {
       // silently handle error
     } finally {
       setCompleting(null);

@@ -133,7 +133,7 @@ export function TasksPage() {
         overdue: overdueResponse?.total || 0,
       });
 
-    } catch (err) {
+    } catch (_err) {
       setError('Failed to load tasks. Please try again.');
     } finally {
       setIsLoading(false);
@@ -163,7 +163,7 @@ export function TasksPage() {
       // Reload tasks
       await loadTasks();
 
-    } catch (err) {
+    } catch (_err) {
       toast.error('Failed to update task');
     } finally {
       setIsUpdating(null);
@@ -179,7 +179,7 @@ export function TasksPage() {
       await tasksApi.startTask(task.task_id);
       toast.success('Task started');
       await loadTasks();
-    } catch (err) {
+    } catch (_err) {
       toast.error('Failed to start task');
     } finally {
       setIsUpdating(null);
@@ -241,7 +241,7 @@ export function TasksPage() {
         dueTime: '17:00',
       });
       await loadTasks();
-    } catch (err) {
+    } catch (_err) {
       toast.error('Failed to create task');
     } finally {
       setIsCreating(false);
