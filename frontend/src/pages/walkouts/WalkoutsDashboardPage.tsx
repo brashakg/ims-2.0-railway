@@ -55,13 +55,14 @@ export function WalkoutsDashboardPage() {
   const refresh = useCallback(async () => {
     setLoading(true);
     setError(null);
+    const sid = user?.activeStoreId || undefined;
     try {
       const [ps, tr, br, fu, td] = await Promise.all([
-        walkoutsApi.dashboardPerStaff(),
-        walkoutsApi.dashboardTopReasons(days, 10),
-        walkoutsApi.dashboardResultBreakdown(days),
-        walkoutsApi.dashboardFuStatus(days),
-        walkoutsApi.walkinsToday(),
+        walkoutsApi.dashboardPerStaff(sid),
+        walkoutsApi.dashboardTopReasons(days, 10, sid),
+        walkoutsApi.dashboardResultBreakdown(days, sid),
+        walkoutsApi.dashboardFuStatus(days, sid),
+        walkoutsApi.walkinsToday(sid),
       ]);
       setPerStaff(ps.items || []);
       setTopReasons(tr);
@@ -74,7 +75,7 @@ export function WalkoutsDashboardPage() {
     } finally {
       setLoading(false);
     }
-  }, [days]);
+  }, [days, user?.activeStoreId]);
 
   useEffect(() => { refresh(); }, [refresh]);
 
@@ -87,7 +88,7 @@ export function WalkoutsDashboardPage() {
     try {
       const updated = await walkoutsApi.walkinsManualTopup({
         delta: topupDelta, reason: topupReason.trim(),
-      });
+      }, user?.activeStoreId || undefined);
       setToday(updated);
       toast.success(`+${topupDelta} walk-in${topupDelta > 1 ? 's' : ''} logged`);
       setTopupOpen(false);
