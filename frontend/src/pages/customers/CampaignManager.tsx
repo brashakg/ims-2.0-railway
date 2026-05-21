@@ -4,7 +4,7 @@
 // Marketing campaigns: Rx Renewal, Birthday, Winback with builder & analytics
 
 import { useState } from 'react';
-import { Mail, MessageSquare, Plus, Edit, BarChart3 } from 'lucide-react';
+import { Plus, Edit, BarChart3 } from 'lucide-react';
 import clsx from 'clsx';
 
 type CampaignType = 'rx_renewal' | 'birthday' | 'winback';
@@ -28,69 +28,17 @@ interface Campaign {
   };
 }
 
-const CAMPAIGNS: Campaign[] = [
-  {
-    id: '1',
-    name: 'Valentine Renewal',
-    type: 'rx_renewal',
-    icon: <Mail className="w-5 h-5" />,
-    status: 'active',
-    audience: 1245,
-    channels: ['email', 'sms'],
-    startDate: '2024-02-01',
-    endDate: '2024-02-14',
-    template: 'Prescription Renewal Reminder',
-    stats: {
-      sent: 1245,
-      opened: 687,
-      clicked: 342,
-      converted: 89,
-    },
-  },
-  {
-    id: '2',
-    name: 'Birthday Specials',
-    type: 'birthday',
-    icon: <Mail className="w-5 h-5" />,
-    status: 'active',
-    audience: 450,
-    channels: ['email', 'whatsapp'],
-    startDate: '2024-01-01',
-    endDate: '2024-12-31',
-    template: 'Birthday Special',
-    stats: {
-      sent: 892,
-      opened: 521,
-      clicked: 198,
-      converted: 67,
-    },
-  },
-  {
-    id: '3',
-    name: 'Win Back Campaign',
-    type: 'winback',
-    icon: <MessageSquare className="w-5 h-5" />,
-    status: 'scheduled',
-    audience: 2100,
-    channels: ['email', 'sms'],
-    startDate: '2024-02-15',
-    endDate: '2024-02-28',
-    template: 'Exclusive Comeback Offer',
-    stats: {
-      sent: 0,
-      opened: 0,
-      clicked: 0,
-      converted: 0,
-    },
-  },
-];
-
 export function CampaignManager() {
   const [activeTab, setActiveTab] = useState<'campaigns' | 'builder'>('campaigns');
   const [selectedCampaign, setSelectedCampaign] = useState<string | null>(null);
+  const [campaigns] = useState<Campaign[]>([]);
 
   return (
     <div className="inv-body">
+      <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 text-sm text-blue-800">
+        Preview — campaign tooling isn't connected to a backend yet. Nothing here is saved or sent.
+      </div>
+
       {/* Editorial header */}
       <div className="inv-head">
         <div>
@@ -98,7 +46,7 @@ export function CampaignManager() {
           <h1>Reach, on cue.</h1>
           <div className="hint">WhatsApp + SMS campaigns against customer segments, triggered by life events (Rx expiry, birthday, walkout) or scheduled.</div>
         </div>
-        <button className="btn sm primary">
+        <button className="btn sm primary" disabled title="Coming soon">
           <Plus className="w-4 h-4" /> New campaign
         </button>
       </div>
@@ -127,25 +75,28 @@ export function CampaignManager() {
           <div className="grid grid-cols-4 gap-4">
             <div className="bg-white border border-gray-200 rounded-lg p-4">
               <p className="text-gray-500 text-sm mb-1">Active</p>
-              <p className="text-2xl font-bold text-blue-600">2</p>
+              <p className="text-2xl font-bold text-blue-600">0</p>
             </div>
             <div className="bg-white border border-gray-200 rounded-lg p-4">
               <p className="text-gray-500 text-sm mb-1">Total Sent</p>
-              <p className="text-2xl font-bold text-gray-900">2,137</p>
+              <p className="text-2xl font-bold text-gray-900">0</p>
             </div>
             <div className="bg-white border border-gray-200 rounded-lg p-4">
               <p className="text-gray-500 text-sm mb-1">Open Rate</p>
-              <p className="text-2xl font-bold text-green-600">54%</p>
+              <p className="text-2xl font-bold text-green-600">0%</p>
             </div>
             <div className="bg-white border border-gray-200 rounded-lg p-4">
               <p className="text-gray-500 text-sm mb-1">Conversion</p>
-              <p className="text-2xl font-bold text-purple-600">7.2%</p>
+              <p className="text-2xl font-bold text-purple-600">0%</p>
             </div>
           </div>
 
           {/* Campaign List */}
           <div className="space-y-3">
-            {CAMPAIGNS.map((campaign) => (
+            {campaigns.length === 0 && (
+              <div className="text-center text-gray-500 py-10 text-sm">No campaigns yet.</div>
+            )}
+            {campaigns.map((campaign) => (
               <div
                 key={campaign.id}
                 onClick={() => setSelectedCampaign(selectedCampaign === campaign.id ? null : campaign.id)}
@@ -195,15 +146,15 @@ export function CampaignManager() {
 
                 {selectedCampaign === campaign.id && (
                   <div className="space-y-2 pt-3 border-t border-gray-200 grid grid-cols-3 gap-2">
-                    <button className="px-3 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded text-sm font-semibold flex items-center justify-center gap-1">
+                    <button className="px-3 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded text-sm font-semibold flex items-center justify-center gap-1" disabled title="Coming soon">
                       <Edit className="w-4 h-4" />
                       Edit
                     </button>
-                    <button className="px-3 py-1 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded text-sm font-semibold flex items-center justify-center gap-1">
+                    <button className="px-3 py-1 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded text-sm font-semibold flex items-center justify-center gap-1" disabled title="Coming soon">
                       <BarChart3 className="w-4 h-4" />
                       Analytics
                     </button>
-                    <button className="px-3 py-1 bg-red-100 hover:bg-red-200 text-red-700 rounded text-sm font-semibold">
+                    <button className="px-3 py-1 bg-red-100 hover:bg-red-200 text-red-700 rounded text-sm font-semibold" disabled title="Coming soon">
                       Pause
                     </button>
                   </div>
@@ -248,7 +199,7 @@ export function CampaignManager() {
                   placeholder="Select customer segment..."
                   className="w-full bg-white border border-gray-300 rounded px-3 py-2 text-gray-900 placeholder-gray-400"
                 />
-                <p className="text-gray-500 text-xs mt-2">Estimated audience: 1,245 customers</p>
+                <p className="text-gray-500 text-xs mt-2">Estimated audience: 0 customers</p>
               </div>
 
               {/* Channels */}
@@ -293,10 +244,10 @@ export function CampaignManager() {
 
               {/* Actions */}
               <div className="flex gap-3 pt-4 border-t border-gray-200">
-                <button className="px-6 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-semibold">
+                <button className="px-6 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-semibold" disabled title="Coming soon">
                   Schedule Campaign
                 </button>
-                <button className="px-6 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-lg font-semibold">
+                <button className="px-6 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-lg font-semibold" disabled title="Coming soon">
                   Save as Draft
                 </button>
               </div>

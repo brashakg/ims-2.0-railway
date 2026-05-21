@@ -11,7 +11,6 @@ import {
   Copy, Download, TrendingUp, Target, Filter,
 } from 'lucide-react';
 import { useToast } from '../../context/ToastContext';
-import { exportToCSV } from '../../utils/exportUtils';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -41,15 +40,6 @@ interface Campaign {
   totalDiscount: number;
   createdAt: string;
   isAutoApply: boolean;
-}
-
-interface CouponCode {
-  code: string;
-  campaignId: string;
-  isUsed: boolean;
-  usedBy?: string;
-  usedAt?: string;
-  amount?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -87,99 +77,13 @@ const STATUS_CONFIG: Record<CampaignStatus, { label: string; color: string; bgCo
 };
 
 // ---------------------------------------------------------------------------
-// Mock data
-// ---------------------------------------------------------------------------
-
-const INITIAL_CAMPAIGNS: Campaign[] = [
-  {
-    id: '1',
-    name: 'Republic Day Frame Sale',
-    description: '20% off on all premium frames. Celebrate with a new look!',
-    type: 'PERCENTAGE',
-    status: 'ACTIVE',
-    discountValue: 20,
-    minPurchase: 3000,
-    maxDiscount: 2000,
-    startDate: '2026-01-20',
-    endDate: '2026-02-10',
-    targetSegment: 'ALL',
-    targetCategories: ['Frames', 'Sunglasses'],
-    couponCode: 'REPUBLIC20',
-    totalCouponsGenerated: 500,
-    totalRedemptions: 87,
-    totalRevenue: 435000,
-    totalDiscount: 87000,
-    createdAt: '2026-01-15',
-    isAutoApply: false,
-  },
-  {
-    id: '2',
-    name: 'Lapsed Customer Win-Back',
-    description: '₹500 off for customers who haven\'t visited in 6 months',
-    type: 'FIXED_AMOUNT',
-    status: 'ACTIVE',
-    discountValue: 500,
-    minPurchase: 2000,
-    startDate: '2026-01-01',
-    endDate: '2026-03-31',
-    targetSegment: 'LAPSED',
-    targetCategories: [],
-    couponCode: 'COMEBACK500',
-    totalCouponsGenerated: 200,
-    totalRedemptions: 28,
-    totalRevenue: 84000,
-    totalDiscount: 14000,
-    createdAt: '2025-12-28',
-    isAutoApply: false,
-  },
-  {
-    id: '3',
-    name: 'Frame + Lens Combo',
-    description: 'Get lens at 50% off when buying any frame above ₹5000',
-    type: 'BUNDLE',
-    status: 'ACTIVE',
-    discountValue: 50,
-    minPurchase: 5000,
-    startDate: '2026-01-01',
-    endDate: '2026-06-30',
-    targetSegment: 'ALL',
-    targetCategories: ['Frames', 'Lenses'],
-    totalCouponsGenerated: 0,
-    totalRedemptions: 145,
-    totalRevenue: 1450000,
-    totalDiscount: 362500,
-    createdAt: '2025-12-20',
-    isAutoApply: true,
-  },
-  {
-    id: '4',
-    name: 'Loyalty Double Points Week',
-    description: 'Earn 2x loyalty points on all purchases this week',
-    type: 'LOYALTY_BONUS',
-    status: 'ENDED',
-    discountValue: 2,
-    minPurchase: 0,
-    startDate: '2026-01-27',
-    endDate: '2026-02-02',
-    targetSegment: 'LOYAL',
-    targetCategories: [],
-    totalCouponsGenerated: 0,
-    totalRedemptions: 62,
-    totalRevenue: 310000,
-    totalDiscount: 0,
-    createdAt: '2026-01-25',
-    isAutoApply: true,
-  },
-];
-
-// ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
 
 export function PromotionEngine() {
   const toast = useToast();
 
-  const [campaigns, setCampaigns] = useState<Campaign[]>(INITIAL_CAMPAIGNS);
+  const [campaigns] = useState<Campaign[]>([]);
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<CampaignStatus | 'ALL'>('ALL');
@@ -216,38 +120,12 @@ export function PromotionEngine() {
   const totalRevenue = campaigns.reduce((sum, c) => sum + c.totalRevenue, 0);
   const totalDiscountGiven = campaigns.reduce((sum, c) => sum + c.totalDiscount, 0);
 
+  const comingSoon = () => {
+    toast.info('Coming soon — not yet connected to a backend.');
+  };
+
   const handleCreateCampaign = () => {
-    if (!form.name || !form.discountValue || !form.startDate || !form.endDate) {
-      toast.error('Please fill in all required fields');
-      return;
-    }
-
-    const newCampaign: Campaign = {
-      id: `camp-${Date.now()}`,
-      name: form.name,
-      description: form.description,
-      type: form.type,
-      status: new Date(form.startDate) > new Date() ? 'SCHEDULED' : 'ACTIVE',
-      discountValue: parseFloat(form.discountValue),
-      minPurchase: parseFloat(form.minPurchase) || 0,
-      maxDiscount: form.maxDiscount ? parseFloat(form.maxDiscount) : undefined,
-      startDate: form.startDate,
-      endDate: form.endDate,
-      targetSegment: form.targetSegment,
-      targetCategories: form.targetCategories,
-      couponCode: form.couponCode || undefined,
-      totalCouponsGenerated: 0,
-      totalRedemptions: 0,
-      totalRevenue: 0,
-      totalDiscount: 0,
-      createdAt: new Date().toISOString().split('T')[0],
-      isAutoApply: form.isAutoApply,
-    };
-
-    setCampaigns(prev => [newCampaign, ...prev]);
-    setShowCreateModal(false);
-    resetForm();
-    toast.success(`Campaign "${form.name}" created successfully`);
+    comingSoon();
   };
 
   const resetForm = () => {
@@ -258,34 +136,12 @@ export function PromotionEngine() {
     });
   };
 
-  const handleToggleStatus = (campaign: Campaign) => {
-    const newStatus = campaign.status === 'ACTIVE' ? 'PAUSED' : 'ACTIVE';
-    setCampaigns(prev => prev.map(c => c.id === campaign.id ? { ...c, status: newStatus } : c));
-    toast.success(`Campaign "${campaign.name}" ${newStatus === 'ACTIVE' ? 'activated' : 'paused'}`);
+  const handleToggleStatus = (_campaign: Campaign) => {
+    comingSoon();
   };
 
-  const handleGenerateCoupons = (campaign: Campaign, count: number) => {
-    const coupons: CouponCode[] = Array.from({ length: count }, (_, i) => ({
-      code: `${campaign.couponCode || campaign.name.slice(0, 4).toUpperCase()}-${String(campaign.totalCouponsGenerated + i + 1).padStart(4, '0')}`,
-      campaignId: campaign.id,
-      isUsed: false,
-    }));
-
-    setCampaigns(prev =>
-      prev.map(c => c.id === campaign.id ? { ...c, totalCouponsGenerated: c.totalCouponsGenerated + count } : c)
-    );
-
-    // Export coupons as CSV
-    exportToCSV(
-      coupons.map(c => ({ code: c.code, campaign: campaign.name, status: 'Available' })),
-      `coupons_${campaign.name.replace(/\s+/g, '_')}`,
-      [
-        { key: 'code', label: 'Coupon Code' },
-        { key: 'campaign', label: 'Campaign' },
-        { key: 'status', label: 'Status' },
-      ]
-    );
-    toast.success(`${count} coupons generated and downloaded`);
+  const handleGenerateCoupons = (_campaign: Campaign, _count: number) => {
+    comingSoon();
   };
 
   const handleCopyCode = (code: string) => {
@@ -304,6 +160,10 @@ export function PromotionEngine() {
 
   return (
     <div className="space-y-4">
+      <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 text-sm text-blue-800">
+        Preview — promotion tooling isn't connected to a backend yet. Nothing here is saved or sent.
+      </div>
+
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
@@ -490,7 +350,7 @@ export function PromotionEngine() {
         {filtered.length === 0 && (
           <div className="text-center py-16 bg-white rounded-lg border border-gray-200">
             <Gift className="w-12 h-12 text-gray-500 mx-auto mb-3" />
-            <p className="text-gray-500">No campaigns found</p>
+            <p className="text-gray-500">No promotions yet.</p>
           </div>
         )}
       </div>
