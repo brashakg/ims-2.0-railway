@@ -8,10 +8,14 @@ from fastapi import APIRouter, HTTPException, Depends, Query
 from pydantic import BaseModel, Field
 from typing import List, Optional
 import uuid
-from .auth import get_current_user
+from .auth import get_current_user, require_roles
 from ..dependencies import get_product_repository
 
 router = APIRouter()
+
+# Roles permitted to mutate the product catalog. Mirrors the frontend
+# `catalog/add` route guard. SUPERADMIN auto-passes via require_roles.
+_CATALOG_ROLES = ("ADMIN", "CATALOG_MANAGER")
 
 
 # ============================================================================
@@ -144,7 +148,8 @@ async def list_products(
 
 @router.post("", status_code=201)
 async def create_product(
-    product: ProductCreate, current_user: dict = Depends(get_current_user)
+    product: ProductCreate,
+    current_user: dict = Depends(require_roles(*_CATALOG_ROLES)),
 ):
     """Create a new product"""
     # Validate MRP >= Offer Price
@@ -248,7 +253,7 @@ async def get_product(product_id: str, current_user: dict = Depends(get_current_
 async def update_product(
     product_id: str,
     product: ProductUpdate,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_roles(*_CATALOG_ROLES)),
 ):
     """Update product details"""
     repo = get_product_repository()
