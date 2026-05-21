@@ -74,11 +74,19 @@ class SentinelAgent(JarvisAgent):
         db_health = await self._check_db_health()
         results["database"] = db_health
 
-        # 2. Agent health check
+        # 2. API router health check (ping critical endpoints)
+        api_health = await self._check_api_health()
+        results["api"] = api_health
+
+        # 3. Frontend reachability (HEAD request to Vercel)
+        frontend_health = await self._check_frontend_health()
+        results["frontend"] = frontend_health
+
+        # 4. Agent health check
         agent_health = await self._check_agent_health()
         results["agents"] = agent_health
 
-        # 3. Data integrity check (every 10th run to save resources)
+        # 5. Data integrity check (every 10th run to save resources)
         if self._run_count % 10 == 0:
             integrity = await self._check_data_integrity()
             results["data_integrity"] = integrity
@@ -91,13 +99,30 @@ class SentinelAgent(JarvisAgent):
         self._last_health_data = results
         await self._store_health_check(results)
 
-        # Alert if degraded
+        # Auto-alert state transitions — first time we drop below 70,
+        # file a HIGH alert with the failing components so the UI/Slack
+        # surface it. Above 70 stays quiet.
         if self._health_score < 70:
+            failing = []
+            for domain in ("database", "api", "frontend", "agents"):
+                d = results.get(domain) or {}
+                if d.get("status") in ("unhealthy", "degraded"):
+                    failing.append(domain)
+            await self._create_alert(
+                severity="HIGH" if self._health_score >= 40 else "CRITICAL",
+                domain="system",
+                message=(
+                    f"System health {self._health_score}/100 — "
+                    f"{', '.join(failing) if failing else 'multiple components'} degraded"
+                ),
+                details={"score": self._health_score, "failing": failing},
+            )
             await self.emit_event("system.degraded", {
                 "score": self._health_score,
+                "failing": failing,
                 "details": results,
             })
-            logger.warning(f"[SENTINEL] System health DEGRADED: {self._health_score}/100")
+            logger.warning(f"[SENTINEL] System health DEGRADED: {self._health_score}/100 — {failing}")
 
     async def run(self, query: str, context: AgentContext) -> AgentResponse:
         """Handle on-demand health queries from CORTEX."""
@@ -207,6 +232,107 @@ class SentinelAgent(JarvisAgent):
 
         return result
 
+    async def _check_api_health(self) -> Dict[str, Any]:
+        """
+        Ping critical API endpoints on this very instance. Uses the
+        in-process HTTP client so we measure the deployed router stack
+        end-to-end, not just a function call.
+
+        Checks: /api/v1/health (anon — required to be public), plus a
+        couple of authenticated routes via the configured API_BASE_URL
+        if a SENTINEL_API_TOKEN is provided (optional; skipped otherwise
+        so we don't store a long-lived token in env by default).
+        """
+        result: Dict[str, Any] = {"status": "unknown", "checks": {}}
+        start = time.time()
+
+        # Cache the token across ticks if provisioned. Empty string = skip.
+        token = os.getenv("SENTINEL_API_TOKEN", "")
+
+        targets = [
+            {"name": "health", "path": "/api/v1/health", "auth": False, "method": "GET"},
+        ]
+        if token:
+            targets.extend([
+                {"name": "auth_me", "path": "/api/v1/auth/me", "auth": True, "method": "GET"},
+                {"name": "products_count", "path": "/api/v1/products?limit=1", "auth": True, "method": "GET"},
+            ])
+
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                for tgt in targets:
+                    t0 = time.time()
+                    headers = {}
+                    if tgt["auth"] and token:
+                        headers["Authorization"] = f"Bearer {token}"
+                    try:
+                        r = await client.request(
+                            tgt["method"],
+                            f"{API_BASE_URL}{tgt['path']}",
+                            headers=headers,
+                        )
+                        result["checks"][tgt["name"]] = {
+                            "status_code": r.status_code,
+                            "ok": 200 <= r.status_code < 400,
+                            "response_time_ms": round((time.time() - t0) * 1000, 1),
+                        }
+                    except Exception as e:
+                        result["checks"][tgt["name"]] = {
+                            "error": str(e)[:200],
+                            "ok": False,
+                        }
+        except Exception as e:
+            result["error"] = str(e)[:200]
+
+        checks = result["checks"]
+        if not checks:
+            result["status"] = "unknown"
+        elif all(c.get("ok") for c in checks.values()):
+            result["status"] = "healthy"
+        elif any(c.get("ok") for c in checks.values()):
+            result["status"] = "degraded"
+        else:
+            result["status"] = "unhealthy"
+        result["response_time_ms"] = round((time.time() - start) * 1000, 1)
+        return result
+
+    async def _check_frontend_health(self) -> Dict[str, Any]:
+        """HEAD request to the Vercel frontend to confirm it's serving.
+
+        Default target: FRONTEND_BASE_URL env, falling back to the public
+        Vercel domain. Counts 2xx and 3xx as healthy (Vercel may redirect
+        /). 5xx or timeout = unhealthy.
+        """
+        result: Dict[str, Any] = {"status": "unknown"}
+        url = os.getenv(
+            "FRONTEND_BASE_URL", "https://ims-2-0-railway.vercel.app"
+        ).rstrip("/")
+        start = time.time()
+        try:
+            async with httpx.AsyncClient(
+                timeout=8.0, follow_redirects=False
+            ) as client:
+                # GET (not HEAD — some hosts return 405 on HEAD)
+                r = await client.get(url)
+            elapsed = round((time.time() - start) * 1000, 1)
+            result["url"] = url
+            result["status_code"] = r.status_code
+            result["response_time_ms"] = elapsed
+            if 200 <= r.status_code < 400:
+                result["status"] = "healthy"
+            elif 400 <= r.status_code < 500:
+                # 4xx is not "down" — likely a misconfigured route — degraded
+                result["status"] = "degraded"
+            else:
+                result["status"] = "unhealthy"
+        except httpx.TimeoutException:
+            result["status"] = "unhealthy"
+            result["error"] = "timeout"
+        except Exception as e:
+            result["status"] = "unhealthy"
+            result["error"] = str(e)[:200]
+        return result
+
     async def _check_agent_health(self) -> Dict[str, Any]:
         """Poll all registered agents' health_check()."""
         from ..registry import AGENT_REGISTRY
@@ -278,31 +404,38 @@ class SentinelAgent(JarvisAgent):
     def _compute_health_score(self, results: Dict[str, Any]) -> int:
         """
         Compute overall system health score (0-100).
-        Weights: Database (40%), Agents (30%), Data Integrity (30%)
+        Weights: Database (30%), API (20%), Frontend (15%), Agents (20%),
+                 Data Integrity (15%).
+
+        Each component's status maps to a deduction proportional to its
+        weight: unhealthy = full deduction, degraded = half, unknown =
+        quarter. Agents use ratio of unhealthy/total. Integrity uses
+        issue count capped at the weight.
         """
         score = 100
 
-        # Database health (40% weight)
-        db = results.get("database", {})
-        db_status = db.get("status", "unknown")
-        if db_status == "unhealthy":
-            score -= 40
-        elif db_status == "degraded":
-            score -= 20
-        elif db_status == "unknown":
-            score -= 10
+        def deduct(status: str, weight: int) -> int:
+            if status == "unhealthy":
+                return weight
+            if status == "degraded":
+                return weight // 2
+            if status == "unknown":
+                return weight // 4
+            return 0
 
-        # Agent health (30% weight)
+        score -= deduct(results.get("database", {}).get("status", "unknown"), 30)
+        score -= deduct(results.get("api", {}).get("status", "unknown"), 20)
+        score -= deduct(results.get("frontend", {}).get("status", "unknown"), 15)
+
         agents = results.get("agents", {})
         if agents.get("total", 0) > 0:
             unhealthy_ratio = agents.get("unhealthy", 0) / max(agents.get("total", 1), 1)
-            score -= int(unhealthy_ratio * 30)
+            score -= int(unhealthy_ratio * 20)
 
-        # Data integrity (30% weight)
         integrity = results.get("data_integrity", {})
         issue_count = len(integrity.get("issues", []))
         if issue_count > 0:
-            score -= min(issue_count * 10, 30)
+            score -= min(issue_count * 5, 15)
 
         return max(0, min(100, score))
 
