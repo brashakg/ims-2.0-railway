@@ -12,8 +12,9 @@ conversion-feed contract Module (ii) consumes. See
 docs/PUNE_INCENTIVE_BUILD_PLAN.md for the full programme.
 
 Auth: every endpoint requires a logged-in user. POST is allowed for
-SUPERADMIN / ADMIN / STORE_MANAGER / SALES_STAFF / CASHIER. Other
-roles get 403 (deliberate — workshop staff don't log walkouts).
+SUPERADMIN / ADMIN / AREA_MANAGER / STORE_MANAGER / ACCOUNTANT /
+SALES_STAFF / SALES_CASHIER / CASHIER (see _ALLOWED_CREATE_ROLES). Other
+roles (OPTOMETRIST, WORKSHOP_STAFF) get 403 — they don't log walkouts.
 
 Side effects on POST:
   1. If the supplied mobile isn't in `customers`, a skeleton customer
@@ -277,11 +278,17 @@ class SetResultRequest(BaseModel):
 _ALLOWED_CREATE_ROLES = {
     "SUPERADMIN",
     "ADMIN",
+    "AREA_MANAGER",
     "STORE_MANAGER",
+    "ACCOUNTANT",
     "SALES_STAFF",
     "SALES_CASHIER",
     "CASHIER",
 }
+# AREA_MANAGER + ACCOUNTANT added so the create set matches the frontend
+# walkouts route (App.tsx). Both are already _REATTRIBUTE_ROLES (trusted to
+# edit/attribute walkouts), so allowing them to log one is consistent — and
+# fixes the broken-UX where they could open the intake modal but the POST 403'd.
 # Roles that can edit any walkout in their store (or any store, for
 # the global ones). Sales staff can only edit walkouts they own.
 _GLOBAL_EDIT_ROLES = {"SUPERADMIN", "ADMIN"}
