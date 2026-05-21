@@ -228,6 +228,9 @@ def item_to_frontend(item: dict) -> dict:
 
     result = {}
     for key, value in item.items():
+        # Drop `_id` ObjectId — same reasoning as order_to_frontend.
+        if key == "_id":
+            continue
         if key in key_map:
             result[key_map[key]] = value
         else:
@@ -248,6 +251,8 @@ def payment_to_frontend(payment: dict) -> dict:
 
     result = {}
     for key, value in payment.items():
+        if key == "_id":
+            continue  # Drop ObjectId — same reasoning as order_to_frontend.
         if key in key_map:
             result[key_map[key]] = value
         else:

@@ -131,6 +131,15 @@ async def list_transfers(
     transfer_type: Optional[TransferType] = None,
     from_location_id: Optional[str] = None,
     to_location_id: Optional[str] = None,
+    store_id: Optional[str] = Query(
+        None,
+        description=(
+            "Convenience filter — returns transfers where store_id is "
+            "EITHER the source OR the destination. Used by the topbar "
+            "store-switcher; mutually exclusive with explicit from/to "
+            "location filters (those take precedence when both are set)."
+        ),
+    ),
     priority: Optional[TransferPriority] = None,
     created_after: Optional[str] = None,
     created_before: Optional[str] = None,
@@ -152,6 +161,15 @@ async def list_transfers(
         ]
     if to_location_id:
         transfers = [t for t in transfers if t.get("to_location_id") == to_location_id]
+    # `store_id` convenience: include transfers where the store is on
+    # either side. Explicit from/to filters already applied above; this
+    # narrows further only if neither was set.
+    if store_id and not (from_location_id or to_location_id):
+        transfers = [
+            t for t in transfers
+            if t.get("from_location_id") == store_id
+            or t.get("to_location_id") == store_id
+        ]
     if priority:
         transfers = [t for t in transfers if t.get("priority") == priority]
 
