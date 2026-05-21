@@ -221,6 +221,44 @@ def default_model_id() -> Optional[str]:
     return None
 
 
+def model_budgets(model_id: Optional[str]) -> Dict[str, int]:
+    """Tier-appropriate token + context budgets for an LLM call.
+
+    Local Ollama is typically a small (3B-class) model running on a
+    shared CPU instance with a 4096-token context window. Sending it
+    a 32k-char (~8k token) prompt forces truncation AND blows past the
+    LLM_TIMEOUT. Claude/Opus have 200k context — no constraint there.
+
+    Returns a dict callers can spread into `complete()`:
+        {"max_tokens": int, "context_budget": int}
+
+    Tunable via env:
+        LLM_LOCAL_MAX_TOKENS       (default 512)
+        LLM_LOCAL_CONTEXT_BUDGET   (default 3000)
+        LLM_STANDARD_MAX_TOKENS    (default 2048)
+        LLM_STANDARD_CONTEXT_BUDGET(default 16000)
+        LLM_PREMIUM_MAX_TOKENS     (default 4096)
+        LLM_PREMIUM_CONTEXT_BUDGET (default 48000)
+    """
+    reg = _registry()
+    tier = (reg.get(model_id or "", {}) or {}).get("tier", "standard")
+
+    if tier == "free":
+        return {
+            "max_tokens": int(os.getenv("LLM_LOCAL_MAX_TOKENS", "512")),
+            "context_budget": int(os.getenv("LLM_LOCAL_CONTEXT_BUDGET", "3000")),
+        }
+    if tier == "premium":
+        return {
+            "max_tokens": int(os.getenv("LLM_PREMIUM_MAX_TOKENS", "4096")),
+            "context_budget": int(os.getenv("LLM_PREMIUM_CONTEXT_BUDGET", "48000")),
+        }
+    return {
+        "max_tokens": int(os.getenv("LLM_STANDARD_MAX_TOKENS", "2048")),
+        "context_budget": int(os.getenv("LLM_STANDARD_CONTEXT_BUDGET", "16000")),
+    }
+
+
 def any_available() -> bool:
     return bool(_registry())
 
@@ -229,7 +267,7 @@ def any_available() -> bool:
 # Completion routing
 # ============================================================================
 
-DEFAULT_TIMEOUT = float(os.getenv("LLM_TIMEOUT", "45.0"))
+DEFAULT_TIMEOUT = float(os.getenv("LLM_TIMEOUT", "120.0"))
 
 
 def _context_block(business_data: Optional[Dict], level: str = "all", budget: int = 12000) -> str:
