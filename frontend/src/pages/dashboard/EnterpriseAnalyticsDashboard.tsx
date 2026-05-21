@@ -20,7 +20,7 @@ import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { reportsApi, analyticsApi, adminStoreApi } from '../../services/api';
 import { EnterpriseKpiCard } from '../../components/dashboard/EnterpriseKpiCard';
-import { LineChart, DonutChart, formatChartValue } from '../../components/dashboard/AdvancedCharts';
+import { LineChart, formatChartValue } from '../../components/dashboard/AdvancedCharts';
 import { MultiStorePerformanceTable } from '../../components/dashboard/MultiStorePerformanceTable';
 import clsx from 'clsx';
 
@@ -617,18 +617,12 @@ export default function EnterpriseAnalyticsDashboard() {
           {/* Revenue by Category */}
           <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
             <h3 className="text-lg font-semibold text-gray-900 mb-4">Revenue by Category</h3>
-            <DonutChart
-              data={[
-                { label: 'Frames', value: 35, color: '#3b82f6' },
-                { label: 'Lenses', value: 28, color: '#10b981' },
-                { label: 'Contact Lenses', value: 18, color: '#f59e0b' },
-                { label: 'Sunglasses', value: 12, color: '#8b5cf6' },
-                { label: 'Accessories', value: 5, color: '#ec4899' },
-                { label: 'Services', value: 2, color: '#6366f1' },
-              ]}
-              showLegend
-              loading={isLoading}
-            />
+            {/* Was a hardcoded donut (Frames 35% / Lenses 28% / ...). Removed —
+                a real category split needs order line items tagged by product
+                category, which isn't available here yet. */}
+            <div className="flex items-center justify-center h-48 text-sm text-gray-400 text-center px-6">
+              Category-wise revenue breakdown isn't available yet.
+            </div>
           </div>
         </div>
       )}
