@@ -174,13 +174,12 @@ export function JarvisPage() {
   const [sentinelLoading, setSentinelLoading] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  // STRICT ACCESS CONTROL - SUPERADMIN ONLY
+  // STRICT ACCESS CONTROL — SUPERADMIN ONLY. The guard (`if (!isSuperAdmin) return null`)
+  // is intentionally NOT here — it lives below, AFTER every hook is declared. React
+  // requires hooks to be called in the same order every render, and an early-return
+  // before the useEffect/useState block would skip them on subsequent renders if the
+  // role changes, throwing "rendered fewer hooks than expected" at runtime.
   const isSuperAdmin = hasRole(['SUPERADMIN']);
-
-  // If not superadmin, render nothing (404-like behavior)
-  if (!isSuperAdmin) {
-    return null;
-  }
 
   // Auto-scroll to bottom
   useEffect(() => {
@@ -679,6 +678,15 @@ Is there a specific aspect you'd like me to dive deeper into? I can provide deta
   const enabledCount = agentsForGrid.filter((a) => a.enabled).length;
   const totalActs24h = agentsForGrid.reduce((s, a) => s + (a.run_count || 0), 0);
   const awaitingApproval = 0; // Phase 4: count from agent_audit_log where tier=2 requires_approval=true
+
+  // STRICT ACCESS CONTROL — render nothing for non-SUPERADMIN.
+  // This guard MUST live after every hook declaration above; an
+  // early-return before useState/useEffect would skip them on a
+  // later render (e.g. if role changes), throwing
+  // "rendered fewer hooks than expected".
+  if (!isSuperAdmin) {
+    return null;
+  }
 
   return (
     <div style={{ padding: '24px 28px 60px', background: 'var(--bg)', minHeight: 'calc(100vh - 52px)', overflowY: 'auto' }}>

@@ -75,14 +75,17 @@ export function FollowUpDashboard() {
   const { user } = useAuth();
   const storeId = user?.activeStoreId;
 
-  if (!storeId) {
-    return <div className="p-8 text-center text-red-600">No store selected. Please select a store from the header.</div>;
-  }
-
+  // NOTE: the "no store selected" guard lives BELOW this useEffect (and
+  // every other hook) so React's "hooks must be called in the same order
+  // every render" rule isn't violated when storeId changes from undefined
+  // to a value. Putting the guard above would skip the effect on first
+  // render and trigger it on second, throwing "rendered fewer hooks
+  // than expected".
   useEffect(() => {
+    if (!storeId) return;
     loadFollowUps();
     loadSummary();
-  }, []);
+  }, [storeId]);
 
   const loadFollowUps = async () => {
     try {
@@ -181,6 +184,12 @@ export function FollowUpDashboard() {
       year: 'numeric',
     });
   };
+
+  // "No store selected" guard — lives here (after every hook above)
+  // to preserve React's hook-call ordering rule.
+  if (!storeId) {
+    return <div className="p-8 text-center text-red-600">No store selected. Please select a store from the header.</div>;
+  }
 
   return (
     <div className="inv-body">
