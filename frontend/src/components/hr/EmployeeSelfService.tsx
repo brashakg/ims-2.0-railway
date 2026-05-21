@@ -2,14 +2,14 @@
 // Employee Self-Service View (HR Page - Staff Role)
 // ============================================================================
 // Read-only view showing:
-// - My attendance this month
-// - My salary slips
-// - My incentive progress
-// - My leaves balance
+// - My attendance this month (real — /hr/attendance)
+// - My latest salary slip (real — /payroll/payslip/{id})
+// - My leaves taken this year (real — /hr/leaves)
+// - My month-to-date incentive score (real — /incentive/points/mtd)
 
 import { useState, useEffect } from 'react';
 import { Calendar, FileText, TrendingUp, Clock, Loader2 } from 'lucide-react';
-import { hrApi } from '../../services/api';
+import { hrApi, incentiveApi } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
 
 interface AttendanceSummary {
@@ -22,22 +22,23 @@ interface AttendanceSummary {
 interface SalarySlip {
   id: string;
   month: string;
-  salary: number;
+  salary: number;       // gross
   deductions: number;
-  netAmount: number;
+  netAmount: number;    // net pay
 }
 
-interface LeaveBalance {
-  casual: number;
-  sick: number;
-  annual: number;
+interface IncentiveSummary {
+  daysLogged: number;
+  avgTotal: number;
+  eligibilityAvg: number;
 }
 
 export function EmployeeSelfService() {
   const { user } = useAuth();
   const [attendance, setAttendance] = useState<AttendanceSummary | null>(null);
   const [salarySlips, setSalarySlips] = useState<SalarySlip[]>([]);
-  const [leaves, setLeaves] = useState<LeaveBalance | null>(null);
+  const [leavesTaken, setLeavesTaken] = useState<number | null>(null);
+  const [incentive, setIncentive] = useState<IncentiveSummary | null>(null);
   const [isLoading, setIsLoading] = useState(false);
 
   useEffect(() => {
@@ -68,15 +69,57 @@ export function EmployeeSelfService() {
       };
       setAttendance(attSummary);
 
-      // Mock salary slips (in production, fetch from API)
-      setSalarySlips([
-        { id: '1', month: 'March 2026', salary: 25000, deductions: 2500, netAmount: 22500 },
-        { id: '2', month: 'February 2026', salary: 25000, deductions: 2500, netAmount: 22500 },
-        { id: '3', month: 'January 2026', salary: 25000, deductions: 2500, netAmount: 22500 },
-      ]);
+      // Real: latest payslip
+      const payslipRes = await hrApi.getLatestPayslip(user.id).catch(() => ({ payslip: null }));
+      const p = payslipRes?.payslip;
+      if (p) {
+        const bd = p.breakdown || {};
+        const monthLabel = new Date(p.year, (p.month || 1) - 1, 1).toLocaleString('en-IN', {
+          month: 'long',
+          year: 'numeric',
+        });
+        setSalarySlips([
+          {
+            id: p.payslip_id || 'latest',
+            month: monthLabel,
+            salary: Number(bd.gross_salary) || 0,
+            deductions: Number(bd.total_deductions) || 0,
+            netAmount: Number(bd.net_pay) || 0,
+          },
+        ]);
+      } else {
+        setSalarySlips([]);
+      }
 
-      // Mock leave balance (in production, fetch from API)
-      setLeaves({ casual: 3, sick: 5, annual: 8 });
+      // Real: approved leave days taken in the current calendar year
+      const leavesRes = await hrApi.getLeaves({ userId: user.id }).catch(() => ({ leaves: [] }));
+      const leaveList: any[] = Array.isArray(leavesRes) ? leavesRes : leavesRes?.leaves || [];
+      const yearNow = new Date().getFullYear();
+      const daysTaken = leaveList
+        .filter((l) => l.status === 'APPROVED' && new Date(l.startDate).getFullYear() === yearNow)
+        .reduce((sum, l) => {
+          const start = new Date(l.startDate);
+          const end = new Date(l.endDate || l.startDate);
+          const d = Math.floor((end.getTime() - start.getTime()) / 86400000) + 1;
+          return sum + (d > 0 ? d : 1);
+        }, 0);
+      setLeavesTaken(daysTaken);
+
+      // Real: this employee's month-to-date incentive score
+      const now2 = new Date();
+      const mtd = await incentiveApi
+        .getMtd(now2.getFullYear(), now2.getMonth() + 1, user.activeStoreId)
+        .catch(() => null);
+      const myEntry = mtd?.items?.find((it: any) => it.staff_id === user.id);
+      setIncentive(
+        myEntry
+          ? {
+              daysLogged: myEntry.days_logged || 0,
+              avgTotal: Math.round((myEntry.avg?.total || 0) * 10) / 10,
+              eligibilityAvg: Math.round((myEntry.eligibility_avg || 0) * 10) / 10,
+            }
+          : null
+      );
     } catch {
       // Handle errors silently
     } finally {
@@ -153,25 +196,12 @@ export function EmployeeSelfService() {
         </div>
       )}
 
-      {/* Leave Balance */}
-      {leaves && (
-        <div className="card">
-          <h2 className="text-lg font-bold text-gray-900 mb-4">Leave Balance</h2>
-          <div className="grid grid-cols-3 gap-4">
-            {[
-              { type: 'Casual Leave', balance: leaves.casual, color: 'text-blue-500' },
-              { type: 'Sick Leave', balance: leaves.sick, color: 'text-red-500' },
-              { type: 'Annual Leave', balance: leaves.annual, color: 'text-green-500' },
-            ].map(leave => (
-              <div key={leave.type} className="bg-white rounded-lg p-4 border border-gray-200">
-                <p className="text-sm text-gray-500 mb-2">{leave.type}</p>
-                <p className={`text-3xl font-bold ${leave.color}`}>{leave.balance}</p>
-                <p className="text-xs text-gray-500 mt-2">days available</p>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
+      {/* Leaves Taken (this year) */}
+      <div className="card">
+        <h2 className="text-lg font-bold text-gray-900 mb-2">Leaves Taken (This Year)</h2>
+        <p className="text-3xl font-bold text-blue-600">{leavesTaken ?? 0}</p>
+        <p className="text-xs text-gray-500 mt-1">approved leave days in {new Date().getFullYear()}</p>
+      </div>
 
       {/* Salary Slips */}
       <div className="card">
@@ -180,6 +210,9 @@ export function EmployeeSelfService() {
           Recent Salary Slips
         </h2>
         <div className="space-y-3">
+          {salarySlips.length === 0 && (
+            <p className="text-sm text-gray-500">No payslips generated yet.</p>
+          )}
           {salarySlips.map(slip => (
             <div key={slip.id} className="bg-white rounded-lg p-4 border border-gray-200 hover:border-bv-red-600 transition-colors">
               <div className="flex items-center justify-between">
@@ -200,22 +233,30 @@ export function EmployeeSelfService() {
         </div>
       </div>
 
-      {/* Incentive Progress (Mock) */}
+      {/* Incentive — month-to-date (real) */}
       <div className="card">
         <h2 className="text-lg font-bold text-gray-900 mb-4 flex items-center gap-2">
           <TrendingUp className="w-5 h-5" />
-          Incentive Progress
+          Incentive (Month to Date)
         </h2>
-        <div className="bg-white rounded-lg p-4 border border-gray-200">
-          <div className="flex items-center justify-between mb-3">
-            <p className="text-gray-700">March 2026 Target</p>
-            <p className="text-sm text-gray-500">₹5,000 of ₹10,000</p>
+        {incentive ? (
+          <div className="grid grid-cols-3 gap-4">
+            <div className="bg-white rounded-lg p-4 border border-gray-200">
+              <p className="text-sm text-gray-500 mb-2">Avg Daily Score</p>
+              <p className="text-3xl font-bold text-bv-red-600">{incentive.avgTotal}</p>
+            </div>
+            <div className="bg-white rounded-lg p-4 border border-gray-200">
+              <p className="text-sm text-gray-500 mb-2">Eligibility Avg</p>
+              <p className="text-3xl font-bold text-green-600">{incentive.eligibilityAvg}</p>
+            </div>
+            <div className="bg-white rounded-lg p-4 border border-gray-200">
+              <p className="text-sm text-gray-500 mb-2">Days Logged</p>
+              <p className="text-3xl font-bold text-blue-600">{incentive.daysLogged}</p>
+            </div>
           </div>
-          <div className="w-full bg-gray-100 rounded-full h-2">
-            <div className="bg-bv-red-600 h-2 rounded-full" style={{ width: '50%' }}></div>
-          </div>
-          <p className="text-xs text-gray-500 mt-2">50% of target achieved</p>
-        </div>
+        ) : (
+          <p className="text-sm text-gray-500">No incentive points logged this month yet.</p>
+        )}
       </div>
     </div>
   );
