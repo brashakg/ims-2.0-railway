@@ -222,6 +222,7 @@ async def get_analytics_root():
 async def get_dashboard_summary(
     current_user: dict = Depends(get_current_user),
     period: str = Query("month", pattern="^(today|week|month|quarter|year)$"),
+    store_id: Optional[str] = Query(None),
 ):
     """
     Get comprehensive dashboard summary with all KPI data
@@ -229,7 +230,7 @@ async def get_dashboard_summary(
     """
     try:
         start_date, end_date = get_date_range(period)
-        store_id = current_user.get("active_store_id") or "store-001"
+        store_id = store_id or current_user.get("active_store_id") or "store-001"
 
         order_repo = get_order_repository()
         stock_repo = get_stock_repository()
@@ -315,13 +316,14 @@ async def get_revenue_trends(
     current_user: dict = Depends(get_current_user),
     period: str = Query("daily", pattern="^(daily|weekly|monthly)$"),
     days: int = Query(30, ge=7, le=365),
+    store_id: Optional[str] = Query(None),
 ):
     """
     Get revenue trend data for charting
     Returns: Time-series revenue data with YoY comparison
     """
     try:
-        store_id = current_user.get("active_store_id") or "store-001"
+        store_id = store_id or current_user.get("active_store_id") or "store-001"
         end_date = datetime.now()
         start_date = end_date - timedelta(days=days)
 
@@ -540,12 +542,13 @@ async def get_store_performance(
 @router.get("/inventory-intelligence")
 async def get_inventory_intelligence(
     current_user: dict = Depends(get_current_user),
+    store_id: Optional[str] = Query(None),
 ):
     """
     Get inventory intelligence: low stock, dead stock, fast-moving items
     """
     try:
-        store_id = current_user.get("active_store_id") or "store-001"
+        store_id = store_id or current_user.get("active_store_id") or "store-001"
 
         stock_repo = get_stock_repository()
         inventory = (
@@ -665,13 +668,14 @@ async def get_inventory_intelligence(
 async def get_customer_insights(
     current_user: dict = Depends(get_current_user),
     period: str = Query("month", pattern="^(today|week|month|quarter|year)$"),
+    store_id: Optional[str] = Query(None),
 ):
     """
     Get customer insights: composition, top customers, lifetime value
     """
     try:
         start_date, end_date = get_date_range(period)
-        store_id = current_user.get("active_store_id") or "store-001"
+        store_id = store_id or current_user.get("active_store_id") or "store-001"
 
         customer_repo = get_customer_repository()
         order_repo = get_order_repository()
@@ -755,13 +759,14 @@ async def get_customer_insights(
 async def get_enterprise_kpis(
     current_user: dict = Depends(get_current_user),
     period: str = Query("today", pattern="^(today|week|month|year)$"),
+    store_id: Optional[str] = Query(None),
 ):
     """
     Comprehensive enterprise KPI dashboard with SAP/Power BI style metrics
     Returns: Revenue, margins, footfall, inventory, products, cash register, store comparison
     """
     try:
-        store_id = current_user.get("active_store_id") or "store-001"
+        store_id = store_id or current_user.get("active_store_id") or "store-001"
         start_date, end_date = get_date_range(period)
 
         # Get repositories
