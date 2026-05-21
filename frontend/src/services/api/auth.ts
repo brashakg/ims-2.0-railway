@@ -5,6 +5,24 @@
 import api, { getSecureApiUrl } from './client';
 import type { ApiResponse, LoginCredentials, LoginResponse, User } from '../../types';
 
+// Mirrors backend/api/services/role_caps.py. Only used as a fallback when
+// the server response is missing `discount_cap` (pre-fix backends). The
+// authoritative cap is always server-side; this prevents a missing field
+// from silently locking SUPERADMIN at 0%.
+const FRONTEND_ROLE_DISCOUNT_CAPS: Record<string, number> = {
+  SUPERADMIN: 100,
+  ADMIN: 100,
+  AREA_MANAGER: 25,
+  STORE_MANAGER: 20,
+  INVENTORY_MANAGER: 20,
+  SALES_CASHIER: 10,
+  SALES_STAFF: 10,
+};
+function roleDiscountCapFallback(roles: string[]): number {
+  if (!roles?.length) return 0;
+  return Math.max(...roles.map((r) => FRONTEND_ROLE_DISCOUNT_CAPS[r] ?? 0));
+}
+
 export const authApi = {
   login: async (credentials: LoginCredentials): Promise<LoginResponse> => {
     // Backend response format differs from frontend LoginResponse
@@ -19,6 +37,11 @@ export const authApi = {
         roles: string[];
         store_ids: string[];
         active_store_id: string;
+        // Role-aware effective cap from the server (added May 2026).
+        // SUPERADMIN/ADMIN = 100; managers see their role baseline; sales = 10.
+        // Optional because pre-fix backends won't include it — we fall
+        // back to a local role lookup so old servers still work.
+        discount_cap?: number;
       };
     }
 
@@ -39,7 +62,9 @@ export const authApi = {
           activeRole: data.user.roles[0] as import('../../types').UserRole,
           storeIds: data.user.store_ids,
           activeStoreId: data.user.active_store_id,
-          discountCap: 0,
+          // Prefer server's role-aware cap. Fallback to role lookup so a
+          // missing field never silently locks a SUPERADMIN at 0%.
+          discountCap: data.user.discount_cap ?? roleDiscountCapFallback(data.user.roles),
           isActive: true,
           geoRestricted: false,
           createdAt: new Date().toISOString(),
@@ -91,6 +116,7 @@ export const authApi = {
       roles: string[];
       store_ids: string[];
       active_store_id: string;
+      discount_cap?: number;
       exp?: number;
     }>('/auth/me');
     const raw = response.data;
@@ -103,7 +129,7 @@ export const authApi = {
       activeRole: (raw.roles[0] ?? 'SALES_STAFF') as import('../../types').UserRole,
       storeIds: raw.store_ids ?? [],
       activeStoreId: raw.active_store_id,
-      discountCap: 0,
+      discountCap: raw.discount_cap ?? roleDiscountCapFallback(raw.roles),
       isActive: true,
       geoRestricted: false,
       createdAt: new Date().toISOString(),

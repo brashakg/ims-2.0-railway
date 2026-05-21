@@ -101,10 +101,13 @@ export function OrdersPage() {
     setCurrentPage(1);
   }, [statusFilter, dateFilter, searchQuery]);
 
-  // Load orders on mount and when filters/page change
+  // Load orders on mount and when filters / page / SELECTED STORE change.
+  // The activeStoreId dep is load-bearing — without it, the topbar's
+  // store-switch updates user.activeStoreId in AuthContext but this page's
+  // data stays pinned to the old store. (May 2026 store-switch reactivity fix.)
   useEffect(() => {
     loadOrders();
-  }, [statusFilter, dateFilter, currentPage]);
+  }, [statusFilter, dateFilter, currentPage, user?.activeStoreId]);
 
   const loadOrders = async () => {
     setIsLoading(true);

@@ -433,6 +433,15 @@ async def login(request: LoginRequest, req: Request = None):
     # Record successful login (clears lockouts)
     _login_limiter.record(client_ip, request.username, success=True)
 
+    # Compute role-aware effective discount cap so the frontend doesn't have to
+    # know the role→cap matrix. SUPERADMIN/ADMIN → 100% (unlimited), managers
+    # get role baseline + any per-user override. See services/role_caps.py.
+    from api.services.role_caps import effective_discount_cap
+    eff_cap = effective_discount_cap(
+        user.get("roles", []),
+        user.get("discount_cap"),
+    )
+
     return LoginResponse(
         access_token=access_token,
         expires_in=ACCESS_TOKEN_EXPIRE_MINUTES * 60,
@@ -443,6 +452,7 @@ async def login(request: LoginRequest, req: Request = None):
             "roles": user.get("roles", []),
             "store_ids": user_store_ids,
             "active_store_id": token_data["active_store_id"],
+            "discount_cap": eff_cap,
         },
     )
 

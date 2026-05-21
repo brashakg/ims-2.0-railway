@@ -124,7 +124,9 @@ export function TaskManagementPage() {
 
   useEffect(() => {
     loadData();
-  }, [activeTab]);
+    // user?.activeStoreId in deps so tasks re-fetch when the topbar
+    // store-switcher changes the active store.
+  }, [activeTab, user?.activeStoreId]);
 
   const loadData = async () => {
     setIsLoading(true);
