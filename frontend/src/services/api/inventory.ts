@@ -73,6 +73,73 @@ export const inventoryApi = {
     return response.data;
   },
 
+  // Serialized Inventory (serial-number tracking for high-value units)
+  getSerials: async (storeId?: string, params?: { status?: string; search?: string }) => {
+    const response = await api.get('/inventory/serials', {
+      params: { ...(storeId ? { store_id: storeId } : {}), ...params },
+    });
+    return response.data;
+  },
+
+  createSerial: async (data: {
+    productId: string;
+    serialNumber: string;
+    status: string;
+    locationCode?: string;
+    purchaseDate?: string;
+    warrantyMonths?: number;
+    warrantyExpiryDate?: string;
+    supplierBatch?: string;
+    notes?: string;
+    soldTo?: string;
+    soldDate?: string;
+    storeId?: string;
+  }) => {
+    const response = await api.post('/inventory/serials', {
+      product_id: data.productId,
+      serial_number: data.serialNumber,
+      status: data.status,
+      location_code: data.locationCode,
+      purchase_date: data.purchaseDate,
+      warranty_months: data.warrantyMonths,
+      warranty_expiry_date: data.warrantyExpiryDate,
+      supplier_batch: data.supplierBatch,
+      notes: data.notes,
+      sold_to: data.soldTo,
+      sold_date: data.soldDate,
+      store_id: data.storeId,
+    });
+    return response.data;
+  },
+
+  updateSerial: async (
+    serialId: string,
+    data: {
+      status?: string;
+      locationCode?: string;
+      purchaseDate?: string;
+      warrantyMonths?: number;
+      warrantyExpiryDate?: string;
+      supplierBatch?: string;
+      notes?: string;
+      soldTo?: string;
+      soldDate?: string;
+    }
+  ) => {
+    const response = await api.patch(`/inventory/serials/${serialId}`, {
+      status: data.status,
+      location_code: data.locationCode,
+      purchase_date: data.purchaseDate,
+      warranty_months: data.warrantyMonths,
+      warranty_expiry_date: data.warrantyExpiryDate,
+      supplier_batch: data.supplierBatch,
+      notes: data.notes,
+      sold_to: data.soldTo,
+      sold_date: data.soldDate,
+    });
+    return response.data;
+  },
+
   // Stock Count / Physical Verification
   getStockCounts: async (storeId: string, status?: string) => {
     const response = await api.get('/inventory/stock-count', { params: { store_id: storeId, status } });
