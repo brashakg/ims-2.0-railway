@@ -188,17 +188,26 @@ export function Customer360Dashboard() {
       const customerData = await customerApi.getCustomer(customerId!);
       setCustomer(customerData);
 
-      // Fetch orders
-      const ordersData = await orderApi.getOrders({ customerId });
-      setOrders(ordersData || []);
+      // Fetch orders. getOrders returns an envelope {orders,total,data,...},
+      // NOT a bare array — calling .reduce on it threw and broke the whole
+      // page (blank total spend / "failed to load"). Orders come back
+      // camelCase (grandTotal/createdAt), so read those with snake fallbacks.
+      const ordersResp = await orderApi.getOrders({ customerId });
+      const ordersData: any[] = Array.isArray(ordersResp)
+        ? ordersResp
+        : ordersResp?.orders || ordersResp?.data || [];
+      setOrders(ordersData);
+
+      const orderAmount = (o: any) => o?.grandTotal ?? o?.total_amount ?? 0;
+      const orderDate = (o: any) => o?.createdAt ?? o?.order_date ?? o?.created_at ?? null;
 
       // Calculate stats
-      const totalLTV = ordersData?.reduce((sum: number, order: any) => sum + (order.total_amount || 0), 0) || 0;
+      const totalLTV = ordersData.reduce((sum: number, order: any) => sum + orderAmount(order), 0);
       const calculatedStats: CustomerStats = {
         totalLifetimeValue: totalLTV,
-        totalOrders: ordersData?.length || 0,
-        lastOrderDate: ordersData?.[0]?.order_date || null,
-        lastOrderAmount: ordersData?.[0]?.total_amount || null,
+        totalOrders: ordersData.length,
+        lastOrderDate: ordersData[0] ? orderDate(ordersData[0]) : null,
+        lastOrderAmount: ordersData[0] ? orderAmount(ordersData[0]) : null,
         customerSinceDate: customerData.created_at,
         preferredStore: customerData.store_id || 'Main Store',
         averageOrderValue: (ordersData?.length || 0) > 0 ? totalLTV / (ordersData?.length || 1) : 0,
@@ -373,7 +382,7 @@ export function Customer360Dashboard() {
         {activeTab === 'orders' && <OrdersTab orders={orders} />}
         {activeTab === 'interactions' && <InteractionsTab interactions={interactions} />}
         {activeTab === 'loyalty' && loyaltyData && <LoyaltyTab loyaltyData={loyaltyData} />}
-        {activeTab === 'preferences' && <PreferencesTab />}
+        {activeTab === 'preferences' && <PreferencesTab customer={customer} />}
       </div>
     </div>
   );
@@ -677,11 +686,11 @@ function OrdersTab({ orders }: OrdersTabProps) {
         <div key={order.id} className="bg-gray-50 rounded-lg p-4">
           <div className="flex items-start justify-between mb-2">
             <div>
-              <p className="font-semibold text-gray-900">Order #{order.order_number || order.id?.slice(-6)}</p>
-              <p className="text-gray-500 text-sm">{new Date(order.order_date || '').toLocaleDateString()}</p>
+              <p className="font-semibold text-gray-900">Order #{order.orderNumber || order.order_number || order.id?.slice(-6)}</p>
+              <p className="text-gray-500 text-sm">{new Date(order.createdAt || order.order_date || '').toLocaleDateString()}</p>
             </div>
             <div className="text-right">
-              <p className="text-green-600 font-semibold">₹{(order.total_amount || 0).toLocaleString('en-IN')}</p>
+              <p className="text-green-600 font-semibold">₹{(order.grandTotal ?? order.total_amount ?? 0).toLocaleString('en-IN')}</p>
               <p className="text-gray-500 text-xs capitalize">{order.status || 'Completed'}</p>
             </div>
           </div>
@@ -820,36 +829,33 @@ function LoyaltyTab({ loyaltyData }: LoyaltyTabProps) {
   );
 }
 
-function PreferencesTab() {
+function PreferencesTab({ customer }: { customer: Customer | null }) {
+  // Only marketing consent is actually captured on the customer record today.
+  // The previous version rendered fabricated toggles (Newsletter/SMS/etc.) and
+  // a fake product-interest list — removed so this reflects real data only.
+  const consent = (customer as any)?.marketing_consent;
+  const hasConsent = typeof consent === 'boolean';
+
   return (
     <div className="space-y-4">
       <div className="bg-gray-50 rounded-lg p-4">
         <h3 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
           <Settings className="w-5 h-5" />
-          Customer Preferences
+          Communication Preferences
         </h3>
-
-        <div className="space-y-3">
-          <PreferenceRow label="Newsletter" status={true} />
-          <PreferenceRow label="SMS Updates" status={true} />
-          <PreferenceRow label="Email Promotions" status={false} />
-          <PreferenceRow label="Birthday Offers" status={true} />
-          <PreferenceRow label="WhatsApp Communication" status={true} />
-        </div>
+        {hasConsent ? (
+          <PreferenceRow label="Marketing consent" status={!!consent} />
+        ) : (
+          <p className="text-gray-500 text-sm">No marketing-consent preference recorded for this customer.</p>
+        )}
       </div>
 
       <div className="bg-gray-50 rounded-lg p-4">
-        <h3 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
+        <h3 className="text-lg font-semibold text-gray-900 mb-2 flex items-center gap-2">
           <Gift className="w-5 h-5" />
           Product Interests
         </h3>
-        <div className="flex flex-wrap gap-2">
-          {['Spectacles', 'Sunglasses', 'Contact Lenses', 'Lens Coatings'].map((interest) => (
-            <span key={interest} className="px-3 py-1 bg-blue-50 text-blue-700 rounded-full text-sm">
-              {interest}
-            </span>
-          ))}
-        </div>
+        <p className="text-gray-500 text-sm">Product interests aren't tracked yet.</p>
       </div>
     </div>
   );

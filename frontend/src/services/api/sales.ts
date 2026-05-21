@@ -104,6 +104,50 @@ function mapRx(rx: any): any {
   };
 }
 
+// --- Prescription CREATE normalisation -------------------------------------
+// The POS PrescriptionForm emits FLAT keys (sph_od/cyl_od/axis_od/add_od/pd_od
+// and the _os left-eye equivalents). The backend PrescriptionCreate requires
+// NESTED right_eye / left_eye EyeData objects, with sph/cyl/add/pd as strings
+// and axis as an int. Convert here so callers can forward the form data as-is.
+function _rxStr(v: unknown): string | undefined {
+  if (v === undefined || v === null || v === '') return undefined;
+  return String(v);
+}
+function _rxAxis(v: unknown): number | undefined {
+  if (v === undefined || v === null || v === '') return undefined;
+  const n = Number(v);
+  return Number.isFinite(n) ? Math.round(n) : undefined;
+}
+function _buildEye(d: any, suffix: 'od' | 'os') {
+  return {
+    sph: _rxStr(d[`sph_${suffix}`]),
+    cyl: _rxStr(d[`cyl_${suffix}`]),
+    axis: _rxAxis(d[`axis_${suffix}`]),
+    add: _rxStr(d[`add_${suffix}`]),
+    pd: _rxStr(d[`pd_${suffix}`]),
+  };
+}
+function toPrescriptionCreatePayload(data: any): any {
+  if (!data || typeof data !== 'object') return data;
+  // Already nested (e.g. a caller that built right_eye/left_eye directly).
+  if (data.right_eye || data.rightEye) return data;
+  const hasFlat = ['sph_od', 'cyl_od', 'axis_od', 'sph_os', 'cyl_os', 'axis_os'].some(
+    (k) => k in data
+  );
+  if (!hasFlat) return data;
+  const {
+    sph_od, cyl_od, axis_od, add_od, pd_od,
+    sph_os, cyl_os, axis_os, add_os, pd_os,
+    issue_date, expiry_date, doctor_name,
+    ...rest
+  } = data;
+  return {
+    ...rest, // patient_id, customer_id, store_id, source, optometrist_id, validity_months, etc.
+    right_eye: _buildEye(data, 'od'),
+    left_eye: _buildEye(data, 'os'),
+  };
+}
+
 export const prescriptionApi = {
   getPrescriptions: async (patientOrCustomerId: string) => {
     // Try patient_id first; if empty, fall back to customer_id
@@ -130,8 +174,11 @@ export const prescriptionApi = {
     return mapRx(response.data);
   },
 
-  createPrescription: async (data: Partial<import('../../types').Prescription>) => {
-    const response = await api.post('/prescriptions', data);
+  createPrescription: async (data: any) => {
+    // Flat POS-form keys -> nested right_eye/left_eye. Without this the POST
+    // 422'd with "field required: right_eye, left_eye", which is why adding a
+    // prescription failed wherever the PrescriptionForm was used.
+    const response = await api.post('/prescriptions', toPrescriptionCreatePayload(data));
     return response.data;
   },
 

@@ -239,7 +239,9 @@ export function CustomersPage() {
       // Map to backend CustomerCreate schema (same as POS, same as ClinicalPage)
       const customerData = {
         name: formData.fullName,
-        mobile: formData.mobileNumber,
+        // Backend requires exactly 10 bare digits (^\d{10}$); strip any
+        // +91 / spaces / dashes the operator typed so it doesn't 422.
+        mobile: (formData.mobileNumber || '').replace(/\D/g, '').slice(-10),
         email: formData.email || undefined,
         customer_type: formData.customerType,
         gstin: formData.customerType === 'B2B' ? formData.gstNumber : undefined,
@@ -260,8 +262,9 @@ export function CustomersPage() {
       toast.success('Customer created successfully');
       loadCustomers();
       setShowAddCustomerModal(false);
-    } catch {
-      toast.error('Failed to create customer');
+    } catch (e: any) {
+      const detail = e?.response?.data?.detail || e?.message || 'Failed to create customer';
+      toast.error(typeof detail === 'string' ? detail : 'Failed to create customer');
     }
   };
 
@@ -273,12 +276,14 @@ export function CustomersPage() {
     }
     setIsAddingPatient(true);
     try {
+      // Backend PatientCreate expects `mobile`/`dob` (not phone/dateOfBirth) —
+      // sending the wrong keys silently dropped the patient's number + DOB.
       await customerApi.addPatient(selectedCustomer.id, {
         name: patientForm.name.trim(),
-        phone: patientForm.mobile || undefined,
-        dateOfBirth: patientForm.dateOfBirth || undefined,
+        mobile: (patientForm.mobile || '').replace(/\D/g, '').slice(-10) || undefined,
+        dob: patientForm.dateOfBirth || undefined,
         relation: patientForm.relation || 'Self',
-      });
+      } as any);
       toast.success('Patient added successfully');
       setShowAddPatientModal(false);
       setPatientForm({ name: '', mobile: '', dateOfBirth: '', relation: 'Self' });
@@ -491,14 +496,15 @@ export function CustomersPage() {
     Diamond: { bg: 'bg-purple-50', text: 'text-purple-700', border: 'border-purple-300' },
   };
 
-  // Mock communication log
-  const communicationLog = [
-    { id: '1', date: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString(), type: 'SMS' as const, message: 'Prescription reminder sent' },
-    { id: '2', date: new Date(Date.now() - 5 * 24 * 60 * 60 * 1000).toISOString(), type: 'Visit' as const, message: 'Walk-in visit for eye checkup' },
-    { id: '3', date: new Date(Date.now() - 12 * 24 * 60 * 60 * 1000).toISOString(), type: 'WhatsApp' as const, message: 'Order ready for pickup notification' },
-    { id: '4', date: new Date(Date.now() - 20 * 24 * 60 * 60 * 1000).toISOString(), type: 'Call' as const, message: 'Follow-up call for lens fitting' },
-    { id: '5', date: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString(), type: 'Email' as const, message: 'Invoice and warranty card sent' },
-  ];
+  // No communication-log API exists yet. This used to render fabricated rows
+  // ("Prescription reminder sent" etc.) with now-relative dates so they always
+  // looked fresh — removed. Honest empty state until a real comms log lands.
+  const communicationLog: {
+    id: string;
+    date: string;
+    type: 'SMS' | 'Visit' | 'WhatsApp' | 'Call' | 'Email';
+    message: string;
+  }[] = [];
   const commTypeConfig: Record<string, { icon: typeof MessageCircle; color: string; bg: string }> = {
     SMS: { icon: MessageCircle, color: 'text-green-600', bg: 'bg-green-50' },
     WhatsApp: { icon: MessageCircle, color: 'text-emerald-600', bg: 'bg-emerald-50' },
@@ -852,6 +858,9 @@ export function CustomersPage() {
           {/* Timeline line */}
           <div className="absolute left-4 top-0 bottom-0 w-px bg-gray-200" />
           <div className="space-y-4">
+            {communicationLog.length === 0 && (
+              <p className="text-sm text-gray-500 pl-12">No communication history recorded yet.</p>
+            )}
             {communicationLog.map(entry => {
               const config = commTypeConfig[entry.type];
               const IconComponent = config.icon;
@@ -1006,20 +1015,24 @@ export function CustomersPage() {
                       return;
                     }
                     try {
+                      // phone/address now persist — CustomerUpdate accepts them
+                      // (previously dropped, so edits silently reverted).
+                      const normalizedPhone = (editForm.phone || '').replace(/\D/g, '').slice(-10);
                       await customerApi.updateCustomer(selectedCustomer.id, {
                         name: editForm.name,
-                        phone: editForm.phone,
+                        phone: normalizedPhone,
                         email: editForm.email || undefined,
                         address: editForm.address || undefined,
-                      });
+                      } as any);
                       // Update local state
-                      const updated = { ...selectedCustomer, ...editForm };
+                      const updated = { ...selectedCustomer, ...editForm, phone: normalizedPhone };
                       setSelectedCustomer(updated as Customer);
                       setCustomers(prev => prev.map(c => c.id === updated.id ? updated as Customer : c));
                       setShowEditModal(false);
                       toast.success('Customer updated successfully');
-                    } catch {
-                      toast.error('Failed to update customer');
+                    } catch (e: any) {
+                      const detail = e?.response?.data?.detail || e?.message || 'Failed to update customer';
+                      toast.error(typeof detail === 'string' ? detail : 'Failed to update customer');
                     }
                   }}
                   disabled={!editForm.name || !editForm.phone}
