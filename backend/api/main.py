@@ -750,7 +750,12 @@ app.include_router(
     tags=["Finance"],
     dependencies=[Depends(require_roles(*_FINANCE_ROLES))],
 )
-app.include_router(hr_router, prefix="/api/v1/hr", tags=["HR"])
+app.include_router(
+    hr_router,
+    prefix="/api/v1/hr",
+    tags=["HR"],
+    dependencies=[Depends(require_roles(*_FINANCE_ROLES))],
+)
 app.include_router(workshop_router, prefix="/api/v1/workshop", tags=["Workshop"])
 app.include_router(reports_router, prefix="/api/v1/reports", tags=["Reports"])
 app.include_router(settings_router, prefix="/api/v1/settings", tags=["Settings"])
