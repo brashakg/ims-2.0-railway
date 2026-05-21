@@ -852,6 +852,55 @@ BRANDS: Dict[str, List[str]] = {
 SKU_COUNTERS: Dict[str, int] = {cat.value: 1000 for cat in ProductCategory}
 
 
+# ============================================================================
+# PERSISTENCE  (MongoDB `catalog_products`, with in-memory fallback)
+# ============================================================================
+# These /catalog/products endpoints used the in-memory CATALOG_PRODUCTS dict
+# above, which was lost on every restart. The frontend uses /admin/catalog/*
+# and /products/* instead, so this surface had neither a consumer nor
+# persistence. Now backed by the `catalog_products` collection, fail-soft to
+# the in-memory dict when the DB is unavailable (local dev / tests).
+
+
+def _get_db():
+    try:
+        from ..dependencies import get_db
+
+        conn = get_db()
+        if conn is not None and conn.is_connected:
+            return conn.db
+    except Exception:
+        pass
+    return None
+
+
+def _catalog_coll():
+    db = _get_db()
+    return db.get_collection("catalog_products") if db is not None else None
+
+
+def _save_catalog_product(product: Dict) -> None:
+    coll = _catalog_coll()
+    if coll is not None:
+        coll.update_one({"id": product["id"]}, {"$set": product}, upsert=True)
+    else:
+        CATALOG_PRODUCTS[product["id"]] = product
+
+
+def _get_catalog_product(product_id: str) -> Optional[Dict]:
+    coll = _catalog_coll()
+    if coll is not None:
+        return coll.find_one({"id": product_id}, {"_id": 0})
+    return CATALOG_PRODUCTS.get(product_id)
+
+
+def _all_catalog_products() -> List[Dict]:
+    coll = _catalog_coll()
+    if coll is not None:
+        return list(coll.find({}, {"_id": 0}))
+    return list(CATALOG_PRODUCTS.values())
+
+
 def generate_sku(category: ProductCategory, attributes: Dict[str, Any]) -> str:
     """Generate unique SKU based on category and attributes"""
     prefix = category.value
@@ -987,7 +1036,7 @@ async def list_catalog_products(
     current_user: dict = Depends(get_current_user),
 ):
     """List all products in catalog"""
-    products = list(CATALOG_PRODUCTS.values())
+    products = _all_catalog_products()
 
     # Apply filters
     if category:
@@ -1028,7 +1077,7 @@ async def get_catalog_product(
     product_id: str, current_user: dict = Depends(get_current_user)
 ):
     """Get a single product with all details"""
-    product = CATALOG_PRODUCTS.get(product_id)
+    product = _get_catalog_product(product_id)
     if product is None:
         raise HTTPException(status_code=404, detail="Product not found")
 
@@ -1123,7 +1172,7 @@ async def create_catalog_product(
             product.inventory.location_id
         ] = product.inventory.initial_quantity
 
-    CATALOG_PRODUCTS[product_id] = product_data
+    _save_catalog_product(product_data)
 
     # Sync to Shopify if requested
     shopify_result = None
@@ -1151,7 +1200,7 @@ async def update_catalog_product(
     ):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
-    existing = CATALOG_PRODUCTS.get(product_id)
+    existing = _get_catalog_product(product_id)
     if existing is None:
         raise HTTPException(status_code=404, detail="Product not found")
 
@@ -1179,6 +1228,7 @@ async def update_catalog_product(
 
     existing["updated_at"] = datetime.now().isoformat()
 
+    _save_catalog_product(existing)
     return {"product": existing, "message": "Product updated successfully"}
 
 
@@ -1192,7 +1242,7 @@ async def delete_catalog_product(
     ):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
-    product = CATALOG_PRODUCTS.get(product_id)
+    product = _get_catalog_product(product_id)
     if product is None:
         raise HTTPException(status_code=404, detail="Product not found")
 
@@ -1200,6 +1250,7 @@ async def delete_catalog_product(
     product["deleted_at"] = datetime.now().isoformat()
     product["deleted_by"] = current_user.get("user_id")
 
+    _save_catalog_product(product)
     return {"message": "Product deleted successfully"}
 
 
@@ -1223,7 +1274,7 @@ async def adjust_product_inventory(
     ):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
-    product = CATALOG_PRODUCTS.get(product_id)
+    product = _get_catalog_product(product_id)
     if product is None:
         raise HTTPException(status_code=404, detail="Product not found")
 
@@ -1239,6 +1290,7 @@ async def adjust_product_inventory(
     )
     product["updated_at"] = datetime.now().isoformat()
 
+    _save_catalog_product(product)
     return {
         "product_id": product_id,
         "location_id": location_id,
@@ -1254,7 +1306,7 @@ async def get_product_inventory(
     product_id: str, current_user: dict = Depends(get_current_user)
 ):
     """Get inventory levels for a product across all locations"""
-    product = CATALOG_PRODUCTS.get(product_id)
+    product = _get_catalog_product(product_id)
     if product is None:
         raise HTTPException(status_code=404, detail="Product not found")
 
@@ -1305,13 +1357,14 @@ async def sync_product_to_shopify(
     ):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
-    product = CATALOG_PRODUCTS.get(product_id)
+    product = _get_catalog_product(product_id)
     if product is None:
         raise HTTPException(status_code=404, detail="Product not found")
 
     result = await _sync_product_to_shopify(product, sync_config)
     product["shopify"] = result
     product["updated_at"] = datetime.now().isoformat()
+    _save_catalog_product(product)
 
     return {
         "product_id": product_id,
@@ -1336,7 +1389,7 @@ async def bulk_sync_products_to_shopify(
     errors = []
 
     for pid in product_ids:
-        product = CATALOG_PRODUCTS.get(pid)
+        product = _get_catalog_product(pid)
         if product is None:
             errors.append({"product_id": pid, "error": "Not found"})
             continue
@@ -1344,6 +1397,7 @@ async def bulk_sync_products_to_shopify(
         result = await _sync_product_to_shopify(product, sync_config)
         product["shopify"] = result
         product["updated_at"] = datetime.now().isoformat()
+        _save_catalog_product(product)
         synced += 1
 
     return {
@@ -1410,7 +1464,7 @@ async def import_products(
                 "updated_at": datetime.now().isoformat(),
             }
 
-            CATALOG_PRODUCTS[product_id] = product_data
+            _save_catalog_product(product_data)
             created += 1
 
         except Exception as e:
@@ -1436,7 +1490,7 @@ async def export_products(
     ):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
-    products = list(CATALOG_PRODUCTS.values())
+    products = _all_catalog_products()
 
     if category:
         products = [p for p in products if p.get("category") == category.value]
