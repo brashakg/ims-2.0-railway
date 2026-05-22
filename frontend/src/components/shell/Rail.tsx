@@ -86,6 +86,7 @@ const RAIL_GROUPS: NavGroup[] = [
     title: 'Operations',
     items: [
       { id: 'tasks', label: 'Tasks & SOPs', to: '/tasks', icon: 'check' },
+      { id: 'expenses', label: 'Expenses', to: '/finance/expenses', icon: 'banknote' },
       { id: 'hr', label: 'HR', to: '/hr', icon: 'user' },
       { id: 'salary-setup', label: 'Salary Setup', to: '/hr/salary-setup', icon: 'banknote', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'] },
       { id: 'payroll-run', label: 'Payroll Run', to: '/hr/payroll-run', icon: 'banknote', requireRoles: ['SUPERADMIN', 'ADMIN', 'ACCOUNTANT'] },

@@ -746,11 +746,12 @@ function App() {
                     }
                   />
 
-                  {/* Expenses */}
+                  {/* Expenses — any authenticated user can submit + see their own;
+                      ownership scoping + role-gated approval/entry happen inside. */}
                   <Route
                     path="finance/expenses"
                     element={
-                      <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT']}>
+                      <ProtectedRoute>
                         <ExpenseTracker />
                       </ProtectedRoute>
                     }
