@@ -24,6 +24,7 @@ import {
 } from 'lucide-react';
 import type { OrderStatus, PaymentStatus, Order } from '../../types';
 import { orderApi } from '../../services/api';
+import { formatDateIST, formatTimeIST } from '../../utils/datetime';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { Pagination } from '../../components/common/Pagination';
@@ -153,20 +154,9 @@ export function OrdersPage() {
     currentPage * pageSize
   );
 
-  const formatDate = (dateStr: string) => {
-    return new Date(dateStr).toLocaleDateString('en-IN', {
-      day: '2-digit',
-      month: 'short',
-      year: 'numeric',
-    });
-  };
-
-  const formatTime = (dateStr: string) => {
-    return new Date(dateStr).toLocaleTimeString('en-IN', {
-      hour: '2-digit',
-      minute: '2-digit',
-    });
-  };
+  // IST-correct: backend timestamps are naive UTC; format in Asia/Kolkata.
+  const formatDate = (dateStr: string) => formatDateIST(dateStr);
+  const formatTime = (dateStr: string) => formatTimeIST(dateStr);
 
   const formatCurrency = (amount: number) => {
     return new Intl.NumberFormat('en-IN', {

@@ -42,6 +42,7 @@ export interface StoreData {
   geoFenceRadius: number;
   enabledCategories: string[];
   isActive: boolean;
+  entityId?: string | null;
 }
 
 export interface UserData {
