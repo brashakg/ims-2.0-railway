@@ -559,7 +559,7 @@ export function CustomersPage() {
         {/* Quick Action Buttons */}
         <div className="flex items-center gap-2">
           <button
-            onClick={() => navigate('/crm?tab=recalls')}
+            onClick={() => navigate('/customers?tab=recalls')}
             className="p-2 rounded-lg bg-amber-50 text-amber-600 hover:bg-amber-100 transition-colors"
             title="Send Recall"
           >

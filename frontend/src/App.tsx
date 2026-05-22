@@ -64,6 +64,7 @@ const SetupPage = lazy(() => import('./pages/settings/SetupPage'));
 const PurchaseOrderDashboard = lazy(() => import('./pages/purchase/PurchaseOrderDashboard').then(m => ({ default: m.PurchaseOrderDashboard })));
 const VendorManagement = lazy(() => import('./pages/purchase/VendorManagement').then(m => ({ default: m.VendorManagement })));
 const GoodsReceiptNote = lazy(() => import('./pages/purchase/GoodsReceiptNote').then(m => ({ default: m.GoodsReceiptNote })));
+const VendorReturns = lazy(() => import('./pages/purchase/VendorReturns').then(m => ({ default: m.VendorReturns })));
 const StockReplenishment = lazy(() => import('./pages/inventory/StockReplenishment').then(m => ({ default: m.StockReplenishment })));
 const StockAudit = lazy(() => import('./pages/inventory/StockAudit').then(m => ({ default: m.StockAudit })));
 const JarvisPage = lazy(() => import('./pages/jarvis/JarvisPage').then(m => ({ default: m.JarvisPage })));
@@ -557,6 +558,16 @@ function App() {
                     element={
                       <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT']}>
                         <GoodsReceiptNote />
+                      </ProtectedRoute>
+                    }
+                  />
+
+                  {/* Vendor Returns (was orphaned — page existed, never routed) */}
+                  <Route
+                    path="purchase/vendor-returns"
+                    element={
+                      <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'WORKSHOP_STAFF']}>
+                        <VendorReturns />
                       </ProtectedRoute>
                     }
                   />
