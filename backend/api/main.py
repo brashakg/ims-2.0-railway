@@ -62,6 +62,7 @@ from .routers import (
     handoffs_router,
     transfers_router,
     catalog_router,
+    catalog_autopilot_router,
     jarvis_router,
     analytics_router,
     billing_router,
@@ -740,6 +741,9 @@ app.include_router(
     transfers_router, prefix="/api/v1/transfers", tags=["Stock Transfers"]
 )
 app.include_router(catalog_router, prefix="/api/v1/catalog", tags=["Catalog"])
+app.include_router(
+    catalog_autopilot_router, prefix="/api/v1/catalog-autopilot", tags=["Catalog Autopilot"]
+)
 app.include_router(jarvis_router, prefix="/api/v1/jarvis", tags=["JARVIS"])
 app.include_router(analytics_router, prefix="/api/v1/analytics", tags=["Analytics"])
 app.include_router(billing_router, prefix="/api/v1/billing", tags=["Billing"])

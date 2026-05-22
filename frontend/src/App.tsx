@@ -69,6 +69,7 @@ const StockReplenishment = lazy(() => import('./pages/inventory/StockReplenishme
 const StockAudit = lazy(() => import('./pages/inventory/StockAudit').then(m => ({ default: m.StockAudit })));
 const JarvisPage = lazy(() => import('./pages/jarvis/JarvisPage').then(m => ({ default: m.JarvisPage })));
 const AddProductPage = lazy(() => import('./pages/catalog/AddProductPage'));
+const CatalogAutopilotPage = lazy(() => import('./pages/catalog/CatalogAutopilotPage'));
 const ExpenseTracker = lazy(() => import('./pages/finance/ExpenseTracker'));
 const FinanceDashboard = lazy(() => import('./pages/finance/FinanceDashboard'));
 const WalkoutsPage = lazy(() => import('./pages/walkouts/WalkoutsPage').then(m => ({ default: m.WalkoutsPage })));
@@ -757,6 +758,16 @@ function App() {
                     element={
                       <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER']}>
                         <AddProductPage />
+                      </ProtectedRoute>
+                    }
+                  />
+
+                  {/* Catalog Autopilot — brand+model search -> approve -> publish */}
+                  <Route
+                    path="catalog/autopilot"
+                    element={
+                      <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER']}>
+                        <CatalogAutopilotPage />
                       </ProtectedRoute>
                     }
                   />
