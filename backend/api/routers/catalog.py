@@ -13,8 +13,38 @@ from enum import Enum
 import uuid
 
 from .auth import get_current_user
+from ..services.online_catalog import (
+    online_status_for_skus,
+    online_summary,
+)
 
 router = APIRouter()
+
+
+# ============================================================================
+# ONLINE CATALOG BRIDGE (IMS Mongo <-> e-commerce BVI Postgres)
+# ============================================================================
+# Lets IMS surface which products are "Online" (in Shopify, via the BVI
+# Postgres in the same Railway project) + their online stock, matched by SKU.
+# Fully fail-soft: if the e-commerce DB isn't configured/reachable, these
+# return empty so IMS keeps working unchanged.
+
+
+@router.get("/online-status")
+async def get_online_status(
+    skus: str = Query(..., description="Comma-separated SKUs to look up"),
+    current_user: dict = Depends(get_current_user),
+):
+    """For each SKU, whether it's online (in Shopify) + its online stock.
+    Returns {statuses: {sku: {online, online_stock, status}}}."""
+    sku_list = [s.strip() for s in (skus or "").split(",") if s.strip()]
+    return {"statuses": online_status_for_skus(sku_list)}
+
+
+@router.get("/online-summary")
+async def get_online_summary(current_user: dict = Depends(get_current_user)):
+    """Diagnostic: is the e-commerce catalog DB configured/reachable + counts."""
+    return online_summary()
 
 
 # ============================================================================
