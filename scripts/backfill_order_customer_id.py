@@ -38,8 +38,18 @@ from typing import Optional
 
 def resolve_mongo_uri(explicit: Optional[str]) -> Optional[str]:
     """Prefer an explicit/standard URI; otherwise assemble one from the
-    MONGO_* component vars Railway injects (no single MONGODB_URL there)."""
-    uri = explicit or os.getenv("MONGODB_URL") or os.getenv("MONGO_URL")
+    MONGO_* component vars Railway injects (no single MONGODB_URL there).
+
+    MONGO_PUBLIC_URL is checked first so this runbook works locally via
+    `railway run -s MongoDB ...` (the internal `mongodb.railway.internal` host
+    is only resolvable inside Railway's network). Inside the container that var
+    is absent, so the internal URL/components are used instead."""
+    uri = (
+        explicit
+        or os.getenv("MONGO_PUBLIC_URL")
+        or os.getenv("MONGODB_URL")
+        or os.getenv("MONGO_URL")
+    )
     if uri:
         return uri
     host = os.getenv("MONGO_HOST")
