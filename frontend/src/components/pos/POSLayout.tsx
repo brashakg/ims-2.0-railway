@@ -337,7 +337,7 @@ export function POSLayout() {
       if (result?.order_id) {
         for (const p of (store.payments || [])) {
           try {
-            await orderApi.addPayment(result.order_id, { method: p.method, amount: p.amount, reference: p.reference } as any);
+            await orderApi.addPayment(result.order_id, { method: p.method, amount: p.amount, reference: p.reference, voucher_code: p.voucherCode } as any);
           } catch {
             // Don't block order — payment can be recorded later
           }
