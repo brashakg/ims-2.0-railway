@@ -3429,8 +3429,7 @@ async def growth_blueprint(
             "narrative_markdown": (
                 "# Growth Blueprint unavailable\n\n"
                 "No LLM provider is configured on this deployment. "
-                "Set `LLM_LOCAL_BASE_URL` (Ollama / vLLM) or "
-                "`ANTHROPIC_API_KEY` (Claude) and retry."
+                "Set `ANTHROPIC_API_KEY` (Claude) and retry."
             ),
             "sections": _BLUEPRINT_SECTIONS,
             "model_used": None,

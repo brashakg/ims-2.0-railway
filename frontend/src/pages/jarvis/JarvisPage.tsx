@@ -102,8 +102,8 @@ export function JarvisPage() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [inputValue, setInputValue] = useState('');
   const [isLoading, setIsLoading] = useState(false);
-  // LLM model selector — populated from /jarvis/models (local OSS / Claude / …)
-  // `tier` is "free" | "standard" | "premium"; the dropdown shows a confirm
+  // LLM model selector — populated from /jarvis/models (Claude / Claude Opus / …)
+  // `tier` is "standard" | "premium"; the dropdown shows a confirm
   // modal before switching TO a premium model so users opt-in to the cost.
   const [llmModels, setLlmModels] = useState<Array<{
     id: string;
@@ -427,12 +427,11 @@ export function JarvisPage() {
       // templates regardless of what was asked. Switching to the shared
       // client fixes both at once.
       // The shared axios client defaults to a 10 s timeout — fine for CRUD,
-      // but LLM cold starts (Ollama loading the 3 B model into RAM on the
-      // first request after deploy) routinely take 25-30 s. The 10 s
-      // cap was firing client-side BEFORE the model could answer, dropping
-      // every cold-start query into the offline-fallback path with mock
-      // template numbers. 90 s here matches the backend's LLM_TIMEOUT and
-      // covers any cold start with margin.
+      // but a Claude call over a large business-data context can take
+      // 25-30 s. The 10 s cap was firing client-side BEFORE the model
+      // could answer, dropping every slow query into the offline-fallback
+      // path with mock template numbers. 90 s here matches the backend's
+      // LLM_TIMEOUT and covers a slow call with margin.
       const { data } = await api.post<{
         response: string;
         ai_powered?: boolean;
