@@ -136,9 +136,9 @@ function toPrescriptionCreatePayload(data: any): any {
   );
   if (!hasFlat) return data;
   const {
-    sph_od, cyl_od, axis_od, add_od, pd_od,
-    sph_os, cyl_os, axis_os, add_os, pd_os,
-    issue_date, expiry_date, doctor_name,
+    sph_od: _sph_od, cyl_od: _cyl_od, axis_od: _axis_od, add_od: _add_od, pd_od: _pd_od,
+    sph_os: _sph_os, cyl_os: _cyl_os, axis_os: _axis_os, add_os: _add_os, pd_os: _pd_os,
+    issue_date: _issue_date, expiry_date: _expiry_date, doctor_name: _doctor_name,
     ...rest
   } = data;
   return {

@@ -3,7 +3,9 @@
 // ============================================================================
 // Save and manage user preferences including dashboard layouts
 
+// Augment the Intl namespace for supportedValuesOf (not in all TS versions)
 declare global {
+  // eslint-disable-next-line @typescript-eslint/no-namespace
   namespace Intl {
     function supportedValuesOf(key: string): string[];
   }

@@ -49,17 +49,19 @@ export function DataExportButton({
       case 'csv':
         exportToCSV(exportData, filenameWithTime, columns);
         break;
-      case 'excel':
+      case 'excel': {
         // Excel export using TSV format that Excel can read natively
         const tsvContent = convertToTSV(exportData, columns);
         const blob = new Blob([tsvContent], { type: 'application/vnd.ms-excel;charset=utf-8;' });
         downloadBlob(blob, `${filenameWithTime}.xls`);
         break;
-      case 'json':
+      }
+      case 'json': {
         const jsonContent = JSON.stringify(exportData, null, 2);
         const jsonBlob = new Blob([jsonContent], { type: 'application/json;charset=utf-8;' });
         downloadBlob(jsonBlob, `${filenameWithTime}.json`);
         break;
+      }
     }
 
     setShowMenu(false);

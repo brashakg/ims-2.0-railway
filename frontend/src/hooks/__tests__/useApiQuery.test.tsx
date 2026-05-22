@@ -138,7 +138,7 @@ describe('useApiQuery', () => {
     it('should support enabled option', async () => {
       const queryFn = jest.fn().mockResolvedValue({});
 
-      const { result, rerender } = renderHook(
+      const { result: _result, rerender } = renderHook(
         ({ enabled }: { enabled: boolean }) =>
           useApiQuery(['products'], queryFn, { enabled }),
         { wrapper, initialProps: { enabled: false } }

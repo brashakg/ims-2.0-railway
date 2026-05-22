@@ -690,9 +690,11 @@ export function POSLayout() {
                 type="button"
                 onClick={() => {
                   setErrorMsg(null);
-                  store.current_step === 'payment'
-                    ? handleCreateOrder()
-                    : startTransition(() => store.nextStep());
+                  if (store.current_step === 'payment') {
+                    handleCreateOrder();
+                  } else {
+                    startTransition(() => store.nextStep());
+                  }
                 }}
                 disabled={!canProceed || store.is_processing}
                 className={'btn sm ' + (store.current_step === 'payment' ? 'accent' : 'primary')}

@@ -25,7 +25,7 @@ export interface FieldError {
 const validators = {
   required: (value: any) => value !== undefined && value !== null && value !== '',
   email: (value: string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value),
-  phone: (value: string) => /^[\d\s\-\+\(\)]{10,}$/.test(value),
+  phone: (value: string) => /^[\d\s\-()+]{10,}$/.test(value),
   url: (value: string) => {
     try {
       new URL(value);
