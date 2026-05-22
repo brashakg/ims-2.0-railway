@@ -55,6 +55,7 @@ const RAIL_GROUPS: NavGroup[] = [
   {
     items: [
       { id: 'hub', label: 'Hub', to: '/dashboard', icon: 'home' },
+      { id: 'notifications', label: 'Notifications', to: '/notifications', icon: 'bell' },
     ],
   },
   {

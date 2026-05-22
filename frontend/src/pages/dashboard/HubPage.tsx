@@ -12,6 +12,7 @@ import { Icon } from '../../components/shell';
 import { analyticsApi, tasksApi, clinicalApi } from '../../services/api';
 import HandoffInboxCard from '../../components/handoffs/HandoffInboxCard';
 import HandoffUploadModal from '../../components/handoffs/HandoffUploadModal';
+import DashboardNotifications from '../../components/notifications/DashboardNotifications';
 
 interface HeroMeta {
   salesToday: string;
@@ -261,6 +262,11 @@ export default function HubPage() {
             <div className="sm">Clinical</div>
           </div>
         </div>
+      </section>
+
+      {/* Notifications snapshot — links to the full Notifications screen. */}
+      <section style={{ marginBottom: 18 }}>
+        <DashboardNotifications />
       </section>
 
       {/* Handoff inbox — only renders when the user has at least one card. */}

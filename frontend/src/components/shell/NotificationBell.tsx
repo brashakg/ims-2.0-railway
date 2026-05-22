@@ -239,6 +239,23 @@ export function NotificationBell() {
               })
             )}
           </div>
+          <button
+            type="button"
+            onClick={() => { setOpen(false); navigate('/notifications'); }}
+            style={{
+              width: '100%',
+              padding: '10px 12px',
+              border: 0,
+              borderTop: '1px solid var(--line)',
+              background: 'transparent',
+              cursor: 'pointer',
+              font: '600 12px var(--font-sans)',
+              color: 'var(--bv, #DC2626)',
+              textAlign: 'center',
+            }}
+          >
+            View all notifications
+          </button>
         </div>
       )}
     </div>
