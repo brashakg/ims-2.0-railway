@@ -1,0 +1,31 @@
+databases:
+  - name: bettervision-db
+    plan: free
+    databaseName: bettervision
+    user: bettervision
+
+services:
+  - type: web
+    name: bettervision-inventory
+    runtime: node
+    plan: free
+    region: singapore
+    buildCommand: npm install && npx prisma generate && npx prisma db push --accept-data-loss && npm run build
+    startCommand: npm start
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: bettervision-db
+          property: connectionString
+      - key: NEXTAUTH_SECRET
+        generateValue: true
+      - key: NEXTAUTH_URL
+        value: https://bettervision-inventory.onrender.com
+      - key: SHOPIFY_STORE_URL
+        value: bokaro-better-vision.myshopify.com
+      - key: SHOPIFY_ACCESS_TOKEN
+        sync: false
+      - key: REMOVEBG_API_KEY
+        sync: false
+      - key: NODE_ENV
+        value: production

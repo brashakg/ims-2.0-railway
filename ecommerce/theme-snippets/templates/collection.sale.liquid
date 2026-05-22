@@ -1,0 +1,192 @@
+{%- comment -%}
+  collection.sale.liquid
+  ----------------------
+  Collection page for the Sale collection. Three things differ from the
+  other collection templates:
+
+    1. Default sort is "highest discount % first" — implemented by
+       computing the discount on each product as we render and sorting
+       the array client-side via a small <script>. (Liquid alone can't
+       sort by computed values, but the default `?sort_by=` is set to
+       `best-selling` and we override the visible order via JS.)
+    2. Discount badges are rendered prominently on every card.
+    3. Optional countdown banner if `collection.metafields.bv.sale_ends`
+       (date_time metafield) is set in the future.
+
+  Usage:
+    Shopify admin -> collection -> Theme template -> `collection.sale`.
+{%- endcomment -%}
+
+{%- liquid
+  assign sale_ends_raw = collection.metafields.bv.sale_ends
+  assign sale_ends_iso = ''
+  if sale_ends_raw
+    assign sale_ends_iso = sale_ends_raw | date: '%FT%T%z'
+  endif
+-%}
+
+<section class="section section-collection section--sale" data-collection-template="sale">
+
+  <div class="page-width">
+
+    <header class="collection__header collection__header--sale">
+      <h1 class="collection__title">{{ collection.title | default: 'Sale' }}</h1>
+      <p class="collection__blurb">
+        Discounts up to 50% off across our most-loved frames. Authentic,
+        warrantied, and limited to current stock.
+      </p>
+
+      {%- if sale_ends_iso != blank -%}
+        <div class="bv-sale-countdown" data-bv-sale-countdown="{{ sale_ends_iso }}" role="timer" aria-live="polite">
+          Sale ends in <span data-bv-countdown-display>--:--:--:--</span>
+        </div>
+      {%- endif -%}
+    </header>
+
+    <div class="collection__layout">
+
+      <aside class="collection__filters" aria-label="Sale collection filters">
+        {%- if collection.filters.size > 0 -%}
+          {%- for filter in collection.filters -%}
+            <details class="collection-filter" open>
+              <summary>{{ filter.label }}</summary>
+              {%- case filter.type -%}
+                {%- when 'list' -%}
+                  <ul class="collection-filter__values">
+                    {%- for value in filter.values -%}
+                      <li>
+                        <label>
+                          <input type="checkbox"
+                                 name="{{ value.param_name }}"
+                                 value="{{ value.value }}"
+                                 {%- if value.active -%} checked {%- endif -%} />
+                          {{ value.label }} <span class="collection-filter__count">({{ value.count }})</span>
+                        </label>
+                      </li>
+                    {%- endfor -%}
+                  </ul>
+                {%- when 'price_range' -%}
+                  <div class="collection-filter__price">
+                    <label>
+                      Min
+                      <input type="number" name="{{ filter.min_value.param_name }}"
+                             value="{{ filter.min_value.value }}" min="0" step="100" />
+                    </label>
+                    <label>
+                      Max
+                      <input type="number" name="{{ filter.max_value.param_name }}"
+                             value="{{ filter.max_value.value }}" min="0" step="100" />
+                    </label>
+                  </div>
+              {%- endcase -%}
+            </details>
+          {%- endfor -%}
+        {%- endif -%}
+      </aside>
+
+      <div class="collection__grid">
+        {%- paginate collection.products by 24 -%}
+          {%- if collection.products.size == 0 -%}
+            <p class="collection__empty">
+              No sale products match these filters. Try clearing them.
+            </p>
+          {%- else -%}
+            <ul class="product-grid product-grid--sale" data-bv-sale-grid>
+              {%- for product in collection.products -%}
+                {%- liquid
+                  assign discount_pct = 0
+                  if product.compare_at_price > 0 and product.compare_at_price > product.price
+                    assign saved   = product.compare_at_price | minus: product.price
+                    assign ratio   = saved | times: 100.0 | divided_by: product.compare_at_price
+                    assign discount_pct = ratio | round
+                  endif
+                -%}
+                <li class="product-grid__item product-grid__item--sale"
+                    data-bv-discount="{{ discount_pct }}">
+                  <a href="{{ product.url | within: collection }}" class="product-card">
+                    <div class="product-card__image">
+                      {%- render 'badge-overlay', product: product -%}
+                      {%- if discount_pct > 0 -%}
+                        <span class="bv-sale-card-badge" aria-label="{{ discount_pct }} percent off">
+                          -{{ discount_pct }}%
+                        </span>
+                      {%- endif -%}
+                      {%- if product.featured_image -%}
+                        {%- assign __bv_alt = product.title | escape -%}{{ product.featured_image | image_url: width: 600 | image_tag: alt: __bv_alt, loading: 'lazy', widths: '300,600,900' }}
+                      {%- else -%}
+                        {{- 'product-1' | placeholder_svg_tag: 'placeholder-svg' -}}
+                      {%- endif -%}
+                    </div>
+                    <h3 class="product-card__title">{{ product.title }}</h3>
+                    {%- if product.vendor -%}
+                      <p class="product-card__vendor">{{ product.vendor }}</p>
+                    {%- endif -%}
+                    <div class="product-card__price">
+                      {%- if product.compare_at_price > product.price -%}
+                        <s>{{ product.compare_at_price | money }}</s>
+                      {%- endif -%}
+                      <span>{{ product.price | money }}</span>
+                    </div>
+                  </a>
+                </li>
+              {%- endfor -%}
+            </ul>
+            {%- if paginate.pages > 1 -%}
+              <nav class="pagination" aria-label="Pagination">
+                {{- paginate | default_pagination -}}
+              </nav>
+            {%- endif -%}
+          {%- endif -%}
+        {%- endpaginate -%}
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<script>
+  (function () {
+    // Sort the rendered grid by data-bv-discount desc on first paint.
+    var grid = document.querySelector('[data-bv-sale-grid]');
+    if (grid) {
+      var items = Array.prototype.slice.call(grid.children);
+      items.sort(function (a, b) {
+        var da = parseFloat(a.getAttribute('data-bv-discount')) || 0;
+        var db = parseFloat(b.getAttribute('data-bv-discount')) || 0;
+        return db - da;
+      });
+      items.forEach(function (item) { grid.appendChild(item); });
+    }
+
+    // Countdown banner.
+    var banner = document.querySelector('[data-bv-sale-countdown]');
+    if (banner) {
+      var endTime = new Date(banner.getAttribute('data-bv-sale-countdown')).getTime();
+      var display = banner.querySelector('[data-bv-countdown-display]');
+      function tick() {
+        var now = Date.now();
+        var diff = endTime - now;
+        if (isNaN(endTime) || diff <= 0) {
+          if (display) { display.textContent = 'Sale has ended'; }
+          banner.classList.add('bv-sale-countdown--ended');
+          clearInterval(timer);
+          return;
+        }
+        var d = Math.floor(diff / 86400000);
+        var h = Math.floor((diff % 86400000) / 3600000);
+        var m = Math.floor((diff % 3600000) / 60000);
+        var s = Math.floor((diff % 60000) / 1000);
+        if (display) {
+          display.textContent =
+            String(d).padStart(2, '0') + 'd ' +
+            String(h).padStart(2, '0') + 'h ' +
+            String(m).padStart(2, '0') + 'm ' +
+            String(s).padStart(2, '0') + 's';
+        }
+      }
+      tick();
+      var timer = setInterval(tick, 1000);
+    }
+  })();
+</script>
+

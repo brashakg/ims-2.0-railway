@@ -1,0 +1,124 @@
+{%- comment -%}
+  product.appointment.liquid
+  --------------------------
+  Alternate product template for "appointment-only" / "request pricing"
+  products — typically high-value designer eyewear or in-store-only
+  items where the merchant doesn't publish online prices.
+
+  HIDES:  product.price, product.compare_at_price, the Add-to-Cart form.
+  SHOWS:  Product gallery, title, vendor, description, an enquiry form
+          using Shopify's `{% form 'contact' %}` with the product title
+          pre-filled in the message.
+
+  Usage:
+    Shopify admin -> product -> Theme template -> `product.appointment`
+    (round 2 U6).
+
+  Style follows Boost / Dawn-style sections — no inline <style>; see
+  README's CSS block for `.bv-appointment-card`.
+{%- endcomment -%}
+
+<section class="section section-product section--appointment" data-product-template="appointment">
+  <div class="page-width">
+
+    <div class="product product--appointment">
+
+      <div class="product__media">
+        {%- if product.media.size > 0 -%}
+          <div class="product__media-gallery">
+            {%- for media in product.media -%}
+              <div class="product__media-item" data-index="{{ forloop.index0 }}">
+                {%- assign __bv_alt = media.alt | escape -%}{{ media | image_url: width: 1200 | image_tag: alt: __bv_alt, widths: '300,600,900,1200,1800', loading: 'lazy' }}
+              </div>
+            {%- endfor -%}
+          </div>
+        {%- else -%}
+          {{- 'product-1' | placeholder_svg_tag: 'placeholder-svg' -}}
+        {%- endif -%}
+      </div>
+
+      <div class="product__info">
+        <h1 class="product__title">{{ product.title }}</h1>
+        {%- if product.vendor -%}
+          <p class="product__vendor">{{ product.vendor }}</p>
+        {%- endif -%}
+
+        {%- comment -%}
+          NO price block here — appointment products don't surface
+          pricing on the storefront.
+        {%- endcomment -%}
+
+        {%- render 'badge-overlay', product: product -%}
+
+        <div class="bv-appointment-card">
+          <h4>Request pricing &amp; availability</h4>
+          <p>
+            This item is reserved for in-store consultation. Send us a
+            quick enquiry and our team will reach out with pricing,
+            availability, and an appointment slot at your nearest Better
+            Vision store.
+          </p>
+
+          {%- form 'contact', class: 'contact-form contact-form--appointment' -%}
+            {%- if form.posted_successfully? -%}
+              <p class="form__message form__message--success">
+                Thanks — we received your enquiry and will get back to
+                you within one business day.
+              </p>
+            {%- endif -%}
+
+            {%- if form.errors -%}
+              <p class="form__message form__message--error">
+                Sorry, we couldn't send your enquiry. Please check the
+                fields below and try again.
+              </p>
+              <ul class="form__error-list">
+                {%- for field in form.errors -%}
+                  <li>{{ form.errors.translated_fields[field] }} {{ form.errors.messages[field] }}</li>
+                {%- endfor -%}
+              </ul>
+            {%- endif -%}
+
+            <div class="contact-form__row">
+              <label for="ContactFormName">Name</label>
+              <input type="text" id="ContactFormName" name="contact[name]" required
+                     value="{%- if form.name -%}{{ form.name }}{%- elsif customer -%}{{ customer.name }}{%- endif -%}" />
+            </div>
+
+            <div class="contact-form__row">
+              <label for="ContactFormEmail">Email</label>
+              <input type="email" id="ContactFormEmail" name="contact[email]" required autocomplete="email"
+                     value="{%- if form.email -%}{{ form.email }}{%- elsif customer -%}{{ customer.email }}{%- endif -%}" />
+            </div>
+
+            <div class="contact-form__row">
+              <label for="ContactFormPhone">Phone (optional)</label>
+              <input type="tel" id="ContactFormPhone" name="contact[phone]" autocomplete="tel"
+                     value="{%- if form.phone -%}{{ form.phone }}{%- elsif customer -%}{{ customer.phone }}{%- endif -%}" />
+            </div>
+
+            <div class="contact-form__row">
+              <label for="ContactFormProduct">Product</label>
+              <input type="text" id="ContactFormProduct" name="contact[product]" readonly
+                     value="{{ product.title | escape }}" />
+            </div>
+
+            <div class="contact-form__row">
+              <label for="ContactFormMessage">Message</label>
+              <textarea id="ContactFormMessage" name="contact[body]" rows="5">{%- if form.body -%}{{ form.body }}{%- else -%}I'd like to know more about {{ product.title | escape }} (vendor: {{ product.vendor | escape }}). Please share pricing and an appointment slot.{%- endif -%}</textarea>
+            </div>
+
+            <button type="submit" class="button button--primary button--full-width">
+              Request Pricing
+            </button>
+          {%- endform -%}
+        </div>
+
+        <div class="product__description rte">
+          {{ product.description }}
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+

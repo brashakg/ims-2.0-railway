@@ -1,0 +1,373 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ============================================================
+   Better Vision design tokens (Polaris-flavored)
+   Source: Claude Design handoff 2026-05.
+
+   Tokens are global so any component can reference var(--brand) etc.
+   The Polaris RESET (body font-size 13px, system font, light gray bg)
+   only applies inside elements with the .polaris-shell class — i.e.
+   the dashboard layout. Login pages, auth flows, and any future
+   Tailwind-only screens keep the standard 16px/system bg they had.
+   ============================================================ */
+:root {
+  /* Surfaces */
+  --bg: #f6f6f7;
+  --bg-surface: #ffffff;
+  --bg-surface-secondary: #fafbfb;
+  --bg-surface-tertiary: #f1f2f3;
+  --bg-surface-hover: #f1f2f3;
+
+  /* Text */
+  --text: #1a1a1a;
+  --text-secondary: #4a4a4f;
+  --text-tertiary: #6d6d73;
+
+  /* Borders */
+  --border: #e1e3e5;
+  --border-strong: #c9cccf;
+  --border-subdued: #ebebeb;
+
+  /* Brand (Shopify green) */
+  --brand: #008060;
+  --brand-text: #00553f;
+  --brand-bg: #e3f1ec;
+  --brand-hover: #006e52;
+
+  /* Semantic */
+  --critical: #d64545;
+  --critical-text: #8e2929;
+  --critical-bg: #fbeae5;
+  --warning: #c98a00;
+  --warning-text: #8a5e00;
+  --warning-bg: #fff5d9;
+  --success: #008060;
+  --success-text: #00553f;
+  --success-bg: #e3f1ec;
+
+  /* Magic / AI / Design */
+  --highlight: #5f38fa;
+  --magic-bg: #f0ebff;
+
+  /* Layout */
+  --sidebar-w: 232px;
+  --topbar-h: 56px;
+
+  /* Shadows */
+  --shadow-xs: 0 1px 0 rgba(0, 0, 0, 0.05);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.06);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.08), 0 1px 2px rgba(0, 0, 0, 0.04);
+  --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.16), 0 2px 6px rgba(0, 0, 0, 0.06);
+}
+
+/* Original app styling — DO NOT remove. Login page and any non-shell
+   screens depend on Tailwind defaults (16px body, slate background). */
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  @apply bg-white text-slate-900;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ─── Polaris shell — applies ONLY when an ancestor has .polaris-shell.
+       The dashboard layout sets that on its outer flex container. This
+       way Polaris-styled pages get 13px / system font / light-gray bg
+       without breaking login.tsx, register flows, or future pages. */
+.polaris-shell {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "SF Pro Text", system-ui, sans-serif;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--text);
+  background: var(--bg);
+}
+
+.polaris-shell *,
+.polaris-shell *::before,
+.polaris-shell *::after {
+  box-sizing: border-box;
+}
+
+/* ─── Polaris primitives ─────────────────────────────
+   Always opt-in via class — they don't bleed onto Tailwind components. */
+.polaris-card {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: var(--shadow-xs);
+}
+.polaris-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border-subdued);
+}
+.polaris-card-title {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.polaris-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 11px;
+  font-size: 12px;
+  font-weight: 500;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--bg-surface);
+  color: var(--text);
+  cursor: pointer;
+  box-shadow: var(--shadow-xs);
+  transition: background 80ms;
+  white-space: nowrap;
+  /* Match Tailwind's default button (overrides our global rule). */
+  min-height: auto;
+  font-family: inherit;
+}
+.polaris-btn:hover {
+  background: var(--bg-surface-hover);
+}
+.polaris-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.polaris-btn-primary {
+  background: var(--text);
+  color: white;
+  border-color: var(--text);
+}
+.polaris-btn-primary:hover {
+  background: #2c2c2c;
+}
+.polaris-btn-success {
+  background: var(--brand);
+  color: white;
+  border-color: var(--brand);
+}
+.polaris-btn-success:hover {
+  background: var(--brand-hover);
+}
+.polaris-btn-plain {
+  background: transparent;
+  border-color: transparent;
+  box-shadow: none;
+  color: var(--brand-text);
+}
+.polaris-btn-plain:hover {
+  background: var(--bg-surface-hover);
+}
+.polaris-btn-icon {
+  padding: 5px;
+}
+.polaris-btn-sm {
+  padding: 3px 8px;
+  font-size: 11px;
+}
+
+.polaris-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 7px;
+  height: 18px;
+  line-height: 16px;
+  border-radius: 6px;
+  background: var(--bg-surface-tertiary);
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+.polaris-badge-success {
+  background: var(--success-bg);
+  color: var(--success-text);
+}
+.polaris-badge-critical {
+  background: var(--critical-bg);
+  color: var(--critical-text);
+}
+.polaris-badge-warning {
+  background: var(--warning-bg);
+  color: var(--warning-text);
+}
+.polaris-badge-magic {
+  background: var(--magic-bg);
+  color: var(--highlight);
+}
+
+.polaris-kbd {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  padding: 0 4px;
+  height: 18px;
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  background: var(--bg-surface);
+  font-family: -apple-system, system-ui, sans-serif;
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--text-tertiary);
+  box-shadow: 0 1px 0 var(--border);
+}
+
+.polaris-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.polaris-table thead th {
+  text-align: left;
+  padding: 8px 12px;
+  background: var(--bg-surface-secondary);
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+.polaris-table tbody td {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border-subdued);
+  vertical-align: middle;
+}
+.polaris-table tbody tr:hover {
+  background: var(--bg-surface-secondary);
+}
+.polaris-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+/* Tailwind already ships a `tabular-nums` utility (font-variant-numeric:
+   tabular-nums) so we don't redefine it here — components that need
+   tabular figures just use className="tabular-nums". */
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.fade-in {
+  animation: fade-in 140ms ease-out;
+}
+
+summary::-webkit-details-marker {
+  display: none;
+}
+
+/* Polaris-shell scrollbars (replaces the slate scrollbar inside the shell) */
+.polaris-shell ::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+.polaris-shell ::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 4px;
+}
+.polaris-shell ::-webkit-scrollbar-track {
+  background: transparent;
+}
+.polaris-shell ::-webkit-scrollbar-thumb:hover {
+  background: var(--text-tertiary);
+}
+
+/* Outside .polaris-shell — keep the original app scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: #f1f5f9;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
+
+/* Focus ring customization — applies everywhere */
+:focus-visible {
+  @apply outline-none ring-2 ring-blue-500 ring-offset-2;
+}
+
+/* Smooth color transitions */
+* {
+  @apply transition-colors duration-200;
+}
+
+/* Link styling */
+a {
+  @apply text-blue-600 hover:text-blue-700 underline;
+}
+/* Polaris components opt-out of the global underlined link styling. */
+.polaris-shell a,
+.polaris-card a,
+.polaris-btn,
+.polaris-table a {
+  text-decoration: none;
+}
+.polaris-shell a:hover,
+.polaris-card a:hover,
+.polaris-table a:hover {
+  text-decoration: none;
+}
+
+button {
+  @apply focus-visible:outline-none;
+}
+
+/* iPad-friendly form input sizing — applies to inputs OUTSIDE the
+   Polaris shell. Login page, public flows etc. still get 44px touch
+   targets. Polaris pages use compact .polaris-* primitives instead. */
+input:not(.polaris-shell input),
+textarea:not(.polaris-shell textarea),
+select:not(.polaris-shell select) {
+  @apply border border-slate-200 rounded-md px-3 py-2.5 min-h-[44px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500;
+}
+
+/* Touch-friendly button sizing — applies outside the Polaris shell. */
+:not(.polaris-shell) > button:not(.polaris-btn) {
+  @apply min-h-[44px] inline-flex items-center justify-center;
+}
+
+/* Code styling — exclude .polaris-kbd which has its own styling. */
+code:not(.polaris-kbd) {
+  @apply bg-slate-100 px-1.5 py-0.5 rounded text-sm font-mono;
+}
+
+pre {
+  @apply bg-slate-900 text-slate-100 p-4 rounded-lg overflow-auto;
+}
+
+/* iPad-first responsive typography */
+@media (max-width: 640px) {
+  html {
+    font-size: 16px;
+  }
+  :not(.polaris-shell) input,
+  :not(.polaris-shell) textarea,
+  :not(.polaris-shell) select,
+  :not(.polaris-shell) > button:not(.polaris-btn) {
+    @apply py-3;
+  }
+}

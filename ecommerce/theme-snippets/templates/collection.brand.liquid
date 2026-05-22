@@ -1,0 +1,153 @@
+{%- comment -%}
+  collection.brand.liquid
+  -----------------------
+  Collection page customised for brand collections (e.g. Ray-Ban,
+  Carrera, BOSS). Boost theme keeps its grid + filter chrome; this
+  template just changes the header and the default filter set.
+
+  Header includes:
+    - Hero banner from `collection.metafields.bv.banner_image`
+    - Brand short description from `collection.metafields.bv.short_description`
+    - Intro line: "All <Brand> eyewear" using collection.title
+
+  Filters surfaced (in addition to the theme defaults):
+    - Shape, Gender, Material, Polarized, Price
+
+  These are tag-driven filters using the same `prefix_value` tag format
+  written by the bv-app's autoGenerate.ts (round 1 mapping). Boost picks
+  these up automatically when products carry tags like `shape_aviator`,
+  `gender_men`, `framematerial_acetate`, `polarized_yes`.
+
+  Usage:
+    Shopify admin -> collection -> Theme template -> `collection.brand`.
+{%- endcomment -%}
+
+{%- liquid
+  assign banner = collection.metafields.bv.banner_image
+  assign desc   = collection.metafields.bv.short_description | strip
+-%}
+
+<section class="section section-collection section--brand" data-collection-template="brand">
+
+  {%- if banner -%}
+    <div class="bv-collection-hero" style="background-image: url('{{ banner | image_url: width: 1800 }}');">
+      <div class="bv-collection-hero__overlay"></div>
+      <div class="bv-collection-hero__inner">
+        <h1 class="bv-collection-hero__title">{{ collection.title }}</h1>
+        {%- if desc != blank -%}
+          <p class="bv-collection-hero__lead">{{ desc | escape }}</p>
+        {%- endif -%}
+      </div>
+    </div>
+  {%- else -%}
+    <div class="page-width">
+      <h1 class="collection__title">{{ collection.title }}</h1>
+      {%- if desc != blank -%}
+        <p class="collection__description rte">{{ desc | escape }}</p>
+      {%- endif -%}
+    </div>
+  {%- endif -%}
+
+  <div class="page-width">
+    <h4>All {{ collection.title }} eyewear</h4>
+    <p class="collection__intro">
+      Explore the full {{ collection.title }} range — every frame is
+      authentic, manufacturer-warrantied, and shipped pan-India with
+      free delivery.
+    </p>
+
+    <div class="collection__layout">
+
+      <aside class="collection__filters" aria-label="Brand collection filters">
+        {%- if collection.filters.size > 0 -%}
+          {%- for filter in collection.filters -%}
+            {%- comment -%}
+              Surface the filters the brand-collection brief calls out.
+              Boost reads filter labels from the merchant's "Search &
+              Discovery" config, but we still scope what shows up here.
+            {%- endcomment -%}
+            {%- assign label = filter.label | downcase -%}
+            {%- if label contains 'shape' or label contains 'gender' or label contains 'material' or label contains 'polariz' or label contains 'price' -%}
+              <details class="collection-filter" open>
+                <summary>{{ filter.label }}</summary>
+                {%- case filter.type -%}
+                  {%- when 'list' -%}
+                    <ul class="collection-filter__values">
+                      {%- for value in filter.values -%}
+                        <li>
+                          <label>
+                            <input type="checkbox"
+                                   name="{{ value.param_name }}"
+                                   value="{{ value.value }}"
+                                   {%- if value.active -%} checked {%- endif -%} />
+                            {{ value.label }} <span class="collection-filter__count">({{ value.count }})</span>
+                          </label>
+                        </li>
+                      {%- endfor -%}
+                    </ul>
+                  {%- when 'price_range' -%}
+                    <div class="collection-filter__price">
+                      <label>
+                        Min
+                        <input type="number" name="{{ filter.min_value.param_name }}"
+                               value="{{ filter.min_value.value }}"
+                               min="0" max="{{ filter.range_max }}" step="100" />
+                      </label>
+                      <label>
+                        Max
+                        <input type="number" name="{{ filter.max_value.param_name }}"
+                               value="{{ filter.max_value.value }}"
+                               min="0" max="{{ filter.range_max }}" step="100" />
+                      </label>
+                    </div>
+                {%- endcase -%}
+              </details>
+            {%- endif -%}
+          {%- endfor -%}
+        {%- endif -%}
+      </aside>
+
+      <div class="collection__grid">
+        {%- paginate collection.products by 24 -%}
+          {%- if collection.products.size == 0 -%}
+            <p class="collection__empty">
+              No products match the current filters. Try clearing them or
+              picking a different shape.
+            </p>
+          {%- else -%}
+            <ul class="product-grid product-grid--brand">
+              {%- for product in collection.products -%}
+                <li class="product-grid__item">
+                  <a href="{{ product.url | within: collection }}" class="product-card">
+                    <div class="product-card__image">
+                      {%- render 'badge-overlay', product: product -%}
+                      {%- if product.featured_image -%}
+                        {%- assign __bv_alt = product.title | escape -%}{{ product.featured_image | image_url: width: 600 | image_tag: alt: __bv_alt, loading: 'lazy', widths: '300,600,900' }}
+                      {%- else -%}
+                        {{- 'product-1' | placeholder_svg_tag: 'placeholder-svg' -}}
+                      {%- endif -%}
+                    </div>
+                    <h3 class="product-card__title">{{ product.title }}</h3>
+                    <div class="product-card__price">
+                      {%- if product.compare_at_price > product.price -%}
+                        <s>{{ product.compare_at_price | money }}</s>
+                      {%- endif -%}
+                      <span>{{ product.price | money }}</span>
+                    </div>
+                  </a>
+                </li>
+              {%- endfor -%}
+            </ul>
+            {%- if paginate.pages > 1 -%}
+              <nav class="pagination" aria-label="Pagination">
+                {{- paginate | default_pagination -}}
+              </nav>
+            {%- endif -%}
+          {%- endif -%}
+        {%- endpaginate -%}
+      </div>
+
+    </div>
+  </div>
+</section>
+
