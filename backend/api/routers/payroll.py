@@ -399,6 +399,8 @@ async def create_salary_config(
         salary_config_coll.insert_one(config_doc)
 
         return {"status": "success", "config_id": config_doc["config_id"]}
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error("Payroll operation failed: %s", e)
         raise HTTPException(
