@@ -1,0 +1,158 @@
+{%- comment -%}
+  product.rx-required.liquid
+  --------------------------
+  Alternate product template for products where a prescription MUST be
+  captured before checkout. Add-to-Cart is replaced by a "Continue to
+  Prescription" button until the customer fills the rx-module form. Once
+  they fill it the form's hidden flag flips to `provided` and the button
+  becomes the standard ATC, posting to /cart/add with the rx data as line
+  item properties.
+
+  Used for products tagged `rxable_yes` where the merchant wants to
+  enforce capture (round 2 U5 + U6).
+
+  Inherits the Boost product layout but swaps the form. Style follows
+  Boost / Dawn-style sections — no inline <style>; see README's CSS for
+  `.bv-rx-module` (used by the included rx-module snippet).
+{%- endcomment -%}
+
+<section class="section section-product section--rx-required" data-product-template="rx-required">
+  <div class="page-width">
+
+    <div class="product product--rx-required">
+
+      <div class="product__media">
+        {%- if product.media.size > 0 -%}
+          <div class="product__media-gallery">
+            {%- for media in product.media -%}
+              <div class="product__media-item" data-index="{{ forloop.index0 }}">
+                {%- assign __bv_alt = media.alt | escape -%}{{ media | image_url: width: 1200 | image_tag: alt: __bv_alt, widths: '300,600,900,1200,1800', loading: 'lazy' }}
+              </div>
+            {%- endfor -%}
+          </div>
+        {%- else -%}
+          {{- 'product-1' | placeholder_svg_tag: 'placeholder-svg' -}}
+        {%- endif -%}
+      </div>
+
+      <div class="product__info">
+        <h1 class="product__title">{{ product.title }}</h1>
+        {%- if product.vendor -%}
+          <p class="product__vendor">{{ product.vendor }}</p>
+        {%- endif -%}
+
+        <div class="product__price">
+          {%- if product.compare_at_price > product.price -%}
+            <s class="product__price-compare">{{ product.compare_at_price | money }}</s>
+          {%- endif -%}
+          <span class="product__price-current">{{ product.price | money }}</span>
+        </div>
+
+        {%- render 'badge-overlay', product: product -%}
+
+        <form method="post" action="/cart/add" enctype="multipart/form-data"
+              class="product-form product-form--rx-required" data-bv-rx-form-host>
+
+          {%- if product.has_only_default_variant == false -%}
+            {%- for option in product.options_with_values -%}
+              <fieldset class="product-form__option">
+                <legend>{{ option.name }}</legend>
+                {%- for value in option.values -%}
+                  <label>
+                    <input type="radio" name="options[{{ option.name | escape }}]" value="{{ value | escape }}"
+                      {%- if option.selected_value == value -%} checked {%- endif -%} />
+                    {{ value }}
+                  </label>
+                {%- endfor -%}
+              </fieldset>
+            {%- endfor -%}
+          {%- endif -%}
+
+          <input type="hidden" name="id" value="{{ product.selected_or_first_available_variant.id }}" />
+
+          {%- comment -%}
+            The rx-module snippet renders the prescription capture form.
+            It writes to `properties[_rx_*]` cart line-item properties
+            and exposes a status hidden input (`_rx_status`) we read
+            below.
+          {%- endcomment -%}
+          {%- render 'rx-module', product: product -%}
+
+          <div class="product-form__buttons">
+            <button type="button"
+                    class="button button--secondary button--full-width"
+                    data-bv-rx-continue
+                    aria-controls="bv-rx-{{ product.id }}-form">
+              Continue to Prescription
+            </button>
+            <button type="submit"
+                    class="button button--primary button--full-width"
+                    name="add"
+                    data-bv-rx-submit
+                    disabled>
+              Add to Cart
+            </button>
+          </div>
+
+          <p class="bv-preorder-note" data-bv-rx-help>
+            Add your prescription details to enable checkout. If you'd
+            rather not enter your power online, click "Order without
+            prescription" inside the form and our team will call you to
+            confirm before lens-fitting.
+          </p>
+        </form>
+
+        <div class="product__description rte">
+          {{ product.description }}
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<script>
+  (function () {
+    var host = document.querySelector('[data-bv-rx-form-host]');
+    if (!host) { return; }
+    var continueBtn = host.querySelector('[data-bv-rx-continue]');
+    var submitBtn   = host.querySelector('[data-bv-rx-submit]');
+    var status      = host.querySelector('[data-bv-rx-status]');
+    var rxFlag      = host.querySelector('[data-bv-rx-flag]');
+    var formArea    = host.querySelector('[data-bv-rx-form]');
+
+    if (continueBtn && formArea) {
+      continueBtn.addEventListener('click', function () {
+        formArea.removeAttribute('hidden');
+        if (status) { status.value = 'in-progress'; }
+      });
+    }
+
+    function rxCaptured() {
+      if (!status || !rxFlag) { return false; }
+      // Treat any non-pending status, plus any rx field with a value,
+      // as captured. The `pending` status means nothing has been entered.
+      if (status.value && status.value !== 'pending') { return true; }
+      var inputs = host.querySelectorAll('[name^="properties[_rx_"]');
+      for (var i = 0; i < inputs.length; i++) {
+        if (inputs[i].value && inputs[i].value.trim() !== '') { return true; }
+      }
+      return false;
+    }
+
+    function refreshSubmit() {
+      if (!submitBtn) { return; }
+      if (rxCaptured()) {
+        submitBtn.disabled = false;
+        if (continueBtn) { continueBtn.setAttribute('hidden', 'hidden'); }
+      } else {
+        submitBtn.disabled = true;
+      }
+    }
+
+    host.addEventListener('input',  refreshSubmit);
+    host.addEventListener('change', refreshSubmit);
+    host.addEventListener('click',  function () { setTimeout(refreshSubmit, 0); });
+    refreshSubmit();
+  })();
+</script>
+

@@ -1,0 +1,59 @@
+# dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# testing
+coverage/
+
+# next.js
+.next/
+out/
+
+# production
+build/
+.vercel
+
+# misc
+.DS_Store
+*.pem
+Thumbs.db
+
+# debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# local env files
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# prisma
+prisma/dev.db
+prisma/dev.db-journal
+prisma/migrations/
+
+# uploads (user images stored locally)
+public/uploads/*
+!public/uploads/.gitkeep
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*.bak
+
+# standalone output
+.next/standalone/
+
+# Docker (not using Dockerfile for Railway)
+Dockerfile
+
+# typescript build info
+tsconfig.tsbuildinfo
+*.tsbuildinfo
+CLAUDE.md

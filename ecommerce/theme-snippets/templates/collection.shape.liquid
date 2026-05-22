@@ -1,0 +1,183 @@
+{%- comment -%}
+  collection.shape.liquid
+  -----------------------
+  Collection page customised for shape-based collections — Aviator,
+  Round, Square, Wayfarer, Cateye, Rectangle, etc.
+
+  Header:
+    - Collection title (the shape name)
+    - Educational paragraph: what the shape is, who it suits
+    - Face-shape pairings list from
+      `collection.metafields.bv.face_shape_pairings`
+      (one pairing per line, e.g. "Round face: try aviator or square")
+
+  Falls back to a built-in pairing dictionary if the metafield is empty
+  so the page is never broken when the merchant hasn't filled it in.
+
+  Usage:
+    Shopify admin -> collection -> Theme template -> `collection.shape`.
+{%- endcomment -%}
+
+{%- liquid
+  assign shape_handle = collection.handle | downcase
+  assign pairings = collection.metafields.bv.face_shape_pairings | default: '' | strip
+
+  comment
+    Per-shape default copy. Used for the educational header and as a
+    fallback for face-shape pairings when the merchant has not set the
+    metafield. Keys match Shopify collection handles.
+  endcomment
+
+  case shape_handle
+    when 'aviator', 'aviators'
+      assign shape_blurb = 'The aviator is a teardrop-lens classic — light metal frames, double bridge, and a flattering silhouette that softens angular features.'
+      assign shape_pairings_default = 'Square face: balances sharp angles. Heart face: complements forehead width. Oval face: most shapes work — pick to taste.'
+    when 'round', 'round-frames'
+      assign shape_blurb = 'Round frames are the literary-cool option — circular lenses, slim metal or acetate frames, equal parts vintage and modern.'
+      assign shape_pairings_default = 'Square face: rounds soften the jaw. Heart face: adds width near the cheeks. Oval face: a flattering sleeper hit.'
+    when 'square'
+      assign shape_blurb = 'Square frames make a statement — bold horizontal lines, defined corners, and a structured profile that frames the eyes.'
+      assign shape_pairings_default = 'Round face: adds definition. Oval face: works year-round. Heart face: balances a narrower chin.'
+    when 'wayfarer', 'wayfarers'
+      assign shape_blurb = 'The wayfarer is the everyday go-to — angled trapezoid acetate, slightly wider at the top, and a tradition-meets-now look.'
+      assign shape_pairings_default = 'Most face shapes suit a wayfarer. Heart face: try a slightly wider rim. Oval face: an easy yes.'
+    when 'cateye', 'cat-eye', 'cat-eye-frames'
+      assign shape_blurb = 'Cat-eye frames lift the outer corners — retro silhouette, feminine geometry, and unmistakable on-camera presence.'
+      assign shape_pairings_default = 'Round face: lifts and lengthens. Square face: softens the brow line. Oval face: any cat-eye works.'
+    when 'rectangle', 'rectangular'
+      assign shape_blurb = 'Rectangular frames keep things sharp — strong horizontal lines, clean corners, and a confident, professional read.'
+      assign shape_pairings_default = 'Round face: adds structure. Oval face: a safe, versatile pick. Heart face: balances the upper face.'
+    when 'oval'
+      assign shape_blurb = 'Oval frames are the gentlest geometry — softly rounded, balanced proportions, and a timeless polish.'
+      assign shape_pairings_default = 'Square face: softens definition. Diamond face: reads in proportion. Most shapes work.'
+    when 'clubmaster'
+      assign shape_blurb = 'Clubmaster frames blend metal and acetate — bold browline on top, slim metal below, and a smart-casual edge.'
+      assign shape_pairings_default = 'Round face: the browline adds top weight. Oval face: easy. Heart face: yes if not too wide at the top.'
+    when 'pilot'
+      assign shape_blurb = 'Pilot frames are aviator cousins — teardrop lenses, sometimes with a top bar, and a classic confidence.'
+      assign shape_pairings_default = 'Square face: pairs well. Heart face: complements the cheekbones. Oval face: an easy yes.'
+    else
+      assign shape_blurb = 'A curated edit of ' | append: collection.title | append: ' frames — every silhouette tested for comfort, fit, and finish.'
+      assign shape_pairings_default = ''
+  endcase
+
+  if pairings == blank
+    assign pairings = shape_pairings_default
+  endif
+-%}
+
+<section class="section section-collection section--shape" data-collection-template="shape">
+
+  <div class="page-width">
+    <header class="collection__header collection__header--shape">
+      <h1 class="collection__title">{{ collection.title }}</h1>
+      <p class="collection__blurb">{{ shape_blurb }}</p>
+
+      {%- if pairings != blank -%}
+        <div class="collection__pairings">
+          <h4>Face-shape pairings</h4>
+          <ul>
+            {%- assign pairing_lines = pairings | split: '
+' -%}
+            {%- for line in pairing_lines -%}
+              {%- assign trimmed = line | strip -%}
+              {%- if trimmed != blank -%}
+                <li>{{ trimmed | escape }}</li>
+              {%- endif -%}
+            {%- endfor -%}
+          </ul>
+        </div>
+      {%- endif -%}
+    </header>
+
+    <div class="collection__layout">
+
+      <aside class="collection__filters" aria-label="Shape collection filters">
+        {%- if collection.filters.size > 0 -%}
+          {%- for filter in collection.filters -%}
+            {%- assign label = filter.label | downcase -%}
+            {%- if label contains 'gender' or label contains 'material' or label contains 'polariz' or label contains 'price' or label contains 'brand' -%}
+              <details class="collection-filter" open>
+                <summary>{{ filter.label }}</summary>
+                {%- case filter.type -%}
+                  {%- when 'list' -%}
+                    <ul class="collection-filter__values">
+                      {%- for value in filter.values -%}
+                        <li>
+                          <label>
+                            <input type="checkbox"
+                                   name="{{ value.param_name }}"
+                                   value="{{ value.value }}"
+                                   {%- if value.active -%} checked {%- endif -%} />
+                            {{ value.label }} <span class="collection-filter__count">({{ value.count }})</span>
+                          </label>
+                        </li>
+                      {%- endfor -%}
+                    </ul>
+                  {%- when 'price_range' -%}
+                    <div class="collection-filter__price">
+                      <label>
+                        Min
+                        <input type="number" name="{{ filter.min_value.param_name }}"
+                               value="{{ filter.min_value.value }}" min="0" step="100" />
+                      </label>
+                      <label>
+                        Max
+                        <input type="number" name="{{ filter.max_value.param_name }}"
+                               value="{{ filter.max_value.value }}" min="0" step="100" />
+                      </label>
+                    </div>
+                {%- endcase -%}
+              </details>
+            {%- endif -%}
+          {%- endfor -%}
+        {%- endif -%}
+      </aside>
+
+      <div class="collection__grid">
+        {%- paginate collection.products by 24 -%}
+          {%- if collection.products.size == 0 -%}
+            <p class="collection__empty">
+              No frames match these filters. Try a different combination,
+              or browse all of our {{ collection.title | downcase }} below.
+            </p>
+          {%- else -%}
+            <ul class="product-grid product-grid--shape">
+              {%- for product in collection.products -%}
+                <li class="product-grid__item">
+                  <a href="{{ product.url | within: collection }}" class="product-card">
+                    <div class="product-card__image">
+                      {%- render 'badge-overlay', product: product -%}
+                      {%- if product.featured_image -%}
+                        {%- assign __bv_alt = product.title | escape -%}{{ product.featured_image | image_url: width: 600 | image_tag: alt: __bv_alt, loading: 'lazy', widths: '300,600,900' }}
+                      {%- else -%}
+                        {{- 'product-1' | placeholder_svg_tag: 'placeholder-svg' -}}
+                      {%- endif -%}
+                    </div>
+                    <h3 class="product-card__title">{{ product.title }}</h3>
+                    {%- if product.vendor -%}
+                      <p class="product-card__vendor">{{ product.vendor }}</p>
+                    {%- endif -%}
+                    <div class="product-card__price">
+                      {%- if product.compare_at_price > product.price -%}
+                        <s>{{ product.compare_at_price | money }}</s>
+                      {%- endif -%}
+                      <span>{{ product.price | money }}</span>
+                    </div>
+                  </a>
+                </li>
+              {%- endfor -%}
+            </ul>
+            {%- if paginate.pages > 1 -%}
+              <nav class="pagination" aria-label="Pagination">
+                {{- paginate | default_pagination -}}
+              </nav>
+            {%- endif -%}
+          {%- endif -%}
+        {%- endpaginate -%}
+      </div>
+
+    </div>
+  </div>
+</section>
+
