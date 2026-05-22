@@ -19,9 +19,9 @@ import clsx from 'clsx';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { tasksApi } from '../../services/api';
+import type { SopChecklist } from '../../services/api/hr';
 
 type TaskTab = 'my-tasks' | 'checklists' | 'team-tasks';
-type ChecklistType = 'opening' | 'closing' | 'stock_count';
 
 interface Task {
   task_id: string;
@@ -39,11 +39,6 @@ interface Task {
   escalation_level?: number;
 }
 
-interface ChecklistItem {
-  text: string;
-  completed: boolean;
-}
-
 // Priority colors (non-customizable per spec)
 const PRIORITY_COLORS: Record<string, { border: string; bg: string; text: string }> = {
   P0: { border: '#991B1B', bg: 'bg-red-950', text: 'text-white' },       // dark red — critical
@@ -51,35 +46,6 @@ const PRIORITY_COLORS: Record<string, { border: string; bg: string; text: string
   P2: { border: '#EA580C', bg: 'bg-orange-600', text: 'text-white' },    // orange
   P3: { border: '#CA8A04', bg: 'bg-yellow-500', text: 'text-gray-900' }, // yellow — dark text for contrast
   P4: { border: '#2563EB', bg: 'bg-blue-600', text: 'text-white' },      // blue
-};
-
-const DEFAULT_CHECKLISTS: Record<ChecklistType, ChecklistItem[]> = {
-  opening: [
-    { text: 'Disarm security system', completed: false },
-    { text: 'Turn on all lights and AC', completed: false },
-    { text: 'Check cash register float (₹5,000)', completed: false },
-    { text: 'Clean all display cases and mirrors', completed: false },
-    { text: 'Boot up POS system', completed: false },
-    { text: 'Verify network connectivity', completed: false },
-    { text: 'Check top 10 SKU stock levels', completed: false },
-  ],
-  closing: [
-    { text: 'Count cash in register (by denomination)', completed: false },
-    { text: 'Reconcile all payment methods', completed: false },
-    { text: 'Update daily sales Excel sheet', completed: false },
-    { text: 'Prepare bank deposit bag', completed: false },
-    { text: 'Lock cash in safe (retain ₹5,000)', completed: false },
-    { text: 'Clean entire store', completed: false },
-    { text: 'Send WhatsApp report to owner', completed: false },
-    { text: 'Set security system', completed: false },
-  ],
-  stock_count: [
-    { text: 'Count frames in display', completed: false },
-    { text: 'Count lenses in inventory', completed: false },
-    { text: 'Check expiry dates', completed: false },
-    { text: 'Flag low stock items', completed: false },
-    { text: 'Update stock report in system', completed: false },
-  ],
 };
 
 export function TasksDashboard() {
@@ -94,9 +60,12 @@ export function TasksDashboard() {
   const [teamFilter, setTeamFilter] = useState<'all' | 'open' | 'completed' | 'escalated'>('all');
   const [summary, setSummary] = useState({ total: 0, overdue: 0, escalated: 0, open: 0, completed: 0 });
 
-  // Checklist state
-  const [checklistType, setChecklistType] = useState<ChecklistType>('opening');
-  const [checklistItems, setChecklistItems] = useState<ChecklistItem[]>(DEFAULT_CHECKLISTS.opening);
+  // Checklist state (real SOP templates + today's completion)
+  const [sopTemplates, setSopTemplates] = useState<Array<{ template_id: string; title: string; frequency?: string }>>([]);
+  const [selectedTemplateId, setSelectedTemplateId] = useState<string>('');
+  const [checklist, setChecklist] = useState<SopChecklist | null>(null);
+  const [checklistLoading, setChecklistLoading] = useState(false);
+  const [seedingDefaults, setSeedingDefaults] = useState(false);
 
   // Create task modal
   const [showCreateModal, setShowCreateModal] = useState(false);
@@ -118,6 +87,13 @@ export function TasksDashboard() {
       loadTeamTasks();
     }
   }, [activeTab, teamFilter]);
+
+  useEffect(() => {
+    if (activeTab === 'checklists') {
+      loadSopTemplates();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab]);
 
   const loadData = async () => {
     setIsLoading(true);
@@ -203,19 +179,75 @@ export function TasksDashboard() {
     }
   };
 
-  const handleChecklistItemToggle = (index: number) => {
-    const updated = [...checklistItems];
-    updated[index].completed = !updated[index].completed;
-    setChecklistItems(updated);
+  const loadSopTemplates = async () => {
+    try {
+      const res = await tasksApi.getSopTemplates({ activeOnly: true });
+      // Daily checklists = DAILY (or unspecified-frequency) active templates.
+      const list = (res?.templates || [])
+        .filter((t) => !t.frequency || t.frequency === 'DAILY')
+        .map((t) => ({ template_id: t.template_id, title: t.title, frequency: t.frequency }));
+      setSopTemplates(list);
+      if (list.length > 0) {
+        setSelectedTemplateId(list[0].template_id);
+        loadChecklist(list[0].template_id);
+      } else {
+        setSelectedTemplateId('');
+        setChecklist(null);
+      }
+    } catch {
+      setSopTemplates([]);
+      setChecklist(null);
+    }
   };
 
-  const handleChecklistTypeChange = (type: ChecklistType) => {
-    setChecklistType(type);
-    setChecklistItems([...DEFAULT_CHECKLISTS[type]]);
+  const loadChecklist = async (templateId: string) => {
+    setChecklistLoading(true);
+    try {
+      const data = await tasksApi.getSopChecklist(templateId);
+      setChecklist(data);
+    } catch {
+      toast.error('Failed to load checklist');
+      setChecklist(null);
+    } finally {
+      setChecklistLoading(false);
+    }
   };
 
-  const completedChecklistItems = checklistItems.filter(item => item.completed).length;
-  const checklistProgress = Math.round((completedChecklistItems / checklistItems.length) * 100);
+  const handleSelectTemplate = (templateId: string) => {
+    setSelectedTemplateId(templateId);
+    loadChecklist(templateId);
+  };
+
+  const handleToggleChecklistItem = async (stepNumber: number, completed: boolean) => {
+    if (!selectedTemplateId) return;
+    try {
+      const data = await tasksApi.toggleSopChecklistItem({
+        template_id: selectedTemplateId,
+        step_number: stepNumber,
+        completed,
+      });
+      setChecklist(data);
+    } catch {
+      toast.error('Failed to update checklist');
+    }
+  };
+
+  const handleSeedDefaults = async () => {
+    setSeedingDefaults(true);
+    try {
+      const res = await tasksApi.seedDefaultSops();
+      toast.success(res?.message || 'Starter checklists created');
+      loadSopTemplates();
+    } catch {
+      toast.error('Failed to create starter checklists');
+    } finally {
+      setSeedingDefaults(false);
+    }
+  };
+
+  const canManageSops = !!user?.roles?.some((r) =>
+    ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER'].includes(r),
+  );
 
   // Filter tasks for display
   const myTasks = tasks.filter(t => t.assigned_to === user?.id);
@@ -411,59 +443,104 @@ export function TasksDashboard() {
           </div>
         ) : activeTab === 'checklists' ? (
           <div className="bg-white rounded-lg border border-gray-200 p-6">
-            {/* Checklist Type Selector */}
-            <div className="mb-6 flex gap-3">
-              {(['opening', 'closing', 'stock_count'] as ChecklistType[]).map(type => (
-                <button
-                  key={type}
-                  onClick={() => handleChecklistTypeChange(type)}
-                  className={clsx(
-                    'px-4 py-2 rounded-lg font-medium transition-colors',
-                    checklistType === type
-                      ? 'bg-blue-600 text-white'
-                      : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
-                  )}
-                >
-                  {type === 'opening' && 'Opening'}
-                  {type === 'closing' && 'Closing'}
-                  {type === 'stock_count' && 'Stock Count'}
-                </button>
-              ))}
-            </div>
-
-            {/* Progress Bar */}
-            <div className="mb-6">
-              <div className="flex items-center justify-between mb-2">
-                <p className="text-gray-600 font-medium">Progress</p>
-                <p className="text-sm text-gray-500">{completedChecklistItems} of {checklistItems.length} completed</p>
+            {sopTemplates.length === 0 ? (
+              <div className="text-center py-12">
+                <ListChecks className="w-12 h-12 text-gray-300 mx-auto mb-3" />
+                <p className="text-gray-600 font-medium">No daily checklists configured</p>
+                <p className="text-gray-500 text-sm mt-1 mb-4">
+                  Create the starter set (opening, closing, stock count) to begin — then edit them in Settings.
+                </p>
+                {canManageSops && (
+                  <button
+                    onClick={handleSeedDefaults}
+                    disabled={seedingDefaults}
+                    className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition-colors inline-flex items-center gap-2"
+                  >
+                    {seedingDefaults ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
+                    Create starter checklists
+                  </button>
+                )}
               </div>
-              <div className="w-full bg-gray-200 rounded-full h-2">
-                <div
-                  className="bg-green-500 h-2 rounded-full transition-all duration-300"
-                  style={{ width: `${checklistProgress}%` }}
-                />
-              </div>
-            </div>
+            ) : (
+              <>
+                {/* Template selector */}
+                <div className="mb-6 flex gap-3 flex-wrap">
+                  {sopTemplates.map((t) => (
+                    <button
+                      key={t.template_id}
+                      onClick={() => handleSelectTemplate(t.template_id)}
+                      className={clsx(
+                        'px-4 py-2 rounded-lg font-medium transition-colors',
+                        selectedTemplateId === t.template_id
+                          ? 'bg-blue-600 text-white'
+                          : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                      )}
+                    >
+                      {t.title}
+                    </button>
+                  ))}
+                </div>
 
-            {/* Checklist Items */}
-            <div className="space-y-3">
-              {checklistItems.map((item, index) => (
-                <label key={index} className="flex items-start gap-3 p-3 rounded-lg hover:bg-gray-100 transition-colors cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={item.completed}
-                    onChange={() => handleChecklistItemToggle(index)}
-                    className="mt-1 w-5 h-5 rounded border-gray-200 text-green-500 cursor-pointer"
-                  />
-                  <span className={clsx(
-                    'text-sm flex-1',
-                    item.completed ? 'line-through text-gray-500' : 'text-gray-600'
-                  )}>
-                    {item.text}
-                  </span>
-                </label>
-              ))}
-            </div>
+                {checklistLoading ? (
+                  <div className="flex items-center justify-center h-40">
+                    <Loader2 className="w-8 h-8 text-blue-600 animate-spin" />
+                  </div>
+                ) : checklist ? (
+                  <>
+                    {/* Progress Bar */}
+                    <div className="mb-6">
+                      <div className="flex items-center justify-between mb-2">
+                        <p className="text-gray-600 font-medium">
+                          Progress
+                          {checklist.status === 'COMPLETED' && (
+                            <span className="ml-2 text-xs px-2 py-0.5 rounded bg-green-100 text-green-700">Done</span>
+                          )}
+                        </p>
+                        <p className="text-sm text-gray-500">
+                          {checklist.progress.done} of {checklist.progress.total} completed · {checklist.date}
+                        </p>
+                      </div>
+                      <div className="w-full bg-gray-200 rounded-full h-2">
+                        <div
+                          className="bg-green-500 h-2 rounded-full transition-all duration-300"
+                          style={{ width: `${checklist.progress.percent}%` }}
+                        />
+                      </div>
+                    </div>
+
+                    {/* Checklist Items */}
+                    <div className="space-y-3">
+                      {checklist.items.map((item) => (
+                        <label
+                          key={item.step_number}
+                          className="flex items-start gap-3 p-3 rounded-lg hover:bg-gray-100 transition-colors cursor-pointer"
+                        >
+                          <input
+                            type="checkbox"
+                            checked={item.completed}
+                            onChange={() => handleToggleChecklistItem(item.step_number, !item.completed)}
+                            className="mt-1 w-5 h-5 rounded border-gray-200 text-green-500 cursor-pointer"
+                          />
+                          <span className="flex-1">
+                            <span className={clsx(
+                              'text-sm',
+                              item.completed ? 'line-through text-gray-500' : 'text-gray-600'
+                            )}>
+                              {item.instruction}
+                            </span>
+                            {item.warning && (
+                              <span className="block text-xs text-orange-600 mt-0.5">{item.warning}</span>
+                            )}
+                          </span>
+                        </label>
+                      ))}
+                    </div>
+                  </>
+                ) : (
+                  <div className="text-center py-10 text-gray-500 text-sm">Select a checklist above.</div>
+                )}
+              </>
+            )}
           </div>
         ) : (
           /* Team Tasks Panel */
