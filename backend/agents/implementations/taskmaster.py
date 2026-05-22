@@ -81,25 +81,46 @@ class TaskmasterAgent(JarvisAgent):
         self._actions_taken += len(actions)
 
     async def _escalate_overdue_tasks(self) -> List[Dict[str, Any]]:
-        """Find tasks past due_at + escalate to next owner. Tier 1 auto-act."""
+        """Flag SLA-breached tasks as ESCALATED. Tier 1 auto-act.
+
+        Uses the shared pure SLA check (services.task_sla.should_escalate) so
+        the 5-minute agent tick and the /tasks/auto-escalate-overdue endpoint
+        make the exact same decision. The candidate set is every non-terminal,
+        not-yet-escalated task (tolerant of legacy lowercase status); the
+        per-priority ack + overdue-grace clocks are applied in Python."""
         coll = self.get_collection("tasks")
         if coll is None:
             return []
+        # Lazy import (matches nexus.py) -- `api.*` is on path at runtime.
+        try:
+            from api.services.task_sla import should_escalate
+        except Exception as e:
+            logger.debug(f"[TASKMASTER] SLA module import failed: {e}")
+            return []
         actions = []
         try:
-            now_iso = datetime.now(timezone.utc).isoformat()
-            overdue = list(coll.find({
-                "due_at": {"$lt": now_iso},
-                "status": {"$nin": ["DONE", "CANCELLED"]},
-                "escalated": {"$ne": True},
-            }).limit(20))
-            for task in overdue:
-                before = {"escalated": False, "owner": task.get("owner")}
-                after = {"escalated": True, "escalation_level": (task.get("escalation_level", 0) + 1)}
+            now = datetime.now()
+            candidates = list(coll.find({
+                "status": {"$in": ["OPEN", "IN_PROGRESS", "open", "in_progress"]},
+            }).limit(200))
+            for task in candidates:
+                flag, reason = should_escalate(task, now=now)
+                if not flag:
+                    continue
+                new_level = task.get("escalation_level", 0) + 1
+                before = {
+                    "status": task.get("status"),
+                    "escalation_level": task.get("escalation_level", 0),
+                }
+                after = {
+                    "status": "ESCALATED",
+                    "escalation_level": new_level,
+                    "escalation_reason": reason,
+                }
                 try:
                     coll.update_one(
                         {"_id": task["_id"]},
-                        {"$set": {**after, "escalated_at": now_iso, "escalated_by": self.agent_id}}
+                        {"$set": {**after, "escalated_at": now, "updated_at": now, "escalated_by": self.agent_id}}
                     )
                     await self._audit_log(
                         action="task_escalation",
@@ -108,7 +129,7 @@ class TaskmasterAgent(JarvisAgent):
                         after=after,
                         tier=1,
                     )
-                    actions.append({"action": "task_escalated", "task_id": task.get("task_id")})
+                    actions.append({"action": "task_escalated", "task_id": task.get("task_id"), "reason": reason})
                 except Exception as e:
                     logger.warning(f"[TASKMASTER] Failed to escalate task {task.get('_id')}: {e}")
         except Exception as e:
@@ -199,15 +220,22 @@ class TaskmasterAgent(JarvisAgent):
         if coll is None:
             return
         try:
+            now = datetime.now()
             coll.insert_one({
-                "task_id": f"TSK-AUTO-{datetime.now(timezone.utc).strftime('%y%m%d-%H%M%S')}",
+                "task_id": f"TSK-AUTO-{now.strftime('%y%m%d-%H%M%S')}",
                 "title": f"Review: {anomaly.get('summary', 'anomaly')}",
+                "description": "Auto-created from a detected anomaly (advisory, Tier 3).",
+                "category": "Review",
                 "priority": "P1",
                 "status": "OPEN",
-                "owner": "store_manager",
+                "source": "SYSTEM",
+                "assigned_to": "store_manager",
                 "auto_created_by": self.agent_id,
                 "linked_anomaly": anomaly,
-                "created_at": datetime.now(timezone.utc).isoformat(),
+                "due_at": now + timedelta(hours=24),
+                "created_at": now,
+                "updated_at": now,
+                "escalation_level": 0,
             })
         except Exception as e:
             logger.warning(f"[TASKMASTER] Failed to create advisory task: {e}")

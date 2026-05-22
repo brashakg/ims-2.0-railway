@@ -28,10 +28,12 @@ interface Task {
   title: string;
   description?: string;
   priority: string;  // P0, P1, P2, P3, P4
-  status: string;    // open, in_progress, completed, escalated
+  status: string;    // OPEN, IN_PROGRESS, COMPLETED, ESCALATED, CANCELLED
   assigned_to: string;
-  due_date: string;
-  type: string;      // manual, sop, system
+  due_at?: string;
+  due_date?: string;  // legacy fallback
+  source?: string;    // SYSTEM, USER, SOP
+  type?: string;      // legacy fallback
   created_at: string;
   completed_at?: string;
   escalation_level?: number;
@@ -377,14 +379,14 @@ export function TasksDashboard() {
                           <p className="text-sm text-gray-500 mb-3">{task.description}</p>
                         )}
                         <div className="flex items-center gap-4 text-sm text-gray-500">
-                          <span>Due: {new Date(task.due_date).toLocaleDateString()}</span>
-                          <span>Type: {task.type}</span>
+                          <span>Due: {new Date(task.due_at || task.due_date || task.created_at).toLocaleDateString()}</span>
+                          <span>Type: {task.source || task.type}</span>
                         </div>
                       </div>
 
                       {/* Action Buttons */}
                       <div className="flex gap-2">
-                        {task.status === 'open' && (
+                        {task.status === 'OPEN' && (
                           <button
                             onClick={() => handleAcknowledgeTask(task.task_id)}
                             className="px-3 py-1 bg-blue-600 hover:bg-blue-700 text-sm text-gray-900 rounded transition-colors"
@@ -392,7 +394,7 @@ export function TasksDashboard() {
                             Acknowledge
                           </button>
                         )}
-                        {task.status !== 'completed' && (
+                        {task.status !== 'COMPLETED' && (
                           <button
                             onClick={() => handleCompleteTask(task.task_id)}
                             className="px-3 py-1 bg-green-600 hover:bg-green-700 text-sm text-gray-900 rounded transition-colors"
@@ -511,7 +513,7 @@ export function TasksDashboard() {
             ) : (
               <div className="space-y-3">
                 {teamTasks.map(task => {
-                  const isOverdue = task.status !== 'completed' && new Date(task.due_date) < new Date();
+                  const isOverdue = task.status !== 'COMPLETED' && new Date(task.due_at || task.due_date || task.created_at) < new Date();
                   return (
                     <div
                       key={task.task_id}
@@ -531,8 +533,8 @@ export function TasksDashboard() {
                             </span>
                             <span className={clsx(
                               'text-xs px-2 py-0.5 rounded',
-                              task.status === 'completed' ? 'bg-green-800 text-green-200' :
-                              task.status === 'escalated' ? 'bg-red-800 text-red-200' :
+                              task.status === 'COMPLETED' ? 'bg-green-800 text-green-200' :
+                              task.status === 'ESCALATED' ? 'bg-red-800 text-red-200' :
                               'bg-gray-100 text-gray-600'
                             )}>
                               {task.status}
@@ -546,11 +548,11 @@ export function TasksDashboard() {
                           )}
                           <div className="flex items-center gap-4 text-xs text-gray-500">
                             <span>Assigned to: <span className="text-gray-600">{task.assigned_to}</span></span>
-                            <span>Due: <span className={isOverdue ? 'text-orange-600' : 'text-gray-600'}>{new Date(task.due_date).toLocaleDateString()}</span></span>
-                            <span>Type: {task.type}</span>
+                            <span>Due: <span className={isOverdue ? 'text-orange-600' : 'text-gray-600'}>{new Date(task.due_at || task.due_date || task.created_at).toLocaleDateString()}</span></span>
+                            <span>Type: {task.source || task.type}</span>
                           </div>
                         </div>
-                        {task.status !== 'completed' && (
+                        {task.status !== 'COMPLETED' && (
                           <button
                             onClick={() => handleCompleteTask(task.task_id)}
                             className="flex-shrink-0 px-3 py-1 bg-green-600 hover:bg-green-700 text-sm text-gray-900 rounded transition-colors"
