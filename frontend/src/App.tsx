@@ -22,6 +22,7 @@ import { Analytics } from '@vercel/analytics/react';
 const LoginPage = lazy(() => import('./pages/auth/LoginPage').then(m => ({ default: m.LoginPage })));
 const VendorPortalPage = lazy(() => import('./pages/vendor-portal/VendorPortalPage'));
 const DashboardPage = lazy(() => import('./pages/dashboard/HubPage'));
+const NotificationsPage = lazy(() => import('./pages/notifications/NotificationsPage'));
 const ExecutiveDashboard = lazy(() => import('./pages/dashboard/ExecutiveDashboard').then(m => ({ default: m.ExecutiveDashboard })));
 const EnterpriseAnalyticsDashboard = lazy(() => import('./pages/dashboard/EnterpriseAnalyticsDashboard'));
 const POSPage = lazy(() => import('./pages/pos/POSPage').then(m => ({ default: m.POSPage })));
@@ -158,6 +159,9 @@ function App() {
 
                   {/* Dashboard */}
                   <Route path="dashboard" element={<DashboardPage />} />
+
+                  {/* Notifications (any authenticated user) */}
+                  <Route path="notifications" element={<ProtectedRoute><NotificationsPage /></ProtectedRoute>} />
                   <Route
                     path="dashboard/executive"
                     element={
