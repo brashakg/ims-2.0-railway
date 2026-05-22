@@ -104,9 +104,58 @@ const handleFinalError = (error: AxiosError<{ message?: string; detail?: string 
   return Promise.reject(new Error(message));
 };
 
-// Response interceptor - handle errors with retry logic
+// ── Additive camelCase aliasing ─────────────────────────────────────────
+// Many components are typed in camelCase (Product.offerPrice, Store.storeName)
+// while the API returns snake_case. Rather than a destructive global rename
+// (which would break the many components that read snake_case directly), we ADD
+// camelCase aliases alongside the original keys. Non-destructive: snake readers
+// keep working; camel-typed reads start resolving. Binary/blob responses (file
+// downloads) are skipped, and the whole thing is wrapped so it can never break
+// a response.
+const _toCamel = (s: string): string =>
+  s.replace(/_+([a-z0-9])/g, (_m, c: string) => c.toUpperCase());
+
+function _isPlainObject(v: unknown): v is Record<string, unknown> {
+  if (v === null || typeof v !== 'object') return false;
+  const proto = Object.getPrototypeOf(v);
+  return proto === Object.prototype || proto === null;
+}
+
+function addCamelAliases(value: any): any {
+  if (Array.isArray(value)) return value.map(addCamelAliases);
+  if (_isPlainObject(value)) {
+    const out: Record<string, any> = {};
+    for (const [k, v] of Object.entries(value)) {
+      const cv = addCamelAliases(v);
+      out[k] = cv;
+      if (k.includes('_')) {
+        const camel = _toCamel(k);
+        if (camel !== k && !(camel in value)) out[camel] = cv;
+      }
+    }
+    return out;
+  }
+  return value;
+}
+
+// Response interceptor - additive camelCase aliasing + error retry logic
 api.interceptors.response.use(
-  (response) => response,
+  (response) => {
+    try {
+      const rt = response.config?.responseType;
+      if (
+        rt !== 'blob' &&
+        rt !== 'arraybuffer' &&
+        response.data &&
+        typeof response.data === 'object'
+      ) {
+        response.data = addCamelAliases(response.data);
+      }
+    } catch {
+      // Never let aliasing break a response.
+    }
+    return response;
+  },
   async (error: AxiosError<{ message?: string; detail?: string | Array<Record<string, unknown>> }>) => {
     const config = error.config as RetryTrackedConfig | undefined;
 
