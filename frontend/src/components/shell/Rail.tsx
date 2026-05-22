@@ -88,6 +88,7 @@ const RAIL_GROUPS: NavGroup[] = [
       { id: 'vendor-returns', label: 'Vendor Returns', to: '/purchase/vendor-returns', icon: 'refresh', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'WORKSHOP_STAFF'] },
       { id: 'workshop', label: 'Workshop', to: '/workshop', icon: 'wrench' },
       { id: 'catalog', label: 'Catalog', to: '/catalog/add', icon: 'tag' },
+      { id: 'catalog-autopilot', label: 'Catalog Autopilot', to: '/catalog/autopilot', icon: 'cpu', requireRoles: ['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER'] },
     ],
   },
   {
