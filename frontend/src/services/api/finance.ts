@@ -56,4 +56,30 @@ export const financeApi = {
     const response = await api.post('/finance/period-lock', null, { params: { month, year } });
     return response.data;
   },
+
+  // --- Phase 2/3: GST reconciliation, Tally export, P&L breakdowns ---
+  getGstReconciliation: async (params?: { month?: number; year?: number; entity_id?: string }) => {
+    const response = await api.get('/finance/gst/reconciliation', { params });
+    return response.data;
+  },
+
+  getPnlByStore: async (params?: { from_date?: string; to_date?: string; entity_id?: string }) => {
+    const response = await api.get('/finance/pnl/by-store', { params });
+    return response.data;
+  },
+
+  getPnlByCategory: async (params?: { from_date?: string; to_date?: string; store_id?: string; entity_id?: string }) => {
+    const response = await api.get('/finance/pnl/by-category', { params });
+    return response.data;
+  },
+
+  getPeriodStatus: async (month: number, year: number) => {
+    const response = await api.get('/finance/period-status', { params: { month, year } });
+    return response.data;
+  },
+
+  downloadTallySalesJv: async (params: { from_date?: string; to_date?: string; store_id?: string; entity_id?: string }) => {
+    const response = await api.get('/finance/tally/sales-jv', { params, responseType: 'blob' });
+    return response.data as Blob;
+  },
 };

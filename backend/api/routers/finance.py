@@ -6,7 +6,11 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
 from .auth import get_current_user
 
-router = APIRouter(prefix="/finance", tags=["finance"])
+# Mounted at /api/v1/finance in main.py. NO internal prefix: the earlier
+# prefix="/finance" double-prefixed every path to /api/v1/finance/finance/*,
+# which the frontend financeApi (it calls /finance/*) never hit — so the whole
+# Finance dashboard 404'd. Dropping it aligns the routes with the client.
+router = APIRouter(tags=["finance"])
 
 
 def _get_db():
@@ -170,6 +174,57 @@ def _store_maps(db):
     except Exception:
         pass
     return s2e, enames
+
+
+def pnl_by_category(orders, cost_by_product: dict) -> list:
+    """Revenue + COGS per product category (item_type), from order line items.
+    Pure. 60%-of-line COGS fallback when a product's cost is unknown."""
+    acc: dict = {}
+    for o in orders:
+        for it in (o.get("items") or []):
+            cat = it.get("item_type") or it.get("category") or "OTHER"
+            qty = it.get("quantity", 1) or 1
+            rev = float(it.get("total", 0) or 0)
+            d = acc.setdefault(cat, {"revenue": 0.0, "cogs": 0.0})
+            d["revenue"] += rev
+            cost = cost_by_product.get(it.get("product_id"))
+            d["cogs"] += (float(cost) * qty) if cost is not None else rev * 0.6
+    rows = []
+    for cat, d in acc.items():
+        r, c = round(d["revenue"], 2), round(d["cogs"], 2)
+        rows.append({
+            "category": cat, "revenue": r, "cogs": c,
+            "gross_profit": round(r - c, 2),
+            "gross_margin": round((r - c) / r * 100, 1) if r > 0 else 0,
+        })
+    return sorted(rows, key=lambda x: -x["revenue"])
+
+
+def is_period_locked(db, month, year) -> bool:
+    """True if the accounting period has been locked (closed)."""
+    try:
+        return db.get_collection("period_locks").find_one(
+            {"month": int(month), "year": int(year)}
+        ) is not None
+    except Exception:
+        return False
+
+
+def _payroll_by_store(db, from_date, to_date) -> dict:
+    """store_id -> payroll cost-to-company over the months in the range."""
+    out: dict = {}
+    try:
+        months = _months_in_range(from_date, to_date)
+        if not months:
+            return out
+        q = {"$or": [{"year": y, "month": m} for (y, m) in months]}
+        for r in db.get_collection("payroll").find(q):
+            sid = r.get("store_id")
+            bd = r.get("breakdown") or {}
+            out[sid] = out.get(sid, 0) + (bd.get("ctc_cost", r.get("net_salary", 0)) or 0)
+    except Exception:
+        pass
+    return out
 
 
 # === Revenue Tracking ===
@@ -831,3 +886,113 @@ async def get_tally_sales_jv(
         media_type="application/xml",
         headers={"Content-Disposition": f'attachment; filename="{fname}"'},
     )
+
+
+# === P&L breakdowns + period status ===
+
+
+@router.get("/pnl/by-store")
+async def get_pnl_by_store(
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+    entity_id: Optional[str] = None,
+    current_user: dict = Depends(get_current_user),
+):
+    """P&L (revenue - COGS - approved expenses - payroll) per store."""
+    db = _get_db()
+    s2e, _ = _store_maps(db)
+    store_ids = [sid for sid, eid in s2e.items() if eid == entity_id] if entity_id else None
+
+    match: dict = {}
+    if store_ids is not None:
+        match["store_id"] = {"$in": store_ids}
+    if from_date:
+        match.setdefault("created_at", {})["$gte"] = from_date
+    if to_date:
+        match.setdefault("created_at", {})["$lte"] = to_date
+
+    rev = list(db.get_collection("orders").aggregate(
+        [{"$match": match}, {"$group": {"_id": "$store_id", "revenue": {"$sum": _REVENUE_EXPR}}}]
+    ))
+    rev_by_store = {r["_id"]: r["revenue"] for r in rev}
+
+    cost_map = _cost_by_product(db)
+    cogs_by_store: dict = {}
+    for o in db.get_collection("orders").find(match, {"_id": 0, "store_id": 1, "items": 1}):
+        sid = o.get("store_id")
+        cogs_by_store[sid] = cogs_by_store.get(sid, 0) + compute_cogs([o], cost_map, fallback_rate=0.6)
+
+    exp_match: dict = {"status": {"$in": ["APPROVED", "PAID", "approved", "paid"]}}
+    if store_ids is not None:
+        exp_match["store_id"] = {"$in": store_ids}
+    if from_date:
+        exp_match.setdefault("date", {})["$gte"] = from_date
+    if to_date:
+        exp_match.setdefault("date", {})["$lte"] = to_date
+    exp = list(db.get_collection("expenses").aggregate(
+        [{"$match": exp_match}, {"$group": {"_id": "$store_id", "amt": {"$sum": "$amount"}}}]
+    ))
+    exp_by_store = {e["_id"]: e["amt"] for e in exp}
+
+    pay_by_store = _payroll_by_store(db, from_date, to_date)
+
+    rows = []
+    for sid in set(rev_by_store) | set(cogs_by_store) | set(exp_by_store) | set(pay_by_store):
+        r = round(rev_by_store.get(sid, 0), 2)
+        c = round(cogs_by_store.get(sid, 0), 2)
+        e = round(exp_by_store.get(sid, 0), 2)
+        p = round(pay_by_store.get(sid, 0), 2)
+        net = round(r - c - e - p, 2)
+        rows.append({
+            "store_id": sid, "entity_id": s2e.get(sid),
+            "revenue": r, "cogs": c, "expenses": e, "payroll": p,
+            "net_profit": net, "net_margin": round(net / r * 100, 1) if r > 0 else 0,
+        })
+    return {
+        "stores": sorted(rows, key=lambda x: -x["revenue"]),
+        "total_net": round(sum(x["net_profit"] for x in rows), 2),
+    }
+
+
+@router.get("/pnl/by-category")
+async def get_pnl_by_category(
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+    store_id: Optional[str] = None,
+    entity_id: Optional[str] = None,
+    current_user: dict = Depends(get_current_user),
+):
+    """Revenue + COGS + gross profit per product category."""
+    db = _get_db()
+    match: dict = {}
+    store_ids = None
+    if store_id:
+        store_ids = [store_id]
+    elif entity_id:
+        s2e, _ = _store_maps(db)
+        store_ids = [sid for sid, eid in s2e.items() if eid == entity_id]
+    if store_ids is not None:
+        match["store_id"] = {"$in": store_ids}
+    if from_date:
+        match.setdefault("created_at", {})["$gte"] = from_date
+    if to_date:
+        match.setdefault("created_at", {})["$lte"] = to_date
+
+    orders = list(db.get_collection("orders").find(match, {"_id": 0, "items": 1}))
+    cats = pnl_by_category(orders, _cost_by_product(db))
+    return {
+        "categories": cats,
+        "total_revenue": round(sum(c["revenue"] for c in cats), 2),
+        "total_gross_profit": round(sum(c["gross_profit"] for c in cats), 2),
+    }
+
+
+@router.get("/period-status")
+async def get_period_status(
+    month: int,
+    year: int,
+    current_user: dict = Depends(get_current_user),
+):
+    """Whether an accounting period is locked (for the UI to disable edits)."""
+    db = _get_db()
+    return {"month": month, "year": year, "locked": is_period_locked(db, month, year)}
