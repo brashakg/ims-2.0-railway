@@ -180,7 +180,7 @@ export function OrdersPage() {
       th{background:#f5f5f5}.total{font-weight:bold;font-size:1.2em}.header{text-align:center;margin-bottom:20px}
       .row{display:flex;justify-content:space-between;padding:4px 0}@media print{button,.no-print{display:none}}</style></head><body>
       <div class="header"><h2>Better Vision Opticals</h2><p>Tax Invoice</p></div>
-      <div class="row"><div><strong>Invoice:</strong> ${order.orderNumber || 'N/A'}</div><div><strong>Date:</strong> ${new Date(order.createdAt || '').toLocaleDateString('en-IN')}</div></div>
+      <div class="row"><div><strong>Invoice:</strong> ${order.orderNumber || 'N/A'}</div><div><strong>Date:</strong> ${formatDateIST(order.createdAt)}</div></div>
       <div class="row"><div><strong>Customer:</strong> ${order.customerName || 'Walk-in'}</div><div><strong>Phone:</strong> ${order.customerPhone || '-'}</div></div>
       <table><thead><tr><th>#</th><th>Item</th><th>Qty</th><th>Rate</th><th>Amount</th></tr></thead><tbody>${items}</tbody></table>
       <div style="text-align:right;margin-top:10px">
