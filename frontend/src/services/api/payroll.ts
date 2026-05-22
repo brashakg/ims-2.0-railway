@@ -123,7 +123,46 @@ export const payrollApi = {
     const res = await api.post('/payroll/lock', req);
     return res.data as { status: string; locked: number };
   },
+
+  // --- Exports (Phase 4) ---------------------------------------------------
+  getSummary: async (params: { month: number; year: number; store_id?: string; entity_id?: string }) => {
+    const res = await api.get('/payroll/registers/summary', { params });
+    return res.data as { summary: StatutorySummary; month: number; year: number; count: number };
+  },
+
+  downloadTallyJv: async (params: { month: number; year: number; entity_id?: string; store_id?: string }) => {
+    const res = await api.get('/payroll/tally/salary-jv', { params, responseType: 'blob' });
+    return res.data as Blob;
+  },
+
+  downloadPfEcr: async (params: { month: number; year: number; entity_id?: string; store_id?: string }) => {
+    const res = await api.get('/payroll/registers/pf-ecr', { params, responseType: 'blob' });
+    return res.data as Blob;
+  },
+
+  getPayslipHtml: async (employeeId: string, month: number, year: number) => {
+    const res = await api.get(`/payroll/payslip/${employeeId}/${month}/${year}/print`, {
+      responseType: 'text',
+    });
+    return res.data as string;
+  },
 };
+
+export interface StatutorySummary {
+  count?: number;
+  gross?: number;
+  pf_employee?: number;
+  pf_employer?: number;
+  esi_employee?: number;
+  esi_employer?: number;
+  professional_tax?: number;
+  tds?: number;
+  advance_recovery?: number;
+  net?: number;
+  employer_cost?: number;
+  pf_total_payable?: number;
+  esi_total_payable?: number;
+}
 
 // --- Run-flow types ---------------------------------------------------------
 

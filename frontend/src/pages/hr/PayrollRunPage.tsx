@@ -14,6 +14,7 @@ import {
   type SalaryConfig,
   type PayrollRow,
   type PayrollTotals,
+  type StatutorySummary,
 } from '../../services/api/payroll';
 import { entitiesApi, type Entity } from '../../services/api/entities';
 
@@ -51,6 +52,7 @@ export function PayrollRunPage() {
   const [totals, setTotals] = useState<PayrollTotals>({});
   const [busy, setBusy] = useState(false);
   const [payslip, setPayslip] = useState<PayrollRow | null>(null);
+  const [summary, setSummary] = useState<StatutorySummary | null>(null);
 
   const scope = useCallback(
     () => (entityId ? { entity_id: entityId } : {}),
@@ -74,6 +76,12 @@ export function PayrollRunPage() {
     } catch {
       setRows([]);
       setTotals({});
+    }
+    try {
+      const s = await payrollApi.getSummary({ month, year, ...scope() });
+      setSummary(s.summary);
+    } catch {
+      setSummary(null);
     }
   }, [month, year, scope]);
 
@@ -137,6 +145,34 @@ export function PayrollRunPage() {
     } finally {
       setBusy(false);
     }
+  };
+
+  const download = (blob: Blob, filename: string) => {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+  const mm = String(month).padStart(2, '0');
+
+  const exportTally = async () => {
+    try {
+      download(await payrollApi.downloadTallyJv({ month, year, ...scope() }), `salary_jv_${year}_${mm}.xml`);
+    } catch (e) { toast.error(e instanceof Error ? e.message : 'Tally export failed'); }
+  };
+  const exportEcr = async () => {
+    try {
+      download(await payrollApi.downloadPfEcr({ month, year, ...scope() }), `pf_ecr_${year}_${mm}.txt`);
+    } catch (e) { toast.error(e instanceof Error ? e.message : 'PF ECR export failed'); }
+  };
+  const printPayslip = async (emp: string) => {
+    try {
+      const html = await payrollApi.getPayslipHtml(emp, month, year);
+      const w = window.open('', '_blank');
+      if (w) { w.document.write(html); w.document.close(); w.focus(); }
+    } catch (e) { toast.error(e instanceof Error ? e.message : 'Payslip print failed'); }
   };
 
   return (
@@ -216,15 +252,34 @@ export function PayrollRunPage() {
         )}
       </div>
 
+      {/* Statutory summary */}
+      {summary && summary.count ? (
+        <div className="card p-4">
+          <div className="text-sm font-medium text-gray-700 mb-2">Statutory summary — {MONTHS[month - 1]} {year}</div>
+          <div className="flex flex-wrap gap-6">
+            <Stat label="PF payable" value={summary.pf_total_payable} />
+            <Stat label="ESI payable" value={summary.esi_total_payable} />
+            <Stat label="Professional Tax" value={summary.professional_tax} />
+            <Stat label="TDS" value={summary.tds} />
+            <Stat label="Net payout" value={summary.net} />
+            <Stat label="Employer cost" value={summary.employer_cost} />
+          </div>
+        </div>
+      ) : null}
+
       {/* Register */}
       <div className="card overflow-x-auto">
         <div className="flex items-center justify-between px-4 py-2 border-b border-gray-100">
           <span className="text-sm font-medium text-gray-700">
             2. Register — {MONTHS[month - 1]} {year}
           </span>
-          {canRun && rows.length > 0 && (
-            <div className="flex gap-2">
-              <button className="btn-secondary" onClick={doApprove} disabled={busy || !rows.some((r) => r.status === 'DRAFT')}>Approve</button>
+          {rows.length > 0 && (
+            <div className="flex flex-wrap gap-2">
+              <button className="btn-secondary" onClick={exportTally} disabled={busy}>Tally JV</button>
+              <button className="btn-secondary" onClick={exportEcr} disabled={busy}>PF ECR</button>
+              {canRun && (
+                <button className="btn-secondary" onClick={doApprove} disabled={busy || !rows.some((r) => r.status === 'DRAFT')}>Approve</button>
+              )}
               {canLock && (
                 <button className="btn-primary" onClick={doLock} disabled={busy || !anyApproved}>Lock (paid)</button>
               )}
@@ -312,7 +367,8 @@ export function PayrollRunPage() {
             <p className="text-xs text-gray-400 mt-2">
               Employer cost (CTC): {inr(payslip.breakdown.ctc_cost)} · LWP {payslip.breakdown.lwp_days}d
             </p>
-            <div className="flex justify-end mt-4">
+            <div className="flex justify-end gap-2 mt-4">
+              <button className="btn-secondary" onClick={() => payslip && printPayslip(payslip.employee_id)}>Print</button>
               <button className="btn-secondary" onClick={() => setPayslip(null)}>Close</button>
             </div>
           </div>
@@ -327,6 +383,15 @@ function Line({ label, value, bold }: { label: string; value: number; bold?: boo
     <div className={`flex justify-between py-1 ${bold ? 'border-t border-gray-100 mt-1 pt-2 font-semibold' : ''}`}>
       <span className="text-gray-600">{label}</span>
       <span className="text-gray-900">{inr(value)}</span>
+    </div>
+  );
+}
+
+function Stat({ label, value }: { label: string; value?: number }) {
+  return (
+    <div>
+      <div className="text-xs text-gray-500">{label}</div>
+      <div className="font-semibold text-gray-900">{inr(value)}</div>
     </div>
   );
 }

@@ -267,6 +267,7 @@ def compute_payroll(
             "advance_recovery": round(advance_recovery, 2),
             "total_deductions": round(total_deductions, 2),
         },
+        "pf_wage": pf["contributory_wage"],  # EPF contributory wage (for the PF ECR)
         "employer_contributions": {
             "pf_employer_epf": pf["employer_epf"],
             "pf_employer_eps": pf["employer_eps"],
