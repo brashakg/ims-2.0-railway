@@ -192,7 +192,7 @@ class DatabaseMigration:
     
     def drop_all(self) -> MigrationResult:
         """Drop all collections (DANGER!)"""
-        if not self.db:
+        if self.db is None:
             return MigrationResult(False, "No database connection")
         
         try:
@@ -204,7 +204,7 @@ class DatabaseMigration:
     
     def get_status(self) -> Dict:
         """Get current database status"""
-        if not self.db:
+        if self.db is None:
             return {"status": "disconnected"}
         
         try:

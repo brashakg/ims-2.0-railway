@@ -199,7 +199,7 @@ class TestPymongoTruthTestBugFixed:
         bad = re.compile(
             r"if\s+(not\s+)?"
             r"(\w*_col(?:l(?:ection)?)?|col|coll|self\.db|self\._db)"
-            r"\s*:",
+            r"\s*(:|and\b|or\b|\))",
         )
         for root, _, files in os.walk(agents_dir):
             for f in files:
@@ -226,7 +226,7 @@ class TestPymongoTruthTestBugFixed:
         bad = re.compile(
             r"if\s+(not\s+)?"
             r"(\w*_col(?:l(?:ection)?)?|col|coll|self\.db|self\._db)"
-            r"\s*:",
+            r"\s*(:|and\b|or\b|\))",
         )
         # All these MUST match (they're all the bug pattern):
         for line in [
@@ -240,6 +240,9 @@ class TestPymongoTruthTestBugFixed:
             "if not user_collection:",
             "if self.db:",
             "if self._db:",
+            "if orders_col and customers_col:",
+            "if not cust_col and users_col:",
+            "if users_col or orders_col:",
         ]:
             assert bad.search(line), f"v2 regex should match: {line!r}"
         # And these must NOT (correct patterns):

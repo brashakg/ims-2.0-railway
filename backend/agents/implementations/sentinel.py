@@ -382,7 +382,7 @@ class SentinelAgent(JarvisAgent):
             orders_col = self.get_collection("orders")
             customers_col = self.get_collection("customers")
 
-            if orders_col and customers_col:
+            if orders_col is not None and customers_col is not None:
                 # Check for orders without valid customer references
                 recent_orders = list(orders_col.find(
                     {"created_at": {"$gte": datetime.now(timezone.utc) - timedelta(days=7)}},
