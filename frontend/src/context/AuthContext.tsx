@@ -204,6 +204,9 @@ export function AuthProvider({ children }: AuthProviderProps) {
         localStorage.setItem('ims_token', response.token);
         localStorage.setItem('ims_user', JSON.stringify(response.user));
         localStorage.setItem('ims_login_time', Date.now().toString());
+        // Reset the sidebar to grouped/expanded on every login (key owned by
+        // components/shell/Rail.tsx COLLAPSED_GROUPS_KEY).
+        localStorage.removeItem('ims_rail_collapsed_groups');
 
         dispatch({
           type: 'LOGIN_SUCCESS',
