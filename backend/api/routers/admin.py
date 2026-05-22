@@ -10,8 +10,30 @@ from pydantic import BaseModel, Field
 from typing import Optional, Dict, Any, List
 from datetime import datetime
 from .auth import get_current_user
-import uuid
 import os
+
+
+def _simulated_integration_response(
+    integration: str, action: str, extra: dict | None = None
+) -> dict:
+    """Honest response for integration test/sync endpoints that do NOT perform
+    a live API call. Real integration runs through the NEXUS agent
+    (nexus_providers.py) with credentials + DISPATCH_MODE=live. We return a
+    truthful 'simulated' status instead of fabricated success metrics."""
+    resp = {
+        "status": "simulated",
+        "simulated": True,
+        "integration": integration,
+        "action": action,
+        "message": (
+            f"{integration} {action} is not performed live by this endpoint. "
+            "Configuration is saved; real sync runs via the NEXUS agent when "
+            "credentials and DISPATCH_MODE=live are set."
+        ),
+    }
+    if extra:
+        resp.update(extra)
+    return resp
 
 
 async def _require_admin_role(
@@ -217,18 +239,7 @@ async def test_shopify_connection(current_user: dict = Depends(get_current_user)
     if not config.get("shop_url"):
         raise HTTPException(status_code=400, detail="Shopify not configured")
 
-    # In production, would make actual API call to Shopify
-    # For now, simulate successful connection
-    return {
-        "status": "success",
-        "message": "Successfully connected to Shopify",
-        "shop_info": {
-            "name": config.get("shop_url", "").replace(".myshopify.com", ""),
-            "plan": "Basic",
-            "products_count": 156,
-            "orders_count": 1247,
-        },
-    }
+    return _simulated_integration_response("Shopify", "connection test")
 
 
 @router.post("/integrations/shopify/sync-orders")
@@ -241,18 +252,7 @@ async def sync_shopify_orders(
     if not config.get("enabled"):
         raise HTTPException(status_code=400, detail="Shopify integration not enabled")
 
-    # Simulate order sync
-    return {
-        "status": "success",
-        "message": "Order sync completed",
-        "sync_details": {
-            "orders_fetched": 15,
-            "orders_created": 12,
-            "orders_updated": 3,
-            "errors": 0,
-            "sync_time": datetime.now().isoformat(),
-        },
-    }
+    return _simulated_integration_response("Shopify", "order sync")
 
 
 @router.post("/integrations/shopify/sync-inventory")
@@ -263,17 +263,7 @@ async def sync_shopify_inventory(current_user: dict = Depends(get_current_user))
     if not config.get("enabled"):
         raise HTTPException(status_code=400, detail="Shopify integration not enabled")
 
-    # Simulate inventory sync
-    return {
-        "status": "success",
-        "message": "Inventory sync completed",
-        "sync_details": {
-            "products_updated": 45,
-            "skus_synced": 156,
-            "errors": 0,
-            "sync_time": datetime.now().isoformat(),
-        },
-    }
+    return _simulated_integration_response("Shopify", "inventory sync")
 
 
 # ============================================================================
@@ -331,18 +321,7 @@ async def test_shiprocket_connection(current_user: dict = Depends(get_current_us
     if not config.get("email"):
         raise HTTPException(status_code=400, detail="Shiprocket not configured")
 
-    # In production, would authenticate with Shiprocket API
-    # POST https://apiv2.shiprocket.in/v1/external/auth/login
-    return {
-        "status": "success",
-        "message": "Successfully connected to Shiprocket",
-        "account_info": {
-            "email": config.get("email"),
-            "company": "Better Vision Opticals",
-            "wallet_balance": 5420.50,
-            "pending_orders": 8,
-        },
-    }
+    return _simulated_integration_response("Shiprocket", "connection test")
 
 
 @router.post("/integrations/shiprocket/create-shipment")
@@ -357,24 +336,9 @@ async def create_shiprocket_shipment(
             status_code=400, detail="Shiprocket integration not enabled"
         )
 
-    # Generate AWB number (would come from Shiprocket API)
-    awb_number = f"AWB{uuid.uuid4().hex[:10].upper()}"
-    shipment_id = f"SR{uuid.uuid4().hex[:8].upper()}"
-
-    return {
-        "status": "success",
-        "message": "Shipment created successfully",
-        "shipment": {
-            "shipment_id": shipment_id,
-            "awb_code": awb_number,
-            "courier_name": "Delhivery",
-            "order_id": shipment.order_id,
-            "pickup_scheduled": True,
-            "expected_pickup": (datetime.now()).strftime("%Y-%m-%d"),
-            "tracking_url": f"https://www.delhivery.com/track/package/{awb_number}",
-            "label_url": f"https://shiprocket.co/label/{shipment_id}",
-        },
-    }
+    return _simulated_integration_response(
+        "Shiprocket", "create shipment", {"order_id": shipment.order_id}
+    )
 
 
 @router.get("/integrations/shiprocket/track/{awb}")
@@ -389,35 +353,9 @@ async def track_shiprocket_shipment(
             status_code=400, detail="Shiprocket integration not enabled"
         )
 
-    # Simulate tracking response
-    return {
-        "status": "success",
-        "tracking": {
-            "awb": awb,
-            "current_status": "IN_TRANSIT",
-            "current_location": "Mumbai Distribution Hub",
-            "origin": "Delhi",
-            "destination": "Mumbai",
-            "expected_delivery": "2026-02-07",
-            "tracking_history": [
-                {
-                    "status": "PICKED_UP",
-                    "location": "Delhi Warehouse",
-                    "timestamp": "2026-02-04T10:30:00",
-                },
-                {
-                    "status": "IN_TRANSIT",
-                    "location": "Delhi Hub",
-                    "timestamp": "2026-02-04T14:00:00",
-                },
-                {
-                    "status": "IN_TRANSIT",
-                    "location": "Mumbai Distribution Hub",
-                    "timestamp": "2026-02-05T08:00:00",
-                },
-            ],
-        },
-    }
+    return _simulated_integration_response(
+        "Shiprocket", "track shipment", {"awb": awb}
+    )
 
 
 @router.get("/integrations/shiprocket/rates")
@@ -436,44 +374,17 @@ async def get_shiprocket_rates(
             status_code=400, detail="Shiprocket integration not enabled"
         )
 
-    # Simulate rate calculation
-    return {
-        "status": "success",
-        "rates": [
-            {
-                "courier_name": "Delhivery Surface",
-                "courier_code": "DELHIVERY_SURFACE",
-                "rate": 65.00,
-                "estimated_days": 5,
-                "cod_available": True,
-                "cod_charges": 35.00 if cod else 0,
-            },
-            {
-                "courier_name": "Delhivery Express",
-                "courier_code": "DELHIVERY_EXPRESS",
-                "rate": 95.00,
-                "estimated_days": 3,
-                "cod_available": True,
-                "cod_charges": 35.00 if cod else 0,
-            },
-            {
-                "courier_name": "Bluedart",
-                "courier_code": "BLUEDART",
-                "rate": 120.00,
-                "estimated_days": 2,
-                "cod_available": True,
-                "cod_charges": 50.00 if cod else 0,
-            },
-            {
-                "courier_name": "Ecom Express",
-                "courier_code": "ECOM_EXPRESS",
-                "rate": 55.00,
-                "estimated_days": 6,
-                "cod_available": True,
-                "cod_charges": 30.00 if cod else 0,
-            },
-        ],
-    }
+    return _simulated_integration_response(
+        "Shiprocket",
+        "rate quote",
+        {
+            "pickup_pincode": pickup_pincode,
+            "delivery_pincode": delivery_pincode,
+            "weight": weight,
+            "cod": cod,
+            "rates": [],
+        },
+    )
 
 
 # ============================================================================
@@ -526,15 +437,7 @@ async def test_razorpay_connection(current_user: dict = Depends(get_current_user
     if not config.get("key_id"):
         raise HTTPException(status_code=400, detail="Razorpay not configured")
 
-    return {
-        "status": "success",
-        "message": "Successfully connected to Razorpay",
-        "account_info": {
-            "merchant_id": "BETTERVISION",
-            "live_mode": False,
-            "balance": 125000.00,
-        },
-    }
+    return _simulated_integration_response("Razorpay", "connection test")
 
 
 # ============================================================================
@@ -584,15 +487,7 @@ async def test_whatsapp_connection(current_user: dict = Depends(get_current_user
     if not config.get("api_key"):
         raise HTTPException(status_code=400, detail="WhatsApp not configured")
 
-    return {
-        "status": "success",
-        "message": "Successfully connected to WhatsApp Business API",
-        "account_info": {
-            "business_name": "Better Vision Opticals",
-            "phone_number": "+91 11 4567 8900",
-            "verified": True,
-        },
-    }
+    return _simulated_integration_response("WhatsApp Business", "connection test")
 
 
 # ============================================================================
@@ -643,15 +538,7 @@ async def test_tally_connection(current_user: dict = Depends(get_current_user)):
     if not config.get("server_url"):
         raise HTTPException(status_code=400, detail="Tally not configured")
 
-    return {
-        "status": "success",
-        "message": "Successfully connected to Tally",
-        "company_info": {
-            "name": config.get("company_name", ""),
-            "financial_year": "2025-26",
-            "last_sync": datetime.now().isoformat(),
-        },
-    }
+    return _simulated_integration_response("Tally ERP", "connection test")
 
 
 # ============================================================================
