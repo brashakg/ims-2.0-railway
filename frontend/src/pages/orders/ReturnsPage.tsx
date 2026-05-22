@@ -4,10 +4,11 @@
 import { useState } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { orderApi } from '../../services/api';
+import { formatDateIST } from '../../utils/datetime';
 import {
   Search, RotateCcw, ArrowLeftRight, Receipt,
   AlertTriangle, CheckCircle, X, ChevronRight,
-  
+
 } from 'lucide-react';
 import clsx from 'clsx';
 
@@ -168,7 +169,7 @@ export default function ReturnsPage() {
                   className="w-full flex items-center justify-between p-3 rounded-lg border border-gray-200 hover:border-bv-red-300 hover:bg-bv-gold-50 text-left transition-all">
                   <div>
                     <p className="font-medium text-sm text-gray-900">{order.orderNumber}</p>
-                    <p className="text-xs text-gray-500">{order.customerName} · {new Date(order.createdAt).toLocaleDateString('en-IN')}</p>
+                    <p className="text-xs text-gray-500">{order.customerName} · {formatDateIST(order.createdAt)}</p>
                     <p className="text-xs text-gray-500">{(order.items || []).length} items</p>
                   </div>
                   <div className="text-right">

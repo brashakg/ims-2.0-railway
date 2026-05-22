@@ -14,6 +14,7 @@ import {
   adminBrandApi,
   adminDiscountApi,
 } from '../../services/api';
+import { entitiesApi, type Entity } from '../../services/api/entities';
 import type { StoreData, Category, Brand } from './settingsTypes';
 import { CATEGORY_DEFINITIONS } from './settingsTypes';
 
@@ -40,6 +41,7 @@ const transformStore = (s: any): StoreData => ({
   geoFenceRadius: s.geo_fence_radius || s.geoFenceRadius || 100,
   enabledCategories: s.enabled_categories || s.enabledCategories || CATEGORY_DEFINITIONS.map(c => c.code),
   isActive: s.is_active !== false,
+  entityId: s.entity_id ?? s.entityId ?? null,
 });
 
 const transformBrand = (b: any): Brand => ({
@@ -66,12 +68,15 @@ export function StoreManagementSection() {
   const toast = useToast();
   const [isLoading, setIsLoading] = useState(false);
   const [stores, setStores] = useState<StoreData[]>([]);
+  const [entities, setEntities] = useState<Entity[]>([]);
   const [showAddStoreModal, setShowAddStoreModal] = useState(false);
   const [editingStore, setEditingStore] = useState<StoreData | null>(null);
   const categories = CATEGORY_DEFINITIONS;
 
   useEffect(() => {
     loadStores();
+    // Legal entities for the store<->entity link (Settings > Entities manages them).
+    entitiesApi.list().then((r) => setEntities(r.entities || [])).catch(() => setEntities([]));
   }, []);
 
   const loadStores = async () => {
@@ -110,10 +115,24 @@ export function StoreManagementSection() {
         status: storeData.isActive ? 'ACTIVE' : 'INACTIVE',
       };
 
+      let storeId: string | undefined = editingStore?.id;
       if (editingStore?.id) {
         await adminStoreApi.updateStore(editingStore.id, apiData);
       } else {
-        await adminStoreApi.createStore(apiData);
+        const created: any = await adminStoreApi.createStore(apiData);
+        storeId = created?.store_id || created?.id || created?.store?.store_id || created?.data?.store_id || storeId;
+      }
+      // Reconcile the legal-entity link (stored as entity_id on the store via
+      // the entities API). Non-fatal: the store still saves if this fails.
+      const newEntity = storeData.entityId ?? null;
+      const prevEntity = editingStore?.entityId ?? null;
+      if (storeId && newEntity !== prevEntity) {
+        try {
+          if (newEntity) await entitiesApi.assignStore(newEntity, storeId);
+          else if (prevEntity) await entitiesApi.unassignStore(prevEntity, storeId);
+        } catch {
+          toast.error('Store saved, but entity link failed — set it from Settings > Entities');
+        }
       }
       toast.success(editingStore ? 'Store updated successfully' : 'Store created successfully');
       setShowAddStoreModal(false);
@@ -224,6 +243,7 @@ export function StoreManagementSection() {
           }}
           onSave={handleSaveStore}
           categories={categories}
+          entities={entities}
         />
       )}
     </>
@@ -643,11 +663,13 @@ function StoreModal({
   onClose,
   onSave,
   categories,
+  entities,
 }: {
   store: StoreData | null;
   onClose: () => void;
   onSave: (data: Partial<StoreData>) => void;
   categories: Category[];
+  entities: Entity[];
 }) {
   const [formData, setFormData] = useState<Partial<StoreData>>(
     store || {
@@ -666,6 +688,7 @@ function StoreModal({
       geoFenceRadius: 100,
       enabledCategories: categories.map(c => c.code),
       isActive: true,
+      entityId: null,
     }
   );
 
@@ -709,15 +732,31 @@ function StoreModal({
             </div>
           </div>
 
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">GSTIN</label>
-            <input
-              type="text"
-              value={formData.gstin || ''}
-              onChange={e => handleChange('gstin', e.target.value.toUpperCase())}
-              placeholder="19ABCDE1234F1Z5"
-              className="w-full px-3 py-2 border border-gray-200 rounded-lg focus:border-bv-red-500 focus:outline-none"
-            />
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">GSTIN</label>
+              <input
+                type="text"
+                value={formData.gstin || ''}
+                onChange={e => handleChange('gstin', e.target.value.toUpperCase())}
+                placeholder="19ABCDE1234F1Z5"
+                className="w-full px-3 py-2 border border-gray-200 rounded-lg focus:border-bv-red-500 focus:outline-none"
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Legal entity</label>
+              <select
+                value={formData.entityId || ''}
+                onChange={e => handleChange('entityId', e.target.value || null)}
+                className="w-full px-3 py-2 border border-gray-200 rounded-lg focus:border-bv-red-500 focus:outline-none bg-white"
+              >
+                <option value="">— none (assign later) —</option>
+                {entities.map(en => (
+                  <option key={en.entity_id} value={en.entity_id}>{en.name}</option>
+                ))}
+              </select>
+              <p className="text-xs text-gray-400 mt-1">PAN/GST entity for payroll &amp; GST filings. Manage in Settings &gt; Entities.</p>
+            </div>
           </div>
 
           <div>
