@@ -144,7 +144,23 @@ class SentinelAgent(JarvisAgent):
         whenever a sensitive write hits an order / line item / P&L period.
         SENTINEL turns CRITICAL/HIGH events into alert rows + (when configured)
         Slack pings via the existing observability helper.
+
+        Also (May 2026): `agent.error` events — emitted by the base agent when a
+        background tick raises — become HIGH alerts so a failing agent shows up
+        in the alert tail + activity feed (replaces the old sentry.io path).
         """
+        if event == "agent.error":
+            await self._create_alert(
+                severity="HIGH",
+                domain="agent",
+                message=(
+                    f"{payload.get('agent_name') or payload.get('agent_id') or 'agent'} "
+                    f"tick failed: {str(payload.get('error', ''))[:200]}"
+                ),
+                details=payload,
+            )
+            return
+
         if event == "audit.alert":
             severity = (payload.get("severity") or "LOW").upper()
             action = payload.get("action") or "audit.unknown"
@@ -163,8 +179,8 @@ class SentinelAgent(JarvisAgent):
             # observability hook, which is fail-soft on missing webhook URL
             if severity in {"HIGH", "CRITICAL"}:
                 try:
-                    from observability import notify_slack_anomaly
-                    notify_slack_anomaly(
+                    from observability import notify_slack
+                    await notify_slack(
                         severity=severity,
                         title=f"[AUDIT] {action}",
                         body=(

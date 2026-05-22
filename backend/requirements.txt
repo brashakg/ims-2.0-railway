@@ -23,8 +23,7 @@ httpx==0.28.1
 # Agent Scheduler
 apscheduler==3.11.2
 
-# Monitoring & Caching
-sentry-sdk[fastapi]==2.59.0
+# Caching
 redis==5.3.1
 
 # Utilities
