@@ -411,7 +411,7 @@ GET    /api/v1/payroll/payslip/{emp}/{month}/{year}  payslip
 # Reports / Finance
 GET    /api/v1/reports/sales/growth              MoM / YoY growth (finance roles)
 GET    /api/v1/reports/gstr1                      GSTR-1 data (finance roles)
-GET    /api/v1/finance/finance/cash-flow         cash flow (note the double 'finance' segment)
+GET    /api/v1/finance/cash-flow                 cash flow
 
 # Jarvis (SUPERADMIN-only; 404 to everyone else)
 POST   /api/v1/jarvis/query                       natural-language query
@@ -419,7 +419,7 @@ GET    /api/v1/jarvis/agents                       list all 8 agents + live stat
 PATCH  /api/v1/jarvis/agents/{id}/toggle          enable/disable an agent
 ```
 
-> **Gotcha:** the `finance` and `billing` routers each declare an *internal* prefix on top of their mount, so their real paths are `/api/v1/finance/finance/*` and `/api/v1/billing/billing/*`. This is intentional and live — don't "fix" it without updating clients.
+> **Gotcha:** the `billing` router declares an *internal* prefix on top of its mount, so its real paths are `/api/v1/billing/billing/*`. (The `finance` router previously did the same; that accidental double prefix was removed, so finance paths are now `/api/v1/finance/*` — matching the frontend `financeApi`, which had been 404ing against the double path.)
 
 ---
 
@@ -592,7 +592,7 @@ Frontend tests are minimal (auth flow, one modal, one hook) — a known gap. Run
 - **No emojis in Python** — Windows cp1252 can crash `print()`/logging. Use ASCII tags like `[AGENTS]`.
 - **Theme is light-only** (dark mode removed).
 - **`is not None` for PyMongo objects** — `bool(collection)` raises in PyMongo 4.x; always compare `is not None`.
-- **Double-prefix paths:** `finance` and `billing` real paths are `/api/v1/finance/finance/*` and `/api/v1/billing/billing/*` (intentional).
+- **Double-prefix path:** `billing` real paths are `/api/v1/billing/billing/*`. (`finance` was de-double-prefixed to `/api/v1/finance/*`.)
 - **Shared prefixes:** `admin` / `admin_catalog` / `admin_extras` all mount at `/api/v1/admin`; `jarvis` + `agents` share `/api/v1/jarvis` (first-registered wins on collisions).
 - **`redirect_slashes=False`** → many routes register both `""` and `"/"`.
 - **Stale `docker-compose.yml`** references PostgreSQL — the real DB is MongoDB.

@@ -11,7 +11,12 @@ import os
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-for-unit-tests")
 os.environ.setdefault("MONGODB_URI", "")
 
-from api.routers.finance import compute_cogs, _order_total, gst_reconciliation  # noqa: E402
+from api.routers.finance import (  # noqa: E402
+    compute_cogs,
+    _order_total,
+    gst_reconciliation,
+    pnl_by_category,
+)
 
 
 def test_cogs_from_real_cost():
@@ -70,3 +75,21 @@ def test_gst_reconciliation_unassigned_store():
     r = gst_reconciliation([{"store_id": "SX", "tax_amount": 18}], [], {}, {})
     assert r["entities"][0]["entity_id"] == "_unassigned"
     assert r["total_collected"] == 18.0
+
+
+def test_pnl_by_category():
+    orders = [
+        {"items": [
+            {"item_type": "FRAME", "product_id": "P1", "quantity": 2, "total": 1000},
+            {"item_type": "LENS", "product_id": "P2", "quantity": 1, "total": 500},
+        ]},
+        {"items": [{"item_type": "FRAME", "product_id": "P1", "quantity": 1, "total": 500}]},
+    ]
+    cats = pnl_by_category(orders, {"P1": 200.0, "P2": 150.0})
+    frame = next(c for c in cats if c["category"] == "FRAME")
+    assert frame["revenue"] == 1500.0   # 1000 + 500
+    assert frame["cogs"] == 600.0       # 3 * 200
+    assert frame["gross_profit"] == 900.0
+    lens = next(c for c in cats if c["category"] == "LENS")
+    assert lens["revenue"] == 500.0 and lens["cogs"] == 150.0
+    assert cats[0]["category"] == "FRAME"  # sorted by revenue desc
