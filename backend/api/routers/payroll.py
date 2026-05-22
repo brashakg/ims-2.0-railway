@@ -41,27 +41,80 @@ router = APIRouter()
 # ============================================================================
 
 
+class OtherAllowance(BaseModel):
+    """A named extra earning line in the CTC."""
+
+    name: str
+    amount: float = 0.0
+
+
 class SalaryConfig(BaseModel):
-    """Employee salary structure"""
+    """Employee Structured-CTC salary configuration. All amounts are MONTHLY.
+
+    Earnings = basic + hra + conveyance + medical + special_allowance + sum(other).
+    Statutory deductions (PF/ESI/PT/TDS) are computed by the payroll engine
+    (Phase 2); this config only stores the inputs/flags + identifiers.
+    """
 
     employee_id: str
-    basic_salary: float = Field(..., gt=0, description="Basic salary amount")
-    hra_percentage: float = Field(
-        default=40.0, ge=0, le=100, description="HRA as % of basic"
+    entity_id: Optional[str] = Field(default=None, description="Employing legal entity")
+    store_id: Optional[str] = Field(default=None, description="Primary work store (PT state)")
+    designation: Optional[str] = None
+    department: Optional[str] = None
+    date_of_joining: Optional[str] = None
+    # Earnings (monthly)
+    basic: float = Field(..., gt=0, description="Monthly Basic")
+    hra: float = Field(default=0.0, ge=0, description="Monthly HRA (absolute)")
+    conveyance: float = Field(default=0.0, ge=0, description="Monthly conveyance")
+    medical: float = Field(default=0.0, ge=0, description="Monthly medical")
+    special_allowance: float = Field(default=0.0, ge=0)
+    other_allowances: List[OtherAllowance] = Field(default_factory=list)
+    # Statutory toggles + params
+    pf_applicable: bool = Field(default=True)
+    pf_wage_ceiling_cap: bool = Field(
+        default=True, description="PF on min(basic, 15000) when True"
     )
-    conveyance_allowance: float = Field(
-        default=1600.0, description="Monthly conveyance"
+    esi_applicable: Optional[bool] = Field(
+        default=None, description="None -> auto-eligible when gross <= 21000"
     )
-    medical_allowance: float = Field(default=1250.0, description="Monthly medical")
-    special_allowance: float = Field(default=0.0, description="Special allowance")
-    pf_employee_percentage: float = Field(default=12.0, description="Employee PF %")
-    pf_employer_percentage: float = Field(default=12.0, description="Employer PF %")
-    professional_tax: float = Field(default=200.0, description="Professional tax")
-    esi_applicable: bool = Field(default=True, description="Is ESI applicable")
-    esi_percentage: float = Field(default=0.75, description="ESI percentage")
-    bank_account: Optional[str] = None
-    pan_number: Optional[str] = None
-    aadhar_number: Optional[str] = None
+    pt_applicable: bool = Field(default=True)
+    tds_monthly: float = Field(default=0.0, ge=0, description="Manual monthly TDS")
+    # Statutory identifiers
+    uan: Optional[str] = Field(default=None, description="PF Universal Account Number")
+    esi_ip_number: Optional[str] = None
+    pan: Optional[str] = None
+    # Bank (for salary register / transfer)
+    bank_account_no: Optional[str] = None
+    bank_ifsc: Optional[str] = None
+    bank_name: Optional[str] = None
+
+
+class SalaryConfigUpdate(BaseModel):
+    """Partial update for an existing salary config (all fields optional)."""
+
+    entity_id: Optional[str] = None
+    store_id: Optional[str] = None
+    designation: Optional[str] = None
+    department: Optional[str] = None
+    date_of_joining: Optional[str] = None
+    basic: Optional[float] = Field(default=None, gt=0)
+    hra: Optional[float] = Field(default=None, ge=0)
+    conveyance: Optional[float] = Field(default=None, ge=0)
+    medical: Optional[float] = Field(default=None, ge=0)
+    special_allowance: Optional[float] = Field(default=None, ge=0)
+    other_allowances: Optional[List[OtherAllowance]] = None
+    pf_applicable: Optional[bool] = None
+    pf_wage_ceiling_cap: Optional[bool] = None
+    esi_applicable: Optional[bool] = None
+    pt_applicable: Optional[bool] = None
+    tds_monthly: Optional[float] = Field(default=None, ge=0)
+    uan: Optional[str] = None
+    esi_ip_number: Optional[str] = None
+    pan: Optional[str] = None
+    bank_account_no: Optional[str] = None
+    bank_ifsc: Optional[str] = None
+    bank_name: Optional[str] = None
+    is_active: Optional[bool] = None
 
 
 class SalaryAdvance(BaseModel):
@@ -190,6 +243,13 @@ def _get_salary_config(db, employee_id: str) -> Optional[dict]:
         return None
 
 
+def _strip_id(doc: Optional[dict]) -> Optional[dict]:
+    """Drop Mongo's _id so the doc is JSON-serializable."""
+    if doc and "_id" in doc:
+        return {k: v for k, v in doc.items() if k != "_id"}
+    return doc
+
+
 def _calculate_tds(gross_salary: float, month: int, year: int) -> float:
     """
     Calculate TDS as per Indian income tax slabs.
@@ -229,14 +289,21 @@ def _calculate_salary(
     Deductions: PF (Employee) + Professional Tax + ESI + TDS + LWP + Advances
     """
 
-    basic = salary_config.get("basic_salary", 0)
+    # Bridge: read Structured-CTC (v2) fields, falling back to legacy names.
+    # (Phase 2 replaces this calculator with the full statutory engine.)
+    basic = salary_config.get("basic") or salary_config.get("basic_salary", 0)
 
     # Earnings
-    hra_pct = salary_config.get("hra_percentage", 40)
-    hra = (basic * hra_pct) / 100
+    hra = salary_config.get("hra")
+    if hra is None:
+        hra = (basic * salary_config.get("hra_percentage", 40)) / 100
 
-    conveyance = salary_config.get("conveyance_allowance", 1600)
-    medical = salary_config.get("medical_allowance", 1250)
+    conveyance = salary_config.get("conveyance")
+    if conveyance is None:
+        conveyance = salary_config.get("conveyance_allowance", 0)
+    medical = salary_config.get("medical")
+    if medical is None:
+        medical = salary_config.get("medical_allowance", 0)
     special_allowance = salary_config.get("special_allowance", 0)
 
     gross_salary = basic + hra + conveyance + medical + special_allowance
@@ -318,29 +385,22 @@ async def create_salary_config(
                 status_code=409, detail="Salary config already exists for this employee"
             )
 
-        config_doc = {
-            "config_id": str(uuid.uuid4()),
-            "employee_id": config.employee_id,
-            "basic_salary": config.basic_salary,
-            "hra_percentage": config.hra_percentage,
-            "conveyance_allowance": config.conveyance_allowance,
-            "medical_allowance": config.medical_allowance,
-            "special_allowance": config.special_allowance,
-            "pf_employee_percentage": config.pf_employee_percentage,
-            "pf_employer_percentage": config.pf_employer_percentage,
-            "professional_tax": config.professional_tax,
-            "esi_applicable": config.esi_applicable,
-            "esi_percentage": config.esi_percentage,
-            "bank_account": config.bank_account,
-            "pan_number": config.pan_number,
-            "aadhar_number": config.aadhar_number,
-            "created_at": datetime.now().isoformat(),
-            "created_by": current_user.get("user_id"),
-        }
+        config_doc = config.model_dump()
+        config_doc.update(
+            {
+                "config_id": str(uuid.uuid4()),
+                "is_active": True,
+                "created_at": datetime.now().isoformat(),
+                "updated_at": datetime.now().isoformat(),
+                "created_by": current_user.get("user_id"),
+            }
+        )
 
         salary_config_coll.insert_one(config_doc)
 
         return {"status": "success", "config_id": config_doc["config_id"]}
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error("Payroll operation failed: %s", e)
         raise HTTPException(
@@ -359,7 +419,119 @@ async def get_salary_config(
 
     try:
         config = _get_salary_config(db, employee_id)
-        return {"config": config or {}}
+        return {"config": _strip_id(config) or {}}
+    except Exception as e:
+        logger.error("Payroll operation failed: %s", e)
+        raise HTTPException(
+            status_code=500, detail="Payroll operation failed. Please try again."
+        )
+
+
+@router.put("/config/{employee_id}")
+async def update_salary_config(
+    employee_id: str,
+    update: SalaryConfigUpdate,
+    current_user: dict = Depends(require_roles("ADMIN")),
+):
+    """Update an employee's salary configuration (admin-only). Partial update."""
+    db = _get_db()
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not available")
+    try:
+        coll = db.get_collection("salary_config")
+        existing = coll.find_one({"employee_id": employee_id})
+        if not existing:
+            raise HTTPException(status_code=404, detail="Salary config not found")
+        updates = {k: v for k, v in update.model_dump().items() if v is not None}
+        if not updates:
+            return {"status": "no_changes", "config_id": existing.get("config_id")}
+        updates["updated_at"] = datetime.now().isoformat()
+        coll.update_one({"employee_id": employee_id}, {"$set": updates})
+        return {
+            "status": "success",
+            "config": _strip_id(coll.find_one({"employee_id": employee_id})),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Payroll operation failed: %s", e)
+        raise HTTPException(
+            status_code=500, detail="Payroll operation failed. Please try again."
+        )
+
+
+@router.get("/config")
+async def list_salary_configs(
+    store_id: Optional[str] = Query(None),
+    entity_id: Optional[str] = Query(None),
+    include_inactive: bool = Query(False),
+    current_user: dict = Depends(get_current_user),
+):
+    """List salary configurations (optionally scoped by store or entity)."""
+    db = _get_db()
+    if not db:
+        return {"configs": [], "total": 0}
+    try:
+        query: dict = {}
+        if entity_id:
+            query["entity_id"] = entity_id
+        if store_id:
+            query["store_id"] = store_id
+        if not include_inactive:
+            # legacy docs may lack is_active; treat absent as active
+            query["is_active"] = {"$ne": False}
+        configs = [_strip_id(c) for c in db.get_collection("salary_config").find(query)]
+        return {"configs": configs, "total": len(configs)}
+    except Exception as e:
+        logger.error("Payroll operation failed: %s", e)
+        raise HTTPException(
+            status_code=500, detail="Payroll operation failed. Please try again."
+        )
+
+
+class BulkSalaryConfig(BaseModel):
+    """Wrapper for bulk salary-config upsert (backs the CSV import)."""
+
+    configs: List[SalaryConfig]
+
+
+@router.post("/config/bulk", status_code=201)
+async def bulk_upsert_salary_config(
+    payload: BulkSalaryConfig,
+    current_user: dict = Depends(require_roles("ADMIN")),
+):
+    """Bulk create/update salary configs (upsert by employee_id). CSV import target."""
+    db = _get_db()
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not available")
+    try:
+        coll = db.get_collection("salary_config")
+        created, updated = 0, 0
+        for cfg in payload.configs:
+            doc = cfg.model_dump()
+            existing = coll.find_one({"employee_id": cfg.employee_id})
+            if existing:
+                doc["updated_at"] = datetime.now().isoformat()
+                coll.update_one({"employee_id": cfg.employee_id}, {"$set": doc})
+                updated += 1
+            else:
+                doc.update(
+                    {
+                        "config_id": str(uuid.uuid4()),
+                        "is_active": True,
+                        "created_at": datetime.now().isoformat(),
+                        "updated_at": datetime.now().isoformat(),
+                        "created_by": current_user.get("user_id"),
+                    }
+                )
+                coll.insert_one(doc)
+                created += 1
+        return {
+            "status": "success",
+            "created": created,
+            "updated": updated,
+            "total": created + updated,
+        }
     except Exception as e:
         logger.error("Payroll operation failed: %s", e)
         raise HTTPException(
@@ -808,6 +980,184 @@ async def get_incentive_summary(
         except Exception as e:
             logger.error(f"Error fetching incentive: {str(e)}", exc_info=True)
             return {"incentive": None, "message": "Incentive data not found"}
+    except Exception as e:
+        logger.error("Payroll operation failed: %s", e)
+        raise HTTPException(
+            status_code=500, detail="Payroll operation failed. Please try again."
+        )
+
+
+# ============================================================================
+# PROFESSIONAL TAX (PT) SLABS - state-aware, editable
+# ============================================================================
+
+# EDITABLE seed defaults. PT rules change; the accountant must verify these.
+# basis = the salary basis the thresholds are evaluated against (MONTHLY/ANNUAL).
+# Each slab: {min, max (None = infinity), amount, amount_february?, gender?}
+DEFAULT_PT_SLABS = {
+    "MH": {
+        "state_code": "MH",
+        "state_name": "Maharashtra",
+        "basis": "MONTHLY",
+        "gender_aware": True,
+        "slabs": [
+            {"min": 0, "max": 7500, "amount": 0, "gender": "MALE"},
+            {"min": 7500.01, "max": 10000, "amount": 175, "gender": "MALE"},
+            {"min": 10000.01, "max": None, "amount": 200, "amount_february": 300, "gender": "MALE"},
+            {"min": 0, "max": 25000, "amount": 0, "gender": "FEMALE"},
+            {"min": 25000.01, "max": None, "amount": 200, "amount_february": 300, "gender": "FEMALE"},
+        ],
+        "notes": "EDITABLE default - verify current Maharashtra PT. Women nil up to 25,000; +100 in February for the top slab.",
+    },
+    "JH": {
+        "state_code": "JH",
+        "state_name": "Jharkhand",
+        "basis": "ANNUAL",
+        "gender_aware": False,
+        "slabs": [
+            {"min": 0, "max": 300000, "amount": 0},
+            {"min": 300000.01, "max": 500000, "amount": 100},
+            {"min": 500000.01, "max": 800000, "amount": 150},
+            {"min": 800000.01, "max": 1000000, "amount": 175},
+            {"min": 1000000.01, "max": None, "amount": 208},
+        ],
+        "notes": "EDITABLE default - verify current Jharkhand PT. Annual gross basis; ~2,500/yr cap.",
+    },
+}
+
+
+def pt_for(
+    slab_doc: Optional[dict], monthly_gross: float, month: int, gender: str = "ANY"
+) -> float:
+    """Resolve the monthly Professional Tax from a state's slab doc.
+
+    Pure helper, reused by the Phase-2 payroll engine. Annualizes gross when
+    the state's basis is ANNUAL; applies the February override when present.
+    """
+    if not slab_doc:
+        return 0.0
+    slabs = slab_doc.get("slabs") or []
+    basis = (slab_doc.get("basis") or "MONTHLY").upper()
+    income = (monthly_gross * 12) if basis == "ANNUAL" else monthly_gross
+    gender = (gender or "ANY").upper()
+    if slab_doc.get("gender_aware") and gender == "ANY":
+        gender = "MALE"  # default unknown gender to the general slab
+    for slab in slabs:
+        s_gender = (slab.get("gender") or "ANY").upper()
+        if s_gender != "ANY" and s_gender != gender:
+            continue
+        lo = slab.get("min", 0) or 0
+        hi = slab.get("max", None)
+        if income >= lo and (hi is None or income <= hi):
+            amount = slab.get("amount", 0) or 0
+            if month == 2 and slab.get("amount_february") is not None:
+                amount = slab.get("amount_february")
+            return float(amount)
+    return 0.0
+
+
+@router.get("/pt-slabs")
+async def list_pt_slabs(current_user: dict = Depends(get_current_user)):
+    """List Professional Tax slabs for all states (returns seed defaults if none stored)."""
+    db = _get_db()
+    if not db:
+        return {
+            "pt_slabs": list(DEFAULT_PT_SLABS.values()),
+            "total": len(DEFAULT_PT_SLABS),
+            "source": "defaults",
+        }
+    try:
+        slabs = [_strip_id(s) for s in db.get_collection("pt_slabs").find({})]
+        if not slabs:
+            return {
+                "pt_slabs": list(DEFAULT_PT_SLABS.values()),
+                "total": len(DEFAULT_PT_SLABS),
+                "source": "defaults",
+            }
+        return {"pt_slabs": slabs, "total": len(slabs), "source": "db"}
+    except Exception as e:
+        logger.error("Payroll operation failed: %s", e)
+        raise HTTPException(
+            status_code=500, detail="Payroll operation failed. Please try again."
+        )
+
+
+@router.get("/pt-slabs/{state_code}")
+async def get_pt_slab(state_code: str, current_user: dict = Depends(get_current_user)):
+    """Get the PT slab for one state (falls back to a seeded default)."""
+    state_code = state_code.upper()
+    db = _get_db()
+    default = DEFAULT_PT_SLABS.get(state_code)
+    if not db:
+        return {"pt_slab": default}
+    try:
+        slab = db.get_collection("pt_slabs").find_one({"state_code": state_code})
+        return {"pt_slab": _strip_id(slab) or default}
+    except Exception as e:
+        logger.error("Payroll operation failed: %s", e)
+        raise HTTPException(
+            status_code=500, detail="Payroll operation failed. Please try again."
+        )
+
+
+class PtSlabUpsert(BaseModel):
+    """Create/replace a state's Professional Tax slab table."""
+
+    state_name: Optional[str] = None
+    basis: str = Field(default="MONTHLY")
+    gender_aware: bool = False
+    slabs: List[dict] = Field(default_factory=list)
+    notes: Optional[str] = None
+
+
+@router.put("/pt-slabs/{state_code}")
+async def upsert_pt_slab(
+    state_code: str,
+    payload: PtSlabUpsert,
+    current_user: dict = Depends(require_roles("ADMIN")),
+):
+    """Create or replace a state's PT slab (admin-only)."""
+    state_code = state_code.upper()
+    db = _get_db()
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not available")
+    try:
+        coll = db.get_collection("pt_slabs")
+        doc = payload.model_dump()
+        doc["state_code"] = state_code
+        doc["updated_at"] = datetime.now().isoformat()
+        coll.update_one({"state_code": state_code}, {"$set": doc}, upsert=True)
+        return {
+            "status": "success",
+            "pt_slab": _strip_id(coll.find_one({"state_code": state_code})),
+        }
+    except Exception as e:
+        logger.error("Payroll operation failed: %s", e)
+        raise HTTPException(
+            status_code=500, detail="Payroll operation failed. Please try again."
+        )
+
+
+@router.post("/pt-slabs/seed", status_code=201)
+async def seed_pt_slabs(current_user: dict = Depends(require_roles("ADMIN"))):
+    """Seed default Jharkhand + Maharashtra PT slabs (idempotent; admin-only)."""
+    db = _get_db()
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not available")
+    try:
+        coll = db.get_collection("pt_slabs")
+        seeded = 0
+        for state_code, slab in DEFAULT_PT_SLABS.items():
+            if not coll.find_one({"state_code": state_code}):
+                doc = dict(slab)
+                doc["updated_at"] = datetime.now().isoformat()
+                coll.insert_one(doc)
+                seeded += 1
+        return {
+            "status": "success",
+            "seeded": seeded,
+            "states": list(DEFAULT_PT_SLABS.keys()),
+        }
     except Exception as e:
         logger.error("Payroll operation failed: %s", e)
         raise HTTPException(

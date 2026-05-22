@@ -84,3 +84,11 @@ export type {
   RedeemResponse,
   AdjustRequest,
 } from './loyalty';
+
+// Legal Entities (payroll / GST org structure)
+export { entitiesApi } from './entities';
+export type { Entity, GstinEntry, PtRegistration } from './entities';
+
+// Payroll config (Structured-CTC salary master + Professional Tax slabs)
+export { payrollApi, grossOf } from './payroll';
+export type { SalaryConfig, PtSlab, OtherAllowance } from './payroll';
