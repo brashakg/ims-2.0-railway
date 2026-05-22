@@ -102,4 +102,103 @@ export const payrollApi = {
     const res = await api.post('/payroll/pt-slabs/seed');
     return res.data as { status: string; seeded: number; states: string[] };
   },
+
+  // --- Run flow (Phase 2 engine) -------------------------------------------
+  runPayroll: async (req: PayrollRunRequest) => {
+    const res = await api.post('/payroll/run', req);
+    return res.data as PayrollRunResponse;
+  },
+
+  listRunRows: async (params: { month: number; year: number; store_id?: string; entity_id?: string }) => {
+    const res = await api.get('/payroll/run/rows', { params });
+    return res.data as { rows: PayrollRow[]; total: number; totals: PayrollTotals };
+  },
+
+  approveRun: async (req: PayrollBatchAction) => {
+    const res = await api.post('/payroll/approve', req);
+    return res.data as { status: string; approved: number };
+  },
+
+  lockRun: async (req: PayrollBatchAction) => {
+    const res = await api.post('/payroll/lock', req);
+    return res.data as { status: string; locked: number };
+  },
 };
+
+// --- Run-flow types ---------------------------------------------------------
+
+export interface PayrollRunRequest {
+  month: number;
+  year: number;
+  store_id?: string;
+  entity_id?: string;
+  lwp_days?: Record<string, number>;
+  incentives?: Record<string, number>;
+  advances?: Record<string, number>;
+  dry_run?: boolean;
+}
+
+export interface PayrollBatchAction {
+  month: number;
+  year: number;
+  store_id?: string;
+  entity_id?: string;
+}
+
+export interface PayrollBreakdown {
+  earnings: {
+    basic: number; hra: number; conveyance: number; medical: number;
+    special_allowance: number; other_allowances: number;
+    full_gross: number; earned_gross: number; incentive: number; total_earnings: number;
+  };
+  deductions: {
+    pf_employee: number; esi_employee: number; professional_tax: number;
+    tds: number; advance_recovery: number; total_deductions: number;
+  };
+  employer_contributions: {
+    pf_employer_epf: number; pf_employer_eps: number; pf_edli: number;
+    pf_admin: number; pf_employer_total: number; esi_employer: number; total: number;
+  };
+  net_pay: number;
+  ctc_cost: number;
+  lwp_days: number;
+  paid_days: number;
+  proration_factor: number;
+  esi_applicable: boolean;
+  pf_applicable: boolean;
+}
+
+export interface PayrollRow {
+  payroll_id?: string;
+  employee_id: string;
+  employee_name?: string;
+  store_id?: string | null;
+  entity_id?: string | null;
+  basic_salary?: number;
+  allowances?: number;
+  incentives?: number;
+  deductions?: number;
+  advance_deduction?: number;
+  net_salary?: number;
+  status?: string;
+  breakdown?: PayrollBreakdown;
+  skipped?: boolean;
+  reason?: string;
+}
+
+export interface PayrollTotals {
+  gross?: number;
+  deductions?: number;
+  net?: number;
+  employer_cost?: number;
+}
+
+export interface PayrollRunResponse {
+  status: string;
+  month: number;
+  year: number;
+  count: number;
+  dry_run: boolean;
+  rows: PayrollRow[];
+  totals: PayrollTotals;
+}
