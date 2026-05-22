@@ -195,8 +195,19 @@ python -c "import sys; sys.path.insert(0,'backend'); from api.main import app; p
 - **User shape:** `user?.id` (not `user_id`), `user?.roles` is an array, `user?.activeRole` is the current one.
 - **Toast:** `useToast()` from `context/ToastContext`. Methods: `toast.success/error/warning/info`.
 
+## Payroll module (complete — entities -> run -> outputs)
+
+Full Indian statutory payroll, built in 4 phases (PRs #198-#201):
+- **Entities** (`/api/v1/entities`, `backend/api/routers/entities.py`): a legal entity (PAN) groups stores; multi-GSTIN per state. UI `/settings/entities`. Stores carry `entity_id`.
+- **Salary master** (Structured CTC) in `payroll.py` (`/payroll/config*`); UI `/hr/salary-setup` (incl. bulk CSV). State-aware **Professional Tax** slabs (`/payroll/pt-slabs*`, seeded Jharkhand + Maharashtra).
+- **Engine** (`backend/api/services/payroll_engine.py`, pure + tested): EPF (12% + EPS 8.33% cap 15k + EDLI/admin), ESI (0.75/3.25, 21k gate), PT (state slab), TDS (manual), 30-day LWP proration, incentive merge, advance recovery. Integer-basis rounding = deterministic.
+- **Run flow** (`/payroll/run|approve|lock`, idempotent per employee+month): UI `/hr/payroll-run`. DRAFT -> APPROVED -> PAID.
+- **Outputs** (`backend/api/services/payroll_exports.py`): payslip print (HTML), **Tally salary JV** (balanced XML), **PF ECR** text, statutory summary.
+- Tests: `test_payroll_engine.py`, `test_payroll_run.py`, `test_payroll_exports.py`, `test_payroll_foundation.py`.
+
 ## Key reference docs (in-repo)
 
+- [README.md](README.md) — **Comprehensive system reference** (architecture, every module, full API map, agents, data layer, business rules, deployment, glossary). Start here; its verified counts supersede the stale figures elsewhere in this file.
 - [docs/design/](docs/design/) — New design language handoff (tokens, shell, 9 module prototypes). Start here for any UI work.
 - [docs/reference/IMS2_Agent_Architecture.html](docs/reference/IMS2_Agent_Architecture.html) — Authoritative spec for the 8 Jarvis agents
 - [docs/reference/IMS2_Comprehensive_Test_Report_April2026.md](docs/reference/IMS2_Comprehensive_Test_Report_April2026.md) — April 10 audit; commit e19be44 (Apr 15) claims all 47 issues fixed, **unverified end-to-end**
@@ -213,17 +224,17 @@ ims-2.0-railway/
 ├── CLAUDE.md                           ← you are here
 ├── backend/
 │   ├── api/
-│   │   ├── main.py                     ← FastAPI app, 31 routers mounted at /api/v1/*
+│   │   ├── main.py                     ← FastAPI app, 44 routers mounted at /api/v1/*
 │   │   ├── routers/                    ← one file per domain
 │   │   └── services/
 │   ├── agents/                         ← Jarvis agents
 │   │   ├── base.py, registry.py, scheduler.py, config.py
-│   │   └── implementations/            ← CORTEX, SENTINEL (6 more pending)
+│   │   └── implementations/            ← all 8 agents (jarvis, cortex, sentinel, pixel, megaphone, oracle, taskmaster, nexus)
 │   └── database/connection.py          ← get_db() pattern
 ├── frontend/
 │   ├── index.html                      ← Google Fonts loaded here
 │   └── src/
-│       ├── App.tsx                     ← 41 protected routes, lazy-loaded
+│       ├── App.tsx                     ← 57 routes, lazy-loaded
 │       ├── index.css                   ← Design tokens + shell CSS
 │       ├── components/
 │       │   ├── shell/                  ← Phase 0 primitives: Rail, Topbar, Icon, etc.
