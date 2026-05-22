@@ -26,6 +26,15 @@ router = APIRouter()
 # inside require_roles, so it is intentionally omitted from this tuple.
 _APPROVAL_ROLES = ("ADMIN", "AREA_MANAGER", "STORE_MANAGER", "ACCOUNTANT")
 
+# Roles that see ALL expenses (not just their own) in the general list, and
+# that can perform accountant-side ledger entry. SUPERADMIN auto-passes.
+_ADMIN_ROLES = ("SUPERADMIN", "ADMIN")
+_ACCOUNTANT_ROLES = ("ADMIN", "ACCOUNTANT")
+
+
+def _is_admin(current_user: dict) -> bool:
+    return any(r in current_user.get("roles", []) for r in _ADMIN_ROLES)
+
 
 # ============================================================================
 # SCHEMAS
@@ -38,6 +47,8 @@ class ExpenseCreate(BaseModel):
     description: str
     expense_date: date
     advance_id: Optional[str] = None
+    payment_mode: Optional[str] = None  # CASH / UPI / CARD / BANK_TRANSFER / CHEQUE
+    store_id: Optional[str] = None
 
 
 class AdvanceCreate(BaseModel):
@@ -62,18 +73,28 @@ async def list_expenses(
     to_date: Optional[date] = Query(None),
     current_user: dict = Depends(get_current_user),
 ):
-    """List expenses with optional filters"""
+    """List expenses with optional filters.
+
+    Ownership scope: a normal user sees ONLY the expenses they uploaded.
+    ADMIN / SUPERADMIN see all (optionally filtered by store/employee).
+    """
     expense_repo = get_expense_repository()
-    active_store = store_id or current_user.get("active_store_id")
 
     if expense_repo is None:
         return {"expenses": [], "total": 0}
 
     filter_dict = {}
-    if active_store:
-        filter_dict["store_id"] = active_store
-    if employee_id:
-        filter_dict["employee_id"] = employee_id
+
+    if _is_admin(current_user):
+        # Admins see everything; honour explicit store/employee filters if given.
+        if store_id:
+            filter_dict["store_id"] = store_id
+        if employee_id:
+            filter_dict["employee_id"] = employee_id
+    else:
+        # Everyone else sees only their own expenses, regardless of store.
+        filter_dict["employee_id"] = current_user.get("user_id")
+
     if status:
         filter_dict["status"] = status
 
@@ -124,23 +145,28 @@ async def create_expense(
         )
 
     if expense_repo is not None:
+        now = datetime.now().isoformat()
         expense_repo.create(
             {
                 "expense_id": expense_id,
                 "employee_id": current_user.get("user_id"),
                 "employee_name": current_user.get("full_name"),
-                "store_id": current_user.get("active_store_id"),
+                "store_id": expense.store_id or current_user.get("active_store_id"),
                 "category": expense.category,
                 "amount": expense.amount,
                 "description": expense.description,
                 "expense_date": expense.expense_date.isoformat(),
+                "payment_mode": expense.payment_mode,
                 "advance_id": expense.advance_id,
-                "status": "DRAFT",
-                "created_at": datetime.now().isoformat(),
+                # Created via the "Submit expense" action -> goes straight into
+                # the approval queue (PENDING). A DRAFT stage is unused by the UI.
+                "status": "PENDING",
+                "created_at": now,
+                "submitted_at": now,
             }
         )
 
-    return {"expense_id": expense_id, "message": "Expense created"}
+    return {"expense_id": expense_id, "message": "Expense submitted for approval"}
 
 
 @router.post("/{expense_id}/upload-bill")
@@ -352,6 +378,88 @@ async def reject_expense(
     return {"message": "Expense rejected", "expense_id": expense_id}
 
 
+@router.post("/{expense_id}/send-to-accountant")
+async def send_to_accountant(
+    expense_id: str,
+    current_user: dict = Depends(require_roles(*_APPROVAL_ROLES)),
+):
+    """Hand an APPROVED expense to the accountant for ledger entry."""
+    expense_repo = get_expense_repository()
+
+    if expense_repo is not None:
+        existing = expense_repo.find_by_id(expense_id)
+        if existing is None:
+            raise HTTPException(status_code=404, detail="Expense not found")
+
+        if existing.get("status") != "APPROVED":
+            raise HTTPException(
+                status_code=400,
+                detail="Only approved expenses can be sent to the accountant",
+            )
+
+        expense_repo.update(
+            expense_id,
+            {
+                "status": "SENT_TO_ACCOUNTANT",
+                "sent_to_accountant_by": current_user.get("user_id"),
+                "sent_to_accountant_at": datetime.now().isoformat(),
+            },
+        )
+
+    return {"message": "Expense sent to accountant", "expense_id": expense_id}
+
+
+@router.post("/{expense_id}/mark-entered")
+async def mark_entered(
+    expense_id: str,
+    ledger_reference: Optional[str] = Query(None),
+    current_user: dict = Depends(require_roles(*_ACCOUNTANT_ROLES)),
+):
+    """Accountant marks the expense as entered into the books (final state)."""
+    expense_repo = get_expense_repository()
+
+    if expense_repo is not None:
+        existing = expense_repo.find_by_id(expense_id)
+        if existing is None:
+            raise HTTPException(status_code=404, detail="Expense not found")
+
+        if existing.get("status") != "SENT_TO_ACCOUNTANT":
+            raise HTTPException(
+                status_code=400,
+                detail="Expense must be sent to the accountant first",
+            )
+
+        expense_repo.update(
+            expense_id,
+            {
+                "status": "ENTERED",
+                "entered_by": current_user.get("user_id"),
+                "entered_at": datetime.now().isoformat(),
+                "ledger_reference": ledger_reference,
+            },
+        )
+
+    return {"message": "Expense marked as entered", "expense_id": expense_id}
+
+
+@router.get("/to-enter")
+async def list_to_enter(
+    store_id: Optional[str] = Query(None),
+    current_user: dict = Depends(require_roles(*_ACCOUNTANT_ROLES)),
+):
+    """Accountant queue: expenses awaiting ledger entry (SENT_TO_ACCOUNTANT)."""
+    expense_repo = get_expense_repository()
+    if expense_repo is None:
+        return {"expenses": [], "total": 0}
+
+    filter_dict = {"status": "SENT_TO_ACCOUNTANT"}
+    if store_id:
+        filter_dict["store_id"] = store_id
+
+    expenses = expense_repo.find_many(filter_dict) or []
+    return {"expenses": expenses, "total": len(expenses)}
+
+
 # ============================================================================
 # ADVANCE ENDPOINTS
 # ============================================================================
@@ -509,9 +617,9 @@ async def settle_advance(
 @router.get("/pending-approval")
 async def get_pending_approvals(
     store_id: Optional[str] = Query(None),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_roles(*_APPROVAL_ROLES)),
 ):
-    """Get all pending expenses and advances for approval"""
+    """Get all pending expenses and advances for approval (approvers only)"""
     expense_repo = get_expense_repository()
     advance_repo = get_advance_repository()
     active_store = store_id or current_user.get("active_store_id")

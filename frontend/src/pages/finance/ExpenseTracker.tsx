@@ -1,57 +1,27 @@
 // ============================================================================
 // IMS 2.0 - Expense Tracking & Approval System
 // ============================================================================
-// Track store expenses with approval hierarchy and category breakdown
+// Submit -> approve/reject -> send to accountant -> entered in books.
+// Visibility: a user sees only their own expenses; ADMIN/SUPERADMIN see all.
+// Approvers (ADMIN/AREA_MANAGER/STORE_MANAGER/ACCOUNTANT) get an approval queue;
+// ACCOUNTANT/ADMIN get a ledger-entry queue.
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import {
-  Plus,
-  Search,
-  CheckCircle,
-  Clock,
-  XCircle,
-  TrendingUp,
-  Eye,
-  Check,
-  X as XIcon,
-  Loader2,
-  BarChart3,
+  Plus, Search, Check, X as XIcon,
+  Loader2, BarChart3, Send, BookCheck, Banknote,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
-import { expensesApi } from '../../services/api/expenses';
-import { ExpenseBillUpload } from '../../components/finance/ExpenseBillUpload';
+import { expensesApi, type ExpenseRecord } from '../../services/api/expenses';
+import { formatDateIST } from '../../utils/datetime';
 import clsx from 'clsx';
 
-type TabType = 'my-expenses' | 'pending-approval' | 'summary';
-type ExpenseStatus = 'pending' | 'approved' | 'rejected';
-type ExpenseCategory = 'utilities' | 'maintenance' | 'supplies' | 'travel' | 'food' | 'marketing' | 'miscellaneous';
+type TabType = 'my' | 'approvals' | 'entry' | 'summary';
 
-interface Expense {
-  id: string;
-  expense_id: string;
-  category: ExpenseCategory;
-  amount: number;
-  description: string;
-  submitted_at: string;
-  status: ExpenseStatus;
-  submitted_by: string;
-  approved_by?: string;
-  approved_at?: string;
-  rejection_reason?: string;
-  receipt_attached: boolean;
-}
-
-interface ExpenseSummary {
-  total_this_month: number;
-  pending_count: number;
-  approved_count: number;
-  average_daily: number;
-  by_category: Record<ExpenseCategory, number>;
-}
-
-const CATEGORIES: { value: ExpenseCategory; label: string; color: string }[] = [
+const CATEGORIES: { value: string; label: string; color: string }[] = [
   { value: 'utilities', label: 'Utilities', color: 'bg-blue-100 text-blue-700' },
+  { value: 'rent', label: 'Rent / Lease', color: 'bg-indigo-100 text-indigo-700' },
   { value: 'maintenance', label: 'Maintenance', color: 'bg-orange-100 text-orange-700' },
   { value: 'supplies', label: 'Supplies', color: 'bg-green-100 text-green-700' },
   { value: 'travel', label: 'Travel', color: 'bg-purple-100 text-purple-700' },
@@ -60,609 +30,418 @@ const CATEGORIES: { value: ExpenseCategory; label: string; color: string }[] = [
   { value: 'miscellaneous', label: 'Miscellaneous', color: 'bg-gray-100 text-gray-700' },
 ];
 
+const PAYMENT_MODES: { value: string; label: string }[] = [
+  { value: 'CASH', label: 'Cash' },
+  { value: 'UPI', label: 'UPI' },
+  { value: 'CARD', label: 'Card' },
+  { value: 'BANK_TRANSFER', label: 'Bank transfer' },
+  { value: 'CHEQUE', label: 'Cheque' },
+];
+
+const STATUS_META: Record<string, { label: string; badge: string }> = {
+  DRAFT: { label: 'Draft', badge: 'bg-gray-100 text-gray-600' },
+  PENDING: { label: 'Pending', badge: 'bg-yellow-100 text-yellow-700' },
+  APPROVED: { label: 'Approved', badge: 'bg-green-100 text-green-700' },
+  REJECTED: { label: 'Rejected', badge: 'bg-red-100 text-red-700' },
+  SENT_TO_ACCOUNTANT: { label: 'With accountant', badge: 'bg-blue-100 text-blue-700' },
+  ENTERED: { label: 'Entered', badge: 'bg-emerald-100 text-emerald-700' },
+};
+
+const catLabel = (v: string) => CATEGORIES.find((c) => c.value === v)?.label || v;
+const catColor = (v: string) => CATEGORIES.find((c) => c.value === v)?.color || 'bg-gray-100 text-gray-700';
+const payLabel = (v?: string | null) => PAYMENT_MODES.find((p) => p.value === v)?.label || v || '—';
+const fc = (n: number) => `₹${Math.round(n || 0).toLocaleString('en-IN')}`;
+
 export default function ExpenseTracker() {
   const { user } = useAuth();
   const toast = useToast();
+  const roles = user?.roles || [];
+  const isApprover = roles.some((r) => ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'].includes(r));
+  const isAccountant = roles.some((r) => ['SUPERADMIN', 'ADMIN', 'ACCOUNTANT'].includes(r));
 
-  const [activeTab, setActiveTab] = useState<TabType>('my-expenses');
+  const [activeTab, setActiveTab] = useState<TabType>('my');
   const [searchQuery, setSearchQuery] = useState('');
-  const [statusFilter, setStatusFilter] = useState<ExpenseStatus | 'all'>('all');
-  const [categoryFilter, setCategoryFilter] = useState<ExpenseCategory | 'all'>('all');
-  const [dateFrom, setDateFrom] = useState('');
-  const [dateTo, setDateTo] = useState('');
+  const [statusFilter, setStatusFilter] = useState<string>('all');
+  const [categoryFilter, setCategoryFilter] = useState<string>('all');
 
-  const [expenses, setExpenses] = useState<Expense[]>([]);
-  const [summary, setSummary] = useState<ExpenseSummary | null>(null);
+  const [mine, setMine] = useState<ExpenseRecord[]>([]);
+  const [approvals, setApprovals] = useState<ExpenseRecord[]>([]);
+  const [toEnter, setToEnter] = useState<ExpenseRecord[]>([]);
   const [isLoading, setIsLoading] = useState(true);
 
-  // Modal states
+  // Modals
   const [showSubmitModal, setShowSubmitModal] = useState(false);
   const [showRejectModal, setShowRejectModal] = useState(false);
-  const [selectedExpense, setSelectedExpense] = useState<Expense | null>(null);
+  const [selected, setSelected] = useState<ExpenseRecord | null>(null);
   const [rejectionReason, setRejectionReason] = useState('');
 
-  // Form states
-  const [formCategory, setFormCategory] = useState<ExpenseCategory>('utilities');
+  // Form
+  const [formCategory, setFormCategory] = useState('utilities');
   const [formAmount, setFormAmount] = useState('');
   const [formDescription, setFormDescription] = useState('');
   const [formDate, setFormDate] = useState(new Date().toISOString().split('T')[0]);
+  const [formPaymentMode, setFormPaymentMode] = useState('CASH');
+  const [formBill, setFormBill] = useState<File | null>(null);
+  const [saving, setSaving] = useState(false);
 
-  useEffect(() => {
-    loadExpenses();
-    loadSummary();
-    // user?.activeStoreId is load-bearing — without it, topbar store switch
-    // doesn't trigger a re-fetch and expenses stay pinned to the old store.
-  }, [activeTab, statusFilter, dateFrom, dateTo, user?.activeStoreId]);
-
-  const loadExpenses = async () => {
+  const load = useCallback(async () => {
     setIsLoading(true);
     try {
-      const response = await expensesApi.getExpenses({
-        store_id: user?.activeStoreId,
-        status: statusFilter !== 'all' ? statusFilter : undefined,
-        from_date: dateFrom || undefined,
-        to_date: dateTo || undefined,
-      });
-      const list = response?.expenses || response || [];
-      setExpenses(Array.isArray(list) ? list : []);
-    } catch (error) {
+      const reqs: Promise<unknown>[] = [expensesApi.getExpenses({})];
+      if (isApprover) reqs.push(expensesApi.getPendingApproval(user?.activeStoreId));
+      if (isAccountant) reqs.push(expensesApi.getToEnter(user?.activeStoreId));
+      const [mineR, apprR, entR] = await Promise.all([
+        reqs[0],
+        isApprover ? reqs[1] : Promise.resolve(null),
+        isAccountant ? reqs[isApprover ? 2 : 1] : Promise.resolve(null),
+      ]);
+      const pick = (r: any): ExpenseRecord[] => (r?.expenses || r || []) as ExpenseRecord[];
+      setMine(pick(mineR));
+      setApprovals(apprR ? pick(apprR) : []);
+      setToEnter(entR ? pick(entR) : []);
+    } catch {
       toast.error('Failed to load expenses');
-      setExpenses([]);
     } finally {
       setIsLoading(false);
     }
+  }, [isApprover, isAccountant, user?.activeStoreId, toast]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const resetForm = () => {
+    setFormCategory('utilities'); setFormAmount(''); setFormDescription('');
+    setFormDate(new Date().toISOString().split('T')[0]); setFormPaymentMode('CASH'); setFormBill(null);
   };
 
-  const loadSummary = async () => {
+  const handleSubmit = async () => {
+    if (!formAmount || Number(formAmount) <= 0) { toast.error('Enter a valid amount'); return; }
+    if (!formDescription.trim()) { toast.error('Enter a description'); return; }
+    setSaving(true);
     try {
-      const response = await expensesApi.getExpenses({ store_id: user?.activeStoreId });
-      const list = response?.expenses || response || [];
-      const expenseList: Expense[] = Array.isArray(list) ? list : [];
-      const byCategory: Record<ExpenseCategory, number> = {
-        utilities: 0, maintenance: 0, supplies: 0, travel: 0, food: 0, marketing: 0, miscellaneous: 0,
-      };
-      let total = 0;
-      let pendingCount = 0;
-      let approvedCount = 0;
-      expenseList.forEach(e => {
-        total += e.amount || 0;
-        if (e.status === 'pending') pendingCount++;
-        if (e.status === 'approved') approvedCount++;
-        if (byCategory[e.category as ExpenseCategory] !== undefined) {
-          byCategory[e.category as ExpenseCategory] += e.amount || 0;
-        }
-      });
-      setSummary({
-        total_this_month: total,
-        pending_count: pendingCount,
-        approved_count: approvedCount,
-        average_daily: expenseList.length > 0 ? Math.round(total / 30) : 0,
-        by_category: byCategory,
-      });
-    } catch (error) {
-      toast.error('Failed to load summary');
-    }
-  };
-
-  const handleSubmitExpense = async () => {
-    if (!formAmount || !formDescription) {
-      toast.error('Please fill in all fields');
-      return;
-    }
-
-    try {
-      await expensesApi.createExpense({
+      const res = await expensesApi.createExpense({
         category: formCategory,
         amount: parseFloat(formAmount),
-        description: formDescription,
+        description: formDescription.trim(),
         expense_date: formDate,
+        payment_mode: formPaymentMode,
         store_id: user?.activeStoreId,
       });
-      toast.success('Expense submitted successfully');
-      setShowSubmitModal(false);
-      setFormAmount('');
-      setFormDescription('');
-      setFormCategory('utilities');
-      await loadExpenses();
-      await loadSummary();
-    } catch (error) {
-      toast.error('Failed to submit expense');
-    }
-  };
-
-  const handleApproveExpense = async (expenseId: string) => {
-    try {
-      await expensesApi.approveExpense(expenseId);
-      toast.success('Expense approved');
-      await loadExpenses();
-      await loadSummary();
-    } catch (error) {
-      toast.error('Failed to approve expense');
-    }
-  };
-
-  const handleRejectExpense = async () => {
-    if (!rejectionReason) {
-      toast.error('Please provide a rejection reason');
-      return;
-    }
-
-    try {
-      if (selectedExpense) {
-        await expensesApi.rejectExpense(selectedExpense.id, rejectionReason);
+      const newId = res?.expense_id;
+      if (formBill && newId) {
+        try { await expensesApi.uploadBill(newId, formBill); }
+        catch { toast.warning('Expense saved, but bill upload failed'); }
       }
-      toast.success('Expense rejected');
-      setShowRejectModal(false);
-      setRejectionReason('');
-      setSelectedExpense(null);
-      await loadExpenses();
-      await loadSummary();
-    } catch (error) {
-      toast.error('Failed to reject expense');
+      toast.success('Expense submitted for approval');
+      setShowSubmitModal(false);
+      resetForm();
+      await load();
+    } catch {
+      toast.error('Failed to submit expense');
+    } finally {
+      setSaving(false);
     }
   };
 
-  const filteredExpenses = expenses.filter((expense) => {
-    const matchesSearch =
-      expense.description.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      expense.expense_id.toLowerCase().includes(searchQuery.toLowerCase());
-    const matchesStatus = statusFilter === 'all' || expense.status === statusFilter;
-    const matchesCategory = categoryFilter === 'all' || expense.category === categoryFilter;
+  const doAction = async (fn: () => Promise<unknown>, ok: string) => {
+    try { await fn(); toast.success(ok); await load(); }
+    catch { toast.error('Action failed'); }
+  };
 
+  const handleReject = async () => {
+    if (!rejectionReason.trim()) { toast.error('Provide a rejection reason'); return; }
+    if (!selected) return;
+    await doAction(() => expensesApi.rejectExpense(selected.expense_id, rejectionReason.trim()), 'Expense rejected');
+    setShowRejectModal(false); setRejectionReason(''); setSelected(null);
+  };
+
+  const filteredMine = mine.filter((e) => {
+    const q = searchQuery.toLowerCase();
+    const matchesSearch = !q || e.description?.toLowerCase().includes(q) || e.expense_id?.toLowerCase().includes(q);
+    const matchesStatus = statusFilter === 'all' || (e.status || '').toUpperCase() === statusFilter;
+    const matchesCategory = categoryFilter === 'all' || e.category === categoryFilter;
     return matchesSearch && matchesStatus && matchesCategory;
   });
 
-  const getStatusBadge = (status: ExpenseStatus) => {
-    const badges = {
-      pending: 'bg-yellow-100 text-yellow-700',
-      approved: 'bg-green-100 text-green-700',
-      rejected: 'bg-red-100 text-red-700',
-    };
-    return badges[status];
+  // Summary derived from the user's own expenses.
+  const totalAmt = mine.reduce((s, e) => s + (e.amount || 0), 0);
+  const pendingCount = mine.filter((e) => (e.status || '').toUpperCase() === 'PENDING').length;
+  const approvedCount = mine.filter((e) => ['APPROVED', 'SENT_TO_ACCOUNTANT', 'ENTERED'].includes((e.status || '').toUpperCase())).length;
+  const byCategory = CATEGORIES.map((c) => ({
+    ...c, amount: mine.filter((e) => e.category === c.value).reduce((s, e) => s + (e.amount || 0), 0),
+  }));
+
+  const StatusPill = ({ status }: { status: string }) => {
+    const m = STATUS_META[(status || '').toUpperCase()] || STATUS_META.PENDING;
+    return <span className={clsx('inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium', m.badge)}>{m.label}</span>;
   };
 
-  const getStatusIcon = (status: ExpenseStatus) => {
-    const icons = {
-      pending: <Clock className="w-4 h-4" />,
-      approved: <CheckCircle className="w-4 h-4" />,
-      rejected: <XCircle className="w-4 h-4" />,
-    };
-    return icons[status];
-  };
-
-  if (isLoading && !summary) {
-    return (
-      <div className="flex items-center justify-center h-96">
-        <Loader2 className="w-8 h-8 text-blue-500 animate-spin" />
-      </div>
-    );
+  if (isLoading && mine.length === 0) {
+    return <div className="flex items-center justify-center h-96"><Loader2 className="w-8 h-8 text-bv-red-600 animate-spin" /></div>;
   }
 
   return (
     <div className="inv-body">
-      {/* Editorial header */}
       <div className="inv-head">
         <div>
           <div className="eyebrow" style={{ marginBottom: 6 }}>Expenses</div>
           <h1>What went out.</h1>
-          <div className="hint">Submit · approve · settle. Category caps by role, mandatory bill attachment, duplicate-bill detection, aging for reimbursements.</div>
+          <div className="hint">Submit · approve · send to accountant · enter in books. You see your own expenses; admins see all.</div>
         </div>
-        <button
-          onClick={() => setShowSubmitModal(true)}
-          className="btn sm primary"
-        >
-          <Plus className="w-4 h-4" /> Submit expense
+        <button onClick={() => setShowSubmitModal(true)} className="btn sm primary">
+          <Plus className="w-4 h-4" /> Add expense
         </button>
       </div>
-      <div className="mb-8">
-        {/* Summary Cards */}
-        {summary && (
-          <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-            <div className="bg-white border border-gray-200 rounded-lg p-6">
-              <p className="text-gray-500 text-sm mb-1">Total (This Month)</p>
-              <p className="text-3xl font-bold text-gray-900">₹{summary.total_this_month.toLocaleString()}</p>
-            </div>
-            <div className="bg-white border border-gray-200 rounded-lg p-6">
-              <p className="text-gray-500 text-sm mb-1">Pending Approval</p>
-              <p className="text-3xl font-bold text-yellow-600">{summary.pending_count}</p>
-            </div>
-            <div className="bg-white border border-gray-200 rounded-lg p-6">
-              <p className="text-gray-500 text-sm mb-1">Approved</p>
-              <p className="text-3xl font-bold text-green-600">{summary.approved_count}</p>
-            </div>
-            <div className="bg-white border border-gray-200 rounded-lg p-6">
-              <p className="text-gray-500 text-sm mb-1">Average Daily</p>
-              <p className="text-3xl font-bold text-blue-600">₹{summary.average_daily.toLocaleString()}</p>
-            </div>
-          </div>
-        )}
+
+      {/* Summary cards */}
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
+        <Card label="My total" value={fc(totalAmt)} />
+        <Card label="Pending" value={String(pendingCount)} color="text-yellow-600" />
+        <Card label="Approved+" value={String(approvedCount)} color="text-green-600" />
+        <Card label={isAccountant ? 'For my entry' : 'For approval'} value={String(isAccountant ? toEnter.length : approvals.length)} color="text-blue-600" />
       </div>
 
       {/* Tabs */}
-      <div className="flex gap-4 mb-6 border-b border-gray-200">
-        {(['my-expenses', 'pending-approval', 'summary'] as const).map((tab) => (
-          <button
-            key={tab}
-            onClick={() => setActiveTab(tab)}
-            className={clsx(
-              'px-4 py-3 font-medium transition-colors border-b-2',
-              activeTab === tab
-                ? 'text-blue-600 border-blue-400'
-                : 'text-gray-500 border-transparent hover:text-gray-700'
-            )}
-          >
-            {tab === 'my-expenses' && 'My Expenses'}
-            {tab === 'pending-approval' && 'Pending Approval'}
-            {tab === 'summary' && 'Category Summary'}
+      <div className="flex gap-4 mb-6 border-b border-gray-200 overflow-x-auto">
+        {([
+          ['my', 'My Expenses'],
+          ...(isApprover ? [['approvals', `Pending Approval${approvals.length ? ` (${approvals.length})` : ''}`]] : []),
+          ...(isAccountant ? [['entry', `For Entry${toEnter.length ? ` (${toEnter.length})` : ''}`]] : []),
+          ['summary', 'Category Summary'],
+        ] as [TabType, string][]).map(([tab, label]) => (
+          <button key={tab} onClick={() => setActiveTab(tab)}
+            className={clsx('px-4 py-3 font-medium whitespace-nowrap transition-colors border-b-2',
+              activeTab === tab ? 'text-bv-red-600 border-bv-red-500' : 'text-gray-500 border-transparent hover:text-gray-700')}>
+            {label}
           </button>
         ))}
       </div>
 
-      {/* Content */}
-      {activeTab === 'my-expenses' && (
+      {/* My Expenses */}
+      {activeTab === 'my' && (
         <div className="bg-white rounded-lg border border-gray-200">
-          {/* Filters */}
-          <div className="p-6 border-b border-gray-200">
-            <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
-              <div>
-                <label className="block text-sm font-medium text-gray-600 mb-2">Search</label>
-                <div className="relative">
-                  <Search className="absolute left-3 top-3 w-5 h-5 text-gray-500" />
-                  <input
-                    type="text"
-                    placeholder="Search expenses..."
-                    value={searchQuery}
-                    onChange={(e) => setSearchQuery(e.target.value)}
-                    className="w-full pl-10 pr-4 py-2 bg-white border border-gray-200 rounded-lg text-gray-900 placeholder-gray-500 focus:outline-none focus:border-blue-500"
-                  />
-                </div>
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-600 mb-2">Status</label>
-                <select
-                  value={statusFilter}
-                  onChange={(e) => setStatusFilter(e.target.value as any)}
-                  className="w-full px-4 py-2 bg-white border border-gray-200 rounded-lg text-gray-900 focus:outline-none focus:border-blue-500"
-                >
-                  <option value="all">All Status</option>
-                  <option value="pending">Pending</option>
-                  <option value="approved">Approved</option>
-                  <option value="rejected">Rejected</option>
-                </select>
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-600 mb-2">Category</label>
-                <select
-                  value={categoryFilter}
-                  onChange={(e) => setCategoryFilter(e.target.value as any)}
-                  className="w-full px-4 py-2 bg-white border border-gray-200 rounded-lg text-gray-900 focus:outline-none focus:border-blue-500"
-                >
-                  <option value="all">All Categories</option>
-                  {CATEGORIES.map((cat) => (
-                    <option key={cat.value} value={cat.value}>
-                      {cat.label}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-600 mb-2">From</label>
-                <input
-                  type="date"
-                  value={dateFrom}
-                  onChange={(e) => setDateFrom(e.target.value)}
-                  className="w-full px-4 py-2 bg-white border border-gray-200 rounded-lg text-gray-900 focus:outline-none focus:border-blue-500"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-600 mb-2">To</label>
-                <input
-                  type="date"
-                  value={dateTo}
-                  onChange={(e) => setDateTo(e.target.value)}
-                  className="w-full px-4 py-2 bg-white border border-gray-200 rounded-lg text-gray-900 focus:outline-none focus:border-blue-500"
-                />
-              </div>
+          <div className="p-4 border-b border-gray-200 grid grid-cols-1 md:grid-cols-3 gap-3">
+            <div className="relative">
+              <Search className="absolute left-3 top-2.5 w-4 h-4 text-gray-400" />
+              <input placeholder="Search…" value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)}
+                className="w-full pl-9 pr-3 py-2 border border-gray-200 rounded-lg text-sm focus:outline-none focus:border-bv-red-500" />
             </div>
+            <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}
+              className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm bg-white focus:outline-none focus:border-bv-red-500">
+              <option value="all">All status</option>
+              {Object.entries(STATUS_META).filter(([k]) => k !== 'DRAFT').map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
+            </select>
+            <select value={categoryFilter} onChange={(e) => setCategoryFilter(e.target.value)}
+              className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm bg-white focus:outline-none focus:border-bv-red-500">
+              <option value="all">All categories</option>
+              {CATEGORIES.map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}
+            </select>
           </div>
-
-          {/* Expenses List */}
-          <div className="overflow-x-auto">
-            <table className="w-full">
-              <thead>
-                <tr className="border-b border-gray-200">
-                  <th className="px-6 py-3 text-left text-sm font-semibold text-gray-600">ID</th>
-                  <th className="px-6 py-3 text-left text-sm font-semibold text-gray-600">Category</th>
-                  <th className="px-6 py-3 text-left text-sm font-semibold text-gray-600">Amount</th>
-                  <th className="px-6 py-3 text-left text-sm font-semibold text-gray-600">Description</th>
-                  <th className="px-6 py-3 text-left text-sm font-semibold text-gray-600">Status</th>
-                  <th className="px-6 py-3 text-left text-sm font-semibold text-gray-600">Date</th>
-                  <th className="px-6 py-3 text-left text-sm font-semibold text-gray-600">Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {filteredExpenses.map((expense) => (
-                  <tr key={expense.id} className="border-b border-gray-200 hover:bg-gray-50 transition-colors">
-                    <td className="px-6 py-4 text-sm text-gray-600">{expense.expense_id}</td>
-                    <td className="px-6 py-4 text-sm">
-                      {CATEGORIES.find((c) => c.value === expense.category) && (
-                        <span
-                          className={clsx(
-                            'inline-block px-2 py-1 rounded text-xs font-medium',
-                            CATEGORIES.find((c) => c.value === expense.category)?.color
-                          )}
-                        >
-                          {CATEGORIES.find((c) => c.value === expense.category)?.label}
-                        </span>
-                      )}
-                    </td>
-                    <td className="px-6 py-4 text-sm font-semibold text-gray-900">₹{expense.amount.toLocaleString()}</td>
-                    <td className="px-6 py-4 text-sm text-gray-600 max-w-xs truncate">{expense.description}</td>
-                    <td className="px-6 py-4 text-sm">
-                      <span className={clsx('inline-flex items-center gap-2 px-2 py-1 rounded-full text-xs font-medium', getStatusBadge(expense.status))}>
-                        {getStatusIcon(expense.status)}
-                        {expense.status.charAt(0).toUpperCase() + expense.status.slice(1)}
-                      </span>
-                    </td>
-                    <td className="px-6 py-4 text-sm text-gray-500">
-                      {new Date(expense.submitted_at).toLocaleDateString()}
-                    </td>
-                    <td className="px-6 py-4 text-sm">
-                      <button
-                        onClick={() => setSelectedExpense(expense)}
-                        className="text-blue-600 hover:text-blue-700 transition-colors"
-                        title="View details"
-                      >
-                        <Eye className="w-4 h-4" />
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-
-          {filteredExpenses.length === 0 && (
-            <div className="p-12 text-center">
-              <p className="text-gray-500">No expenses found</p>
-            </div>
-          )}
+          <ExpenseTable rows={filteredMine} showOwner={false}
+            renderActions={(e) => (
+              (e.status || '').toUpperCase() === 'APPROVED' && isApprover ? (
+                <button className="text-blue-600 hover:underline text-xs inline-flex items-center gap-1"
+                  onClick={() => doAction(() => expensesApi.sendToAccountant(e.expense_id), 'Sent to accountant')}>
+                  <Send className="w-3.5 h-3.5" /> To accountant
+                </button>
+              ) : null
+            )} />
         </div>
       )}
 
-      {activeTab === 'pending-approval' && (
-        <div className="bg-white rounded-lg border border-gray-200 p-6">
-          <div className="space-y-4">
-            {expenses.filter((e) => e.status === 'pending').map((expense) => (
-              <div key={expense.id} className="bg-gray-50 rounded-lg p-4 border border-gray-200">
-                <div className="flex justify-between items-start mb-4">
-                  <div>
-                    <p className="font-semibold text-gray-900">{expense.description}</p>
-                    <p className="text-sm text-gray-500">{expense.expense_id}</p>
-                  </div>
-                  <span className="text-2xl font-bold text-blue-600">₹{expense.amount.toLocaleString()}</span>
-                </div>
-                <div className="flex gap-4">
-                  <button
-                    onClick={() => handleApproveExpense(expense.id)}
-                    className="flex-1 flex items-center justify-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors"
-                  >
-                    <Check className="w-4 h-4" />
-                    Approve
-                  </button>
-                  <button
-                    onClick={() => {
-                      setSelectedExpense(expense);
-                      setShowRejectModal(true);
-                    }}
-                    className="flex-1 flex items-center justify-center gap-2 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors"
-                  >
-                    <XIcon className="w-4 h-4" />
-                    Reject
-                  </button>
-                </div>
+      {/* Pending Approval (approvers) */}
+      {activeTab === 'approvals' && isApprover && (
+        <div className="bg-white rounded-lg border border-gray-200">
+          <ExpenseTable rows={approvals} showOwner
+            empty="No expenses pending approval"
+            renderActions={(e) => (
+              <div className="flex items-center gap-2 justify-end">
+                <button className="px-3 py-1 rounded-md bg-green-600 text-white text-xs inline-flex items-center gap-1 hover:bg-green-700"
+                  onClick={() => doAction(() => expensesApi.approveExpense(e.expense_id), 'Approved')}>
+                  <Check className="w-3.5 h-3.5" /> Approve
+                </button>
+                <button className="px-3 py-1 rounded-md bg-red-600 text-white text-xs inline-flex items-center gap-1 hover:bg-red-700"
+                  onClick={() => { setSelected(e); setShowRejectModal(true); }}>
+                  <XIcon className="w-3.5 h-3.5" /> Reject
+                </button>
               </div>
-            ))}
-            {expenses.filter((e) => e.status === 'pending').length === 0 && (
-              <p className="text-gray-500 text-center py-8">No pending expenses for approval</p>
-            )}
-          </div>
+            )} />
         </div>
       )}
 
-      {activeTab === 'summary' && summary && (
+      {/* For Entry (accountant) */}
+      {activeTab === 'entry' && isAccountant && (
+        <div className="bg-white rounded-lg border border-gray-200">
+          <ExpenseTable rows={toEnter} showOwner
+            empty="Nothing awaiting ledger entry"
+            renderActions={(e) => (
+              <button className="px-3 py-1 rounded-md bg-emerald-600 text-white text-xs inline-flex items-center gap-1 hover:bg-emerald-700"
+                onClick={() => doAction(() => expensesApi.markEntered(e.expense_id), 'Marked as entered')}>
+                <BookCheck className="w-3.5 h-3.5" /> Mark entered
+              </button>
+            )} />
+        </div>
+      )}
+
+      {/* Summary */}
+      {activeTab === 'summary' && (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-          {/* Category breakdown chart */}
           <div className="bg-white rounded-lg border border-gray-200 p-6">
-            <h3 className="text-lg font-semibold text-gray-900 mb-6 flex items-center gap-2">
-              <BarChart3 className="w-5 h-5" />
-              Spending by Category
-            </h3>
+            <h3 className="text-lg font-semibold text-gray-900 mb-6 flex items-center gap-2"><BarChart3 className="w-5 h-5" /> Spending by category</h3>
             <div className="space-y-4">
-              {CATEGORIES.map((cat) => {
-                const amount = summary.by_category[cat.value] || 0;
-                const percentage = summary.total_this_month > 0 ? (amount / summary.total_this_month) * 100 : 0;
+              {byCategory.map((c) => {
+                const pct = totalAmt > 0 ? (c.amount / totalAmt) * 100 : 0;
                 return (
-                  <div key={cat.value}>
-                    <div className="flex justify-between items-center mb-2">
-                      <span className="text-sm font-medium text-gray-600">{cat.label}</span>
-                      <span className="text-sm font-semibold text-gray-900">₹{amount.toLocaleString()}</span>
+                  <div key={c.value}>
+                    <div className="flex justify-between items-center mb-1">
+                      <span className="text-sm font-medium text-gray-600">{c.label}</span>
+                      <span className="text-sm font-semibold text-gray-900">{fc(c.amount)}</span>
                     </div>
-                    <div className="w-full bg-gray-200 rounded-full h-2">
-                      <div
-                        className="bg-blue-500 h-2 rounded-full transition-all"
-                        style={{ width: `${percentage}%` }}
-                      />
-                    </div>
+                    <div className="w-full bg-gray-200 rounded-full h-2"><div className="bg-bv-red-500 h-2 rounded-full" style={{ width: `${pct}%` }} /></div>
                   </div>
                 );
               })}
             </div>
           </div>
-
-          {/* Summary stats */}
           <div className="bg-white rounded-lg border border-gray-200 p-6">
-            <h3 className="text-lg font-semibold text-gray-900 mb-6 flex items-center gap-2">
-              <TrendingUp className="w-5 h-5" />
-              Summary Statistics
-            </h3>
+            <h3 className="text-lg font-semibold text-gray-900 mb-6 flex items-center gap-2"><Banknote className="w-5 h-5" /> Totals</h3>
             <div className="space-y-4">
-              <div className="flex justify-between items-center pb-4 border-b border-gray-200">
-                <span className="text-gray-500">Total Expenses</span>
-                <span className="text-2xl font-bold text-gray-900">₹{summary.total_this_month.toLocaleString()}</span>
-              </div>
-              <div className="flex justify-between items-center pb-4 border-b border-gray-200">
-                <span className="text-gray-500">Pending Approval</span>
-                <span className="text-2xl font-bold text-yellow-600">{summary.pending_count}</span>
-              </div>
-              <div className="flex justify-between items-center pb-4 border-b border-gray-200">
-                <span className="text-gray-500">Approved</span>
-                <span className="text-2xl font-bold text-green-600">{summary.approved_count}</span>
-              </div>
-              <div className="flex justify-between items-center">
-                <span className="text-gray-500">Daily Average</span>
-                <span className="text-2xl font-bold text-blue-600">₹{summary.average_daily.toLocaleString()}</span>
-              </div>
+              <Row label="My total expenses" value={fc(totalAmt)} />
+              <Row label="Pending approval" value={String(pendingCount)} color="text-yellow-600" />
+              <Row label="Approved or beyond" value={String(approvedCount)} color="text-green-600" />
             </div>
           </div>
         </div>
       )}
 
-      {/* Submit Expense Modal */}
+      {/* Add expense modal */}
       {showSubmitModal && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-lg border border-gray-200 max-w-md w-full">
+          <div className="bg-white rounded-lg border border-gray-200 max-w-md w-full max-h-[90vh] overflow-y-auto">
             <div className="border-b border-gray-200 px-6 py-4 flex items-center justify-between">
-              <h2 className="text-lg font-semibold text-gray-900">Submit Expense</h2>
-              <button
-                onClick={() => setShowSubmitModal(false)}
-                className="text-gray-500 hover:text-gray-700 transition-colors"
-              >
-                <XIcon className="w-5 h-5" />
-              </button>
+              <h2 className="text-lg font-semibold text-gray-900">Add expense</h2>
+              <button onClick={() => setShowSubmitModal(false)} className="text-gray-500 hover:text-gray-700"><XIcon className="w-5 h-5" /></button>
             </div>
             <div className="p-6 space-y-4">
-              <div>
-                <label className="block text-sm font-medium text-gray-600 mb-2">Category</label>
-                <select
-                  value={formCategory}
-                  onChange={(e) => setFormCategory(e.target.value as ExpenseCategory)}
-                  className="w-full px-4 py-2 bg-white border border-gray-200 rounded-lg text-gray-900 focus:outline-none focus:border-blue-500"
-                >
-                  {CATEGORIES.map((cat) => (
-                    <option key={cat.value} value={cat.value}>
-                      {cat.label}
-                    </option>
-                  ))}
+              <Labeled label="Type of expense">
+                <select value={formCategory} onChange={(e) => setFormCategory(e.target.value)} className="input-field">
+                  {CATEGORIES.map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}
                 </select>
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-600 mb-2">Amount (₹)</label>
-                <input
-                  type="number"
-                  value={formAmount}
-                  onChange={(e) => setFormAmount(e.target.value)}
-                  placeholder="0.00"
-                  className="w-full px-4 py-2 bg-white border border-gray-200 rounded-lg text-gray-900 placeholder-gray-500 focus:outline-none focus:border-blue-500"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-600 mb-2">Description</label>
-                <textarea
-                  value={formDescription}
-                  onChange={(e) => setFormDescription(e.target.value)}
-                  placeholder="Enter expense details..."
-                  rows={3}
-                  className="w-full px-4 py-2 bg-white border border-gray-200 rounded-lg text-gray-900 placeholder-gray-500 focus:outline-none focus:border-blue-500"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-600 mb-2">Date</label>
-                <input
-                  type="date"
-                  value={formDate}
-                  onChange={(e) => setFormDate(e.target.value)}
-                  className="w-full px-4 py-2 bg-white border border-gray-200 rounded-lg text-gray-900 focus:outline-none focus:border-blue-500"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-600 mb-2">Attach Bill / Receipt</label>
-                <ExpenseBillUpload
-                  onBillUpload={(_file, _hash) => {
-                    toast.success('Bill attached successfully');
-                  }}
-                />
-              </div>
+              </Labeled>
+              <Labeled label="Amount (₹)">
+                <input type="number" value={formAmount} onChange={(e) => setFormAmount(e.target.value)} placeholder="0" className="input-field" />
+              </Labeled>
+              <Labeled label="Mode of payment">
+                <select value={formPaymentMode} onChange={(e) => setFormPaymentMode(e.target.value)} className="input-field">
+                  {PAYMENT_MODES.map((p) => <option key={p.value} value={p.value}>{p.label}</option>)}
+                </select>
+              </Labeled>
+              <Labeled label="Description">
+                <textarea value={formDescription} onChange={(e) => setFormDescription(e.target.value)} rows={3} placeholder="What was this for?" className="input-field" />
+              </Labeled>
+              <Labeled label="Date">
+                <input type="date" value={formDate} onChange={(e) => setFormDate(e.target.value)} className="input-field" />
+              </Labeled>
+              <Labeled label="Bill / receipt (optional)">
+                <input type="file" accept="image/*,application/pdf" onChange={(e) => setFormBill(e.target.files?.[0] || null)}
+                  className="block w-full text-sm text-gray-600 file:mr-3 file:py-1.5 file:px-3 file:rounded-md file:border-0 file:bg-gray-100 file:text-gray-700" />
+              </Labeled>
             </div>
             <div className="border-t border-gray-200 px-6 py-4 flex gap-3 justify-end">
-              <button
-                onClick={() => setShowSubmitModal(false)}
-                className="px-4 py-2 rounded-lg text-gray-600 hover:bg-gray-100 transition-colors"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={handleSubmitExpense}
-                className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
-              >
-                Submit
+              <button onClick={() => setShowSubmitModal(false)} className="px-4 py-2 rounded-lg text-gray-600 hover:bg-gray-100">Cancel</button>
+              <button onClick={handleSubmit} disabled={saving} className="px-4 py-2 bg-bv-red-600 text-white rounded-lg hover:bg-bv-red-700 disabled:opacity-60">
+                {saving ? 'Submitting…' : 'Submit'}
               </button>
             </div>
           </div>
         </div>
       )}
 
-      {/* Reject Expense Modal */}
-      {showRejectModal && selectedExpense && (
+      {/* Reject modal */}
+      {showRejectModal && selected && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
           <div className="bg-white rounded-lg border border-gray-200 max-w-md w-full">
             <div className="border-b border-gray-200 px-6 py-4 flex items-center justify-between">
-              <h2 className="text-lg font-semibold text-gray-900">Reject Expense</h2>
-              <button
-                onClick={() => {
-                  setShowRejectModal(false);
-                  setRejectionReason('');
-                }}
-                className="text-gray-500 hover:text-gray-700 transition-colors"
-              >
-                <XIcon className="w-5 h-5" />
-              </button>
+              <h2 className="text-lg font-semibold text-gray-900">Reject expense</h2>
+              <button onClick={() => { setShowRejectModal(false); setRejectionReason(''); }} className="text-gray-500 hover:text-gray-700"><XIcon className="w-5 h-5" /></button>
             </div>
             <div className="p-6 space-y-4">
-              <p className="text-gray-600">
-                <strong>Expense:</strong> {selectedExpense.description}
-              </p>
-              <div>
-                <label className="block text-sm font-medium text-gray-600 mb-2">Reason for Rejection</label>
-                <textarea
-                  value={rejectionReason}
-                  onChange={(e) => setRejectionReason(e.target.value)}
-                  placeholder="Explain why this expense is being rejected..."
-                  rows={3}
-                  className="w-full px-4 py-2 bg-white border border-gray-200 rounded-lg text-gray-900 placeholder-gray-500 focus:outline-none focus:border-blue-500"
-                />
-              </div>
+              <p className="text-gray-600 text-sm"><strong>Expense:</strong> {selected.description} · {fc(selected.amount)}</p>
+              <Labeled label="Reason for rejection">
+                <textarea value={rejectionReason} onChange={(e) => setRejectionReason(e.target.value)} rows={3} placeholder="Why is this being rejected?" className="input-field" />
+              </Labeled>
             </div>
             <div className="border-t border-gray-200 px-6 py-4 flex gap-3 justify-end">
-              <button
-                onClick={() => {
-                  setShowRejectModal(false);
-                  setRejectionReason('');
-                }}
-                className="px-4 py-2 rounded-lg text-gray-600 hover:bg-gray-100 transition-colors"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={handleRejectExpense}
-                className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors"
-              >
-                Reject
-              </button>
+              <button onClick={() => { setShowRejectModal(false); setRejectionReason(''); }} className="px-4 py-2 rounded-lg text-gray-600 hover:bg-gray-100">Cancel</button>
+              <button onClick={handleReject} className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700">Reject</button>
             </div>
           </div>
         </div>
       )}
     </div>
+  );
+
+  function ExpenseTable({ rows, showOwner, empty, renderActions }: {
+    rows: ExpenseRecord[]; showOwner: boolean; empty?: string; renderActions?: (e: ExpenseRecord) => React.ReactNode;
+  }) {
+    return (
+      <div className="overflow-x-auto">
+        <table className="w-full">
+          <thead>
+            <tr className="border-b border-gray-200 text-left text-xs font-semibold text-gray-500 uppercase">
+              <th className="px-4 py-3">Date</th>
+              {showOwner && <th className="px-4 py-3">By</th>}
+              <th className="px-4 py-3">Category</th>
+              <th className="px-4 py-3">Payment</th>
+              <th className="px-4 py-3 text-right">Amount</th>
+              <th className="px-4 py-3">Description</th>
+              <th className="px-4 py-3">Status</th>
+              <th className="px-4 py-3 text-right">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((e) => (
+              <tr key={e.expense_id} className="border-b border-gray-100 hover:bg-gray-50">
+                <td className="px-4 py-3 text-sm text-gray-500 whitespace-nowrap">{formatDateIST(e.expense_date || e.created_at)}</td>
+                {showOwner && <td className="px-4 py-3 text-sm text-gray-700">{e.employee_name || e.employee_id || '—'}</td>}
+                <td className="px-4 py-3 text-sm"><span className={clsx('inline-block px-2 py-0.5 rounded text-xs font-medium', catColor(e.category))}>{catLabel(e.category)}</span></td>
+                <td className="px-4 py-3 text-sm text-gray-600">{payLabel(e.payment_mode)}</td>
+                <td className="px-4 py-3 text-sm font-semibold text-gray-900 text-right">{fc(e.amount)}</td>
+                <td className="px-4 py-3 text-sm text-gray-600 max-w-xs truncate" title={e.description}>{e.description}</td>
+                <td className="px-4 py-3"><StatusPill status={e.status} /></td>
+                <td className="px-4 py-3 text-right">{renderActions?.(e)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {rows.length === 0 && <div className="p-10 text-center text-gray-500 text-sm">{empty || 'No expenses found'}</div>}
+      </div>
+    );
+  }
+}
+
+function Card({ label, value, color }: { label: string; value: string; color?: string }) {
+  return (
+    <div className="bg-white border border-gray-200 rounded-lg p-5">
+      <p className="text-gray-500 text-sm mb-1">{label}</p>
+      <p className={clsx('text-2xl font-bold', color || 'text-gray-900')}>{value}</p>
+    </div>
+  );
+}
+
+function Row({ label, value, color }: { label: string; value: string; color?: string }) {
+  return (
+    <div className="flex justify-between items-center pb-3 border-b border-gray-100 last:border-0">
+      <span className="text-gray-500">{label}</span>
+      <span className={clsx('text-xl font-bold', color || 'text-gray-900')}>{value}</span>
+    </div>
+  );
+}
+
+function Labeled({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <label className="block">
+      <span className="block text-sm font-medium text-gray-600 mb-1">{label}</span>
+      {children}
+    </label>
   );
 }

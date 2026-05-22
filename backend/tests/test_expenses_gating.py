@@ -46,6 +46,10 @@ def _client_as(roles):
 GATED = [
     ("post", "/expenses/e1/approve", None),
     ("post", "/expenses/e1/reject", {"reason": "duplicate"}),
+    ("post", "/expenses/e1/send-to-accountant", None),
+    ("post", "/expenses/e1/mark-entered", None),
+    ("get", "/expenses/to-enter", None),
+    ("get", "/expenses/pending-approval", None),
     ("post", "/expenses/advances/a1/approve", None),
     ("post", "/expenses/advances/a1/disburse", {"reference": "TXN-1"}),
     ("post", "/expenses/advances/a1/settle", None),
@@ -99,3 +103,49 @@ class TestExpensesGating:
         client = _client_as(["SALES_STAFF"])
         resp = client.post("/expenses/e1/submit")
         assert resp.status_code != 403
+
+
+class _FakeRepo:
+    """Records the filter passed to find_many so we can assert ownership scope."""
+
+    def __init__(self):
+        self.last_filter = None
+
+    def find_many(self, filter_dict, *args, **kwargs):
+        self.last_filter = filter_dict
+        return []
+
+
+class TestExpenseOwnershipScope:
+    """A normal user sees only their own expenses; admins see all."""
+
+    def _client_with_repo(self, monkeypatch, roles, repo):
+        app = FastAPI()
+        app.include_router(expenses.router, prefix="/expenses")
+
+        async def _fake_user():
+            return {
+                "user_id": "u1",
+                "full_name": "Test User",
+                "active_store_id": "store-001",
+                "roles": roles,
+            }
+
+        app.dependency_overrides[get_current_user] = _fake_user
+        monkeypatch.setattr(expenses, "get_expense_repository", lambda: repo)
+        return TestClient(app)
+
+    def test_non_admin_scoped_to_own(self, monkeypatch):
+        repo = _FakeRepo()
+        client = self._client_with_repo(monkeypatch, ["SALES_STAFF"], repo)
+        resp = client.get("/expenses")
+        assert resp.status_code == 200
+        assert repo.last_filter == {"employee_id": "u1"}
+
+    def test_admin_sees_all(self, monkeypatch):
+        repo = _FakeRepo()
+        client = self._client_with_repo(monkeypatch, ["ADMIN"], repo)
+        resp = client.get("/expenses")
+        assert resp.status_code == 200
+        # No employee_id restriction for admins.
+        assert "employee_id" not in (repo.last_filter or {})
