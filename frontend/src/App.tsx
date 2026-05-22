@@ -47,6 +47,8 @@ const TaskManagementPage = lazy(() => import('./pages/tasks/TaskManagementPage')
 const TasksDashboard = lazy(() => import('./pages/tasks/TasksDashboard').then(m => ({ default: m.TasksDashboard })));
 const HRPage = lazy(() => import('./pages/hr/HRPage').then(m => ({ default: m.HRPage })));
 const PayrollDashboard = lazy(() => import('./pages/hr/PayrollDashboard').then(m => ({ default: m.PayrollDashboard })));
+const SalarySetupPage = lazy(() => import('./pages/hr/SalarySetupPage').then(m => ({ default: m.SalarySetupPage })));
+const EntitiesPage = lazy(() => import('./pages/settings/EntitiesPage').then(m => ({ default: m.EntitiesPage })));
 const ReportsPage = lazy(() => import('./pages/reports/ReportsPage').then(m => ({ default: m.ReportsPage })));
 const GrowthBlueprintPage = lazy(() => import('./pages/reports/GrowthBlueprintPage').then(m => ({ default: m.GrowthBlueprintPage })));
 const SettingsPage = lazy(() => import('./pages/settings/SettingsPage').then(m => ({ default: m.SettingsPage })));
@@ -620,6 +622,14 @@ function App() {
                       </ProtectedRoute>
                     )}
                   />
+                  <Route
+                    path="hr/salary-setup"
+                    element={(
+                      <ProtectedRoute allowedRoles={["SUPERADMIN", "ADMIN", "AREA_MANAGER", "STORE_MANAGER", "ACCOUNTANT"]}>
+                        <SalarySetupPage />
+                      </ProtectedRoute>
+                    )}
+                  />
 
                   {/* Reports */}
                   <Route
@@ -685,6 +695,14 @@ function App() {
                     element={
                       <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'AREA_MANAGER', 'CATALOG_MANAGER', 'ACCOUNTANT']}>
                         <SettingsPage />
+                      </ProtectedRoute>
+                    }
+                  />
+                  <Route
+                    path="settings/entities"
+                    element={
+                      <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN']}>
+                        <EntitiesPage />
                       </ProtectedRoute>
                     }
                   />
