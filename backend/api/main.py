@@ -80,6 +80,7 @@ from .routers import (
     techcherry_import_router,
     vouchers_router,
     entities_router,
+    notifications_router,
 )
 from .routers.auth import require_roles
 
@@ -708,6 +709,7 @@ app.include_router(
     vendor_returns_router, prefix="/api/v1/vendor-returns", tags=["Vendor Returns"]
 )
 app.include_router(tasks_router, prefix="/api/v1/tasks", tags=["Tasks"])
+app.include_router(notifications_router, prefix="/api/v1/notifications", tags=["Notifications"])
 app.include_router(expenses_router, prefix="/api/v1/expenses", tags=["Expenses"])
 app.include_router(
     finance_router,

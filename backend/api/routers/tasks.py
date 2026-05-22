@@ -20,6 +20,7 @@ from ..services.task_sla import (
     sla_for,
 )
 from ..services.task_escalation import resolve_escalation_target
+from ..services.task_notify import notify_escalation
 
 router = APIRouter()
 
@@ -180,6 +181,25 @@ def _escalate_and_reassign(
         history_entry["to"] = target["user_id"]
     update["history"] = (task.get("history") or []) + [history_entry]
     repo.update(task.get("task_id"), update)
+    return target
+
+
+def _notifications_coll():
+    """Return the notifications collection (or None if DB unavailable)."""
+    db = get_db()
+    if db is None or not getattr(db, "is_connected", True):
+        return None
+    try:
+        return db.get_collection("notifications")
+    except Exception:
+        return None
+
+
+async def _escalate_reassign_notify(repo, task: dict, *, reason: str, by: str, now: datetime):
+    """Escalate + reassign (resolve owner) then alert the new owner in-app +
+    WhatsApp. Returns the resolved target user dict (or None)."""
+    target = _escalate_and_reassign(repo, task, reason=reason, by=by, now=now)
+    await notify_escalation(_notifications_coll(), target, task, reason, now=now)
     return target
 
 
@@ -676,13 +696,24 @@ async def escalate_task(
             "escalated_by": by,
             "history": (task.get("history") or []) + [history_entry],
         })
+        # Alert the explicit target (in-app + WhatsApp).
+        user_repo = get_user_repository()
+        target_user = None
+        if user_repo is not None:
+            try:
+                target_user = user_repo.find_by_id(escalate_to)
+            except Exception:
+                target_user = None
+        await notify_escalation(
+            _notifications_coll(), target_user or {"user_id": escalate_to}, task, "manual", now=now
+        )
         return {
             "task_id": task_id, "status": "ESCALATED", "escalation_level": new_level,
             "escalated_to": escalate_to, "message": "Task escalated",
         }
 
     # Auto-resolve up the ladder.
-    target = _escalate_and_reassign(repo, task, reason="manual", by=by, now=now)
+    target = await _escalate_reassign_notify(repo, task, reason="manual", by=by, now=now)
     return {
         "task_id": task_id,
         "status": "ESCALATED",
@@ -727,8 +758,8 @@ async def auto_escalate_overdue_tasks(
         flag, reason = should_escalate(task, now=now, sla_config=sla_cfg)
         if not flag:
             continue
-        # Resolve the next owner up the role ladder + reassign.
-        _escalate_and_reassign(repo, task, reason=reason, by="system", now=now)
+        # Resolve the next owner up the role ladder + reassign + notify.
+        await _escalate_reassign_notify(repo, task, reason=reason, by="system", now=now)
         escalated_count += 1
 
     return {
