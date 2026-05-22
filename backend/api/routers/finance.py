@@ -3,6 +3,7 @@
 from datetime import datetime, timedelta
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import Response
 from .auth import get_current_user
 
 router = APIRouter(prefix="/finance", tags=["finance"])
@@ -114,6 +115,61 @@ def _payroll_cost(db, store_id, from_date, to_date) -> float:
         return round(total, 2)
     except Exception:
         return 0.0
+
+
+def gst_reconciliation(orders, purchases, store_to_entity: dict, entity_names: dict = None) -> dict:
+    """Group GST output (orders) vs input credit (purchases) by legal entity.
+    CGST/SGST split intra-state (tax/2 each); IGST not modelled (orders don't
+    capture inter-state). Pure."""
+    entity_names = entity_names or {}
+    acc: dict = {}
+
+    def _ent(store_id):
+        return store_to_entity.get(store_id) or "_unassigned"
+
+    for o in orders:
+        eid = _ent(o.get("store_id"))
+        tax = float(o.get("tax_amount") or o.get("tax_total") or 0)
+        acc.setdefault(eid, {"collected": 0.0, "input_credit": 0.0})["collected"] += tax
+    for p in purchases:
+        eid = _ent(p.get("delivery_store_id") or p.get("store_id"))
+        tax = float(p.get("tax_amount") or 0)
+        acc.setdefault(eid, {"collected": 0.0, "input_credit": 0.0})["input_credit"] += tax
+
+    entities, tot_c, tot_i = [], 0.0, 0.0
+    for eid, d in acc.items():
+        c, i = round(d["collected"], 2), round(d["input_credit"], 2)
+        tot_c += c
+        tot_i += i
+        entities.append({
+            "entity_id": eid,
+            "entity_name": entity_names.get(eid, eid),
+            "gst_collected": c,
+            "cgst": round(c / 2, 2),
+            "sgst": round(c / 2, 2),
+            "input_credit": i,
+            "net_payable": round(c - i, 2),
+        })
+    return {
+        "entities": sorted(entities, key=lambda e: -e["gst_collected"]),
+        "total_collected": round(tot_c, 2),
+        "total_input_credit": round(tot_i, 2),
+        "total_net_payable": round(tot_c - tot_i, 2),
+    }
+
+
+def _store_maps(db):
+    """Return (store_id -> entity_id, entity_id -> entity_name)."""
+    s2e, enames = {}, {}
+    try:
+        for s in db.get_collection("stores").find({}, {"_id": 0, "store_id": 1, "entity_id": 1}):
+            if s.get("store_id"):
+                s2e[s["store_id"]] = s.get("entity_id")
+        for e in db.get_collection("entities").find({}, {"_id": 0, "entity_id": 1, "name": 1}):
+            enames[e.get("entity_id")] = e.get("name")
+    except Exception:
+        pass
+    return s2e, enames
 
 
 # === Revenue Tracking ===
@@ -671,3 +727,107 @@ async def get_reconciliation(current_user: dict = Depends(get_current_user)):
         "pending_transfers": len(pending),
         "transfers": pending,
     }
+
+
+# === GST Reconciliation (per entity) + Tally export ===
+
+
+@router.get("/gst/reconciliation")
+async def get_gst_reconciliation(
+    month: Optional[int] = None,
+    year: Optional[int] = None,
+    entity_id: Optional[str] = None,
+    current_user: dict = Depends(get_current_user),
+):
+    """GST output (sales tax) vs input credit (purchase tax), grouped by entity.
+    You file the actual returns through Tally; this is the cross-check."""
+    db = _get_db()
+    now = datetime.utcnow()
+    m = month or now.month
+    y = year or now.year
+    start = datetime(y, m, 1)
+    end = datetime(y + 1, 1, 1) if m == 12 else datetime(y, m + 1, 1)
+
+    s2e, enames = _store_maps(db)
+    store_ids = None
+    if entity_id:
+        store_ids = [sid for sid, eid in s2e.items() if eid == entity_id]
+
+    o_match = {"created_at": {"$gte": start.isoformat(), "$lt": end.isoformat()}}
+    if store_ids is not None:
+        o_match["store_id"] = {"$in": store_ids}
+    orders = list(
+        db.get_collection("orders").find(
+            o_match, {"_id": 0, "store_id": 1, "tax_amount": 1, "tax_total": 1}
+        )
+    )
+
+    p_match = {"date": {"$gte": start.isoformat(), "$lt": end.isoformat()}}
+    if store_ids is not None:
+        p_match["delivery_store_id"] = {"$in": store_ids}
+    purchases = list(
+        db.get_collection("purchase_orders").find(
+            p_match, {"_id": 0, "delivery_store_id": 1, "store_id": 1, "tax_amount": 1}
+        )
+    )
+
+    recon = gst_reconciliation(orders, purchases, s2e, enames)
+    recon.update(
+        {"month": m, "year": y, "note": "CGST/SGST split intra-state; file via Tally."}
+    )
+    return recon
+
+
+@router.get("/tally/sales-jv")
+async def get_tally_sales_jv(
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+    store_id: Optional[str] = None,
+    entity_id: Optional[str] = None,
+    current_user: dict = Depends(get_current_user),
+):
+    """Tally sales-voucher XML for a period + scope, ready to import into Tally."""
+    db = _get_db()
+    match: dict = {}
+    store_ids = None
+    if store_id:
+        store_ids = [store_id]
+    elif entity_id:
+        s2e, _ = _store_maps(db)
+        store_ids = [sid for sid, eid in s2e.items() if eid == entity_id]
+    if store_ids is not None:
+        match["store_id"] = {"$in": store_ids}
+    if from_date:
+        match.setdefault("created_at", {})["$gte"] = from_date
+    if to_date:
+        match.setdefault("created_at", {})["$lte"] = to_date
+
+    orders = list(db.get_collection("orders").find(match, {"_id": 0}))
+    # Orders persist only total tax; split intra-state CGST/SGST = tax/2 and set
+    # the taxable subtotal so each voucher balances (taxable + cgst + sgst = grand).
+    for o in orders:
+        tax = float(o.get("tax_amount") or o.get("tax_total") or 0)
+        grand = float(o.get("grand_total") or o.get("total") or 0)
+        o["cgst_amount"] = round(tax / 2, 2)
+        o["sgst_amount"] = round(tax / 2, 2)
+        o["subtotal"] = round(grand - tax, 2)
+        o["grand_total"] = grand
+
+    store_meta = {}
+    if store_id:
+        s = db.get_collection("stores").find_one({"store_id": store_id}) or {}
+        store_meta = {
+            "store_id": store_id,
+            "store_code": s.get("store_code"),
+            "store_name": s.get("store_name"),
+        }
+
+    from agents.nexus_providers import tally_build_day_voucher_xml
+
+    xml = tally_build_day_voucher_xml(orders, store_meta)
+    fname = f"sales_jv_{(from_date or 'all')[:10]}_{(to_date or 'all')[:10]}.xml"
+    return Response(
+        content=xml,
+        media_type="application/xml",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )

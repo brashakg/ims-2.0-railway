@@ -11,7 +11,7 @@ import os
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-for-unit-tests")
 os.environ.setdefault("MONGODB_URI", "")
 
-from api.routers.finance import compute_cogs, _order_total  # noqa: E402
+from api.routers.finance import compute_cogs, _order_total, gst_reconciliation  # noqa: E402
 
 
 def test_cogs_from_real_cost():
@@ -41,3 +41,32 @@ def test_order_total_prefers_grand_total():
     assert _order_total({"grand_total": 500, "total": 999}) == 500.0
     assert _order_total({"total": 250}) == 250.0   # legacy fallback
     assert _order_total({}) == 0.0
+
+
+def test_gst_reconciliation_groups_by_entity():
+    orders = [
+        {"store_id": "S1", "tax_amount": 100},
+        {"store_id": "S2", "tax_amount": 50},
+        {"store_id": "S1", "tax_total": 20},  # tax_total fallback
+    ]
+    purchases = [
+        {"delivery_store_id": "S1", "tax_amount": 30},
+        {"store_id": "S2", "tax_amount": 10},
+    ]
+    s2e = {"S1": "E1", "S2": "E2"}
+    r = gst_reconciliation(orders, purchases, s2e, {"E1": "Entity One", "E2": "Entity Two"})
+    assert r["total_collected"] == 170.0       # 100 + 50 + 20
+    assert r["total_input_credit"] == 40.0     # 30 + 10
+    assert r["total_net_payable"] == 130.0
+    e1 = next(e for e in r["entities"] if e["entity_id"] == "E1")
+    assert e1["entity_name"] == "Entity One"
+    assert e1["gst_collected"] == 120.0        # 100 + 20
+    assert e1["cgst"] == 60.0 and e1["sgst"] == 60.0
+    assert e1["input_credit"] == 30.0
+    assert e1["net_payable"] == 90.0
+
+
+def test_gst_reconciliation_unassigned_store():
+    r = gst_reconciliation([{"store_id": "SX", "tax_amount": 18}], [], {}, {})
+    assert r["entities"][0]["entity_id"] == "_unassigned"
+    assert r["total_collected"] == 18.0
