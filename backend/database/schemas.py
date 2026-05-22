@@ -65,6 +65,7 @@ STORE_SCHEMA = {
         "email": {"bsonType": "string"},
         "gstin": {"bsonType": "string"},
         "gst_state_code": {"bsonType": "string"},
+        "entity_id": {"bsonType": "string"},  # legal entity that owns this store (payroll/GST grouping)
         "coordinates": {
             "bsonType": "object",
             "properties": {
@@ -829,4 +830,148 @@ COLLECTIONS.update({
         {"keys": [("employee_id", 1), ("status", 1)]},
         {"keys": [("status", 1)]}
     ]}
+})
+
+
+# ============================================================================
+# PAYROLL FOUNDATION SCHEMAS (entity model, salary master, PT slabs)
+# ============================================================================
+
+# A legal entity (PAN). One entity can hold multiple GSTINs (one per state).
+# Statutory payroll filings (PF/ESI/PT/TDS) are grouped per entity.
+ENTITY_SCHEMA = {
+    "bsonType": "object",
+    "required": ["entity_id", "name", "is_active"],
+    "properties": {
+        "entity_id": {"bsonType": "string"},
+        "name": {"bsonType": "string"},          # display name e.g. "Better Vision (Chas/Bokaro)"
+        "legal_name": {"bsonType": "string"},    # registered legal name
+        "pan": {"bsonType": "string"},
+        "tan": {"bsonType": "string"},           # for TDS returns (24Q)
+        "registered_address": {"bsonType": "string"},
+        "gstins": {
+            "bsonType": "array",
+            "items": {
+                "bsonType": "object",
+                "properties": {
+                    "gstin": {"bsonType": "string"},
+                    "state_code": {"bsonType": "string"},
+                    "state_name": {"bsonType": "string"},
+                },
+            },
+        },
+        "pf": {
+            "bsonType": "object",
+            "properties": {
+                "registered": {"bsonType": "bool"},
+                "establishment_code": {"bsonType": "string"},
+            },
+        },
+        "esi": {
+            "bsonType": "object",
+            "properties": {
+                "registered": {"bsonType": "bool"},
+                "code": {"bsonType": "string"},
+            },
+        },
+        "pt_registrations": {
+            "bsonType": "array",
+            "items": {
+                "bsonType": "object",
+                "properties": {
+                    "state_code": {"bsonType": "string"},
+                    "registration_number": {"bsonType": "string"},
+                },
+            },
+        },
+        "bank_account_no": {"bsonType": "string"},
+        "bank_ifsc": {"bsonType": "string"},
+        "bank_name": {"bsonType": "string"},
+        "is_active": {"bsonType": "bool"},
+        "created_at": {"bsonType": "string"},
+        "updated_at": {"bsonType": "string"},
+        "created_by": {"bsonType": "string"},
+    },
+}
+
+# Per-employee Structured CTC + statutory configuration. Monthly amounts.
+SALARY_CONFIG_SCHEMA = {
+    "bsonType": "object",
+    "required": ["employee_id", "basic"],
+    "properties": {
+        "config_id": {"bsonType": "string"},
+        "employee_id": {"bsonType": "string"},
+        "entity_id": {"bsonType": "string"},     # legal entity employing this person
+        "store_id": {"bsonType": "string"},      # primary work store (drives PT state)
+        "designation": {"bsonType": "string"},
+        "department": {"bsonType": "string"},
+        "date_of_joining": {"bsonType": "string"},
+        # Earnings (monthly, structured CTC)
+        "basic": {"bsonType": "double", "minimum": 0},
+        "hra": {"bsonType": "double", "minimum": 0},
+        "conveyance": {"bsonType": "double", "minimum": 0},
+        "medical": {"bsonType": "double", "minimum": 0},
+        "special_allowance": {"bsonType": "double", "minimum": 0},
+        "other_allowances": {
+            "bsonType": "array",
+            "items": {
+                "bsonType": "object",
+                "properties": {
+                    "name": {"bsonType": "string"},
+                    "amount": {"bsonType": "double"},
+                },
+            },
+        },
+        # Statutory toggles + params
+        "pf_applicable": {"bsonType": "bool"},
+        "pf_wage_ceiling_cap": {"bsonType": "bool"},  # PF on min(basic, 15000) if True
+        "esi_applicable": {"bsonType": "bool"},       # null/absent -> auto by gross <= 21000
+        "pt_applicable": {"bsonType": "bool"},
+        "tds_monthly": {"bsonType": "double", "minimum": 0},  # manual monthly TDS
+        # Statutory IDs
+        "uan": {"bsonType": "string"},                # PF Universal Account Number
+        "esi_ip_number": {"bsonType": "string"},
+        "pan": {"bsonType": "string"},
+        # Bank (salary register / transfer)
+        "bank_account_no": {"bsonType": "string"},
+        "bank_ifsc": {"bsonType": "string"},
+        "bank_name": {"bsonType": "string"},
+        "is_active": {"bsonType": "bool"},
+        "created_at": {"bsonType": "string"},
+        "updated_at": {"bsonType": "string"},
+        "created_by": {"bsonType": "string"},
+    },
+}
+
+# State-wise Professional Tax slabs. EDITABLE — PT rules change; seeded with
+# sensible defaults that the accountant must verify. `basis` says whether the
+# slab thresholds are evaluated on MONTHLY or ANNUAL gross. Each slab item:
+#   {min, max (null=infinity), amount, amount_february (optional), gender ("ANY"|"MALE"|"FEMALE")}
+PT_SLAB_SCHEMA = {
+    "bsonType": "object",
+    "required": ["state_code", "slabs"],
+    "properties": {
+        "state_code": {"bsonType": "string"},
+        "state_name": {"bsonType": "string"},
+        "basis": {"bsonType": "string"},        # "MONTHLY" or "ANNUAL"
+        "gender_aware": {"bsonType": "bool"},
+        "slabs": {"bsonType": "array", "items": {"bsonType": "object"}},
+        "notes": {"bsonType": "string"},
+        "updated_at": {"bsonType": "string"},
+    },
+}
+
+COLLECTIONS.update({
+    "entities": {"schema": ENTITY_SCHEMA, "indexes": [
+        {"keys": [("entity_id", 1)], "unique": True},
+        {"keys": [("is_active", 1)]},
+    ]},
+    "salary_config": {"schema": SALARY_CONFIG_SCHEMA, "indexes": [
+        {"keys": [("employee_id", 1)], "unique": True},
+        {"keys": [("entity_id", 1)]},
+        {"keys": [("store_id", 1)]},
+    ]},
+    "pt_slabs": {"schema": PT_SLAB_SCHEMA, "indexes": [
+        {"keys": [("state_code", 1)], "unique": True},
+    ]},
 })

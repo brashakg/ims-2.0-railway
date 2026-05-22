@@ -79,6 +79,7 @@ from .routers import (
     vendor_portal_router,
     techcherry_import_router,
     vouchers_router,
+    entities_router,
 )
 from .routers.auth import require_roles
 
@@ -732,6 +733,7 @@ app.include_router(
     admin_extras_router, prefix="/api/v1/admin", tags=["Admin · Discounts & System"]
 )
 app.include_router(handoffs_router, prefix="/api/v1/handoffs", tags=["Handoffs"])
+app.include_router(entities_router, prefix="/api/v1/entities", tags=["Entities"])
 app.include_router(
     transfers_router, prefix="/api/v1/transfers", tags=["Stock Transfers"]
 )
