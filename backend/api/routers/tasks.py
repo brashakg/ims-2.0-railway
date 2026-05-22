@@ -6,12 +6,12 @@ Complete task management with auto-escalation and SOP templates
 
 from fastapi import APIRouter, HTTPException, Depends, Query
 from pydantic import BaseModel, Field
-from typing import Optional, List
+from typing import Optional, List, Dict
 from datetime import datetime, timedelta
 import uuid
 
 from .auth import get_current_user
-from ..dependencies import get_task_repository, get_db
+from ..dependencies import get_task_repository, get_user_repository, get_db
 from ..services.task_sla import (
     DEFAULT_SLA,
     canon_source,
@@ -19,6 +19,7 @@ from ..services.task_sla import (
     should_escalate,
     sla_for,
 )
+from ..services.task_escalation import resolve_escalation_target
 
 router = APIRouter()
 
@@ -104,6 +105,82 @@ def _canon_task_out(task: dict) -> dict:
 # NOTE: `should_escalate(task, *, now=None, sla_config=None)` is imported from
 # services.task_sla -- a pure, per-priority SLA check (ack clock + overdue
 # grace) that replaces the old hard-coded 2-hour rule.
+
+
+def _sla_config_collection():
+    """Return the task_sla_config collection (or None if DB unavailable)."""
+    db = get_db()
+    if db is None or not getattr(db, "is_connected", True):
+        return None
+    try:
+        return db.get_collection("task_sla_config")
+    except Exception:
+        return None
+
+
+def _load_sla_config() -> Optional[dict]:
+    """Load persisted per-priority SLA overrides, merged onto DEFAULT_SLA.
+    Returns None when nothing is stored (callers fall back to DEFAULT_SLA)."""
+    col = _sla_config_collection()
+    if col is None:
+        return None
+    try:
+        doc = col.find_one({"config_id": "global"}, {"_id": 0})
+    except Exception:
+        doc = None
+    overrides = (doc or {}).get("matrix") or {}
+    if not overrides:
+        return None
+    return {p: {**DEFAULT_SLA[p], **(overrides.get(p) or {})} for p in DEFAULT_SLA}
+
+
+def _escalate_and_reassign(
+    repo, task: dict, *, reason: str, by: str, now: datetime
+) -> Optional[dict]:
+    """Resolve the next owner up the role ladder and reassign the task to them.
+
+    Marks the task ESCALATED, bumps escalation_level, records escalated_to +
+    an escalation history entry. Returns the target user dict, or None if the
+    chain is exhausted (the task is still marked ESCALATED so it surfaces)."""
+    user_repo = get_user_repository()
+    target = None
+    if user_repo is not None:
+        assignee = None
+        try:
+            if task.get("assigned_to"):
+                assignee = user_repo.find_by_id(task.get("assigned_to"))
+        except Exception:
+            assignee = None
+        target = resolve_escalation_target(
+            user_repo.find_by_role,
+            task.get("store_id"),
+            assignee or {"user_id": task.get("assigned_to")},
+        )
+
+    new_level = task.get("escalation_level", 0) + 1
+    history_entry = {
+        "action": "escalated",
+        "level": new_level,
+        "reason": reason,
+        "from": task.get("assigned_to"),
+        "by": by,
+        "at": now,
+    }
+    update: dict = {
+        "status": "ESCALATED",
+        "escalation_level": new_level,
+        "escalation_reason": reason,
+        "escalated_at": now,
+        "updated_at": now,
+        "escalated_by": by,
+    }
+    if target and target.get("user_id"):
+        update["assigned_to"] = target["user_id"]
+        update["escalated_to"] = target["user_id"]
+        history_entry["to"] = target["user_id"]
+    update["history"] = (task.get("history") or []) + [history_entry]
+    repo.update(task.get("task_id"), update)
+    return target
 
 
 # ============================================================================
@@ -564,42 +641,58 @@ async def acknowledge_task(
 @router.post("/{task_id}/escalate")
 async def escalate_task(
     task_id: str,
-    escalate_to: str = Query(...),
+    escalate_to: Optional[str] = Query(None),
     current_user: dict = Depends(get_current_user),
 ):
-    """Manually escalate task"""
+    """Manually escalate a task. If `escalate_to` is omitted, the next owner is
+    resolved automatically up the role ladder (Store Manager -> Area Manager ->
+    Admin -> Superadmin) scoped to the task's store."""
     repo = get_task_repository()
 
     if repo is None:
         return {"task_id": task_id, "status": "ESCALATED"}
 
     task = repo.find_by_id(task_id)
-
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
 
-    current_level = task.get("escalation_level", 0)
-
     now = datetime.now()
-    if repo.update(
-        task_id,
-        {
+    by = current_user.get("user_id")
+
+    if escalate_to:
+        # Explicit target chosen by the user -- reassign ownership to them.
+        new_level = task.get("escalation_level", 0) + 1
+        history_entry = {
+            "action": "escalated", "level": new_level, "reason": "manual",
+            "from": task.get("assigned_to"), "to": escalate_to, "by": by, "at": now,
+        }
+        repo.update(task_id, {
             "status": "ESCALATED",
+            "assigned_to": escalate_to,
             "escalated_to": escalate_to,
             "escalated_at": now,
             "updated_at": now,
-            "escalation_level": current_level + 1,
-            "escalated_by": current_user.get("user_id"),
-        },
-    ):
+            "escalation_level": new_level,
+            "escalated_by": by,
+            "history": (task.get("history") or []) + [history_entry],
+        })
         return {
-            "task_id": task_id,
-            "status": "ESCALATED",
-            "escalation_level": current_level + 1,
-            "message": "Task escalated",
+            "task_id": task_id, "status": "ESCALATED", "escalation_level": new_level,
+            "escalated_to": escalate_to, "message": "Task escalated",
         }
 
-    raise HTTPException(status_code=500, detail="Failed to escalate task")
+    # Auto-resolve up the ladder.
+    target = _escalate_and_reassign(repo, task, reason="manual", by=by, now=now)
+    return {
+        "task_id": task_id,
+        "status": "ESCALATED",
+        "escalation_level": task.get("escalation_level", 0) + 1,
+        "escalated_to": (target or {}).get("user_id"),
+        "message": (
+            f"Task escalated to {target.get('user_id')}" if target
+            else "Task escalated (no higher owner found)"
+        ),
+    }
 
 
 @router.post("/auto-escalate-overdue")
@@ -627,27 +720,16 @@ async def auto_escalate_overdue_tasks(
 
     candidates = repo.find_many(filters, limit=500)
     now = datetime.now()
+    sla_cfg = _load_sla_config()
     escalated_count = 0
 
     for task in candidates:
-        flag, reason = should_escalate(task, now=now)
+        flag, reason = should_escalate(task, now=now, sla_config=sla_cfg)
         if not flag:
             continue
-        current_level = task.get("escalation_level", 0)
-        # Phase 1: flag the breach (status -> ESCALATED, bump level). The
-        # role-ladder target resolution + reassignment lands in Phase 2.
-        if repo.update(
-            task["task_id"],
-            {
-                "status": "ESCALATED",
-                "escalated_at": now,
-                "updated_at": now,
-                "escalation_level": current_level + 1,
-                "escalation_reason": reason,
-                "escalated_by": "system",
-            },
-        ):
-            escalated_count += 1
+        # Resolve the next owner up the role ladder + reassign.
+        _escalate_and_reassign(repo, task, reason=reason, by="system", now=now)
+        escalated_count += 1
 
     return {
         "escalated": escalated_count,
@@ -716,6 +798,78 @@ async def get_task_summary(
         "escalated_count": escalated_ct,
         "total": total,
     }
+
+
+# ============================================================================
+# SLA CONFIG (Tasks/SOP Phase 2)
+# ============================================================================
+# Persisted per-priority SLA overrides in the `task_sla_config` collection
+# (single global doc, config_id="global"). Unset => DEFAULT_SLA (Standard
+# matrix). Drives both /auto-escalate-overdue and the TASKMASTER agent.
+
+
+class SlaRow(BaseModel):
+    ack_minutes: int = Field(..., ge=1, le=43200)  # <= 30 days
+    grace_minutes: int = Field(..., ge=1, le=43200)
+
+
+class SlaConfigUpdate(BaseModel):
+    matrix: Dict[str, SlaRow]
+
+
+@router.get("/sla-config")
+async def get_sla_config(current_user: dict = Depends(get_current_user)):
+    """Return the per-priority SLA matrix (Standard default merged with any
+    stored overrides)."""
+    col = _sla_config_collection()
+    stored = None
+    if col is not None:
+        try:
+            stored = col.find_one({"config_id": "global"}, {"_id": 0})
+        except Exception:
+            stored = None
+    overrides = (stored or {}).get("matrix") or {}
+    merged = {p: {**DEFAULT_SLA[p], **(overrides.get(p) or {})} for p in DEFAULT_SLA}
+    return {
+        "matrix": merged,
+        "is_default": not bool(overrides),
+        "updated_at": (stored or {}).get("updated_at"),
+        "updated_by": (stored or {}).get("updated_by"),
+    }
+
+
+@router.put("/sla-config")
+async def update_sla_config(
+    payload: SlaConfigUpdate,
+    current_user: dict = Depends(get_current_user),
+):
+    """Persist per-priority SLA overrides. SUPERADMIN / ADMIN only."""
+    allowed = {"SUPERADMIN", "ADMIN"}
+    if not (set(current_user.get("roles", [])) & allowed):
+        raise HTTPException(
+            status_code=403, detail="Only SUPERADMIN / ADMIN may edit SLA config"
+        )
+
+    clean: dict = {}
+    for p, row in payload.matrix.items():
+        pu = str(p).upper()
+        if pu not in DEFAULT_SLA:
+            raise HTTPException(
+                status_code=422, detail=f"Unknown priority '{p}' (expected P0-P4)"
+            )
+        clean[pu] = {"ack_minutes": row.ack_minutes, "grace_minutes": row.grace_minutes}
+
+    col = _sla_config_collection()
+    if col is None:
+        raise HTTPException(status_code=503, detail="DB unavailable")
+    now = datetime.now()
+    col.update_one(
+        {"config_id": "global"},
+        {"$set": {"matrix": clean, "updated_at": now, "updated_by": current_user.get("user_id")}},
+        upsert=True,
+    )
+    merged = {p: {**DEFAULT_SLA[p], **(clean.get(p) or {})} for p in DEFAULT_SLA}
+    return {"matrix": merged, "is_default": False, "message": "SLA config updated"}
 
 
 # ============================================================================
