@@ -97,6 +97,7 @@ class TaskmasterAgent(JarvisAgent):
         try:
             from api.services.task_sla import should_escalate, DEFAULT_SLA
             from api.services.task_escalation import resolve_escalation_target
+            from api.services.task_notify import notify_escalation
         except Exception as e:
             logger.debug(f"[TASKMASTER] escalation modules import failed: {e}")
             return []
@@ -187,6 +188,10 @@ class TaskmasterAgent(JarvisAgent):
                         before=before,
                         after=after,
                         tier=1,
+                    )
+                    # Alert the new owner (in-app + WhatsApp), fail-soft.
+                    await notify_escalation(
+                        self.get_collection("notifications"), target, task, reason, now=now
                     )
                     actions.append({
                         "action": "task_escalated",

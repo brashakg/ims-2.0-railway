@@ -8,6 +8,7 @@ import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
 import { storeApi } from '../../services/api';
 import { Icon } from './Icon';
+import { NotificationBell } from './NotificationBell';
 
 export interface Crumb {
   label: string;
@@ -251,9 +252,7 @@ export function Topbar({ crumbs = [], actions }: TopbarProps) {
         </span>
       )}
 
-      <button className="btn icon ghost" type="button" title="Notifications" aria-label="Notifications">
-        <Icon.bell />
-      </button>
+      <NotificationBell />
 
       {actions}
     </header>
