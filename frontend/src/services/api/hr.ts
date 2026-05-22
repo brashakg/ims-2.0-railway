@@ -35,7 +35,16 @@ export const hrApi = {
   },
 
   approveLeave: async (leaveId: string, approved: boolean, remarks?: string) => {
-    const response = await api.post(`/hr/leaves/${leaveId}/approve`, { approved, remarks });
+    // Backend exposes SEPARATE endpoints: /approve (no body) and
+    // /reject (?reason=). The old single-call form silently approved even
+    // when approved=false and dropped remarks.
+    if (approved) {
+      const response = await api.post(`/hr/leaves/${leaveId}/approve`);
+      return response.data;
+    }
+    const response = await api.post(`/hr/leaves/${leaveId}/reject`, null, {
+      params: { reason: remarks || 'Rejected' },
+    });
     return response.data;
   },
 

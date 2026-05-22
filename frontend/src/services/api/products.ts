@@ -6,6 +6,10 @@ import api from './client';
 
 export interface CreateProductPayload {
   category: string;
+  // Required by the backend ProductCreate (top-level, NOT inside attributes).
+  sku: string;
+  brand: string;
+  model: string;
   attributes: Record<string, string | number>;
   description?: string;
   hsn_code?: string;
