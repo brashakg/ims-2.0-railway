@@ -7,7 +7,7 @@ Indian salary structure with PF, ESI, PT, TDS deductions
 
 from fastapi import APIRouter, Depends, Query, HTTPException, Body
 from pydantic import BaseModel, Field
-from typing import Optional, List
+from typing import Optional, List, Dict
 from datetime import datetime, date, timedelta
 from calendar import monthrange
 import uuid
@@ -17,6 +17,12 @@ import logging
 logger = logging.getLogger(__name__)
 
 from .auth import get_current_user, require_roles
+from ..services.payroll_engine import (
+    DEFAULT_PT_SLABS,
+    pt_for,
+    pt_code_for_state,
+    compute_payroll,
+)
 
 # Import database connection
 import sys
@@ -991,69 +997,8 @@ async def get_incentive_summary(
 # PROFESSIONAL TAX (PT) SLABS - state-aware, editable
 # ============================================================================
 
-# EDITABLE seed defaults. PT rules change; the accountant must verify these.
-# basis = the salary basis the thresholds are evaluated against (MONTHLY/ANNUAL).
-# Each slab: {min, max (None = infinity), amount, amount_february?, gender?}
-DEFAULT_PT_SLABS = {
-    "MH": {
-        "state_code": "MH",
-        "state_name": "Maharashtra",
-        "basis": "MONTHLY",
-        "gender_aware": True,
-        "slabs": [
-            {"min": 0, "max": 7500, "amount": 0, "gender": "MALE"},
-            {"min": 7500.01, "max": 10000, "amount": 175, "gender": "MALE"},
-            {"min": 10000.01, "max": None, "amount": 200, "amount_february": 300, "gender": "MALE"},
-            {"min": 0, "max": 25000, "amount": 0, "gender": "FEMALE"},
-            {"min": 25000.01, "max": None, "amount": 200, "amount_february": 300, "gender": "FEMALE"},
-        ],
-        "notes": "EDITABLE default - verify current Maharashtra PT. Women nil up to 25,000; +100 in February for the top slab.",
-    },
-    "JH": {
-        "state_code": "JH",
-        "state_name": "Jharkhand",
-        "basis": "ANNUAL",
-        "gender_aware": False,
-        "slabs": [
-            {"min": 0, "max": 300000, "amount": 0},
-            {"min": 300000.01, "max": 500000, "amount": 100},
-            {"min": 500000.01, "max": 800000, "amount": 150},
-            {"min": 800000.01, "max": 1000000, "amount": 175},
-            {"min": 1000000.01, "max": None, "amount": 208},
-        ],
-        "notes": "EDITABLE default - verify current Jharkhand PT. Annual gross basis; ~2,500/yr cap.",
-    },
-}
-
-
-def pt_for(
-    slab_doc: Optional[dict], monthly_gross: float, month: int, gender: str = "ANY"
-) -> float:
-    """Resolve the monthly Professional Tax from a state's slab doc.
-
-    Pure helper, reused by the Phase-2 payroll engine. Annualizes gross when
-    the state's basis is ANNUAL; applies the February override when present.
-    """
-    if not slab_doc:
-        return 0.0
-    slabs = slab_doc.get("slabs") or []
-    basis = (slab_doc.get("basis") or "MONTHLY").upper()
-    income = (monthly_gross * 12) if basis == "ANNUAL" else monthly_gross
-    gender = (gender or "ANY").upper()
-    if slab_doc.get("gender_aware") and gender == "ANY":
-        gender = "MALE"  # default unknown gender to the general slab
-    for slab in slabs:
-        s_gender = (slab.get("gender") or "ANY").upper()
-        if s_gender != "ANY" and s_gender != gender:
-            continue
-        lo = slab.get("min", 0) or 0
-        hi = slab.get("max", None)
-        if income >= lo and (hi is None or income <= hi):
-            amount = slab.get("amount", 0) or 0
-            if month == 2 and slab.get("amount_february") is not None:
-                amount = slab.get("amount_february")
-            return float(amount)
-    return 0.0
+# DEFAULT_PT_SLABS and pt_for() live in api/services/payroll_engine.py (single
+# source of truth) and are imported at the top of this module.
 
 
 @router.get("/pt-slabs")
@@ -1162,6 +1107,291 @@ async def seed_pt_slabs(current_user: dict = Depends(require_roles("ADMIN"))):
         logger.error("Payroll operation failed: %s", e)
         raise HTTPException(
             status_code=500, detail="Payroll operation failed. Please try again."
+        )
+
+
+# ============================================================================
+# PAYROLL RUN (compute -> DRAFT -> APPROVED -> PAID/locked)
+# ============================================================================
+
+_RUN_ROLES = ("ADMIN", "ACCOUNTANT")  # SUPERADMIN auto-passes
+
+
+class PayrollRunRequest(BaseModel):
+    """Compute (and optionally save) payroll for a month + scope."""
+
+    month: int = Field(..., ge=1, le=12)
+    year: int = Field(..., ge=2000, le=2100)
+    store_id: Optional[str] = None
+    entity_id: Optional[str] = None
+    lwp_days: Dict[str, float] = Field(default_factory=dict)      # employee_id -> unpaid days
+    incentives: Optional[Dict[str, float]] = None                 # override; else auto-fetched
+    advances: Dict[str, float] = Field(default_factory=dict)      # employee_id -> recovery amount
+    dry_run: bool = False                                         # true = preview, do not persist
+
+
+class PayrollBatchAction(BaseModel):
+    """Approve/lock all matching payroll rows for a month + scope."""
+
+    month: int = Field(..., ge=1, le=12)
+    year: int = Field(..., ge=2000, le=2100)
+    store_id: Optional[str] = None
+    entity_id: Optional[str] = None
+
+
+def _fetch_incentive(db, employee_id: str, month: int, year: int) -> float:
+    """Best-effort monthly incentive from the incentives collection."""
+    if db is None:
+        return 0.0
+    try:
+        doc = db.get_collection("incentives").find_one(
+            {"staff_id": employee_id, "month": month, "year": year}
+        )
+        if not doc:
+            return 0.0
+        for key in ("incentive_amount", "amount", "total", "payout", "net_incentive"):
+            v = doc.get(key)
+            if isinstance(v, (int, float)):
+                return float(v)
+        return 0.0
+    except Exception:  # pragma: no cover - defensive
+        return 0.0
+
+
+def _resolve_pt_slab(db, config: dict) -> Optional[dict]:
+    """Resolve the PT slab for an employee from their store's state."""
+    state = None
+    store_id = config.get("store_id")
+    if db is not None and store_id:
+        try:
+            store = db.get_collection("stores").find_one({"store_id": store_id})
+            if store:
+                state = store.get("state") or store.get("gst_state_code")
+        except Exception:
+            state = None
+    code = pt_code_for_state(state)
+    if not code:
+        return None
+    if db is not None:
+        try:
+            slab = db.get_collection("pt_slabs").find_one({"state_code": code})
+            if slab:
+                return slab
+        except Exception:
+            pass
+    return DEFAULT_PT_SLABS.get(code)
+
+
+def _scope_configs(db, store_id: Optional[str], entity_id: Optional[str]) -> list:
+    query: dict = {"is_active": {"$ne": False}}
+    if entity_id:
+        query["entity_id"] = entity_id
+    if store_id:
+        query["store_id"] = store_id
+    return list(db.get_collection("salary_config").find(query))
+
+
+@router.post("/run")
+async def run_payroll(
+    req: PayrollRunRequest,
+    current_user: dict = Depends(require_roles(*_RUN_ROLES)),
+):
+    """Compute payroll for every active employee in scope.
+
+    Persists DRAFT rows (idempotent per employee+month+year) unless dry_run.
+    Already APPROVED/PAID rows are never overwritten.
+    """
+    db = _get_db()
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not available")
+    try:
+        configs = _scope_configs(db, req.store_id, req.entity_id)
+        payroll_coll = db.get_collection("payroll")
+        rows = []
+        totals = {"gross": 0.0, "deductions": 0.0, "net": 0.0, "employer_cost": 0.0}
+        for cfg in configs:
+            emp = cfg.get("employee_id")
+            lwp = float(req.lwp_days.get(emp, 0) or 0)
+            incentive = (req.incentives or {}).get(emp)
+            if incentive is None:
+                incentive = _fetch_incentive(db, emp, req.month, req.year)
+            advance = float(req.advances.get(emp, 0) or 0)
+            pt_slab = _resolve_pt_slab(db, cfg)
+            breakdown = compute_payroll(
+                cfg,
+                month=req.month,
+                year=req.year,
+                lwp_days=lwp,
+                incentive=incentive,
+                advance_recovery=advance,
+                pt_slab=pt_slab,
+                gender=cfg.get("gender", "ANY"),
+            )
+            doc = {
+                "employee_id": emp,
+                "employee_name": _get_employee_details(db, emp).get("full_name", ""),
+                "store_id": cfg.get("store_id"),
+                "entity_id": cfg.get("entity_id"),
+                "year": req.year,
+                "month": req.month,
+                "breakdown": breakdown,
+                "basic_salary": breakdown["earnings"]["basic"],
+                "allowances": round(
+                    breakdown["earnings"]["earned_gross"] - breakdown["earnings"]["basic"], 2
+                ),
+                "incentives": breakdown["earnings"]["incentive"],
+                "deductions": breakdown["deductions"]["total_deductions"],
+                "advance_deduction": breakdown["deductions"]["advance_recovery"],
+                "net_salary": breakdown["net_pay"],
+                "status": "DRAFT",
+                "updated_at": datetime.now().isoformat(),
+            }
+            if not req.dry_run:
+                existing = payroll_coll.find_one(
+                    {"employee_id": emp, "year": req.year, "month": req.month}
+                )
+                if existing and existing.get("status") in ("APPROVED", "PAID"):
+                    rows.append(
+                        {
+                            "employee_id": emp,
+                            "skipped": True,
+                            "reason": f"already {existing.get('status')}",
+                            "net_salary": existing.get("net_salary"),
+                        }
+                    )
+                    continue
+                if existing:
+                    doc["payroll_id"] = existing.get("payroll_id")
+                    payroll_coll.update_one(
+                        {"employee_id": emp, "year": req.year, "month": req.month},
+                        {"$set": doc},
+                    )
+                else:
+                    doc["payroll_id"] = str(uuid.uuid4())
+                    doc["created_at"] = datetime.now().isoformat()
+                    doc["created_by"] = current_user.get("user_id")
+                    payroll_coll.insert_one(doc)
+            rows.append(_strip_id({k: v for k, v in doc.items()}))
+            totals["gross"] += breakdown["earnings"]["total_earnings"]
+            totals["deductions"] += breakdown["deductions"]["total_deductions"]
+            totals["net"] += breakdown["net_pay"]
+            totals["employer_cost"] += breakdown["ctc_cost"]
+        totals = {k: round(v, 2) for k, v in totals.items()}
+        return {
+            "status": "success",
+            "month": req.month,
+            "year": req.year,
+            "count": len(rows),
+            "dry_run": req.dry_run,
+            "rows": rows,
+            "totals": totals,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Payroll run failed: %s", e)
+        raise HTTPException(status_code=500, detail="Payroll run failed. Please try again.")
+
+
+@router.get("/run/rows")
+async def list_payroll_rows(
+    month: int,
+    year: int,
+    store_id: Optional[str] = Query(None),
+    entity_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """The salary register: saved payroll rows for a month + scope."""
+    db = _get_db()
+    if not db:
+        return {"rows": [], "total": 0, "totals": {}}
+    try:
+        query: dict = {"month": month, "year": year}
+        if store_id:
+            query["store_id"] = store_id
+        if entity_id:
+            query["entity_id"] = entity_id
+        rows = [_strip_id(r) for r in db.get_collection("payroll").find(query)]
+        totals = {
+            "gross": round(
+                sum(
+                    (r.get("breakdown", {}).get("earnings", {}) or {}).get("total_earnings", 0)
+                    for r in rows
+                ),
+                2,
+            ),
+            "deductions": round(sum(r.get("deductions", 0) or 0 for r in rows), 2),
+            "net": round(sum(r.get("net_salary", 0) or 0 for r in rows), 2),
+        }
+        return {"rows": rows, "total": len(rows), "totals": totals}
+    except Exception as e:
+        logger.error("Payroll operation failed: %s", e)
+        raise HTTPException(
+            status_code=500, detail="Payroll operation failed. Please try again."
+        )
+
+
+@router.post("/approve")
+async def approve_payroll(
+    req: PayrollBatchAction,
+    current_user: dict = Depends(require_roles(*_RUN_ROLES)),
+):
+    """Move DRAFT payroll rows to APPROVED for a month + scope."""
+    db = _get_db()
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not available")
+    try:
+        query: dict = {"month": req.month, "year": req.year, "status": "DRAFT"}
+        if req.store_id:
+            query["store_id"] = req.store_id
+        if req.entity_id:
+            query["entity_id"] = req.entity_id
+        result = db.get_collection("payroll").update_many(
+            query,
+            {
+                "$set": {
+                    "status": "APPROVED",
+                    "approved_by": current_user.get("user_id"),
+                    "approved_at": datetime.now().isoformat(),
+                }
+            },
+        )
+        return {"status": "success", "approved": getattr(result, "modified_count", 0)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Payroll approve failed: %s", e)
+        raise HTTPException(
+            status_code=500, detail="Payroll approve failed. Please try again."
+        )
+
+
+@router.post("/lock")
+async def lock_payroll(
+    req: PayrollBatchAction,
+    current_user: dict = Depends(require_roles("ADMIN")),
+):
+    """Lock APPROVED payroll rows as PAID for a month + scope (final)."""
+    db = _get_db()
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not available")
+    try:
+        query: dict = {"month": req.month, "year": req.year, "status": "APPROVED"}
+        if req.store_id:
+            query["store_id"] = req.store_id
+        if req.entity_id:
+            query["entity_id"] = req.entity_id
+        result = db.get_collection("payroll").update_many(
+            query,
+            {"$set": {"status": "PAID", "paid_at": datetime.now().isoformat()}},
+        )
+        return {"status": "success", "locked": getattr(result, "modified_count", 0)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Payroll lock failed: %s", e)
+        raise HTTPException(
+            status_code=500, detail="Payroll lock failed. Please try again."
         )
 
 
