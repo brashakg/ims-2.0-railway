@@ -16,12 +16,19 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+from fastapi.responses import HTMLResponse, PlainTextResponse, Response
 from .auth import get_current_user, require_roles
 from ..services.payroll_engine import (
     DEFAULT_PT_SLABS,
     pt_for,
     pt_code_for_state,
     compute_payroll,
+)
+from ..services.payroll_exports import (
+    statutory_summary,
+    build_salary_jv_xml,
+    build_pf_ecr,
+    build_payslip_html,
 )
 
 # Import database connection
@@ -1392,6 +1399,154 @@ async def lock_payroll(
         logger.error("Payroll lock failed: %s", e)
         raise HTTPException(
             status_code=500, detail="Payroll lock failed. Please try again."
+        )
+
+
+# ============================================================================
+# PAYROLL EXPORTS (payslip print, Tally salary JV, PF ECR, statutory summary)
+# ============================================================================
+
+
+def _payroll_rows(db, month: int, year: int, store_id, entity_id) -> list:
+    query: dict = {"month": month, "year": year}
+    if store_id:
+        query["store_id"] = store_id
+    if entity_id:
+        query["entity_id"] = entity_id
+    return [_strip_id(r) for r in db.get_collection("payroll").find(query)]
+
+
+@router.get("/registers/summary")
+async def payroll_statutory_summary(
+    month: int,
+    year: int,
+    store_id: Optional[str] = Query(None),
+    entity_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """PF/ESI/PT/TDS + gross/net totals for a month + scope (a filing aid)."""
+    db = _get_db()
+    if not db:
+        return {"summary": statutory_summary([]), "month": month, "year": year, "count": 0}
+    try:
+        rows = _payroll_rows(db, month, year, store_id, entity_id)
+        return {
+            "summary": statutory_summary(rows),
+            "month": month,
+            "year": year,
+            "count": len(rows),
+        }
+    except Exception as e:
+        logger.error("Payroll operation failed: %s", e)
+        raise HTTPException(
+            status_code=500, detail="Payroll operation failed. Please try again."
+        )
+
+
+@router.get("/tally/salary-jv")
+async def payroll_tally_jv(
+    month: int,
+    year: int,
+    entity_id: Optional[str] = Query(None),
+    store_id: Optional[str] = Query(None),
+    current_user: dict = Depends(require_roles(*_RUN_ROLES)),
+):
+    """Balanced Tally salary Journal Voucher (XML) for a month + entity."""
+    db = _get_db()
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not available")
+    try:
+        rows = _payroll_rows(db, month, year, store_id, entity_id)
+        if not rows:
+            raise HTTPException(status_code=404, detail="No payroll rows for this month/scope")
+        entity = None
+        if entity_id:
+            entity = db.get_collection("entities").find_one({"entity_id": entity_id})
+        xml = build_salary_jv_xml(entity, rows, month, year)
+        filename = f"salary_jv_{year}_{month:02d}.xml"
+        return Response(
+            content=xml,
+            media_type="application/xml",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Tally JV export failed: %s", e)
+        raise HTTPException(
+            status_code=500, detail="Tally JV export failed. Please try again."
+        )
+
+
+@router.get("/registers/pf-ecr")
+async def payroll_pf_ecr(
+    month: int,
+    year: int,
+    entity_id: Optional[str] = Query(None),
+    store_id: Optional[str] = Query(None),
+    current_user: dict = Depends(require_roles(*_RUN_ROLES)),
+):
+    """EPFO PF ECR text file for a month + scope."""
+    db = _get_db()
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not available")
+    try:
+        rows = _payroll_rows(db, month, year, store_id, entity_id)
+        emps = [r.get("employee_id") for r in rows]
+        cfgs = (
+            {
+                c.get("employee_id"): c
+                for c in db.get_collection("salary_config").find(
+                    {"employee_id": {"$in": emps}}
+                )
+            }
+            if emps
+            else {}
+        )
+        text = build_pf_ecr(rows, cfgs)
+        filename = f"pf_ecr_{year}_{month:02d}.txt"
+        return PlainTextResponse(
+            text,
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("PF ECR export failed: %s", e)
+        raise HTTPException(
+            status_code=500, detail="PF ECR export failed. Please try again."
+        )
+
+
+@router.get("/payslip/{employee_id}/{month}/{year}/print", response_class=HTMLResponse)
+async def payslip_print(
+    employee_id: str,
+    month: int,
+    year: int,
+    current_user: dict = Depends(get_current_user),
+):
+    """Branded, printable HTML payslip from the computed payroll row."""
+    db = _get_db()
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not available")
+    try:
+        row = db.get_collection("payroll").find_one(
+            {"employee_id": employee_id, "month": month, "year": year}
+        )
+        if not row:
+            raise HTTPException(status_code=404, detail="Payroll row not found for this month")
+        row = _strip_id(row)
+        entity = None
+        if row.get("entity_id"):
+            entity = db.get_collection("entities").find_one({"entity_id": row["entity_id"]})
+        employee = _get_employee_details(db, employee_id)
+        return HTMLResponse(build_payslip_html(row, entity, employee))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Payslip print failed: %s", e)
+        raise HTTPException(
+            status_code=500, detail="Payslip print failed. Please try again."
         )
 
 
