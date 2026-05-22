@@ -178,6 +178,9 @@ export default function FinanceDashboard() {
   const [budgets, setBudgets] = useState<BudgetData[]>([]);
   const [vendorPayments, setVendorPayments] = useState<VendorPaymentData[]>([]);
   const [reconciliation, setReconciliation] = useState<ReconciliationData[]>([]);
+  const [pnlByStore, setPnlByStore] = useState<Array<{ store_id?: string; revenue?: number; cogs?: number; expenses?: number; payroll?: number; net_profit?: number }>>([]);
+  const [pnlByCategory, setPnlByCategory] = useState<Array<{ category?: string; revenue?: number; cogs?: number; gross_profit?: number }>>([]);
+  const [gstRecon, setGstRecon] = useState<Array<{ entity_name?: string; gst_collected?: number; input_credit?: number; net_payable?: number }>>([]);
 
   // UI states
   const [isLoading, setIsLoading] = useState(true);
@@ -222,6 +225,21 @@ export default function FinanceDashboard() {
         const d = new Date(dateTo);
         const ps = await financeApi.getPeriodStatus(d.getMonth() + 1, d.getFullYear());
         setPeriodLocked(!!ps?.locked);
+      } catch {
+        /* non-fatal */
+      }
+
+      // P&L breakdowns + GST reconciliation (Phase 2/3 endpoints, fail-soft).
+      try {
+        const d = new Date(dateTo);
+        const [ps2, pc2, gr2] = await Promise.allSettled([
+          financeApi.getPnlByStore({ from_date: dateFrom, to_date: dateTo }),
+          financeApi.getPnlByCategory({ from_date: dateFrom, to_date: dateTo, store_id: storeId }),
+          financeApi.getGstReconciliation({ month: d.getMonth() + 1, year: d.getFullYear() }),
+        ]);
+        setPnlByStore(ps2.status === 'fulfilled' ? (ps2.value?.stores || []) : []);
+        setPnlByCategory(pc2.status === 'fulfilled' ? (pc2.value?.categories || []) : []);
+        setGstRecon(gr2.status === 'fulfilled' ? (gr2.value?.entities || []) : []);
       } catch {
         /* non-fatal */
       }
@@ -334,9 +352,88 @@ export default function FinanceDashboard() {
         {/* Tab Content */}
         <div className="animate-fadeIn">
           {activeTab === 'revenue-pl' && (
-            <FinanceSummary revenueData={revenueData} plStatement={plStatement} />
+            <>
+              <FinanceSummary revenueData={revenueData} plStatement={plStatement} />
+              {pnlByStore.length > 0 && (
+                <div className="card mt-4 overflow-x-auto">
+                  <div className="px-4 py-2 text-sm font-medium text-gray-700 border-b border-gray-100">P&amp;L by store</div>
+                  <table className="min-w-full text-sm">
+                    <thead className="bg-gray-50 text-gray-600"><tr>
+                      <th className="px-3 py-2 text-left">Store</th>
+                      <th className="px-3 py-2 text-right">Revenue</th>
+                      <th className="px-3 py-2 text-right">COGS</th>
+                      <th className="px-3 py-2 text-right">Expenses</th>
+                      <th className="px-3 py-2 text-right">Payroll</th>
+                      <th className="px-3 py-2 text-right">Net</th>
+                    </tr></thead>
+                    <tbody>
+                      {pnlByStore.map((s) => (
+                        <tr key={s.store_id} className="border-t border-gray-100">
+                          <td className="px-3 py-2">{s.store_id}</td>
+                          <td className="px-3 py-2 text-right">₹{Math.round(s.revenue || 0).toLocaleString('en-IN')}</td>
+                          <td className="px-3 py-2 text-right">₹{Math.round(s.cogs || 0).toLocaleString('en-IN')}</td>
+                          <td className="px-3 py-2 text-right">₹{Math.round(s.expenses || 0).toLocaleString('en-IN')}</td>
+                          <td className="px-3 py-2 text-right">₹{Math.round(s.payroll || 0).toLocaleString('en-IN')}</td>
+                          <td className="px-3 py-2 text-right font-semibold">₹{Math.round(s.net_profit || 0).toLocaleString('en-IN')}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+              {pnlByCategory.length > 0 && (
+                <div className="card mt-4 overflow-x-auto">
+                  <div className="px-4 py-2 text-sm font-medium text-gray-700 border-b border-gray-100">P&amp;L by category</div>
+                  <table className="min-w-full text-sm">
+                    <thead className="bg-gray-50 text-gray-600"><tr>
+                      <th className="px-3 py-2 text-left">Category</th>
+                      <th className="px-3 py-2 text-right">Revenue</th>
+                      <th className="px-3 py-2 text-right">COGS</th>
+                      <th className="px-3 py-2 text-right">Gross profit</th>
+                    </tr></thead>
+                    <tbody>
+                      {pnlByCategory.map((c) => (
+                        <tr key={c.category} className="border-t border-gray-100">
+                          <td className="px-3 py-2">{c.category}</td>
+                          <td className="px-3 py-2 text-right">₹{Math.round(c.revenue || 0).toLocaleString('en-IN')}</td>
+                          <td className="px-3 py-2 text-right">₹{Math.round(c.cogs || 0).toLocaleString('en-IN')}</td>
+                          <td className="px-3 py-2 text-right font-semibold">₹{Math.round(c.gross_profit || 0).toLocaleString('en-IN')}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </>
           )}
-          {activeTab === 'gst' && <GSTPanel gstSummary={gstSummary} />}
+          {activeTab === 'gst' && (
+            <>
+              <GSTPanel gstSummary={gstSummary} />
+              {gstRecon.length > 0 && (
+                <div className="card mt-4 overflow-x-auto">
+                  <div className="px-4 py-2 text-sm font-medium text-gray-700 border-b border-gray-100">GST reconciliation by entity (file via Tally)</div>
+                  <table className="min-w-full text-sm">
+                    <thead className="bg-gray-50 text-gray-600"><tr>
+                      <th className="px-3 py-2 text-left">Entity</th>
+                      <th className="px-3 py-2 text-right">GST collected</th>
+                      <th className="px-3 py-2 text-right">Input credit</th>
+                      <th className="px-3 py-2 text-right">Net payable</th>
+                    </tr></thead>
+                    <tbody>
+                      {gstRecon.map((e, i) => (
+                        <tr key={i} className="border-t border-gray-100">
+                          <td className="px-3 py-2">{e.entity_name}</td>
+                          <td className="px-3 py-2 text-right">₹{Math.round(e.gst_collected || 0).toLocaleString('en-IN')}</td>
+                          <td className="px-3 py-2 text-right">₹{Math.round(e.input_credit || 0).toLocaleString('en-IN')}</td>
+                          <td className="px-3 py-2 text-right font-semibold">₹{Math.round(e.net_payable || 0).toLocaleString('en-IN')}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </>
+          )}
           {activeTab === 'outstanding' && (
             <OutstandingPanel outstanding={outstanding} vendorPayments={vendorPayments} />
           )}
