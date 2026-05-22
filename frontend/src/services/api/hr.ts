@@ -245,11 +245,31 @@ export const tasksApi = {
     return response.data;
   },
 
-  // Reassign a task
-  reassignTask: async (taskId: string, newAssignee: string) => {
-    const response = await api.post(`/tasks/${taskId}/reassign`, null, {
-      params: { new_assignee: newAssignee }
+  // Reassign a task. Backend expects a JSON body { assigned_to, reason }.
+  reassignTask: async (taskId: string, newAssignee: string, reason?: string) => {
+    const response = await api.post(`/tasks/${taskId}/reassign`, {
+      assigned_to: newAssignee,
+      reason,
     });
+    return response.data;
+  },
+
+  // --- SLA config (Phase 2) ----------------------------------------
+  // Per-priority escalation SLA matrix (Standard default + admin overrides).
+  getSlaConfig: async () => {
+    const response = await api.get('/tasks/sla-config');
+    return response.data as {
+      matrix: Record<string, { ack_minutes: number; grace_minutes: number }>;
+      is_default: boolean;
+      updated_at?: string | null;
+      updated_by?: string | null;
+    };
+  },
+
+  updateSlaConfig: async (
+    matrix: Record<string, { ack_minutes: number; grace_minutes: number }>,
+  ) => {
+    const response = await api.put('/tasks/sla-config', { matrix });
     return response.data;
   },
 };

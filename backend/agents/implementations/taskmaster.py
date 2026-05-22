@@ -81,22 +81,51 @@ class TaskmasterAgent(JarvisAgent):
         self._actions_taken += len(actions)
 
     async def _escalate_overdue_tasks(self) -> List[Dict[str, Any]]:
-        """Flag SLA-breached tasks as ESCALATED. Tier 1 auto-act.
+        """Escalate SLA-breached tasks UP the role ladder. Tier 1 auto-act.
 
-        Uses the shared pure SLA check (services.task_sla.should_escalate) so
-        the 5-minute agent tick and the /tasks/auto-escalate-overdue endpoint
-        make the exact same decision. The candidate set is every non-terminal,
-        not-yet-escalated task (tolerant of legacy lowercase status); the
-        per-priority ack + overdue-grace clocks are applied in Python."""
+        Uses the shared pure SLA check (services.task_sla.should_escalate) and
+        the shared role-ladder resolver (services.task_escalation) so the
+        5-minute agent tick and the /tasks/auto-escalate-overdue endpoint make
+        the exact same decision AND pick the same next owner. Honours any
+        persisted SLA overrides (task_sla_config). Reassigns ownership to the
+        resolved manager (Store Manager -> Area Manager -> Admin -> Superadmin),
+        scoped to the task's store."""
         coll = self.get_collection("tasks")
         if coll is None:
             return []
         # Lazy import (matches nexus.py) -- `api.*` is on path at runtime.
         try:
-            from api.services.task_sla import should_escalate
+            from api.services.task_sla import should_escalate, DEFAULT_SLA
+            from api.services.task_escalation import resolve_escalation_target
         except Exception as e:
-            logger.debug(f"[TASKMASTER] SLA module import failed: {e}")
+            logger.debug(f"[TASKMASTER] escalation modules import failed: {e}")
             return []
+
+        users_coll = self.get_collection("users")
+
+        def _find_by_role(role, sid):
+            if users_coll is None:
+                return []
+            q = {"roles": role, "is_active": True}
+            if sid:
+                q["store_ids"] = sid
+            try:
+                return list(users_coll.find(q))
+            except Exception:
+                return []
+
+        # Load persisted SLA overrides (if any), merged onto the Standard matrix.
+        sla_cfg = None
+        cfg_coll = self.get_collection("task_sla_config")
+        if cfg_coll is not None:
+            try:
+                doc = cfg_coll.find_one({"config_id": "global"}, {"_id": 0})
+                overrides = (doc or {}).get("matrix") or {}
+                if overrides:
+                    sla_cfg = {p: {**DEFAULT_SLA[p], **(overrides.get(p) or {})} for p in DEFAULT_SLA}
+            except Exception:
+                sla_cfg = None
+
         actions = []
         try:
             now = datetime.now()
@@ -104,23 +133,53 @@ class TaskmasterAgent(JarvisAgent):
                 "status": {"$in": ["OPEN", "IN_PROGRESS", "open", "in_progress"]},
             }).limit(200))
             for task in candidates:
-                flag, reason = should_escalate(task, now=now)
+                flag, reason = should_escalate(task, now=now, sla_config=sla_cfg)
                 if not flag:
                     continue
                 new_level = task.get("escalation_level", 0) + 1
                 before = {
                     "status": task.get("status"),
+                    "assigned_to": task.get("assigned_to"),
                     "escalation_level": task.get("escalation_level", 0),
                 }
-                after = {
+                assignee = None
+                if task.get("assigned_to") and users_coll is not None:
+                    try:
+                        assignee = users_coll.find_one({"user_id": task.get("assigned_to")})
+                    except Exception:
+                        assignee = None
+                target = resolve_escalation_target(
+                    _find_by_role, task.get("store_id"),
+                    assignee or {"user_id": task.get("assigned_to")},
+                )
+                set_fields = {
                     "status": "ESCALATED",
                     "escalation_level": new_level,
                     "escalation_reason": reason,
+                    "escalated_at": now,
+                    "updated_at": now,
+                    "escalated_by": self.agent_id,
+                }
+                history_entry = {
+                    "action": "escalated", "level": new_level, "reason": reason,
+                    "from": task.get("assigned_to"), "by": self.agent_id, "at": now,
+                }
+                if target and target.get("user_id"):
+                    set_fields["assigned_to"] = target["user_id"]
+                    set_fields["escalated_to"] = target["user_id"]
+                    history_entry["to"] = target["user_id"]
+                after = {
+                    "status": "ESCALATED",
+                    "escalation_level": new_level,
+                    "assigned_to": set_fields.get("assigned_to", task.get("assigned_to")),
                 }
                 try:
                     coll.update_one(
                         {"_id": task["_id"]},
-                        {"$set": {**after, "escalated_at": now, "updated_at": now, "escalated_by": self.agent_id}}
+                        {
+                            "$set": set_fields,
+                            "$push": {"history": history_entry},
+                        },
                     )
                     await self._audit_log(
                         action="task_escalation",
@@ -129,7 +188,12 @@ class TaskmasterAgent(JarvisAgent):
                         after=after,
                         tier=1,
                     )
-                    actions.append({"action": "task_escalated", "task_id": task.get("task_id"), "reason": reason})
+                    actions.append({
+                        "action": "task_escalated",
+                        "task_id": task.get("task_id"),
+                        "reason": reason,
+                        "to": set_fields.get("assigned_to"),
+                    })
                 except Exception as e:
                     logger.warning(f"[TASKMASTER] Failed to escalate task {task.get('_id')}: {e}")
         except Exception as e:
