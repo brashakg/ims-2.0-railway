@@ -78,6 +78,7 @@ from .routers import (
     loyalty_router,
     vendor_portal_router,
     techcherry_import_router,
+    vouchers_router,
 )
 from .routers.auth import require_roles
 
@@ -760,6 +761,7 @@ app.include_router(
 app.include_router(payout_router, prefix="/api/v1/payout", tags=["Payout"])
 app.include_router(webhooks_router, prefix="/api/v1/webhooks", tags=["Webhooks"])
 app.include_router(loyalty_router, prefix="/api/v1/loyalty", tags=["Loyalty"])
+app.include_router(vouchers_router, prefix="/api/v1/vouchers", tags=["Vouchers"])
 # Vendor portal — PUBLIC, token-auth via path param. Mounted OUTSIDE the
 # JWT-protected family of routers because external lens labs hit this
 # without an IMS user account.
