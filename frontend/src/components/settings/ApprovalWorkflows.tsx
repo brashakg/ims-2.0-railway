@@ -88,126 +88,6 @@ const URGENCY_STYLES: Record<string, string> = {
 };
 
 // ============================================================================
-// Mock Data
-// ============================================================================
-
-const INITIAL_WORKFLOWS: ApprovalWorkflow[] = [
-  {
-    id: 'wf-001',
-    type: 'DISCOUNT_APPROVAL',
-    name: 'Discount Approval',
-    description:
-      'Requires manager approval when a discount exceeds the configured threshold. Prevents unauthorized heavy discounting on optical products and lenses.',
-    isEnabled: true,
-    thresholdType: 'PERCENTAGE',
-    thresholdValue: 15,
-    approverRoles: ['ADMIN', 'STORE_MANAGER'],
-    escalationTimeout: 2,
-    notifyOnRequest: true,
-    notifyOnApproval: true,
-  },
-  {
-    id: 'wf-002',
-    type: 'REFUND_APPROVAL',
-    name: 'Refund Approval',
-    description:
-      'All refund requests must be approved by an authorized manager before processing. Applies to both cash and digital payment refunds.',
-    isEnabled: true,
-    thresholdType: 'ALWAYS',
-    thresholdValue: undefined,
-    approverRoles: ['ADMIN', 'STORE_MANAGER', 'ACCOUNTANT'],
-    escalationTimeout: 4,
-    notifyOnRequest: true,
-    notifyOnApproval: true,
-  },
-  {
-    id: 'wf-003',
-    type: 'PO_APPROVAL',
-    name: 'Purchase Order Approval',
-    description:
-      'Purchase orders exceeding the configured amount threshold require approval before being sent to the supplier. Helps control procurement spend.',
-    isEnabled: true,
-    thresholdType: 'AMOUNT',
-    thresholdValue: 50000,
-    approverRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER'],
-    escalationTimeout: 8,
-    notifyOnRequest: true,
-    notifyOnApproval: false,
-  },
-  {
-    id: 'wf-004',
-    type: 'STOCK_ADJUSTMENT',
-    name: 'Stock Write-off Approval',
-    description:
-      'Stock write-offs and manual adjustments (damage, expiry, loss) require approval to maintain inventory accuracy and prevent shrinkage.',
-    isEnabled: false,
-    thresholdType: 'ALWAYS',
-    thresholdValue: undefined,
-    approverRoles: ['ADMIN', 'STORE_MANAGER'],
-    escalationTimeout: 24,
-    notifyOnRequest: true,
-    notifyOnApproval: false,
-  },
-  {
-    id: 'wf-005',
-    type: 'CREDIT_SALE',
-    name: 'Credit Sale Approval',
-    description:
-      'Credit sales (pay-later transactions) require manager approval. Ensures credit is only extended to verified customers with proper documentation.',
-    isEnabled: false,
-    thresholdType: 'AMOUNT',
-    thresholdValue: 5000,
-    approverRoles: ['ADMIN', 'STORE_MANAGER', 'ACCOUNTANT'],
-    escalationTimeout: 1,
-    notifyOnRequest: true,
-    notifyOnApproval: true,
-  },
-];
-
-const INITIAL_PENDING_APPROVALS: PendingApproval[] = [
-  {
-    id: 'pa-001',
-    workflowType: 'DISCOUNT_APPROVAL',
-    description: 'Discount of 25% on Order #ORD-1087',
-    requestedBy: 'Rahul Sharma (Cashier)',
-    requestedAt: '2026-02-07T09:30:00',
-    details:
-      'Customer requested bulk discount on 3 pairs of Titan Eyeplus frames + CR-39 lenses. Total order value: \u20B918,450. Discount amount: \u20B94,612.',
-    urgency: 'MEDIUM',
-  },
-  {
-    id: 'pa-002',
-    workflowType: 'REFUND_APPROVAL',
-    description: 'Full refund for Order #ORD-1052 - \u20B93,200',
-    requestedBy: 'Priya Patel (Sales Staff)',
-    requestedAt: '2026-02-07T08:15:00',
-    details:
-      'Customer returned Ray-Ban prescription sunglasses due to incorrect power. Lens power mismatch confirmed by optometrist. Original payment via UPI.',
-    urgency: 'HIGH',
-  },
-  {
-    id: 'pa-003',
-    workflowType: 'PO_APPROVAL',
-    description: 'Purchase Order #PO-2041 to Essilor India - \u20B91,25,000',
-    requestedBy: 'Amit Kumar (Store Manager)',
-    requestedAt: '2026-02-06T16:45:00',
-    details:
-      'Monthly restock of Crizal and Varilux lenses. 50 pairs Crizal Sapphire UV, 30 pairs Varilux Comfort. Supplier: Essilor India Pvt Ltd.',
-    urgency: 'LOW',
-  },
-  {
-    id: 'pa-004',
-    workflowType: 'DISCOUNT_APPROVAL',
-    description: 'Discount of 20% on Order #ORD-1092',
-    requestedBy: 'Sneha Reddy (Sales Staff)',
-    requestedAt: '2026-02-07T10:05:00',
-    details:
-      'Loyalty customer (5+ purchases). Requested discount on Oakley sports frames + photochromic lenses combo. Order value: \u20B912,800.',
-    urgency: 'MEDIUM',
-  },
-];
-
-// ============================================================================
 // Helper Functions
 // ============================================================================
 
@@ -661,10 +541,9 @@ function WorkflowCard({
 
 export function ApprovalWorkflows() {
   const toast = useToast();
-  const [workflows, setWorkflows] = useState<ApprovalWorkflow[]>(INITIAL_WORKFLOWS);
+  const [workflows, setWorkflows] = useState<ApprovalWorkflow[]>([]);
   const [loadingWorkflows, setLoadingWorkflows] = useState(true);
-  const [pendingApprovals, setPendingApprovals] =
-    useState<PendingApproval[]>(INITIAL_PENDING_APPROVALS);
+  const [pendingApprovals, setPendingApprovals] = useState<PendingApproval[]>([]);
 
   // Load workflows from backend on mount
   useEffect(() => {
@@ -678,7 +557,7 @@ export function ApprovalWorkflows() {
         }
       })
       .catch(() => {
-        // Fall back to INITIAL_WORKFLOWS already set
+        // On failure, workflows stays empty (no fabricated fallback)
       })
       .finally(() => {
         if (!cancelled) setLoadingWorkflows(false);
@@ -740,28 +619,6 @@ export function ApprovalWorkflows() {
 
   return (
     <div className="space-y-6">
-      {/* Demo data banner — approval workflows panel renders sample
-          rules + sample pending approvals until the backend surface
-          (configurable rules + queue) is wired. The render structure
-          stays so the design stays reviewable; numbers + names are
-          illustrative. */}
-      <div
-        style={{
-          padding: '10px 14px',
-          background: 'var(--warn-50)',
-          border: '1px solid var(--warn-50)',
-          borderRadius: 8,
-          fontSize: 12.5,
-          color: 'var(--warn)',
-          display: 'flex',
-          alignItems: 'center',
-          gap: 8,
-        }}
-      >
-        <AlertTriangle className="w-4 h-4" />
-        <span><strong>Sample data shown</strong> — approval workflow rules + pending queue are not yet backend-wired. Edits here don't persist; numbers are illustrative.</span>
-      </div>
-
       {/* Summary Stats */}
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
         <div className="flex items-center gap-3 p-4 bg-white border border-gray-200 rounded-lg shadow-sm">
@@ -811,12 +668,7 @@ export function ApprovalWorkflows() {
       )}
 
       {pendingApprovals.length === 0 && (
-        <div className="flex items-center gap-3 p-4 bg-green-50 border border-green-200 rounded-lg">
-          <ShieldCheck className="w-5 h-5 text-green-600 shrink-0" />
-          <p className="text-sm text-green-700">
-            All caught up -- no pending approvals at the moment.
-          </p>
-        </div>
+        <div className="text-center text-gray-500 py-8 text-sm">No pending approvals.</div>
       )}
 
       {/* Workflow Rules Section */}
