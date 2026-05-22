@@ -200,6 +200,10 @@ async def create_customer(
             "customer_type": customer.customer_type,
             "name": customer.name,
             "mobile": customer.mobile,
+            # Canonical alias for the phone concept (imported customers store it
+            # under `phone`). Written alongside `mobile` so new customers are
+            # discoverable by either key and we can later drop the read-side $or.
+            "phone": customer.mobile,
             "email": customer.email,
             "dob": customer.dob.isoformat() if customer.dob else None,
             "anniversary": (
@@ -209,6 +213,9 @@ async def create_customer(
             "billing_address": customer.billing_address,
             "marketing_consent": customer.marketing_consent,
             "home_store_id": current_user.get("active_store_id"),
+            # Canonical alias for the store reference (imported customers store
+            # it under `preferred_store_id`); mirrors `home_store_id`.
+            "preferred_store_id": current_user.get("active_store_id"),
             "loyalty_points": 0,
             "store_credit": 0,
             "total_purchases": 0,
