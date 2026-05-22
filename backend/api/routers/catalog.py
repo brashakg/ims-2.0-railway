@@ -12,10 +12,11 @@ from datetime import datetime
 from enum import Enum
 import uuid
 
-from .auth import get_current_user
+from .auth import get_current_user, require_roles
 from ..services.online_catalog import (
     online_status_for_skus,
     online_summary,
+    reconcile_store_barcodes,
 )
 
 router = APIRouter()
@@ -45,6 +46,26 @@ async def get_online_status(
 async def get_online_summary(current_user: dict = Depends(get_current_user)):
     """Diagnostic: is the e-commerce catalog DB configured/reachable + counts."""
     return online_summary()
+
+
+class ReconcileBarcodesBody(BaseModel):
+    # { sku: barcode } from the store's master spreadsheet.
+    pairs: Dict[str, Union[str, int, float]] = Field(default_factory=dict)
+    apply: bool = False  # dry-run unless explicitly applied
+    only_empty: bool = True  # never overwrite an existing storeBarcode
+
+
+@router.post("/reconcile-store-barcodes")
+async def reconcile_store_barcodes_ep(
+    body: ReconcileBarcodesBody,
+    current_user: dict = Depends(require_roles("SUPERADMIN")),
+):
+    """One-time SUPERADMIN reconciliation: fill the e-commerce catalog's
+    storeBarcode from a SKU->barcode map (the store master sheet). Dry-run by
+    default; writes only the storeBarcode column, only where it's empty."""
+    return reconcile_store_barcodes(
+        body.pairs, apply=body.apply, only_empty=body.only_empty
+    )
 
 
 # ============================================================================

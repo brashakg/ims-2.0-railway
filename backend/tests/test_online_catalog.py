@@ -14,11 +14,33 @@ os.environ.setdefault("MONGODB_URI", "")
 os.environ.pop("ECOMMERCE_DATABASE_URL", None)
 
 from api.services.online_catalog import (  # noqa: E402
+    clean_barcode,
     ecommerce_db_configured,
     map_rows,
     normalize_sku,
     online_status_for_skus,
+    reconcile_store_barcodes,
 )
+
+
+def test_clean_barcode_strips_excel_float_and_filters_junk():
+    assert clean_barcode("00050567") == "00050567"        # plain store code
+    assert clean_barcode("8056597004466") == "8056597004466"  # 13-digit EAN
+    assert clean_barcode("77017701.0") == "77017701"      # Excel float artifact
+    assert clean_barcode("  00040566 ") == "00040566"     # trimmed
+    assert clean_barcode("SHEET") == ""                    # junk -> dropped
+    assert clean_barcode("ACETATE") == ""
+    assert clean_barcode("") == ""
+    assert clean_barcode(None) == ""
+    assert clean_barcode("12") == ""                       # too short (<4)
+
+
+def test_reconcile_failsoft_when_unconfigured():
+    # No ECOMMERCE_DATABASE_URL -> never raises; dry-run returns safely.
+    out = reconcile_store_barcodes({"SKU1": "00012345"}, apply=False)
+    assert isinstance(out, dict)
+    # Either unreachable (no conn) or zero work — but never an exception.
+    assert "error" in out or out.get("applied") is False
 
 
 def test_normalize_sku():
