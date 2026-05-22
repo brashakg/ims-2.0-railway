@@ -4,6 +4,7 @@
 
 import { useState } from 'react';
 import { usePOSStore } from '../../stores/posStore';
+import { vouchersApi } from '../../services/api/vouchers';
 import { Gift, X, Loader2, AlertCircle } from 'lucide-react';
 
 interface VoucherRedemptionProps {
@@ -26,49 +27,39 @@ export function VoucherRedemption({ onVoucherApplied }: VoucherRedemptionProps) 
     setError(null);
 
     try {
-      // Mock voucher validation - in production, call API
-      // For now: validate basic format and mock some codes
-      const mockVouchers: Record<string, { amount: number; valid: boolean; expiry: string }> = {
-        'GIFT100': { amount: 100, valid: true, expiry: '2026-12-31' },
-        'GIFT500': { amount: 500, valid: true, expiry: '2026-12-31' },
-        'WELCOME50': { amount: 50, valid: true, expiry: '2026-06-30' },
-      };
+      // Validate against the real voucher backend (read-only — the actual
+      // redeem/decrement happens server-side when the payment is recorded
+      // on the order, so an abandoned sale never burns a card).
+      const code = voucherCode.trim().toUpperCase();
+      const v = await vouchersApi.validate(code);
 
-      const voucher = mockVouchers[voucherCode.toUpperCase()];
-      
-      if (!voucher) {
-        setError('Voucher code not found or expired');
+      if (!v.valid) {
+        setError(v.reason || 'Voucher not valid');
         setIsValidating(false);
         return;
       }
 
-      const now = new Date();
-      const expiry = new Date(voucher.expiry);
-      
-      if (now > expiry) {
-        setError('Voucher has expired');
-        setIsValidating(false);
-        return;
-      }
+      // Apply only up to the order total; the rest stays on the card.
+      const balance = v.balance ?? 0;
+      const discountAmount = Math.min(balance, store.getGrandTotal());
+      store.applyVoucher(code, discountAmount);
 
-      // Apply voucher
-      const discountAmount = Math.min(voucher.amount, store.getGrandTotal());
-      store.applyVoucher(voucherCode.toUpperCase(), discountAmount);
-      
-      // Add voucher as payment method
+      // Record the voucher as a GIFT_VOUCHER payment so the backend
+      // recognizes it and redeems the card at payment time.
       store.addPayment({
-        method: 'VOUCHER',
+        method: 'GIFT_VOUCHER',
         amount: discountAmount,
-        reference: voucherCode.toUpperCase(),
-        voucherCode: voucherCode.toUpperCase(),
-        voucherAmount: voucher.amount,
+        reference: code,
+        voucherCode: code,
+        voucherAmount: balance,
       });
 
       setVoucherCode('');
       onVoucherApplied?.(discountAmount);
       setIsValidating(false);
-    } catch {
-      setError('Failed to validate voucher. Please try again.');
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Failed to validate voucher. Please try again.';
+      setError(message);
       setIsValidating(false);
     }
   };

@@ -328,6 +328,10 @@ class PaymentCreate(BaseModel):
     method: PaymentMethod = Field(..., validation_alias="method")
     amount: float = Field(..., gt=0)
     reference: Optional[str] = None
+    # Gift-voucher code (only used when method=GIFT_VOUCHER). The POS sends
+    # both `reference` and `voucher_code` set to the card code; we prefer
+    # this explicit field and fall back to `reference` for older callers.
+    voucher_code: Optional[str] = None
     # EMI-specific fields (only required when method=EMI)
     emi_months: Optional[int] = Field(None, ge=3, le=24)
     emi_provider: Optional[str] = None  # e.g., "BAJAJ", "HDFC", "ICICI"
@@ -1198,6 +1202,35 @@ async def add_payment(
                 status_code=400,
                 detail=f"Payment amount exceeds balance due (₹{balance_due})",
             )
+
+        # Gift voucher: REDEEM (decrement the card) before recording the
+        # payment, so an abandoned sale never burns a card and there is no
+        # client-side double-spend. The atomic redeem is the single source
+        # of truth for spend rules + concurrency safety (see vouchers.py).
+        # On failure nothing is recorded; on success we fall through to the
+        # normal payment-recording path unchanged.
+        if payment.method == PaymentMethod.GIFT_VOUCHER:
+            from .vouchers import redeem_voucher_atomic
+
+            voucher_code = (payment.voucher_code or payment.reference or "").strip()
+            if not voucher_code:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Voucher: a voucher code is required for GIFT_VOUCHER payments",
+                )
+            from ..dependencies import get_seeded_db
+
+            result = redeem_voucher_atomic(
+                get_seeded_db(),
+                voucher_code,
+                payment.amount,
+                order_id,
+                current_user.get("user_id"),
+            )
+            if not result.get("ok"):
+                raise HTTPException(
+                    status_code=400, detail=f"Voucher: {result.get('reason')}"
+                )
 
         # EMI validation and interest calculation
         emi_details = None
