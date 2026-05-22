@@ -224,7 +224,12 @@ class TestHttpGatesAndFailSoft:
         assert resp.status_code == 200
         assert resp.json()["valid"] is False
 
-    def test_issue_dbless_returns_empty(self, client, auth_headers):
+    def test_issue_dbless_returns_empty(self, client, auth_headers, monkeypatch):
+        # Force the genuinely DB-less path. CI runs the app in stub mode where
+        # the db object is truthy (so a write "succeeds" against the stub), so
+        # pin _get_db to None to deterministically exercise the fail-soft
+        # branch in both local and CI.
+        monkeypatch.setattr(vouchers_module, "_get_db", lambda: None)
         resp = client.post(
             "/api/v1/vouchers", json={"amount": 500}, headers=auth_headers
         )
