@@ -1,103 +1,74 @@
 // ============================================================================
 // IMS 2.0 - Referral Tracker
 // ============================================================================
-// Referral codes, chain tracking, rewards, leaderboard, analytics
+// Referral codes, chain tracking, rewards. Wired to GET /marketing/referrals
+// (store-scoped). Aggregates (totals, leaderboard) are derived from the real
+// referral records returned by the backend — no fabricated numbers.
 
-import { useState } from 'react';
-import { Share2, Gift, Copy, Check, Trophy, Award, AlertCircle } from 'lucide-react';
+import { useState, useEffect } from 'react';
+import { Share2, Gift, Copy, Check, Trophy } from 'lucide-react';
 import clsx from 'clsx';
+import { useAuth } from '../../context/AuthContext';
+import { useToast } from '../../context/ToastContext';
+import { marketingApi } from '../../services/api/marketing';
 
-interface Referrer {
-  id: string;
+// Shape of a referral record as returned by GET /marketing/referrals.
+interface Referral {
+  referral_id: string;
+  store_id?: string;
+  referrer_customer_id?: string;
+  referrer_name?: string;
+  referrer_phone?: string;
+  referral_code?: string;
+  referee_customer_id?: string | null;
+  referee_name?: string | null;
+  status?: string; // INVITED | REWARD_CREDITED | ...
+  reward_amount?: number;
+  invite_sent_at?: string | null;
+  reward_credited_at?: string | null;
+  created_at?: string;
+}
+
+// A referrer aggregated from the real referral records (leaderboard).
+interface ReferrerSummary {
   name: string;
   code: string;
   referrals: number;
   earnings: number;
-  topReward?: string;
 }
 
-interface Referral {
-  id: string;
-  referrer: string;
-  referred: string;
-  date: string;
-  status: 'pending' | 'confirmed';
-  reward: number;
+const REWARDED_STATUSES = new Set(['REWARD_CREDITED', 'CONFIRMED', 'COMPLETED']);
+
+function isRewarded(status?: string): boolean {
+  return !!status && REWARDED_STATUSES.has(status.toUpperCase());
 }
-
-const REFERRERS: Referrer[] = [
-  {
-    id: '1',
-    name: 'Rajesh Kumar',
-    code: 'RAJ2024',
-    referrals: 24,
-    earnings: 12000,
-    topReward: 'Gold Tier',
-  },
-  {
-    id: '2',
-    name: 'Priya Sharma',
-    code: 'PRIYA123',
-    referrals: 18,
-    earnings: 9000,
-    topReward: 'Silver Tier',
-  },
-  {
-    id: '3',
-    name: 'Amit Patel',
-    code: 'AMIT456',
-    referrals: 15,
-    earnings: 7500,
-    topReward: 'Silver Tier',
-  },
-  {
-    id: '4',
-    name: 'Sunita Singh',
-    code: 'SUNI789',
-    referrals: 12,
-    earnings: 6000,
-    topReward: 'Silver Tier',
-  },
-  {
-    id: '5',
-    name: 'Vikram Desai',
-    code: 'VIK2025',
-    referrals: 8,
-    earnings: 4000,
-    topReward: 'Bronze Tier',
-  },
-];
-
-const REFERRAL_HISTORY: Referral[] = [
-  {
-    id: '1',
-    referrer: 'Rajesh Kumar',
-    referred: 'Neha Singh',
-    date: '2024-02-01',
-    status: 'confirmed',
-    reward: 500,
-  },
-  {
-    id: '2',
-    referrer: 'Priya Sharma',
-    referred: 'Akshay Gupta',
-    date: '2024-01-28',
-    status: 'confirmed',
-    reward: 500,
-  },
-  {
-    id: '3',
-    referrer: 'Rajesh Kumar',
-    referred: 'Anjali Verma',
-    date: '2024-01-25',
-    status: 'pending',
-    reward: 0,
-  },
-];
 
 export function ReferralTracker() {
-  const [activeTab, setActiveTab] = useState<'overview' | 'leaderboard' | 'history' | 'rewards'>('overview');
+  const { user } = useAuth();
+  const toast = useToast();
+  const [activeTab, setActiveTab] = useState<'overview' | 'leaderboard' | 'history'>('overview');
   const [copiedCode, setCopiedCode] = useState<string | null>(null);
+  const [referrals, setReferrals] = useState<Referral[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    loadReferrals();
+    // Refetch when the active store changes so referrals follow the switcher.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.activeStoreId]);
+
+  const loadReferrals = async () => {
+    setLoading(true);
+    try {
+      const res = await marketingApi.getReferrals(user?.activeStoreId);
+      setReferrals(Array.isArray(res?.referrals) ? res.referrals : []);
+    } catch {
+      setReferrals([]);
+      toast.error('Failed to load referral data');
+    } finally {
+      setLoading(false);
+    }
+  };
 
   const copyCode = (code: string) => {
     navigator.clipboard.writeText(code);
@@ -105,8 +76,33 @@ export function ReferralTracker() {
     setTimeout(() => setCopiedCode(null), 2000);
   };
 
-  const totalReferrals = REFERRERS.reduce((sum, r) => sum + r.referrals, 0);
-  const totalEarnings = REFERRERS.reduce((sum, r) => sum + r.earnings, 0);
+  // --- Derived aggregates (all from the real referral records) ---
+  const totalReferrals = referrals.length;
+  const confirmedReferrals = referrals.filter((r) => isRewarded(r.status));
+  const totalEarnings = confirmedReferrals.reduce((sum, r) => sum + (r.reward_amount || 0), 0);
+
+  // Build a leaderboard by grouping records on the referrer.
+  const referrerMap = new Map<string, ReferrerSummary>();
+  for (const r of referrals) {
+    const key = r.referrer_customer_id || r.referrer_name || r.referral_code || r.referral_id;
+    if (!key) continue;
+    const existing = referrerMap.get(key) || {
+      name: r.referrer_name || 'Unknown',
+      code: r.referral_code || '—',
+      referrals: 0,
+      earnings: 0,
+    };
+    existing.referrals += 1;
+    if (isRewarded(r.status)) existing.earnings += r.reward_amount || 0;
+    referrerMap.set(key, existing);
+  }
+  const referrers = Array.from(referrerMap.values()).sort((a, b) => b.referrals - a.referrals);
+
+  const confirmedCount = confirmedReferrals.length;
+  const conversionRate = totalReferrals > 0 ? Math.round((confirmedCount / totalReferrals) * 100) : 0;
+
+  const formatDate = (value?: string | null) =>
+    value ? new Date(value).toLocaleDateString() : '—';
 
   return (
     <div className="inv-body">
@@ -119,49 +115,29 @@ export function ReferralTracker() {
         </div>
       </div>
 
-      {/* Demo data banner — referrals page renders sample fixtures
-          until the backend referral surface lands. */}
-      <div
-        style={{
-          padding: '10px 14px',
-          background: 'var(--warn-50)',
-          border: '1px solid var(--warn-50)',
-          borderRadius: 8,
-          fontSize: 12.5,
-          color: 'var(--warn)',
-          marginBottom: 14,
-          display: 'flex',
-          alignItems: 'center',
-          gap: 8,
-        }}
-      >
-        <AlertCircle className="w-4 h-4" />
-        <span><strong>Sample data shown</strong> — referral tracking backend is pending. Numbers below are illustrative.</span>
-      </div>
-
       {/* Summary Stats */}
       <div className="grid grid-cols-4 gap-4">
-        <div className="bg-white rounded-lg p-4">
+        <div className="bg-white rounded-lg p-4 border border-gray-200">
           <p className="text-gray-500 text-sm mb-1">Total Referrals</p>
           <p className="text-2xl font-bold text-gray-900">{totalReferrals}</p>
         </div>
-        <div className="bg-white rounded-lg p-4">
+        <div className="bg-white rounded-lg p-4 border border-gray-200">
           <p className="text-gray-500 text-sm mb-1">Active Referrers</p>
-          <p className="text-2xl font-bold text-blue-600">{REFERRERS.length}</p>
+          <p className="text-2xl font-bold text-blue-600">{referrers.length}</p>
         </div>
-        <div className="bg-white rounded-lg p-4">
+        <div className="bg-white rounded-lg p-4 border border-gray-200">
           <p className="text-gray-500 text-sm mb-1">Total Rewards Given</p>
           <p className="text-2xl font-bold text-green-600">₹{totalEarnings.toLocaleString('en-IN')}</p>
         </div>
-        <div className="bg-white rounded-lg p-4">
+        <div className="bg-white rounded-lg p-4 border border-gray-200">
           <p className="text-gray-500 text-sm mb-1">Conversion Rate</p>
-          <p className="text-2xl font-bold text-purple-600">34%</p>
+          <p className="text-2xl font-bold text-purple-600">{conversionRate}%</p>
         </div>
       </div>
 
       {/* Tabs */}
       <div className="flex gap-2 border-b border-gray-200">
-        {(['overview', 'leaderboard', 'history', 'rewards'] as const).map((tab) => (
+        {(['overview', 'leaderboard', 'history'] as const).map((tab) => (
           <button
             key={tab}
             onClick={() => setActiveTab(tab)}
@@ -172,152 +148,162 @@ export function ReferralTracker() {
                 : 'border-transparent text-gray-500 hover:text-gray-700'
             )}
           >
-            {tab === 'overview' ? 'Overview' : tab === 'leaderboard' ? 'Leaderboard' : tab === 'history' ? 'History' : 'Rewards'}
+            {tab === 'overview' ? 'Overview' : tab === 'leaderboard' ? 'Leaderboard' : 'History'}
           </button>
         ))}
       </div>
 
-      {/* Tab Content */}
-      {activeTab === 'overview' && (
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          {/* Share Your Code */}
-          <div className="bg-white rounded-lg p-6 border border-gray-200">
-            <h3 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
-              <Share2 className="w-5 h-5" />
-              Share Your Referral Code
-            </h3>
-            <p className="text-gray-500 text-sm mb-4">
-              Share your unique code with friends and family to earn rewards on their purchases.
-            </p>
-            <div className="bg-gray-100 rounded p-4 mb-4">
-              <p className="text-gray-500 text-xs mb-2">Your Referral Code</p>
-              <div className="flex items-center gap-2">
-                <input
-                  type="text"
-                  value="RAJ2024"
-                  readOnly
-                  className="flex-1 bg-gray-600 border border-gray-500 rounded px-3 py-2 text-gray-900 font-mono"
-                />
-                <button
-                  onClick={() => copyCode('RAJ2024')}
-                  className="p-2 bg-blue-600 hover:bg-blue-700 text-white rounded transition-colors"
-                >
-                  {copiedCode === 'RAJ2024' ? <Check className="w-5 h-5" /> : <Copy className="w-5 h-5" />}
-                </button>
-              </div>
-            </div>
-            <button className="w-full py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-semibold flex items-center justify-center gap-2">
-              <Share2 className="w-4 h-4" />
-              Share Now
-            </button>
-          </div>
-
-          {/* Top Rewards */}
-          <div className="bg-white rounded-lg p-6 border border-gray-200">
-            <h3 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
-              <Gift className="w-5 h-5" />
-              Reward Tiers
-            </h3>
-            <div className="space-y-3">
-              {[
-                { level: 'Bronze', referrals: '5+', reward: '₹500' },
-                { level: 'Silver', referrals: '10+', reward: '₹1,200' },
-                { level: 'Gold', referrals: '20+', reward: '₹3,000' },
-                { level: 'Platinum', referrals: '30+', reward: '₹6,000+' },
-              ].map((tier) => (
-                <div key={tier.level} className="flex items-center justify-between p-3 bg-gray-100 rounded">
-                  <div>
-                    <p className="text-gray-900 font-semibold">{tier.level}</p>
-                    <p className="text-gray-500 text-xs">{tier.referrals} referrals</p>
+      {loading ? (
+        <div className="text-center text-gray-500 py-12 text-sm">Loading referrals…</div>
+      ) : (
+        <>
+          {/* Tab Content */}
+          {activeTab === 'overview' && (
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+              {/* Share Your Code */}
+              <div className="bg-white rounded-lg p-6 border border-gray-200">
+                <h3 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
+                  <Share2 className="w-5 h-5" />
+                  Referral Codes
+                </h3>
+                <p className="text-gray-500 text-sm mb-4">
+                  Share a customer's unique code with friends and family so they earn rewards on purchases.
+                </p>
+                {referrers.length === 0 ? (
+                  <div className="text-center text-gray-500 py-8 text-sm">
+                    No referral codes issued yet. Send a referral invite from a customer's profile to generate one.
                   </div>
-                  <p className="text-green-600 font-bold">{tier.reward}</p>
+                ) : (
+                  <div className="space-y-2">
+                    {referrers.slice(0, 5).map((ref) => (
+                      <div key={ref.code} className="bg-gray-100 rounded p-3">
+                        <p className="text-gray-500 text-xs mb-1">{ref.name}</p>
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="text"
+                            value={ref.code}
+                            readOnly
+                            className="flex-1 bg-white border border-gray-300 rounded px-3 py-2 text-gray-900 font-mono text-sm"
+                          />
+                          <button
+                            onClick={() => copyCode(ref.code)}
+                            className="p-2 bg-blue-600 hover:bg-blue-700 text-white rounded transition-colors"
+                            aria-label={`Copy ${ref.code}`}
+                          >
+                            {copiedCode === ref.code ? <Check className="w-5 h-5" /> : <Copy className="w-5 h-5" />}
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* Reward Info */}
+              <div className="bg-white rounded-lg p-6 border border-gray-200">
+                <h3 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
+                  <Gift className="w-5 h-5" />
+                  How Rewards Work
+                </h3>
+                <p className="text-gray-500 text-sm mb-4">
+                  When a referred customer completes a qualifying purchase, the reward is credited to the
+                  referrer's wallet (store credit + loyalty points) on redemption.
+                </p>
+                <div className="flex items-center justify-between p-3 bg-gray-100 rounded">
+                  <div>
+                    <p className="text-gray-900 font-semibold">Confirmed referrals</p>
+                    <p className="text-gray-500 text-xs">Rewards already credited</p>
+                  </div>
+                  <p className="text-green-600 font-bold">{confirmedCount}</p>
                 </div>
-              ))}
+                <div className="flex items-center justify-between p-3 bg-gray-100 rounded mt-2">
+                  <div>
+                    <p className="text-gray-900 font-semibold">Pending</p>
+                    <p className="text-gray-500 text-xs">Awaiting qualifying purchase</p>
+                  </div>
+                  <p className="text-gray-900 font-bold">{totalReferrals - confirmedCount}</p>
+                </div>
+              </div>
             </div>
-          </div>
-        </div>
-      )}
+          )}
 
-      {activeTab === 'leaderboard' && (
-        <div className="bg-white rounded-lg p-6 border border-gray-200">
-          <h3 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
-            <Trophy className="w-5 h-5" />
-            Top Referrers
-          </h3>
-          <div className="space-y-3">
-            {REFERRERS.map((referrer, idx) => (
-              <div key={referrer.id} className="flex items-center gap-4 p-4 bg-gray-100 rounded-lg hover:bg-gray-200 transition-colors">
-                <div className={clsx(
-                  'w-10 h-10 rounded-full flex items-center justify-center font-bold text-gray-900',
-                  idx === 0 ? 'bg-yellow-600' : idx === 1 ? 'bg-gray-500' : idx === 2 ? 'bg-orange-600' : 'bg-gray-100 border border-gray-200'
-                )}>
-                  {idx === 0 ? '🥇' : idx === 1 ? '🥈' : idx === 2 ? '🥉' : idx + 1}
+          {activeTab === 'leaderboard' && (
+            <div className="bg-white rounded-lg p-6 border border-gray-200">
+              <h3 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
+                <Trophy className="w-5 h-5" />
+                Top Referrers
+              </h3>
+              {referrers.length === 0 ? (
+                <div className="text-center text-gray-500 py-8 text-sm">No referrers yet.</div>
+              ) : (
+                <div className="space-y-3">
+                  {referrers.map((referrer, idx) => (
+                    <div key={referrer.code + idx} className="flex items-center gap-4 p-4 bg-gray-100 rounded-lg hover:bg-gray-200 transition-colors">
+                      <div className={clsx(
+                        'w-10 h-10 rounded-full flex items-center justify-center font-bold text-gray-900',
+                        idx === 0 ? 'bg-yellow-400' : idx === 1 ? 'bg-gray-300' : idx === 2 ? 'bg-orange-400' : 'bg-white border border-gray-200'
+                      )}>
+                        {idx + 1}
+                      </div>
+                      <div className="flex-1">
+                        <p className="text-gray-900 font-semibold">{referrer.name}</p>
+                        <p className="text-gray-500 text-xs">Code: {referrer.code}</p>
+                      </div>
+                      <div className="text-right">
+                        <p className="text-gray-900 font-bold">{referrer.referrals}</p>
+                        <p className="text-gray-500 text-xs">referrals</p>
+                      </div>
+                      <div className="text-right min-w-fit">
+                        <p className="text-green-600 font-bold">₹{referrer.earnings.toLocaleString('en-IN')}</p>
+                        <p className="text-gray-500 text-xs">earned</p>
+                      </div>
+                    </div>
+                  ))}
                 </div>
-                <div className="flex-1">
-                  <p className="text-gray-900 font-semibold">{referrer.name}</p>
-                  <p className="text-gray-500 text-xs">Code: {referrer.code}</p>
-                </div>
-                <div className="text-right">
-                  <p className="text-gray-900 font-bold">{referrer.referrals}</p>
-                  <p className="text-gray-500 text-xs">referrals</p>
-                </div>
-                <div className="text-right min-w-fit">
-                  <p className="text-green-600 font-bold">₹{referrer.earnings}</p>
-                  <p className="text-gray-500 text-xs">earned</p>
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
+              )}
+            </div>
+          )}
 
-      {activeTab === 'history' && (
-        <div className="bg-white rounded-lg p-6 border border-gray-200">
-          <h3 className="text-lg font-semibold text-gray-900 mb-4">Referral History</h3>
-          <div className="space-y-3">
-            {REFERRAL_HISTORY.map((referral) => (
-              <div key={referral.id} className="flex items-center justify-between p-4 bg-gray-100 rounded-lg">
-                <div>
-                  <p className="text-gray-900 font-semibold">{referral.referrer} → {referral.referred}</p>
-                  <p className="text-gray-500 text-xs">{new Date(referral.date).toLocaleDateString()}</p>
+          {activeTab === 'history' && (
+            <div className="bg-white rounded-lg p-6 border border-gray-200">
+              <h3 className="text-lg font-semibold text-gray-900 mb-4">Referral History</h3>
+              {referrals.length === 0 ? (
+                <div className="text-center text-gray-500 py-8 text-sm">No referrals yet.</div>
+              ) : (
+                <div className="space-y-3">
+                  {referrals.map((referral) => {
+                    const confirmed = isRewarded(referral.status);
+                    return (
+                      <div key={referral.referral_id} className="flex items-center justify-between p-4 bg-gray-100 rounded-lg">
+                        <div>
+                          <p className="text-gray-900 font-semibold">
+                            {referral.referrer_name || 'Unknown'}
+                            {referral.referee_name ? ` → ${referral.referee_name}` : ''}
+                          </p>
+                          <p className="text-gray-500 text-xs">
+                            {referral.referral_code ? `${referral.referral_code} · ` : ''}
+                            {formatDate(referral.created_at)}
+                          </p>
+                        </div>
+                        <div className="flex items-center gap-3">
+                          <span className={clsx(
+                            'px-2 py-1 rounded text-xs font-semibold',
+                            confirmed ? 'bg-green-50 text-green-700' : 'bg-yellow-50 text-yellow-700'
+                          )}>
+                            {confirmed ? 'Confirmed' : 'Pending'}
+                          </span>
+                          <p className="text-green-600 font-bold min-w-fit">
+                            +₹{(confirmed ? referral.reward_amount || 0 : 0).toLocaleString('en-IN')}
+                          </p>
+                        </div>
+                      </div>
+                    );
+                  })}
                 </div>
-                <div className="flex items-center gap-3">
-                  <span className={clsx(
-                    'px-2 py-1 rounded text-xs font-semibold',
-                    referral.status === 'confirmed' ? 'bg-green-50 text-green-700' : 'bg-yellow-50 text-yellow-700'
-                  )}>
-                    {referral.status === 'confirmed' ? 'Confirmed' : 'Pending'}
-                  </span>
-                  <p className="text-green-600 font-bold min-w-fit">+₹{referral.reward}</p>
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {activeTab === 'rewards' && (
-        <div className="space-y-4">
-          <div className="bg-blue-50 border border-blue-700 rounded-lg p-4">
-            <p className="text-blue-700 text-sm flex items-center gap-2">
-              <Award className="w-4 h-4" />
-              Reward structure: ₹500 per confirmed referral + tier bonuses
-            </p>
-          </div>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {[
-              { name: 'Direct Referral', value: '₹500' },
-              { name: 'Bronze Tier Bonus', value: '₹500' },
-              { name: 'Silver Tier Bonus', value: '₹2,000' },
-              { name: 'Gold Tier Bonus', value: '₹5,000' },
-            ].map((reward) => (
-              <div key={reward.name} className="bg-white rounded-lg p-4 border border-gray-200">
-                <p className="text-gray-500 text-sm mb-1">{reward.name}</p>
-                <p className="text-2xl font-bold text-green-600">{reward.value}</p>
-              </div>
-            ))}
-          </div>
-        </div>
+              )}
+            </div>
+          )}
+        </>
       )}
     </div>
   );
