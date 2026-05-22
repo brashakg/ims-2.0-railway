@@ -292,11 +292,13 @@ async def search_customer_by_phone(
 
     # Try exact first (fast path), then fall back to a digit-prefix regex
     # so partial typing ("9876") surfaces matches as the user types.
+    # find_by_mobile ORs phone+mobile; the partial search must too, since
+    # TechCherry-imported docs carry the number under `phone`.
     exact = repo.find_by_mobile(digits)
     if exact:
         return {"customers": [exact], "customer": exact}
 
-    matches = repo.search(digits, ["mobile"])
+    matches = repo.search(digits, ["mobile", "phone"])
     return {
         "customers": matches,
         "customer": matches[0] if matches else None,
@@ -462,9 +464,37 @@ async def get_customer_orders(
     customer_id: str = Path(..., description="Customer ID"),
     current_user: dict = Depends(get_current_user),
 ):
-    """Get orders for a customer"""
-    # This will be implemented when we connect OrderRepository
-    return {"orders": []}
+    """Get orders for a customer.
+
+    Imported (TechCherry) orders carry only `customer_phone`, never a
+    `customer_id`, while natively-created orders link by `customer_id`. We
+    load the customer first, then match orders on customer_id OR the
+    customer's phone (read from `phone`/`mobile`) so both data sources
+    surface.
+    """
+    repo = get_customer_repository()
+    if repo is None:
+        return {"orders": []}
+
+    customer = repo.find_by_id(customer_id)
+    if customer is None:
+        raise HTTPException(status_code=404, detail="Customer not found")
+
+    from ..dependencies import get_order_repository
+
+    order_repo = get_order_repository()
+    if order_repo is None:
+        return {"orders": []}
+
+    phone = customer.get("phone") or customer.get("mobile")
+    or_clauses: List[dict] = [{"customer_id": customer_id}]
+    if phone:
+        or_clauses.append({"customer_phone": phone})
+
+    orders = order_repo.find_many(
+        {"$or": or_clauses}, sort=[("created_at", -1)], limit=500
+    )
+    return {"orders": orders}
 
 
 @router.get("/{customer_id}/prescriptions")

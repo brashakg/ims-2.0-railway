@@ -304,19 +304,16 @@ export function AddProductPage() {
         attributes,
         description: description || undefined,
         hsn_code: hsnCode || undefined,
+        // Flat fields — ProductCreate is flat, not nested. Offer price falls
+        // back to MRP when left blank (matches the form hint). Stock qty is
+        // intentionally omitted: ProductCreate has no stock field; inventory
+        // is created via GRN, not at product-create time.
+        mrp: parseFloat(mrp),
+        offer_price: offerPrice ? parseFloat(offerPrice) : parseFloat(mrp),
         gst_rate: parseFloat(gstRate),
         weight: weight ? parseFloat(weight) : undefined,
-        pricing: {
-          mrp: parseFloat(mrp),
-          offer_price: offerPrice ? parseFloat(offerPrice) : undefined,
-          cost_price: costPrice ? parseFloat(costPrice) : undefined,
-          discount_category: discountCategory,
-        },
-        inventory: {
-          initial_quantity: parseInt(initialQuantity, 10),
-          barcode: barcode || undefined,
-          reorder_level: parseInt(reorderLevel, 10),
-        },
+        cost_price: costPrice ? parseFloat(costPrice) : undefined,
+        discount_category: discountCategory,
         images: [],
         shopify: {
           // Shopify here is kept for future vendor sync only (NEXUS agent

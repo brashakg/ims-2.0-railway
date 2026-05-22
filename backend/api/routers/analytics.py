@@ -263,7 +263,14 @@ async def get_dashboard_summary(
         # Get customer metrics
         customers = (
             customer_repo.find_many(
-                {"$or": [{"store_id": store_id}, {"primary_store_id": store_id}]}
+                {
+                    "$or": [
+                        {"preferred_store_id": store_id},
+                        {"home_store_id": store_id},
+                        {"primary_store_id": store_id},
+                        {"store_id": store_id},
+                    ]
+                }
             )
             if customer_repo is not None
             else []
@@ -683,7 +690,14 @@ async def get_customer_insights(
         # Total customers
         all_customers = (
             customer_repo.find_many(
-                {"$or": [{"store_id": store_id}, {"primary_store_id": store_id}]}
+                {
+                    "$or": [
+                        {"preferred_store_id": store_id},
+                        {"home_store_id": store_id},
+                        {"primary_store_id": store_id},
+                        {"store_id": store_id},
+                    ]
+                }
             )
             if customer_repo is not None
             else []

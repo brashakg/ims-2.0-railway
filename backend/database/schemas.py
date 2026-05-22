@@ -141,12 +141,17 @@ STOCK_UNIT_SCHEMA = {
 
 CUSTOMER_SCHEMA = {
     "bsonType": "object",
-    "required": ["customer_id", "customer_type", "name", "mobile", "created_at"],
+    # `mobile` is NOT required: TechCherry-imported customers store the
+    # number under `phone` (and the store under `preferred_store_id`),
+    # so requiring the legacy keys would reject every imported doc. Both
+    # variants are declared as optional string properties below.
+    "required": ["customer_id", "customer_type", "name", "created_at"],
     "properties": {
         "customer_id": {"bsonType": "string"},
         "customer_type": {"enum": ["B2C", "B2B"]},
         "name": {"bsonType": "string"},
         "mobile": {"bsonType": "string"},
+        "phone": {"bsonType": "string"},
         "email": {"bsonType": "string"},
         "gstin": {"bsonType": "string"},
         "pan": {"bsonType": "string"},
@@ -179,7 +184,8 @@ CUSTOMER_SCHEMA = {
         "total_purchases": {"bsonType": "decimal"},
         "created_at": {"bsonType": "date"},
         "created_by": {"bsonType": "string"},
-        "home_store_id": {"bsonType": "string"}
+        "home_store_id": {"bsonType": "string"},
+        "preferred_store_id": {"bsonType": "string"}
     }
 }
 

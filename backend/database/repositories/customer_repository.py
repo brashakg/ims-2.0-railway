@@ -20,7 +20,10 @@ class CustomerRepository(BaseRepository):
         return "customer_id"
     
     def find_by_mobile(self, mobile: str) -> Optional[Dict]:
-        return self.find_one({"mobile": mobile})
+        # TechCherry-imported customers store the number under `phone`;
+        # natively-created docs use `mobile`. Match either so a lookup by
+        # number resolves both data sources.
+        return self.find_one({"$or": [{"phone": mobile}, {"mobile": mobile}]})
     
     def find_by_email(self, email: str) -> Optional[Dict]:
         return self.find_one({"email": email})
