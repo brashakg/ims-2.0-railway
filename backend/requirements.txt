@@ -16,6 +16,8 @@ python-multipart==0.0.29
 
 # Database
 pymongo==4.17.0
+# Read-only bridge to the e-commerce (BVI) Postgres for online catalog/stock
+psycopg2-binary==2.9.10
 
 # HTTP Client (for JARVIS AI)
 httpx==0.28.1
