@@ -133,6 +133,19 @@ def online_summary() -> Dict[str, Any]:
             products = cur.fetchone()[0]
             cur.execute('SELECT count(*) FROM "ProductVariant"')
             variants = cur.fetchone()[0]
+            # Physical-barcode coverage on the online side. Because the chosen
+            # store<->online match key is the physical barcode, this sizes the
+            # reconciliation: how many online variants already carry a
+            # storeBarcode / barcode that an IMS product could match.
+            cur.execute(
+                'SELECT '
+                "count(*) FILTER (WHERE \"storeBarcode\" IS NOT NULL AND \"storeBarcode\" <> ''), "
+                "count(*) FILTER (WHERE barcode IS NOT NULL AND barcode <> '') "
+                'FROM "ProductVariant"'
+            )
+            cov = cur.fetchone()
+            variants_with_store_barcode = int(cov[0] or 0)
+            variants_with_barcode = int(cov[1] or 0)
             # A few real identifiers so ops can sanity-check the SKU/barcode
             # match end-to-end (these are catalog ids, not sensitive data).
             cur.execute(
@@ -148,6 +161,8 @@ def online_summary() -> Dict[str, Any]:
             "reachable": True,
             "online_products": int(products),
             "online_variants": int(variants),
+            "variants_with_store_barcode": variants_with_store_barcode,
+            "variants_with_barcode": variants_with_barcode,
             "sample": sample,
         }
     except Exception as e:  # noqa: BLE001
