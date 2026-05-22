@@ -83,7 +83,7 @@ const RAIL_GROUPS: NavGroup[] = [
     ],
   },
   {
-    title: 'Ops',
+    title: 'Operations',
     items: [
       { id: 'tasks', label: 'Tasks & SOPs', to: '/tasks', icon: 'check' },
       { id: 'hr', label: 'HR', to: '/hr', icon: 'user' },
@@ -106,10 +106,17 @@ const RAIL_GROUPS: NavGroup[] = [
     ],
   },
   {
+    // AI features (JARVIS + the 8 superhero agents live behind /jarvis).
+    // SUPERADMIN-only, so the whole group only renders for superadmins.
+    title: 'AI',
+    items: [
+      { id: 'jarvis', label: 'Jarvis', to: '/jarvis', icon: 'cpu', requireRoles: ['SUPERADMIN'] },
+    ],
+  },
+  {
     title: 'System',
     items: [
       { id: 'print', label: 'Print', to: '/print', icon: 'printer' },
-      { id: 'jarvis', label: 'Jarvis', to: '/jarvis', icon: 'cpu', requireRoles: ['SUPERADMIN'] },
       { id: 'setup', label: 'Store Setup', to: '/settings', icon: 'settings' },
       { id: 'entities', label: 'Entities', to: '/settings/entities', icon: 'settings', requireRoles: ['SUPERADMIN', 'ADMIN'] },
     ],
@@ -141,19 +148,19 @@ export function Rail({ brand = 'bv' }: { brand?: 'bv' | 'wizopt' }) {
   }, [userRoles, activeRole]);
 
   // Which group titles are collapsed. Untitled (Hub) groups can't collapse.
-  // Persisted to localStorage so the user's choice survives refresh. The
-  // group containing the active route is force-expanded on every navigation
-  // so the user is never one click away from an invisible nav item.
+  // Persisted to localStorage so a user's collapse choices survive refresh
+  // within a session. The group containing the active route is force-expanded
+  // on every navigation so the user is never one click away from an invisible
+  // nav item.
   //
-  // First-time users (no localStorage key) see ALL titled groups collapsed
-  // for a compact starting view; the active-route effect below opens the
-  // relevant group, and individual clicks pin a group's state.
+  // Default (no localStorage key) = ALL groups EXPANDED, so the sidebar shows
+  // its full grouped structure. AuthContext clears the key on every login, so
+  // each login starts grouped/expanded; in-session collapses still persist
+  // across refresh until the next login.
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(() => {
     const saved = loadCollapsedGroups();
     if (saved !== null) return saved;
-    return new Set(
-      RAIL_GROUPS.map((g) => g.title).filter((t): t is string => !!t),
-    );
+    return new Set<string>();
   });
 
   const activeGroupTitle = useMemo(() => {

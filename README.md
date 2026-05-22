@@ -314,19 +314,19 @@ Product catalog with category-specific fields, brands/sub-brands, lens masters (
 Vendors, purchase orders (create → send → cancel), goods-receipt notes (GRN) with variance tracking and stock-add on accept, vendor returns, vendor performance, and replenishment suggestions (reorder points → draft POs). Backend: `vendors.py`, `vendor_returns.py`, `supply_chain.py`.
 
 ### Tasks, SOPs & Escalation
-Tasks with priority (P0–P4), daily SOP checklists (opening/closing/stock-count), auto-generation, acknowledge/escalate, overdue auto-escalation, and SOP templates. The **TASKMASTER** agent drives escalation. Backend: `tasks.py`.
+Tasks on a canonical model (UPPERCASE status, `due_at`, `source`) with priority P0–P4. A **per-priority SLA engine** (`services/task_sla.py` — the Standard matrix P0 15m/30m … P4 3d/7d, tunable via `GET/PUT /tasks/sla-config`) runs two clocks: time-to-acknowledge and overdue-grace. Breached tasks **escalate up the role ladder** (`services/task_escalation.py`: assignee → Store Manager → Area Manager → Admin → Superadmin, store-scoped, climbing past empty rungs) and are **reassigned** to the resolved owner, who is alerted **in-app** (the topbar bell + `notifications` collection) and over **WhatsApp** (quiet-hours-gated except P0/P1). The `/tasks/auto-escalate-overdue` endpoint and the **TASKMASTER** 5-minute tick share the same SLA check + resolver, so they always agree. Plus daily SOP checklists + persisted SOP templates. Backend: `tasks.py`, `notifications.py`, `services/task_{sla,escalation,notify}.py`.
 
 ### HR
 Attendance (check-in/out, geo-aware), leave requests + balances, and the HR summary. Gated to finance roles. Backend: `hr.py`.
 
-### Payroll *(actively being expanded)*
-Salary configuration, monthly salary calculation with Indian deductions (PF/ESI/PT/TDS), advances + settlement, payslips, salary sheet, and incentive integration. The current implementation is a starter; a full statutory engine (entity-grouped, state-aware PT, EPS split, ₹21k ESI gate, batch run/lock, Tally JV export, PDF payslips) is on the roadmap. Backend: `payroll.py` (+ payroll bits in `hr.py`).
+### Payroll
+Full Indian statutory payroll, built end-to-end across four phases. A **legal-entity** model (PAN-grouped stores, multi-GSTIN per state); a Structured-CTC **salary master** (+ bulk CSV) with state-aware **Professional Tax** slabs; a pure, tested **computation engine** (EPF 12% + EPS 8.33% capped at ₹15k + EDLI/admin, ESI 0.75%/3.25% with the ₹21k eligibility gate, PT by state slab, manual TDS, 30-day LWP proration, incentive merge, advance recovery — integer-basis rounding for deterministic output); an idempotent **run flow** (DRAFT → APPROVED → PAID, one record per employee+month) with period lock; and **outputs**: payslip print (HTML), **Tally salary JV** (balanced XML), **PF ECR** text, and a statutory summary. Backend: `entities.py`, `payroll.py`, `services/payroll_{engine,exports}.py`. UI: `/settings/entities`, `/hr/salary-setup`, `/hr/payroll-run`.
 
 ### Incentives (Pune module)
 A daily-points → monthly-payout engine: daily scorecards (9 weighted categories summing to 100), MTD leaderboard, eligibility/payout settings, payout preview → lock (one locked snapshot per store-month), and CSV export. Walkout/walk-in tracking feeds conversion metrics. Backend: `points.py`, `payout.py`, `walkouts.py`.
 
 ### Finance & Accounting
-Revenue, P&L, GST summary, outstanding receivables, vendor payables, cash flow, period locking, budgets (full vs survival mode), and inter-store reconciliation. Gated to finance roles. Backend: `finance.py`, `expenses.py`.
+Real revenue & **P&L** (COGS from product cost with a 60%-of-line fallback, minus operating expenses + payroll), **P&L by store** and **by category**, GST summary, **GST reconciliation per legal entity** (output tax − input credit → net payable, filed via Tally), a **Tally sales-JV** XML export, outstanding receivables, vendor payables, cash flow, **period locking** (a locked month rejects new or approved expenses), and budgets (full vs survival mode) — all surfaced on the Finance dashboard with breakdown tables. Gated to finance roles. Backend: `finance.py`, `expenses.py`.
 
 ### Reports
 Sales (summary/daily/by-salesperson/by-category/comparison/growth), inventory (valuation/non-moving/brand sell-through), clinical, HR, tasks, finance (outstanding/GST/GSTR-1/GSTR-3B/expense-vs-revenue), profit by category/store, discount analysis, staff ranking, customer acquisition, and a JARVIS-narrated "Growth Blueprint." Backend: `reports.py`, `analytics.py`, `analytics_v2.py`.
@@ -361,7 +361,8 @@ Centralized print templates: thermal receipt, A4 receipt, GST tax invoice, PO, G
 | `/api/v1/prescriptions`, `/api/v1/clinical` | Clinical | OPTOMETRIST + managers |
 | `/api/v1/workshop`, `/api/v1/vendor-portal` | Workshop (+ public lab portal) | workshop roles |
 | `/api/v1/vendors`, `/api/v1/vendor-returns`, `/api/v1/supply-chain` | Purchase | vendor roles |
-| `/api/v1/tasks` | Tasks & SOPs | mixed |
+| `/api/v1/tasks` | Tasks & SOPs (+ SLA config) | mixed |
+| `/api/v1/notifications` | In-app staff notifications (bell) | per-user |
 | `/api/v1/hr`, `/api/v1/payroll` | HR & Payroll | **finance roles** (router-level) |
 | `/api/v1/finance`, `/api/v1/expenses` | Finance | **finance roles** |
 | `/api/v1/reports`, `/api/v1/analytics`, `/api/v1/analytics-v2` | Reporting | financial reports gated |
@@ -403,6 +404,12 @@ GET    /api/v1/workshop/dashboard-kpis           one-call KPIs
 POST   /api/v1/workshop/jobs/{id}/qc             QC pass/fail
 GET    /api/v1/vendor-portal/{token}/jobs        external lab: open jobs (public, tokenized)
 
+# Tasks, escalation & notifications
+POST   /api/v1/tasks/{id}/escalate               escalate (auto-resolves up the role ladder if no target)
+POST   /api/v1/tasks/auto-escalate-overdue       SLA scan -> escalate + reassign + notify
+GET    /api/v1/tasks/sla-config                  per-priority SLA matrix (PUT to tune; SUPERADMIN/ADMIN)
+GET    /api/v1/notifications                      current user's bell feed (+ unread_count)
+
 # Payroll
 POST   /api/v1/payroll/config                    create salary config (ADMIN)
 POST   /api/v1/payroll/salary/calculate          compute a month's salary
@@ -428,8 +435,8 @@ PATCH  /api/v1/jarvis/agents/{id}/toggle          enable/disable an agent
 A single-page React app. Every route is **lazy-loaded** and wrapped in two guard layers: a top-level `ProtectedRoute` (auth-only) renders `AppLayout`, and most child routes add their own `ProtectedRoute allowedRoles={[...]}`.
 
 ### Shell
-- **`Rail`** — 64px left nav (expands to ~200px), grouped sections (Sales floor, Clinical, Stock & supply, Ops, Analysis, Growth, System), brand glyph, persisted collapse state. Jarvis is the only role-gated item (SUPERADMIN).
-- **`Topbar`** — 52px bar with breadcrumbs, ⌘K command palette, a **store switcher** pill (multi-store users), a **role switcher** pill (multi-role users), and notifications.
+- **`Rail`** — 64px left nav (expands to ~200px), grouped sections (Sales floor, Clinical, Stock & supply, Operations, Analysis, Growth, **AI**, System), brand glyph. Groups are **expanded by default** and reset to grouped on every login (in-session collapses persist across refresh until the next login). The **AI** group (Jarvis + the 8 agents) is SUPERADMIN-only; Entities is SUPERADMIN/ADMIN.
+- **`Topbar`** — 52px bar with breadcrumbs, ⌘K command palette, a **store switcher** pill (multi-store users), a **role switcher** pill (multi-role users), and a **live notifications bell** (unread badge + dropdown, backed by `/notifications`).
 - **`AppLayout`** — composes the shell, builds breadcrumbs from the URL, and shows a read-only banner for INVESTOR seats.
 
 ### Contexts (`src/context/`)
@@ -497,7 +504,9 @@ No ORM — direct PyMongo via `database/connection.py`:
 - *Incentives:* `points_log`, `incentive_settings`, `incentive_inputs`, `incentives`, `payout_snapshots`, `targets`, `walkouts`, `walk_in_counters`
 - *CRM/marketing/loyalty:* `loyalty_accounts`, `loyalty_transactions`, `loyalty_settings`, `notification_logs`, `follow_ups`, `referrals`, `nps_responses`
 - *Agents:* `agent_config`, `agent_events`, `agent_errors`, `agent_audit_log`, `anomalies`, `health_checks`, `alert_history`, `ui_audits`, `sync_runs`
-- *Integrations/audit:* `integrations`, `webhook_inbox`, `tally_exports`, `audit_logs`, `report_blueprints`, `sop_templates`
+- *Tasks/ops:* `tasks`, `sop_templates`, `task_sla_config`, `notifications` (user-targeted staff bell — distinct from customer-facing `notification_logs`)
+- *Org structure:* `entities` (legal entities / GSTINs), `pt_slabs`
+- *Integrations/audit:* `integrations`, `webhook_inbox`, `tally_exports`, `audit_logs`, `report_blueprints`
 - Plus GridFS internal collections (`fs.files` / `fs.chunks`) for binary uploads.
 
 **Field-naming conventions (snake_case backend):**
@@ -603,15 +612,19 @@ Frontend tests are minimal (auth flow, one modal, one hook) — a known gap. Run
 
 ## 20. Roadmap & feature status
 
-Tracked in [`docs/reference/IMS2_Updated_Feature_Status.md`](docs/reference/IMS2_Updated_Feature_Status.md): **130 built · 8 partial · 157 remaining**.
+Detailed status is tracked in [`docs/reference/IMS2_Updated_Feature_Status.md`](docs/reference/IMS2_Updated_Feature_Status.md).
 
-Highest-impact areas still to build (roughly in priority order for the chain):
-1. **Payroll** (full Indian statutory engine — *in progress*) and **Finance/Accounting** (P&L per store, receivables aging, GST filing).
-2. **Tasks/SOP escalation engine** (the core "enforce discipline" differentiator).
-3. **Inventory depth** (daily count + barcode, SPH×CYL grid, batch/expiry, inter-store transfer).
-4. **Clinical/Workshop completion** (Rx token queue, QC checklist, lab status).
-5. **CRM/marketing automation** (WhatsApp send — MEGAPHONE is built, needs MSG91 activation), POS additions (EMI, credit billing, loyalty display).
-6. **Integrations** (Tally, Razorpay, Shiprocket, GST portal) and **AI intelligence** expansion.
+**Recently shipped:**
+- **Payroll** — full Indian statutory engine (legal entities, state-aware PT, EPS split, ₹21k ESI gate, batch run/lock, Tally JV, PF ECR, payslips). ✅
+- **Finance & Accounting** — real P&L (per store + per category), GST reconciliation per entity + Tally sales-JV, receivables/payables, period lock, dashboard breakdown tables. ✅
+- **Tasks/SOP escalation engine** — canonical task model, per-priority SLA, role-ladder auto-escalation **with reassignment**, and in-app + WhatsApp alerts. ✅ *(daily SOP-checklist completion tracking in progress)*
+
+**Highest-impact areas still ahead (priority order):**
+1. **E-commerce consolidation** — fold the `bettervision-inventory` Shopify catalog/PIM app (Next.js + Prisma/Postgres; storefront `bettervision.in`) into this repo as a unified-shell monorepo (one login, one nav), with a SKU/`storeBarcode` bridge so in-store (Mongo) and online (Postgres↔Shopify) stock reconcile.
+2. **Inventory depth** — daily count + barcode, batch/expiry, inter-store transfer polish.
+3. **Clinical/Workshop completion** — Rx token queue, QC checklist, lab status.
+4. **CRM/marketing automation** — WhatsApp send (MEGAPHONE built; needs MSG91 activation), POS additions (EMI, credit billing).
+5. **Integrations** (Tally, Razorpay, Shiprocket, GST portal) and **AI intelligence** expansion.
 
 ---
 
