@@ -216,6 +216,15 @@ export default function FinanceDashboard() {
       setBudgets(bud.status === 'fulfilled' ? mapBudget(bud.value) : []);
       setVendorPayments(vend.status === 'fulfilled' ? mapVendorPayments(vend.value) : []);
       setReconciliation(recon.status === 'fulfilled' ? mapReconciliation(recon.value) : []);
+
+      // Reflect the real period-lock state for the selected month.
+      try {
+        const d = new Date(dateTo);
+        const ps = await financeApi.getPeriodStatus(d.getMonth() + 1, d.getFullYear());
+        setPeriodLocked(!!ps?.locked);
+      } catch {
+        /* non-fatal */
+      }
     } catch (error) {
       toast.error('Failed to load financial data');
     } finally {
@@ -223,22 +232,45 @@ export default function FinanceDashboard() {
     }
   };
 
-  const handleLockPeriod = () => {
-    if (user?.activeRole !== 'ACCOUNTANT' && user?.activeRole !== 'ADMIN') {
+  const handleLockPeriod = async () => {
+    const role = user?.activeRole;
+    if (role !== 'ACCOUNTANT' && role !== 'ADMIN' && role !== 'SUPERADMIN') {
       toast.error('Only accountants and admins can lock periods');
       return;
     }
-    setPeriodLocked(true);
-    toast.success('Financial period locked successfully');
+    const d = new Date(dateTo);
+    try {
+      await financeApi.lockPeriod(d.getMonth() + 1, d.getFullYear());
+      setPeriodLocked(true);
+      toast.success(`Period ${d.getMonth() + 1}/${d.getFullYear()} locked`);
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Failed to lock period');
+    }
   };
 
   const handleUnlockPeriod = () => {
-    if (user?.activeRole !== 'ADMIN' && user?.activeRole !== 'SUPERADMIN') {
-      toast.error('Only admins can unlock periods');
-      return;
+    // Locked periods are intentionally permanent (closed-book integrity); there
+    // is no unlock endpoint. Surface that instead of faking a local toggle.
+    toast.info('Locked periods are permanent for audit integrity — no unlock.');
+  };
+
+  const handleTallyExport = async () => {
+    try {
+      const blob = await financeApi.downloadTallySalesJv({
+        from_date: dateFrom,
+        to_date: dateTo,
+        store_id: user?.activeStoreId,
+      });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `sales_jv_${dateFrom}_${dateTo}.xml`;
+      a.click();
+      URL.revokeObjectURL(url);
+      toast.success('Tally sales voucher exported');
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Tally export failed');
     }
-    setPeriodLocked(false);
-    toast.success('Financial period unlocked successfully');
   };
 
   const handleAllocateBudget = (category: string, amount: string) => {
@@ -281,6 +313,9 @@ export default function FinanceDashboard() {
           <div className="eyebrow" style={{ marginBottom: 6 }}>Finance &amp; Accounting</div>
           <h1>The books, in real time.</h1>
           <div className="hint">Revenue, P&amp;L, GST collected / payable, outstanding aging, cash flow, period lock after month-end. Tally export on sync.</div>
+        </div>
+        <div>
+          <button className="btn-secondary" onClick={handleTallyExport}>Export to Tally</button>
         </div>
       </div>
 
