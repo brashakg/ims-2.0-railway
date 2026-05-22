@@ -172,20 +172,12 @@ class JarvisAgent(ABC):
         Checks if agent is enabled before executing.
         DO NOT override this — override _do_background_work() instead.
 
-        Wrapped in an observability span so each run becomes its own Sentry
-        transaction (op=agent.tick, tagged with agent.id). Exceptions are
-        surfaced to Sentry tagged by agent_id so the "which agent is on
-        fire" question is answerable in one filter.
+        On a failed tick the exception is captured IN-HOUSE: persisted to the
+        `agent_errors` collection and emitted as an `agent.error` event so
+        SENTINEL and the Jarvis activity feed answer "which agent is on fire"
+        — no external APM.
         """
         import time
-
-        # observability module is optional at import time — if the user
-        # strips it out for some slim build, the agent still ticks.
-        try:
-            from observability import agent_tick_span, capture_agent_error
-        except Exception:  # pragma: no cover
-            agent_tick_span = None
-            capture_agent_error = None
 
         start = time.time()
 
@@ -196,19 +188,10 @@ class JarvisAgent(ABC):
             return  # Agent is toggled OFF — skip
 
         self._status = AgentStatus.RUNNING
+        await self._run_inner(start)
 
-        # If observability is available, wrap in a span context manager.
-        # Otherwise run the work directly — same semantics, no span.
-        if agent_tick_span is not None:
-            async with agent_tick_span(self.agent_id, "background"):
-                await self._run_inner(start, capture_agent_error)
-        else:
-            await self._run_inner(start, None)
-
-    async def _run_inner(self, start: float, capture_fn):
-        """Inner body of background_tick — split out so agent_tick_span can
-        wrap it cleanly. `start` is the wall-clock start, `capture_fn` is
-        observability.capture_agent_error or None."""
+    async def _run_inner(self, start: float):
+        """Inner body of background_tick. `start` is the wall-clock start."""
         import time as _time
         try:
             await self._do_background_work()
@@ -228,13 +211,37 @@ class JarvisAgent(ABC):
             self._status = AgentStatus.ERROR
             logger.error(f"[{self.agent_id}] background_tick failed: {e}\n{traceback.format_exc()}")
 
-            if capture_fn is not None:
-                try:
-                    capture_fn(self.agent_id, e, extra={"elapsed_ms": elapsed})
-                except Exception:
-                    pass
-
+            await self._capture_agent_error(e, elapsed)
             await self._update_run_stats("error", elapsed, error=str(e))
+
+    async def _capture_agent_error(self, exc: BaseException, elapsed_ms: float):
+        """Capture a failed tick IN-HOUSE — persist to the `agent_errors`
+        collection and emit an `agent.error` event so SENTINEL (already
+        subscribed) files an alert and the Jarvis activity feed shows it.
+        Fully fail-soft; never raises (it runs inside an except branch)."""
+        try:
+            col = self.get_collection("agent_errors")
+            if col is not None:
+                col.insert_one({
+                    "agent_id": self.agent_id,
+                    "agent_name": self.agent_name,
+                    "error": str(exc),
+                    "traceback": traceback.format_exc()[:4000],
+                    "elapsed_ms": round(elapsed_ms, 1),
+                    "timestamp": datetime.now(timezone.utc),
+                })
+        except Exception as persist_err:  # pragma: no cover
+            logger.debug(f"[{self.agent_id}] failed to persist agent_error: {persist_err}")
+
+        try:
+            await self.emit_event("agent.error", {
+                "agent_id": self.agent_id,
+                "agent_name": self.agent_name,
+                "error": str(exc),
+                "elapsed_ms": round(elapsed_ms, 1),
+            })
+        except Exception as emit_err:  # pragma: no cover
+            logger.debug(f"[{self.agent_id}] failed to emit agent.error: {emit_err}")
 
     @abstractmethod
     async def _do_background_work(self):

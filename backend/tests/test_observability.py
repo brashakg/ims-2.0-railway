@@ -6,8 +6,9 @@ Unit tests for backend/observability.py - verify the fail-soft contract:
   - Slack helpers no-op when SLACK_WEBHOOK_URL is unset
   - Severity threshold gating works (SLACK_ALERT_SEVERITY)
   - Payload shape is correct
-  - Sentry helpers no-op when sentry_sdk is absent or DSN unset
-  - agent_tick_span context manager works even without Sentry
+
+Error/health monitoring is the SENTINEL agent's job (no external APM), so this
+module only covers Slack alerting now.
 
 None of these tests hit the network. Slack POST is mocked via
 httpx.MockTransport.
@@ -139,40 +140,6 @@ async def test_notify_slack_swallows_errors(monkeypatch):
 
     ok = await observability.notify_slack("CRITICAL", "t", "b", None)
     assert ok is False
-
-
-# ============================================================================
-# Sentry no-op behavior
-# ============================================================================
-
-
-def test_sentry_sdk_returns_none_when_dsn_unset(monkeypatch):
-    monkeypatch.delenv("SENTRY_DSN", raising=False)
-    assert observability._sentry_sdk() is None
-
-
-def test_capture_agent_error_noop_without_sentry(monkeypatch):
-    """capture_agent_error must not raise when Sentry is absent."""
-    monkeypatch.delenv("SENTRY_DSN", raising=False)
-    # Should be a silent no-op
-    observability.capture_agent_error("oracle", RuntimeError("boom"), extra={"x": 1})
-
-
-@pytest.mark.asyncio
-async def test_agent_tick_span_works_without_sentry(monkeypatch):
-    """agent_tick_span yields None cleanly when Sentry isn't configured."""
-    monkeypatch.delenv("SENTRY_DSN", raising=False)
-    async with observability.agent_tick_span("oracle", "background") as txn:
-        assert txn is None
-
-
-@pytest.mark.asyncio
-async def test_agent_tick_span_propagates_exceptions(monkeypatch):
-    """Exceptions raised inside the span must propagate to the caller."""
-    monkeypatch.delenv("SENTRY_DSN", raising=False)
-    with pytest.raises(ValueError):
-        async with observability.agent_tick_span("oracle", "background"):
-            raise ValueError("test error")
 
 
 def test_is_slack_configured(monkeypatch):
