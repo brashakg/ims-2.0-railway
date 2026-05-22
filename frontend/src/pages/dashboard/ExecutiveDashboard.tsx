@@ -73,7 +73,7 @@ interface TopProduct {
 function getDateRange(range: string): { startDate: string; endDate: string } {
   const now = new Date();
   const endDate = now.toISOString().split('T')[0];
-  let start = new Date(now);
+  const start = new Date(now);
 
   switch (range) {
     case 'today':

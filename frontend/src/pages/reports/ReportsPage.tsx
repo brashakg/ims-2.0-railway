@@ -213,21 +213,24 @@ export function ReportsPage() {
       case 'today':
         startDate = endDate;
         break;
-      case 'week':
+      case 'week': {
         const weekAgo = new Date(now);
         weekAgo.setDate(weekAgo.getDate() - 7);
         startDate = weekAgo.toISOString().split('T')[0];
         break;
-      case 'month':
+      }
+      case 'month': {
         const monthAgo = new Date(now);
         monthAgo.setMonth(monthAgo.getMonth() - 1);
         startDate = monthAgo.toISOString().split('T')[0];
         break;
-      case 'quarter':
+      }
+      case 'quarter': {
         const quarterAgo = new Date(now);
         quarterAgo.setMonth(quarterAgo.getMonth() - 3);
         startDate = quarterAgo.toISOString().split('T')[0];
         break;
+      }
       default:
         startDate = endDate;
     }

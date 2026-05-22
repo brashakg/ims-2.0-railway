@@ -20,6 +20,7 @@ import { WalkoutIntakeModal } from './WalkoutIntakeModal';
 import { WalkoutResultBadge } from './ResultPanel';
 
 const RESULT_OPTIONS = ['DUE', 'NEGATIVE', 'CONVERTED', 'none'] as const;
+type ResultOption = typeof RESULT_OPTIONS[number];
 const PAGE_SIZE = 50;
 
 export function WalkoutsPage() {
@@ -36,7 +37,7 @@ export function WalkoutsPage() {
   const [dateTo, setDateTo] = useState('');
   const [salesPersonId, setSalesPersonId] = useState('');
   const [reason, setReason] = useState<WalkoutReason | ''>('');
-  const [resultFilter, setResultFilter] = useState<typeof RESULT_OPTIONS[number] | ''>('');
+  const [resultFilter, setResultFilter] = useState<ResultOption | ''>('');
 
   const params: ListWalkoutsParams = useMemo(() => {
     const p: ListWalkoutsParams = { skip, limit: PAGE_SIZE };
@@ -196,10 +197,9 @@ export function WalkoutsPage() {
                 className="filter-input"
               >
                 <option value="">All</option>
-                <option value="none">Not yet set</option>
-                <option value="DUE">DUE</option>
-                <option value="NEGATIVE">NEGATIVE</option>
-                <option value="CONVERTED">CONVERTED</option>
+                {RESULT_OPTIONS.map(r => (
+                  <option key={r} value={r}>{r === 'none' ? 'Not yet set' : r}</option>
+                ))}
               </select>
             </FilterField>
           </div>
