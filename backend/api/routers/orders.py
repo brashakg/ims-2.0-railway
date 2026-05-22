@@ -570,6 +570,36 @@ def generate_order_number(store_id: str) -> str:
     return f"ORD-{prefix}-{year}-{short_uuid}"
 
 
+def _resolve_product_doc(product_repo, pid: str):
+    """Tolerant product existence lookup for order-create.
+
+    Imported products are often referenced by their Mongo `_id` or `sku`
+    rather than `product_id` (the same tolerance the admin catalog uses).
+    Tries product_id, then sku, then _id (string or ObjectId). Returns the
+    product doc or None. Existence only — pricing comes from the order payload.
+    """
+    if not pid:
+        return None
+    product = product_repo.find_by_id(pid)
+    if product is not None:
+        return product
+    try:
+        coll = product_repo.collection
+        product = coll.find_one(
+            {"$or": [{"product_id": pid}, {"sku": pid}, {"_id": pid}]}
+        )
+        if product is None and len(pid) == 24:
+            from bson import ObjectId
+
+            try:
+                product = coll.find_one({"_id": ObjectId(pid)})
+            except Exception:
+                product = None
+        return product
+    except Exception:
+        return None
+
+
 @router.post("", status_code=201)
 async def create_order(
     order: OrderCreate, current_user: dict = Depends(get_current_user)
@@ -617,7 +647,7 @@ async def create_order(
                 continue
             if pid.startswith(("custom-", "lens-", "lens-sug-")):
                 continue
-            product = product_repo.find_by_id(pid)
+            product = _resolve_product_doc(product_repo, pid)
             if product is None:
                 raise HTTPException(
                     status_code=400,

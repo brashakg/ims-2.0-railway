@@ -377,7 +377,7 @@ export function InventoryPage() {
               <button onClick={() => setShowCSVImport(true)} className="btn sm">
                 <Upload className="w-4 h-4" /> CSV import
               </button>
-              <button onClick={() => navigate('/settings?tab=products')} className="btn sm primary">
+              <button onClick={() => navigate('/catalog/add')} className="btn sm primary">
                 <Plus className="w-4 h-4" /> Add product
               </button>
             </>
