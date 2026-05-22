@@ -92,6 +92,21 @@ async def list_expenses(
     return {"expenses": expenses or [], "total": len(expenses) if expenses else 0}
 
 
+def _period_locked(year: int, month: int) -> bool:
+    """True if the finance accounting period (month/year) has been locked."""
+    try:
+        from database.connection import get_db
+
+        db = get_db().db
+        if db is None:
+            return False
+        return db.get_collection("period_locks").find_one(
+            {"month": int(month), "year": int(year)}
+        ) is not None
+    except Exception:
+        return False
+
+
 @router.post("", status_code=201)
 @router.post("/", status_code=201)
 async def create_expense(
@@ -100,6 +115,13 @@ async def create_expense(
     """Create a new expense"""
     expense_repo = get_expense_repository()
     expense_id = str(uuid.uuid4())
+
+    d = expense.expense_date
+    if _period_locked(d.year, d.month):
+        raise HTTPException(
+            status_code=423,
+            detail=f"Accounting period {d.month:02d}/{d.year} is locked; cannot add expenses to a closed month.",
+        )
 
     if expense_repo is not None:
         expense_repo.create(
@@ -273,6 +295,17 @@ async def approve_expense(
         if existing.get("status") != "PENDING":
             raise HTTPException(
                 status_code=400, detail="Expense is not pending approval"
+            )
+
+        ed = existing.get("expense_date", "") or ""
+        try:
+            d = datetime.fromisoformat(ed[:10]) if ed else None
+        except Exception:
+            d = None
+        if d is not None and _period_locked(d.year, d.month):
+            raise HTTPException(
+                status_code=423,
+                detail=f"Accounting period {d.month:02d}/{d.year} is locked; cannot approve.",
             )
 
         expense_repo.update(
