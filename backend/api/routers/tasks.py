@@ -12,6 +12,13 @@ import uuid
 
 from .auth import get_current_user
 from ..dependencies import get_task_repository, get_db
+from ..services.task_sla import (
+    DEFAULT_SLA,
+    canon_source,
+    canon_status,
+    should_escalate,
+    sla_for,
+)
 
 router = APIRouter()
 
@@ -24,19 +31,26 @@ router = APIRouter()
 class TaskCreate(BaseModel):
     title: str = Field(..., min_length=3)
     description: Optional[str] = None
+    category: str = Field(default="General")
     priority: str = Field(default="P3")  # P0-P4
     assigned_to: str
-    due_date: datetime
-    type: str = Field(default="manual")  # manual, sop, system
+    # Canonical field is `due_at`; `due_date` accepted for backwards compat.
+    due_date: Optional[datetime] = None
+    due_at: Optional[datetime] = None
+    # Canonical field is `source` (SYSTEM|USER|SOP); `type` (manual|sop|system)
+    # accepted for backwards compat.
+    type: Optional[str] = None
+    source: Optional[str] = None
 
 
 class TaskUpdate(BaseModel):
     title: Optional[str] = None
     description: Optional[str] = None
     priority: Optional[str] = None
-    status: Optional[str] = None  # open, in_progress, completed, escalated
+    status: Optional[str] = None  # OPEN, IN_PROGRESS, COMPLETED, ESCALATED, CANCELLED
     notes: Optional[str] = None
     assigned_to: Optional[str] = None
+    due_at: Optional[datetime] = None
 
 
 class TaskComplete(BaseModel):
@@ -71,29 +85,25 @@ def generate_task_id() -> str:
     return f"TASK-{uuid.uuid4().hex[:8].upper()}"
 
 
-def should_escalate(task: dict) -> tuple[bool, str]:
-    """
-    Determine if task should be escalated.
-    Returns (should_escalate, reason)
-    """
-    if task.get("status") == "completed":
-        return False, ""
+def _canon_task_out(task: dict) -> dict:
+    """Normalize a stored task to the canonical shape on the way OUT, so the
+    API always emits UPPERCASE status + ``due_at`` + ``source`` regardless of
+    whether the doc was written by the new code or a legacy lowercase write.
+    Lets old rows display correctly without a destructive data migration."""
+    if not isinstance(task, dict):
+        return task
+    if task.get("status"):
+        task["status"] = canon_status(task["status"])
+    if task.get("due_at") is None and task.get("due_date") is not None:
+        task["due_at"] = task["due_date"]
+    if not task.get("source") and task.get("type"):
+        task["source"] = canon_source(task["type"])
+    return task
 
-    created_at = task.get("created_at")
-    due_date = task.get("due_date")
-    now = datetime.now()
 
-    # Check if not acknowledged within 2 hours (if in OPEN status)
-    if task.get("status") == "open" and created_at:
-        time_since_created = now - created_at
-        if time_since_created > timedelta(hours=2):
-            return True, "Not acknowledged within 2 hours"
-
-    # Check if overdue
-    if due_date and now > due_date:
-        return True, "Task overdue"
-
-    return False, ""
+# NOTE: `should_escalate(task, *, now=None, sla_config=None)` is imported from
+# services.task_sla -- a pure, per-priority SLA check (ack clock + overdue
+# grace) that replaces the old hard-coded 2-hour rule.
 
 
 # ============================================================================
@@ -123,22 +133,24 @@ async def list_tasks(
     if repo is None:
         return {"tasks": [], "total": 0}
 
-    filters = {}
+    filters: dict = {}
 
     if status:
-        filters["status"] = status
+        # Tolerant: match canonical UPPERCASE and any legacy lowercase rows.
+        canon = canon_status(status)
+        filters["status"] = {"$in": list({canon, canon.lower()})}
     if priority:
         filters["priority"] = priority
     if assigned_to:
         filters["assigned_to"] = assigned_to
     if task_type:
-        filters["type"] = task_type
+        filters["source"] = canon_source(task_type)
     if store_id:
         filters["store_id"] = store_id
     else:
         filters["store_id"] = current_user.get("active_store_id")
 
-    tasks = repo.find_many(filters, skip=skip, limit=limit)
+    tasks = [_canon_task_out(t) for t in repo.find_many(filters, skip=skip, limit=limit)]
     total = repo.count(filters)
 
     return {"tasks": tasks, "total": total}
@@ -159,23 +171,30 @@ async def create_task(
     if repo is None:
         return {"task_id": generate_task_id(), "message": "Task created"}
 
+    due_at = task.due_at or task.due_date
+    if due_at is None:
+        raise HTTPException(status_code=422, detail="due_at (or due_date) is required")
+    now = datetime.now()
+
     task_data = {
         "task_id": generate_task_id(),
         "title": task.title,
         "description": task.description,
-        "priority": task.priority,  # P0, P1, P2, P3, P4
-        "status": "open",
+        "category": task.category or "General",
+        "priority": task.priority,  # P0-P4
+        "status": "OPEN",
+        "source": canon_source(task.source or task.type),  # SYSTEM | USER | SOP
         "assigned_to": task.assigned_to,
         "assigned_by": current_user.get("user_id"),
         "store_id": current_user.get("active_store_id"),
-        "type": task.type,  # manual, sop, system
-        "due_date": task.due_date,
-        "created_at": datetime.now(),
+        "due_at": due_at,
+        "created_at": now,
+        "updated_at": now,
         "escalation_level": 0,
         "history": [
             {
-                "status": "open",
-                "timestamp": datetime.now(),
+                "status": "OPEN",
+                "timestamp": now,
                 "by": current_user.get("user_id"),
                 "notes": "Task created",
             }
@@ -204,15 +223,21 @@ async def get_my_tasks(
     if repo is None:
         return {"tasks": []}
 
-    filters = {"assigned_to": current_user.get("user_id")}
+    filters: dict = {"assigned_to": current_user.get("user_id")}
 
     if status:
-        filters["status"] = status
+        canon = canon_status(status)
+        filters["status"] = {"$in": list({canon, canon.lower()})}
     else:
-        # By default, exclude completed
-        filters["status"] = {"$in": ["open", "in_progress", "escalated"]}
+        # By default, exclude completed/cancelled (tolerant of legacy casing).
+        filters["status"] = {
+            "$in": ["OPEN", "IN_PROGRESS", "ESCALATED", "open", "in_progress", "escalated"]
+        }
 
-    tasks = repo.find_many(filters, sort=[("priority", 1), ("due_date", 1)])
+    tasks = [
+        _canon_task_out(t)
+        for t in repo.find_many(filters, sort=[("priority", 1), ("due_at", 1)])
+    ]
 
     return {"tasks": tasks, "total": len(tasks)}
 
@@ -230,15 +255,16 @@ async def get_overdue_tasks(
 
     active_store = store_id or current_user.get("active_store_id")
 
-    filters = {
-        "status": {"$in": ["open", "in_progress"]},
-        "due_date": {"$lt": datetime.now()},
+    now = datetime.now()
+    filters: dict = {
+        "status": {"$in": ["OPEN", "IN_PROGRESS", "open", "in_progress"]},
+        "$or": [{"due_at": {"$lt": now}}, {"due_date": {"$lt": now}}],
     }
 
     if active_store:
         filters["store_id"] = active_store
 
-    tasks = repo.find_many(filters, sort=[("due_date", 1)])
+    tasks = [_canon_task_out(t) for t in repo.find_many(filters, sort=[("due_at", 1)])]
 
     return {"tasks": tasks, "total": len(tasks)}
 
@@ -265,7 +291,7 @@ async def get_task(
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
 
-    return task
+    return _canon_task_out(task)
 
 
 @router.patch("/{task_id}")
@@ -294,13 +320,16 @@ async def update_task(
     if update.priority:
         update_data["priority"] = update.priority
     if update.status:
-        update_data["status"] = update.status
+        update_data["status"] = canon_status(update.status)
     if update.notes:
         update_data["notes"] = update.notes
     if update.assigned_to:
         update_data["assigned_to"] = update.assigned_to
+    if update.due_at is not None:
+        update_data["due_at"] = update.due_at
 
     if update_data:
+        update_data["updated_at"] = datetime.now()
         if repo.update(task_id, update_data):
             return {"task_id": task_id, "message": "Task updated"}
 
@@ -317,28 +346,30 @@ async def complete_task(
     repo = get_task_repository()
 
     if repo is None:
-        return {"task_id": task_id, "status": "completed"}
+        return {"task_id": task_id, "status": "COMPLETED"}
 
     task = repo.find_by_id(task_id)
 
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
 
-    if task.get("status") == "completed":
+    if canon_status(task.get("status")) == "COMPLETED":
         raise HTTPException(status_code=400, detail="Task already completed")
 
+    now = datetime.now()
     result = repo.update(
         task_id,
         {
-            "status": "completed",
-            "completed_at": datetime.now(),
+            "status": "COMPLETED",
+            "completed_at": now,
+            "updated_at": now,
             "completion_notes": completion.completion_notes,
             "completed_by": current_user.get("user_id"),
         },
     )
 
     if result:
-        return {"task_id": task_id, "status": "completed", "message": "Task completed"}
+        return {"task_id": task_id, "status": "COMPLETED", "message": "Task completed"}
 
     raise HTTPException(status_code=500, detail="Failed to complete task")
 
@@ -458,18 +489,21 @@ async def auto_generate_daily_tasks(
     generated_count = 0
 
     for template in sop_templates:
+        now = datetime.now()
         task_data = {
             "task_id": generate_task_id(),
             "title": template["name"],
             "description": f"Daily {template['type']} checklist",
+            "category": "Operations",
             "priority": "P2",
-            "status": "open",
+            "status": "OPEN",
+            "source": "SOP",
             "assigned_to": current_user.get("user_id"),
             "assigned_by": current_user.get("user_id"),
             "store_id": active_store,
-            "type": "sop",
-            "due_date": datetime.now() + timedelta(days=1),
-            "created_at": datetime.now(),
+            "due_at": now + timedelta(days=1),
+            "created_at": now,
+            "updated_at": now,
             "escalation_level": 0,
             "sop_type": template["type"],
             "checklist_items": [
@@ -508,17 +542,19 @@ async def acknowledge_task(
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
 
+    now = datetime.now()
     if repo.update(
         task_id,
         {
-            "status": "in_progress",
-            "acknowledged_at": datetime.now(),
+            "status": "IN_PROGRESS",
+            "acknowledged_at": now,
+            "updated_at": now,
             "acknowledged_by": current_user.get("user_id"),
         },
     ):
         return {
             "task_id": task_id,
-            "status": "in_progress",
+            "status": "IN_PROGRESS",
             "message": "Task acknowledged",
         }
 
@@ -535,7 +571,7 @@ async def escalate_task(
     repo = get_task_repository()
 
     if repo is None:
-        return {"task_id": task_id, "status": "escalated"}
+        return {"task_id": task_id, "status": "ESCALATED"}
 
     task = repo.find_by_id(task_id)
 
@@ -544,19 +580,21 @@ async def escalate_task(
 
     current_level = task.get("escalation_level", 0)
 
+    now = datetime.now()
     if repo.update(
         task_id,
         {
-            "status": "escalated",
+            "status": "ESCALATED",
             "escalated_to": escalate_to,
-            "escalated_at": datetime.now(),
+            "escalated_at": now,
+            "updated_at": now,
             "escalation_level": current_level + 1,
             "escalated_by": current_user.get("user_id"),
         },
     ):
         return {
             "task_id": task_id,
-            "status": "escalated",
+            "status": "ESCALATED",
             "escalation_level": current_level + 1,
             "message": "Task escalated",
         }
@@ -577,38 +615,39 @@ async def auto_escalate_overdue_tasks(
 
     active_store = store_id or current_user.get("active_store_id")
 
-    filters = {
-        "status": {"$in": ["open", "in_progress"]},
-        "due_date": {"$lt": datetime.now()},
-        "escalation_level": {"$lt": 2},  # Don't escalate beyond level 2
+    # Candidate set: non-terminal, not-yet-escalated tasks. The precise
+    # decision (ack clock + overdue grace, per priority) is made by the pure
+    # should_escalate() below -- a task can breach its ack SLA before it is
+    # even past due, so we can't pre-filter on due date alone.
+    filters: dict = {
+        "status": {"$in": ["OPEN", "IN_PROGRESS", "open", "in_progress"]},
     }
-
     if active_store:
         filters["store_id"] = active_store
 
-    overdue_tasks = repo.find_many(filters)
+    candidates = repo.find_many(filters, limit=500)
+    now = datetime.now()
     escalated_count = 0
 
-    for task in overdue_tasks:
-        should_escalate_flag, reason = should_escalate(task)
-
-        if should_escalate_flag:
-            current_level = task.get("escalation_level", 0)
-            escalate_to = current_user.get(
-                "user_id"
-            )  # In real app, determine based on level
-
-            if repo.update(
-                task["task_id"],
-                {
-                    "status": "escalated",
-                    "escalated_to": escalate_to,
-                    "escalated_at": datetime.now(),
-                    "escalation_level": current_level + 1,
-                    "escalation_reason": reason,
-                },
-            ):
-                escalated_count += 1
+    for task in candidates:
+        flag, reason = should_escalate(task, now=now)
+        if not flag:
+            continue
+        current_level = task.get("escalation_level", 0)
+        # Phase 1: flag the breach (status -> ESCALATED, bump level). The
+        # role-ladder target resolution + reassignment lands in Phase 2.
+        if repo.update(
+            task["task_id"],
+            {
+                "status": "ESCALATED",
+                "escalated_at": now,
+                "updated_at": now,
+                "escalation_level": current_level + 1,
+                "escalation_reason": reason,
+                "escalated_by": "system",
+            },
+        ):
+            escalated_count += 1
 
     return {
         "escalated": escalated_count,
@@ -634,33 +673,48 @@ async def get_task_summary(
 
     active_store = store_id or current_user.get("active_store_id")
 
-    filters = {}
+    filters: dict = {}
     if active_store:
         filters["store_id"] = active_store
 
-    # Count by status
-    summary = {}
-    for status in ["open", "in_progress", "completed", "escalated"]:
-        count = repo.count({**filters, "status": status})
-        summary[status] = count
+    # Count by status -- tolerant of canonical UPPERCASE and legacy lowercase.
+    def _count(*variants: str) -> int:
+        return repo.count({**filters, "status": {"$in": list(variants)}})
 
-    # Count overdue
+    open_ct = _count("OPEN", "open")
+    in_progress_ct = _count("IN_PROGRESS", "in_progress")
+    completed_ct = _count("COMPLETED", "completed")
+    escalated_ct = _count("ESCALATED", "escalated")
+
+    summary = {
+        "OPEN": open_ct,
+        "IN_PROGRESS": in_progress_ct,
+        "COMPLETED": completed_ct,
+        "ESCALATED": escalated_ct,
+    }
+
+    now = datetime.now()
     overdue_count = repo.count(
         {
             **filters,
-            "status": {"$in": ["open", "in_progress"]},
-            "due_date": {"$lt": datetime.now()},
+            "status": {"$in": ["OPEN", "IN_PROGRESS", "open", "in_progress"]},
+            "$or": [{"due_at": {"$lt": now}}, {"due_date": {"$lt": now}}],
         }
     )
 
-    # Count escalated
-    escalated_count = repo.count({**filters, "status": "escalated"})
+    total = open_ct + in_progress_ct + completed_ct + escalated_ct
 
+    # Both the nested `summary` (canonical keys) and flat convenience keys the
+    # dashboard cards read directly (open = open + in-progress).
     return {
         "summary": summary,
+        "open": open_ct + in_progress_ct,
+        "completed": completed_ct,
+        "escalated": escalated_ct,
+        "overdue": overdue_count,
         "overdue_count": overdue_count,
-        "escalated_count": escalated_count,
-        "total": sum(summary.values()),
+        "escalated_count": escalated_ct,
+        "total": total,
     }
 
 
@@ -955,27 +1009,30 @@ async def start_task(
     """Transition a task from open → in_progress."""
     repo = get_task_repository()
     if repo is None:
-        return {"task_id": task_id, "status": "in_progress"}
+        return {"task_id": task_id, "status": "IN_PROGRESS"}
     task = repo.find_by_id(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
-    if task.get("status") == "in_progress":
+    existing = canon_status(task.get("status"))
+    if existing == "IN_PROGRESS":
         return {
             "task_id": task_id,
-            "status": "in_progress",
+            "status": "IN_PROGRESS",
             "message": "Already in progress",
         }
-    if task.get("status") == "completed":
+    if existing == "COMPLETED":
         raise HTTPException(status_code=400, detail="Task already completed")
+    now = datetime.now()
     repo.update(
         task_id,
         {
-            "status": "in_progress",
-            "started_at": datetime.now(),
+            "status": "IN_PROGRESS",
+            "started_at": now,
+            "updated_at": now,
             "started_by": current_user.get("user_id"),
         },
     )
-    return {"task_id": task_id, "status": "in_progress", "message": "Task started"}
+    return {"task_id": task_id, "status": "IN_PROGRESS", "message": "Task started"}
 
 
 @router.post("/{task_id}/reassign")
@@ -991,7 +1048,7 @@ async def reassign_task(
     task = repo.find_by_id(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
-    if task.get("status") == "completed":
+    if canon_status(task.get("status")) == "COMPLETED":
         raise HTTPException(status_code=400, detail="Cannot reassign a completed task")
     history_entry = {
         "action": "reassigned",
