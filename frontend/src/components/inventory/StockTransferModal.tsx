@@ -20,6 +20,7 @@ import {
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { inventoryApi } from '../../services/api';
+import { storeApi } from '../../services/api/stores';
 
 interface StockTransferModalProps {
   isOpen: boolean;
@@ -80,16 +81,16 @@ export function StockTransferModal({ isOpen, onClose, onTransferCreated }: Stock
 
   const loadStores = async () => {
     try {
-      // Mock stores for now - in production, fetch from API
-      const mockStores: Store[] = [
-        { id: 'store-1', name: 'Main Store - Mumbai', code: 'MUM01' },
-        { id: 'store-2', name: 'Branch Store - Pune', code: 'PUN01' },
-        { id: 'store-3', name: 'Branch Store - Delhi', code: 'DEL01' },
-        { id: 'store-4', name: 'Warehouse - Bangalore', code: 'BLR01' },
-      ];
+      const res = await storeApi.getStores();
+      const list = Array.isArray(res) ? res : res.stores || res.data || [];
+      const mapped: Store[] = list.map((s: any) => ({
+        id: s.store_id || s.id || s._id,
+        name: s.store_name || s.name || '',
+        code: s.store_code || s.code || '',
+      }));
 
       // Filter out current store
-      const otherStores = mockStores.filter(s => s.id !== user?.activeStoreId);
+      const otherStores = mapped.filter(s => s.id !== user?.activeStoreId);
       setStores(otherStores);
     } catch (error: any) {
       toast.error('Failed to load stores');

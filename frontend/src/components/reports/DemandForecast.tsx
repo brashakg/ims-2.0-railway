@@ -137,7 +137,7 @@ function getTrendIcon(trend: 'UP' | 'DOWN' | 'STABLE') {
 }
 
 // ============================================================================
-// Mock Data Generation
+// Derivations from the real /demand-forecast API response
 // ============================================================================
 
 function deriveCategoryForecasts(apiForecasts: ApiForecast[], days: ForecastRange): ForecastItem[] {
