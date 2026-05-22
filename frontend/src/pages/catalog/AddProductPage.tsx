@@ -299,8 +299,23 @@ export function AddProductPage() {
 
     setIsSubmitting(true);
     try {
+      // ProductCreate requires top-level sku/brand/model. The dynamic form
+      // collects these under category-specific attribute names (brand_name,
+      // model_no / model_name); map them here. SKU is not a form field, so
+      // generate a stable unique one when absent (avoids the 422 the flat
+      // payload otherwise hit).
+      const brand = String(attributes.brand_name || attributes.brand || '').trim();
+      const model = String(
+        attributes.model_no || attributes.model_name || attributes.subbrand || 'STD'
+      ).trim();
+      const sku =
+        String(attributes.sku || attributes.barcode || '').trim() ||
+        `${selectedCategory}-${(brand || 'GEN').replace(/\s+/g, '').slice(0, 6)}-${Date.now().toString(36)}`.toUpperCase();
       await productApi.createProduct({
         category: selectedCategory,
+        sku,
+        brand,
+        model,
         attributes,
         description: description || undefined,
         hsn_code: hsnCode || undefined,
