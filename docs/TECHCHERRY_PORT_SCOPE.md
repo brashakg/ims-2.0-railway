@@ -363,7 +363,7 @@ Sections (mirrors TechCherry's "Deep Analysis & Growth Blueprint"):
 11. Top 10 actions
 12. Competitive positioning
 
-Generated on-demand. Optionally cached per-(store, month) since regeneration costs Claude/Ollama tokens.
+Generated on-demand. Optionally cached per-(store, month) since regeneration costs Claude tokens.
 
 ---
 

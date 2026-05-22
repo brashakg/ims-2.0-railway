@@ -3,34 +3,25 @@ IMS 2.0 — Pluggable LLM provider
 ================================
 One async entry point (`complete`) that routes to whichever model the
 caller selects, plus a registry of the models that are configured via
-env. Lets JARVIS + the agents run a self-hosted OSS model (Ollama /
-vLLM / any OpenAI-compatible server) and/or Anthropic Claude, with a
-runtime per-query selector — a hybrid of "local & private" and
-"Claude deep analysis".
+env. JARVIS + the agents run on Anthropic Claude, with a runtime
+per-query selector between the standard and premium Claude tiers.
 
 Model registry is env-driven so no code change is needed to add/remove
 a model:
-
-  Local (OpenAI-compatible — Ollama, vLLM, LM Studio, Groq, …):
-    LLM_LOCAL_BASE_URL   e.g. http://ollama.railway.internal:11434/v1
-    LLM_LOCAL_MODEL      e.g. qwen2.5:3b-instruct   (default)
-    LLM_LOCAL_LABEL      e.g. "Local (fast & private)"
-    LLM_LOCAL_API_KEY    optional (Ollama needs none; Groq needs a key)
 
   Claude:
     ANTHROPIC_API_KEY    (already used elsewhere)
     AGENT_CLAUDE_MODEL   default claude-haiku-4-5
     LLM_CLAUDE_LABEL     e.g. "Claude (deep analysis)"
 
-  Optional third (any OpenAI-compatible):
+  Optional second (any OpenAI-compatible cloud endpoint):
     LLM_EXTRA_BASE_URL / LLM_EXTRA_MODEL / LLM_EXTRA_LABEL / LLM_EXTRA_API_KEY
 
-  LLM_DEFAULT_MODEL      id to default to (local | claude | extra)
+  LLM_DEFAULT_MODEL      id to default to (claude | claude-opus | extra)
 
 Privacy: `scrub_pii` redacts customer PII (names, phones, emails,
 addresses, GSTIN) from any structured context before it leaves the
-process. On by default for every provider — defence in depth even for
-the local one.
+process. On by default for every provider — defence in depth.
 """
 from __future__ import annotations
 
@@ -139,18 +130,6 @@ def _registry() -> Dict[str, Dict[str, Any]]:
     code change."""
     models: Dict[str, Dict[str, Any]] = {}
 
-    local_url = os.getenv("LLM_LOCAL_BASE_URL") or os.getenv("OLLAMA_BASE_URL")
-    if local_url:
-        models["local"] = {
-            "id": "local",
-            "label": os.getenv("LLM_LOCAL_LABEL", "Local (fast & private)"),
-            "provider": "openai_compat",
-            "base_url": local_url.rstrip("/"),
-            "model": os.getenv("LLM_LOCAL_MODEL", "qwen2.5:3b-instruct"),
-            "api_key": os.getenv("LLM_LOCAL_API_KEY", ""),
-            "tier": "free",
-        }
-
     if os.getenv("ANTHROPIC_API_KEY"):
         models["claude"] = {
             "id": "claude",
@@ -214,8 +193,8 @@ def default_model_id() -> Optional[str]:
     pref = os.getenv("LLM_DEFAULT_MODEL")
     if pref and pref in reg:
         return pref
-    # Prefer the private local model, then claude, then extra.
-    for k in ("local", "claude", "extra"):
+    # Prefer Claude (standard tier), then Opus, then an extra cloud model.
+    for k in ("claude", "claude-opus", "extra"):
         if k in reg:
             return k
     return None
@@ -224,17 +203,12 @@ def default_model_id() -> Optional[str]:
 def model_budgets(model_id: Optional[str]) -> Dict[str, int]:
     """Tier-appropriate token + context budgets for an LLM call.
 
-    Local Ollama is typically a small (3B-class) model running on a
-    shared CPU instance with a 4096-token context window. Sending it
-    a 32k-char (~8k token) prompt forces truncation AND blows past the
-    LLM_TIMEOUT. Claude/Opus have 200k context — no constraint there.
-
-    Returns a dict callers can spread into `complete()`:
+    Claude (standard) and Claude Opus (premium) both have a 200k-token
+    context window, so the full ~32k-char business-data lens fits with
+    room to spare. Returns a dict callers can spread into `complete()`:
         {"max_tokens": int, "context_budget": int}
 
     Tunable via env:
-        LLM_LOCAL_MAX_TOKENS       (default 512)
-        LLM_LOCAL_CONTEXT_BUDGET   (default 3000)
         LLM_STANDARD_MAX_TOKENS    (default 2048)
         LLM_STANDARD_CONTEXT_BUDGET(default 16000)
         LLM_PREMIUM_MAX_TOKENS     (default 4096)
@@ -243,11 +217,6 @@ def model_budgets(model_id: Optional[str]) -> Dict[str, int]:
     reg = _registry()
     tier = (reg.get(model_id or "", {}) or {}).get("tier", "standard")
 
-    if tier == "free":
-        return {
-            "max_tokens": int(os.getenv("LLM_LOCAL_MAX_TOKENS", "512")),
-            "context_budget": int(os.getenv("LLM_LOCAL_CONTEXT_BUDGET", "3000")),
-        }
     if tier == "premium":
         return {
             "max_tokens": int(os.getenv("LLM_PREMIUM_MAX_TOKENS", "4096")),

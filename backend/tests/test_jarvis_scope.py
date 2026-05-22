@@ -189,9 +189,9 @@ def test_coerce_mongo_value_parses_json():
 # ----- PR #127 regression: prompt-template format bug --------------------
 
 def test_model_budgets_per_tier():
-    """Local Ollama gets a SMALL budget that fits the 4096-token Ollama
-    context window. Claude/Opus get the full lens. Regression-locks the
-    fix for the Ollama timeout/truncate problem."""
+    """Claude (standard) and Claude Opus (premium) get progressively
+    larger token + context budgets. Local/Ollama tier was removed — the
+    system is Claude-only."""
     from agents.llm_provider import model_budgets
 
     # The function reads tier from the live registry. To avoid depending
@@ -201,43 +201,35 @@ def test_model_budgets_per_tier():
 
     original = lp._registry  # pylint: disable=protected-access
     lp._registry = lambda: {  # pylint: disable=protected-access
-        "local": {"tier": "free"},
         "claude": {"tier": "standard"},
         "claude-opus": {"tier": "premium"},
     }
     try:
-        local = model_budgets("local")
         std = model_budgets("claude")
         prem = model_budgets("claude-opus")
-        # Local must be small enough to fit Ollama's 4096-token window
-        assert local["max_tokens"] <= 1024, "local max_tokens too high for 3B model"
-        assert local["context_budget"] <= 4000, "local context too large for 4096-token window"
-        # Standard / premium are progressively larger
-        assert std["max_tokens"] >= local["max_tokens"] * 2
+        # Premium is at least as large as standard on both axes
         assert prem["max_tokens"] >= std["max_tokens"]
-        assert std["context_budget"] >= local["context_budget"] * 3
         assert prem["context_budget"] >= std["context_budget"]
+        # Standard still gets a generous lens (Claude has 200k context)
+        assert std["max_tokens"] >= 1024
+        assert std["context_budget"] >= 8000
     finally:
         lp._registry = original  # pylint: disable=protected-access
 
 
-def test_local_system_prompt_is_short_enough_for_ollama_4k_window():
-    """The LOCAL system prompt must be compact — full prompt is ~1200
-    tokens which eats 30% of a 4096-token Ollama window. Compact one
-    should be under 300 tokens (~1200 chars)."""
+def test_jarvis_system_prompt_has_persona_and_placeholder():
+    """Claude-only: there is a single JARVIS system prompt (the compact
+    local/Ollama prompt was removed). It must carry the persona markers
+    and the {current_datetime} placeholder used by .replace()."""
     from api.routers.jarvis import ClaudeClient
 
-    local_prompt = ClaudeClient.JARVIS_LOCAL_SYSTEM_PROMPT
-    # ~4 chars per token rough estimate
-    approx_tokens = len(local_prompt) // 4
-    assert approx_tokens < 300, (
-        f"LOCAL prompt is ~{approx_tokens} tokens — must stay under 300 "
-        "so the 4096-token Ollama window has room for business data + query"
-    )
-    # And it must still contain the persona + scrub contract markers
-    assert "JARVIS" in local_prompt
-    assert "Sir" in local_prompt
-    assert "{current_datetime}" in local_prompt  # placeholder still there for .replace()
+    # The removed local prompt must not be reintroduced.
+    assert not hasattr(ClaudeClient, "JARVIS_LOCAL_SYSTEM_PROMPT")
+
+    prompt = ClaudeClient.JARVIS_SYSTEM_PROMPT
+    assert "JARVIS" in prompt
+    assert "Sir" in prompt
+    assert "{current_datetime}" in prompt  # placeholder still there for .replace()
 
 
 def test_system_prompt_renders_with_literal_curly_braces():

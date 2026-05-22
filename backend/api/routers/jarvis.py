@@ -1794,24 +1794,6 @@ class JarvisResponseGenerator:
 class ClaudeClient:
     """Anthropic Claude API client for JARVIS"""
 
-    # Compact prompt used ONLY for the local OSS model (qwen2.5:3b etc.)
-    # The full prompt is ~4800 chars / ~1200 tokens — that alone eats ~30%
-    # of a 4096-token Ollama context window, leaving little room for the
-    # business data + user query + model output. This compact version
-    # keeps the JARVIS persona + scrub contract but drops the
-    # documentation-of-data-keys (the model reads the BUSINESS DATA JSON
-    # directly anyway and can infer the shape).
-    JARVIS_LOCAL_SYSTEM_PROMPT = """You are JARVIS, the AI executive assistant to the Superadmin of Better Vision + WizOpt — a premium optical retail chain in India.
-
-Style: lightly witty British English, address user as "Sir" or "Ma'am", concise, solution-first.
-
-Format currency in Indian Rupees (₹, L for Lakh, Cr for Crore). Use markdown. No emojis unless useful for scannability.
-
-You have read access to the chain's operational data (snapshot in BUSINESS DATA below). Customer/patient PII is auto-redacted; own staff/vendor names are not. If a specific data point isn't in the snapshot, say so directly and suggest which IMS page (Reports / Finance / Agents / Inventory) would show it.
-
-Indian financial year is April–March. Date/time: {current_datetime}
-"""
-
     JARVIS_SYSTEM_PROMPT = """You are JARVIS (Just A Rather Very Intelligent System), the personal AI executive assistant to the Superadmin of Better Vision + WizOpt — a premium optical retail chain operating multiple stores in India. You report directly to the owner. Think of yourself as Tony Stark's JARVIS: an inner-circle AI with full access to the business's operational nervous system.
 
 ## Your Personality:
@@ -1908,8 +1890,8 @@ Current date and time: {current_datetime}
         model_id: str = None,
     ) -> str:
         """Run a JARVIS chat completion through the pluggable LLM provider
-        (local OSS and/or Claude). `model_id` selects which configured
-        model answers; None = the configured default.
+        (Claude). `model_id` selects which configured Claude tier answers;
+        None = the configured default.
 
         Scrub policy: `scrub_level="customer"` — customer/patient PII is
         stripped before leaving the process, but owner-data (own staff
@@ -1924,24 +1906,12 @@ Current date and time: {current_datetime}
         # documentation of API paths and JSON keys, which .format() would
         # interpret as missing placeholders → KeyError. .replace() only
         # touches the explicit `{current_datetime}` token.
-        # Tier-aware budgets — local Ollama (3B model on shared CPU) can't
-        # process 32k chars (~8k tokens) within its 4096-token window AND
-        # finish under LLM_TIMEOUT. Claude/Opus get the full lens.
+        # Tier-aware budgets — Claude (standard) and Opus (premium) both
+        # have a 200k-token window so they get the full lens.
         # See `llm_provider.model_budgets()` for the per-tier defaults.
         budgets = llm_provider.model_budgets(model_id)
-        reg = llm_provider._registry()  # pylint: disable=protected-access
-        tier = (reg.get(model_id or "", {}) or {}).get("tier", "standard")
 
-        # Local model gets a compact system prompt — the full ~4800-char
-        # prompt blows past the 4096-token Ollama context window on its
-        # own. The compact version preserves the JARVIS persona + scrub
-        # contract but drops the long table-of-data-keys (the model can
-        # still read the BUSINESS DATA JSON; it doesn't need a glossary).
-        if tier == "free":
-            base_prompt = cls.JARVIS_LOCAL_SYSTEM_PROMPT
-        else:
-            base_prompt = cls.JARVIS_SYSTEM_PROMPT
-        system_prompt = base_prompt.replace(
+        system_prompt = cls.JARVIS_SYSTEM_PROMPT.replace(
             "{current_datetime}",
             datetime.now().strftime("%Y-%m-%d %H:%M:%S IST"),
         )
@@ -2374,7 +2344,7 @@ async def get_jarvis_status(current_user: dict = Depends(require_superadmin)):
 @router.get("/models")
 async def list_jarvis_models(current_user: dict = Depends(require_superadmin)):
     """Available LLM choices for the JARVIS chat selector. Reflects what's
-    configured via env (local OSS, Claude, extra). Empty list = JARVIS
+    configured via env (Claude, Claude Opus, extra). Empty list = JARVIS
     runs on the deterministic template fallback only."""
     from agents import llm_provider
 
