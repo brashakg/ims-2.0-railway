@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from typing import Any, Dict, Iterable, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -36,6 +37,20 @@ def ecommerce_db_configured() -> bool:
 
 def normalize_sku(value: Any) -> str:
     return str(value).strip() if value not in (None, "") else ""
+
+
+# A physical store barcode here is numeric, 4-14 digits (e.g. "00050567" or a
+# 13-digit EAN). Excel often coerces these to floats, leaving a trailing ".0".
+_BARCODE_RE = re.compile(r"^\d{4,14}$")
+
+
+def clean_barcode(value: Any) -> str:
+    """Normalize a spreadsheet barcode cell; return '' if it's not a plausible
+    barcode (filters junk like 'SHEET'/'ACETATE' that bled in from other cols)."""
+    s = str(value).strip() if value not in (None, "") else ""
+    if s.endswith(".0") and s[:-2].isdigit():
+        s = s[:-2]
+    return s if _BARCODE_RE.match(s) else ""
 
 
 def map_rows(rows: Iterable[Any]) -> Dict[str, Dict[str, Any]]:
@@ -168,6 +183,92 @@ def online_summary() -> Dict[str, Any]:
     except Exception as e:  # noqa: BLE001
         logger.warning("[ONLINE_CATALOG] summary failed: %s", e)
         return {"configured": True, "reachable": False}
+    finally:
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def reconcile_store_barcodes(
+    pairs: Dict[str, Any], apply: bool = False, only_empty: bool = True
+) -> Dict[str, Any]:
+    """One-time reconciliation: fill ProductVariant.storeBarcode from an
+    external SKU -> barcode map (e.g. the store's master spreadsheet).
+
+    Safety contract:
+    - WRITES ONLY the storeBarcode column, matched by exact sku.
+    - By default (only_empty=True) never overwrites a storeBarcode that's
+      already set.
+    - apply=False (default) is a DRY RUN — counts what would change, writes
+      nothing.
+    - Barcodes are validated/cleaned (clean_barcode); junk is skipped.
+    storeBarcode is never pushed to Shopify (it's the in-store physical code),
+    so this is safe for the online catalog.
+    """
+    cleaned: Dict[str, str] = {}
+    invalid = 0
+    for sku, bc in (pairs or {}).items():
+        nsku = normalize_sku(sku)
+        nbc = clean_barcode(bc)
+        if not nsku:
+            continue
+        if not nbc:
+            invalid += 1
+            continue
+        cleaned[nsku] = nbc
+
+    if not cleaned:
+        return {"matched": 0, "updated": 0, "invalid_barcode": invalid, "applied": apply}
+
+    conn = _connect()
+    if conn is None:
+        return {"error": "e-commerce DB unavailable", "applied": False}
+
+    matched = updated = skipped_existing = no_match = 0
+    sample: List[Dict[str, str]] = []
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                skus = list(cleaned.keys())
+                for i in range(0, len(skus), 1000):
+                    chunk = skus[i : i + 1000]
+                    cur.execute(
+                        'SELECT sku, "storeBarcode" FROM "ProductVariant" WHERE sku = ANY(%s)',
+                        (chunk,),
+                    )
+                    existing = {r[0]: r[1] for r in cur.fetchall()}
+                    for sku in chunk:
+                        if sku not in existing:
+                            no_match += 1
+                            continue
+                        matched += 1
+                        current = existing[sku]
+                        if only_empty and current not in (None, ""):
+                            skipped_existing += 1
+                            continue
+                        if apply:
+                            cur.execute(
+                                'UPDATE "ProductVariant" SET "storeBarcode" = %s WHERE sku = %s',
+                                (cleaned[sku], sku),
+                            )
+                        updated += 1
+                        if len(sample) < 10:
+                            sample.append({"sku": sku, "store_barcode": cleaned[sku]})
+        return {
+            "applied": apply,
+            "input_pairs": len(pairs or {}),
+            "valid_pairs": len(cleaned),
+            "invalid_barcode": invalid,
+            "matched_in_bvi": matched,
+            "no_match_in_bvi": no_match,
+            "skipped_existing": skipped_existing,
+            ("updated" if apply else "would_update"): updated,
+            "sample": sample,
+        }
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[ONLINE_CATALOG] reconcile failed: %s", e)
+        return {"error": str(e)[:200], "applied": False}
     finally:
         try:
             conn.close()
