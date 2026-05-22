@@ -40,7 +40,13 @@ interface NavItem {
   to: string;
   icon: IconName;
   requireRoles?: UserRole[]; // if set, only visible to users holding one of these roles
+  external?: boolean; // render as <a target=_blank> instead of an in-app route
 }
+
+// The consolidated e-commerce (BVI) admin. Configurable per-env so the URL can
+// change with the uniparallel.com cutover without a code change.
+const ECOMMERCE_URL =
+  (import.meta.env.VITE_ECOMMERCE_URL as string | undefined) || 'https://uniparallel.com';
 
 interface NavGroup {
   /** Section title rendered only in expanded mode. Omit for the first
@@ -106,6 +112,7 @@ const RAIL_GROUPS: NavGroup[] = [
     title: 'Growth',
     items: [
       { id: 'marketing', label: 'Marketing', to: '/customers/campaigns', icon: 'megaphone' },
+      { id: 'online-store', label: 'Online Store', to: ECOMMERCE_URL, icon: 'tag', external: true, requireRoles: ['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER'] },
     ],
   },
   {
@@ -250,6 +257,22 @@ export function Rail({ brand = 'bv' }: { brand?: 'bv' | 'wizopt' }) {
             <div id={`rail-group-${gi}-items`} hidden={itemsHidden}>
               {group.items.map((item) => {
                 const IconCmp = Icon[item.icon];
+                if (item.external) {
+                  // External app (e.g. the e-commerce admin) — open in a new tab.
+                  return (
+                    <a
+                      key={item.id}
+                      href={item.to}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="rail-item"
+                      title={`${item.label} (opens in new tab)`}
+                    >
+                      <IconCmp />
+                      <span className="rail-label">{item.label}</span>
+                    </a>
+                  );
+                }
                 return (
                   <NavLink
                     key={item.id}
