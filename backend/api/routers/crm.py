@@ -50,7 +50,20 @@ class _CRMDataAdapter:
         repo = get_customer_repository()
         if not repo:
             return []
-        return repo.find_many({"primary_store_id": store_id})
+        # Store is recorded under different keys across data sources:
+        # TechCherry import uses `preferred_store_id`, native docs use
+        # `home_store_id`, and older/legacy code wrote `primary_store_id`
+        # or `store_id`. OR all four so no store-scoped customer is missed.
+        return repo.find_many(
+            {
+                "$or": [
+                    {"preferred_store_id": store_id},
+                    {"home_store_id": store_id},
+                    {"primary_store_id": store_id},
+                    {"store_id": store_id},
+                ]
+            }
+        )
 
     def query_customer_orders(self, customer_id: str):
         repo = get_order_repository()

@@ -9,19 +9,19 @@ export interface CreateProductPayload {
   attributes: Record<string, string | number>;
   description?: string;
   hsn_code?: string;
+  // Pricing is FLAT to match the backend `ProductCreate` schema. It used
+  // to be nested under `pricing` / `inventory`, which pydantic silently
+  // dropped — so MRP, offer_price and gst_rate never persisted. ProductCreate
+  // has no stock field, so initial quantity is not sent here (stock is
+  // created later via GRN, not at product-create time).
+  mrp: number;
+  offer_price?: number;
   gst_rate?: number;
   weight?: number;
-  pricing: {
-    mrp: number;
-    offer_price?: number;
-    cost_price?: number;
-    discount_category?: string;
-  };
-  inventory?: {
-    initial_quantity?: number;
-    barcode?: string;
-    reorder_level?: number;
-  };
+  // Extra fields the form collects; the backend ignores keys it doesn't
+  // model, so these are harmless passthrough until ProductCreate grows them.
+  cost_price?: number;
+  discount_category?: string;
   images?: string[];
   shopify?: {
     // Kept for future NEXUS agent → Shopify sync only. We don't run our

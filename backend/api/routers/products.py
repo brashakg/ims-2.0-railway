@@ -64,7 +64,9 @@ class ProductCreate(BaseModel):
     mrp: float = Field(..., gt=0)
     offer_price: float = Field(..., gt=0)
     hsn_code: Optional[str] = None
-    tax_rate: float = Field(default=18.0)
+    # Persisted as `gst_rate` — the key seed data, reports and billing all
+    # read. Was previously `tax_rate`, which no reader looked at.
+    gst_rate: float = Field(default=18.0)
     attributes: Optional[dict] = None
 
 
@@ -177,7 +179,7 @@ async def create_product(
             "mrp": product.mrp,
             "offer_price": product.offer_price,
             "hsn_code": product.hsn_code,
-            "tax_rate": product.tax_rate,
+            "gst_rate": product.gst_rate,
             "attributes": product.attributes or {},
             "is_active": True,
             "created_by": current_user.get("user_id"),
