@@ -9,6 +9,13 @@ import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { payrollApi, grossOf, type SalaryConfig, type PtSlab } from '../../services/api/payroll';
 import { entitiesApi, type Entity } from '../../services/api/entities';
+import { storeApi } from '../../services/api/stores';
+
+interface StoreOption {
+  store_id: string;
+  store_code?: string;
+  store_name?: string;
+}
 
 const EMPTY_FORM: SalaryConfig = {
   employee_id: '',
@@ -53,6 +60,7 @@ export function SalarySetupPage() {
 
   const [configs, setConfigs] = useState<SalaryConfig[]>([]);
   const [entities, setEntities] = useState<Entity[]>([]);
+  const [stores, setStores] = useState<StoreOption[]>([]);
   const [ptSlabs, setPtSlabs] = useState<PtSlab[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -67,14 +75,16 @@ export function SalarySetupPage() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [cfg, ents, pt] = await Promise.all([
+      const [cfg, ents, pt, st] = await Promise.all([
         payrollApi.listConfigs(),
         entitiesApi.list().catch(() => ({ entities: [] as Entity[], total: 0 })),
         payrollApi.listPtSlabs().catch(() => ({ pt_slabs: [] as PtSlab[], total: 0, source: '' })),
+        storeApi.getStores().catch(() => ({ stores: [] as StoreOption[] })),
       ]);
       setConfigs(cfg.configs || []);
       setEntities(ents.entities || []);
       setPtSlabs(pt.pt_slabs || []);
+      setStores((st?.stores || st || []) as StoreOption[]);
     } catch {
       toast.error('Failed to load salary configs');
     } finally {
@@ -262,13 +272,23 @@ export function SalarySetupPage() {
               <Field label="Entity">
                 <select className="input-field" value={form.entity_id || ''}
                   onChange={(e) => setField('entity_id', e.target.value)}>
-                  <option value="">— select —</option>
+                  <option value="">{entities.length ? '— select —' : '— no entities yet —'}</option>
                   {entities.map((en) => <option key={en.entity_id} value={en.entity_id}>{en.name}</option>)}
                 </select>
+                {entities.length === 0 && (
+                  <span className="block text-xs text-gray-400 mt-1">Create entities in Settings &gt; Entities first.</span>
+                )}
               </Field>
-              <Field label="Store ID">
-                <input className="input-field" value={form.store_id || ''}
-                  onChange={(e) => setField('store_id', e.target.value)} />
+              <Field label="Store">
+                <select className="input-field" value={form.store_id || ''}
+                  onChange={(e) => setField('store_id', e.target.value)}>
+                  <option value="">{stores.length ? '— select —' : '— no stores found —'}</option>
+                  {stores.map((s) => (
+                    <option key={s.store_id} value={s.store_id}>
+                      {[s.store_code, s.store_name].filter(Boolean).join(' · ') || s.store_id}
+                    </option>
+                  ))}
+                </select>
               </Field>
 
               <Field label="Basic *">
