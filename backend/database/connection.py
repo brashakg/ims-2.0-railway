@@ -163,7 +163,7 @@ class DatabaseConnection:
         """Create MongoDB indexes for query performance.
         Safe to call multiple times — MongoDB skips existing indexes.
         """
-        if not self._connected or not self._db:
+        if not self._connected or self._db is None:
             return
         try:
             # Orders — most queried collection
