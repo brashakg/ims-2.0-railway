@@ -75,16 +75,25 @@ def _connect():
         return None
 
 
+# Match the caller's identifier against ANY of the three variant keys a
+# physical-store product might carry: sku, storeBarcode (the canonical
+# store<->online reconciliation key per the BVI schema) or barcode (GTIN).
+# We key the result by the REQUESTED identifier (req.key) so the caller can
+# map the response straight back onto whatever id it sent. The 4-column row
+# shape (key, online_stock, status, pushed) is preserved so map_rows() and
+# its unit tests are unchanged.
 _QUERY = """
-    SELECT v.sku,
+    WITH req(key) AS (SELECT DISTINCT unnest(%s::text[]))
+    SELECT req.key,
            COALESCE(SUM(vl.quantity), 0) AS online_stock,
-           p.status,
-           (p."shopifyProductId" IS NOT NULL) AS pushed
-    FROM "ProductVariant" v
+           MAX(p.status) AS status,
+           bool_or(p."shopifyProductId" IS NOT NULL) AS pushed
+    FROM req
+    JOIN "ProductVariant" v
+      ON v.sku = req.key OR v."storeBarcode" = req.key OR v.barcode = req.key
     JOIN "Product" p ON p.id = v."productId"
     LEFT JOIN "VariantLocation" vl ON vl."variantId" = v.id
-    WHERE v.sku = ANY(%s)
-    GROUP BY v.sku, p.status, p."shopifyProductId"
+    GROUP BY req.key
 """
 
 
@@ -124,11 +133,22 @@ def online_summary() -> Dict[str, Any]:
             products = cur.fetchone()[0]
             cur.execute('SELECT count(*) FROM "ProductVariant"')
             variants = cur.fetchone()[0]
+            # A few real identifiers so ops can sanity-check the SKU/barcode
+            # match end-to-end (these are catalog ids, not sensitive data).
+            cur.execute(
+                'SELECT sku, "storeBarcode", barcode FROM "ProductVariant" '
+                "WHERE sku IS NOT NULL ORDER BY sku LIMIT 5"
+            )
+            sample = [
+                {"sku": r[0], "store_barcode": r[1], "barcode": r[2]}
+                for r in cur.fetchall()
+            ]
         return {
             "configured": True,
             "reachable": True,
             "online_products": int(products),
             "online_variants": int(variants),
+            "sample": sample,
         }
     except Exception as e:  # noqa: BLE001
         logger.warning("[ONLINE_CATALOG] summary failed: %s", e)

@@ -35,10 +35,11 @@ import {
   Headphones,
   Sparkles,
   Ear,
+  Globe,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import type { ProductCategory } from '../../types';
-import { inventoryApi, adminProductApi } from '../../services/api';
+import { inventoryApi, adminProductApi, catalogApi, type OnlineStatus } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { BarcodeManagementModal } from '../../components/inventory/BarcodeManagementModal';
@@ -88,6 +89,8 @@ interface StockItem {
   location?: string;
   lowStockThreshold?: number;
   minStock?: number;
+  barcode?: string;
+  storeBarcode?: string;
 }
 
 // Stock movement type
@@ -114,6 +117,8 @@ export function InventoryPage() {
   const [inventory, setInventory] = useState<StockItem[]>([]);
   const [lowStockItems, setLowStockItems] = useState<StockItem[]>([]);
   const [movements, setMovements] = useState<StockMovement[]>([]);
+  // Online (Shopify/e-commerce) status keyed by sku and/or barcode.
+  const [onlineStatus, setOnlineStatus] = useState<Record<string, OnlineStatus>>({});
   const [movementFilter, setMovementFilter] = useState<StockMovement['type'] | 'ALL'>('ALL');
   const [movementSearch, setMovementSearch] = useState('');
 
@@ -181,13 +186,29 @@ export function InventoryPage() {
 
       // Process stock data
       const items = stockData?.items || stockData || [];
-      setInventory(Array.isArray(items) ? items.map((item: StockItem) => ({
+      const normalized: StockItem[] = Array.isArray(items) ? items.map((item: StockItem) => ({
         ...item,
         name: item.name || item.productName || 'Unknown Product',
         stock: item.stock || item.quantity || 0,
         lowStockThreshold: item.lowStockThreshold || item.minStock || 5,
         reserved: item.reserved || 0,
-      })) : []);
+      })) : [];
+      setInventory(normalized);
+
+      // Tag which SKUs are online (in Shopify via the e-commerce catalog) and
+      // how much online stock exists. Fail-soft: bridge off -> {} -> no badges.
+      const ids = Array.from(new Set(
+        normalized.flatMap(i => [i.sku, (i as any).barcode, (i as any).storeBarcode])
+          .map(v => String(v || '').trim())
+          .filter(Boolean)
+      ));
+      if (ids.length > 0) {
+        catalogApi.getOnlineStatus(ids)
+          .then(setOnlineStatus)
+          .catch(() => setOnlineStatus({}));
+      } else {
+        setOnlineStatus({});
+      }
 
       // Process low stock data
       const lowItems = lowStockData?.items || lowStockData || [];
@@ -242,6 +263,20 @@ export function InventoryPage() {
     if (item.stock <= threshold) return { label: 'Low Stock', class: 'badge-warning' };
     return { label: 'In Stock', class: 'badge-success' };
   };
+
+  // Online status for an item, matched by sku -> barcode -> storeBarcode.
+  const getOnline = (item: StockItem): OnlineStatus | undefined => {
+    const keys = [item.sku, item.barcode, item.storeBarcode]
+      .map(v => String(v || '').trim())
+      .filter(Boolean);
+    for (const k of keys) {
+      if (onlineStatus[k]) return onlineStatus[k];
+    }
+    return undefined;
+  };
+
+  // Count of inventory rows currently online.
+  const onlineCount = inventory.reduce((n, i) => (getOnline(i)?.online ? n + 1 : n), 0);
 
   const formatCurrency = (amount: number) => {
     return new Intl.NumberFormat('en-IN', {
@@ -394,8 +429,8 @@ export function InventoryPage() {
         </div>
       )}
 
-      {/* 5-cell stat strip */}
-      <div className="stat-strip">
+      {/* 6-cell stat strip (incl. Online) */}
+      <div className="stat-strip stat-strip-6">
         <div>
           <div className="l">Total SKUs</div>
           <div className="v">{totalSKUs.toLocaleString('en-IN')}</div>
@@ -412,6 +447,11 @@ export function InventoryPage() {
           <div className={'d ' + (lowStockCount > 0 ? 'bad' : 'good')}>
             {lowStockCount > 0 ? 'needs reorder' : 'all above reorder pt'}
           </div>
+        </div>
+        <div>
+          <div className="l">Online</div>
+          <div className="v" style={{ color: onlineCount > 0 ? 'var(--ok, #059669)' : 'var(--ink)' }}>{onlineCount}</div>
+          <div className="d">{onlineCount > 0 ? 'listed in Shopify' : 'none synced online'}</div>
         </div>
         <div>
           <div className="l">Categories</div>
@@ -568,7 +608,8 @@ export function InventoryPage() {
                     <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Category</th>
                     <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">MRP</th>
                     <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Offer</th>
-                    <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Stock</th>
+                    <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">In-Store</th>
+                    <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Online</th>
                     <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Location</th>
                     <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Status</th>
                     <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Actions</th>
@@ -620,6 +661,23 @@ export function InventoryPage() {
                           {item.reserved > 0 && (
                             <span className="text-xs text-orange-500 ml-1">+{item.reserved} reserved</span>
                           )}
+                        </td>
+                        <td className="px-4 py-3 text-center">
+                          {(() => {
+                            const o = getOnline(item);
+                            if (!o?.online) {
+                              return <span className="text-xs text-gray-400">In-store only</span>;
+                            }
+                            return (
+                              <div className="flex flex-col items-center gap-0.5">
+                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-emerald-100 text-emerald-700">
+                                  <Globe className="w-3 h-3" strokeWidth={2} />
+                                  Online
+                                </span>
+                                <span className="text-xs text-gray-600">{o.online_stock} online</span>
+                              </div>
+                            );
+                          })()}
                         </td>
                         <td className="px-4 py-3 text-center text-sm text-gray-600">{item.location || '-'}</td>
                         <td className="px-4 py-3 text-center">

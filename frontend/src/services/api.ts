@@ -13,6 +13,7 @@ export {
   adminUserApi,
   adminSystemApi,
   productApi,
+  catalogApi,
   adminProductApi,
   adminCategoryApi,
   adminBrandApi,
@@ -35,3 +36,5 @@ export {
   incentiveApi,
   payoutApi,
 } from './api/index';
+
+export type { OnlineStatus } from './api/index';

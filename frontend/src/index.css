@@ -1250,6 +1250,9 @@
   border-radius: var(--r-lg);
   margin-bottom: 18px;
 }
+/* 6-cell variant (e.g. Inventory with the Online stat). Mobile still
+   collapses to 2 columns via the !important rule in styles/mobile.css. */
+.stat-strip.stat-strip-6 { grid-template-columns: repeat(6, 1fr); }
 .stat-strip > div {
   padding: 14px 18px;
   border-right: 1px solid var(--line);

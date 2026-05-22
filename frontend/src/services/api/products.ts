@@ -36,6 +36,44 @@ export interface CreateProductPayload {
   };
 }
 
+// ============================================================================
+// Catalog API - Online (Shopify/e-commerce) status bridge
+// ----------------------------------------------------------------------------
+// Reads the e-commerce (BVI) catalog to tell, per SKU/barcode, whether a
+// product is online (in Shopify) and how much online stock exists. Fully
+// fail-soft on the backend: an unconfigured/unreachable bridge returns {}.
+// ============================================================================
+
+export interface OnlineStatus {
+  online: boolean;
+  online_stock: number;
+  status?: string | null;
+}
+
+export const catalogApi = {
+  /** Per-identifier online status. Pass any mix of SKUs / barcodes; the
+   *  backend matches each against sku, storeBarcode or barcode and keys the
+   *  result by the identifier you sent. Empty {} when the bridge is off. */
+  getOnlineStatus: async (skus: string[]): Promise<Record<string, OnlineStatus>> => {
+    const clean = Array.from(new Set((skus || []).map(s => String(s || '').trim()).filter(Boolean)));
+    if (clean.length === 0) return {};
+    const response = await api.get('/catalog/online-status', { params: { skus: clean.join(',') } });
+    return (response.data?.statuses || {}) as Record<string, OnlineStatus>;
+  },
+
+  /** Diagnostic: is the e-commerce catalog configured/reachable + counts. */
+  getOnlineSummary: async () => {
+    const response = await api.get('/catalog/online-summary');
+    return response.data as {
+      configured: boolean;
+      reachable: boolean;
+      online_products?: number;
+      online_variants?: number;
+      sample?: Array<{ sku: string | null; store_barcode: string | null; barcode: string | null }>;
+    };
+  },
+};
+
 export const productApi = {
   getProducts: async (params?: { category?: string; brand?: string; search?: string; store_id?: string }) => {
     const response = await api.get('/products', { params });
