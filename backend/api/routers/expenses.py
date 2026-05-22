@@ -4,13 +4,20 @@ IMS 2.0 - Expenses Router
 Real database queries for expense and advance management
 """
 
+import io
 from fastapi import APIRouter, Depends, Query, UploadFile, File, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import Optional
 from datetime import date, datetime
 import uuid
 from .auth import get_current_user, require_roles
 from ..dependencies import get_expense_repository, get_advance_repository
+from ..services.file_store import (
+    get_file_store,
+    ALLOWED_MIME_TYPES,
+    MAX_FILE_SIZE_BYTES,
+)
 
 router = APIRouter()
 
@@ -120,25 +127,109 @@ async def upload_bill(
     file: UploadFile = File(...),
     current_user: dict = Depends(get_current_user),
 ):
-    """Upload bill/receipt for expense"""
+    """Upload bill/receipt for an expense.
+
+    Persists the bytes durably in the GridFS-backed file store (Railway's
+    disk is ephemeral, so a filename alone would not survive a redeploy)
+    and records the resulting file_id on the expense document. Mirrors the
+    handoffs upload pattern: size + mime validation, then store.put(...).
+    """
     expense_repo = get_expense_repository()
+    if expense_repo is None:
+        raise HTTPException(status_code=503, detail="Database not available")
 
-    if expense_repo is not None:
-        existing = expense_repo.find_by_id(expense_id)
-        if existing is None:
-            raise HTTPException(status_code=404, detail="Expense not found")
+    existing = expense_repo.find_by_id(expense_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="Expense not found")
 
-        # In production, you'd upload to cloud storage (S3, GCS, etc.)
-        # For now, just record the filename
-        expense_repo.update(
-            expense_id,
-            {
-                "bill_filename": file.filename,
-                "bill_uploaded_at": datetime.now().isoformat(),
-            },
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="No file provided")
+
+    # Read + validate before persisting anything.
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Empty file")
+    if len(content) > MAX_FILE_SIZE_BYTES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"File exceeds {MAX_FILE_SIZE_BYTES // (1024 * 1024)} MB cap",
+        )
+    mime = (file.content_type or "").lower()
+    if mime not in ALLOWED_MIME_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"File type '{mime}' not allowed. Accepted: {sorted(ALLOWED_MIME_TYPES)}",
         )
 
-    return {"message": "Bill uploaded", "filename": file.filename}
+    store = get_file_store()
+    if store is None:
+        # Fail-soft: don't 500 — tell the caller storage is unavailable.
+        return {
+            "message": "File storage unavailable; bill not saved",
+            "filename": file.filename,
+            "persisted": False,
+        }
+
+    file_id = store.put(
+        content=content,
+        filename=file.filename,
+        mime_type=mime,
+        metadata={"expense_id": expense_id},
+    )
+    if not file_id:
+        raise HTTPException(status_code=500, detail="File store write failed")
+
+    uploaded_at = datetime.now().isoformat()
+    expense_repo.update(
+        expense_id,
+        {
+            "bill_file_id": file_id,
+            "bill_filename": file.filename,
+            "bill_mime": mime,
+            "bill_uploaded_at": uploaded_at,
+        },
+    )
+
+    return {
+        "message": "Bill uploaded",
+        "filename": file.filename,
+        "file_id": file_id,
+        "persisted": True,
+    }
+
+
+@router.get("/{expense_id}/bill")
+async def download_bill(
+    expense_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """Stream the bill/receipt attached to an expense by its stored file_id."""
+    expense_repo = get_expense_repository()
+    if expense_repo is None:
+        raise HTTPException(status_code=503, detail="Database not available")
+
+    existing = expense_repo.find_by_id(expense_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="Expense not found")
+
+    file_id = existing.get("bill_file_id")
+    if not file_id:
+        raise HTTPException(status_code=404, detail="No bill attached to this expense")
+
+    store = get_file_store()
+    if store is None:
+        raise HTTPException(status_code=503, detail="File storage unavailable")
+
+    rec = store.get(file_id)
+    if rec is None:
+        raise HTTPException(status_code=404, detail="Bill file no longer available")
+
+    content, filename, mime = rec
+    return StreamingResponse(
+        io.BytesIO(content),
+        media_type=mime,
+        headers={"Content-Disposition": f'inline; filename="{filename}"'},
+    )
 
 
 @router.post("/{expense_id}/submit")
