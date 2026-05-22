@@ -272,4 +272,51 @@ export const tasksApi = {
     const response = await api.put('/tasks/sla-config', { matrix });
     return response.data;
   },
+
+  // --- SOP daily checklists (Phase 4) ------------------------------
+  // A checklist is a run of an SOP template at a store on a date.
+  getSopChecklist: async (templateId: string, opts?: { date?: string; storeId?: string }) => {
+    const params: Record<string, string> = { template_id: templateId };
+    if (opts?.date) params.date = opts.date;
+    if (opts?.storeId) params.store_id = opts.storeId;
+    const response = await api.get('/tasks/sop-checklist', { params });
+    return response.data as SopChecklist;
+  },
+
+  toggleSopChecklistItem: async (payload: {
+    template_id: string;
+    step_number: number;
+    completed: boolean;
+    date?: string;
+    store_id?: string;
+  }) => {
+    const response = await api.post('/tasks/sop-checklist/item', payload);
+    return response.data as SopChecklist;
+  },
+
+  seedDefaultSops: async (storeId?: string) => {
+    const response = await api.post('/tasks/sop-templates/seed-defaults', null, {
+      params: storeId ? { store_id: storeId } : {},
+    });
+    return response.data as { created: number; store_id: string; message: string };
+  },
 };
+
+export interface SopChecklistItem {
+  step_number: number;
+  instruction: string;
+  warning?: string | null;
+  completed: boolean;
+  completed_by?: string | null;
+  completed_at?: string | null;
+}
+
+export interface SopChecklist {
+  template_id: string;
+  title: string;
+  store_id?: string;
+  date: string;
+  items: SopChecklistItem[];
+  progress: { done: number; total: number; percent: number };
+  status: string;
+}

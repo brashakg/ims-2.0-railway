@@ -21,6 +21,14 @@ from ..services.task_sla import (
 )
 from ..services.task_escalation import resolve_escalation_target
 from ..services.task_notify import notify_escalation
+from ..services.sop_checklist import (
+    DEFAULT_SOP_TEMPLATES,
+    apply_item_toggle,
+    completion_status,
+    default_template_steps,
+    merge_checklist,
+    progress_of,
+)
 
 router = APIRouter()
 
@@ -537,61 +545,39 @@ async def auto_generate_daily_tasks(
     store_id: Optional[str] = Query(None),
     current_user: dict = Depends(get_current_user),
 ):
-    """Auto-generate daily tasks from SOP templates"""
+    """Auto-generate today's daily tasks from persisted DAILY SOP templates for
+    the store. Falls back to the built-in starter set when none are configured."""
     repo = get_task_repository()
     active_store = store_id or current_user.get("active_store_id")
 
     if repo is None:
         return {"generated": 0, "message": "Auto-generate failed"}
 
-    # Default SOP templates for optical retail
-    sop_templates = [
-        {
-            "name": "Opening Checklist",
-            "type": "opening",
-            "items": [
-                "Disarm security system",
-                "Turn on all lights and AC",
-                "Check cash register float",
-                "Clean display cases",
-                "Boot up POS system",
-                "Verify network connectivity",
-            ],
-        },
-        {
-            "name": "Closing Checklist",
-            "type": "closing",
-            "items": [
-                "Count cash in register",
-                "Reconcile payment methods",
-                "Update daily sales",
-                "Lock cash in safe",
-                "Clean store",
-                "Set security system",
-            ],
-        },
-        {
-            "name": "Stock Count",
-            "type": "stock_count",
-            "items": [
-                "Count frames in display",
-                "Count lenses in inventory",
-                "Check expiry dates",
-                "Verify low stock items",
-                "Update stock report",
-            ],
-        },
-    ]
+    # Persisted DAILY templates assigned to this store (or global).
+    templates: list = []
+    scol = _sop_collection()
+    if scol is not None:
+        try:
+            templates = list(scol.find(
+                {
+                    "frequency": "DAILY",
+                    "is_active": {"$ne": False},
+                    "$or": [{"store_id": active_store}, {"store_id": None}],
+                },
+                {"_id": 0},
+            ))
+        except Exception:
+            templates = []
 
+    now = datetime.now()
     generated_count = 0
 
-    for template in sop_templates:
-        now = datetime.now()
-        task_data = {
+    def _make_task(title, description, category, items, template_id=None):
+        return {
             "task_id": generate_task_id(),
-            "title": template["name"],
-            "description": f"Daily {template['type']} checklist",
-            "category": "Operations",
+            "title": title,
+            "description": description,
+            "category": category or "Operations",
             "priority": "P2",
             "status": "OPEN",
             "source": "SOP",
@@ -602,19 +588,34 @@ async def auto_generate_daily_tasks(
             "created_at": now,
             "updated_at": now,
             "escalation_level": 0,
-            "sop_type": template["type"],
-            "checklist_items": [
-                {"text": item, "completed": False} for item in template["items"]
-            ],
+            "sop_template_id": template_id,
+            "checklist_items": [{"text": t, "completed": False} for t in items],
         }
 
-        result = repo.create(task_data)
-        if result:
-            generated_count += 1
+    if templates:
+        for tpl in templates:
+            items = [s.get("instruction") for s in (tpl.get("steps") or [])]
+            task_data = _make_task(
+                tpl.get("title") or "Daily SOP",
+                tpl.get("description") or "Daily SOP checklist",
+                tpl.get("category"),
+                items,
+                template_id=tpl.get("template_id"),
+            )
+            if repo.create(task_data):
+                generated_count += 1
+    else:
+        # No templates configured yet -> built-in starter set.
+        for tdef in DEFAULT_SOP_TEMPLATES:
+            task_data = _make_task(
+                tdef["title"], tdef["description"], tdef["category"], tdef["steps"]
+            )
+            if repo.create(task_data):
+                generated_count += 1
 
     return {
         "generated": generated_count,
-        "message": f"Generated {generated_count} daily tasks from SOP templates",
+        "message": f"Generated {generated_count} daily task(s) from SOP templates",
     }
 
 
@@ -908,9 +909,9 @@ async def update_sla_config(
 # ============================================================================
 # Persisted SOPs in the `sop_templates` collection. Replaces the static
 # DEFAULT_CHECKLISTS dict on the frontend so SUPERADMIN can edit items +
-# assign templates to roles/users/stores. Checklist completion is still
-# a per-session concern (lives on the frontend + complete-item endpoint
-# above); this is just the template source of truth.
+# assign templates to roles/users/stores. Phase 4 adds real completion
+# tracking in `sop_completions` (one doc per template+store+date) via the
+# /sop-checklist endpoints further below.
 
 
 class SopStep(BaseModel):
@@ -950,6 +951,17 @@ def _sop_collection():
         return None
     try:
         return db.get_collection("sop_templates")
+    except Exception:
+        return None
+
+
+def _sop_completions_collection():
+    """Return the sop_completions collection (or None if DB unavailable)."""
+    db = get_db()
+    if db is None or not getattr(db, "is_connected", True):
+        return None
+    try:
+        return db.get_collection("sop_completions")
     except Exception:
         return None
 
@@ -1152,6 +1164,177 @@ async def assign_sop(
         "template_id": template_id,
         "template": tpl,
         "message": "SOP assignment updated",
+    }
+
+
+# ============================================================================
+# SOP DAILY CHECKLISTS — completion tracking (Tasks/SOP Phase 4)
+# ============================================================================
+# A checklist is a run of an SOP template at a store on a date. The template
+# owns the steps; a `sop_completions` doc (one per template+store+date) tracks
+# which steps are ticked. Replaces the old stubbed get_daily_checklists /
+# complete_checklist_item (hard-coded items, no persistence).
+
+
+class SopChecklistItemToggle(BaseModel):
+    template_id: str
+    step_number: int = Field(..., ge=1)
+    completed: bool
+    date: Optional[str] = None      # YYYY-MM-DD; defaults to today
+    store_id: Optional[str] = None
+
+
+@router.get("/sop-checklist")
+async def get_sop_checklist(
+    template_id: str = Query(...),
+    date: Optional[str] = Query(None),
+    store_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """An SOP template's steps merged with today's completion state + progress.
+    Read-only; the completion doc is created lazily on the first toggle."""
+    tcol = _sop_collection()
+    if tcol is None:
+        raise HTTPException(status_code=503, detail="DB unavailable")
+    tpl = tcol.find_one({"template_id": template_id}, {"_id": 0})
+    if not tpl:
+        raise HTTPException(status_code=404, detail="SOP template not found")
+
+    active_store = store_id or current_user.get("active_store_id")
+    day = date or datetime.now().strftime("%Y-%m-%d")
+
+    ccol = _sop_completions_collection()
+    completion = None
+    if ccol is not None:
+        try:
+            completion = ccol.find_one(
+                {"template_id": template_id, "store_id": active_store, "date": day},
+                {"_id": 0},
+            )
+        except Exception:
+            completion = None
+
+    items, progress = merge_checklist(tpl.get("steps") or [], (completion or {}).get("items"))
+    return {
+        "template_id": template_id,
+        "title": tpl.get("title"),
+        "store_id": active_store,
+        "date": day,
+        "items": items,
+        "progress": progress,
+        "status": (completion or {}).get("status") or completion_status(progress),
+    }
+
+
+@router.post("/sop-checklist/item")
+async def toggle_sop_checklist_item(
+    payload: SopChecklistItemToggle,
+    current_user: dict = Depends(get_current_user),
+):
+    """Tick / untick one checklist step for a template+store+date. Upserts the
+    sop_completions doc and returns the updated checklist + progress."""
+    tcol = _sop_collection()
+    ccol = _sop_completions_collection()
+    if tcol is None or ccol is None:
+        raise HTTPException(status_code=503, detail="DB unavailable")
+    tpl = tcol.find_one({"template_id": payload.template_id}, {"_id": 0})
+    if not tpl:
+        raise HTTPException(status_code=404, detail="SOP template not found")
+
+    active_store = payload.store_id or current_user.get("active_store_id")
+    day = payload.date or datetime.now().strftime("%Y-%m-%d")
+    now = datetime.now()
+    steps = tpl.get("steps") or []
+
+    existing = ccol.find_one(
+        {"template_id": payload.template_id, "store_id": active_store, "date": day}
+    )
+    items = apply_item_toggle(
+        (existing or {}).get("items") or [], steps,
+        payload.step_number, payload.completed,
+        by=current_user.get("user_id"), at=now,
+    )
+    merged, progress = merge_checklist(steps, items)
+    status = completion_status(progress)
+
+    doc_set = {
+        "template_id": payload.template_id,
+        "store_id": active_store,
+        "date": day,
+        "title": tpl.get("title"),
+        "items": items,
+        "progress": progress,
+        "status": status,
+        "updated_at": now,
+        "updated_by": current_user.get("user_id"),
+    }
+    if status == "COMPLETED":
+        doc_set["completed_at"] = now
+        doc_set["completed_by"] = current_user.get("user_id")
+
+    ccol.update_one(
+        {"template_id": payload.template_id, "store_id": active_store, "date": day},
+        {
+            "$set": doc_set,
+            "$setOnInsert": {
+                "completion_id": f"SOPC-{uuid.uuid4().hex[:8].upper()}",
+                "created_at": now,
+            },
+        },
+        upsert=True,
+    )
+    return {
+        "template_id": payload.template_id,
+        "title": tpl.get("title"),
+        "store_id": active_store,
+        "date": day,
+        "items": merged,
+        "progress": progress,
+        "status": status,
+    }
+
+
+@router.post("/sop-templates/seed-defaults")
+async def seed_default_sop_templates(
+    store_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Create the starter daily SOP templates (opening / closing / stock-count)
+    for a store if they don't already exist. SUPERADMIN / ADMIN / STORE_MANAGER."""
+    allowed = {"SUPERADMIN", "ADMIN", "STORE_MANAGER"}
+    if not (set(current_user.get("roles", [])) & allowed):
+        raise HTTPException(status_code=403, detail="Not authorized to seed SOPs")
+    col = _sop_collection()
+    if col is None:
+        raise HTTPException(status_code=503, detail="DB unavailable")
+
+    active_store = store_id or current_user.get("active_store_id")
+    now = datetime.now()
+    created = 0
+    for tdef in DEFAULT_SOP_TEMPLATES:
+        if col.find_one({"title": tdef["title"], "store_id": active_store}):
+            continue  # already seeded for this store
+        col.insert_one({
+            "template_id": f"SOP-{uuid.uuid4().hex[:8].upper()}",
+            "title": tdef["title"],
+            "description": tdef["description"],
+            "category": tdef["category"],
+            "frequency": tdef["frequency"],
+            "estimated_time": tdef["estimated_time"],
+            "steps": default_template_steps(tdef["steps"]),
+            "assigned_roles": [],
+            "assigned_users": [],
+            "store_id": active_store,
+            "is_active": True,
+            "created_by": current_user.get("user_id"),
+            "created_at": now,
+            "updated_at": now,
+        })
+        created += 1
+    return {
+        "created": created,
+        "store_id": active_store,
+        "message": f"Seeded {created} starter SOP template(s)",
     }
 
 
