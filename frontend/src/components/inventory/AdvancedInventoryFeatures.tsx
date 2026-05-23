@@ -127,6 +127,193 @@ export function ContactLensExpiryWidget() {
 }
 
 // ============================================================================
+// CONTACT LENS INVENTORY (brand x power x BC x modality)
+// ============================================================================
+
+interface CLLine {
+  product_id: string;
+  sku: string;
+  brand: string;
+  model: string;
+  cl_series: string | null;
+  modality: string | null;
+  base_curve: number | null;
+  diameter: number | null;
+  cl_power: number | null;
+  cl_cyl: number | null;
+  cl_axis: number | null;
+  color: string | null;
+  pack_size: number | null;
+  batch_code: string | null;
+  expiry_date: string | null;
+  on_hand: number;
+  days_until_expiry: number | null;
+}
+
+const NEAR_EXPIRY_DAYS = 90;
+
+function fmtPower(v: number | null): string {
+  if (v === null || v === undefined) return '-';
+  // Explicit sign, 2 decimals — matches Rx power formatting (e.g. -2.00, +1.25).
+  const sign = v > 0 ? '+' : v < 0 ? '' : '';
+  return `${sign}${v.toFixed(2)}`;
+}
+
+export function ContactLensInventoryWidget() {
+  const { user } = useAuth();
+  const [lines, setLines] = useState<CLLine[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [brand, setBrand] = useState('');
+  const [modality, setModality] = useState('');
+  const [nearExpiryOnly, setNearExpiryOnly] = useState(false);
+
+  useEffect(() => {
+    loadData();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.activeStoreId, brand, modality, nearExpiryOnly]);
+
+  const loadData = async () => {
+    setLoading(true);
+    try {
+      const params: Record<string, string | number> = {};
+      if (user?.activeStoreId) params.store_id = user.activeStoreId;
+      if (brand) params.brand = brand;
+      if (modality) params.modality = modality;
+      if (nearExpiryOnly) params.near_expiry_days = NEAR_EXPIRY_DAYS;
+      const response = await api.get('/inventory/contact-lenses', { params });
+      setLines(response.data?.items || []);
+    } catch {
+      // fail-soft: show empty
+      setLines([]);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Distinct brands for the filter dropdown (from the loaded rows).
+  const brands = Array.from(new Set(lines.map((l) => l.brand).filter(Boolean))).sort();
+  const totalUnits = lines.reduce((sum, l) => sum + (l.on_hand || 0), 0);
+
+  return (
+    <div className="bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden">
+      <div className="p-4 border-b border-gray-200 flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <Package className="w-5 h-5 text-gray-700" />
+          <h3 className="font-semibold text-gray-900">Contact Lens Inventory</h3>
+          <span className="text-xs text-gray-500">
+            {lines.length} lines · {totalUnits} units
+          </span>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <select
+            value={brand}
+            onChange={(e) => setBrand(e.target.value)}
+            className="px-2 py-1 bg-gray-100 border border-gray-300 rounded text-sm text-gray-700"
+          >
+            <option value="">All brands</option>
+            {brands.map((b) => (
+              <option key={b} value={b}>{b}</option>
+            ))}
+          </select>
+          <select
+            value={modality}
+            onChange={(e) => setModality(e.target.value)}
+            className="px-2 py-1 bg-gray-100 border border-gray-300 rounded text-sm text-gray-700"
+          >
+            <option value="">All modalities</option>
+            {['DAILY', 'FORTNIGHTLY', 'MONTHLY', 'QUARTERLY', 'YEARLY', 'COLOR'].map((m) => (
+              <option key={m} value={m}>{m}</option>
+            ))}
+          </select>
+          <label className="flex items-center gap-1.5 text-sm text-gray-700">
+            <input
+              type="checkbox"
+              checked={nearExpiryOnly}
+              onChange={(e) => setNearExpiryOnly(e.target.checked)}
+            />
+            Near expiry (&lt;{NEAR_EXPIRY_DAYS}d)
+          </label>
+        </div>
+      </div>
+
+      {loading ? (
+        <div className="p-4 text-center text-gray-500">Loading...</div>
+      ) : lines.length === 0 ? (
+        <p className="p-6 text-center text-gray-500 text-sm">No contact-lens stock found</p>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-left text-xs uppercase text-gray-500 border-b border-gray-200">
+                <th className="px-3 py-2">Brand / Series</th>
+                <th className="px-3 py-2">SKU</th>
+                <th className="px-3 py-2">Power</th>
+                <th className="px-3 py-2">BC / DIA</th>
+                <th className="px-3 py-2">Modality</th>
+                <th className="px-3 py-2 text-right">Pack</th>
+                <th className="px-3 py-2 text-right">On hand</th>
+                <th className="px-3 py-2">Batch</th>
+                <th className="px-3 py-2">Nearest expiry</th>
+              </tr>
+            </thead>
+            <tbody>
+              {lines.map((l, i) => {
+                const near =
+                  l.days_until_expiry !== null && l.days_until_expiry < NEAR_EXPIRY_DAYS;
+                const expired = l.days_until_expiry !== null && l.days_until_expiry < 0;
+                return (
+                  <tr
+                    key={`${l.product_id}-${l.batch_code ?? 'nobatch'}-${i}`}
+                    className="border-b border-gray-100 hover:bg-gray-50"
+                  >
+                    <td className="px-3 py-2">
+                      <div className="font-medium text-gray-900">{l.brand || '-'}</div>
+                      <div className="text-xs text-gray-500">{l.cl_series || l.model}</div>
+                    </td>
+                    <td className="px-3 py-2 text-gray-700">{l.sku || '-'}</td>
+                    <td className="px-3 py-2 text-gray-900 font-mono">{fmtPower(l.cl_power)}</td>
+                    <td className="px-3 py-2 text-gray-700">
+                      {l.base_curve ?? '-'} / {l.diameter ?? '-'}
+                    </td>
+                    <td className="px-3 py-2 text-gray-700">{l.modality || '-'}</td>
+                    <td className="px-3 py-2 text-right text-gray-700">{l.pack_size ?? '-'}</td>
+                    <td className="px-3 py-2 text-right font-semibold text-gray-900">{l.on_hand}</td>
+                    <td className="px-3 py-2 text-gray-600">{l.batch_code || '-'}</td>
+                    <td className="px-3 py-2">
+                      {l.expiry_date ? (
+                        <span
+                          className={clsx(
+                            'text-xs',
+                            expired
+                              ? 'text-red-700 font-semibold'
+                              : near
+                                ? 'text-red-600'
+                                : 'text-gray-600'
+                          )}
+                        >
+                          {new Date(l.expiry_date).toLocaleDateString()}
+                          {l.days_until_expiry !== null && (
+                            <span className="ml-1 text-[10px]">
+                              ({expired ? 'expired' : `${l.days_until_expiry}d`})
+                            </span>
+                          )}
+                        </span>
+                      ) : (
+                        <span className="text-xs text-gray-400">-</span>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ============================================================================
 // POWER-WISE LENS STOCK GRID
 // ============================================================================
 
