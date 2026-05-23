@@ -673,5 +673,3 @@ async def get_store_credit_ledger(
         )
     balance = _current_credit_balance(customer_id, existing)
     return {"customer_id": customer_id, "balance": balance, "entries": entries}
-
-    return {"message": f"Added ₹{amount} store credit"}
