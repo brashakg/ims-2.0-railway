@@ -10,8 +10,19 @@ from typing import Optional, List, Dict
 from datetime import datetime, timedelta
 import uuid
 
-from .auth import get_current_user
-from ..dependencies import get_task_repository, get_user_repository, get_db
+from .auth import get_current_user, require_roles
+from ..dependencies import (
+    get_task_repository,
+    get_user_repository,
+    get_db,
+    get_order_repository,
+)
+from ..services.task_triggers import (
+    create_system_task,
+    is_suspicious_closure,
+    payment_anomalies,
+    silent_tasks,
+)
 from ..services.task_sla import (
     DEFAULT_SLA,
     canon_source,
@@ -767,6 +778,123 @@ async def auto_escalate_overdue_tasks(
         "escalated": escalated_count,
         "message": f"Auto-escalated {escalated_count} overdue tasks",
     }
+
+
+# ============================================================================
+# ENDPOINTS: VARIANCE-DRIVEN AUTOMATION + INTEGRITY DETECTORS
+# ============================================================================
+
+_SCAN_ROLES = ("STORE_MANAGER", "AREA_MANAGER", "ADMIN", "ACCOUNTANT")
+_INTEGRITY_ROLES = ("STORE_MANAGER", "AREA_MANAGER", "ADMIN")
+
+
+@router.post("/scan/payment-variance")
+async def scan_payment_variance(
+    days: int = Query(7, ge=1, le=90),
+    store_id: Optional[str] = Query(None),
+    current_user: dict = Depends(require_roles(*_SCAN_ROLES)),
+):
+    """Scan recent orders for money that doesn't reconcile (overpaid /
+    payments-mismatch / delivered-but-unpaid) and raise a SYSTEM task per
+    offending order (deduped). Safe to run repeatedly / on a schedule."""
+    order_repo = get_order_repository()
+    task_repo = get_task_repository()
+    if order_repo is None:
+        return {"scanned": 0, "anomalies": 0, "tasks_created": 0}
+
+    active_store = store_id or current_user.get("active_store_id")
+    cutoff = (datetime.now() - timedelta(days=days)).isoformat()
+    filters: dict = {"created_at": {"$gte": cutoff}}
+    if active_store:
+        filters["store_id"] = active_store
+
+    try:
+        orders = order_repo.find_many(filters, limit=2000) or []
+    except Exception:  # noqa: BLE001
+        orders = []
+
+    anomalies = payment_anomalies(orders)
+    created = 0
+    for a in anomalies:
+        t = create_system_task(
+            task_repo,
+            title=f"Payment variance on order {a['order_id']}",
+            description=f"{a['kind']}: {a['detail']}. Verify the payment record.",
+            priority="P2",
+            category="Finance",
+            store_id=active_store,
+            dedupe_ref=f"payvar:{a['order_id']}",
+        )
+        if t:
+            created += 1
+
+    return {
+        "scanned": len(orders),
+        "anomalies": len(anomalies),
+        "tasks_created": created,
+        "details": anomalies[:50],
+    }
+
+
+@router.get("/integrity/fake-closures")
+async def list_fake_closures(
+    days: int = Query(30, ge=1, le=180),
+    store_id: Optional[str] = Query(None),
+    min_seconds: int = Query(20, ge=1, le=600),
+    current_user: dict = Depends(require_roles(*_INTEGRITY_ROLES)),
+):
+    """Tasks marked complete implausibly fast (possible box-ticking). Read-only."""
+    repo = get_task_repository()
+    if repo is None:
+        return {"flagged": [], "count": 0}
+
+    active_store = store_id or current_user.get("active_store_id")
+    cutoff = datetime.now() - timedelta(days=days)
+    filters: dict = {
+        "status": {"$in": ["COMPLETED", "DONE", "CLOSED", "RESOLVED", "completed", "done", "closed"]}
+    }
+    if active_store:
+        filters["store_id"] = active_store
+
+    try:
+        candidates = repo.find_many(filters, limit=1000) or []
+    except Exception:  # noqa: BLE001
+        candidates = []
+
+    flagged = []
+    for t in candidates:
+        created = t.get("created_at")
+        cdt = created if isinstance(created, datetime) else None
+        if cdt is not None and cdt < cutoff:
+            continue
+        if is_suspicious_closure(t, min_seconds=min_seconds):
+            flagged.append(_canon_task_out(t))
+    return {"flagged": flagged, "count": len(flagged)}
+
+
+@router.get("/integrity/silent")
+async def list_silent_tasks(
+    store_id: Optional[str] = Query(None),
+    current_user: dict = Depends(require_roles(*_INTEGRITY_ROLES)),
+):
+    """OPEN tasks never acknowledged within their ack-SLA window. Read-only;
+    the auto-escalator acts on these, this just surfaces them for a manager."""
+    repo = get_task_repository()
+    if repo is None:
+        return {"silent": [], "count": 0}
+
+    active_store = store_id or current_user.get("active_store_id")
+    filters: dict = {"status": {"$in": ["OPEN", "open"]}}
+    if active_store:
+        filters["store_id"] = active_store
+
+    try:
+        candidates = repo.find_many(filters, limit=1000) or []
+    except Exception:  # noqa: BLE001
+        candidates = []
+
+    silent = silent_tasks(candidates, now=datetime.now(), sla_config=_load_sla_config())
+    return {"silent": [_canon_task_out(t) for t in silent], "count": len(silent)}
 
 
 # ============================================================================

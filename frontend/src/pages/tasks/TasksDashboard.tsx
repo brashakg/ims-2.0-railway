@@ -20,6 +20,7 @@ import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { tasksApi } from '../../services/api';
 import type { SopChecklist } from '../../services/api/hr';
+import SystemIntegrityPanel from '../../components/tasks/SystemIntegrityPanel';
 
 type TaskTab = 'my-tasks' | 'checklists' | 'team-tasks';
 
@@ -261,6 +262,11 @@ export function TasksDashboard() {
         <div className="mb-8">
           <h1 className="text-3xl font-bold text-gray-900 mb-2">Tasks & Daily Checklists</h1>
           <p className="text-gray-500">Manage your tasks, checklists, and team assignments</p>
+        </div>
+
+        {/* Manager-only: variance/integrity controls (self-hides for staff) */}
+        <div className="mb-6">
+          <SystemIntegrityPanel />
         </div>
 
         {/* Alert: Overdue/Escalated */}
