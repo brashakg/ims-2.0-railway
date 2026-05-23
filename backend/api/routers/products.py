@@ -53,15 +53,17 @@ def _get_categories_from_db() -> List[str]:
 # ============================================================================
 
 
-# Contact-lens product categories. CL identity fields + HSN/GST defaults only
-# apply to these. Kept in sync with schemas.py PRODUCT_SCHEMA category enum.
+# Contact-lens product categories. CL identity fields only apply to these.
+# Kept in sync with schemas.py PRODUCT_SCHEMA category enum.
 CL_CATEGORIES = ("CONTACT_LENS", "COLORED_CONTACT_LENS", "CL")
-# India: contact lenses are HSN 9001 (90013000). GST rate defaults to 5% to
-# match the LIVE POS billing (orders.py bills CONTACT_LENS at 5%) and the
-# documented business rule, so the product master never disagrees with what is
-# actually billed. NOTE: external research suggests HSN 9001 may attract 12% --
-# confirm the correct rate with the accountant; if it is 12%, change this AND
-# orders.py _gst_rate_for_category together so master + billing stay in sync.
+# India: contact lenses are HSN 9001 (90013000) at 5% GST under GST 2.0
+# (effective 22 Sep 2025; verified against the 56th GST Council press release
+# Annexure-I Sr. 351 -- the 12% slab was eliminated, so 5% is now correct, not
+# 12%). HSN/GST defaults for EVERY category come from the canonical table in
+# api/services/gst_rates.py, which the POS billing engine (orders.py) also
+# reads, so the product master rate always equals what POS bills.
+from ..services.gst_rates import gst_rate_for_category, hsn_for_category
+
 CL_HSN_DEFAULT = "90013000"
 CL_GST_DEFAULT = 5.0
 CL_MODALITIES = ("DAILY", "FORTNIGHTLY", "MONTHLY", "QUARTERLY", "YEARLY", "COLOR")
@@ -212,15 +214,16 @@ async def create_product(
                 detail=f"Invalid modality. Allowed: {', '.join(CL_MODALITIES)}",
             )
 
-        # HSN / GST: explicit value wins; else CL default for CL categories;
-        # else the legacy non-CL default (18%) so existing behaviour is intact.
-        hsn_code = product.hsn_code or (CL_HSN_DEFAULT if is_cl else None)
+        # HSN / GST: explicit value wins; otherwise fall back to the canonical
+        # category->(hsn, rate) table so the master rate a product is created
+        # with equals what POS bills it (see api/services/gst_rates.py). This
+        # gives OPTICAL_LENS / READING_GLASSES / COLORED_CONTACT_LENS their
+        # correct 5% instead of the old blanket 18% non-CL default.
+        hsn_code = product.hsn_code or hsn_for_category(product.category)
         if product.gst_rate is not None:
             gst_rate = product.gst_rate
-        elif is_cl:
-            gst_rate = CL_GST_DEFAULT
         else:
-            gst_rate = 18.0
+            gst_rate = gst_rate_for_category(product.category)
 
         product_data = {
             "sku": product.sku,
