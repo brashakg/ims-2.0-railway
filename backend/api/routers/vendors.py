@@ -5,7 +5,7 @@ Real database queries for vendor and purchase order management
 """
 
 from fastapi import APIRouter, HTTPException, Depends, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import List, Optional
 from datetime import datetime
 import uuid
@@ -18,12 +18,27 @@ from ..dependencies import (
     get_vendor_portal_token_repository,
     get_audit_repository,
 )
+from ..services import ap_engine
 
 router = APIRouter()
 
 # Roles permitted to mutate vendors, purchase orders and goods-receipt notes.
 # Mirrors the frontend /purchase/* route guards. SUPERADMIN auto-passes.
 _VENDOR_ROLES = ("ADMIN", "AREA_MANAGER", "STORE_MANAGER", "ACCOUNTANT")
+
+# Tighter set for money-out / accounts-payable writes (bills, payments, debit
+# notes). Recording a payable or releasing cash is an accounting action, so it
+# is limited to ADMIN / ACCOUNTANT (SUPERADMIN auto-passes via require_roles).
+_AP_ROLES = ("ADMIN", "ACCOUNTANT")
+
+
+def _get_db():
+    """Direct DB handle for the accounts-payable collections (vendor_bills,
+    vendor_payments, vendor_debit_notes). Matches finance.py's pattern -- these
+    collections have no repository factory and are queried directly."""
+    from database.connection import get_db
+
+    return get_db().db
 
 
 # ============================================================================
@@ -869,8 +884,371 @@ async def revoke_portal_token(
 
 
 # ============================================================================
+# ACCOUNTS-PAYABLE: vendor bills, payments, debit notes, ledger, aging
+# ============================================================================
+# The PO/GRN flow above tracks GOODS. This block tracks MONEY: a vendor bill
+# (purchase invoice) is the payable; payments (with optional TDS) and debit
+# notes discharge it. Pure money/date math lives in services/ap_engine.py so
+# these handlers stay thin (fetch rows -> call engine -> return).
+#
+# Route-order: every route here is a decorator, so it registers BEFORE the
+# catch-all `/{vendor_id}` added at the very bottom. `/ap-aging` (one segment)
+# therefore resolves to its own handler, not to get_vendor.
+
+
+class VendorBillCreate(BaseModel):
+    bill_number: str  # the vendor's own invoice / bill number
+    bill_date: str  # ISO date (YYYY-MM-DD)
+    taxable_amount: float = Field(..., ge=0)
+    tax_amount: float = Field(0, ge=0)
+    total_amount: float = Field(..., gt=0)
+    po_id: Optional[str] = None
+    grn_id: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class VendorPaymentCreate(BaseModel):
+    amount: float = Field(..., gt=0)  # cash actually paid to the vendor
+    payment_date: str  # ISO date
+    mode: str = "BANK"  # CASH / BANK / UPI / CHEQUE / NEFT
+    bill_id: Optional[str] = None  # allocate to a bill; else on-account/advance
+    tds_section: Optional[str] = "NONE"  # see ap_engine.TDS_SECTIONS
+    tds_base: Optional[float] = Field(default=None, ge=0)  # base for auto-TDS
+    tds_amount: Optional[float] = Field(default=None, ge=0)  # explicit override
+    reference: Optional[str] = None  # UTR / cheque no / txn id
+    notes: Optional[str] = None
+
+
+class DebitNoteCreate(BaseModel):
+    amount: float = Field(..., gt=0)
+    date: str  # ISO date
+    reason: str
+    bill_id: Optional[str] = None  # allocate to a bill; else on-account
+    grn_id: Optional[str] = None  # link to the rejected-goods GRN, if any
+
+
+def _clean(doc: dict) -> dict:
+    """Strip Mongo's _id so a freshly-inserted doc is JSON-serialisable."""
+    return {k: v for k, v in doc.items() if k != "_id"}
+
+
+def _recompute_bill_status(db, bill_id: Optional[str]) -> None:
+    """Re-derive a bill's status (OUTSTANDING / PARTIAL / PAID) from its
+    allocated payments + debit notes. Fail-soft."""
+    if not db or not bill_id:
+        return
+    try:
+        bill = db.get_collection("vendor_bills").find_one(
+            {"bill_id": bill_id}, {"_id": 0}
+        )
+        if not bill:
+            return
+        payments = list(
+            db.get_collection("vendor_payments").find(
+                {"bill_id": bill_id}, {"_id": 0}
+            )
+        )
+        debit_notes = list(
+            db.get_collection("vendor_debit_notes").find(
+                {"bill_id": bill_id}, {"_id": 0}
+            )
+        )
+        out = ap_engine.bill_outstanding(bill, payments, debit_notes)
+        total = float(bill.get("total_amount") or 0)
+        if out <= 0.01:
+            status = "PAID"
+        elif out < total:
+            status = "PARTIAL"
+        else:
+            status = "OUTSTANDING"
+        db.get_collection("vendor_bills").update_one(
+            {"bill_id": bill_id},
+            {"$set": {"outstanding": out, "status": status}},
+        )
+    except Exception:
+        pass
+
+
+@router.get("/ap-aging")
+async def ap_aging(
+    as_of: Optional[str] = Query(None, description="ISO date; defaults to today"),
+    current_user: dict = Depends(require_roles(*_AP_ROLES)),
+):
+    """Org-wide accounts-payable aging, grouped by vendor + grand totals.
+
+    Buckets each outstanding bill by days past its due date (current / 1-30 /
+    31-60 / 61-90 / 90+). ADMIN / ACCOUNTANT only.
+    """
+    db = _get_db()
+    if db is None:
+        return {"as_of": as_of, "totals": {}, "vendors": []}
+    try:
+        bills = list(
+            db.get_collection("vendor_bills").find(
+                {"status": {"$ne": "PAID"}}, {"_id": 0}
+            )
+        )
+        payments = list(db.get_collection("vendor_payments").find({}, {"_id": 0}))
+        debit_notes = list(db.get_collection("vendor_debit_notes").find({}, {"_id": 0}))
+    except Exception:
+        bills, payments, debit_notes = [], [], []
+    return ap_engine.build_aging_by_vendor(bills, payments, debit_notes, as_of)
+
+
+@router.post("/{vendor_id}/bills", status_code=201)
+async def create_vendor_bill(
+    vendor_id: str,
+    bill: VendorBillCreate,
+    current_user: dict = Depends(require_roles(*_AP_ROLES)),
+):
+    """Record a vendor bill (purchase invoice) as a payable. Due date is
+    derived from the vendor's credit terms."""
+    vendor_repo = get_vendor_repository()
+    vendor = vendor_repo.find_by_id(vendor_id) if vendor_repo is not None else None
+    if vendor_repo is not None and vendor is None:
+        raise HTTPException(status_code=404, detail="Vendor not found")
+
+    # Data-entry guard: taxable + tax should reconcile to the bill total
+    # (allow Rs 1 of rounding slack).
+    if abs((bill.taxable_amount + bill.tax_amount) - bill.total_amount) > 1.0:
+        raise HTTPException(
+            status_code=400,
+            detail="taxable_amount + tax_amount must equal total_amount",
+        )
+
+    credit_days = int((vendor or {}).get("credit_days", 30) or 30)
+    due_date = ap_engine.compute_due_date(bill.bill_date, credit_days)
+    bill_id = str(uuid.uuid4())
+    doc = {
+        "bill_id": bill_id,
+        "vendor_id": vendor_id,
+        "vendor_name": (vendor or {}).get("trade_name")
+        or (vendor or {}).get("legal_name"),
+        "bill_number": bill.bill_number,
+        "bill_date": bill.bill_date,
+        "due_date": due_date,
+        "credit_days": credit_days,
+        "taxable_amount": round(bill.taxable_amount, 2),
+        "tax_amount": round(bill.tax_amount, 2),
+        "total_amount": round(bill.total_amount, 2),
+        "outstanding": round(bill.total_amount, 2),
+        "po_id": bill.po_id,
+        "grn_id": bill.grn_id,
+        "notes": bill.notes,
+        "status": "OUTSTANDING",
+        "created_by": current_user.get("user_id"),
+        "created_at": datetime.now().isoformat(),
+    }
+    db = _get_db()
+    if db is not None:
+        try:
+            db.get_collection("vendor_bills").insert_one(dict(doc))
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail="Failed to save bill") from exc
+    return _clean(doc)
+
+
+@router.get("/{vendor_id}/bills")
+async def list_vendor_bills(
+    vendor_id: str,
+    status: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """List a vendor's bills (newest first)."""
+    db = _get_db()
+    if db is None:
+        return {"bills": [], "total": 0}
+    flt: dict = {"vendor_id": vendor_id}
+    if status:
+        flt["status"] = status
+    try:
+        bills = list(db.get_collection("vendor_bills").find(flt, {"_id": 0}))
+    except Exception:
+        bills = []
+    bills.sort(key=lambda b: b.get("bill_date") or "", reverse=True)
+    return {"bills": bills, "total": len(bills)}
+
+
+@router.post("/{vendor_id}/payments", status_code=201)
+async def create_vendor_payment(
+    vendor_id: str,
+    payment: VendorPaymentCreate,
+    current_user: dict = Depends(require_roles(*_AP_ROLES)),
+):
+    """Record a payment to a vendor (optionally allocated to a bill, optionally
+    with TDS withheld). Recomputes the allocated bill's status."""
+    vendor_repo = get_vendor_repository()
+    vendor = vendor_repo.find_by_id(vendor_id) if vendor_repo is not None else None
+    if vendor_repo is not None and vendor is None:
+        raise HTTPException(status_code=404, detail="Vendor not found")
+
+    # TDS: explicit amount wins; else auto-compute from section + base.
+    tds_section = (payment.tds_section or "NONE").upper()
+    if payment.tds_amount is not None:
+        tds_amount = round(payment.tds_amount, 2)
+    elif tds_section != "NONE":
+        base = payment.tds_base if payment.tds_base is not None else payment.amount
+        tds_amount = ap_engine.compute_tds(base, tds_section)["tds_amount"]
+    else:
+        tds_amount = 0.0
+
+    payment_id = str(uuid.uuid4())
+    doc = {
+        "payment_id": payment_id,
+        "vendor_id": vendor_id,
+        "vendor_name": (vendor or {}).get("trade_name")
+        or (vendor or {}).get("legal_name"),
+        "bill_id": payment.bill_id,
+        "amount": round(payment.amount, 2),
+        "mode": payment.mode,
+        "payment_date": payment.payment_date,
+        "tds_section": tds_section,
+        "tds_base": payment.tds_base,
+        "tds_amount": tds_amount,
+        "reference": payment.reference,
+        "notes": payment.notes,
+        "created_by": current_user.get("user_id"),
+        "created_at": datetime.now().isoformat(),
+    }
+    db = _get_db()
+    if db is not None:
+        try:
+            db.get_collection("vendor_payments").insert_one(dict(doc))
+        except Exception as exc:
+            raise HTTPException(
+                status_code=500, detail="Failed to save payment"
+            ) from exc
+        _recompute_bill_status(db, payment.bill_id)
+    return _clean(doc)
+
+
+@router.get("/{vendor_id}/payments")
+async def list_vendor_payments(
+    vendor_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """List a vendor's payments (newest first)."""
+    db = _get_db()
+    if db is None:
+        return {"payments": [], "total": 0}
+    try:
+        rows = list(
+            db.get_collection("vendor_payments").find(
+                {"vendor_id": vendor_id}, {"_id": 0}
+            )
+        )
+    except Exception:
+        rows = []
+    rows.sort(key=lambda p: p.get("payment_date") or "", reverse=True)
+    return {"payments": rows, "total": len(rows)}
+
+
+@router.post("/{vendor_id}/debit-notes", status_code=201)
+async def create_debit_note(
+    vendor_id: str,
+    note: DebitNoteCreate,
+    current_user: dict = Depends(require_roles(*_AP_ROLES)),
+):
+    """Issue a debit note against a vendor (e.g. for rejected/returned goods).
+    Reduces the payable. Recomputes the allocated bill's status."""
+    vendor_repo = get_vendor_repository()
+    vendor = vendor_repo.find_by_id(vendor_id) if vendor_repo is not None else None
+    if vendor_repo is not None and vendor is None:
+        raise HTTPException(status_code=404, detail="Vendor not found")
+
+    dn_id = str(uuid.uuid4())
+    prefix = (vendor_id[:3].upper() if vendor_id else "DN")
+    doc = {
+        "debit_note_id": dn_id,
+        "debit_note_number": f"DN-{prefix}-{datetime.now().strftime('%y%m%d%H%M')}",
+        "vendor_id": vendor_id,
+        "vendor_name": (vendor or {}).get("trade_name")
+        or (vendor or {}).get("legal_name"),
+        "bill_id": note.bill_id,
+        "grn_id": note.grn_id,
+        "amount": round(note.amount, 2),
+        "date": note.date,
+        "reason": note.reason,
+        "created_by": current_user.get("user_id"),
+        "created_at": datetime.now().isoformat(),
+    }
+    db = _get_db()
+    if db is not None:
+        try:
+            db.get_collection("vendor_debit_notes").insert_one(dict(doc))
+        except Exception as exc:
+            raise HTTPException(
+                status_code=500, detail="Failed to save debit note"
+            ) from exc
+        _recompute_bill_status(db, note.bill_id)
+    return _clean(doc)
+
+
+@router.get("/{vendor_id}/debit-notes")
+async def list_debit_notes(
+    vendor_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """List a vendor's debit notes (newest first)."""
+    db = _get_db()
+    if db is None:
+        return {"debit_notes": [], "total": 0}
+    try:
+        rows = list(
+            db.get_collection("vendor_debit_notes").find(
+                {"vendor_id": vendor_id}, {"_id": 0}
+            )
+        )
+    except Exception:
+        rows = []
+    rows.sort(key=lambda d: d.get("date") or "", reverse=True)
+    return {"debit_notes": rows, "total": len(rows)}
+
+
+@router.get("/{vendor_id}/ledger")
+async def vendor_ledger(
+    vendor_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """Full vendor ledger: bills (credit) + payments + debit notes (debit) with
+    a running payable balance, plus an aging snapshot for the same vendor."""
+    db = _get_db()
+    vendor_repo = get_vendor_repository()
+    vendor = vendor_repo.find_by_id(vendor_id) if vendor_repo is not None else None
+    if db is None:
+        return {
+            "vendor_id": vendor_id,
+            "vendor": vendor,
+            "ledger": ap_engine.build_ledger([], [], []),
+            "aging": ap_engine.build_aging([], [], []),
+        }
+    try:
+        bills = list(
+            db.get_collection("vendor_bills").find({"vendor_id": vendor_id}, {"_id": 0})
+        )
+        payments = list(
+            db.get_collection("vendor_payments").find(
+                {"vendor_id": vendor_id}, {"_id": 0}
+            )
+        )
+        debit_notes = list(
+            db.get_collection("vendor_debit_notes").find(
+                {"vendor_id": vendor_id}, {"_id": 0}
+            )
+        )
+    except Exception:
+        bills, payments, debit_notes = [], [], []
+    return {
+        "vendor_id": vendor_id,
+        "vendor": vendor,
+        "ledger": ap_engine.build_ledger(bills, payments, debit_notes),
+        "aging": ap_engine.build_aging(bills, payments, debit_notes),
+    }
+
+
+# ============================================================================
 # Catch-all parametric routes — registered LAST so they do not shadow
-# specific paths above (`/purchase-orders`, `/grn`, etc.). FastAPI
-# resolves routes in registration order.
+# specific paths above (`/purchase-orders`, `/grn`, `/ap-aging`, etc.).
+# FastAPI resolves routes in registration order.
 # ============================================================================
 router.add_api_route("/{vendor_id}", get_vendor, methods=["GET"])
