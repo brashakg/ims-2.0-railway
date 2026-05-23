@@ -58,4 +58,27 @@ export const clinicalApi = {
     const response = await api.post(`/clinical/tests/${testId}/complete`, data);
     return response.data;
   },
+
+  // Prescription printout (A5 card) — returns a self-contained HTML string.
+  // Fetched through the authenticated client (not window.open(url)) so the
+  // Bearer token is attached; the caller writes the HTML into a new window.
+  // Mirrors payrollApi.getPayslipHtml.
+  getPrescriptionPrintHtml: async (prescriptionId: string): Promise<string> => {
+    const response = await api.get(`/clinical/prescriptions/${prescriptionId}/print`, {
+      responseType: 'text',
+    });
+    return response.data as string;
+  },
+
+  // Redo tracking (lens remake / re-dispense) — gated server-side to optometry
+  // + manager roles.
+  recordRedo: async (prescriptionId: string, reason: string) => {
+    const response = await api.post(`/clinical/prescriptions/${prescriptionId}/redo`, { reason });
+    return response.data;
+  },
+
+  getRedos: async (prescriptionId: string) => {
+    const response = await api.get(`/clinical/prescriptions/${prescriptionId}/redos`);
+    return response.data;
+  },
 };

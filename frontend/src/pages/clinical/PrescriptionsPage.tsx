@@ -13,6 +13,7 @@ import {
   AlertCircle,
   Calendar,
   Printer,
+  RotateCcw,
 } from 'lucide-react';
 import { clinicalApi, storeApi } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
@@ -22,6 +23,9 @@ import type { PrescriptionPrintData, StoreInfo } from '../../components/clinical
 
 interface Prescription {
   id: string;
+  // Real prescription_id when the row resolves to a saved Rx (the eye-test
+  // completion flow auto-creates one). Falls back to `id` when absent.
+  prescriptionId?: string;
   patientName: string;
   customerPhone: string;
   prescribedAt: string;
@@ -110,6 +114,52 @@ export function PrescriptionsPage() {
       optometristName: rx.optometristName,
     };
     setPrintPrescription(printData);
+  };
+
+  // Print the server-rendered A5 Rx card. Fetched through the authenticated
+  // client (window.open(url) would not carry the Bearer token), then written
+  // into a blank window which self-prints. Mirrors the payslip-print flow.
+  const handlePrintRxCard = async (rx: Prescription) => {
+    const rxId = rx.prescriptionId || rx.id;
+    if (!rxId) {
+      toast.error('Cannot print: prescription id missing.');
+      return;
+    }
+    try {
+      const html = await clinicalApi.getPrescriptionPrintHtml(rxId);
+      const w = window.open('', '_blank');
+      if (w) {
+        w.document.write(html);
+        w.document.close();
+        w.focus();
+      } else {
+        toast.error('Pop-up blocked. Please allow pop-ups to print.');
+      }
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Failed to print prescription.');
+    }
+  };
+
+  // Flag a redo (lens remake / re-dispense) against this Rx. Prompts for a
+  // reason; server gates this to optometry + manager roles.
+  const handleMarkRedo = async (rx: Prescription) => {
+    const rxId = rx.prescriptionId || rx.id;
+    if (!rxId) {
+      toast.error('Cannot mark redo: prescription id missing.');
+      return;
+    }
+    const reason = window.prompt('Reason for redo (e.g. wrong axis, coating defect):');
+    if (reason === null) return; // user cancelled
+    if (!reason.trim()) {
+      toast.error('A reason is required to mark a redo.');
+      return;
+    }
+    try {
+      await clinicalApi.recordRedo(rxId, reason.trim());
+      toast.success('Redo recorded.');
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Failed to record redo.');
+    }
   };
 
   const loadPrescriptions = async () => {
@@ -274,7 +324,7 @@ export function PrescriptionsPage() {
                 </div>
               </div>
 
-              <div className="mt-3 pt-3 border-t border-gray-200 flex items-center gap-3">
+              <div className="mt-3 pt-3 border-t border-gray-200 flex flex-wrap items-center gap-3">
                 <button
                   onClick={(e) => {
                     e.stopPropagation();
@@ -294,6 +344,26 @@ export function PrescriptionsPage() {
                 >
                   <Printer className="w-4 h-4" />
                   Print
+                </button>
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handlePrintRxCard(rx);
+                  }}
+                  className="text-sm text-gray-500 hover:text-purple-600 flex items-center gap-1"
+                >
+                  <Printer className="w-4 h-4" />
+                  Print Rx (A5)
+                </button>
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handleMarkRedo(rx);
+                  }}
+                  className="text-sm text-gray-500 hover:text-amber-600 flex items-center gap-1"
+                >
+                  <RotateCcw className="w-4 h-4" />
+                  Mark redo
                 </button>
               </div>
             </div>
@@ -420,13 +490,21 @@ export function PrescriptionsPage() {
                 <div className="flex gap-2">
                   <button
                     onClick={() => {
-                      handlePrintPrescription(selectedPrescription);
-                      setSelectedPrescription(null);
+                      handlePrintRxCard(selectedPrescription);
                     }}
                     className="btn-primary flex-1 flex items-center justify-center"
                   >
                     <Printer className="w-4 h-4 mr-2" />
-                    Print Prescription
+                    Print Rx (A5)
+                  </button>
+                  <button
+                    onClick={() => {
+                      handleMarkRedo(selectedPrescription);
+                    }}
+                    className="btn-outline flex items-center justify-center"
+                  >
+                    <RotateCcw className="w-4 h-4 mr-2" />
+                    Mark redo
                   </button>
                   <button
                     onClick={() => setSelectedPrescription(null)}
