@@ -4,7 +4,7 @@
 // Segment invoices into 11 bands (₹<1K → ₹1.5L+) and track customer movement
 // across financial years. Spec: docs/TECHCHERRY_PORT_SCOPE.md §5.2.
 
-import { useEffect, useState } from 'react';
+import { Fragment, useEffect, useState } from 'react';
 import { AlertTriangle, ArrowDownRight, ArrowUpRight, BarChart3, Loader2 } from 'lucide-react';
 import { reportsApi } from '../../../services/api';
 
@@ -108,10 +108,10 @@ export function PriceBandCard({ storeId }: { storeId?: string }) {
                   <tr className="text-[10px] text-gray-400">
                     <th></th>
                     {data.by_fy.map(fy => (
-                      <>
-                        <th key={fy.fy + '-i'} className="text-right py-1 px-2 font-normal">invoices</th>
-                        <th key={fy.fy + '-r'} className="text-right py-1 px-2 font-normal">revenue</th>
-                      </>
+                      <Fragment key={fy.fy}>
+                        <th className="text-right py-1 px-2 font-normal">invoices</th>
+                        <th className="text-right py-1 px-2 font-normal">revenue</th>
+                      </Fragment>
                     ))}
                   </tr>
                 </thead>
@@ -120,14 +120,14 @@ export function PriceBandCard({ storeId }: { storeId?: string }) {
                     <tr key={band} className="border-b last:border-b-0">
                       <td className="py-1.5 px-2 font-mono text-xs">{band}</td>
                       {data.by_fy.map(fy => (
-                        <>
-                          <td key={fy.fy + band + '-i'} className="py-1.5 px-2 text-right tabular-nums text-gray-700">
+                        <Fragment key={fy.fy}>
+                          <td className="py-1.5 px-2 text-right tabular-nums text-gray-700">
                             {fy.invoices_by_band[bi]}
                           </td>
-                          <td key={fy.fy + band + '-r'} className="py-1.5 px-2 text-right tabular-nums">
+                          <td className="py-1.5 px-2 text-right tabular-nums">
                             {fy.revenue_by_band[bi] > 0 ? inr(fy.revenue_by_band[bi]) : '—'}
                           </td>
-                        </>
+                        </Fragment>
                       ))}
                     </tr>
                   ))}
