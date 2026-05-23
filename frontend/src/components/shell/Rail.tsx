@@ -66,53 +66,55 @@ const RAIL_GROUPS: NavGroup[] = [
   },
   {
     title: 'Sales floor',
+    // requireRoles on each item MIRRORS the route's ProtectedRoute allowedRoles
+    // in App.tsx, so a role never sees a nav link that lands it on /unauthorized.
     items: [
-      { id: 'pos', label: 'POS', to: '/pos', icon: 'cart' },
-      { id: 'customers', label: 'Customers', to: '/customers', icon: 'users' },
-      { id: 'walkouts', label: 'Walkouts', to: '/walkouts', icon: 'user' },
-      { id: 'orders', label: 'Orders', to: '/orders', icon: 'receipt' },
-      { id: 'returns', label: 'Returns', to: '/returns', icon: 'refresh' },
+      { id: 'pos', label: 'POS', to: '/pos', icon: 'cart', requireRoles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'OPTOMETRIST', 'CASHIER', 'SALES_CASHIER', 'SALES_STAFF'] },
+      { id: 'customers', label: 'Customers', to: '/customers', icon: 'users', requireRoles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'OPTOMETRIST', 'CASHIER', 'SALES_CASHIER', 'SALES_STAFF'] },
+      { id: 'walkouts', label: 'Walkouts', to: '/walkouts', icon: 'user', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT', 'SALES_STAFF', 'SALES_CASHIER', 'CASHIER'] },
+      { id: 'orders', label: 'Orders', to: '/orders', icon: 'receipt', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'CASHIER', 'SALES_CASHIER', 'SALES_STAFF', 'OPTOMETRIST', 'WORKSHOP_STAFF'] },
+      { id: 'returns', label: 'Returns', to: '/returns', icon: 'refresh', requireRoles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'CASHIER', 'SALES_CASHIER'] },
     ],
   },
   {
     title: 'Clinical',
     items: [
-      { id: 'clinical', label: 'Clinical', to: '/clinical', icon: 'eye' },
+      { id: 'clinical', label: 'Clinical', to: '/clinical', icon: 'eye', requireRoles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'OPTOMETRIST'] },
     ],
   },
   {
     title: 'Stock & supply',
     items: [
-      { id: 'inventory', label: 'Inventory', to: '/inventory', icon: 'box' },
-      { id: 'purchase', label: 'Purchase', to: '/purchase', icon: 'truck' },
+      { id: 'inventory', label: 'Inventory', to: '/inventory', icon: 'box', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'CATALOG_MANAGER', 'WORKSHOP_STAFF'] },
+      { id: 'purchase', label: 'Purchase', to: '/purchase', icon: 'truck', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'] },
       { id: 'vendor-returns', label: 'Vendor Returns', to: '/purchase/vendor-returns', icon: 'refresh', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'WORKSHOP_STAFF'] },
-      { id: 'workshop', label: 'Workshop', to: '/workshop', icon: 'wrench' },
-      { id: 'catalog', label: 'Catalog', to: '/catalog/add', icon: 'tag' },
+      { id: 'workshop', label: 'Workshop', to: '/workshop', icon: 'wrench', requireRoles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'WORKSHOP_STAFF'] },
+      { id: 'catalog', label: 'Catalog', to: '/catalog/add', icon: 'tag', requireRoles: ['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER'] },
       { id: 'catalog-autopilot', label: 'Catalog Autopilot', to: '/catalog/autopilot', icon: 'cpu', requireRoles: ['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER'] },
     ],
   },
   {
     title: 'Operations',
     items: [
-      { id: 'tasks', label: 'Tasks & SOPs', to: '/tasks', icon: 'check' },
+      { id: 'tasks', label: 'Tasks & SOPs', to: '/tasks', icon: 'check', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'] },
       { id: 'expenses', label: 'Expenses', to: '/finance/expenses', icon: 'banknote' },
-      { id: 'hr', label: 'HR', to: '/hr', icon: 'user' },
+      { id: 'hr', label: 'HR', to: '/hr', icon: 'user', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'] },
       { id: 'salary-setup', label: 'Salary Setup', to: '/hr/salary-setup', icon: 'banknote', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'] },
       { id: 'payroll-run', label: 'Payroll Run', to: '/hr/payroll-run', icon: 'banknote', requireRoles: ['SUPERADMIN', 'ADMIN', 'ACCOUNTANT'] },
-      { id: 'incentive', label: 'Incentive', to: '/incentive', icon: 'zap' },
+      { id: 'incentive', label: 'Incentive', to: '/incentive', icon: 'zap', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT', 'SALES_STAFF', 'SALES_CASHIER', 'CASHIER'] },
     ],
   },
   {
     title: 'Analysis',
     items: [
-      { id: 'reports', label: 'Reports', to: '/reports', icon: 'chart' },
-      { id: 'finance', label: 'Finance', to: '/finance/dashboard', icon: 'banknote' },
+      { id: 'reports', label: 'Reports', to: '/reports', icon: 'chart', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'] },
+      { id: 'finance', label: 'Finance', to: '/finance/dashboard', icon: 'banknote', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'] },
     ],
   },
   {
     title: 'Growth',
     items: [
-      { id: 'marketing', label: 'Marketing', to: '/customers/campaigns', icon: 'megaphone' },
+      { id: 'marketing', label: 'Marketing', to: '/customers/campaigns', icon: 'megaphone', requireRoles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER'] },
       { id: 'online-store', label: 'Online Store', to: ECOMMERCE_URL, icon: 'tag', external: true, requireRoles: ['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER'] },
     ],
   },
@@ -127,8 +129,9 @@ const RAIL_GROUPS: NavGroup[] = [
   {
     title: 'System',
     items: [
-      { id: 'print', label: 'Print', to: '/print', icon: 'printer' },
-      { id: 'setup', label: 'Store Setup', to: '/settings', icon: 'settings' },
+      { id: 'print', label: 'Print', to: '/print', icon: 'printer', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT', 'CASHIER', 'SALES_CASHIER', 'SALES_STAFF'] },
+      { id: 'setup', label: 'Settings', to: '/settings', icon: 'settings', requireRoles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'AREA_MANAGER', 'CATALOG_MANAGER', 'ACCOUNTANT'] },
+      { id: 'onboarding', label: 'Store Onboarding', to: '/setup', icon: 'settings', requireRoles: ['SUPERADMIN', 'ADMIN'] },
       { id: 'entities', label: 'Entities', to: '/settings/entities', icon: 'settings', requireRoles: ['SUPERADMIN', 'ADMIN'] },
     ],
   },
