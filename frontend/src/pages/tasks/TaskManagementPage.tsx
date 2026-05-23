@@ -925,7 +925,7 @@ function TasksV2View({ tasks, counts, selected, onSelect }: TasksV2ViewProps) {
           </div>
         )}
 
-        {tasks.map((t) => {
+        {tasks.map((t, i) => {
           const isSel = selected?.id === t.id;
           const isOverdue = t.dueInMin < 0
             || (t.pCode === 'P1' && t.dueInMin >= 0 && t.dueInMin < 10);
@@ -939,7 +939,7 @@ function TasksV2View({ tasks, counts, selected, onSelect }: TasksV2ViewProps) {
 
           return (
             <div
-              key={t.id}
+              key={t.id || `task-${i}`}
               className={
                 't-item' +
                 (isSel ? ' sel' : '') +
