@@ -81,7 +81,6 @@ from .routers import (
     vouchers_router,
     entities_router,
     notifications_router,
-    customer_portal_router,
 )
 from .routers.auth import require_roles
 
@@ -773,12 +772,6 @@ app.include_router(vouchers_router, prefix="/api/v1/vouchers", tags=["Vouchers"]
 app.include_router(
     vendor_portal_router, prefix="/api/v1/vendor-portal", tags=["Vendor Portal"]
 )
-# Customer self-service portal — PUBLIC, customer OTP token (scope-locked).
-# Mounted OUTSIDE the staff JWT family; customers read only their own Rx.
-app.include_router(
-    customer_portal_router, prefix="/api/v1/customer-portal", tags=["Customer Portal"]
-)
-
 # TechCherry one-time migration — SUPERADMIN-only batch upsert endpoint.
 # Mounted under /admin/techcherry so it sits in the operator namespace
 # without inheriting the broader admin router (which is ADMIN+SUPERADMIN;
