@@ -26,6 +26,16 @@ export { orderApi, prescriptionApi, workshopApi, adminDiscountApi } from './sale
 // Customers
 export { customerApi } from './customers';
 
+// Customer Returns / Exchanges / Credit Notes
+export { returnsApi } from './returns';
+export type {
+  ReturnType,
+  ItemCondition,
+  ReturnLinePayload,
+  ReplacementLinePayload,
+  CreateReturnPayload,
+} from './returns';
+
 // Reports & Analytics
 export { reportsApi, analyticsApi } from './reports';
 

@@ -48,6 +48,7 @@ from .routers import (
     prescriptions_router,
     vendors_router,
     vendor_returns_router,
+    returns_router,
     tasks_router,
     expenses_router,
     finance_router,
@@ -708,6 +709,7 @@ app.include_router(vendors_router, prefix="/api/v1/vendors", tags=["Vendors"])
 app.include_router(
     vendor_returns_router, prefix="/api/v1/vendor-returns", tags=["Vendor Returns"]
 )
+app.include_router(returns_router, prefix="/api/v1/returns", tags=["Returns"])
 app.include_router(tasks_router, prefix="/api/v1/tasks", tags=["Tasks"])
 app.include_router(notifications_router, prefix="/api/v1/notifications", tags=["Notifications"])
 app.include_router(expenses_router, prefix="/api/v1/expenses", tags=["Expenses"])
