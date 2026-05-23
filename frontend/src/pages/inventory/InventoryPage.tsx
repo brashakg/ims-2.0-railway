@@ -39,7 +39,7 @@ import {
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import type { ProductCategory } from '../../types';
-import { inventoryApi, adminProductApi, catalogApi, type OnlineStatus } from '../../services/api';
+import { inventoryApi, adminProductApi, catalogApi, storeApi, type OnlineStatus } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { BarcodeManagementModal } from '../../components/inventory/BarcodeManagementModal';
@@ -127,6 +127,11 @@ export function InventoryPage() {
   const [selectedCategory, setSelectedCategory] = useState<ProductCategory | null>(null);
   const [activeTab, setActiveTab] = useState<ViewTab>('catalog');
 
+  // Online/offline availability filter + cross-store stock view.
+  const [availabilityFilter, setAvailabilityFilter] = useState<'all' | 'online' | 'offline'>('all');
+  const [storeFilter, setStoreFilter] = useState<string>(user?.activeStoreId || '');
+  const [stores, setStores] = useState<{ id: string; name: string }[]>([]);
+
   // Pagination state
   const [currentPage, setCurrentPage] = useState(1);
   const pageSize = 50;
@@ -166,22 +171,43 @@ export function InventoryPage() {
   const canExport = hasRole(['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT']);
   const canManageBarcode = hasRole(['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER', 'STORE_MANAGER']);
 
-  // Load data on mount
+  // Load data on mount + whenever the viewed store changes
   useEffect(() => {
     loadInventory();
+  }, [storeFilter]);
+
+  // Stores the user may view (multi-store roles see all; others see their own).
+  useEffect(() => {
+    const allStoreAccess = hasRole(['SUPERADMIN', 'ADMIN', 'AREA_MANAGER']);
+    storeApi.getStores().then((res: any) => {
+      const list = res?.stores || res || [];
+      const mapped = (Array.isArray(list) ? list : [])
+        .map((s: any) => ({
+          id: String(s.store_id || s.id || s._id || ''),
+          name: String(s.store_name || s.storeName || s.name || s.store_id || s.id || ''),
+        }))
+        .filter((s: { id: string }) => s.id && (allStoreAccess || (user?.storeIds || []).includes(s.id)));
+      setStores(mapped);
+    }).catch(() => setStores([]));
+  }, [user?.storeIds]);
+
+  // Follow the global active store when it is switched elsewhere (e.g. topbar).
+  useEffect(() => {
+    if (user?.activeStoreId) setStoreFilter(user.activeStoreId);
   }, [user?.activeStoreId]);
 
   const loadInventory = async () => {
-    if (!user?.activeStoreId) return;
+    const storeId = storeFilter || user?.activeStoreId;
+    if (!storeId) return;
 
     setIsLoading(true);
     setError(null);
 
     try {
-      // Fetch inventory and low stock in parallel
+      // Fetch inventory and low stock in parallel (for the viewed store)
       const [stockData, lowStockData] = await Promise.all([
-        inventoryApi.getStock(user.activeStoreId).catch(() => ({ items: [] })),
-        inventoryApi.getLowStock(user.activeStoreId).catch(() => ({ items: [] })),
+        inventoryApi.getStock(storeId).catch(() => ({ items: [] })),
+        inventoryApi.getLowStock(storeId).catch(() => ({ items: [] })),
       ]);
 
       // Process stock data
@@ -232,7 +258,18 @@ export function InventoryPage() {
   // Reset page when filters change
   useEffect(() => {
     setCurrentPage(1);
-  }, [searchQuery, selectedCategory]);
+  }, [searchQuery, selectedCategory, availabilityFilter, storeFilter]);
+
+  // Online status for an item, matched by sku -> barcode -> storeBarcode.
+  const getOnline = (item: StockItem): OnlineStatus | undefined => {
+    const keys = [item.sku, item.barcode, item.storeBarcode]
+      .map(v => String(v || '').trim())
+      .filter(Boolean);
+    for (const k of keys) {
+      if (onlineStatus[k]) return onlineStatus[k];
+    }
+    return undefined;
+  };
 
   // Filter inventory locally
   const filteredInventory = inventory.filter(item => {
@@ -243,7 +280,11 @@ export function InventoryPage() {
 
     const matchesCategory = !selectedCategory || item.category === selectedCategory;
 
-    return matchesSearch && matchesCategory;
+    const isOnline = !!getOnline(item)?.online;
+    const matchesAvailability =
+      availabilityFilter === 'all' ? true : availabilityFilter === 'online' ? isOnline : !isOnline;
+
+    return matchesSearch && matchesCategory && matchesAvailability;
   });
 
   // Paginate filtered results
@@ -262,17 +303,6 @@ export function InventoryPage() {
     if (item.stock === 0) return { label: 'Out of Stock', class: 'badge-error' };
     if (item.stock <= threshold) return { label: 'Low Stock', class: 'badge-warning' };
     return { label: 'In Stock', class: 'badge-success' };
-  };
-
-  // Online status for an item, matched by sku -> barcode -> storeBarcode.
-  const getOnline = (item: StockItem): OnlineStatus | undefined => {
-    const keys = [item.sku, item.barcode, item.storeBarcode]
-      .map(v => String(v || '').trim())
-      .filter(Boolean);
-    for (const k of keys) {
-      if (onlineStatus[k]) return onlineStatus[k];
-    }
-    return undefined;
   };
 
   // Count of inventory rows currently online.
@@ -538,6 +568,43 @@ export function InventoryPage() {
           </div>
         </div>
 
+        {/* Availability (online / offline) + store filter */}
+        <div className="flex flex-wrap items-center gap-2 mb-4">
+          <span className="text-xs font-medium text-gray-500 uppercase mr-1">Stock</span>
+          {(['all', 'online', 'offline'] as const).map(f => (
+            <button
+              key={f}
+              onClick={() => setAvailabilityFilter(f)}
+              className={clsx(
+                'px-3 py-1.5 rounded-full text-sm font-medium whitespace-nowrap transition-colors inline-flex items-center gap-1.5 border',
+                availabilityFilter === f
+                  ? 'bg-bv-red-50 text-gray-900 border-bv-red-500'
+                  : 'bg-gray-100 text-gray-600 hover:bg-gray-200 border-transparent',
+              )}
+            >
+              {f === 'online' && <Globe className="w-3.5 h-3.5" strokeWidth={1.6} />}
+              {f === 'all' ? 'All' : f === 'online' ? 'Online' : 'Offline'}
+            </button>
+          ))}
+          {stores.length > 1 && (
+            <div className="ml-auto flex items-center gap-2">
+              <label htmlFor="inv-store" className="text-xs font-medium text-gray-500 uppercase">Store</label>
+              <select
+                id="inv-store"
+                value={storeFilter}
+                onChange={e => setStoreFilter(e.target.value)}
+                className="input-field text-sm py-1.5 w-48"
+              >
+                {stores.map(s => (
+                  <option key={s.id} value={s.id}>
+                    {s.name}{s.id === user?.activeStoreId ? ' (current)' : ''}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+        </div>
+
         {/* Category Filters */}
         <div className="flex gap-2 overflow-x-auto pb-2 scrollbar-hide">
           <button
@@ -595,7 +662,7 @@ export function InventoryPage() {
           ) : filteredInventory.length === 0 ? (
             <div className="text-center py-12 text-gray-500">
               <Package className="w-12 h-12 mx-auto mb-2 opacity-50" />
-              <p>{searchQuery || selectedCategory ? 'No products found matching your filters' : 'No products in inventory'}</p>
+              <p>{searchQuery || selectedCategory || availabilityFilter !== 'all' ? 'No products found matching your filters' : 'No products in inventory'}</p>
             </div>
           ) : (
             <>
@@ -617,11 +684,11 @@ export function InventoryPage() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-200">
-                  {paginatedInventory.map(item => {
+                  {paginatedInventory.map((item, i) => {
                     const status = getStockStatus(item);
                     const category = CATEGORIES.find(c => c.code === item.category);
                     return (
-                      <tr key={item.id} className="hover:bg-gray-50">
+                      <tr key={item.id || item.sku || `row-${i}`} className="hover:bg-gray-50">
                         <td className="px-4 py-3">
                           <div>
                             <p className="font-medium text-gray-900">{item.name}</p>
