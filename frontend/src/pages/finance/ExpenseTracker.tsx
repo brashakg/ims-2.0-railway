@@ -9,15 +9,19 @@
 import { useState, useEffect, useCallback } from 'react';
 import {
   Plus, Search, Check, X as XIcon,
-  Loader2, BarChart3, Send, BookCheck, Banknote,
+  Loader2, BarChart3, Send, BookCheck, Banknote, Clock,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
-import { expensesApi, type ExpenseRecord } from '../../services/api/expenses';
+import { expensesApi, type ExpenseRecord, type AgingReport } from '../../services/api/expenses';
 import { formatDateIST } from '../../utils/datetime';
 import clsx from 'clsx';
 
-type TabType = 'my' | 'approvals' | 'entry' | 'summary';
+type TabType = 'my' | 'approvals' | 'entry' | 'aging' | 'summary';
+
+interface ApiError {
+  response?: { status?: number; data?: { detail?: string } };
+}
 
 const CATEGORIES: { value: string; label: string; color: string }[] = [
   { value: 'utilities', label: 'Utilities', color: 'bg-blue-100 text-blue-700' },
@@ -67,6 +71,7 @@ export default function ExpenseTracker() {
   const [mine, setMine] = useState<ExpenseRecord[]>([]);
   const [approvals, setApprovals] = useState<ExpenseRecord[]>([]);
   const [toEnter, setToEnter] = useState<ExpenseRecord[]>([]);
+  const [aging, setAging] = useState<AgingReport | null>(null);
   const [isLoading, setIsLoading] = useState(true);
 
   // Modals
@@ -87,18 +92,17 @@ export default function ExpenseTracker() {
   const load = useCallback(async () => {
     setIsLoading(true);
     try {
-      const reqs: Promise<unknown>[] = [expensesApi.getExpenses({})];
-      if (isApprover) reqs.push(expensesApi.getPendingApproval(user?.activeStoreId));
-      if (isAccountant) reqs.push(expensesApi.getToEnter(user?.activeStoreId));
-      const [mineR, apprR, entR] = await Promise.all([
-        reqs[0],
-        isApprover ? reqs[1] : Promise.resolve(null),
-        isAccountant ? reqs[isApprover ? 2 : 1] : Promise.resolve(null),
-      ]);
       const pick = (r: any): ExpenseRecord[] => (r?.expenses || r || []) as ExpenseRecord[];
+      const [mineR, apprR, entR, agingR] = await Promise.all([
+        expensesApi.getExpenses({}),
+        isApprover ? expensesApi.getPendingApproval(user?.activeStoreId) : Promise.resolve(null),
+        isAccountant ? expensesApi.getToEnter(user?.activeStoreId) : Promise.resolve(null),
+        isAccountant ? expensesApi.getAging(user?.activeStoreId).catch(() => null) : Promise.resolve(null),
+      ]);
       setMine(pick(mineR));
       setApprovals(apprR ? pick(apprR) : []);
       setToEnter(entR ? pick(entR) : []);
+      setAging((agingR as AgingReport | null) || null);
     } catch {
       toast.error('Failed to load expenses');
     } finally {
@@ -135,8 +139,16 @@ export default function ExpenseTracker() {
       setShowSubmitModal(false);
       resetForm();
       await load();
-    } catch {
-      toast.error('Failed to submit expense');
+    } catch (err) {
+      // Surface governance rejections (cap exceeded / unsettled advance) which
+      // the backend returns as a 400 with a clear detail message.
+      const e = err as ApiError;
+      const detail = e?.response?.data?.detail;
+      if (e?.response?.status === 400 && detail) {
+        toast.error(detail);
+      } else {
+        toast.error('Failed to submit expense');
+      }
     } finally {
       setSaving(false);
     }
@@ -206,6 +218,7 @@ export default function ExpenseTracker() {
           ['my', 'My Expenses'],
           ...(isApprover ? [['approvals', `Pending Approval${approvals.length ? ` (${approvals.length})` : ''}`]] : []),
           ...(isAccountant ? [['entry', `For Entry${toEnter.length ? ` (${toEnter.length})` : ''}`]] : []),
+          ...(isAccountant ? [['aging', `Aging${aging?.total_count ? ` (${aging.total_count})` : ''}`]] : []),
           ['summary', 'Category Summary'],
         ] as [TabType, string][]).map(([tab, label]) => (
           <button key={tab} onClick={() => setActiveTab(tab)}
@@ -279,6 +292,67 @@ export default function ExpenseTracker() {
                 <BookCheck className="w-3.5 h-3.5" /> Mark entered
               </button>
             )} />
+        </div>
+      )}
+
+      {/* Reimbursement aging (accountant/admin) */}
+      {activeTab === 'aging' && isAccountant && (
+        <div className="space-y-6">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            {(['0-7', '8-15', '15+'] as const).map((b) => {
+              const bk = aging?.buckets?.[b];
+              const tone = b === '15+' ? 'text-red-600' : b === '8-15' ? 'text-orange-600' : 'text-green-600';
+              const label = b === '0-7' ? '0-7 days' : b === '8-15' ? '8-15 days' : 'Over 15 days';
+              return (
+                <div key={b} className="bg-white border border-gray-200 rounded-lg p-5">
+                  <p className="text-gray-500 text-sm mb-1 flex items-center gap-1.5"><Clock className="w-4 h-4" /> {label}</p>
+                  <p className={clsx('text-2xl font-bold', tone)}>{bk?.count ?? 0}</p>
+                  <p className="text-xs text-gray-500 mt-1">{fc(bk?.amount ?? 0)} outstanding</p>
+                </div>
+              );
+            })}
+          </div>
+
+          <div className="bg-white rounded-lg border border-gray-200">
+            <div className="px-4 py-3 border-b border-gray-200 flex items-center justify-between">
+              <h3 className="text-sm font-semibold text-gray-700">Pending reimbursements (approved, not yet entered)</h3>
+              <span className="text-xs text-gray-500">{aging?.total_count ?? 0} item(s) · {fc(aging?.total_amount ?? 0)}</span>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full">
+                <thead>
+                  <tr className="border-b border-gray-200 text-left text-xs font-semibold text-gray-500 uppercase">
+                    <th className="px-4 py-3">By</th>
+                    <th className="px-4 py-3">Category</th>
+                    <th className="px-4 py-3 text-right">Amount</th>
+                    <th className="px-4 py-3">Status</th>
+                    <th className="px-4 py-3">Waiting since</th>
+                    <th className="px-4 py-3 text-right">Days</th>
+                    <th className="px-4 py-3">Bucket</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(aging?.rows || []).map((r) => (
+                    <tr key={r.expense_id} className="border-b border-gray-100 hover:bg-gray-50">
+                      <td className="px-4 py-3 text-sm text-gray-700">{r.employee_name || r.employee_id || '—'}</td>
+                      <td className="px-4 py-3 text-sm"><span className={clsx('inline-block px-2 py-0.5 rounded text-xs font-medium', catColor(r.category || ''))}>{catLabel(r.category || '')}</span></td>
+                      <td className="px-4 py-3 text-sm font-semibold text-gray-900 text-right">{fc(r.amount)}</td>
+                      <td className="px-4 py-3"><StatusPill status={r.status} /></td>
+                      <td className="px-4 py-3 text-sm text-gray-500 whitespace-nowrap">{formatDateIST(r.since)}</td>
+                      <td className="px-4 py-3 text-sm text-gray-700 text-right">{r.days_pending}</td>
+                      <td className="px-4 py-3">
+                        <span className={clsx('inline-block px-2 py-0.5 rounded-full text-xs font-medium',
+                          r.bucket === '15+' ? 'bg-red-100 text-red-700' : r.bucket === '8-15' ? 'bg-orange-100 text-orange-700' : 'bg-green-100 text-green-700')}>
+                          {r.bucket} days
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {(aging?.rows?.length ?? 0) === 0 && <div className="p-10 text-center text-gray-500 text-sm">No pending reimbursements</div>}
+            </div>
+          </div>
         </div>
       )}
 
