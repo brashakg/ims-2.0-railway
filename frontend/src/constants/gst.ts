@@ -9,7 +9,7 @@ export interface HSNCode {
   code: string;
   description: string;
   gstRate: number;
-  category: 'LENS' | 'FRAME' | 'SPECTACLE' | 'CONTACT_LENS' | 'SUNGLASSES' | 'ACCESSORIES' | 'WATCH' | 'SMARTWATCH' | 'SERVICE';
+  category: 'LENS' | 'FRAME' | 'SPECTACLE' | 'CONTACT_LENS' | 'SUNGLASSES' | 'ACCESSORIES' | 'WATCH' | 'SMARTWATCH' | 'CLOCK' | 'HEARING_AID' | 'SERVICE';
 }
 
 // ============================================================================
@@ -78,6 +78,19 @@ export const HSN_CODES: Record<string, HSNCode> = {
     gstRate: 18,
     category: 'SMARTWATCH',
   },
+  '910500': {
+    code: '910500',
+    description: 'Clocks (wall clocks, alarm clocks)',
+    gstRate: 18,
+    category: 'CLOCK',
+  },
+  // Chapter 90: Hearing aids (NIL / exempt for complete devices; parts 18%)
+  '902140': {
+    code: '902140',
+    description: 'Hearing aids (complete device) — NIL/exempt; parts attract 18%',
+    gstRate: 0,
+    category: 'HEARING_AID',
+  },
   // Accessories & Services
   '392690': {
     code: '392690',
@@ -125,37 +138,84 @@ export const HSN_CODES_4_DIGIT: Record<string, HSNCode> = {
     gstRate: 18,
     category: 'SMARTWATCH',
   },
+  '9105': {
+    code: '9105',
+    description: 'Clocks (wall / alarm)',
+    gstRate: 18,
+    category: 'CLOCK',
+  },
+  '9021': {
+    code: '9021',
+    description: 'Hearing aids (complete device) — NIL/exempt; parts 18%',
+    gstRate: 0,
+    category: 'HEARING_AID',
+  },
 };
 
 // ============================================================================
 // Category → GST Rate mapping (used by POS for quick rate lookup)
 // ============================================================================
 export function getGSTRateByCategory(category: string): number {
+  // Accepts the canonical schema enum (FRAME, OPTICAL_LENS, ...), the seed
+  // plural/alt forms (FRAMES, RX_LENSES, ...), AND the short UI codes used on
+  // AddProductPage (FR, LS, CL, RG, SG, WT, CK, HA, ACC, SMT*). All resolve
+  // to the same GST 2.0 rate so master == billing regardless of vocabulary.
   switch (category?.toUpperCase()) {
+    // Frames -> HSN 9003 -> 5%
     case 'FRAMES':
     case 'FRAME':
+    case 'FR':
     case 'EYEGLASS_FRAME':
       return 5;
+    // Spectacle / optical lenses + readymade reading glasses -> HSN 9001/9004 -> 5%
     case 'RX_LENSES':
     case 'LENS':
+    case 'LS':
     case 'EYEGLASS_LENS':
     case 'OPTICAL_LENS':
+    case 'READING_GLASSES':
+    case 'RG':
       return 5;
+    // Contact lenses (incl. coloured) -> HSN 9001 -> 5%
     case 'CONTACT_LENSES':
     case 'CONTACT_LENS':
+    case 'CL':
     case 'COLOUR_CONTACTS':
+    case 'COLORED_CONTACT_LENS':
       return 5;
+    // Corrective spectacles -> HSN 9004 -> 5%
     case 'SPECTACLE':
     case 'COMPLETE_SPECTACLE':
       return 5;
+    // Non-corrective sunglasses -> HSN 9004 -> 18%
     case 'SUNGLASSES':
+    case 'SUNGLASS':
+    case 'SG':
       return 18;
+    // Watches / clocks / smartwatches -> HSN 9101/9102/9105 -> 18%
     case 'WRIST_WATCHES':
     case 'WATCH':
+    case 'WT':
+    case 'WALL_CLOCK':
+    case 'WALL_CLOCKS':
+    case 'CK':
     case 'SMARTWATCHES':
     case 'SMARTWATCH':
+    case 'SMTWT':
       return 18;
+    // GST-REVIEW: electronic smart eyewear classification is ambiguous
+    // (Ch. 85 18% vs corrective 5%); kept at 18% pending accountant confirmation.
+    case 'SMARTGLASSES':
+    case 'SMTSG':
+    case 'SMTFR':
+      return 18;
+    // Hearing aids -> HSN 9021 -> NIL/exempt (complete devices). Parts are 18%.
+    case 'HEARING_AID':
+    case 'HEARING_AIDS':
+    case 'HA':
+      return 0;
     case 'ACCESSORIES':
+    case 'ACC':
     case 'SERVICE':
     case 'SERVICES':
       return 18;
@@ -166,33 +226,58 @@ export function getGSTRateByCategory(category: string): number {
 
 // Get HSN code by product category
 export function getHSNByCategory(category: string, use6Digit: boolean = false): HSNCode | null {
+  // Accepts canonical enum codes, seed plural forms, and the short UI codes
+  // (FR/LS/RG/CL/SG/WT/CK/HA/ACC/SMT*) used on AddProductPage.
   if (use6Digit) {
     switch (category.toUpperCase()) {
       case 'CONTACT_LENS':
       case 'CONTACT_LENSES':
+      case 'COLORED_CONTACT_LENS':
       case 'COLOUR_CONTACTS':
+      case 'CL':
         return HSN_CODES['900130'];
       case 'LENS':
       case 'RX_LENSES':
       case 'OPTICAL_LENS':
       case 'EYEGLASS_LENS':
+      case 'LS':
         return HSN_CODES['900150'];
       case 'FRAME':
       case 'FRAMES':
       case 'EYEGLASS_FRAME':
+      case 'FR':
         return HSN_CODES['900311'];
       case 'SPECTACLE':
       case 'COMPLETE_SPECTACLE':
+      case 'READING_GLASSES':
+      case 'RG':
         return HSN_CODES['900490'];
       case 'SUNGLASSES':
+      case 'SUNGLASS':
+      case 'SG':
         return HSN_CODES['900410'];
       case 'WRIST_WATCHES':
       case 'WATCH':
+      case 'WT':
         return HSN_CODES['910111'];
       case 'SMARTWATCHES':
       case 'SMARTWATCH':
+      case 'SMTWT':
         return HSN_CODES['910221'];
+      case 'WALL_CLOCK':
+      case 'WALL_CLOCKS':
+      case 'CK':
+        return HSN_CODES['910500'];
+      case 'HEARING_AID':
+      case 'HEARING_AIDS':
+      case 'HA':
+        return HSN_CODES['902140'];
+      case 'SMARTGLASSES':
+      case 'SMTSG':
+      case 'SMTFR':
+        return HSN_CODES['900410']; // GST-REVIEW: electronic eyewear, 18% placeholder
       case 'ACCESSORIES':
+      case 'ACC':
         return HSN_CODES['392690'];
       case 'SERVICE':
       case 'SERVICES':
@@ -204,26 +289,44 @@ export function getHSNByCategory(category: string, use6Digit: boolean = false): 
     switch (category.toUpperCase()) {
       case 'CONTACT_LENS':
       case 'CONTACT_LENSES':
+      case 'COLORED_CONTACT_LENS':
       case 'COLOUR_CONTACTS':
+      case 'CL':
       case 'LENS':
       case 'RX_LENSES':
       case 'OPTICAL_LENS':
       case 'EYEGLASS_LENS':
+      case 'LS':
         return HSN_CODES_4_DIGIT['9001'];
       case 'FRAME':
       case 'FRAMES':
       case 'EYEGLASS_FRAME':
+      case 'FR':
         return HSN_CODES_4_DIGIT['9003'];
       case 'SPECTACLE':
       case 'COMPLETE_SPECTACLE':
+      case 'READING_GLASSES':
+      case 'RG':
       case 'SUNGLASSES':
+      case 'SUNGLASS':
+      case 'SG':
         return HSN_CODES_4_DIGIT['9004'];
       case 'WRIST_WATCHES':
       case 'WATCH':
+      case 'WT':
         return HSN_CODES_4_DIGIT['9101'];
       case 'SMARTWATCHES':
       case 'SMARTWATCH':
+      case 'SMTWT':
         return HSN_CODES_4_DIGIT['9102'];
+      case 'WALL_CLOCK':
+      case 'WALL_CLOCKS':
+      case 'CK':
+        return HSN_CODES_4_DIGIT['9105'];
+      case 'HEARING_AID':
+      case 'HEARING_AIDS':
+      case 'HA':
+        return HSN_CODES_4_DIGIT['9021'];
       default:
         return HSN_CODES_4_DIGIT['9004'];
     }

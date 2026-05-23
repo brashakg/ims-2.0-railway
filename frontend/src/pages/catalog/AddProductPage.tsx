@@ -23,7 +23,7 @@ import {
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { productApi } from '../../services/api/products';
-import { getHSNByCategory, getHSNOptions } from '../../constants/gst';
+import { getHSNByCategory, getHSNOptions, getGSTRateByCategory } from '../../constants/gst';
 import clsx from 'clsx';
 
 // Product categories with display names
@@ -220,14 +220,18 @@ export function AddProductPage() {
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [useAdvancedHSN, setUseAdvancedHSN] = useState(false);
 
-  // Auto-populate HSN code and GST rate when category changes
+  // Auto-populate HSN code and GST rate when category changes. The HSN CODE
+  // comes from getHSNByCategory, but the RATE comes from getGSTRateByCategory
+  // (the canonical category->rate map) so that categories sharing one HSN
+  // heading at different rates -- e.g. corrective spectacles (5%) vs sunglasses
+  // (18%), both under 4-digit 9004 -- still get the correct per-category rate.
   useEffect(() => {
     if (selectedCategory) {
       const hsnData = getHSNByCategory(selectedCategory, useAdvancedHSN);
       if (hsnData) {
         setHsnCode(hsnData.code);
-        setGstRate(hsnData.gstRate.toString());
       }
+      setGstRate(getGSTRateByCategory(selectedCategory).toString());
     }
   }, [selectedCategory, useAdvancedHSN]);
 
@@ -348,7 +352,8 @@ export function AddProductPage() {
         model,
         attributes,
         description: description || undefined,
-        // India: contact lenses default to HSN 9001 / 12% GST when not set.
+        // India: contact lenses default to HSN 9001 (90013000) at 5% GST under
+        // GST 2.0 when an HSN is not explicitly chosen.
         hsn_code: hsnCode || (isCL ? '90013000' : undefined),
         // Flat fields — ProductCreate is flat, not nested. Offer price falls
         // back to MRP when left blank (matches the form hint). Stock qty is
@@ -394,8 +399,10 @@ export function AddProductPage() {
             key={category.code}
             onClick={() => {
               setSelectedCategory(category.code);
-              // Contact lenses default to 12% GST (HSN 9001); others 18%.
-              setGstRate(category.code === 'CL' ? '12' : '18');
+              // GST rate + HSN are auto-filled from the canonical map by the
+              // useEffect on selectedCategory (getHSNByCategory). Do not hard-
+              // code a rate here -- under GST 2.0 the 12% slab no longer exists
+              // (optical lenses / frames / contacts are 5%).
             }}
             className={clsx(
               'p-6 rounded-xl border-2 transition-all text-center hover:shadow-md',

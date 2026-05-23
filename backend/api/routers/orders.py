@@ -32,32 +32,21 @@ CATEGORY_DISCOUNT_CAPS = {
     "NON_DISCOUNTABLE": 0.0,
 }
 
-# Per-category GST table (Phase 6.15 — Indian rules: 5% for frames /
-# spectacle lenses / contact lenses, 18% otherwise). Mirrors the
-# frontend's getGSTRateByCategory.
+# Per-category GST is sourced from the canonical table in
+# api/services/gst_rates.py (single source of truth, shared with the product
+# master in products.py so a product's master rate == what POS bills it).
+# Indian GST 2.0 (effective 22 Sep 2025): 5% for frames / spectacle &
+# contact lenses / corrective spectacles, 18% otherwise. That table is the
+# backend mirror of the frontend's getGSTRateByCategory.
+from ..services.gst_rates import gst_rate_for_category as _gst_rate_for_category
+
+# LOW_GST_CATEGORIES retained for any external reference / readability; it is
+# the set of categories the canonical table bills at 5%.
+from ..services.gst_rates import GST_CATEGORY_TABLE as _GST_CATEGORY_TABLE
+
 LOW_GST_CATEGORIES = {
-    "FRAMES",
-    "FRAME",
-    "EYEGLASS_FRAME",
-    "SPECTACLE_FRAME",
-    "RX_LENSES",
-    "LENS",
-    "LENSES",
-    "EYEGLASS_LENS",
-    "OPTICAL_LENS",
-    "OPTICAL_LENSES",
-    "SPECTACLE_LENS",
-    "SPECTACLE_LENSES",
-    "CONTACT_LENS",
-    "CONTACT_LENSES",
-    "COLOUR_CONTACTS",
-    "SPECTACLE",
-    "COMPLETE_SPECTACLE",
+    cat for cat, (_hsn, rate) in _GST_CATEGORY_TABLE.items() if rate == 5.0
 }
-
-
-def _gst_rate_for_category(cat: str) -> float:
-    return 5.0 if (cat or "").upper() in LOW_GST_CATEGORIES else 18.0
 
 
 def _compute_per_category_gst(items: list, cart_discount_pct: float) -> dict:
