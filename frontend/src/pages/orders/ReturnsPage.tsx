@@ -1,14 +1,14 @@
 // ============================================================================
 // IMS 2.0 — Returns, Exchanges & Credit Notes
 // ============================================================================
-import { useState } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { orderApi, productApi } from '../../services/api';
 import { returnsApi, type CreateReturnPayload } from '../../services/api/returns';
 import { formatDateIST } from '../../utils/datetime';
 import {
   Search, RotateCcw, ArrowLeftRight, Receipt,
-  AlertTriangle, CheckCircle, X, ChevronRight, Plus, Trash2,
+  AlertTriangle, CheckCircle, X, ChevronRight, Plus, Trash2, RefreshCw,
 
 } from 'lucide-react';
 import clsx from 'clsx';
@@ -65,6 +65,11 @@ export default function ReturnsPage() {
   const [productQuery, setProductQuery] = useState('');
   const [productResults, setProductResults] = useState<any[]>([]);
   const [productSearching, setProductSearching] = useState(false);
+
+  // New-return wizard vs. history list of past returns.
+  const [mode, setMode] = useState<'new' | 'history'>('new');
+  const [history, setHistory] = useState<any[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
 
   const searchOrders = async () => {
     if (!searchQuery.trim()) return;
@@ -204,6 +209,22 @@ export default function ReturnsPage() {
 
   const fc = (amount: number) => `₹${Math.round(amount).toLocaleString('en-IN')}`;
 
+  const loadHistory = useCallback(async () => {
+    setHistoryLoading(true);
+    try {
+      const res = await returnsApi.list({ store_id: user?.activeStoreId, limit: 100 });
+      setHistory(res?.returns || res || []);
+    } catch {
+      setHistory([]);
+    } finally {
+      setHistoryLoading(false);
+    }
+  }, [user?.activeStoreId]);
+
+  useEffect(() => {
+    if (mode === 'history') loadHistory();
+  }, [mode, loadHistory]);
+
   return (
     <div className="inv-body">
       {/* Editorial header */}
@@ -213,8 +234,18 @@ export default function ReturnsPage() {
           <h1>Undo, gracefully.</h1>
           <div className="hint">Refund to source, exchange for another SKU, or issue a store-credit note. Every action is audit-logged against the original invoice.</div>
         </div>
+        <div className="flex rounded-lg border border-gray-200 overflow-hidden self-start">
+          {(['new', 'history'] as const).map((m) => (
+            <button key={m} onClick={() => setMode(m)}
+              className={clsx('px-3 py-1.5 text-sm', mode === m ? 'bg-bv-red-600 text-white' : 'bg-white text-gray-600 hover:bg-gray-50')}>
+              {m === 'new' ? 'New return' : 'History'}
+            </button>
+          ))}
+        </div>
       </div>
 
+      {mode === 'new' && (
+      <>
       {/* Return Type Selection */}
       <div className="flex gap-2">
         {([
@@ -468,6 +499,60 @@ export default function ReturnsPage() {
             <button onClick={() => { setStep('search'); setSelectedOrder(null); setReturnItems([]); setResultId(null); setReplacementItems([]); setProductResults([]); setProductQuery(''); }}
               className="px-6 py-2.5 bg-bv-red-600 text-white rounded-lg text-sm font-semibold">New Return</button>
           </div>
+        </div>
+      )}
+      </>
+      )}
+
+      {mode === 'history' && (
+        <div className="bg-white border border-gray-200 rounded-xl p-5">
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="font-semibold text-gray-900">Recent returns</h3>
+            <button onClick={loadHistory} className="text-sm text-gray-500 hover:text-gray-700 inline-flex items-center gap-1">
+              <RefreshCw className="w-4 h-4" /> Refresh
+            </button>
+          </div>
+          {historyLoading ? (
+            <div className="py-10 text-center text-gray-500">Loading...</div>
+          ) : history.length === 0 ? (
+            <div className="py-10 text-center text-gray-500">
+              <RotateCcw className="w-9 h-9 mx-auto mb-2 opacity-40" />
+              <p>No returns recorded yet.</p>
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="text-xs text-gray-500 text-left border-b border-gray-200">
+                    <th className="py-2 pr-3">Return</th>
+                    <th className="py-2 pr-3">Type</th>
+                    <th className="py-2 pr-3">Customer</th>
+                    <th className="py-2 pr-3">Order</th>
+                    <th className="py-2 pr-3 text-right">Amount</th>
+                    <th className="py-2">Date</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {history.map((r, i) => {
+                    const amt = r.return_type === 'EXCHANGE'
+                      ? (r.settlement?.difference ?? 0)
+                      : (r.refund_amount ?? r.credit_amount ?? r.returned_value ?? 0);
+                    const typeLabel = ({ RETURN: 'Refund', EXCHANGE: 'Exchange', CREDIT_NOTE: 'Credit' } as Record<string, string>)[r.return_type] || r.return_type;
+                    return (
+                      <tr key={r.return_id || i} className="border-b border-gray-100">
+                        <td className="py-2 pr-3 font-mono text-xs text-gray-700">{r.return_id}</td>
+                        <td className="py-2 pr-3"><span className="text-xs px-2 py-0.5 rounded-full bg-gray-100 text-gray-700">{typeLabel}</span></td>
+                        <td className="py-2 pr-3">{r.customer_name || '-'}</td>
+                        <td className="py-2 pr-3 text-gray-500">{r.order_number || '-'}</td>
+                        <td className="py-2 pr-3 text-right font-medium">{fc(amt)}</td>
+                        <td className="py-2 text-gray-500">{formatDateIST(r.created_at)}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
         </div>
       )}
     </div>
