@@ -8,8 +8,7 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { Truck, Package, RefreshCw, ExternalLink, Loader2 } from 'lucide-react';
-import { shippingApi } from '../../services/api';
-import type { Shipment } from '../../services/api/shipping';
+import { shippingApi, type Shipment } from '../../services/api/shipping';
 import { useToast } from '../../context/ToastContext';
 
 interface OrderShippingCardProps {
