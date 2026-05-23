@@ -101,6 +101,25 @@ export function GSTR3BReport() {
     toast.success('GSTR-3B JSON downloaded successfully');
   };
 
+  // GST portal offline-tool JSON (the format you upload on gst.gov.in).
+  const downloadGstnJSON = async () => {
+    if (!reportData) return;
+    try {
+      const gstn = await reportsApi.getGSTR3BGstnJson(selectedMonth, user?.activeStoreId);
+      const dataStr = JSON.stringify(gstn, null, 2);
+      const dataBlob = new Blob([dataStr], { type: 'application/json' });
+      const url = URL.createObjectURL(dataBlob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `GSTR3B_GSTN_${reportData.period}.json`;
+      link.click();
+      URL.revokeObjectURL(url);
+      toast.success('GSTN portal JSON downloaded');
+    } catch (error: any) {
+      toast.error(error?.message || 'Failed to generate GSTN JSON');
+    }
+  };
+
   const getTotalTax = (liability: GSTR3BTaxLiability): number => {
     return liability.integratedTax + liability.centralTax + liability.stateTax + liability.cess;
   };
@@ -190,9 +209,13 @@ export function GSTR3BReport() {
 
           {reportData && (
             <div className="ml-auto flex items-center gap-2">
-              <button onClick={downloadJSON} className="btn-primary text-sm flex items-center gap-2">
+              <button onClick={downloadJSON} className="btn-outline text-sm flex items-center gap-2">
                 <Download className="w-4 h-4" />
                 Download JSON
+              </button>
+              <button onClick={downloadGstnJSON} className="btn-primary text-sm flex items-center gap-2">
+                <Download className="w-4 h-4" />
+                Download GSTN JSON
               </button>
             </div>
           )}

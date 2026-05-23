@@ -43,6 +43,22 @@ export const reportsApi = {
     return response.data;
   },
 
+  // GSTN portal offline-tool JSON (upload format). Distinct from the IMS
+  // report shape returned by getGSTR1Report/getGSTR3BReport above.
+  getGSTR1GstnJson: async (month: string, storeId?: string) => {
+    const response = await api.get('/reports/gstr1/gstn-json', {
+      params: { month, ...(storeId ? { store_id: storeId } : {}) },
+    });
+    return response.data as Record<string, unknown>;
+  },
+
+  getGSTR3BGstnJson: async (month: string, storeId?: string) => {
+    const response = await api.get('/reports/gstr3b/gstn-json', {
+      params: { month, ...(storeId ? { store_id: storeId } : {}) },
+    });
+    return response.data as Record<string, unknown>;
+  },
+
   // Phase 6.3 — cash-tied-up-in-shelves report
   getNonMovingStock: async (
     storeId?: string,

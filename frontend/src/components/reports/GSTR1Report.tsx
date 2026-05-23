@@ -97,6 +97,25 @@ export function GSTR1Report() {
     toast.success('GSTR-1 JSON downloaded successfully');
   };
 
+  // GST portal offline-tool JSON (the format you upload on gst.gov.in).
+  const downloadGstnJSON = async () => {
+    if (!reportData) return;
+    try {
+      const gstn = await reportsApi.getGSTR1GstnJson(selectedMonth, user?.activeStoreId);
+      const dataStr = JSON.stringify(gstn, null, 2);
+      const dataBlob = new Blob([dataStr], { type: 'application/json' });
+      const url = URL.createObjectURL(dataBlob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `GSTR1_GSTN_${reportData.period}.json`;
+      link.click();
+      URL.revokeObjectURL(url);
+      toast.success('GSTN portal JSON downloaded');
+    } catch (error: any) {
+      toast.error(error?.message || 'Failed to generate GSTN JSON');
+    }
+  };
+
   const downloadCSV = () => {
     if (!reportData) return;
 
@@ -340,6 +359,10 @@ export function GSTR1Report() {
               <button onClick={downloadJSON} className="btn-outline text-sm flex items-center gap-2">
                 <Download className="w-4 h-4" />
                 Download JSON
+              </button>
+              <button onClick={downloadGstnJSON} className="btn-outline text-sm flex items-center gap-2">
+                <Download className="w-4 h-4" />
+                Download GSTN JSON
               </button>
               <button onClick={downloadCSV} className="btn-primary text-sm flex items-center gap-2">
                 <Download className="w-4 h-4" />
