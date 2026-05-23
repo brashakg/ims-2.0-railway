@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional
 from datetime import date
 import uuid
 import re
-from .auth import get_current_user
+from .auth import get_current_user, require_roles
 
 
 def _sanitize_text(value: str) -> str:
@@ -555,10 +555,123 @@ async def add_store_credit(
 
         if repo.add_store_credit(customer_id, amount):
             return {
-                "message": f"Added ₹{amount} store credit",
+                "message": f"Added store credit: {amount}",
                 "new_total": existing.get("store_credit", 0) + amount,
             }
 
         raise HTTPException(status_code=500, detail="Failed to add store credit")
+
+
+# ============================================================================
+# STORE-CREDIT / CREDIT-NOTE LEDGER (auditable history per customer)
+# ============================================================================
+
+_CREDIT_ROLES = ("ACCOUNTANT", "STORE_MANAGER", "AREA_MANAGER", "ADMIN")
+
+
+class StoreCreditEntryRequest(BaseModel):
+    amount: float
+    reason: Optional[str] = ""
+    ref: Optional[str] = None  # e.g. originating return_id / order_id
+
+
+def _ledger_coll():
+    from ..dependencies import get_db
+
+    db = get_db()
+    if db is None or not getattr(db, "is_connected", True):
+        return None
+    try:
+        return db.get_collection("credit_note_ledger")
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _current_credit_balance(customer_id: str, customer_doc: Optional[dict]) -> float:
+    """Ledger is authoritative once it has entries; before that, bridge from the
+    legacy customer.store_credit number so existing balances aren't lost."""
+    from ..services import store_credit_ledger as scl
+
+    coll = _ledger_coll()
+    if coll is not None:
+        entries = list(coll.find({"customer_id": customer_id}, {"_id": 0}))
+        if entries:
+            return scl.compute_balance(entries)
+    return float((customer_doc or {}).get("store_credit", 0) or 0)
+
+
+def _post_credit_entry(customer_id: str, entry_type: str, body: StoreCreditEntryRequest, current_user: dict):
+    from ..services import store_credit_ledger as scl
+
+    repo = get_customer_repository()
+    if repo is None:
+        raise HTTPException(status_code=503, detail="Database not available")
+    existing = repo.find_by_id(customer_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="Customer not found")
+
+    balance = _current_credit_balance(customer_id, existing)
+    try:
+        entry = scl.make_entry(
+            customer_id=customer_id,
+            entry_type=entry_type,
+            amount=body.amount,
+            current_balance=balance,
+            reason=body.reason or "",
+            ref=body.ref,
+            store_id=current_user.get("active_store_id"),
+            user_id=current_user.get("user_id"),
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    coll = _ledger_coll()
+    if coll is not None:
+        coll.insert_one(dict(entry))
+    # Keep the legacy number in sync so the rest of the app stays correct.
+    try:
+        repo.update(customer_id, {"store_credit": entry["balance_after"]})
+    except Exception:  # noqa: BLE001
+        pass
+    entry.pop("_id", None)
+    return {"entry": entry, "balance": entry["balance_after"]}
+
+
+@router.post("/{customer_id}/store-credit/issue")
+async def issue_store_credit(
+    customer_id: str,
+    body: StoreCreditEntryRequest,
+    current_user: dict = Depends(require_roles(*_CREDIT_ROLES)),
+):
+    """Issue store credit (e.g. a credit note from a return). Appends a ledger
+    entry and updates the running balance."""
+    return _post_credit_entry(customer_id, "ISSUED", body, current_user)
+
+
+@router.post("/{customer_id}/store-credit/redeem")
+async def redeem_store_credit(
+    customer_id: str,
+    body: StoreCreditEntryRequest,
+    current_user: dict = Depends(require_roles(*_CREDIT_ROLES)),
+):
+    """Redeem store credit. Rejected if it exceeds the current balance."""
+    return _post_credit_entry(customer_id, "REDEEMED", body, current_user)
+
+
+@router.get("/{customer_id}/store-credit/ledger")
+async def get_store_credit_ledger(
+    customer_id: str, current_user: dict = Depends(get_current_user)
+):
+    """Full credit-note ledger for a customer + current balance, newest first."""
+    repo = get_customer_repository()
+    existing = repo.find_by_id(customer_id) if repo is not None else None
+    coll = _ledger_coll()
+    entries = []
+    if coll is not None:
+        entries = list(
+            coll.find({"customer_id": customer_id}, {"_id": 0}).sort("created_at", -1)
+        )
+    balance = _current_credit_balance(customer_id, existing)
+    return {"customer_id": customer_id, "balance": balance, "entries": entries}
 
     return {"message": f"Added ₹{amount} store credit"}

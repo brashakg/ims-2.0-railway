@@ -21,6 +21,28 @@ export const customerApi = {
     return response.data;
   },
 
+  // Store-credit / credit-note ledger
+  getStoreCreditLedger: async (customerId: string) => {
+    const response = await api.get(`/customers/${customerId}/store-credit/ledger`);
+    return response.data as {
+      customer_id: string;
+      balance: number;
+      entries: Array<{
+        entry_id: string; type: string; amount: number; delta: number;
+        balance_after: number; reason?: string; ref?: string | null;
+        created_by?: string | null; created_at?: string;
+      }>;
+    };
+  },
+  issueStoreCredit: async (customerId: string, amount: number, reason?: string, ref?: string) => {
+    const response = await api.post(`/customers/${customerId}/store-credit/issue`, { amount, reason, ref });
+    return response.data;
+  },
+  redeemStoreCredit: async (customerId: string, amount: number, reason?: string, ref?: string) => {
+    const response = await api.post(`/customers/${customerId}/store-credit/redeem`, { amount, reason, ref });
+    return response.data;
+  },
+
   createCustomer: async (data: Partial<import('../../types').Customer>) => {
     const response = await api.post('/customers', data);
     return response.data;
