@@ -44,6 +44,25 @@ interface Job {
   createdAt: string;
   completedAt?: string;
   notes?: string;
+  // Lens-order lifecycle (snake_case — passes through job_to_frontend as-is).
+  lens_status?: LensStatus;
+  lens_ordered_at?: string;
+  lens_received_at?: string;
+  lens_mounted_at?: string;
+  ready_notified_at?: string;
+}
+
+// Lens-order lifecycle: forward-only NOT_ORDERED -> ORDERED -> RECEIVED -> MOUNTED.
+type LensStatus = 'NOT_ORDERED' | 'ORDERED' | 'RECEIVED' | 'MOUNTED';
+const LENS_STATUS_CONFIG: Record<LensStatus, { label: string; class: string; next?: LensStatus; nextLabel?: string }> = {
+  NOT_ORDERED: { label: 'Lens: Not ordered', class: 'bg-gray-100 text-gray-600', next: 'ORDERED', nextLabel: 'Mark lens ordered' },
+  ORDERED: { label: 'Lens: Ordered', class: 'bg-blue-50 text-blue-700', next: 'RECEIVED', nextLabel: 'Mark lens received' },
+  RECEIVED: { label: 'Lens: Received', class: 'bg-indigo-50 text-indigo-700', next: 'MOUNTED', nextLabel: 'Mark lens mounted' },
+  MOUNTED: { label: 'Lens: Mounted', class: 'bg-green-50 text-green-700' },
+};
+function resolveLensConfig(status: unknown) {
+  const key = (typeof status === 'string' ? status : 'NOT_ORDERED') as LensStatus;
+  return LENS_STATUS_CONFIG[key] ?? LENS_STATUS_CONFIG.NOT_ORDERED;
 }
 
 // Audit Run #2 fix: the workshop page was crashing via error boundary when
@@ -277,6 +296,48 @@ const loadJobs = async () => {
     }
   };
 
+  // Advance the lens lifecycle one step (forward-only; backend enforces).
+  const [lensBusy, setLensBusy] = useState(false);
+  const handleLensAdvance = async (jobId: string, nextStatus: LensStatus) => {
+    setLensBusy(true);
+    try {
+      await workshopApi.updateLensStatus(jobId, nextStatus);
+      toast.success(`Lens ${nextStatus.toLowerCase().replace('_', ' ')}`);
+      setSelectedJob(null);
+      await loadJobs();
+    } catch (err) {
+      const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+        ?? 'Failed to update lens status';
+      toast.error(msg);
+    } finally {
+      setLensBusy(false);
+    }
+  };
+
+  // Notify the customer their job is ready for pickup.
+  const [notifyBusy, setNotifyBusy] = useState(false);
+  const handleNotifyReady = async (jobId: string) => {
+    setNotifyBusy(true);
+    try {
+      const res = await workshopApi.notifyReady(jobId);
+      const wa = res?.whatsapp_status;
+      if (wa === 'SENT') {
+        toast.success('Customer notified via WhatsApp');
+      } else if (wa === 'SIMULATED') {
+        toast.success('Pickup notification logged (dispatch off — not sent live)');
+      } else if (wa === 'no_phone') {
+        toast.warning('No customer phone on file — logged only');
+      } else {
+        toast.warning('Notification logged but WhatsApp send failed');
+      }
+      await loadJobs();
+    } catch {
+      toast.error('Failed to send pickup notification');
+    } finally {
+      setNotifyBusy(false);
+    }
+  };
+
   return (
     <div className="inv-body">
       {/* Editorial header */}
@@ -444,6 +505,9 @@ const loadJobs = async () => {
                       <span className={clsx('flex items-center gap-1 text-xs font-medium', priorityConfig.class)}>
                         <PriorityIcon className="w-3 h-3" />
                         {priorityConfig.label}
+                      </span>
+                      <span className={clsx('px-2 py-0.5 rounded-full text-xs font-medium', resolveLensConfig(job.lens_status).class)}>
+                        {resolveLensConfig(job.lens_status).label}
                       </span>
                       {overdue && (
                         <span className="badge-error flex items-center gap-1">
@@ -645,6 +709,40 @@ const loadJobs = async () => {
                   </div>
                 </div>
 
+                {/* Lens-order lifecycle — forward-only NOT_ORDERED -> ORDERED
+                    -> RECEIVED -> MOUNTED. Independent of the job workflow status. */}
+                <div className="rounded-lg border border-gray-200 bg-gray-50/60 p-3">
+                  <div className="flex items-center justify-between mb-2">
+                    <p className="text-sm font-medium text-gray-700">Lens order</p>
+                    <span className={clsx('px-2 py-0.5 rounded-full text-xs font-medium', resolveLensConfig(selectedJob.lens_status).class)}>
+                      {resolveLensConfig(selectedJob.lens_status).label}
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-3 gap-2 text-xs text-gray-500 mb-2">
+                    <div>
+                      <p className="text-gray-400">Ordered</p>
+                      <p className="font-medium text-gray-700">{selectedJob.lens_ordered_at ? formatDate(selectedJob.lens_ordered_at) : '—'}</p>
+                    </div>
+                    <div>
+                      <p className="text-gray-400">Received</p>
+                      <p className="font-medium text-gray-700">{selectedJob.lens_received_at ? formatDate(selectedJob.lens_received_at) : '—'}</p>
+                    </div>
+                    <div>
+                      <p className="text-gray-400">Mounted</p>
+                      <p className="font-medium text-gray-700">{selectedJob.lens_mounted_at ? formatDate(selectedJob.lens_mounted_at) : '—'}</p>
+                    </div>
+                  </div>
+                  {resolveLensConfig(selectedJob.lens_status).next && (
+                    <button
+                      onClick={() => handleLensAdvance(selectedJob.id, resolveLensConfig(selectedJob.lens_status).next as LensStatus)}
+                      disabled={lensBusy}
+                      className="btn-outline text-sm disabled:opacity-50"
+                    >
+                      {resolveLensConfig(selectedJob.lens_status).nextLabel}
+                    </button>
+                  )}
+                </div>
+
                 {/* Status Transition Buttons */}
                 <div className="flex gap-2 flex-wrap">
                   {selectedJob.status === 'PENDING' && (
@@ -664,6 +762,16 @@ const loadJobs = async () => {
                   )}
                   {selectedJob.status === 'READY' && (
                     <button onClick={() => handleStatusChange(selectedJob.id, 'DELIVERED')} className="btn-success text-sm">Mark Delivered</button>
+                  )}
+                  {['COMPLETED', 'READY'].includes(selectedJob.status) && (
+                    <button
+                      onClick={() => handleNotifyReady(selectedJob.id)}
+                      disabled={notifyBusy}
+                      className="btn-outline text-sm flex items-center gap-1 disabled:opacity-50"
+                    >
+                      <Phone className="w-4 h-4" />
+                      {selectedJob.ready_notified_at ? 'Notify ready again' : 'Notify ready'}
+                    </button>
                   )}
                 </div>
 

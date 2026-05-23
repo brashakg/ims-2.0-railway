@@ -278,6 +278,30 @@ export const workshopApi = {
     return response.data;
   },
 
+  // Lens-order lifecycle (NOT_ORDERED -> ORDERED -> RECEIVED -> MOUNTED).
+  // Forward-only; backend rejects skips/backwards with 400.
+  updateLensStatus: async (jobId: string, status: string) => {
+    const response = await api.post(`/workshop/jobs/${jobId}/lens-status`, { status });
+    return response.data as {
+      job_id: string;
+      lens_status: string;
+      message: string;
+    };
+  },
+
+  // Notify the customer their job is ready for pickup (WhatsApp + in-app log).
+  // Fail-soft on the backend; whatsapp_status is SENT | SIMULATED | FAILED | no_phone.
+  notifyReady: async (jobId: string) => {
+    const response = await api.post(`/workshop/jobs/${jobId}/notify-ready`);
+    return response.data as {
+      job_id: string;
+      ready_notified_at: string;
+      whatsapp_status: string;
+      notification_logged: boolean;
+      message: string;
+    };
+  },
+
   assignJob: async (jobId: string, staffId: string) => {
     const response = await api.post(`/workshop/jobs/${jobId}/assign`, { staff_id: staffId });
     return response.data;
