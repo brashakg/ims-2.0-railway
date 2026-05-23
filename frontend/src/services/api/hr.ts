@@ -179,6 +179,20 @@ export const tasksApi = {
     return response.data;
   },
 
+  // Variance-driven automation + integrity detectors
+  scanPaymentVariance: async (days = 7, storeId?: string) => {
+    const response = await api.post('/tasks/scan/payment-variance', null, { params: { days, store_id: storeId } });
+    return response.data as { scanned: number; anomalies: number; tasks_created: number; details?: any[] };
+  },
+  getFakeClosures: async (storeId?: string) => {
+    const response = await api.get('/tasks/integrity/fake-closures', { params: { store_id: storeId } });
+    return response.data as { flagged: any[]; count: number };
+  },
+  getSilentTasks: async (storeId?: string) => {
+    const response = await api.get('/tasks/integrity/silent', { params: { store_id: storeId } });
+    return response.data as { silent: any[]; count: number };
+  },
+
   // Get single task by ID
   getTask: async (taskId: string) => {
     const response = await api.get(`/tasks/${taskId}`);

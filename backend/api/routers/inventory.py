@@ -692,6 +692,31 @@ async def complete_stock_count(
         }
         collection.update_one({"count_id": count_id}, {"$set": update_data})
 
+        # Variance -> accountable SYSTEM task (fail-soft; deduped per count).
+        try:
+            from ..services.task_triggers import (
+                create_system_task,
+                stock_variance_priority,
+            )
+            from ..dependencies import get_task_repository
+
+            pri = stock_variance_priority(shrinkage_pct, overall_var_pct)
+            if pri:
+                create_system_task(
+                    get_task_repository(),
+                    title=f"Stock-count variance: {count_doc.get('audit_number', count_id)}",
+                    description=(
+                        f"Shrinkage {shrinkage_pct}% / overall variance {overall_var_pct}% "
+                        f"across {len(items)} items. Investigate and reconcile."
+                    ),
+                    priority=pri,
+                    category="Inventory",
+                    store_id=count_doc.get("store_id") or current_user.get("active_store_id"),
+                    dedupe_ref=f"stockcount:{count_id}",
+                )
+        except Exception as _e:  # noqa: BLE001
+            logger.warning(f"[INVENTORY] variance task creation skipped: {_e}")
+
         return {
             "message": "Stock count completed",
             "count_id": count_id,
