@@ -5,7 +5,7 @@
 // Snooze: up to 3 times per notification, each to a custom time.
 
 import { useCallback, useEffect, useState } from 'react';
-import { Bell, Check, CheckCheck, Clock, Loader2, AlarmClock } from 'lucide-react';
+import { Bell, Check, Clock, Loader2, AlarmClock } from 'lucide-react';
 import { useToast } from '../../context/ToastContext';
 import { notificationsApi, MAX_SNOOZE, type AppNotification } from '../../services/api/notifications';
 import { formatDateTimeIST, toDate } from '../../utils/datetime';
@@ -66,11 +66,6 @@ export function NotificationsPage() {
     catch { toast.error('Failed to mark read'); }
   };
 
-  const markAllRead = async () => {
-    try { const r = await notificationsApi.markAllRead(); toast.success(`Marked ${r.updated ?? 0} read`); await load(); }
-    catch { toast.error('Failed to mark all read'); }
-  };
-
   const doSnooze = async (n: AppNotification, date: Date) => {
     if ((n.snooze_count || 0) >= MAX_SNOOZE) { toast.error('Max snoozes reached'); return; }
     if (date.getTime() <= Date.now()) { toast.error('Pick a future time'); return; }
@@ -105,9 +100,6 @@ export function NotificationsPage() {
               </button>
             ))}
           </div>
-          <button onClick={markAllRead} className="btn-secondary text-sm inline-flex items-center gap-1">
-            <CheckCheck className="w-4 h-4" /> Mark all read
-          </button>
         </div>
       </div>
 
