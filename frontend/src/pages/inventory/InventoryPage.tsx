@@ -51,7 +51,7 @@ import { StockAgingReport } from '../../components/inventory/StockAgingReport';
 import { StockAlertsOverview } from '../../components/inventory/StockAlertsOverview';
 import { NonMovingStockWidget } from '../../components/inventory/NonMovingStockWidget';
 import { StockCountScanningInterface } from '../../components/inventory/StockCountScanningInterface';
-import { ContactLensExpiryWidget, LensPowerGridWidget, SellThroughAnalysisWidget, OverstockAnalysisWidget } from '../../components/inventory/AdvancedInventoryFeatures';
+import { ContactLensExpiryWidget, LensPowerGridWidget, SellThroughAnalysisWidget, OverstockAnalysisWidget, TransferRecommendationsWidget } from '../../components/inventory/AdvancedInventoryFeatures';
 import { Pagination } from '../../components/common/Pagination';
 import clsx from 'clsx';
 
@@ -105,7 +105,7 @@ interface StockMovement {
   createdBy: string;
 }
 
-type ViewTab = 'alerts' | 'catalog' | 'low-stock' | 'reorders' | 'serial-numbers' | 'aging' | 'transfers' | 'movements' | 'non-moving' | 'stock-count' | 'contact-lens' | 'power-grid' | 'sell-through' | 'overstock';
+type ViewTab = 'alerts' | 'catalog' | 'low-stock' | 'reorders' | 'serial-numbers' | 'aging' | 'transfers' | 'movements' | 'non-moving' | 'stock-count' | 'contact-lens' | 'power-grid' | 'sell-through' | 'overstock' | 'rebalance';
 
 export function InventoryPage() {
   const { user, hasRole } = useAuth();
@@ -135,7 +135,7 @@ export function InventoryPage() {
   useEffect(() => {
     const tabParam = searchParams.get('tab');
     if (tabParam && tabParam !== activeTab) {
-      const validTabs: ViewTab[] = ['alerts', 'catalog', 'low-stock', 'reorders', 'serial-numbers', 'aging', 'transfers', 'movements', 'non-moving', 'stock-count', 'contact-lens', 'power-grid', 'sell-through', 'overstock'];
+      const validTabs: ViewTab[] = ['alerts', 'catalog', 'low-stock', 'reorders', 'serial-numbers', 'aging', 'transfers', 'movements', 'non-moving', 'stock-count', 'contact-lens', 'power-grid', 'sell-through', 'overstock', 'rebalance'];
       if (validTabs.includes(tabParam as ViewTab)) {
         setActiveTab(tabParam as ViewTab);
       }
@@ -346,6 +346,7 @@ export function InventoryPage() {
     { id: 'power-grid',     label: 'Lens power grid', icon: BarChart3 },
     { id: 'sell-through',   label: 'Sell-through',    icon: TrendingDown },
     { id: 'overstock',      label: 'Overstock',       icon: Boxes },
+    { id: 'rebalance',      label: 'Rebalance',       icon: ArrowRightLeft },
   ];
 
   /**
@@ -365,7 +366,7 @@ export function InventoryPage() {
   }> = [
     { id: 'catalog',  label: 'Catalog',     icon: Package,         members: ['catalog'] },
     { id: 'health',   label: 'Stock health',icon: AlertTriangle,   members: ['low-stock', 'non-moving', 'aging', 'alerts'] },
-    { id: 'ops',      label: 'Operations',  icon: ShoppingCart,    members: ['reorders', 'transfers', 'movements', 'stock-count'] },
+    { id: 'ops',      label: 'Operations',  icon: ShoppingCart,    members: ['reorders', 'transfers', 'rebalance', 'movements', 'stock-count'] },
     { id: 'optical',  label: 'Optical',     icon: Eye,             members: ['serial-numbers', 'contact-lens', 'power-grid'] },
     { id: 'insights', label: 'Insights',    icon: BarChart3,       members: ['sell-through', 'overstock'] },
   ];
@@ -955,6 +956,11 @@ export function InventoryPage() {
       {/* Overstock Analysis Tab */}
       {activeTab === 'overstock' && (
         <OverstockAnalysisWidget />
+      )}
+
+      {/* Rebalance: inter-store transfer suggestions + stock accountability */}
+      {activeTab === 'rebalance' && (
+        <TransferRecommendationsWidget />
       )}
 
       {/* Barcode Management Modal */}
