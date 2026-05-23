@@ -21,6 +21,7 @@ import { Analytics } from '@vercel/analytics/react';
 // Lazy load pages for code splitting
 const LoginPage = lazy(() => import('./pages/auth/LoginPage').then(m => ({ default: m.LoginPage })));
 const VendorPortalPage = lazy(() => import('./pages/vendor-portal/VendorPortalPage'));
+const CustomerRxPortal = lazy(() => import('./pages/customer-portal/CustomerRxPortal'));
 const DashboardPage = lazy(() => import('./pages/dashboard/HubPage'));
 const NotificationsPage = lazy(() => import('./pages/notifications/NotificationsPage'));
 const ExecutiveDashboard = lazy(() => import('./pages/dashboard/ExecutiveDashboard').then(m => ({ default: m.ExecutiveDashboard })));
@@ -146,6 +147,7 @@ function App() {
                       labs hit this without an IMS user account. The
                       tokenId in the URL IS the auth (server-side check). */}
                   <Route path="/vendor-portal/:tokenId" element={<VendorPortalPage />} />
+                  <Route path="/my-rx" element={<CustomerRxPortal />} />
 
                 {/* Protected routes with layout */}
                 <Route
