@@ -31,6 +31,7 @@ import {
 } from 'lucide-react';
 import type { Customer } from '../../types';
 import { customerApi, orderApi, prescriptionApi } from '../../services/api';
+import StoreCreditLedgerCard from '../../components/customers/StoreCreditLedgerCard';
 import { useToast } from '../../context/ToastContext';
 import { PrescriptionVersionsEditor } from '../../components/clinical/PrescriptionVersionsEditor';
 import { PrescriptionHistoryModal } from '../../components/clinical/PrescriptionHistoryModal';
@@ -381,7 +382,12 @@ export function Customer360Dashboard() {
         {activeTab === 'prescriptions' && <PrescriptionsTab prescriptions={prescriptions} customerId={customerId!} customerName={customer?.name} />}
         {activeTab === 'orders' && <OrdersTab orders={orders} />}
         {activeTab === 'interactions' && <InteractionsTab interactions={interactions} />}
-        {activeTab === 'loyalty' && loyaltyData && <LoyaltyTab loyaltyData={loyaltyData} />}
+        {activeTab === 'loyalty' && (
+          <div className="space-y-4">
+            {loyaltyData && <LoyaltyTab loyaltyData={loyaltyData} />}
+            {customerId && <StoreCreditLedgerCard customerId={customerId} />}
+          </div>
+        )}
         {activeTab === 'preferences' && <PreferencesTab customer={customer} />}
       </div>
     </div>
