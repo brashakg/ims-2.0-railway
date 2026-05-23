@@ -783,6 +783,7 @@ export function POSLayout() {
             )}
             <div className="p-4">
               <PrescriptionForm
+                allowContactLens={false}
                 onSubmit={async (rxData) => {
                   setErrorMsg(null);
                   try {

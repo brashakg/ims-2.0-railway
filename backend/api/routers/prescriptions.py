@@ -7,6 +7,7 @@ Prescription management endpoints
 from fastapi import APIRouter, HTTPException, Depends, Query
 from pydantic import BaseModel, Field, field_validator
 from typing import Optional
+from typing_extensions import Literal
 from datetime import date, datetime, timedelta
 import uuid
 
@@ -36,6 +37,33 @@ _RX_LIMITS = {
     "cyl": (-6.0, 6.0),
     "add": (0.75, 3.50),
     "pd": (20.0, 80.0),
+}
+
+# ============================================================================
+# Contact-lens (CL) prescription support (additive, May 2026)
+# ============================================================================
+# A contact-lens Rx is a DISTINCT thing from a spectacle Rx: it is fit by
+# base-curve (BC) + diameter (DIA) rather than PD, and the powers are
+# vertex-adjusted to sit on the cornea. We reuse the SAME prescriptions
+# collection + validity/expiry/optometrist/store machinery, discriminated by
+# a top-level `rx_kind` field. `rx_kind` defaults to "SPECTACLE" so every
+# existing prescription + endpoint behaves identically.
+#
+# CL field names mirror the just-shipped CL inventory product master
+# (products.py: cl_power/cl_cyl/cl_axis/cl_add/base_curve/diameter/modality)
+# so the Rx and the product it binds to never disagree on naming.
+
+# Allowed CL replacement modalities -- kept in sync with products.CL_MODALITIES.
+CL_MODALITIES = ("DAILY", "FORTNIGHTLY", "MONTHLY", "QUARTERLY", "YEARLY", "COLOR")
+
+# CL power ranges are tighter than spectacle (toric cyl on a soft CL rarely
+# exceeds -2.75; powers beyond these are almost always a data-entry slip).
+_CL_LIMITS = {
+    "cl_power": (-30.0, 30.0),
+    "cl_cyl": (-10.0, 10.0),
+    "cl_add": (0.0, 4.0),
+    "base_curve": (7.0, 10.0),
+    "diameter": (12.0, 16.0),
 }
 
 
@@ -92,14 +120,42 @@ class EyeData(BaseModel):
         return _validate_rx_value(v, "pd")
 
 
+class CLEyeData(BaseModel):
+    """Per-eye contact-lens parameters. Fit by base-curve + diameter (not PD);
+    cl_cyl/cl_axis present only for toric lenses, cl_add only for multifocal.
+    Powers are stored as floats (the CL inventory master uses floats too)."""
+
+    cl_power: Optional[float] = None
+    cl_cyl: Optional[float] = None  # toric
+    cl_axis: Optional[int] = Field(None, ge=0, le=180)  # toric (CL axis is 0-180)
+    cl_add: Optional[float] = None  # multifocal
+    base_curve: Optional[float] = None  # BC, mm
+    diameter: Optional[float] = None  # DIA, mm
+    acuity: Optional[str] = None  # visual acuity, e.g. "6/6"
+
+
 class PrescriptionCreate(BaseModel):
     patient_id: str
     customer_id: str
+    # rx_kind discriminates a spectacle Rx from a contact-lens Rx. Defaults to
+    # SPECTACLE so every pre-existing prescription stays a spectacle Rx and all
+    # existing create calls (which omit rx_kind) behave exactly as before.
+    rx_kind: Literal["SPECTACLE", "CONTACT_LENS"] = "SPECTACLE"
     source: str = "TESTED_AT_STORE"  # TESTED_AT_STORE, FROM_DOCTOR
     optometrist_id: Optional[str] = None
     validity_months: int = Field(default=12, ge=6, le=24)
-    right_eye: EyeData
-    left_eye: EyeData
+    # Spectacle eyes default to empty EyeData so a CONTACT_LENS payload need not
+    # send them; a SPECTACLE payload still validates powers as before.
+    right_eye: EyeData = Field(default_factory=EyeData)
+    left_eye: EyeData = Field(default_factory=EyeData)
+    # ---- Contact-lens (CL) block. All optional + only used when CONTACT_LENS. ----
+    cl_right: Optional[CLEyeData] = None
+    cl_left: Optional[CLEyeData] = None
+    cl_brand: Optional[str] = None
+    cl_series: Optional[str] = None
+    modality: Optional[str] = None
+    color: Optional[str] = None  # for cosmetic / coloured lenses
+    cl_product_id: Optional[str] = None  # bind to a CONTACT_LENS product
     lens_recommendation: Optional[str] = None
     coating_recommendation: Optional[str] = None
     remarks: Optional[str] = None
@@ -113,6 +169,35 @@ class PrescriptionCreate(BaseModel):
 def generate_rx_number() -> str:
     """Generate unique prescription number"""
     return f"RX-{datetime.now().strftime('%y%m%d')}-{str(uuid.uuid4())[:6].upper()}"
+
+
+def _validate_cl_eye(eye_label: str, eye: Optional[CLEyeData]):
+    """Validate one eye of a contact-lens Rx. Raises HTTPException(422) on a
+    bad value. CL axis is 0-180 (toric); modality is checked separately at the
+    top level. All fields optional -- only present values are range-checked."""
+    if eye is None:
+        return
+    if eye.cl_axis is not None and (eye.cl_axis < 0 or eye.cl_axis > 180):
+        raise HTTPException(
+            status_code=422,
+            detail=f"{eye_label} CL AXIS must be a whole number between 0 and 180",
+        )
+    for field_name, lo, hi in (
+        ("cl_power", *_CL_LIMITS["cl_power"]),
+        ("cl_cyl", *_CL_LIMITS["cl_cyl"]),
+        ("cl_add", *_CL_LIMITS["cl_add"]),
+        ("base_curve", *_CL_LIMITS["base_curve"]),
+        ("diameter", *_CL_LIMITS["diameter"]),
+    ):
+        val = getattr(eye, field_name)
+        if val is not None and (val < lo or val > hi):
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"{eye_label} {field_name} value {val} is outside the valid "
+                    f"range ({lo} to {hi}). Please double-check the prescription."
+                ),
+            )
 
 
 # ============================================================================
@@ -203,13 +288,16 @@ async def list_prescriptions(
     customer_id: Optional[str] = Query(None),
     optometrist_id: Optional[str] = Query(None),
     store_id: Optional[str] = Query(None),
+    rx_kind: Optional[Literal["SPECTACLE", "CONTACT_LENS"]] = Query(None),
     from_date: Optional[date] = Query(None),
     to_date: Optional[date] = Query(None),
     skip: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=100),
     current_user: dict = Depends(get_current_user),
 ):
-    """List prescriptions with filters"""
+    """List prescriptions with filters. Pass rx_kind=CONTACT_LENS (or SPECTACLE)
+    to return only that kind; omitting it returns every prescription as before.
+    A doc with no stored rx_kind is treated as SPECTACLE (back-compat)."""
     repo = get_prescription_repository()
     active_store = store_id or current_user.get("active_store_id")
 
@@ -224,6 +312,13 @@ async def list_prescriptions(
             prescriptions = repo.find_by_store(active_store, from_date, to_date)
         else:
             prescriptions = repo.find_many({}, skip=skip, limit=limit)
+
+        if rx_kind is not None:
+            prescriptions = [
+                p
+                for p in prescriptions
+                if (p.get("rx_kind") or "SPECTACLE") == rx_kind
+            ]
 
         return {"prescriptions": prescriptions, "total": len(prescriptions)}
 
@@ -292,8 +387,20 @@ async def create_prescription(
                     detail=f"{eye_label} AXIS must be whole number between 1 and 180",
                 )
 
-    _validate_power("Right eye", rx.right_eye)
-    _validate_power("Left eye", rx.left_eye)
+    if rx.rx_kind == "CONTACT_LENS":
+        # Contact-lens Rx: validate CL fields (modality + per-eye BC/DIA/power/
+        # toric axis) instead of spectacle powers. Spectacle eyes are ignored.
+        if rx.modality and rx.modality not in CL_MODALITIES:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Invalid modality. Allowed: {', '.join(CL_MODALITIES)}",
+            )
+        _validate_cl_eye("Right eye", rx.cl_right)
+        _validate_cl_eye("Left eye", rx.cl_left)
+    else:
+        # Spectacle Rx (default): unchanged power validation.
+        _validate_power("Right eye", rx.right_eye)
+        _validate_power("Left eye", rx.left_eye)
 
     if repo is not None:
         # Verify customer exists
@@ -312,12 +419,15 @@ async def create_prescription(
             "prescription_number": generate_rx_number(),
             "patient_id": rx.patient_id,
             "customer_id": rx.customer_id,
+            "rx_kind": rx.rx_kind,
             "store_id": current_user.get("active_store_id"),
             "source": rx.source,
             "optometrist_id": rx.optometrist_id,
             "prescription_date": prescription_date.isoformat(),
             "expiry_date": expiry_date.isoformat(),
             "validity_months": rx.validity_months,
+            # Spectacle eyes are always persisted (empty for a CL Rx) so any
+            # reader expecting right_eye/left_eye keys never KeyErrors.
             "right_eye": rx.right_eye.model_dump(),
             "left_eye": rx.left_eye.model_dump(),
             "lens_recommendation": rx.lens_recommendation,
@@ -325,6 +435,21 @@ async def create_prescription(
             "remarks": rx.remarks,
             "created_by": current_user.get("user_id"),
         }
+
+        # Persist the CL block only for a contact-lens Rx so spectacle docs
+        # stay byte-for-byte identical to before.
+        if rx.rx_kind == "CONTACT_LENS":
+            rx_data.update(
+                {
+                    "cl_right": rx.cl_right.model_dump() if rx.cl_right else None,
+                    "cl_left": rx.cl_left.model_dump() if rx.cl_left else None,
+                    "cl_brand": rx.cl_brand,
+                    "cl_series": rx.cl_series,
+                    "modality": rx.modality,
+                    "color": rx.color,
+                    "cl_product_id": rx.cl_product_id,
+                }
+            )
 
         created = repo.create(rx_data)
         if created:
@@ -428,33 +553,34 @@ async def validate_prescription(
     }
 
 
-@router.get("/{prescription_id}/print")
-async def print_prescription(
-    prescription_id: str, current_user: dict = Depends(get_current_user)
-):
-    """Generate printable prescription HTML"""
-    repo = get_prescription_repository()
+_PRINT_STYLE = """
+                body { font-family: Arial, sans-serif; padding: 20px; }
+                .header { text-align: center; margin-bottom: 20px; }
+                .rx-number { font-size: 14px; color: #666; }
+                table { width: 100%; border-collapse: collapse; margin: 20px 0; }
+                th, td { border: 1px solid #ddd; padding: 8px; text-align: center; }
+                th { background: #f5f5f5; }
+                .footer { margin-top: 40px; }
+"""
 
-    if repo is not None:
-        prescription = repo.find_by_id(prescription_id)
-        if prescription is None:
-            raise HTTPException(status_code=404, detail="Prescription not found")
 
-        # Generate basic HTML for printing
-        html = f"""
+def _cell(value) -> str:
+    """Render a stored Rx cell value, falling back to '-' for None/empty."""
+    if value is None or value == "":
+        return "-"
+    return str(value)
+
+
+def _build_spectacle_print_html(prescription: dict) -> str:
+    """Existing spectacle Rx card (unchanged output)."""
+    right = prescription.get("right_eye", {}) or {}
+    left = prescription.get("left_eye", {}) or {}
+    return f"""
         <!DOCTYPE html>
         <html>
         <head>
             <title>Prescription {prescription.get('prescription_number')}</title>
-            <style>
-                body {{ font-family: Arial, sans-serif; padding: 20px; }}
-                .header {{ text-align: center; margin-bottom: 20px; }}
-                .rx-number {{ font-size: 14px; color: #666; }}
-                table {{ width: 100%; border-collapse: collapse; margin: 20px 0; }}
-                th, td {{ border: 1px solid #ddd; padding: 8px; text-align: center; }}
-                th {{ background: #f5f5f5; }}
-                .footer {{ margin-top: 40px; }}
-            </style>
+            <style>{_PRINT_STYLE}</style>
         </head>
         <body>
             <div class="header">
@@ -468,19 +594,19 @@ async def print_prescription(
                 </tr>
                 <tr>
                     <td><strong>RE</strong></td>
-                    <td>{prescription.get('right_eye', {}).get('sph', '-')}</td>
-                    <td>{prescription.get('right_eye', {}).get('cyl', '-')}</td>
-                    <td>{prescription.get('right_eye', {}).get('axis', '-')}</td>
-                    <td>{prescription.get('right_eye', {}).get('add', '-')}</td>
-                    <td>{prescription.get('right_eye', {}).get('pd', '-')}</td>
+                    <td>{_cell(right.get('sph'))}</td>
+                    <td>{_cell(right.get('cyl'))}</td>
+                    <td>{_cell(right.get('axis'))}</td>
+                    <td>{_cell(right.get('add'))}</td>
+                    <td>{_cell(right.get('pd'))}</td>
                 </tr>
                 <tr>
                     <td><strong>LE</strong></td>
-                    <td>{prescription.get('left_eye', {}).get('sph', '-')}</td>
-                    <td>{prescription.get('left_eye', {}).get('cyl', '-')}</td>
-                    <td>{prescription.get('left_eye', {}).get('axis', '-')}</td>
-                    <td>{prescription.get('left_eye', {}).get('add', '-')}</td>
-                    <td>{prescription.get('left_eye', {}).get('pd', '-')}</td>
+                    <td>{_cell(left.get('sph'))}</td>
+                    <td>{_cell(left.get('cyl'))}</td>
+                    <td>{_cell(left.get('axis'))}</td>
+                    <td>{_cell(left.get('add'))}</td>
+                    <td>{_cell(left.get('pd'))}</td>
                 </tr>
             </table>
             <p><strong>Lens Recommendation:</strong> {prescription.get('lens_recommendation', 'N/A')}</p>
@@ -492,6 +618,86 @@ async def print_prescription(
         </body>
         </html>
         """
+
+
+def _build_cl_print_html(prescription: dict) -> str:
+    """Contact-lens Rx card: brand/series/modality header + per-eye
+    power/CYL/AXIS/ADD/BC/DIA (no PD -- a CL is fit by base-curve+diameter)."""
+    right = prescription.get("cl_right") or {}
+    left = prescription.get("cl_left") or {}
+    brand = prescription.get("cl_brand") or "-"
+    series = prescription.get("cl_series") or "-"
+    modality = prescription.get("modality") or "-"
+    color = prescription.get("color")
+    color_row = (
+        f"<p><strong>Color:</strong> {color}</p>" if color else ""
+    )
+    return f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Contact Lens Prescription {prescription.get('prescription_number')}</title>
+            <style>{_PRINT_STYLE}</style>
+        </head>
+        <body>
+            <div class="header">
+                <h2>Contact Lens Prescription</h2>
+                <p class="rx-number">{prescription.get('prescription_number')}</p>
+                <p>Date: {prescription.get('prescription_date', '')[:10]}</p>
+            </div>
+            <p><strong>Brand:</strong> {brand} &nbsp; <strong>Series:</strong> {series}
+               &nbsp; <strong>Modality:</strong> {modality}</p>
+            {color_row}
+            <table>
+                <tr>
+                    <th></th><th>POWER</th><th>CYL</th><th>AXIS</th><th>ADD</th>
+                    <th>BC</th><th>DIA</th>
+                </tr>
+                <tr>
+                    <td><strong>RE</strong></td>
+                    <td>{_cell(right.get('cl_power'))}</td>
+                    <td>{_cell(right.get('cl_cyl'))}</td>
+                    <td>{_cell(right.get('cl_axis'))}</td>
+                    <td>{_cell(right.get('cl_add'))}</td>
+                    <td>{_cell(right.get('base_curve'))}</td>
+                    <td>{_cell(right.get('diameter'))}</td>
+                </tr>
+                <tr>
+                    <td><strong>LE</strong></td>
+                    <td>{_cell(left.get('cl_power'))}</td>
+                    <td>{_cell(left.get('cl_cyl'))}</td>
+                    <td>{_cell(left.get('cl_axis'))}</td>
+                    <td>{_cell(left.get('cl_add'))}</td>
+                    <td>{_cell(left.get('base_curve'))}</td>
+                    <td>{_cell(left.get('diameter'))}</td>
+                </tr>
+            </table>
+            <p><strong>Remarks:</strong> {prescription.get('remarks', '-')}</p>
+            <div class="footer">
+                <p>Valid until: {prescription.get('expiry_date', '')[:10]}</p>
+            </div>
+        </body>
+        </html>
+        """
+
+
+@router.get("/{prescription_id}/print")
+async def print_prescription(
+    prescription_id: str, current_user: dict = Depends(get_current_user)
+):
+    """Generate printable prescription HTML. Renders a contact-lens card when
+    the Rx is rx_kind=CONTACT_LENS, else the existing spectacle card."""
+    repo = get_prescription_repository()
+
+    if repo is not None:
+        prescription = repo.find_by_id(prescription_id)
+        if prescription is None:
+            raise HTTPException(status_code=404, detail="Prescription not found")
+
+        if (prescription.get("rx_kind") or "SPECTACLE") == "CONTACT_LENS":
+            html = _build_cl_print_html(prescription)
+        else:
+            html = _build_spectacle_print_html(prescription)
 
         return {
             "html": html,

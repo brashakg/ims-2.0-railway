@@ -217,6 +217,9 @@ PRESCRIPTION_SCHEMA = {
         "prescription_date": {"bsonType": "date"},
         "validity_months": {"bsonType": "int"},
         "source": {"enum": ["TESTED_AT_STORE", "FROM_DOCTOR"]},
+        # rx_kind discriminates spectacle vs contact-lens Rx. Optional +
+        # absent on every legacy doc (which is treated as SPECTACLE).
+        "rx_kind": {"enum": ["SPECTACLE", "CONTACT_LENS"]},
         "optometrist_id": {"bsonType": "string"},
         "optometrist_name": {"bsonType": "string"},
         "right_eye": {
@@ -233,6 +236,16 @@ PRESCRIPTION_SCHEMA = {
             }
         },
         "left_eye": {"bsonType": "object"},
+        # ---- Contact-lens (CL) block. All optional; only set when CONTACT_LENS.
+        # Fit by base-curve + diameter (not PD); cl_cyl/cl_axis for toric,
+        # cl_add for multifocal. Mirrors the CL inventory product field names.
+        "cl_right": {"bsonType": "object"},
+        "cl_left": {"bsonType": "object"},
+        "cl_brand": {"bsonType": "string"},
+        "cl_series": {"bsonType": "string"},
+        "modality": {"enum": ["DAILY", "FORTNIGHTLY", "MONTHLY", "QUARTERLY", "YEARLY", "COLOR"]},
+        "color": {"bsonType": "string"},
+        "cl_product_id": {"bsonType": "string"},
         "lens_recommendation": {"bsonType": "string"},
         "coating_recommendation": {"bsonType": "string"},
         "remarks": {"bsonType": "string"},
