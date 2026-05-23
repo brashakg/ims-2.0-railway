@@ -31,6 +31,7 @@ import { Pagination } from '../../components/common/Pagination';
 import clsx from 'clsx';
 import { OrderNotificationTracker } from '../../components/orders/OrderNotificationTracker';
 import { OrderStatusTimeline } from '../../components/orders/OrderStatusTimeline';
+import { OrderShippingCard } from '../../components/orders/OrderShippingCard';
 
 // Status configurations
 const ORDER_STATUS_CONFIG: Record<OrderStatus, { label: string; color: string; bgColor: string; icon: typeof Clock }> = {
@@ -604,6 +605,13 @@ export function OrdersPage() {
                   onSendNotification={(status, channel) => {
                     toast.success(`${channel} notification sent for status: ${status}`);
                   }}
+                />
+
+                {/* Shipping (Shiprocket) — book + track customer shipments */}
+                <OrderShippingCard
+                  orderId={selectedOrder.id}
+                  orderNumber={selectedOrder.orderNumber}
+                  storeId={selectedOrder.storeId}
                 />
 
                 <div className="flex gap-2 pt-4 flex-wrap">

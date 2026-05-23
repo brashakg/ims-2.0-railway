@@ -81,6 +81,7 @@ from .routers import (
     vouchers_router,
     entities_router,
     notifications_router,
+    shipping_router,
 )
 from .routers.auth import require_roles
 
@@ -709,6 +710,7 @@ app.include_router(
     vendor_returns_router, prefix="/api/v1/vendor-returns", tags=["Vendor Returns"]
 )
 app.include_router(returns_router, prefix="/api/v1/returns", tags=["Returns"])
+app.include_router(shipping_router, prefix="/api/v1/shipping", tags=["Shipping"])
 app.include_router(tasks_router, prefix="/api/v1/tasks", tags=["Tasks"])
 app.include_router(notifications_router, prefix="/api/v1/notifications", tags=["Notifications"])
 app.include_router(expenses_router, prefix="/api/v1/expenses", tags=["Expenses"])

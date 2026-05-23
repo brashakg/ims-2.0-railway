@@ -36,6 +36,17 @@ export type {
   CreateReturnPayload,
 } from './returns';
 
+// Shipping (Shiprocket) — book + track customer shipments
+export { shippingApi } from './shipping';
+export type {
+  ShipmentStatus,
+  ShipAddressPayload,
+  BookShipmentPayload,
+  Shipment,
+  BookShipmentResponse,
+  TrackResponse,
+} from './shipping';
+
 // Reports & Analytics
 export { reportsApi, analyticsApi } from './reports';
 
