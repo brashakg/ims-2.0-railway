@@ -65,8 +65,6 @@ from .routers import (
     catalog_autopilot_router,
     jarvis_router,
     analytics_router,
-    billing_router,
-    supply_chain_router,
     follow_ups_router,
     payroll_router,
     marketing_router,
@@ -746,10 +744,6 @@ app.include_router(
 )
 app.include_router(jarvis_router, prefix="/api/v1/jarvis", tags=["JARVIS"])
 app.include_router(analytics_router, prefix="/api/v1/analytics", tags=["Analytics"])
-app.include_router(billing_router, prefix="/api/v1/billing", tags=["Billing"])
-app.include_router(
-    supply_chain_router, prefix="/api/v1/supply-chain", tags=["Supply Chain"]
-)
 app.include_router(follow_ups_router, prefix="/api/v1/follow-ups", tags=["Follow-ups"])
 app.include_router(
     payroll_router,
