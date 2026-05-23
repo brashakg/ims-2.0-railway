@@ -10,6 +10,9 @@ import os
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-for-unit-tests")
 os.environ.setdefault("MONGODB_URI", "")
 os.environ.pop("ECOMMERCE_DATABASE_URL", None)
+# Phase 1b: run_search now attempts brand-site fetches; keep this pure-logic
+# suite strictly offline (the framework's own tests live in test_*_1b.py).
+os.environ["AUTOPILOT_DISABLE_NETWORK"] = "1"
 
 from api.services.catalog_autopilot import (  # noqa: E402
     AUTHORIZED,
