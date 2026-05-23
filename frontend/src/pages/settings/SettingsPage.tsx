@@ -162,6 +162,8 @@ export function SettingsPage() {
     auto_print_receipt: boolean;
     auto_print_job_card: boolean;
     copies_per_print: number;
+    qz_enabled?: boolean;
+    auto_print_stage_sticker?: boolean;
   } | null>(null);
   const [availablePrinters, setAvailablePrinters] = useState<Array<{ name: string; type: string; status: string }>>([]);
 
@@ -665,6 +667,27 @@ function PrinterSection({
                 className="rounded border-gray-300 text-bv-red-600"
               />
               <span className="text-sm">Auto-print job card for workshop orders</span>
+            </label>
+            <label className="flex items-center gap-2 cursor-pointer p-2 hover:bg-gray-100 rounded">
+              <input
+                type="checkbox"
+                checked={printerSettings?.auto_print_stage_sticker ?? true}
+                onChange={e => setPrinterSettings((prev: any) => prev ? { ...prev, auto_print_stage_sticker: e.target.checked } : null)}
+                className="rounded border-gray-300 text-bv-red-600"
+              />
+              <span className="text-sm">Auto-print stage sticker when a job advances</span>
+            </label>
+            <label className="flex items-center gap-2 cursor-pointer p-2 hover:bg-gray-100 rounded">
+              <input
+                type="checkbox"
+                checked={printerSettings?.qz_enabled ?? true}
+                onChange={e => setPrinterSettings((prev: any) => prev ? { ...prev, qz_enabled: e.target.checked } : null)}
+                className="rounded border-gray-300 text-bv-red-600"
+              />
+              <span className="text-sm">
+                Use QZ Tray for silent label printing
+                <span className="block text-xs text-gray-500">When off (or QZ/cert not configured), labels open in a print window.</span>
+              </span>
             </label>
           </div>
 

@@ -356,6 +356,11 @@ class PrinterSettings(BaseModel):
     auto_print_receipt: bool = True
     auto_print_job_card: bool = True
     copies_per_print: int = 1
+    # QZ Tray silent raw label printing. When False (or no cert/key on the
+    # server), the frontend falls back to HTML print windows.
+    qz_enabled: bool = True
+    # Auto-print a stage sticker each time a workshop job advances a stage.
+    auto_print_stage_sticker: bool = True
 
 
 class AuditLogEntry(BaseModel):
