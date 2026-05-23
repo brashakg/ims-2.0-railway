@@ -8,14 +8,21 @@ from fastapi import APIRouter, Depends, Query, HTTPException
 from pydantic import BaseModel
 from typing import Optional
 from datetime import date, datetime
+from calendar import monthrange
 import uuid
-from .auth import get_current_user
+from .auth import get_current_user, require_roles
 from ..dependencies import (
     get_attendance_repository,
     get_leave_repository,
     get_payroll_repository,
     get_user_repository,
+    validate_store_access,
 )
+
+# Roles allowed to view HR reporting screens. Mirrors the router-level gate in
+# main.py (_FINANCE_ROLES) and how payroll.py gates its read endpoints.
+# SUPERADMIN auto-passes inside require_roles, so it is intentionally omitted.
+_HR_READ_ROLES = ("ADMIN", "AREA_MANAGER", "STORE_MANAGER", "ACCOUNTANT")
 
 router = APIRouter()
 
@@ -38,6 +45,188 @@ class AttendanceMarkRequest(BaseModel):
     status: str  # PRESENT, ABSENT, HALF_DAY, LEAVE
     check_in: Optional[datetime] = None
     check_out: Optional[datetime] = None
+
+
+# ============================================================================
+# ATTENDANCE GRID HELPERS (pure functions - unit tested, no DB)
+# ============================================================================
+
+# Map raw DB status spellings to the short grid codes. The canonical enum is
+# PRESENT / ABSENT / HALF_DAY / LEAVE / HOLIDAY (database/schemas.py), but we
+# also defensively accept LWP / UNPAID and various week-off spellings so the
+# grid stays correct regardless of how a record was written.
+_STATUS_CODE_MAP = {
+    "PRESENT": "P",
+    "ABSENT": "A",
+    "LEAVE": "L",
+    "ON_LEAVE": "L",
+    "HALF_DAY": "HD",
+    "HALFDAY": "HD",
+    "LWP": "LWP",
+    "UNPAID": "LWP",
+    "LOP": "LWP",
+    "HOLIDAY": "WO",
+    "WEEK_OFF": "WO",
+    "WEEKLY_OFF": "WO",
+    "WEEKOFF": "WO",
+    "OFF": "WO",
+}
+
+# Grid code -> summary bucket key.
+_CODE_SUMMARY_KEY = {
+    "P": "present",
+    "A": "absent",
+    "L": "leave",
+    "LWP": "lwp",
+    "HD": "half_day",
+    "WO": "week_off",
+}
+
+_EMPTY_CODE = "-"
+
+
+def _days_in_month(year: int, month: int) -> int:
+    """Number of days in the given month (handles Feb leap years)."""
+    return monthrange(year, month)[1]
+
+
+def _parse_month(month: str) -> tuple:
+    """Parse a 'YYYY-MM' string into (year, month). Falls back to the current
+    month for any malformed / missing input so the endpoint never 500s."""
+    if month:
+        try:
+            parts = month.split("-")
+            year = int(parts[0])
+            mon = int(parts[1])
+            if 1 <= mon <= 12 and year >= 1900:
+                return year, mon
+        except (ValueError, IndexError, AttributeError):
+            pass
+    today = date.today()
+    return today.year, today.month
+
+
+def _status_to_code(status: Optional[str]) -> str:
+    """Map a raw attendance status value to a short grid code."""
+    if not status:
+        return _EMPTY_CODE
+    return _STATUS_CODE_MAP.get(str(status).strip().upper(), _EMPTY_CODE)
+
+
+def _day_of_record(raw_date) -> Optional[int]:
+    """Extract the day-of-month from an attendance record's `date` field.
+
+    The write path (POST /attendance/mark) stores an ISO string ('2026-05-01'),
+    while the schema declares a BSON date and some repo helpers write datetimes.
+    Handle both so the grid is robust to either storage format. Returns None if
+    the value can't be interpreted."""
+    if raw_date is None:
+        return None
+    if isinstance(raw_date, (datetime, date)):
+        return raw_date.day
+    if isinstance(raw_date, str):
+        # Expect 'YYYY-MM-DD' (optionally with a 'T...' time component).
+        try:
+            return int(raw_date[:10].split("-")[2])
+        except (ValueError, IndexError):
+            return None
+    return None
+
+
+def _empty_summary() -> dict:
+    """A zeroed summary bucket."""
+    return {
+        "present": 0,
+        "absent": 0,
+        "leave": 0,
+        "lwp": 0,
+        "half_day": 0,
+        "late": 0,
+        "week_off": 0,
+    }
+
+
+def _build_grid(year: int, month: int, employees: list, records: list) -> dict:
+    """Assemble the month grid from a roster + attendance records.
+
+    Args:
+        year, month: target period
+        employees: list of {employee_id, name, store_id} (the roster)
+        records: list of raw attendance docs for the period
+
+    Pure function (no DB) so it can be unit-tested directly.
+    """
+    n_days = _days_in_month(year, month)
+    days = list(range(1, n_days + 1))
+
+    # Bucket records by employee_id -> {day: code} and remember late flags.
+    by_emp: dict = {}
+    for rec in records or []:
+        emp_id = rec.get("employee_id")
+        if not emp_id:
+            continue
+        day = _day_of_record(rec.get("date"))
+        if day is None or day < 1 or day > n_days:
+            continue
+        code = _status_to_code(rec.get("status"))
+        slot = by_emp.setdefault(emp_id, {"days": {}, "late_days": set()})
+        slot["days"][str(day)] = code
+        if rec.get("is_late"):
+            slot["late_days"].add(day)
+
+    totals = _empty_summary()
+    out_employees = []
+    for emp in employees or []:
+        emp_id = emp.get("employee_id")
+        slot = by_emp.get(emp_id, {"days": {}, "late_days": set()})
+        day_codes = slot["days"]
+        summary = _empty_summary()
+        for code in day_codes.values():
+            key = _CODE_SUMMARY_KEY.get(code)
+            if key:
+                summary[key] += 1
+        summary["late"] = len(slot["late_days"])
+        # Roll into grand totals.
+        for k in totals:
+            totals[k] += summary[k]
+        out_employees.append(
+            {
+                "employee_id": emp_id,
+                "name": emp.get("name", ""),
+                "store_id": emp.get("store_id", ""),
+                "days": day_codes,
+                "summary": summary,
+            }
+        )
+
+    return {
+        "month": f"{year:04d}-{month:02d}",
+        "days": days,
+        "employees": out_employees,
+        "totals": totals,
+    }
+
+
+def _roster_from_users(users: list, store_id: Optional[str]) -> list:
+    """Normalise user docs into the grid roster shape, sorted by name."""
+    roster = []
+    for u in users or []:
+        uid = u.get("user_id") or u.get("_id")
+        if not uid:
+            continue
+        # A user may belong to multiple stores; pin the row to the requested
+        # store when one was resolved, else fall back to the user's first store.
+        store_ids = u.get("store_ids") or []
+        row_store = store_id or (store_ids[0] if store_ids else u.get("store_id", ""))
+        roster.append(
+            {
+                "employee_id": uid,
+                "name": u.get("full_name") or u.get("name") or u.get("username") or uid,
+                "store_id": row_store or "",
+            }
+        )
+    roster.sort(key=lambda r: (r["name"] or "").lower())
+    return roster
 
 
 # ============================================================================
@@ -99,6 +288,62 @@ async def get_attendance(
         )
 
     return {"records": camel_records, "total": len(camel_records)}
+
+
+@router.get("/attendance/grid")
+async def get_attendance_grid(
+    month: Optional[str] = Query(None, description="Target month as YYYY-MM"),
+    store_id: Optional[str] = Query(None),
+    current_user: dict = Depends(require_roles(*_HR_READ_ROLES)),
+):
+    """Monthly attendance grid: per-employee x per-day status matrix.
+
+    Returns a well-formed grid (days computed from the month, employees joined
+    from the store roster). Read-only reporting view.
+
+    Store scoping: HQ roles (SUPERADMIN/ADMIN/AREA_MANAGER) may pass any
+    store_id; lower roles are pinned to a store they have access to via
+    validate_store_access. Fail-soft: no DB / no records => empty-but-valid grid
+    (never 500).
+    """
+    year, mon = _parse_month(month)
+
+    # Resolve + authorise the store. validate_store_access falls back to the
+    # user's active store when store_id is omitted and 403s on cross-store
+    # access for non-HQ roles.
+    active_store = validate_store_access(store_id, current_user)
+
+    user_repo = get_user_repository()
+    attendance_repo = get_attendance_repository()
+
+    # Build the roster (store-scoped). No DB -> empty roster, still valid grid.
+    employees = []
+    if user_repo is not None:
+        roster_filter = {"is_active": True}
+        if active_store:
+            roster_filter["store_ids"] = active_store
+        try:
+            users = user_repo.find_many(roster_filter, limit=1000)
+        except Exception:
+            users = []
+        employees = _roster_from_users(users, active_store)
+
+    # Pull the month's attendance records (string date range mirrors the actual
+    # write path in POST /attendance/mark and payroll/generate).
+    records = []
+    if attendance_repo is not None:
+        n_days = _days_in_month(year, mon)
+        start = f"{year:04d}-{mon:02d}-01"
+        end = f"{year:04d}-{mon:02d}-{n_days:02d}"
+        rec_filter = {"date": {"$gte": start, "$lte": end}}
+        if active_store:
+            rec_filter["store_id"] = active_store
+        try:
+            records = attendance_repo.find_many(rec_filter, limit=5000)
+        except Exception:
+            records = []
+
+    return _build_grid(year, mon, employees, records)
 
 
 @router.post("/attendance/check-in")
