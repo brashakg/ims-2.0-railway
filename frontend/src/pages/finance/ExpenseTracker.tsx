@@ -9,7 +9,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import {
   Plus, Search, Check, X as XIcon,
-  Loader2, BarChart3, Send, BookCheck, Banknote, Clock,
+  Loader2, BarChart3, Send, BookCheck, Banknote, Clock, AlertTriangle,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
@@ -17,7 +17,7 @@ import { expensesApi, type ExpenseRecord, type AgingReport } from '../../service
 import { formatDateIST } from '../../utils/datetime';
 import clsx from 'clsx';
 
-type TabType = 'my' | 'approvals' | 'entry' | 'aging' | 'summary';
+type TabType = 'my' | 'approvals' | 'entry' | 'aging' | 'duplicates' | 'summary';
 
 interface ApiError {
   response?: { status?: number; data?: { detail?: string } };
@@ -72,6 +72,7 @@ export default function ExpenseTracker() {
   const [approvals, setApprovals] = useState<ExpenseRecord[]>([]);
   const [toEnter, setToEnter] = useState<ExpenseRecord[]>([]);
   const [aging, setAging] = useState<AgingReport | null>(null);
+  const [duplicates, setDuplicates] = useState<ExpenseRecord[]>([]);
   const [isLoading, setIsLoading] = useState(true);
 
   // Modals
@@ -93,16 +94,18 @@ export default function ExpenseTracker() {
     setIsLoading(true);
     try {
       const pick = (r: any): ExpenseRecord[] => (r?.expenses || r || []) as ExpenseRecord[];
-      const [mineR, apprR, entR, agingR] = await Promise.all([
+      const [mineR, apprR, entR, agingR, dupR] = await Promise.all([
         expensesApi.getExpenses({}),
         isApprover ? expensesApi.getPendingApproval(user?.activeStoreId) : Promise.resolve(null),
         isAccountant ? expensesApi.getToEnter(user?.activeStoreId) : Promise.resolve(null),
         isAccountant ? expensesApi.getAging(user?.activeStoreId).catch(() => null) : Promise.resolve(null),
+        isApprover ? expensesApi.getDuplicateBills(user?.activeStoreId).catch(() => null) : Promise.resolve(null),
       ]);
       setMine(pick(mineR));
       setApprovals(apprR ? pick(apprR) : []);
       setToEnter(entR ? pick(entR) : []);
       setAging((agingR as AgingReport | null) || null);
+      setDuplicates(dupR ? pick(dupR) : []);
     } catch {
       toast.error('Failed to load expenses');
     } finally {
@@ -131,11 +134,21 @@ export default function ExpenseTracker() {
         store_id: user?.activeStoreId,
       });
       const newId = res?.expense_id;
+      let dupWarned = false;
       if (formBill && newId) {
-        try { await expensesApi.uploadBill(newId, formBill); }
+        try {
+          const up = await expensesApi.uploadBill(newId, formBill);
+          if (up?.duplicate_bill) {
+            // Anti-fraud: same receipt was already attached to another expense
+            // in this store. Soft warning -- the claim still goes through for an
+            // approver to scrutinise.
+            toast.warning('This bill matches a receipt already submitted in this store. Flagged for approver review.');
+            dupWarned = true;
+          }
+        }
         catch { toast.warning('Expense saved, but bill upload failed'); }
       }
-      toast.success('Expense submitted for approval');
+      if (!dupWarned) toast.success('Expense submitted for approval');
       setShowSubmitModal(false);
       resetForm();
       await load();
@@ -219,6 +232,7 @@ export default function ExpenseTracker() {
           ...(isApprover ? [['approvals', `Pending Approval${approvals.length ? ` (${approvals.length})` : ''}`]] : []),
           ...(isAccountant ? [['entry', `For Entry${toEnter.length ? ` (${toEnter.length})` : ''}`]] : []),
           ...(isAccountant ? [['aging', `Aging${aging?.total_count ? ` (${aging.total_count})` : ''}`]] : []),
+          ...(isApprover ? [['duplicates', `Duplicates${duplicates.length ? ` (${duplicates.length})` : ''}`]] : []),
           ['summary', 'Category Summary'],
         ] as [TabType, string][]).map(([tab, label]) => (
           <button key={tab} onClick={() => setActiveTab(tab)}
@@ -356,6 +370,21 @@ export default function ExpenseTracker() {
         </div>
       )}
 
+      {/* Duplicate-bill watch-list (approvers) */}
+      {activeTab === 'duplicates' && isApprover && (
+        <div className="bg-white rounded-lg border border-gray-200">
+          <div className="px-4 py-3 border-b border-gray-200 flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 text-orange-500" />
+            <h3 className="text-sm font-semibold text-gray-700">Possible duplicate bills</h3>
+            <span className="text-xs text-gray-500">
+              Same receipt fingerprint as an earlier expense in this store — scrutinise before approving.
+            </span>
+          </div>
+          <ExpenseTable rows={duplicates} showOwner
+            empty="No duplicate bills detected" />
+        </div>
+      )}
+
       {/* Summary */}
       {activeTab === 'summary' && (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -455,7 +484,8 @@ export default function ExpenseTracker() {
   );
 
   function ExpenseTable({ rows, showOwner, empty, renderActions }: {
-    rows: ExpenseRecord[]; showOwner: boolean; empty?: string; renderActions?: (e: ExpenseRecord) => React.ReactNode;
+    rows: ExpenseRecord[]; showOwner: boolean; empty?: string;
+    renderActions?: (e: ExpenseRecord) => React.ReactNode;
   }) {
     return (
       <div className="overflow-x-auto">
@@ -480,7 +510,15 @@ export default function ExpenseTracker() {
                 <td className="px-4 py-3 text-sm"><span className={clsx('inline-block px-2 py-0.5 rounded text-xs font-medium', catColor(e.category))}>{catLabel(e.category)}</span></td>
                 <td className="px-4 py-3 text-sm text-gray-600">{payLabel(e.payment_mode)}</td>
                 <td className="px-4 py-3 text-sm font-semibold text-gray-900 text-right">{fc(e.amount)}</td>
-                <td className="px-4 py-3 text-sm text-gray-600 max-w-xs truncate" title={e.description}>{e.description}</td>
+                <td className="px-4 py-3 text-sm text-gray-600 max-w-xs">
+                  <div className="truncate" title={e.description}>{e.description}</div>
+                  {e.duplicate_bill && (
+                    <span className="mt-1 inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-orange-100 text-orange-700"
+                      title={e.duplicate_of ? `Matches expense ${e.duplicate_of}` : 'Bill matches an earlier receipt'}>
+                      <AlertTriangle className="w-3 h-3" /> Duplicate bill
+                    </span>
+                  )}
+                </td>
                 <td className="px-4 py-3"><StatusPill status={e.status} /></td>
                 <td className="px-4 py-3 text-right">{renderActions?.(e)}</td>
               </tr>
