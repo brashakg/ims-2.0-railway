@@ -7,7 +7,7 @@
 // scaffolded and activate in Phase 1b.
 
 import { useEffect, useState } from 'react';
-import { Search, Loader2, Check, X as XIcon, ShieldCheck, AlertTriangle, Globe, FileText, Eye } from 'lucide-react';
+import { Search, Loader2, Check, X as XIcon, ShieldCheck, AlertTriangle, Globe, FileText, Eye, Sparkles } from 'lucide-react';
 import { useToast } from '../../context/ToastContext';
 import {
   catalogAutopilotApi,
@@ -70,7 +70,8 @@ export default function CatalogAutopilotPage() {
         <h1 className="text-xl font-semibold text-gray-900">Catalog Autopilot</h1>
         <p className="text-sm text-gray-500">
           Enter a brand + model — we search authorized sources, score matches, and you approve before publishing.
-          Phase 1 checks our own online catalog; brand-site &amp; myLuxottica scraping arrive in Phase 1b.
+          We check your online catalog and the brand's regional site live; myLuxottica &amp; marketplace sources
+          activate once their credentials are set on the server.
         </p>
       </div>
 
@@ -109,8 +110,9 @@ export default function CatalogAutopilotPage() {
       {searched && candidates.length === 0 && (
         <div className="card p-10 text-center text-gray-500">
           <Search className="w-9 h-9 mx-auto mb-2 opacity-40" />
-          <p>No candidates yet. Phase 1 only searches our existing online catalog; the brand-site &amp; myLuxottica
-          sources light up once their credentials/selectors are configured (Phase 1b).</p>
+          <p>No candidates from the active sources. The brand-site source runs live; myLuxottica and marketplace
+          sources light up once their credentials are configured on the server. Check the source chips above for
+          which are active.</p>
         </div>
       )}
 
@@ -122,6 +124,14 @@ export default function CatalogAutopilotPage() {
           return (
             <div key={c.candidate_id} className="card p-4">
               <div className="flex items-start gap-4">
+                {c.image_urls && c.image_urls.length > 0 && (
+                  <img
+                    src={c.image_urls[0]}
+                    alt={c.title || `${c.brand ?? ''} ${c.model ?? ''}`.trim()}
+                    className={clsx('w-16 h-16 rounded-lg object-cover border flex-shrink-0', authorized ? 'border-gray-200' : 'border-amber-300')}
+                    onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = 'none'; }}
+                  />
+                )}
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2 flex-wrap">
                     <span className={clsx('inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium',
@@ -142,6 +152,30 @@ export default function CatalogAutopilotPage() {
                   </div>
                   <p className="font-medium text-gray-900 mt-1 truncate">{c.title || `${c.brand} ${c.model}`}</p>
                   <p className="text-sm text-gray-500">{c.brand} · {c.model}{c.color ? ` · ${c.color}` : ''}{c.size ? ` · ${c.size}` : ''}</p>
+                  {c.usp && (
+                    <p className="text-xs text-gray-700 mt-1.5 flex items-start gap-1">
+                      <Sparkles className="w-3 h-3 text-bv-red-500 mt-0.5 flex-shrink-0" />
+                      <span className="line-clamp-2">{c.usp}</span>
+                    </p>
+                  )}
+                  {c.description && c.description !== c.usp && (
+                    <p className="text-xs text-gray-500 mt-1 line-clamp-2">{c.description}</p>
+                  )}
+                  {c.specs && Object.keys(c.specs).length > 0 && (
+                    <div className="flex flex-wrap gap-x-3 gap-y-0.5 mt-1.5">
+                      {Object.entries(c.specs)
+                        .filter(([, v]) => v != null && String(v).trim() !== '')
+                        .slice(0, 6)
+                        .map(([k, v]) => (
+                          <span key={k} className="text-[11px] text-gray-500">
+                            <span className="text-gray-400">{k}:</span> {String(v)}
+                          </span>
+                        ))}
+                    </div>
+                  )}
+                  {!authorized && (c.image_urls?.length ?? 0) > 0 && (
+                    <p className="text-[11px] text-amber-600 mt-1">Image from an unverified source — confirm rights below before using it.</p>
+                  )}
                   {c.matched && (
                     <div className="flex flex-wrap gap-1 mt-2">
                       {Object.entries(c.matched).map(([k, v]) => (

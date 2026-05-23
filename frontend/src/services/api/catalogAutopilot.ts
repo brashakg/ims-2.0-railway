@@ -19,6 +19,8 @@ export interface AutopilotCandidate {
   size?: string | null;
   image_urls?: string[];
   specs?: Record<string, unknown>;
+  description?: string | null;
+  usp?: string | null;
   existing_status?: string | null;
   existing_shopify_product_id?: string | null;
   score: number;
