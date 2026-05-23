@@ -267,6 +267,24 @@ class IntegrationConfig(BaseModel):
     config: Dict
 
 
+# Marketplace channels (Amazon / Flipkart). Light config scaffold so the
+# channels are wireable later — no live marketplace API calls are made here.
+_MARKETPLACE_CHANNELS = ("amazon", "flipkart")
+
+
+class MarketplaceChannelConfig(BaseModel):
+    enabled: bool = False
+    seller_id: str = ""
+    # Free-form extras (marketplace, region, fulfillment mode, etc.). Any
+    # secret-looking keys (api_key/secret/token/...) are encrypted at rest
+    # by _encrypt_config, exactly like the integrations collection.
+    config: Dict[str, Any] = Field(default_factory=dict)
+
+
+class MarketplaceChannelsPayload(BaseModel):
+    channels: Dict[str, MarketplaceChannelConfig] = Field(default_factory=dict)
+
+
 class ProfileUpdate(BaseModel):
     full_name: Optional[str] = None
     phone: Optional[str] = None
@@ -834,6 +852,146 @@ async def test_integration(
 ):
     """Test integration connection"""
     return {"status": "success", "message": f"{integration_type} connection successful"}
+
+
+# ============================================================================
+# MARKETPLACE CHANNELS ENDPOINTS (light scaffold)
+# ============================================================================
+# Per-channel (amazon, flipkart) config so the channels are WIREABLE later.
+# This deliberately does NOT make any live Amazon/Flipkart API calls — the
+# sync endpoint is a stub that returns SIMULATED when unconfigured, mirroring
+# the NEXUS provider fail-soft pattern (backend/agents/nexus_providers.py).
+# Stored in the `marketplace_channels` singleton; sensitive fields encrypted.
+
+
+def _default_marketplace_channels() -> Dict[str, Any]:
+    """All known channels disabled, no seller ids — the empty baseline."""
+    return {
+        ch: {"enabled": False, "seller_id": "", "config": {}}
+        for ch in _MARKETPLACE_CHANNELS
+    }
+
+
+@router.get("/marketplace-channels")
+async def get_marketplace_channels(current_user: dict = Depends(get_current_user)):
+    """Get per-channel marketplace config (amazon, flipkart).
+
+    Sensitive fields inside each channel's `config` are masked. Falls back
+    to an all-disabled baseline so the Settings tab always renders even
+    without a database.
+    """
+    result = _default_marketplace_channels()
+    coll = _get_settings_collection("marketplace_channels")
+    if coll is not None:
+        try:
+            doc = coll.find_one({"_id": "marketplace_channels"})
+            if doc:
+                doc.pop("_id", None)
+                for ch, cfg in (doc.get("channels") or {}).items():
+                    if not isinstance(cfg, dict):
+                        continue
+                    masked = dict(cfg)
+                    if isinstance(masked.get("config"), dict):
+                        masked["config"] = _mask_config(
+                            _decrypt_config(masked["config"])
+                        )
+                    result[ch] = {**result.get(ch, {}), **masked}
+        except Exception:
+            # Fail soft — return the baseline rather than 500.
+            pass
+    return {"channels": result}
+
+
+@router.put("/marketplace-channels")
+async def update_marketplace_channels(
+    payload: MarketplaceChannelsPayload,
+    current_user: dict = Depends(require_roles("ADMIN")),
+):
+    """Update marketplace channel config (SUPERADMIN/ADMIN only).
+
+    Unknown channel keys are ignored. Sensitive fields in each channel's
+    `config` are encrypted before persisting. No secrets are echoed back
+    (the response is re-masked via the GET path's logic).
+    """
+    channels_in = payload.channels or {}
+    to_store: Dict[str, Any] = {}
+    for ch, cfg in channels_in.items():
+        if ch not in _MARKETPLACE_CHANNELS:
+            continue  # ignore channels we don't support yet
+        entry = cfg.model_dump()
+        if isinstance(entry.get("config"), dict):
+            entry["config"] = _encrypt_config(entry["config"])
+        to_store[ch] = entry
+
+    coll = _get_settings_collection("marketplace_channels")
+    if coll is not None:
+        try:
+            coll.update_one(
+                {"_id": "marketplace_channels"},
+                {
+                    "$set": {
+                        "channels": to_store,
+                        "updated_at": datetime.utcnow().isoformat(),
+                    }
+                },
+                upsert=True,
+            )
+        except Exception:
+            pass
+
+    # Re-read so the response carries masked values + the persisted baseline.
+    result = _default_marketplace_channels()
+    for ch, cfg in to_store.items():
+        masked = dict(cfg)
+        if isinstance(masked.get("config"), dict):
+            masked["config"] = _mask_config(_decrypt_config(masked["config"]))
+        result[ch] = {**result.get(ch, {}), **masked}
+    return {"message": "Marketplace channels updated", "channels": result}
+
+
+@router.post("/marketplace-channels/{channel}/sync")
+async def sync_marketplace_channel(
+    channel: str,
+    current_user: dict = Depends(require_roles("ADMIN")),
+):
+    """Trigger a marketplace sync for one channel — STUB.
+
+    Returns {status: "SIMULATED"} when the channel is missing/disabled or
+    has no seller_id, mirroring the NEXUS provider fail-soft contract
+    (no credentials -> no outbound call, structured non-error result).
+    Real Amazon/Flipkart sync is intentionally not implemented here; this
+    is the wireable seam for a future provider.
+    """
+    ch = (channel or "").strip().lower()
+    if ch not in _MARKETPLACE_CHANNELS:
+        raise HTTPException(status_code=404, detail=f"Unknown channel: {channel}")
+
+    configured = False
+    coll = _get_settings_collection("marketplace_channels")
+    if coll is not None:
+        try:
+            doc = coll.find_one({"_id": "marketplace_channels"})
+            cfg = ((doc or {}).get("channels") or {}).get(ch) or {}
+            configured = bool(cfg.get("enabled")) and bool(cfg.get("seller_id"))
+        except Exception:
+            configured = False
+
+    if not configured:
+        return {
+            "status": "SIMULATED",
+            "channel": ch,
+            "items_synced": 0,
+            "notes": "channel not configured (enabled + seller_id required)",
+        }
+
+    # Configured but no real provider wired yet — still a stub, but report
+    # it distinctly so the UI can show "pending implementation" vs "off".
+    return {
+        "status": "SIMULATED",
+        "channel": ch,
+        "items_synced": 0,
+        "notes": "marketplace provider not yet implemented",
+    }
 
 
 # ============================================================================

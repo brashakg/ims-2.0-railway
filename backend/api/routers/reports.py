@@ -1709,14 +1709,13 @@ def _get_raw_db():
     return None
 
 
-@router.get("/gstr1")
-async def gstr1_report(
-    month: str = Query(..., description="Tax period in YYYY-MM format"),
-    store_id: Optional[str] = Query(None),
-    current_user: dict = Depends(require_roles(*_REPORT_FINANCE_ROLES)),
-):
-    """
-    GSTR-1 report: outward supplies aggregated from the orders collection.
+def _compute_gstr1(month: str, active_store: str) -> dict:
+    """Compute the IMS GSTR-1 report dict for a (month, store).
+
+    Extracted from the `/gstr1` endpoint so both the JSON-report endpoint
+    and the GSTN portal-export endpoint can share the SAME aggregation
+    (no duplicated query logic). Pure-ish: reads MongoDB, returns a dict.
+    Raises HTTPException(400) only on a malformed `month`.
 
     Classifies invoices into:
       - B2B  : orders where the customer has a GSTIN on file
@@ -1738,8 +1737,6 @@ async def gstr1_report(
     Validation report (`validation`) flags B2B invoices missing GSTIN
     so the CA can fix them before downloading.
     """
-    active_store = store_id or current_user.get("active_store_id") or "store-001"
-
     # Parse month to date range
     try:
         year, mon = int(month[:4]), int(month[5:7])
@@ -1986,19 +1983,63 @@ async def gstr1_report(
     }
 
 
+@router.get("/gstr1")
+async def gstr1_report(
+    month: str = Query(..., description="Tax period in YYYY-MM format"),
+    store_id: Optional[str] = Query(None),
+    current_user: dict = Depends(require_roles(*_REPORT_FINANCE_ROLES)),
+):
+    """GSTR-1 report (IMS internal shape). See _compute_gstr1 for details."""
+    active_store = store_id or current_user.get("active_store_id") or "store-001"
+    return _compute_gstr1(month, active_store)
+
+
+@router.get("/gstr1/gstn-json")
+async def gstr1_gstn_json(
+    month: str = Query(..., description="Tax period in YYYY-MM format"),
+    year: Optional[int] = Query(
+        None, description="Optional year; combined with `month` as a number when given"
+    ),
+    store_id: Optional[str] = Query(None),
+    entity_id: Optional[str] = Query(
+        None, description="Reserved — entity-level rollup not yet wired; store_id wins"
+    ),
+    current_user: dict = Depends(require_roles(*_REPORT_FINANCE_ROLES)),
+):
+    """GSTR-1 shaped for the GST portal's offline upload tool.
+
+    Reuses _compute_gstr1 (no duplicated aggregation) and runs the pure
+    mapping in services/gstn_export.py. The accountant uploads the
+    resulting JSON via gst.gov.in -> Returns Offline Tool -> Import.
+
+    `month` accepts the IMS canonical "YYYY-MM". For convenience a numeric
+    `month` (1-12) plus `year` is also accepted and normalised. `entity_id`
+    is accepted for forward-compat but store_id remains the resolution key.
+    """
+    from ..services.gstn_export import to_gstr1_json
+
+    active_store = store_id or current_user.get("active_store_id") or "store-001"
+    period = _normalise_period(month, year)
+    data = _compute_gstr1(period, active_store)
+    try:
+        return to_gstr1_json(data, gstin=data.get("gstin", ""), period=period)
+    except Exception:
+        # Fail soft: never 500 on a shaping bug — return an empty skeleton.
+        return to_gstr1_json({}, gstin="", period=period)
+
+
 # ============================================================================
 # GST RETURNS - GSTR-3B (Summary Return)
 # ============================================================================
 
 
-@router.get("/gstr3b")
-async def gstr3b_report(
-    month: str = Query(..., description="Tax period in YYYY-MM format"),
-    store_id: Optional[str] = Query(None),
-    current_user: dict = Depends(require_roles(*_REPORT_FINANCE_ROLES)),
-):
-    """
-    GSTR-3B summary return: aggregates output tax from the orders collection.
+def _compute_gstr3b(month: str, active_store: str) -> dict:
+    """Compute the IMS GSTR-3B report dict for a (month, store).
+
+    Extracted from the `/gstr3b` endpoint so the JSON-report endpoint and
+    the GSTN portal-export endpoint share the SAME aggregation. Reads
+    MongoDB, returns a dict. Raises HTTPException(400) on a malformed
+    `month`.
 
     Table 3.1 - Outward taxable supplies: derived from completed sales invoices.
     Table 4   - ITC available: derived from purchase GRNs (grns collection).
@@ -2006,8 +2047,6 @@ async def gstr3b_report(
     Table 6.1 - Payment of tax: net cash liability = output tax - ITC.
     Returns all-zero figures when no data exists for the period.
     """
-    active_store = store_id or current_user.get("active_store_id") or "store-001"
-
     try:
         year, mon = int(month[:4]), int(month[5:7])
         _, last_day = monthrange(year, mon)
@@ -2186,6 +2225,65 @@ async def gstr3b_report(
         },
         "lateFee": 0.0,
     }
+
+
+def _normalise_period(month: str, year: Optional[int] = None) -> str:
+    """Normalise the (month, year) query params into IMS canonical "YYYY-MM".
+
+    Accepts:
+      - month="YYYY-MM"           -> returned as-is
+      - month="MM" or "M" + year  -> "{year}-{MM}"
+      - month="MMYYYY"            -> "{YYYY}-{MM}"
+    Falls back to returning `month` unchanged so the downstream parser can
+    raise a clean 400 on genuinely bad input.
+    """
+    m = (month or "").strip()
+    if len(m) >= 7 and m[4] == "-":
+        return m  # already YYYY-MM[-DD]
+    if year is not None and m.isdigit() and 1 <= int(m) <= 12:
+        return f"{int(year):04d}-{int(m):02d}"
+    if len(m) == 6 and m.isdigit():  # MMYYYY
+        return f"{m[2:]}-{m[:2]}"
+    return m
+
+
+@router.get("/gstr3b")
+async def gstr3b_report(
+    month: str = Query(..., description="Tax period in YYYY-MM format"),
+    store_id: Optional[str] = Query(None),
+    current_user: dict = Depends(require_roles(*_REPORT_FINANCE_ROLES)),
+):
+    """GSTR-3B summary return (IMS internal shape). See _compute_gstr3b."""
+    active_store = store_id or current_user.get("active_store_id") or "store-001"
+    return _compute_gstr3b(month, active_store)
+
+
+@router.get("/gstr3b/gstn-json")
+async def gstr3b_gstn_json(
+    month: str = Query(..., description="Tax period in YYYY-MM format"),
+    year: Optional[int] = Query(
+        None, description="Optional year; combined with `month` as a number when given"
+    ),
+    store_id: Optional[str] = Query(None),
+    entity_id: Optional[str] = Query(
+        None, description="Reserved — entity-level rollup not yet wired; store_id wins"
+    ),
+    current_user: dict = Depends(require_roles(*_REPORT_FINANCE_ROLES)),
+):
+    """GSTR-3B shaped for the GST portal's offline upload tool.
+
+    Reuses _compute_gstr3b (no duplicated aggregation) and runs the pure
+    mapping in services/gstn_export.py.
+    """
+    from ..services.gstn_export import to_gstr3b_json
+
+    active_store = store_id or current_user.get("active_store_id") or "store-001"
+    period = _normalise_period(month, year)
+    data = _compute_gstr3b(period, active_store)
+    try:
+        return to_gstr3b_json(data, gstin=data.get("gstin", ""), period=period)
+    except Exception:
+        return to_gstr3b_json({}, gstin="", period=period)
 
 
 # ============================================================================
