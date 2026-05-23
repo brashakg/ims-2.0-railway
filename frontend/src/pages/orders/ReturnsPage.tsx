@@ -3,8 +3,8 @@
 // ============================================================================
 import { useState } from 'react';
 import { useAuth } from '../../context/AuthContext';
-import { orderApi, productApi, returnsApi } from '../../services/api';
-import type { CreateReturnPayload } from '../../services/api/returns';
+import { orderApi, productApi } from '../../services/api';
+import { returnsApi, type CreateReturnPayload } from '../../services/api/returns';
 import { formatDateIST } from '../../utils/datetime';
 import {
   Search, RotateCcw, ArrowLeftRight, Receipt,

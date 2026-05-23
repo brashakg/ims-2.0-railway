@@ -370,12 +370,13 @@ def test_create_return_records_refund_and_restocks(ctx):
     # Default refund method falls back to the order's payment method.
     assert data["refund_method"] == "UPI"
     assert data["return_id"].startswith("RET-")
-    # GOOD item was restocked via $inc on stock_quantity.
-    assert ctx["products_coll"].inc_calls
-    flt, update = ctx["products_coll"].inc_calls[0]
-    assert flt == {"product_id": "PRD-1"}
-    assert update == {"$inc": {"stock_quantity": 1}}
-    assert data["restocked"][0]["applied"] is True
+    # GOOD item is RECORDED for restock (intent only; the serialized `stock`
+    # collection is not mutated here - that is a deliberate follow-up), so no
+    # product write happens.
+    assert ctx["products_coll"].inc_calls == []
+    assert data["restocked"][0]["product_id"] == "PRD-1"
+    assert data["restocked"][0]["quantity"] == 1
+    assert data["restocked"][0]["applied"] is False
     # Persisted.
     assert ctx["returns_coll"].docs[0]["return_id"] == data["return_id"]
 

@@ -247,14 +247,17 @@ def _issue_store_credit(
 def _restock_good_items(
     items: List[ReturnLine], store_id: Optional[str]
 ) -> List[Dict[str, Any]]:
-    """Add GOOD-condition returned units back into stock. FAIL-SOFT: any error
-    is swallowed so a restock failure never 500s the return.
+    """RECORD which GOOD-condition returned units should go back on the shelf.
 
-    Stock-on-hand in this DB lives as `stock_quantity` on the product doc
-    (that is the field the inventory alerts / reorder engine reads - see
-    inventory.py _build_stock_alert and the TechCherry import). We therefore
-    `$inc` products.stock_quantity by the returned qty, keyed on product_id
-    (falling back to _id). Damaged / opened units are NOT restocked.
+    Restock is intentionally recorded but NOT applied to live stock here. The
+    authoritative per-store on-hand is the serialized `stock` collection (one
+    row per physical unit - see inventory.py get_stock + POST /stock/add), NOT
+    the product-level `stock_quantity` aggregate. Re-activating a sold unit's
+    stock row (or minting a fresh AVAILABLE row) is a deliberate follow-up;
+    writing a different field here would desync the reports from the real
+    sellable stock. So we capture the intent on the return doc (applied=False)
+    and never half-apply an inventory change. Damaged / opened units are not
+    recorded.
     """
     restocked: List[Dict[str, Any]] = []
     good = [
@@ -262,58 +265,19 @@ def _restock_good_items(
         for it in (items or [])
         if it.condition == "GOOD" and it.return_qty > 0 and it.product_id
     ]
-    if not good:
-        return restocked
-
-    db = _get_db()
-    if db is None:
-        return restocked
-
-    try:
-        products = db.get_collection("products")
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("[RETURNS] restock skipped (no products coll): %s", exc)
-        return restocked
-
     for it in good:
         qty = int(round(it.return_qty))
         if qty <= 0:
             continue
-        try:
-            res = products.update_one(
-                {"product_id": it.product_id},
-                {"$inc": {"stock_quantity": qty}},
-            )
-            matched = getattr(res, "matched_count", 0) or 0
-            if not matched:
-                # Imported products are keyed by _id; try that as a fallback.
-                res = products.update_one(
-                    {"_id": it.product_id},
-                    {"$inc": {"stock_quantity": qty}},
-                )
-                matched = getattr(res, "matched_count", 0) or 0
-            restocked.append(
-                {
-                    "product_id": it.product_id,
-                    "sku": it.sku,
-                    "product_name": it.product_name,
-                    "quantity": qty,
-                    "applied": bool(matched),
-                }
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "[RETURNS] restock failed for %s: %s", it.product_id, exc
-            )
-            restocked.append(
-                {
-                    "product_id": it.product_id,
-                    "sku": it.sku,
-                    "product_name": it.product_name,
-                    "quantity": qty,
-                    "applied": False,
-                }
-            )
+        restocked.append(
+            {
+                "product_id": it.product_id,
+                "sku": it.sku,
+                "product_name": it.product_name,
+                "quantity": qty,
+                "applied": False,
+            }
+        )
     return restocked
 
 
