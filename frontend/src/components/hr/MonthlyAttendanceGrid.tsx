@@ -1,218 +1,215 @@
 // ============================================================================
-// Monthly Attendance Grid View (HR Page - New Tab)
+// Monthly Attendance Grid View (HR Page - "Monthly View" tab)
 // ============================================================================
-// Rows = Employees, Columns = Days of Month
-// Cell values: P/A/L/H/WO with color coding
-// Supports current month viewing and navigation
+// Rows = Employees, Columns = days 1..N of the selected month.
+// Cell values: P / A / L / HD / LWP / WO color-coded status codes, plus a
+// right-hand summary column (P/A/L counts) and a totals row.
+// Server-authoritative: the grid (day math + roster join + per-day codes) is
+// computed by GET /hr/attendance/grid. Read-only. Light theme only.
 
 import { useState, useEffect } from 'react';
 import { ChevronLeft, ChevronRight, Loader2 } from 'lucide-react';
 import { hrApi } from '../../services/api';
+import type { AttendanceCode, AttendanceGrid } from '../../services/api/hr';
 import { useAuth } from '../../context/AuthContext';
 import clsx from 'clsx';
-
-type AttendanceCode = 'P' | 'A' | 'L' | 'H' | 'WO' | '-';
-
-interface EmployeeAttendance {
-  userId: string;
-  name: string;
-  attendance: Record<number, AttendanceCode>; // day -> code
-}
 
 const ATTENDANCE_COLORS: Record<AttendanceCode, { bg: string; text: string; label: string }> = {
   P: { bg: 'bg-green-100', text: 'text-green-700', label: 'Present' },
   A: { bg: 'bg-red-100', text: 'text-red-700', label: 'Absent' },
-  L: { bg: 'bg-blue-100', text: 'text-blue-700', label: 'Leave' },
-  H: { bg: 'bg-yellow-100', text: 'text-yellow-700', label: 'Half Day' },
-  WO: { bg: 'bg-gray-100', text: 'text-gray-700', label: 'Week Off' },
-  '-': { bg: 'bg-white', text: 'text-gray-500', label: '-' },
+  L: { bg: 'bg-amber-100', text: 'text-amber-700', label: 'Leave' },
+  HD: { bg: 'bg-amber-100', text: 'text-amber-700', label: 'Half Day' },
+  LWP: { bg: 'bg-orange-100', text: 'text-orange-700', label: 'LWP' },
+  WO: { bg: 'bg-gray-100', text: 'text-gray-600', label: 'Week Off' },
+  '-': { bg: 'bg-white', text: 'text-gray-400', label: 'No record' },
 };
+
+// Order shown in the legend + summary blocks.
+const LEGEND_CODES: AttendanceCode[] = ['P', 'A', 'L', 'HD', 'LWP', 'WO'];
+
+// 'YYYY-MM' for the current month.
+function currentMonthValue(): string {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+}
+
+function shiftMonth(value: string, delta: number): string {
+  const [y, m] = value.split('-').map(Number);
+  const d = new Date(y, (m - 1) + delta, 1);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+}
+
+function monthLabel(value: string): string {
+  const [y, m] = value.split('-').map(Number);
+  return new Date(y, m - 1, 1).toLocaleString('en-IN', { month: 'long', year: 'numeric' });
+}
+
+// Day-of-week initial for a given day number in the selected month.
+function weekdayInitial(month: string, day: number): { initial: string; isWeekend: boolean } {
+  const [y, m] = month.split('-').map(Number);
+  const date = new Date(y, m - 1, day);
+  const dow = date.getDay();
+  return { initial: ['Su', 'Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa'][dow], isWeekend: dow === 0 || dow === 6 };
+}
 
 export function MonthlyAttendanceGrid() {
   const { user } = useAuth();
-  const [currentDate, setCurrentDate] = useState(new Date());
-  const [employees, setEmployees] = useState<EmployeeAttendance[]>([]);
+  const [month, setMonth] = useState<string>(currentMonthValue());
+  const [grid, setGrid] = useState<AttendanceGrid | null>(null);
   const [isLoading, setIsLoading] = useState(false);
 
-  const daysInMonth = new Date(currentDate.getFullYear(), currentDate.getMonth() + 1, 0).getDate();
-
   useEffect(() => {
-    loadMonthlyData();
-  }, [currentDate, user?.activeStoreId]);
-
-  const loadMonthlyData = async () => {
-    if (!user?.activeStoreId) return;
-    setIsLoading(true);
-    try {
-      const data = await hrApi.getAttendance(user.activeStoreId);
-      const records = data?.records || data || [];
-
-      // Group by employee and build attendance map for the month
-      const empMap: Record<string, EmployeeAttendance> = {};
-      
-      for (const record of records) {
-        if (!empMap[record.userId]) {
-          empMap[record.userId] = {
-            userId: record.userId,
-            name: record.userName,
-            attendance: {},
-          };
-        }
-
-        // Extract day from record date
-        const recordDate = new Date(record.checkInTime || new Date());
-        if (recordDate.getMonth() === currentDate.getMonth() && 
-            recordDate.getFullYear() === currentDate.getFullYear()) {
-          const day = recordDate.getDate();
-          let code: AttendanceCode = 'P';
-          
-          if (record.status === 'ABSENT') code = 'A';
-          else if (record.status === 'LEAVE') code = 'L';
-          else if (record.status === 'HALF_DAY') code = 'H';
-          else if (record.leaveType === 'WEEKLY_OFF') code = 'WO';
-
-          empMap[record.userId].attendance[day] = code;
-        }
+    let cancelled = false;
+    const load = async () => {
+      if (!user?.activeStoreId) return;
+      setIsLoading(true);
+      try {
+        const data = await hrApi.getAttendanceGrid({ month, storeId: user.activeStoreId });
+        if (!cancelled) setGrid(data);
+      } catch {
+        if (!cancelled) setGrid(null);
+      } finally {
+        if (!cancelled) setIsLoading(false);
       }
+    };
+    load();
+    return () => { cancelled = true; };
+  }, [month, user?.activeStoreId]);
 
-      setEmployees(Object.values(empMap));
-    } catch {
-      setEmployees([]);
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  const monthName = currentDate.toLocaleString('en-IN', { month: 'long', year: 'numeric' });
-
-  const prevMonth = () => {
-    setCurrentDate(new Date(currentDate.getFullYear(), currentDate.getMonth() - 1));
-  };
-
-  const nextMonth = () => {
-    setCurrentDate(new Date(currentDate.getFullYear(), currentDate.getMonth() + 1));
-  };
+  const days = grid?.days ?? [];
+  const employees = grid?.employees ?? [];
+  const totals = grid?.totals;
 
   return (
     <div className="space-y-4">
-      {/* Header with Navigation */}
-      <div className="flex items-center justify-between">
+      {/* Header with month picker + navigation */}
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h2 className="text-xl font-bold text-gray-900">{monthName}</h2>
-          <p className="text-sm text-gray-500">Monthly Attendance View</p>
+          <h2 className="text-xl font-bold text-gray-900">{monthLabel(month)}</h2>
+          <p className="text-sm text-gray-500">Monthly attendance — per-employee, per-day</p>
         </div>
-        <div className="flex gap-2">
-          <button onClick={prevMonth} className="btn-outline p-2">
+        <div className="flex items-center gap-2">
+          <button onClick={() => setMonth(shiftMonth(month, -1))} className="btn-outline p-2" title="Previous month">
             <ChevronLeft className="w-5 h-5" />
           </button>
-          <button onClick={nextMonth} className="btn-outline p-2">
+          <input
+            type="month"
+            value={month}
+            onChange={(e) => setMonth(e.target.value || currentMonthValue())}
+            className="input-field text-sm"
+          />
+          <button onClick={() => setMonth(shiftMonth(month, 1))} className="btn-outline p-2" title="Next month">
             <ChevronRight className="w-5 h-5" />
           </button>
         </div>
       </div>
 
       {/* Legend */}
-      <div className="flex flex-wrap gap-3 p-3 bg-gray-100 dark:bg-white rounded-lg">
-        {Object.entries(ATTENDANCE_COLORS).map(([code, { bg, label }]) => (
-          code !== '-' && (
+      <div className="flex flex-wrap gap-3 p-3 bg-gray-50 rounded-lg">
+        {LEGEND_CODES.map(code => {
+          const { bg, text, label } = ATTENDANCE_COLORS[code];
+          return (
             <div key={code} className="flex items-center gap-2 text-sm">
-              <div className={`w-6 h-6 rounded ${bg} flex items-center justify-center`}>
-                <span className="text-xs font-bold">{code}</span>
+              <div className={clsx('w-6 h-6 rounded flex items-center justify-center font-bold text-xs', bg, text)}>
+                {code}
               </div>
-              <span className="text-gray-600 dark:text-gray-700">{label}</span>
+              <span className="text-gray-600">{label}</span>
             </div>
-          )
-        ))}
+          );
+        })}
       </div>
 
-      {/* Grid Table */}
+      {/* Grid */}
       {isLoading ? (
         <div className="flex justify-center py-12">
           <Loader2 className="w-8 h-8 animate-spin text-bv-red-600" />
         </div>
       ) : employees.length === 0 ? (
         <div className="card text-center py-12 text-gray-500">
-          <p>No attendance records for this month</p>
+          <p>No employees / attendance for this month</p>
         </div>
       ) : (
         <div className="overflow-x-auto card">
-          <table className="w-full text-sm">
-            <thead className="bg-gray-100 dark:bg-white border-b border-gray-200 dark:border-gray-200 sticky top-0">
+          <table className="w-full text-sm border-collapse">
+            <thead className="bg-gray-50 border-b border-gray-200 sticky top-0">
               <tr>
-                <th className="px-3 py-2 text-left text-xs font-bold text-gray-500 min-w-max">Employee</th>
-                {Array.from({ length: daysInMonth }, (_, i) => i + 1).map(day => {
-                  const date = new Date(currentDate.getFullYear(), currentDate.getMonth(), day);
-                  const isWeekend = date.getDay() === 0 || date.getDay() === 6;
+                <th className="px-3 py-2 text-left text-xs font-bold text-gray-500 sticky left-0 bg-gray-50 z-10 whitespace-nowrap">
+                  Employee
+                </th>
+                {days.map(day => {
+                  const { initial, isWeekend } = weekdayInitial(month, day);
                   return (
-                    <th 
-                      key={day} 
+                    <th
+                      key={day}
                       className={clsx(
-                        'px-1 py-2 text-center text-xs font-bold min-w-10',
-                        isWeekend ? 'bg-white text-gray-500' : 'text-gray-500'
+                        'px-1 py-2 text-center text-xs font-bold w-10',
+                        isWeekend ? 'bg-gray-100 text-gray-500' : 'text-gray-500',
                       )}
                     >
-                      <div className="text-xs">{day}</div>
-                      <div className="text-xs text-gray-600">
-                        {['Su', 'Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa'][date.getDay()]}
-                      </div>
+                      <div>{day}</div>
+                      <div className="text-[10px] font-normal text-gray-400">{initial}</div>
                     </th>
                   );
                 })}
+                {/* Summary columns */}
+                <th className="px-2 py-2 text-center text-xs font-bold text-green-700 border-l border-gray-200">P</th>
+                <th className="px-2 py-2 text-center text-xs font-bold text-red-700">A</th>
+                <th className="px-2 py-2 text-center text-xs font-bold text-amber-700">L</th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-gray-700">
+            <tbody className="divide-y divide-gray-200">
               {employees.map(emp => (
-                <tr key={emp.userId} className="hover:bg-white/50">
-                  <td className="px-3 py-2 font-medium text-gray-900 min-w-max">{emp.name}</td>
-                  {Array.from({ length: daysInMonth }, (_, i) => i + 1).map(day => {
-                    const code = emp.attendance[day] || '-';
-                    const color = ATTENDANCE_COLORS[code];
-                    const date = new Date(currentDate.getFullYear(), currentDate.getMonth(), day);
-                    const isWeekend = date.getDay() === 0 || date.getDay() === 6;
-                    
+                <tr key={emp.employee_id} className="hover:bg-gray-50">
+                  <td className="px-3 py-2 font-medium text-gray-900 sticky left-0 bg-white z-10 whitespace-nowrap">
+                    {emp.name}
+                  </td>
+                  {days.map(day => {
+                    const code = (emp.days[String(day)] || '-') as AttendanceCode;
+                    const color = ATTENDANCE_COLORS[code] || ATTENDANCE_COLORS['-'];
+                    const { isWeekend } = weekdayInitial(month, day);
                     return (
-                      <td 
-                        key={day}
-                        className={clsx(
-                          'px-1 py-2 text-center',
-                          isWeekend ? 'bg-white/50' : ''
-                        )}
-                      >
-                        <button 
+                      <td key={day} className={clsx('px-1 py-1.5 text-center', isWeekend ? 'bg-gray-50' : '')}>
+                        <span
                           title={color.label}
                           className={clsx(
-                            'w-8 h-8 rounded font-bold text-xs transition-all',
+                            'inline-flex w-7 h-7 items-center justify-center rounded font-bold text-xs',
                             color.bg, color.text,
-                            'hover:shadow-md hover:scale-105'
                           )}
                         >
-                          {code}
-                        </button>
+                          {code === '-' ? '' : code}
+                        </span>
                       </td>
                     );
                   })}
+                  {/* Per-employee summary */}
+                  <td className="px-2 py-2 text-center font-semibold text-green-700 border-l border-gray-200">
+                    {emp.summary.present}
+                  </td>
+                  <td className="px-2 py-2 text-center font-semibold text-red-700">{emp.summary.absent}</td>
+                  <td className="px-2 py-2 text-center font-semibold text-amber-700">
+                    {emp.summary.leave + emp.summary.half_day + emp.summary.lwp}
+                  </td>
                 </tr>
               ))}
             </tbody>
+            {totals && (
+              <tfoot>
+                <tr className="border-t-2 border-gray-300 bg-gray-50 font-bold">
+                  <td className="px-3 py-2 text-gray-900 sticky left-0 bg-gray-50 z-10 whitespace-nowrap">Totals</td>
+                  <td colSpan={days.length} className="px-3 py-2 text-xs text-gray-500">
+                    Present {totals.present} &middot; Absent {totals.absent} &middot; Leave {totals.leave}
+                    {' '}&middot; Half-day {totals.half_day} &middot; LWP {totals.lwp}
+                    {' '}&middot; Week-off {totals.week_off} &middot; Late {totals.late}
+                  </td>
+                  <td className="px-2 py-2 text-center text-green-700 border-l border-gray-200">{totals.present}</td>
+                  <td className="px-2 py-2 text-center text-red-700">{totals.absent}</td>
+                  <td className="px-2 py-2 text-center text-amber-700">
+                    {totals.leave + totals.half_day + totals.lwp}
+                  </td>
+                </tr>
+              </tfoot>
+            )}
           </table>
-        </div>
-      )}
-
-      {/* Summary Stats */}
-      {employees.length > 0 && (
-        <div className="grid grid-cols-5 gap-3">
-          {['P', 'A', 'L', 'H', 'WO'].map(code => {
-            const count = employees.reduce((sum, emp) => 
-              sum + Object.values(emp.attendance).filter(c => c === code).length, 0
-            );
-            const color = ATTENDANCE_COLORS[code as AttendanceCode];
-            return (
-              <div key={code} className={`card ${color.bg}`}>
-                <p className="text-xs text-gray-600">{ATTENDANCE_COLORS[code as AttendanceCode].label}</p>
-                <p className={`text-2xl font-bold ${color.text}`}>{count}</p>
-              </div>
-            );
-          })}
         </div>
       )}
     </div>

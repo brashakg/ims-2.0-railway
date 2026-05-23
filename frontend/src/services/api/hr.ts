@@ -52,7 +52,43 @@ export const hrApi = {
     const response = await api.get(`/payroll/payslip/${employeeId}`);
     return response.data;
   },
+
+  // Monthly attendance grid (per-employee x per-day status matrix).
+  // month: 'YYYY-MM'. Returns AttendanceGrid (see type below).
+  getAttendanceGrid: async (opts: { month: string; storeId?: string }) => {
+    const params: Record<string, string> = { month: opts.month };
+    if (opts.storeId) params.store_id = opts.storeId;
+    const response = await api.get('/hr/attendance/grid', { params });
+    return response.data as AttendanceGrid;
+  },
 };
+
+export type AttendanceCode = 'P' | 'A' | 'L' | 'HD' | 'LWP' | 'WO' | '-';
+
+export interface AttendanceGridSummary {
+  present: number;
+  absent: number;
+  leave: number;
+  lwp: number;
+  half_day: number;
+  late: number;
+  week_off: number;
+}
+
+export interface AttendanceGridEmployee {
+  employee_id: string;
+  name: string;
+  store_id: string;
+  days: Record<string, AttendanceCode>;
+  summary: AttendanceGridSummary;
+}
+
+export interface AttendanceGrid {
+  month: string;
+  days: number[];
+  employees: AttendanceGridEmployee[];
+  totals: AttendanceGridSummary;
+}
 
 // ============================================================================
 // Incentives API - Staff Incentive Tracking
