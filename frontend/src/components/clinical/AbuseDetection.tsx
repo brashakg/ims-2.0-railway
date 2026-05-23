@@ -2,22 +2,21 @@
 // IMS 2.0 - Clinical Abuse Detection
 // ============================================================================
 
-import { AlertTriangle, TrendingUp, Clock, Copy, CheckCircle } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { AlertTriangle, TrendingUp, Clock, Copy, CheckCircle, Loader2 } from 'lucide-react';
+import { clinicalApi } from '../../services/api';
+import type { AbuseAlert } from '../../services/api/clinical';
 
-interface AbuseAlert {
-  id: string;
-  type: 'high-redo-rate' | 'exact-copy' | 'suspicious-speed';
-  severity: 'warning' | 'critical';
-  optometristName: string;
-  optometristId: string;
-  details: string;
-  timestamp: string;
-  prescriptionIds?: string[];
-  redoRate?: number;
-}
+export type { AbuseAlert };
 
 interface AbuseDetectionProps {
+  /** When provided, alerts are rendered as-is (controlled mode).
+   *  When omitted, the component fetches its own alerts from the backend. */
   alerts?: AbuseAlert[];
+  /** Store to scope the fetch to (self-fetching mode). */
+  storeId?: string;
+  /** Lookback window in days (self-fetching mode). Defaults to 30. */
+  days?: number;
 }
 
 
@@ -43,7 +42,59 @@ const getAlertTitle = (type: AbuseAlert['type']) => {
   }
 };
 
-export function AbuseDetection({ alerts = [] }: AbuseDetectionProps) {
+export function AbuseDetection({ alerts: alertsProp, storeId, days = 30 }: AbuseDetectionProps) {
+  // Controlled mode: caller passed alerts -> render them and skip fetching.
+  // Self-fetching mode (default): pull alerts from the backend on mount.
+  const controlled = alertsProp !== undefined;
+  const [fetchedAlerts, setFetchedAlerts] = useState<AbuseAlert[]>([]);
+  const [loading, setLoading] = useState(!controlled);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (controlled) return;
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    clinicalApi
+      .getAbuseAlerts(storeId, days)
+      .then(res => {
+        if (cancelled) return;
+        setFetchedAlerts(Array.isArray(res?.alerts) ? res.alerts : []);
+      })
+      .catch(() => {
+        if (!cancelled) setError('Failed to load abuse alerts.');
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [controlled, storeId, days]);
+
+  const alerts = controlled ? (alertsProp as AbuseAlert[]) : fetchedAlerts;
+
+  if (loading) {
+    return (
+      <div className="p-8 bg-white rounded-lg border border-gray-200 text-center">
+        <Loader2 className="w-8 h-8 mx-auto animate-spin text-bv-red-600" />
+        <p className="text-sm text-gray-500 mt-3">Scanning recent clinical activity...</p>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="p-8 bg-white rounded-lg border border-gray-200 text-center">
+        <div className="text-gray-500">
+          <AlertTriangle className="w-12 h-12 mx-auto mb-4 text-yellow-600" />
+          <p className="text-lg font-semibold mb-2">Could not load alerts</p>
+          <p className="text-sm">{error}</p>
+        </div>
+      </div>
+    );
+  }
+
   if (alerts.length === 0) {
     return (
       <div className="p-8 bg-white rounded-lg border border-gray-200 text-center">
