@@ -742,9 +742,9 @@ export function ClinicalPage() {
         </div>
       )}
 
-      {/* Abuse Alerts Tab */}
+      {/* Abuse Alerts Tab — self-fetching, scoped to the active store. */}
       {activeTab === 'abuse-alerts' && canViewAbuseAlerts && (
-        <AbuseDetection />
+        <AbuseDetection storeId={user?.activeStoreId} />
       )}
 
       {/* Prescription Card Print Modal */}

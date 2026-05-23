@@ -4,6 +4,20 @@
 
 import api from './client';
 
+// Shape returned by GET /clinical/abuse-detection. Mirrors the backend
+// _build_abuse_alerts() output and the AbuseDetection component's renderer.
+export interface AbuseAlert {
+  id: string;
+  type: 'high-redo-rate' | 'exact-copy' | 'suspicious-speed';
+  severity: 'warning' | 'critical';
+  optometristName: string;
+  optometristId: string;
+  details: string;
+  timestamp: string;
+  prescriptionIds?: string[];
+  redoRate?: number;
+}
+
 export const clinicalApi = {
   // Queue management
   getQueue: async (storeId: string) => {
@@ -80,5 +94,15 @@ export const clinicalApi = {
   getRedos: async (prescriptionId: string) => {
     const response = await api.get(`/clinical/prescriptions/${prescriptionId}/redos`);
     return response.data;
+  },
+
+  // Clinical abuse / fraud-signal detection (management view). Server-gated to
+  // STORE_MANAGER / AREA_MANAGER / ADMIN / SUPERADMIN. Returns the alert list
+  // computed over the last `days` for the given store.
+  getAbuseAlerts: async (storeId?: string, days = 30) => {
+    const params: Record<string, string | number> = { days };
+    if (storeId) params.store_id = storeId;
+    const response = await api.get('/clinical/abuse-detection', { params });
+    return response.data as { alerts: AbuseAlert[]; generated_at: string };
   },
 };
