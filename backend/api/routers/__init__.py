@@ -48,6 +48,7 @@ from .techcherry_import import router as techcherry_import_router
 from .vouchers import router as vouchers_router
 from .entities import router as entities_router
 from .notifications import router as notifications_router
+from .shipping import router as shipping_router
 
 __all__ = [
     "auth_router",
@@ -95,4 +96,5 @@ __all__ = [
     "vouchers_router",
     "entities_router",
     "notifications_router",
+    "shipping_router",
 ]
