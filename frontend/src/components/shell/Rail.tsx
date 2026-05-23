@@ -3,7 +3,7 @@
 // Ported from design_handoff_ims_2_0/shell/shell.jsx → Rail
 
 import { NavLink, useLocation } from 'react-router-dom';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { useAppearance } from '../../context/AppearanceContext';
 import { Icon, type IconName } from './Icon';
@@ -197,7 +197,43 @@ export function Rail({ brand = 'bv' }: { brand?: 'bv' | 'wizopt' }) {
     });
   }, [activeGroupTitle]);
 
+  // Latest active-group title for the auto-group timer (read at fire time so
+  // navigating around doesn't restart the countdown).
+  const activeGroupTitleRef = useRef(activeGroupTitle);
+  activeGroupTitleRef.current = activeGroupTitle;
+
+  // The rail starts fully expanded after login (all groups open), which makes a
+  // long sidebar that can scroll past the main content, leaving empty space on
+  // the right. 15s after mount, auto-collapse every group except the active one
+  // so the rail settles into a compact grouped state. A manual group toggle
+  // cancels this (the user has taken control of the layout).
+  const autoGroupTimer = useRef<number | null>(null);
+  useEffect(() => {
+    autoGroupTimer.current = window.setTimeout(() => {
+      autoGroupTimer.current = null;
+      setCollapsedGroups(() => {
+        const next = new Set<string>();
+        for (const g of RAIL_GROUPS) {
+          if (g.title && g.title !== activeGroupTitleRef.current) next.add(g.title);
+        }
+        saveCollapsedGroups(next);
+        return next;
+      });
+    }, 15000);
+    return () => {
+      if (autoGroupTimer.current) {
+        window.clearTimeout(autoGroupTimer.current);
+        autoGroupTimer.current = null;
+      }
+    };
+  }, []);
+
   const toggleGroup = useCallback((title: string) => {
+    // User is managing groups manually — stop the pending auto-collapse.
+    if (autoGroupTimer.current) {
+      window.clearTimeout(autoGroupTimer.current);
+      autoGroupTimer.current = null;
+    }
     setCollapsedGroups((prev) => {
       const next = new Set(prev);
       if (next.has(title)) next.delete(title);
