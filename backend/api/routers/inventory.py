@@ -760,6 +760,153 @@ async def get_stock_count(
 
 
 # ============================================================================
+# INVENTORY INTELLIGENCE: transfer recommendations + staff accountability
+# ============================================================================
+
+_STOCK_MANAGER_ROLES = ("ADMIN", "AREA_MANAGER", "STORE_MANAGER")
+
+
+class AccountabilityAssign(BaseModel):
+    store_id: str
+    category: Optional[str] = "ALL"
+    staff_id: str
+    staff_name: Optional[str] = None
+
+
+@router.get("/transfer-recommendations")
+async def transfer_recommendations(
+    store_id: Optional[str] = Query(None),
+    threshold: int = Query(5, ge=0, le=1000),
+    current_user: dict = Depends(require_roles(*_INVENTORY_ROLES)),
+):
+    """Suggest inter-store transfers to refill the active store's low/out
+    products from other stores that hold a surplus. Fail-soft."""
+    from ..services.inventory_intel import recommend_transfers
+
+    stock_repo = get_stock_repository()
+    active_store = store_id or current_user.get("active_store_id")
+    if stock_repo is None or not active_store:
+        return {"recommendations": [], "store_id": active_store}
+
+    try:
+        low = stock_repo.find_low_stock(active_store, threshold) or []
+        low_ids = [r["_id"] for r in low if r.get("_id")]
+        if not low_ids:
+            return {"recommendations": [], "store_id": active_store}
+
+        # Cross-store available levels for just the deficit products.
+        rows = stock_repo.aggregate(
+            [
+                {"$match": {"product_id": {"$in": low_ids}, "status": "AVAILABLE"}},
+                {"$group": {"_id": {"p": "$product_id", "s": "$store_id"}, "qty": {"$sum": "$quantity"}}},
+            ]
+        ) or []
+        store_levels: Dict[str, Dict[str, int]] = {}
+        for r in rows:
+            key = r.get("_id", {})
+            store_levels.setdefault(key.get("p"), {})[key.get("s")] = int(r.get("qty", 0) or 0)
+
+        # Enrich with product names.
+        names: Dict[str, str] = {}
+        product_repo = get_product_repository()
+        if product_repo is not None:
+            for p in product_repo.find_many({"product_id": {"$in": low_ids}}) or []:
+                names[p.get("product_id")] = p.get("name") or p.get("product_name") or ""
+
+        low_products = [
+            {"product_id": r["_id"], "quantity": int(r.get("quantity", 0) or 0),
+             "product_name": names.get(r["_id"], "")}
+            for r in low if r.get("_id")
+        ]
+        recs = recommend_transfers(active_store, low_products, store_levels, threshold=threshold)
+        return {"store_id": active_store, "threshold": threshold, "recommendations": recs, "count": len(recs)}
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"transfer_recommendations error: {e}")
+        return {"recommendations": [], "store_id": active_store}
+
+
+@router.post("/accountability")
+async def assign_accountability(
+    body: AccountabilityAssign,
+    current_user: dict = Depends(require_roles(*_STOCK_MANAGER_ROLES)),
+):
+    """Assign a staff member as the stock custodian for a store (+ optional
+    category), so count shrinkage can be attributed to them."""
+    db = _get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database not available")
+    coll = db.get_collection("stock_accountability")
+    key = {"store_id": body.store_id, "category": body.category or "ALL"}
+    coll.update_one(
+        key,
+        {"$set": {
+            **key,
+            "staff_id": body.staff_id,
+            "staff_name": body.staff_name,
+            "assigned_by": current_user.get("user_id"),
+            "assigned_at": datetime.now().isoformat(),
+        }},
+        upsert=True,
+    )
+    return {"message": "Custodian assigned", **key, "staff_id": body.staff_id}
+
+
+@router.get("/accountability")
+async def list_accountability(
+    store_id: Optional[str] = Query(None),
+    current_user: dict = Depends(require_roles(*_INVENTORY_ROLES)),
+):
+    """List stock custodians for a store."""
+    db = _get_db()
+    if db is None:
+        return {"custodians": []}
+    active_store = store_id or current_user.get("active_store_id")
+    q = {"store_id": active_store} if active_store else {}
+    try:
+        items = list(db.get_collection("stock_accountability").find(q, {"_id": 0}))
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"list_accountability error: {e}")
+        return {"custodians": []}
+    return {"custodians": items, "total": len(items)}
+
+
+@router.get("/accountability/shrinkage")
+async def accountability_shrinkage(
+    store_id: Optional[str] = Query(None),
+    days: int = Query(90, ge=1, le=365),
+    current_user: dict = Depends(require_roles(*_STOCK_MANAGER_ROLES)),
+):
+    """Recent completed-count shrinkage attributed to each store's custodian."""
+    from ..services.inventory_intel import shrinkage_by_custodian
+
+    db = _get_db()
+    if db is None:
+        return {"rows": []}
+    active_store = store_id or current_user.get("active_store_id")
+    cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat()
+    q: dict = {"status": "completed", "completed_at": {"$gte": cutoff}}
+    if active_store:
+        q["store_id"] = active_store
+    try:
+        counts = list(
+            db.get_collection("stock_counts").find(
+                q, {"_id": 0, "store_id": 1, "audit_number": 1, "shrinkage_percentage": 1, "completed_at": 1}
+            )
+        )
+        custodians = {
+            c["store_id"]: c
+            for c in db.get_collection("stock_accountability").find(
+                {"category": "ALL"}, {"_id": 0}
+            )
+            if c.get("store_id")
+        }
+        return {"rows": shrinkage_by_custodian(counts, custodians), "count": len(counts)}
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"accountability_shrinkage error: {e}")
+        return {"rows": []}
+
+
+# ============================================================================
 # TRANSFER STUBS (real transfers are in transfers.py router)
 # ============================================================================
 

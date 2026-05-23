@@ -4,7 +4,7 @@
 // Contact Lens Expiry, Power Grid, Sell-Through, Overstock Analysis
 
 import { useState, useEffect } from 'react';
-import { AlertTriangle, TrendingUp, Package, Grid3x3 } from 'lucide-react';
+import { AlertTriangle, TrendingUp, Package, Grid3x3, ArrowLeftRight, ShieldAlert } from 'lucide-react';
 import api from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
 import clsx from 'clsx';
@@ -447,6 +447,128 @@ export function OverstockAnalysisWidget() {
           </table>
         </div>
       )}
+    </div>
+  );
+}
+
+// ============================================================================
+// INTER-STORE TRANSFER RECOMMENDATIONS + STOCK ACCOUNTABILITY
+// ============================================================================
+
+interface TransferRec {
+  product_id: string;
+  product_name?: string;
+  from_store: string;
+  to_store: string;
+  quantity: number;
+  to_store_qty: number;
+  from_store_qty: number;
+}
+interface ShrinkRow {
+  store_id: string;
+  audit_number?: string;
+  shrinkage_percentage: number;
+  custodian_name?: string | null;
+}
+
+export function TransferRecommendationsWidget() {
+  const { user } = useAuth();
+  const storeId = user?.activeStoreId;
+  const [recs, setRecs] = useState<TransferRec[]>([]);
+  const [shrink, setShrink] = useState<ShrinkRow[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      setLoading(true);
+      const sp = storeId ? `?store_id=${encodeURIComponent(storeId)}` : '';
+      try {
+        const [r, s] = await Promise.all([
+          api.get(`/inventory/transfer-recommendations${sp}`).then((x) => x.data).catch(() => ({ recommendations: [] })),
+          api.get(`/inventory/accountability/shrinkage${sp}`).then((x) => x.data).catch(() => ({ rows: [] })),
+        ]);
+        if (!alive) return;
+        setRecs(r.recommendations || []);
+        setShrink(s.rows || []);
+      } finally {
+        if (alive) setLoading(false);
+      }
+    })();
+    return () => { alive = false; };
+  }, [storeId]);
+
+  if (loading) return <div className="p-6 text-center text-gray-500">Loading recommendations...</div>;
+
+  return (
+    <div className="space-y-6">
+      <div className="bg-white border border-gray-200 rounded-lg p-5">
+        <h3 className="text-lg font-semibold text-gray-900 mb-1 flex items-center gap-2">
+          <ArrowLeftRight className="w-5 h-5" /> Suggested inter-store transfers
+        </h3>
+        <p className="text-sm text-gray-500 mb-4">Refill this store's low/out products from stores holding a surplus.</p>
+        {recs.length === 0 ? (
+          <p className="text-sm text-gray-400 py-4">No transfers suggested — nothing is below reorder, or no other store has spare stock.</p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-gray-200 text-left text-xs font-semibold text-gray-500 uppercase">
+                  <th className="px-3 py-2">Product</th>
+                  <th className="px-3 py-2">From store</th>
+                  <th className="px-3 py-2">To store</th>
+                  <th className="px-3 py-2 text-right">Move qty</th>
+                  <th className="px-3 py-2 text-right">Here now</th>
+                </tr>
+              </thead>
+              <tbody>
+                {recs.map((r) => (
+                  <tr key={`${r.product_id}-${r.from_store}`} className="border-b border-gray-100">
+                    <td className="px-3 py-2 text-gray-900">{r.product_name || r.product_id}</td>
+                    <td className="px-3 py-2"><span className="px-2 py-0.5 rounded bg-emerald-50 text-emerald-700 text-xs">{r.from_store} ({r.from_store_qty})</span></td>
+                    <td className="px-3 py-2"><span className="px-2 py-0.5 rounded bg-blue-50 text-blue-700 text-xs">{r.to_store}</span></td>
+                    <td className="px-3 py-2 text-right font-semibold text-gray-900">{r.quantity}</td>
+                    <td className="px-3 py-2 text-right text-red-600">{r.to_store_qty}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      <div className="bg-white border border-gray-200 rounded-lg p-5">
+        <h3 className="text-lg font-semibold text-gray-900 mb-1 flex items-center gap-2">
+          <ShieldAlert className="w-5 h-5" /> Stock accountability — recent shrinkage
+        </h3>
+        <p className="text-sm text-gray-500 mb-4">Completed-count shrinkage attributed to each store's assigned custodian.</p>
+        {shrink.length === 0 ? (
+          <p className="text-sm text-gray-400 py-4">No completed counts in the window.</p>
+        ) : (
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-gray-200 text-left text-xs font-semibold text-gray-500 uppercase">
+                <th className="px-3 py-2">Audit</th>
+                <th className="px-3 py-2">Store</th>
+                <th className="px-3 py-2">Custodian</th>
+                <th className="px-3 py-2 text-right">Shrinkage %</th>
+              </tr>
+            </thead>
+            <tbody>
+              {shrink.map((s, i) => (
+                <tr key={s.audit_number || i} className="border-b border-gray-100">
+                  <td className="px-3 py-2 text-gray-600">{s.audit_number || '-'}</td>
+                  <td className="px-3 py-2 text-gray-600">{s.store_id}</td>
+                  <td className="px-3 py-2 text-gray-900">{s.custodian_name || <span className="text-gray-400">unassigned</span>}</td>
+                  <td className={clsx('px-3 py-2 text-right font-semibold', (s.shrinkage_percentage || 0) >= 2 ? 'text-red-600' : 'text-gray-700')}>
+                    {(s.shrinkage_percentage || 0).toFixed(1)}%
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
     </div>
   );
 }
