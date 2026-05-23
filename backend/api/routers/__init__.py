@@ -31,9 +31,7 @@ from .catalog import router as catalog_router
 from .catalog_autopilot import router as catalog_autopilot_router
 from .jarvis import router as jarvis_router
 from .analytics import router as analytics_router
-from .billing import router as billing_router
 from .crm import router as crm_router
-from .supply_chain import router as supply_chain_router
 from .follow_ups import router as follow_ups_router
 from .payroll import router as payroll_router
 from .marketing import router as marketing_router
@@ -80,8 +78,6 @@ __all__ = [
     "catalog_autopilot_router",
     "jarvis_router",
     "analytics_router",
-    "billing_router",
-    "supply_chain_router",
     "follow_ups_router",
     "payroll_router",
     "marketing_router",
