@@ -26,6 +26,21 @@ export interface ExpenseRecord {
   ledger_reference?: string;
   bill_file_id?: string;
   bill_filename?: string;
+  // Anti-fraud: SHA-256 fingerprint of the uploaded bill + duplicate flags.
+  bill_sha256?: string;
+  duplicate_bill?: boolean;
+  duplicate_of?: string | null;
+}
+
+// Shape returned by POST /expenses/{id}/upload-bill.
+export interface UploadBillResult {
+  message: string;
+  filename?: string;
+  file_id?: string;
+  persisted?: boolean;
+  bill_sha256?: string;
+  duplicate_bill?: boolean;
+  duplicate_of?: string | null;
 }
 
 export interface ExpenseCapEntry {
@@ -124,12 +139,19 @@ export const expensesApi = {
     return response.data;
   },
 
-  uploadBill: async (expenseId: string, file: File) => {
+  uploadBill: async (expenseId: string, file: File): Promise<UploadBillResult> => {
     const fd = new FormData();
     fd.append('file', file);
     const response = await api.post(`/expenses/${expenseId}/upload-bill`, fd, {
       headers: { 'Content-Type': 'multipart/form-data' },
     });
+    return response.data;
+  },
+
+  // Anti-fraud watch-list: expenses whose bill matched an earlier receipt
+  // (approver / finance gated).
+  getDuplicateBills: async (storeId?: string) => {
+    const response = await api.get('/expenses/duplicate-bills', { params: { store_id: storeId } });
     return response.data;
   },
 

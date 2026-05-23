@@ -4,6 +4,7 @@ IMS 2.0 - Expenses Router
 Real database queries for expense and advance management
 """
 
+import hashlib
 import io
 from fastapi import APIRouter, Depends, Query, UploadFile, File, HTTPException
 from fastapi.responses import StreamingResponse
@@ -31,6 +32,10 @@ _APPROVAL_ROLES = ("ADMIN", "AREA_MANAGER", "STORE_MANAGER", "ACCOUNTANT")
 _ADMIN_ROLES = ("SUPERADMIN", "ADMIN")
 _ACCOUNTANT_ROLES = ("ADMIN", "ACCOUNTANT")
 
+# Roles that may review the duplicate-bill watch-list (an anti-fraud surface for
+# approvers/finance). Mirrors _APPROVAL_ROLES; SUPERADMIN auto-passes.
+_REVIEW_ROLES = ("ADMIN", "AREA_MANAGER", "STORE_MANAGER", "ACCOUNTANT")
+
 # Roles allowed to edit the spend-cap configuration. SUPERADMIN auto-passes
 # inside require_roles, so it is intentionally omitted here.
 _CAP_EDIT_ROLES = ("ADMIN",)
@@ -53,6 +58,48 @@ _UNSETTLED_ADVANCE_STATUSES = ("DISBURSED", "PARTIALLY_SETTLED")
 
 def _is_admin(current_user: dict) -> bool:
     return any(r in current_user.get("roles", []) for r in _ADMIN_ROLES)
+
+
+# ============================================================================
+# ANTI-FRAUD - DUPLICATE-BILL PURE HELPERS (no DB, unit-tested directly)
+# ============================================================================
+#
+# The same physical receipt can be photographed and submitted twice (across two
+# claims, or by two employees) to get reimbursed twice. We fingerprint the
+# uploaded bytes with SHA-256 and look for a prior expense in the same store
+# carrying the same fingerprint. A match is a SOFT flag (the file may legitimately
+# recur, e.g. a monthly rent receipt) -- never a hard block.
+
+
+def sha256_hex(data: bytes) -> str:
+    """Stable lowercase hex SHA-256 of the given bytes.
+
+    Pure and total: coerces None to empty bytes so a caller can never crash the
+    upload path on a fingerprint. Deterministic across processes (unlike Python's
+    salted hash()), which is what makes it usable as a stored dedupe key.
+    """
+    if data is None:
+        data = b""
+    return hashlib.sha256(data).hexdigest()
+
+
+def find_duplicate(new_hash: str, existing: list) -> Optional[str]:
+    """Return the expense_id of the first existing expense whose bill_sha256
+    matches new_hash, or None.
+
+    `existing` is a list of already-fetched expense docs (dicts). Pure so the
+    matching rule stays unit-tested independently of the Mongo query. A blank /
+    missing new_hash never matches (returns None) so an unreadable upload can't
+    be flagged against every other blank-hash row.
+    """
+    if not new_hash:
+        return None
+    for exp in existing or []:
+        if not isinstance(exp, dict):
+            continue
+        if exp.get("bill_sha256") == new_hash:
+            return exp.get("expense_id")
+    return None
 
 
 # ============================================================================
@@ -438,6 +485,38 @@ def _spent_for_category(employee_id: str, category: str, on_date: date):
     return spent_today, spent_month
 
 
+def _find_duplicate_bill(
+    bill_sha256: str, this_expense: Optional[dict], this_expense_id: str
+) -> Optional[str]:
+    """expense_id of a prior expense in the same store sharing this fingerprint.
+
+    Scope is the store of the expense being uploaded against (a receipt claimed
+    twice within one store is the realistic fraud). The current expense is
+    excluded so re-uploading the same file to the same row doesn't self-flag.
+    Fail-soft: any DB error -> None (treat as not-a-duplicate; never block the
+    upload). Matching itself is delegated to the pure find_duplicate helper.
+    """
+    if not bill_sha256:
+        return None
+    repo = get_expense_repository()
+    if repo is None:
+        return None
+    store_id = (this_expense or {}).get("store_id")
+    query = {"bill_sha256": bill_sha256}
+    if store_id:
+        query["store_id"] = store_id
+    try:
+        candidates = repo.find_many(query, limit=50) or []
+    except Exception:
+        return None
+    others = [
+        c
+        for c in candidates
+        if isinstance(c, dict) and c.get("expense_id") != this_expense_id
+    ]
+    return find_duplicate(bill_sha256, others)
+
+
 def _outstanding_advances(employee_id: str) -> list:
     """The employee's advances still in an unsettled state (fail-soft -> [])."""
     repo = get_advance_repository()
@@ -649,13 +728,35 @@ async def upload_bill(
             detail=f"File type '{mime}' not allowed. Accepted: {sorted(ALLOWED_MIME_TYPES)}",
         )
 
+    # Anti-fraud: fingerprint the bytes and look for the same receipt already
+    # attached to ANOTHER expense in the same store (same physical bill claimed
+    # twice / across two employees). A match is flagged for an approver to
+    # scrutinise -- never a hard block, since some receipts legitimately recur.
+    bill_sha256 = sha256_hex(content)
+    duplicate_of = _find_duplicate_bill(bill_sha256, existing, expense_id)
+
     store = get_file_store()
     if store is None:
-        # Fail-soft: don't 500 — tell the caller storage is unavailable.
+        # Fail-soft: don't 500 — tell the caller storage is unavailable. Still
+        # persist the fingerprint so a later re-upload can be matched.
+        try:
+            expense_repo.update(
+                expense_id,
+                {
+                    "bill_sha256": bill_sha256,
+                    "duplicate_bill": bool(duplicate_of),
+                    "duplicate_of": duplicate_of,
+                },
+            )
+        except Exception:
+            pass
         return {
             "message": "File storage unavailable; bill not saved",
             "filename": file.filename,
             "persisted": False,
+            "bill_sha256": bill_sha256,
+            "duplicate_bill": bool(duplicate_of),
+            "duplicate_of": duplicate_of,
         }
 
     file_id = store.put(
@@ -675,6 +776,9 @@ async def upload_bill(
             "bill_filename": file.filename,
             "bill_mime": mime,
             "bill_uploaded_at": uploaded_at,
+            "bill_sha256": bill_sha256,
+            "duplicate_bill": bool(duplicate_of),
+            "duplicate_of": duplicate_of,
         },
     )
 
@@ -683,6 +787,9 @@ async def upload_bill(
         "filename": file.filename,
         "file_id": file_id,
         "persisted": True,
+        "bill_sha256": bill_sha256,
+        "duplicate_bill": bool(duplicate_of),
+        "duplicate_of": duplicate_of,
     }
 
 
@@ -988,6 +1095,34 @@ async def get_reimbursement_aging(
         return empty
 
     return compute_aging(expenses, datetime.now())
+
+
+@router.get("/duplicate-bills")
+async def list_duplicate_bills(
+    store_id: Optional[str] = Query(None),
+    current_user: dict = Depends(require_roles(*_REVIEW_ROLES)),
+):
+    """Anti-fraud watch-list: expenses whose bill matched an earlier receipt.
+
+    Returns rows flagged duplicate_bill=true (same SHA-256 as a prior expense in
+    the same store) so an approver can scrutinise possible double-claims. Each
+    row carries duplicate_of (the expense_id it collided with). Approver/finance
+    gated; fail-soft to an empty list when no DB.
+    """
+    expense_repo = get_expense_repository()
+    if expense_repo is None:
+        return {"expenses": [], "total": 0}
+
+    filter_dict = {"duplicate_bill": True}
+    if store_id:
+        filter_dict["store_id"] = store_id
+
+    try:
+        expenses = expense_repo.find_many(filter_dict, limit=10000) or []
+    except Exception:
+        return {"expenses": [], "total": 0}
+
+    return {"expenses": expenses, "total": len(expenses)}
 
 
 # ============================================================================

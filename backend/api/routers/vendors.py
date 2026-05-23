@@ -109,6 +109,49 @@ def generate_grn_number(store_id: str) -> str:
     return f"GRN-{prefix}-{timestamp}"
 
 
+def grn_has_discrepancy(grn: dict, qty_tolerance: int = 0) -> bool:
+    """True if a goods-receipt note shows a receiving variance worth a task.
+
+    A discrepancy is any of:
+      * a line with rejected_qty > 0 (goods sent back as defective/wrong), or
+      * a line whose received_qty differs from its ordered_qty beyond
+        qty_tolerance (short or over shipment), where ordered_qty is matched
+        from the PO and stamped onto the line, or
+      * a top-level total_received != total_ordered beyond qty_tolerance.
+
+    Pure and total: missing/garbage fields coerce to 0 so a malformed GRN never
+    raises here (the caller is fail-soft regardless). Only line-level signals are
+    used when present; the total check is a backstop for callers that pass totals
+    but not per-line ordered quantities.
+    """
+    if not isinstance(grn, dict):
+        return False
+
+    def _int(v) -> int:
+        try:
+            return int(v or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    tol = abs(_int(qty_tolerance))
+    items = grn.get("items") if isinstance(grn.get("items"), list) else []
+
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        if _int(item.get("rejected_qty")) > 0:
+            return True
+        if "ordered_qty" in item:
+            if abs(_int(item.get("received_qty")) - _int(item.get("ordered_qty"))) > tol:
+                return True
+
+    if grn.get("total_ordered") is not None:
+        if abs(_int(grn.get("total_received")) - _int(grn.get("total_ordered"))) > tol:
+            return True
+
+    return False
+
+
 # ============================================================================
 # VENDOR ENDPOINTS
 # ============================================================================
@@ -453,33 +496,98 @@ async def create_grn(
     total_accepted = sum(item.accepted_qty for item in grn.items)
     total_rejected = sum(item.rejected_qty for item in grn.items)
 
+    # Stamp the ordered quantity (from the PO, matched by product_id) onto each
+    # received line so the GRN doc is self-describing for discrepancy detection
+    # and downstream reporting. Fail-soft: a PO line we can't match leaves the
+    # GRN line without an ordered_qty (no false discrepancy).
+    ordered_by_product: dict = {}
+    total_ordered = None
+    if po:
+        po_items = po.get("items") if isinstance(po.get("items"), list) else []
+        for po_item in po_items:
+            if not isinstance(po_item, dict):
+                continue
+            pid = po_item.get("product_id")
+            if pid is None:
+                continue
+            try:
+                ordered_by_product[pid] = ordered_by_product.get(pid, 0) + int(
+                    po_item.get("quantity", 0) or 0
+                )
+            except (TypeError, ValueError):
+                continue
+        if ordered_by_product:
+            total_ordered = sum(ordered_by_product.values())
+
+    item_docs = []
+    for item in grn.items:
+        doc = item.model_dump()
+        if item.product_id in ordered_by_product:
+            doc["ordered_qty"] = ordered_by_product[item.product_id]
+        item_docs.append(doc)
+
+    grn_doc = {
+        "grn_id": grn_id,
+        "grn_number": grn_number,
+        "po_id": grn.po_id,
+        "po_number": po.get("po_number") if po else None,
+        "vendor_id": po.get("vendor_id") if po else None,
+        "vendor_name": po.get("vendor_name") if po else None,
+        "store_id": current_user.get("active_store_id"),
+        "vendor_invoice_no": grn.vendor_invoice_no,
+        "vendor_invoice_date": grn.vendor_invoice_date,
+        "items": item_docs,
+        "total_received": total_received,
+        "total_accepted": total_accepted,
+        "total_rejected": total_rejected,
+        "total_ordered": total_ordered,
+        "notes": grn.notes,
+        "status": "PENDING",
+        "created_by": current_user.get("user_id"),
+        "created_at": datetime.now().isoformat(),
+    }
+
     if grn_repo is not None:
-        grn_repo.create(
-            {
-                "grn_id": grn_id,
-                "grn_number": grn_number,
-                "po_id": grn.po_id,
-                "po_number": po.get("po_number") if po else None,
-                "vendor_id": po.get("vendor_id") if po else None,
-                "vendor_name": po.get("vendor_name") if po else None,
-                "store_id": current_user.get("active_store_id"),
-                "vendor_invoice_no": grn.vendor_invoice_no,
-                "vendor_invoice_date": grn.vendor_invoice_date,
-                "items": [item.model_dump() for item in grn.items],
-                "total_received": total_received,
-                "total_accepted": total_accepted,
-                "total_rejected": total_rejected,
-                "notes": grn.notes,
-                "status": "PENDING",
-                "created_by": current_user.get("user_id"),
-                "created_at": datetime.now().isoformat(),
-            }
-        )
+        grn_repo.create(grn_doc)
+
+    # Anti-fraud / variance: a receiving discrepancy (rejected goods or a
+    # short/over shipment vs the PO) raises an accountable SYSTEM task so it is
+    # investigated rather than silently absorbed. Fail-soft -- a task failure
+    # must never break the GRN save.
+    if grn_has_discrepancy(grn_doc):
+        try:
+            from ..services.task_triggers import create_system_task
+            from ..dependencies import get_task_repository
+
+            po_label = grn_doc.get("po_number") or grn.po_id
+            create_system_task(
+                get_task_repository(),
+                title=f"GRN discrepancy on PO {po_label}",
+                description=(
+                    f"Goods receipt {grn_number} against PO {po_label} shows a "
+                    f"discrepancy: received {total_received}, accepted "
+                    f"{total_accepted}, rejected {total_rejected}"
+                    + (
+                        f" vs ordered {total_ordered}"
+                        if total_ordered is not None
+                        else ""
+                    )
+                    + ". Reconcile receipt vs order and vendor invoice "
+                    f"{grn.vendor_invoice_no}."
+                ),
+                priority="P2",
+                category="Purchase",
+                store_id=grn_doc.get("store_id"),
+                dedupe_ref=f"grn:{grn_id}",
+            )
+        except Exception:
+            pass
 
     return {
         "grn_id": grn_id,
         "grn_number": grn_number,
         "total_received": total_received,
+        "has_discrepancy": grn_has_discrepancy(grn_doc),
         "message": "GRN created",
     }
 
