@@ -92,15 +92,6 @@ export function NotificationBell() {
     if (n.action_url) navigate(n.action_url);
   };
 
-  const onMarkAll = async () => {
-    try {
-      await notificationsApi.markAllRead();
-    } catch {
-      /* non-fatal */
-    }
-    loadList();
-  };
-
   return (
     <div ref={ref} style={{ position: 'relative' }}>
       <button
@@ -168,21 +159,6 @@ export function NotificationBell() {
             <strong style={{ font: '600 13px var(--font-sans)', color: 'var(--ink-1)' }}>
               Notifications{unread > 0 ? ` (${unread})` : ''}
             </strong>
-            {items.length > 0 && (
-              <button
-                type="button"
-                onClick={onMarkAll}
-                style={{
-                  background: 'transparent',
-                  border: 0,
-                  color: 'var(--bv)',
-                  font: '500 11.5px var(--font-sans)',
-                  cursor: 'pointer',
-                }}
-              >
-                Mark all read
-              </button>
-            )}
           </div>
 
           <div style={{ maxHeight: 360, overflowY: 'auto' }}>
