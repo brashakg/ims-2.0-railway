@@ -56,9 +56,14 @@ def _get_categories_from_db() -> List[str]:
 # Contact-lens product categories. CL identity fields + HSN/GST defaults only
 # apply to these. Kept in sync with schemas.py PRODUCT_SCHEMA category enum.
 CL_CATEGORIES = ("CONTACT_LENS", "COLORED_CONTACT_LENS", "CL")
-# India: contact lenses fall under HSN 9001 / 12% GST.
+# India: contact lenses are HSN 9001 (90013000). GST rate defaults to 5% to
+# match the LIVE POS billing (orders.py bills CONTACT_LENS at 5%) and the
+# documented business rule, so the product master never disagrees with what is
+# actually billed. NOTE: external research suggests HSN 9001 may attract 12% --
+# confirm the correct rate with the accountant; if it is 12%, change this AND
+# orders.py _gst_rate_for_category together so master + billing stay in sync.
 CL_HSN_DEFAULT = "90013000"
-CL_GST_DEFAULT = 12.0
+CL_GST_DEFAULT = 5.0
 CL_MODALITIES = ("DAILY", "FORTNIGHTLY", "MONTHLY", "QUARTERLY", "YEARLY", "COLOR")
 
 
