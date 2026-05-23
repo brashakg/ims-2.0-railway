@@ -71,10 +71,16 @@ const CATEGORY_FIELDS: Record<string, Array<{
   ],
   CL: [
     { name: 'brand_name', label: 'Brand Name', type: 'select', required: true, options: ['Bausch & Lomb', 'Johnson & Johnson', 'Alcon', 'CooperVision', 'Acuvue'] },
-    { name: 'subbrand', label: 'Sub Brand', type: 'text', required: false },
+    { name: 'cl_series', label: 'Series', type: 'text', required: false, placeholder: 'e.g. Acuvue Oasys' },
     { name: 'model_name', label: 'Model Name', type: 'text', required: true },
+    { name: 'modality', label: 'Modality', type: 'select', required: false, options: ['DAILY', 'FORTNIGHTLY', 'MONTHLY', 'QUARTERLY', 'YEARLY', 'COLOR'] },
     { name: 'colour_name', label: 'Colour Name', type: 'text', required: false },
-    { name: 'power', label: 'Power', type: 'text', required: true, placeholder: '-6.00 to +6.00' },
+    { name: 'power', label: 'Power (SPH)', type: 'text', required: true, placeholder: '-6.00 to +6.00' },
+    { name: 'base_curve', label: 'Base Curve (BC)', type: 'number', required: false, placeholder: '8.6' },
+    { name: 'diameter', label: 'Diameter (DIA)', type: 'number', required: false, placeholder: '14.2' },
+    { name: 'cl_cyl', label: 'Cylinder (toric)', type: 'number', required: false },
+    { name: 'cl_axis', label: 'Axis (toric, 0-180)', type: 'number', required: false },
+    { name: 'cl_add', label: 'Add (multifocal)', type: 'number', required: false },
     { name: 'pack', label: 'Pack Size', type: 'select', required: false, options: ['1', '3', '6', '30', '90'] },
     { name: 'expiry_date', label: 'Expiry Date', type: 'date', required: false },
   ],
@@ -311,6 +317,30 @@ export function AddProductPage() {
       const sku =
         String(attributes.sku || attributes.barcode || '').trim() ||
         `${selectedCategory}-${(brand || 'GEN').replace(/\s+/g, '').slice(0, 6)}-${Date.now().toString(36)}`.toUpperCase();
+
+      // Contact lenses: map the CL attribute fields onto the top-level CL
+      // identity fields the backend ProductCreate models (the CL-Rx / sale
+      // modules read these). Only sent for the CL category; non-CL products
+      // are untouched. `power` is the SKU nominal power -> cl_power.
+      const isCL = selectedCategory === 'CL';
+      const num = (v: unknown): number | undefined => {
+        const n = parseFloat(String(v ?? '').trim());
+        return Number.isFinite(n) ? n : undefined;
+      };
+      const clFields = isCL
+        ? {
+            cl_series: String(attributes.cl_series || '').trim() || undefined,
+            modality: String(attributes.modality || '').trim() || undefined,
+            base_curve: num(attributes.base_curve),
+            diameter: num(attributes.diameter),
+            cl_power: num(attributes.power),
+            cl_cyl: num(attributes.cl_cyl),
+            cl_axis: num(attributes.cl_axis),
+            cl_add: num(attributes.cl_add),
+            pack_size: num(attributes.pack),
+          }
+        : {};
+
       await productApi.createProduct({
         category: selectedCategory,
         sku,
@@ -318,7 +348,8 @@ export function AddProductPage() {
         model,
         attributes,
         description: description || undefined,
-        hsn_code: hsnCode || undefined,
+        // India: contact lenses default to HSN 9001 / 12% GST when not set.
+        hsn_code: hsnCode || (isCL ? '90013000' : undefined),
         // Flat fields — ProductCreate is flat, not nested. Offer price falls
         // back to MRP when left blank (matches the form hint). Stock qty is
         // intentionally omitted: ProductCreate has no stock field; inventory
@@ -326,6 +357,7 @@ export function AddProductPage() {
         mrp: parseFloat(mrp),
         offer_price: offerPrice ? parseFloat(offerPrice) : parseFloat(mrp),
         gst_rate: parseFloat(gstRate),
+        ...clFields,
         weight: weight ? parseFloat(weight) : undefined,
         cost_price: costPrice ? parseFloat(costPrice) : undefined,
         discount_category: discountCategory,
@@ -360,7 +392,11 @@ export function AddProductPage() {
         {CATEGORIES.map((category) => (
           <button
             key={category.code}
-            onClick={() => setSelectedCategory(category.code)}
+            onClick={() => {
+              setSelectedCategory(category.code);
+              // Contact lenses default to 12% GST (HSN 9001); others 18%.
+              setGstRate(category.code === 'CL' ? '12' : '18');
+            }}
             className={clsx(
               'p-6 rounded-xl border-2 transition-all text-center hover:shadow-md',
               selectedCategory === category.code

@@ -51,7 +51,7 @@ import { StockAgingReport } from '../../components/inventory/StockAgingReport';
 import { StockAlertsOverview } from '../../components/inventory/StockAlertsOverview';
 import { NonMovingStockWidget } from '../../components/inventory/NonMovingStockWidget';
 import { StockCountScanningInterface } from '../../components/inventory/StockCountScanningInterface';
-import { ContactLensExpiryWidget, LensPowerGridWidget, SellThroughAnalysisWidget, OverstockAnalysisWidget, TransferRecommendationsWidget } from '../../components/inventory/AdvancedInventoryFeatures';
+import { ContactLensInventoryWidget, ContactLensExpiryWidget, LensPowerGridWidget, SellThroughAnalysisWidget, OverstockAnalysisWidget, TransferRecommendationsWidget } from '../../components/inventory/AdvancedInventoryFeatures';
 import { Pagination } from '../../components/common/Pagination';
 import clsx from 'clsx';
 
@@ -372,7 +372,7 @@ export function InventoryPage() {
     { id: 'movements',      label: 'Movements',       icon: Eye },
     { id: 'non-moving',     label: 'Non-moving',      icon: TrendingDown },
     { id: 'stock-count',    label: 'Stock count',     icon: Barcode },
-    { id: 'contact-lens',   label: 'CL expiry',       icon: Eye },
+    { id: 'contact-lens',   label: 'Contact lens',    icon: Eye },
     { id: 'power-grid',     label: 'Lens power grid', icon: BarChart3 },
     { id: 'sell-through',   label: 'Sell-through',    icon: TrendingDown },
     { id: 'overstock',      label: 'Overstock',       icon: Boxes },
@@ -1005,9 +1005,12 @@ export function InventoryPage() {
         <StockCountScanningInterface />
       )}
 
-      {/* Contact Lens Expiry Tab */}
+      {/* Contact Lens Inventory + Expiry Tab */}
       {activeTab === 'contact-lens' && (
-        <ContactLensExpiryWidget />
+        <div className="space-y-4">
+          <ContactLensInventoryWidget />
+          <ContactLensExpiryWidget />
+        </div>
       )}
 
       {/* Lens Power Grid Tab */}

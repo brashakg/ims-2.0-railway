@@ -108,8 +108,23 @@ PRODUCT_SCHEMA = {
         "cost_price": {"bsonType": "decimal"},
         "hsn_code": {"bsonType": "string"},
         "tax_rate": {"bsonType": "double"},
+        "gst_rate": {"bsonType": "double"},
         "images": {"bsonType": "array", "items": {"bsonType": "string"}},
         "attributes": {"bsonType": "object"},  # Category-specific attributes
+        # ------------------------------------------------------------------
+        # Contact-lens (CL) identity fields. All OPTIONAL + additive so they
+        # only apply to CONTACT_LENS / COLORED_CONTACT_LENS products and never
+        # break existing non-CL docs. These exact names are shared with the
+        # CL-Rx / sale modules. HSN 9001 / 12% GST (India) for CL categories.
+        "cl_series": {"bsonType": "string"},  # e.g. Acuvue Oasys
+        "modality": {"enum": ["DAILY", "FORTNIGHTLY", "MONTHLY", "QUARTERLY", "YEARLY", "COLOR"]},
+        "base_curve": {"bsonType": "double"},  # BC, e.g. 8.6
+        "diameter": {"bsonType": "double"},  # DIA, e.g. 14.2
+        "cl_power": {"bsonType": "double"},  # SKU nominal power (per-eye set on Rx/sale)
+        "cl_cyl": {"bsonType": "double"},  # toric cylinder
+        "cl_axis": {"bsonType": "int", "minimum": 0, "maximum": 180},  # toric axis
+        "cl_add": {"bsonType": "double"},  # multifocal add
+        "pack_size": {"bsonType": "int", "minimum": 1},  # lenses per box
         "is_active": {"bsonType": "bool"},
         "is_discountable": {"bsonType": "bool"},
         "discount_category": {"enum": ["MASS", "PREMIUM", "LUXURY", "NON_DISCOUNTABLE"]},
@@ -129,7 +144,8 @@ STOCK_UNIT_SCHEMA = {
         "quantity": {"bsonType": "int", "minimum": 0},
         "reserved_quantity": {"bsonType": "int", "minimum": 0},
         "location_code": {"bsonType": "string"},  # Counter/Shelf location
-        "batch_code": {"bsonType": "string"},
+        "batch_code": {"bsonType": "string"},  # batch / lot identifier (CL FEFO)
+        "lot": {"bsonType": "string"},  # alias accepted alongside batch_code
         "expiry_date": {"bsonType": "date"},
         "status": {"enum": ["AVAILABLE", "RESERVED", "SOLD", "DAMAGED", "RETURNED", "TRANSFERRED"]},
         "assigned_to": {"bsonType": "string"},  # Salesperson assignment

@@ -165,7 +165,82 @@ export const inventoryApi = {
     const response = await api.get(`/inventory/stock-count/${countId}`);
     return response.data;
   },
+
+  // ----- Contact-lens (CL) inventory ---------------------------------------
+  // Grouped CL stock by brand x power x base-curve x modality, with on-hand
+  // qty, nearest expiry, pack info + batch. Store-scoped + fail-soft backend.
+  getContactLensInventory: async (
+    storeId?: string,
+    filters?: {
+      brand?: string;
+      modality?: string;
+      base_curve?: number;
+      cl_power?: number;
+      near_expiry_days?: number;
+    }
+  ): Promise<CLInventoryResponse> => {
+    const response = await api.get('/inventory/contact-lenses', {
+      params: { store_id: storeId, ...filters },
+    });
+    return response.data as CLInventoryResponse;
+  },
+
+  // Expired / expiring-soon / safe buckets + FEFO pick suggestion.
+  getContactLensExpiryStatus: async (
+    storeId?: string,
+    expiringWithinDays: number = 90
+  ): Promise<CLExpiryStatusResponse> => {
+    const response = await api.get('/inventory/contact-lenses/expiry-status', {
+      params: { store_id: storeId, expiring_within_days: expiringWithinDays },
+    });
+    return response.data as CLExpiryStatusResponse;
+  },
 };
+
+// Contact-lens inventory line (one SKU x batch group).
+export interface CLInventoryLine {
+  product_id: string;
+  sku: string;
+  brand: string;
+  model: string;
+  category: string;
+  cl_series: string | null;
+  modality: string | null;
+  base_curve: number | null;
+  diameter: number | null;
+  cl_power: number | null;
+  cl_cyl: number | null;
+  cl_axis: number | null;
+  cl_add: number | null;
+  color: string | null;
+  pack_size: number | null;
+  batch_code: string | null;
+  expiry_date: string | null;
+  location_code: string | null;
+  on_hand: number;
+  days_until_expiry: number | null;
+}
+
+export interface CLInventoryResponse {
+  items: CLInventoryLine[];
+  total_lines: number;
+  total_units: number;
+  store_id: string | null;
+}
+
+export interface CLExpiryStatusResponse {
+  expired: CLInventoryLine[];
+  expiring_soon: CLInventoryLine[];
+  safe: CLInventoryLine[];
+  fefo_pick: CLInventoryLine[];
+  near_expiry_days: number;
+  summary: {
+    expired_count: number;
+    expiring_soon_count: number;
+    safe_count: number;
+    undated_count: number;
+  };
+}
 
 // ============================================================================
 // Vendors API

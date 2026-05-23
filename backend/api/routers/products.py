@@ -53,6 +53,15 @@ def _get_categories_from_db() -> List[str]:
 # ============================================================================
 
 
+# Contact-lens product categories. CL identity fields + HSN/GST defaults only
+# apply to these. Kept in sync with schemas.py PRODUCT_SCHEMA category enum.
+CL_CATEGORIES = ("CONTACT_LENS", "COLORED_CONTACT_LENS", "CL")
+# India: contact lenses fall under HSN 9001 / 12% GST.
+CL_HSN_DEFAULT = "90013000"
+CL_GST_DEFAULT = 12.0
+CL_MODALITIES = ("DAILY", "FORTNIGHTLY", "MONTHLY", "QUARTERLY", "YEARLY", "COLOR")
+
+
 class ProductCreate(BaseModel):
     sku: str
     category: str
@@ -66,16 +75,39 @@ class ProductCreate(BaseModel):
     hsn_code: Optional[str] = None
     # Persisted as `gst_rate` — the key seed data, reports and billing all
     # read. Was previously `tax_rate`, which no reader looked at.
-    gst_rate: float = Field(default=18.0)
+    gst_rate: Optional[float] = None
     attributes: Optional[dict] = None
+    # ---- Contact-lens (CL) identity fields. All optional + additive. ----
+    cl_series: Optional[str] = None
+    modality: Optional[str] = None
+    base_curve: Optional[float] = None
+    diameter: Optional[float] = None
+    cl_power: Optional[float] = None
+    cl_cyl: Optional[float] = None
+    cl_axis: Optional[int] = Field(default=None, ge=0, le=180)
+    cl_add: Optional[float] = None
+    pack_size: Optional[int] = Field(default=None, ge=1)
 
 
 class ProductUpdate(BaseModel):
     brand: Optional[str] = None
     model: Optional[str] = None
+    color: Optional[str] = None
     mrp: Optional[float] = Field(None, gt=0)
     offer_price: Optional[float] = Field(None, gt=0)
+    hsn_code: Optional[str] = None
+    gst_rate: Optional[float] = None
     is_active: Optional[bool] = None
+    # ---- Contact-lens (CL) identity fields. All optional + additive. ----
+    cl_series: Optional[str] = None
+    modality: Optional[str] = None
+    base_curve: Optional[float] = None
+    diameter: Optional[float] = None
+    cl_power: Optional[float] = None
+    cl_cyl: Optional[float] = None
+    cl_axis: Optional[int] = Field(None, ge=0, le=180)
+    cl_add: Optional[float] = None
+    pack_size: Optional[int] = Field(None, ge=1)
 
 
 # ============================================================================
@@ -168,6 +200,23 @@ async def create_product(
                 status_code=400, detail="Product with this SKU already exists"
             )
 
+        is_cl = product.category in CL_CATEGORIES
+        if product.modality and product.modality not in CL_MODALITIES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid modality. Allowed: {', '.join(CL_MODALITIES)}",
+            )
+
+        # HSN / GST: explicit value wins; else CL default for CL categories;
+        # else the legacy non-CL default (18%) so existing behaviour is intact.
+        hsn_code = product.hsn_code or (CL_HSN_DEFAULT if is_cl else None)
+        if product.gst_rate is not None:
+            gst_rate = product.gst_rate
+        elif is_cl:
+            gst_rate = CL_GST_DEFAULT
+        else:
+            gst_rate = 18.0
+
         product_data = {
             "sku": product.sku,
             "category": product.category,
@@ -178,12 +227,21 @@ async def create_product(
             "size": product.size,
             "mrp": product.mrp,
             "offer_price": product.offer_price,
-            "hsn_code": product.hsn_code,
-            "gst_rate": product.gst_rate,
+            "hsn_code": hsn_code,
+            "gst_rate": gst_rate,
             "attributes": product.attributes or {},
             "is_active": True,
             "created_by": current_user.get("user_id"),
         }
+
+        # Persist CL identity fields top-level only when provided (additive).
+        for _f in (
+            "cl_series", "modality", "base_curve", "diameter",
+            "cl_power", "cl_cyl", "cl_axis", "cl_add", "pack_size",
+        ):
+            _v = getattr(product, _f, None)
+            if _v is not None:
+                product_data[_f] = _v
 
         created = repo.create(product_data)
         if created:
@@ -266,6 +324,13 @@ async def update_product(
             raise HTTPException(status_code=404, detail="Product not found")
 
         update_data = product.model_dump(exclude_unset=True)
+
+        # Validate modality enum if a CL modality is being set.
+        if update_data.get("modality") and update_data["modality"] not in CL_MODALITIES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid modality. Allowed: {', '.join(CL_MODALITIES)}",
+            )
 
         # Validate MRP >= Offer Price if both are being updated
         if "mrp" in update_data and "offer_price" in update_data:

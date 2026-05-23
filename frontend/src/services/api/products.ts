@@ -22,6 +22,17 @@ export interface CreateProductPayload {
   offer_price?: number;
   gst_rate?: number;
   weight?: number;
+  // ---- Contact-lens (CL) identity fields. Top-level on ProductCreate,
+  // optional + additive. Only sent for CONTACT_LENS / COLORED_CONTACT_LENS. ----
+  cl_series?: string;
+  modality?: string;
+  base_curve?: number;
+  diameter?: number;
+  cl_power?: number;
+  cl_cyl?: number;
+  cl_axis?: number;
+  cl_add?: number;
+  pack_size?: number;
   // Extra fields the form collects; the backend ignores keys it doesn't
   // model, so these are harmless passthrough until ProductCreate grows them.
   cost_price?: number;
