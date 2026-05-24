@@ -140,25 +140,54 @@ class OrderRepository(BaseRepository):
             return False
     
     def add_payment(self, order_id: str, payment: Dict) -> bool:
-        """Add payment to order"""
+        """Add a tender to an order and recompute its AR (receivable) status.
+
+        A CREDIT tender is a pay-later promise, NOT cash received: it is excluded
+        from amount_paid and instead flags the order as a credit sale
+        (payment_status 'CREDIT') so it surfaces as a receivable in finance
+        /outstanding (which treats CREDIT as unpaid). Real money tenders
+        (cash/card/UPI/cheque/etc.) reduce the balance as before.
+        """
         try:
             order = self.find_by_id(order_id)
             if not order:
                 return False
-            
-            # Add payment
+
+            # Record the tender.
             self.collection.update_one(
                 {"order_id": order_id},
                 {"$push": {"payments": payment}}
             )
-            
-            # Update totals
-            amount_paid = float(order.get("amount_paid", 0)) + float(payment["amount"])
+
+            # Recompute from the full tender list (existing + this one) so the
+            # result is independent of any stale amount_paid. CREDIT tenders do
+            # not count toward cash received.
+            def _is_credit(p):
+                return str((p or {}).get("method", "")).upper() == "CREDIT"
+
+            all_payments = list(order.get("payments") or []) + [payment]
+            amount_paid = round(
+                sum(
+                    float(p.get("amount", 0) or 0)
+                    for p in all_payments
+                    if not _is_credit(p)
+                ),
+                2,
+            )
+            has_credit = any(_is_credit(p) for p in all_payments)
             grand_total = float(order.get("grand_total", 0))
-            balance_due = grand_total - amount_paid
-            
-            payment_status = "PAID" if balance_due <= 0 else "PARTIAL" if amount_paid > 0 else "UNPAID"
-            
+            balance_due = round(grand_total - amount_paid, 2)
+
+            if balance_due <= 0:
+                payment_status = "PAID"
+            elif has_credit:
+                # Credit sale with an outstanding balance -> a receivable.
+                payment_status = "CREDIT"
+            elif amount_paid > 0:
+                payment_status = "PARTIAL"
+            else:
+                payment_status = "UNPAID"
+
             return self.update(order_id, {
                 "amount_paid": amount_paid,
                 "balance_due": max(0, balance_due),
