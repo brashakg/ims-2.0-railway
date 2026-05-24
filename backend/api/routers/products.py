@@ -94,6 +94,11 @@ class ProductCreate(BaseModel):
     cl_axis: Optional[int] = Field(default=None, ge=0, le=180)
     cl_add: Optional[float] = None
     pack_size: Optional[int] = Field(default=None, ge=1)
+    # ---- Spectacle-lens power identity (drives the stock power grid). Additive. ----
+    sph: Optional[float] = None
+    cyl: Optional[float] = None
+    axis: Optional[int] = Field(default=None, ge=0, le=180)
+    add: Optional[float] = None
 
 
 class ProductUpdate(BaseModel):
@@ -115,6 +120,11 @@ class ProductUpdate(BaseModel):
     cl_axis: Optional[int] = Field(None, ge=0, le=180)
     cl_add: Optional[float] = None
     pack_size: Optional[int] = Field(None, ge=1)
+    # ---- Spectacle-lens power identity (drives the stock power grid). Additive. ----
+    sph: Optional[float] = None
+    cyl: Optional[float] = None
+    axis: Optional[int] = Field(None, ge=0, le=180)
+    add: Optional[float] = None
 
 
 # ============================================================================
@@ -246,6 +256,7 @@ async def create_product(
         for _f in (
             "cl_series", "modality", "base_curve", "diameter",
             "cl_power", "cl_cyl", "cl_axis", "cl_add", "pack_size",
+            "sph", "cyl", "axis", "add",
         ):
             _v = getattr(product, _f, None)
             if _v is not None:
