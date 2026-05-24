@@ -90,6 +90,12 @@ const CATEGORY_FIELDS: Record<string, Array<{
     { name: 'index', label: 'Index', type: 'select', required: true, options: ['1.50', '1.56', '1.59', '1.60', '1.67', '1.74'] },
     { name: 'coating', label: 'Coating', type: 'select', required: true, options: ['UC', 'HC', 'ARC', 'Blue Cut', 'Photochromic', 'Transitions', 'Polarized'] },
     { name: 'lens_category', label: 'Lens Category', type: 'select', required: false, options: ['Single Vision', 'Bifocal', 'Progressive', 'Office', 'Driving'] },
+    // Stock-power identity -> drives the SPH x CYL Power Grid. Leave blank for
+    // made-to-order lenses; fill for ready-made stock trays.
+    { name: 'sph', label: 'SPH (stock power)', type: 'number', required: false, placeholder: 'e.g. -2.00' },
+    { name: 'cyl', label: 'CYL (stock power)', type: 'number', required: false, placeholder: 'e.g. -0.50' },
+    { name: 'axis', label: 'Axis (0-180)', type: 'number', required: false },
+    { name: 'add', label: 'Add (bifocal/progressive)', type: 'number', required: false },
     { name: 'add_on_1', label: 'Add-On 1', type: 'text', required: false },
     { name: 'add_on_2', label: 'Add-On 2', type: 'text', required: false },
     { name: 'add_on_3', label: 'Add-On 3', type: 'text', required: false },
@@ -345,6 +351,18 @@ export function AddProductPage() {
           }
         : {};
 
+      // Spectacle lenses: map the stock-power fields onto the top-level lens
+      // power identity (drives the SPH x CYL Power Grid). Only sent for LS.
+      const isLens = selectedCategory === 'LS';
+      const lsFields = isLens
+        ? {
+            sph: num(attributes.sph),
+            cyl: num(attributes.cyl),
+            axis: num(attributes.axis),
+            add: num(attributes.add),
+          }
+        : {};
+
       await productApi.createProduct({
         category: selectedCategory,
         sku,
@@ -363,6 +381,7 @@ export function AddProductPage() {
         offer_price: offerPrice ? parseFloat(offerPrice) : parseFloat(mrp),
         gst_rate: parseFloat(gstRate),
         ...clFields,
+        ...lsFields,
         weight: weight ? parseFloat(weight) : undefined,
         cost_price: costPrice ? parseFloat(costPrice) : undefined,
         discount_category: discountCategory,
