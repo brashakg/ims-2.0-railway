@@ -51,6 +51,7 @@ const PayrollDashboard = lazy(() => import('./pages/hr/PayrollDashboard').then(m
 const SalarySetupPage = lazy(() => import('./pages/hr/SalarySetupPage').then(m => ({ default: m.SalarySetupPage })));
 const PayrollRunPage = lazy(() => import('./pages/hr/PayrollRunPage').then(m => ({ default: m.PayrollRunPage })));
 const EntitiesPage = lazy(() => import('./pages/settings/EntitiesPage').then(m => ({ default: m.EntitiesPage })));
+const OrganizationPage = lazy(() => import('./pages/settings/OrganizationPage'));
 const ReportsPage = lazy(() => import('./pages/reports/ReportsPage').then(m => ({ default: m.ReportsPage })));
 const GrowthBlueprintPage = lazy(() => import('./pages/reports/GrowthBlueprintPage').then(m => ({ default: m.GrowthBlueprintPage })));
 const SettingsPage = lazy(() => import('./pages/settings/SettingsPage').then(m => ({ default: m.SettingsPage })));
@@ -728,6 +729,14 @@ function App() {
                     element={
                       <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN']}>
                         <EntitiesPage />
+                      </ProtectedRoute>
+                    }
+                  />
+                  <Route
+                    path="organization"
+                    element={
+                      <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN']}>
+                        <OrganizationPage />
                       </ProtectedRoute>
                     }
                   />

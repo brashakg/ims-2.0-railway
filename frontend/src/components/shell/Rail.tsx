@@ -132,7 +132,7 @@ const RAIL_GROUPS: NavGroup[] = [
       { id: 'print', label: 'Print', to: '/print', icon: 'printer', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT', 'CASHIER', 'SALES_CASHIER', 'SALES_STAFF'] },
       { id: 'setup', label: 'Settings', to: '/settings', icon: 'settings', requireRoles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'AREA_MANAGER', 'CATALOG_MANAGER', 'ACCOUNTANT'] },
       { id: 'onboarding', label: 'Store Onboarding', to: '/setup', icon: 'settings', requireRoles: ['SUPERADMIN', 'ADMIN'] },
-      { id: 'entities', label: 'Entities', to: '/settings/entities', icon: 'settings', requireRoles: ['SUPERADMIN', 'ADMIN'] },
+      { id: 'organization', label: 'Organization', to: '/organization', icon: 'settings', requireRoles: ['SUPERADMIN', 'ADMIN'] },
     ],
   },
 ];
