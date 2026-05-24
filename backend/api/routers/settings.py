@@ -41,6 +41,7 @@ _SENSITIVE_FIELDS = {
     "api_key",
     "api_secret",
     "secret_key",
+    "key_secret",
     "secret",
     "password",
     "token",
@@ -811,9 +812,30 @@ async def list_integrations(current_user: dict = Depends(get_current_user)):
 async def get_integration(
     integration_type: str, current_user: dict = Depends(get_current_user)
 ):
-    """Get specific integration configuration"""
+    """Get one integration's configuration (sensitive fields masked).
+
+    Reads the canonical {type:<lower>} doc that the provider clients
+    (nexus_providers.py, services/shiprocket.py) and the
+    /api/v1/admin/integrations/* endpoints share, so this reflects what
+    actually activates an integration. (Was previously a hardcoded stub
+    that always returned is_configured=False.)
+    """
+    collection = _get_settings_collection("integrations")
+    if collection is not None:
+        doc = collection.find_one({"type": integration_type.lower()})
+        if doc:
+            config = doc.get("config") or {}
+            masked = (
+                _mask_config(_decrypt_config(config)) if isinstance(config, dict) else {}
+            )
+            return {
+                "type": integration_type.lower(),
+                "is_configured": bool(config),
+                "is_enabled": bool(doc.get("enabled")),
+                "config": masked,
+            }
     return {
-        "type": integration_type.upper(),
+        "type": integration_type.lower(),
         "is_configured": False,
         "is_enabled": False,
         "config": {},
@@ -827,27 +849,44 @@ async def update_integration(
     current_user: dict = Depends(get_current_user),
 ):
     """Update integration configuration (SUPERADMIN/ADMIN only).
-    Encrypts sensitive fields before storing in MongoDB."""
+
+    Writes the canonical {type:<lower>, enabled, config} document that the
+    provider clients (nexus_providers.py, services/shiprocket.py) and the
+    /api/v1/admin/integrations/* endpoints read - so saving here actually
+    activates the integration. Stored as plaintext so the providers can use
+    it, mirroring routers/admin.py::_save_integration_config.
+
+    NOTE: previously this wrote an encrypted, `integration_type`-keyed doc
+    that the providers could not read (wrong key + `enc:` values), so the UI
+    silently failed to turn anything on. This converges both write paths
+    onto the same Mongo document.
+    """
     if not any(role in current_user["roles"] for role in ["SUPERADMIN", "ADMIN"]):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
-    # Encrypt sensitive fields before persisting
-    safe_config = config.model_dump()
-    if "config" in safe_config and isinstance(safe_config["config"], dict):
-        safe_config["config"] = _encrypt_config(safe_config["config"])
+    payload = config.model_dump()
+    cfg = payload.get("config") if isinstance(payload.get("config"), dict) else {}
 
-    # Persist to MongoDB
     collection = _get_settings_collection("integrations")
     if collection:
         collection.update_one(
-            {"integration_type": integration_type},
-            {"$set": safe_config},
+            {"type": integration_type.lower()},
+            {
+                "$set": {
+                    "type": integration_type.lower(),
+                    "enabled": bool(payload.get("enabled")),
+                    "config": cfg,
+                    "updated_at": datetime.now().isoformat(),
+                }
+            },
             upsert=True,
         )
 
     return {
         "message": f"{integration_type} integration updated",
-        "config": _mask_config(config.model_dump().get("config", {})),
+        "type": integration_type.lower(),
+        "enabled": bool(payload.get("enabled")),
+        "config": _mask_config(cfg),
     }
 
 
@@ -855,8 +894,35 @@ async def update_integration(
 async def test_integration(
     integration_type: str, current_user: dict = Depends(get_current_user)
 ):
-    """Test integration connection"""
-    return {"status": "success", "message": f"{integration_type} connection successful"}
+    """Report integration readiness honestly (does NOT fake success).
+
+    This does not perform a live third-party call - real syncs run via the
+    NEXUS agent with DISPATCH_MODE=live. It reports whether credentials are
+    present (presence only, never values) plus the current DISPATCH_MODE, so
+    the operator can tell configured-vs-dormant. (Was previously a placebo
+    that returned success unconditionally.)
+    """
+    collection = _get_settings_collection("integrations")
+    doc = (
+        collection.find_one({"type": integration_type.lower()})
+        if collection is not None
+        else None
+    )
+    configured = bool((doc or {}).get("config")) and bool((doc or {}).get("enabled"))
+    mode = (os.getenv("DISPATCH_MODE", "off") or "off").lower()
+    return {
+        "status": "configured" if configured else "not_configured",
+        "integration": integration_type.lower(),
+        "enabled": bool((doc or {}).get("enabled")),
+        "dispatch_mode": mode,
+        "live": configured and mode == "live",
+        "message": (
+            f"{integration_type} configuration saved; live sync runs via the "
+            "NEXUS agent when credentials are set and DISPATCH_MODE=live."
+            if configured
+            else f"{integration_type} is not configured (set credentials and enable it)."
+        ),
+    }
 
 
 # ============================================================================

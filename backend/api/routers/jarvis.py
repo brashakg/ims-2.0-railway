@@ -2354,6 +2354,28 @@ async def list_jarvis_models(current_user: dict = Depends(require_superadmin)):
     }
 
 
+@router.get("/integrations/status")
+async def get_integration_status(current_user: dict = Depends(require_superadmin)):
+    """Read-only integration status for the operator. SUPERADMIN ONLY.
+
+    Reports, per external integration, whether its credentials are present
+    (KEY presence only - never values), the integrations-collection state,
+    and the current DISPATCH_MODE - so the owner can see what is live vs
+    dormant as credentials are added on Railway. Never returns a secret."""
+    from ..services.integration_status import build_integration_status
+
+    db = None
+    try:
+        from ..dependencies import get_db
+
+        conn = get_db()
+        if conn is not None and getattr(conn, "is_connected", False):
+            db = conn.db
+    except Exception:
+        db = None
+    return build_integration_status(db)
+
+
 @router.post("/query")
 async def query_jarvis(
     query: JarvisQuery, current_user: dict = Depends(require_superadmin)
