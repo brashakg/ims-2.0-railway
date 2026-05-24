@@ -17,9 +17,13 @@ from ..services.online_catalog import (
     online_status_for_skus,
     online_summary,
     reconcile_store_barcodes,
+    ecommerce_db_configured,
 )
+from ..services import stock_allocation
+from .inventory import _on_hand_by_product
 
 router = APIRouter()
+# NOTE: _get_db() is defined later in this module (reused here at call time).
 
 
 # ============================================================================
@@ -66,6 +70,60 @@ async def reconcile_store_barcodes_ep(
     return reconcile_store_barcodes(
         body.pairs, apply=body.apply, only_empty=body.only_empty
     )
+
+
+@router.get("/online-stock-reconcile")
+async def online_stock_reconcile(
+    store_id: Optional[str] = Query(None, description="Limit in-store on-hand to one store"),
+    safety_buffer: int = Query(0, ge=0, le=1000, description="Units to hold back from online"),
+    limit: int = Query(1000, ge=1, le=5000),
+    current_user: dict = Depends(get_current_user),
+):
+    """Reconcile in-store physical on-hand (IMS) vs online-listed stock
+    (BVI/Shopify) per SKU and flag overselling risk + a recommended safe online
+    allocation (on-hand minus safety_buffer). Read-only + fail-soft: if the
+    e-commerce DB isn't configured, every product shows 0 online stock."""
+    db = _get_db()
+    if db is None:
+        return {
+            "items": [],
+            "summary": {},
+            "online_configured": ecommerce_db_configured(),
+        }
+    try:
+        products = list(
+            db.get_collection("products")
+            .find(
+                {"sku": {"$nin": [None, ""]}, "is_active": {"$ne": False}},
+                {"_id": 0, "product_id": 1, "sku": 1, "brand": 1, "model": 1},
+            )
+            .limit(limit)
+        )
+    except Exception:
+        products = []
+
+    pids = [p.get("product_id") for p in products if p.get("product_id")]
+    on_hand = _on_hand_by_product(db, pids, store_id)
+    skus = [p.get("sku") for p in products if p.get("sku")]
+    online = online_status_for_skus(skus)  # {sku: {online, online_stock, status}}
+
+    items = []
+    for p in products:
+        sku = p.get("sku")
+        o = online.get(sku, {})
+        items.append(
+            {
+                "sku": sku,
+                "name": f"{p.get('brand', '') or ''} {p.get('model', '') or ''}".strip(),
+                "in_store": on_hand.get(p.get("product_id"), 0),
+                "online": int(o.get("online_stock") or 0),
+                "is_online": bool(o.get("online")),
+            }
+        )
+
+    result = stock_allocation.reconcile_items(items, safety_buffer=safety_buffer)
+    result["online_configured"] = ecommerce_db_configured()
+    return result
 
 
 # ============================================================================

@@ -37,6 +37,7 @@ const CustomerFeedback = lazy(() => import('./pages/customers/CustomerFeedback')
 const FollowUpDashboard = lazy(() => import('./pages/customers/FollowUpDashboard').then(m => ({ default: m.FollowUpDashboard })))
 const InventoryPage = lazy(() => import('./pages/inventory/InventoryPage').then(m => ({ default: m.InventoryPage })));
 const PowerGridPage = lazy(() => import('./pages/inventory/PowerGridPage'));
+const OnlineStockPage = lazy(() => import('./pages/inventory/OnlineStockPage'));
 const OrdersPage = lazy(() => import('./pages/orders/OrdersPage').then(m => ({ default: m.OrdersPage })));
 const ClinicalPage = lazy(() => import('./pages/clinical/ClinicalPage').then(m => ({ default: m.ClinicalPage })));
 const NewEyeTestPage = lazy(() => import('./pages/clinical/NewEyeTestPage').then(m => ({ default: m.NewEyeTestPage })));
@@ -600,6 +601,14 @@ function App() {
                     element={
                       <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'CATALOG_MANAGER', 'OPTOMETRIST']}>
                         <PowerGridPage />
+                      </ProtectedRoute>
+                    }
+                  />
+                  <Route
+                    path="inventory/online-sync"
+                    element={
+                      <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'CATALOG_MANAGER']}>
+                        <OnlineStockPage />
                       </ProtectedRoute>
                     }
                   />
