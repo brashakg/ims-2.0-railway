@@ -323,6 +323,45 @@ def require_roles(*allowed_roles: str):
 # ============================================================================
 
 
+def _store_fence_coords(user: dict) -> list:
+    """Geo-fence coordinates derived from the store(s) a user is assigned to, so
+    seeding a store's location auto-fences its staff (roles 4-7) without having
+    to copy coordinates onto every user. Fail-soft -> []."""
+    try:
+        from database.connection import get_db
+
+        db = get_db().db
+    except Exception:
+        return []
+    if db is None:
+        return []
+    ids = set()
+    for key in ("store_ids", "home_store_id", "active_store_id"):
+        val = user.get(key)
+        if isinstance(val, list):
+            ids.update(v for v in val if v)
+        elif val:
+            ids.add(val)
+    out = []
+    for sid in ids:
+        try:
+            s = db.get_collection("stores").find_one(
+                {"store_id": sid},
+                {"_id": 0, "latitude": 1, "longitude": 1, "geofence_radius_m": 1},
+            )
+        except Exception:
+            s = None
+        if s and s.get("latitude") is not None and s.get("longitude") is not None:
+            out.append(
+                {
+                    "lat": s["latitude"],
+                    "lng": s["longitude"],
+                    "radius_meters": s.get("geofence_radius_m") or 500,
+                }
+            )
+    return out
+
+
 @router.post("/login", response_model=LoginResponse)
 async def login(request: LoginRequest, req: Request = None):
     """
@@ -403,14 +442,22 @@ async def login(request: LoginRequest, req: Request = None):
     if not user.get("is_active", False):
         raise HTTPException(status_code=403, detail="User account is disabled")
 
-    # Geo-fence validation: if user is geo_restricted, verify login coordinates
-    if user.get("geo_restricted") and user.get("allowed_coordinates"):
+    # Geo-fence validation: a geo_restricted user must log in within range of an
+    # allowed coordinate. Allowed coordinates are the union of the user's
+    # explicit allowed_coordinates AND the geo-coordinates of the store(s) they
+    # are assigned to -- so seeding a store's location auto-fences its staff.
+    if user.get("geo_restricted"):
+        fence_coords = list(user.get("allowed_coordinates") or [])
+        fence_coords.extend(_store_fence_coords(user))
+    else:
+        fence_coords = []
+    if fence_coords:
         if request.latitude is None or request.longitude is None:
             raise HTTPException(
                 status_code=403,
                 detail="Location access required. Please enable location services and try again.",
             )
-        allowed = user["allowed_coordinates"]
+        allowed = fence_coords
         within_fence = False
         for coord in allowed:
             c_lat = coord.get("lat")

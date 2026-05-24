@@ -22,6 +22,70 @@ export const storeApi = {
 };
 
 // ============================================================================
+// Org setup - store CRUD with the real backend StoreCreate/StoreUpdate shape
+// (entity_id required; GSTIN is derived server-side from the entity by state).
+// ============================================================================
+
+export interface StorePayload {
+  store_code?: string;
+  store_name?: string;
+  brand?: string;
+  entity_id?: string;
+  address?: string;
+  city?: string;
+  state?: string;
+  state_code?: string;
+  pincode?: string;
+  phone?: string;
+  email?: string;
+  whatsapp?: string;
+  enabled_categories?: string[];
+  latitude?: number | null;
+  longitude?: number | null;
+  geofence_radius_m?: number | null;
+  locality?: string;
+  landmark?: string;
+  store_type?: string;
+  region?: string;
+  opening_date?: string;
+  manager_user_id?: string;
+  working_hours?: string;
+  weekly_off?: string;
+  upi_vpa?: string;
+  cost_center?: string;
+  invoice_prefix?: string;
+  invoice_header?: string;
+  invoice_footer?: string;
+  invoice_terms?: string;
+  is_active?: boolean;
+}
+
+export interface Store extends StorePayload {
+  store_id: string;
+  gstin?: string;
+  is_hq?: boolean;
+}
+
+export const orgStoreApi = {
+  list: async () => {
+    const response = await api.get('/stores', { params: { active_only: false } });
+    return response.data as { stores: Store[]; total: number };
+  },
+  create: async (payload: StorePayload) => {
+    const response = await api.post('/stores', payload);
+    return response.data as { store_id: string; gstin?: string; message: string };
+  },
+  update: async (storeId: string, payload: StorePayload) => {
+    const response = await api.put(`/stores/${storeId}`, payload);
+    return response.data;
+  },
+  remove: async (storeId: string) => {
+    const response = await api.delete(`/stores/${storeId}`);
+    return response.data;
+  },
+};
+
+// ============================================================================
 // Admin API - Store Management
 // ============================================================================
 

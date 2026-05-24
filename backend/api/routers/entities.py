@@ -18,6 +18,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 from .auth import get_current_user, require_roles
+from ..services import org_validation as ov
 
 import sys
 import os
@@ -44,10 +45,59 @@ _ENTITY_ADMIN = ("ADMIN",)  # SUPERADMIN auto-passes inside require_roles
 # ============================================================================
 
 
+# Allowed legal-entity types (Indian).
+ENTITY_TYPES = (
+    "PROPRIETORSHIP",
+    "PARTNERSHIP",
+    "LLP",
+    "PRIVATE_LIMITED",
+    "PUBLIC_LIMITED",
+    "OPC",
+    "HUF",
+    "TRUST",
+    "SOCIETY",
+)
+
+
 class GstinEntry(BaseModel):
     gstin: str
     state_code: str
     state_name: Optional[str] = None
+    registration_type: Optional[str] = "REGULAR"  # REGULAR / COMPOSITION
+    is_primary: bool = False
+
+
+class BankAccount(BaseModel):
+    """A bank account, optionally tied to a specific GSTIN (so collections /
+    payments can be routed per registration)."""
+    label: Optional[str] = None
+    account_no: str
+    ifsc: str
+    bank_name: Optional[str] = None
+    branch: Optional[str] = None
+    account_type: Optional[str] = "CURRENT"  # CURRENT / SAVINGS / CC / OD
+    gstin: Optional[str] = None  # link to a GstinEntry.gstin
+    upi_vpa: Optional[str] = None
+    is_default: bool = False
+
+
+class EntityDocument(BaseModel):
+    doc_type: str  # PAN / GST_CERT / INCORPORATION / MSME / OTHER
+    name: str
+    url: str
+    uploaded_at: Optional[str] = None
+
+
+class InvoiceIdentity(BaseModel):
+    """Entity-level invoice defaults. Stores may override header/footer/terms
+    slightly per outlet (same layout, per-store wording)."""
+    legal_display_name: Optional[str] = None
+    logo_url: Optional[str] = None
+    header_lines: Optional[List[str]] = None
+    footer_text: Optional[str] = None
+    terms: Optional[str] = None
+    signatory_name: Optional[str] = None
+    signatory_designation: Optional[str] = None
 
 
 class PtRegistration(BaseModel):
@@ -68,13 +118,25 @@ class EsiInfo(BaseModel):
 class EntityCreate(BaseModel):
     name: str = Field(..., min_length=2)
     legal_name: Optional[str] = None
+    entity_type: Optional[str] = None
     pan: Optional[str] = None
     tan: Optional[str] = None
+    cin: Optional[str] = None
+    llpin: Optional[str] = None
+    udyam: Optional[str] = None
+    incorporation_date: Optional[str] = None
+    website: Optional[str] = None
     registered_address: Optional[str] = None
+    registered_email: Optional[str] = None
+    registered_phone: Optional[str] = None
     gstins: List[GstinEntry] = Field(default_factory=list)
     pf: PfInfo = Field(default_factory=PfInfo)
     esi: EsiInfo = Field(default_factory=EsiInfo)
     pt_registrations: List[PtRegistration] = Field(default_factory=list)
+    bank_accounts: List[BankAccount] = Field(default_factory=list)
+    invoice: Optional[InvoiceIdentity] = None
+    documents: List[EntityDocument] = Field(default_factory=list)
+    # Legacy single-bank fields, retained for back-compat with older readers.
     bank_account_no: Optional[str] = None
     bank_ifsc: Optional[str] = None
     bank_name: Optional[str] = None
@@ -83,13 +145,24 @@ class EntityCreate(BaseModel):
 class EntityUpdate(BaseModel):
     name: Optional[str] = None
     legal_name: Optional[str] = None
+    entity_type: Optional[str] = None
     pan: Optional[str] = None
     tan: Optional[str] = None
+    cin: Optional[str] = None
+    llpin: Optional[str] = None
+    udyam: Optional[str] = None
+    incorporation_date: Optional[str] = None
+    website: Optional[str] = None
     registered_address: Optional[str] = None
+    registered_email: Optional[str] = None
+    registered_phone: Optional[str] = None
     gstins: Optional[List[GstinEntry]] = None
     pf: Optional[PfInfo] = None
     esi: Optional[EsiInfo] = None
     pt_registrations: Optional[List[PtRegistration]] = None
+    bank_accounts: Optional[List[BankAccount]] = None
+    invoice: Optional[InvoiceIdentity] = None
+    documents: Optional[List[EntityDocument]] = None
     bank_account_no: Optional[str] = None
     bank_ifsc: Optional[str] = None
     bank_name: Optional[str] = None
@@ -116,6 +189,78 @@ def _clean(doc: dict) -> dict:
     if doc and "_id" in doc:
         doc = {k: v for k, v in doc.items() if k != "_id"}
     return doc
+
+
+def _validate_entity_payload(data: dict) -> None:
+    """Block (HTTP 400) on malformed statutory IDs or inconsistent GSTINs.
+    Only validates keys that are present, so partial updates are fine."""
+    et = data.get("entity_type")
+    if et and et not in ENTITY_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid entity_type. Allowed: {', '.join(ENTITY_TYPES)}",
+        )
+    pan = data.get("pan")
+    if pan and not ov.validate_pan(pan):
+        raise HTTPException(status_code=400, detail="Invalid PAN (expected AAAAA9999A)")
+    tan = data.get("tan")
+    if tan and not ov.validate_tan(tan):
+        raise HTTPException(status_code=400, detail="Invalid TAN (expected AAAA99999A)")
+    for g in data.get("gstins") or []:
+        if not isinstance(g, dict):
+            continue
+        gv = g.get("gstin")
+        # Canonicalise the state code in place (JH -> 20, "Jharkhand" -> 20)
+        # so the stored value is always the GST numeric code.
+        if g.get("state_code"):
+            g["state_code"] = ov.normalize_state_code(g["state_code"])
+        sc = g.get("state_code")
+        if sc and not g.get("state_name"):
+            g["state_name"] = ov.state_name(sc)
+        if sc and sc not in ov.INDIAN_STATE_CODES:
+            raise HTTPException(status_code=400, detail=f"Unknown state code: {sc}")
+        if gv:
+            if not ov.validate_gstin(gv):
+                raise HTTPException(
+                    status_code=400, detail=f"Invalid GSTIN (format/checksum): {gv}"
+                )
+            if sc and not ov.gstin_matches_state(gv, sc):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"GSTIN {gv} state prefix does not match state_code {sc}",
+                )
+            if pan and not ov.gstin_matches_pan(gv, pan):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"GSTIN {gv} does not embed the entity PAN {pan}",
+                )
+    for b in data.get("bank_accounts") or []:
+        if isinstance(b, dict) and b.get("ifsc") and not ov.validate_ifsc(b["ifsc"]):
+            raise HTTPException(status_code=400, detail=f"Invalid IFSC: {b['ifsc']}")
+
+
+def _entity_active_dependents(db, entity_id: str) -> Optional[str]:
+    """Human description if the entity still has active stores / employees (so
+    deactivation can be blocked), else None. Fail-soft."""
+    if db is None:
+        return None
+    try:
+        n = db.get_collection("stores").count_documents(
+            {"entity_id": entity_id, "is_active": {"$ne": False}}
+        )
+        if n:
+            return f"{n} active store(s)"
+    except Exception:
+        pass
+    try:
+        n = db.get_collection("employees").count_documents(
+            {"entity_id": entity_id, "is_active": {"$ne": False}}
+        )
+        if n:
+            return f"{n} active employee(s)"
+    except Exception:
+        pass
+    return None
 
 
 def resolve_entity_for_store(db, store_id: Optional[str]) -> Optional[dict]:
@@ -163,6 +308,18 @@ async def list_entities(
         raise HTTPException(status_code=500, detail="Failed to list entities")
 
 
+@router.get("/meta/options")
+async def entity_meta(current_user: dict = Depends(get_current_user)):
+    """Dropdown data for the org-setup UI: GST state codes + entity types.
+    Two-segment path, so it is never captured by GET /{entity_id}."""
+    return {
+        "state_codes": [
+            {"code": c, "name": n} for c, n in sorted(ov.INDIAN_STATE_CODES.items())
+        ],
+        "entity_types": list(ENTITY_TYPES),
+    }
+
+
 @router.post("", status_code=201)
 @router.post("/", status_code=201)
 async def create_entity(
@@ -176,6 +333,7 @@ async def create_entity(
     try:
         coll = db.get_collection("entities")
         doc = payload.model_dump()
+        _validate_entity_payload(doc)
         doc.update(
             {
                 "entity_id": f"ent_{uuid.uuid4().hex[:12]}",
@@ -187,6 +345,8 @@ async def create_entity(
         )
         coll.insert_one(doc)
         return {"status": "success", "entity": _clean(doc)}
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error("create_entity failed: %s", e)
         raise HTTPException(status_code=500, detail="Failed to create entity")
@@ -226,6 +386,19 @@ async def update_entity(
         updates = {k: v for k, v in payload.model_dump().items() if v is not None}
         if not updates:
             return {"status": "no_changes", "entity": _clean(existing)}
+        _validate_entity_payload(updates)
+        # Integrity: don't let an entity be deactivated while it still owns
+        # active stores / employees (their GST + payroll filings depend on it).
+        if updates.get("is_active") is False:
+            dep = _entity_active_dependents(db, entity_id)
+            if dep:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Cannot deactivate entity: it still has {dep}. "
+                        "Reassign or deactivate those first."
+                    ),
+                )
         updates["updated_at"] = _now()
         coll.update_one({"entity_id": entity_id}, {"$set": updates})
         return {"status": "success", "entity": _clean(coll.find_one({"entity_id": entity_id}))}
