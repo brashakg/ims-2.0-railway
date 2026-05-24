@@ -5,11 +5,12 @@
 // ============================================================================
 
 import { Outlet, useLocation } from 'react-router-dom';
-import { useMemo } from 'react';
+import { useEffect, useMemo } from 'react';
 import { Eye } from 'lucide-react';
 import { Shell, type Crumb } from '../shell';
 import { useAppearance } from '../../context/AppearanceContext';
 import { useAuth } from '../../context/AuthContext';
+import { loadHsnRates } from '../../constants/gstRuntime';
 
 // Keep labels consistent with the Rail labels so the crumb matches the active item.
 const SEGMENT_LABELS: Record<string, string> = {
@@ -81,6 +82,11 @@ export function AppLayout() {
   const { isReadOnly } = useAuth();
 
   const crumbs = useMemo(() => pathToCrumbs(location.pathname), [location.pathname]);
+
+  // Load the editable HSN->GST master once per session so the POS preview +
+  // invoice reflect the same (SUPERADMIN-edited) rates the backend bills from.
+  // Fail-soft: resolveGstRate() falls back to static GST 2.0 constants.
+  useEffect(() => { loadHsnRates(); }, []);
 
   return (
     <Shell crumbs={crumbs} brand={brand}>

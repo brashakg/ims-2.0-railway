@@ -12,6 +12,7 @@ export type SettingsTab =
   | 'lens-master'
   | 'discounts'
   | 'tax-invoice'
+  | 'hsn-rates'
   | 'notifications'
   | 'integrations'
   | 'printers'
@@ -158,11 +159,11 @@ export const getHighestRoleLevel = (roles: string[]): number => {
 
 // Category definitions
 export const CATEGORY_DEFINITIONS: Category[] = [
-  { code: 'FR', name: 'Frame', shortName: 'Spectacles', hsnCode: '900311', gstRate: 18, attributes: ['brandName', 'subbrand', 'modelNo', 'colourCode', 'lensSize', 'bridgeWidth', 'templeLength'], isActive: true },
+  { code: 'FR', name: 'Frame', shortName: 'Spectacles', hsnCode: '900311', gstRate: 5, attributes: ['brandName', 'subbrand', 'modelNo', 'colourCode', 'lensSize', 'bridgeWidth', 'templeLength'], isActive: true },
   { code: 'SG', name: 'Sunglass', shortName: 'Sunglasses', hsnCode: '900410', gstRate: 18, attributes: ['brandName', 'subbrand', 'modelNo', 'colourCode', 'lensSize', 'bridgeWidth', 'templeLength'], isActive: true },
-  { code: 'CL', name: 'Contact Lens', shortName: 'Contact Lens', hsnCode: '90013100', gstRate: 12, attributes: ['brandName', 'subbrand', 'modelNo', 'colourName', 'power', 'pack', 'expiryDate'], isActive: true },
-  { code: 'LS', name: 'Optical Lens', shortName: 'Lens', hsnCode: '900150', gstRate: 18, attributes: ['brandName', 'subbrand', 'index', 'coating', 'addOn1', 'addOn2', 'addOn3', 'lensCategory'], isActive: true },
-  { code: 'RG', name: 'Reading Glasses', shortName: 'Readers', hsnCode: '900490', gstRate: 18, attributes: ['brandName', 'subbrand', 'modelNo', 'colourCode', 'lensSize', 'bridgeWidth', 'templeLength', 'power'], isActive: true },
+  { code: 'CL', name: 'Contact Lens', shortName: 'Contact Lens', hsnCode: '90013000', gstRate: 5, attributes: ['brandName', 'subbrand', 'modelNo', 'colourName', 'power', 'pack', 'expiryDate'], isActive: true },
+  { code: 'LS', name: 'Optical Lens', shortName: 'Lens', hsnCode: '900150', gstRate: 5, attributes: ['brandName', 'subbrand', 'index', 'coating', 'addOn1', 'addOn2', 'addOn3', 'lensCategory'], isActive: true },
+  { code: 'RG', name: 'Reading Glasses', shortName: 'Readers', hsnCode: '900490', gstRate: 5, attributes: ['brandName', 'subbrand', 'modelNo', 'colourCode', 'lensSize', 'bridgeWidth', 'templeLength', 'power'], isActive: true },
   { code: 'WT', name: 'Wrist Watch', shortName: 'Watch', hsnCode: '9101', gstRate: 18, attributes: ['brandName', 'subbrand', 'modelNo', 'colourCode', 'dialColour', 'beltColour', 'dialSize', 'beltSize', 'watchCategory'], isActive: true },
   { code: 'CK', name: 'Clock', shortName: 'Clock', hsnCode: '9105', gstRate: 18, attributes: ['brandName', 'subbrand', 'modelNo', 'colourCode', 'dialColour', 'bodyColour', 'dialSize', 'batterySize', 'clockCategory'], isActive: true },
   { code: 'HA', name: 'Hearing Aid', shortName: 'Hearing Aid', hsnCode: '9021', gstRate: 5, attributes: ['brandName', 'subbrand', 'modelNo', 'serialNo', 'machineCapacity', 'machineType'], isActive: true },

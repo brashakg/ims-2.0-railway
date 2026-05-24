@@ -115,7 +115,7 @@ PRODUCT_SCHEMA = {
         # Contact-lens (CL) identity fields. All OPTIONAL + additive so they
         # only apply to CONTACT_LENS / COLORED_CONTACT_LENS products and never
         # break existing non-CL docs. These exact names are shared with the
-        # CL-Rx / sale modules. HSN 9001 / 12% GST (India) for CL categories.
+        # CL-Rx / sale modules. HSN 90013000 / 5% GST (GST 2.0) for CL categories.
         "cl_series": {"bsonType": "string"},  # e.g. Acuvue Oasys
         "modality": {"enum": ["DAILY", "FORTNIGHTLY", "MONTHLY", "QUARTERLY", "YEARLY", "COLOR"]},
         "base_curve": {"bsonType": "double"},  # BC, e.g. 8.6

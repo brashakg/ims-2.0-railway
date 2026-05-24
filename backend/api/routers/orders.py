@@ -40,6 +40,12 @@ CATEGORY_DISCOUNT_CAPS = {
 # backend mirror of the frontend's getGSTRateByCategory.
 from ..services.gst_rates import gst_rate_for_category as _gst_rate_for_category
 
+# resolve_gst_rate layers the SUPERADMIN-editable HSN->GST master over the
+# static canonical table, so a govt rate change is an in-app edit (Settings ->
+# HSN & GST Rates) with no code change. Fail-soft: falls back to the static
+# table when the master/DB is unavailable.
+from ..services.gst_rates import resolve_gst_rate
+
 # LOW_GST_CATEGORIES retained for any external reference / readability; it is
 # the set of categories the canonical table bills at 5%.
 from ..services.gst_rates import GST_CATEGORY_TABLE as _GST_CATEGORY_TABLE
@@ -78,7 +84,8 @@ def _compute_per_category_gst(items: list, cart_discount_pct: float) -> dict:
         subtotal += line_subtotal
         item_discount_sum += float(it.get("discount_amount") or 0.0)
         cat = it.get("category") or it.get("item_type") or ""
-        rate = _gst_rate_for_category(cat)
+        hsn = it.get("hsn_code") or it.get("hsn") or None
+        rate = resolve_gst_rate(hsn_code=hsn, category=cat)
         line_taxable = round(line_subtotal * cart_factor, 2)
         line_tax = round(line_taxable * (rate / 100.0), 2)
         per_rate_taxable[rate] = round(
