@@ -1,11 +1,12 @@
 # Finance & Accounting Router — _get_db() pattern (matches working routers)
 
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Optional, List, Dict
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
+from pydantic import BaseModel, Field
 from .auth import get_current_user
-from ..services import ap_engine, cashflow
+from ..services import ap_engine, cashflow, itc_reconcile
 
 # Mounted at /api/v1/finance in main.py. NO internal prefix: the earlier
 # prefix="/finance" double-prefixed every path to /api/v1/finance/finance/*,
@@ -968,6 +969,81 @@ async def cash_flow_forecast(
         "recurring_monthly_total": recurring_monthly,
     }
     return forecast
+
+
+# === GST input-tax-credit (ITC) reconciliation (ADMIN / ACCOUNTANT) ===
+
+
+@router.get("/itc-register")
+async def itc_register(current_user: dict = Depends(get_current_user)):
+    """Input tax credit available from booked vendor bills, grouped by period."""
+    _require_finance_admin(current_user)
+    db = _get_db()
+    if db is None:
+        return {"periods": [], "total_taxable": 0, "total_itc": 0}
+    try:
+        bills = list(
+            db.get_collection("vendor_bills").find(
+                {}, {"_id": 0, "bill_date": 1, "taxable_amount": 1, "tax_amount": 1}
+            )
+        )
+    except Exception:
+        bills = []
+    return itc_reconcile.build_itc_register(bills)
+
+
+class Gstr2bRow(BaseModel):
+    gstin: Optional[str] = None
+    invoice_no: Optional[str] = None
+    taxable: Optional[float] = 0
+    tax: Optional[float] = 0
+
+
+class Gstr2bReconcileBody(BaseModel):
+    rows: List[Gstr2bRow] = Field(default_factory=list)
+    as_of: Optional[str] = None
+
+
+@router.post("/gstr2b-reconcile")
+async def gstr2b_reconcile(
+    body: Gstr2bReconcileBody, current_user: dict = Depends(get_current_user)
+):
+    """Reconcile booked vendor bills against an uploaded GSTR-2B (rows parsed
+    client-side from the portal download). Returns matched / mismatch /
+    only-in-books (ITC at risk) / only-in-2B buckets."""
+    _require_finance_admin(current_user)
+    rows = [r.model_dump() for r in body.rows]
+    db = _get_db()
+    if db is None:
+        return itc_reconcile.reconcile_gstr2b([], rows, as_of_iso=body.as_of)
+
+    gstin_by_vendor: Dict[str, str] = {}
+    try:
+        for v in db.get_collection("vendors").find(
+            {}, {"_id": 0, "vendor_id": 1, "gstin": 1}
+        ):
+            gstin_by_vendor[v.get("vendor_id")] = v.get("gstin")
+    except Exception:
+        pass
+
+    book_rows = []
+    try:
+        for b in db.get_collection("vendor_bills").find({}, {"_id": 0}):
+            book_rows.append(
+                {
+                    "gstin": gstin_by_vendor.get(b.get("vendor_id")),
+                    "invoice_no": b.get("bill_number"),
+                    "taxable": b.get("taxable_amount"),
+                    "tax": b.get("tax_amount"),
+                    "bill_id": b.get("bill_id"),
+                    "vendor_name": b.get("vendor_name"),
+                    "bill_date": b.get("bill_date"),
+                }
+            )
+    except Exception:
+        book_rows = []
+
+    return itc_reconcile.reconcile_gstr2b(book_rows, rows, as_of_iso=body.as_of)
 
 
 # === Period Lock ===
