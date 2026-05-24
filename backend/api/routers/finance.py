@@ -5,6 +5,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
 from .auth import get_current_user
+from ..services import ap_engine, cashflow
 
 # Mounted at /api/v1/finance in main.py. NO internal prefix: the earlier
 # prefix="/finance" double-prefixed every path to /api/v1/finance/finance/*,
@@ -552,6 +553,9 @@ async def get_outstanding(
 
 @router.get("/vendor-payments")
 async def get_vendor_payments(current_user: dict = Depends(get_current_user)):
+    """Per-vendor accounts-payable summary from REAL bills / payments / debit
+    notes (via ap_engine). `balance` is the true outstanding payable; PO totals
+    are kept only as context. Sorted by largest payable first."""
     db = _get_db()
     vendors = list(
         db.get_collection("vendors").find(
@@ -559,30 +563,48 @@ async def get_vendor_payments(current_user: dict = Depends(get_current_user)):
         )
     )
 
+    def _grouped(coll):
+        out: dict = {}
+        for row in db.get_collection(coll).find({}, {"_id": 0}):
+            out.setdefault(row.get("vendor_id"), []).append(row)
+        return out
+
+    bills_by_v = _grouped("vendor_bills")
+    pays_by_v = _grouped("vendor_payments")
+    dn_by_v = _grouped("vendor_debit_notes")
+
     def _po_total(p):
         return float(p.get("total_amount") or p.get("total") or 0)
 
-    paid_set = {"PAID", "paid"}
     result = []
     for v in vendors:
+        vid = v["vendor_id"]
+        led = ap_engine.build_ledger(
+            bills_by_v.get(vid, []), pays_by_v.get(vid, []), dn_by_v.get(vid, [])
+        )
         pos = list(
             db.get_collection("purchase_orders").find(
-                {"vendor_id": v["vendor_id"]},
-                {"_id": 0, "total_amount": 1, "total": 1, "payment_status": 1},
+                {"vendor_id": vid}, {"_id": 0, "total_amount": 1, "total": 1}
             )
         )
-        total = sum(_po_total(p) for p in pos)
-        paid = sum(_po_total(p) for p in pos if p.get("payment_status") in paid_set)
+        po_total = round(sum(_po_total(p) for p in pos), 2)
         result.append(
             {
-                "vendor_id": v["vendor_id"],
-                "vendor_name": v.get("legal_name") or v.get("trade_name") or v.get("name") or v["vendor_id"],
-                "total_orders": total,
-                "total_paid": paid,
-                "balance": total - paid,
+                "vendor_id": vid,
+                "vendor_name": v.get("legal_name")
+                or v.get("trade_name")
+                or v.get("name")
+                or vid,
+                "po_total": po_total,
+                "total_orders": po_total,  # back-compat alias for the old key
+                "total_billed": led["total_billed"],
+                "total_paid": led["total_paid"],
+                "total_tds": led["total_tds"],
+                "total_debit_notes": led["total_debit_notes"],
+                "balance": led["closing_balance"],
             }
         )
-    return result
+    return sorted(result, key=lambda r: -r["balance"])
 
 
 # === Cash Flow ===
@@ -644,18 +666,308 @@ async def get_cash_flow(
             ]
         )
     )
-    total_outflow = (exp_out[0]["total"] if exp_out else 0) + (
-        po_out[0]["total"] if po_out else 0
-    )
+    # Real cash paid to vendors this period (vendor_payments). AP is org-level,
+    # so only fold it in for the org/owner view (no specific store selected) to
+    # avoid double-attributing HQ payments to one store.
+    vendor_payment_outflow = 0.0
+    if not active_store:
+        try:
+            vp = list(
+                db.get_collection("vendor_payments").aggregate(
+                    [
+                        {"$match": {"payment_date": {"$gte": start.date().isoformat()}}},
+                        {"$group": {"_id": None, "total": {"$sum": "$amount"}}},
+                    ]
+                )
+            )
+            vendor_payment_outflow = round(vp[0]["total"], 2) if vp else 0.0
+        except Exception:
+            vendor_payment_outflow = 0.0
+
+    expense_outflow = exp_out[0]["total"] if exp_out else 0
+    purchase_outflow = po_out[0]["total"] if po_out else 0
+    total_outflow = expense_outflow + purchase_outflow + vendor_payment_outflow
 
     return {
         "period": period,
         "inflows": total_inflow,
         "outflows": total_outflow,
         "net_cash_flow": total_inflow - total_outflow,
-        "expense_outflow": exp_out[0]["total"] if exp_out else 0,
-        "purchase_outflow": po_out[0]["total"] if po_out else 0,
+        "expense_outflow": expense_outflow,
+        "purchase_outflow": purchase_outflow,
+        "vendor_payment_outflow": vendor_payment_outflow,
     }
+
+
+# === Owner cash-flow dashboard + forecast (ADMIN / ACCOUNTANT) ===
+
+
+def _require_finance_admin(current_user: dict) -> None:
+    """Org-wide financials are owner/accountant material."""
+    roles = current_user.get("roles", []) or []
+    if not any(r in roles for r in ("SUPERADMIN", "ADMIN", "ACCOUNTANT")):
+        raise HTTPException(
+            status_code=403, detail="Owner financials require ADMIN / ACCOUNTANT"
+        )
+
+
+def _ap_rows(db):
+    """(outstanding bills, all payments, all debit notes) for AP math."""
+    try:
+        bills = list(
+            db.get_collection("vendor_bills").find(
+                {"status": {"$ne": "PAID"}}, {"_id": 0}
+            )
+        )
+        payments = list(db.get_collection("vendor_payments").find({}, {"_id": 0}))
+        dn = list(db.get_collection("vendor_debit_notes").find({}, {"_id": 0}))
+    except Exception:
+        bills, payments, dn = [], [], []
+    return bills, payments, dn
+
+
+def _ar_aging(db, now: datetime) -> dict:
+    """Customer receivables aged by order age (mirror of /outstanding)."""
+    buckets = {"0_30": 0.0, "31_60": 0.0, "61_90": 0.0, "90_plus": 0.0}
+    total = 0.0
+    try:
+        orders = list(
+            db.get_collection("orders").find(
+                {"payment_status": {"$in": UNPAID_STATUSES}},
+                {
+                    "_id": 0,
+                    "grand_total": 1,
+                    "total": 1,
+                    "amount_paid": 1,
+                    "created_at": 1,
+                },
+            )
+        )
+    except Exception:
+        orders = []
+    for o in orders:
+        bal = _order_total(o) - float(o.get("amount_paid", 0) or 0)
+        if bal <= 0:
+            continue
+        created = ap_engine.parse_date(o.get("created_at")) or now
+        days = (now - created).days
+        if days <= 30:
+            buckets["0_30"] += bal
+        elif days <= 60:
+            buckets["31_60"] += bal
+        elif days <= 90:
+            buckets["61_90"] += bal
+        else:
+            buckets["90_plus"] += bal
+        total += bal
+    buckets = {k: round(v, 2) for k, v in buckets.items()}
+    overdue = round(buckets["31_60"] + buckets["61_90"] + buckets["90_plus"], 2)
+    return {"total": round(total, 2), "buckets": buckets, "overdue": overdue}
+
+
+def _agg_sum(db, coll: str, match: dict, expr) -> float:
+    try:
+        r = list(
+            db.get_collection(coll).aggregate(
+                [{"$match": match}, {"$group": {"_id": None, "total": {"$sum": expr}}}]
+            )
+        )
+        return round(r[0]["total"], 2) if r else 0.0
+    except Exception:
+        return 0.0
+
+
+@router.get("/owner-dashboard")
+async def owner_dashboard(current_user: dict = Depends(get_current_user)):
+    """CEO/owner financial snapshot: receivables (AR) vs payables (AP), net
+    working-capital position, this-month cash movement, and alerts. Org-wide,
+    ADMIN / ACCOUNTANT only."""
+    _require_finance_admin(current_user)
+    db = _get_db()
+    now = datetime.utcnow()
+    start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+    ar = _ar_aging(db, now)
+
+    bills, payments, dn = _ap_rows(db)
+    ap = ap_engine.build_aging(bills, payments, dn)
+    ap_overdue = round(ap["total_outstanding"] - ap["buckets"]["current"], 2)
+    due_7d = 0.0
+    due_30d = 0.0
+    for it in ap["items"]:
+        due = ap_engine.parse_date(it.get("due_date"))
+        if due is None:
+            continue
+        delta = (due.date() - now.date()).days
+        if delta <= 7:
+            due_7d += it["outstanding"]
+        if delta <= 30:
+            due_30d += it["outstanding"]
+    due_7d = round(due_7d, 2)
+    due_30d = round(due_30d, 2)
+
+    revenue = _agg_sum(
+        db,
+        "orders",
+        {
+            "created_at": {"$gte": start.isoformat()},
+            "payment_status": {"$in": PAID_STATUSES},
+        },
+        _REVENUE_EXPR,
+    )
+    expenses = _agg_sum(
+        db,
+        "expenses",
+        {
+            "date": {"$gte": start.isoformat()},
+            "status": {"$in": ["APPROVED", "PAID", "approved", "paid"]},
+        },
+        "$amount",
+    )
+    vpaid = _agg_sum(
+        db,
+        "vendor_payments",
+        {"payment_date": {"$gte": start.date().isoformat()}},
+        "$amount",
+    )
+
+    alerts = []
+    if ap_overdue > 0:
+        alerts.append(
+            {"level": "warning", "message": f"Rs {ap_overdue:.0f} of vendor payables overdue"}
+        )
+    if due_7d > 0:
+        alerts.append(
+            {"level": "info", "message": f"Rs {due_7d:.0f} of vendor bills due within 7 days"}
+        )
+    if ar["overdue"] > 0:
+        alerts.append(
+            {
+                "level": "warning",
+                "message": f"Rs {ar['overdue']:.0f} of receivables overdue 30+ days",
+            }
+        )
+
+    return {
+        "as_of": now.date().isoformat(),
+        "receivables": ar,
+        "payables": {
+            "total": ap["total_outstanding"],
+            "buckets": ap["buckets"],
+            "overdue": ap_overdue,
+            "due_7d": due_7d,
+            "due_30d": due_30d,
+            "unallocated_credits": ap["unallocated_credits"],
+        },
+        "net_position": round(ar["total"] - ap["total_outstanding"], 2),
+        "this_month": {
+            "revenue": revenue,
+            "expenses": expenses,
+            "vendor_payments": vpaid,
+            "net_cash_flow": round(revenue - expenses - vpaid, 2),
+        },
+        "alerts": alerts,
+    }
+
+
+@router.get("/cash-flow-forecast")
+async def cash_flow_forecast(
+    days: int = Query(90, ge=7, le=365),
+    opening_cash: float = Query(0.0),
+    collection_lag_days: int = Query(15, ge=0, le=120),
+    recurring_monthly_outflow: float = Query(0.0, ge=0),
+    current_user: dict = Depends(get_current_user),
+):
+    """Weekly cash-flow projection. Inflows = unpaid orders projected to a
+    collection date (created + collection_lag_days); outflows = outstanding
+    vendor bills on their due date + a recurring monthly estimate (avg of the
+    last 3 months' expenses plus an owner-supplied recurring_monthly_outflow,
+    e.g. payroll). Surfaces the lowest projected balance as a cash-crunch
+    warning. ADMIN / ACCOUNTANT only."""
+    _require_finance_admin(current_user)
+    db = _get_db()
+    now = datetime.utcnow()
+
+    # Inflows from AR.
+    inflow_events = []
+    try:
+        orders = list(
+            db.get_collection("orders").find(
+                {"payment_status": {"$in": UNPAID_STATUSES}},
+                {
+                    "_id": 0,
+                    "grand_total": 1,
+                    "total": 1,
+                    "amount_paid": 1,
+                    "created_at": 1,
+                },
+            )
+        )
+    except Exception:
+        orders = []
+    for o in orders:
+        bal = _order_total(o) - float(o.get("amount_paid", 0) or 0)
+        if bal <= 0:
+            continue
+        created = ap_engine.parse_date(o.get("created_at")) or now
+        coll_date = created + timedelta(days=collection_lag_days)
+        inflow_events.append({"date": coll_date.date().isoformat(), "amount": bal})
+
+    # Outflows from AP (real due dates).
+    bills, payments, dn = _ap_rows(db)
+    ap = ap_engine.build_aging(bills, payments, dn)
+    outflow_events = [
+        {"date": it.get("due_date"), "amount": it["outstanding"]} for it in ap["items"]
+    ]
+
+    # Recurring monthly outflow estimate.
+    monthly_expense_est = 0.0
+    try:
+        three_mo_ago = (now - timedelta(days=90)).isoformat()
+        r = list(
+            db.get_collection("expenses").aggregate(
+                [
+                    {
+                        "$match": {
+                            "date": {"$gte": three_mo_ago},
+                            "status": {"$in": ["APPROVED", "PAID", "approved", "paid"]},
+                        }
+                    },
+                    {"$group": {"_id": None, "total": {"$sum": "$amount"}}},
+                ]
+            )
+        )
+        monthly_expense_est = round(r[0]["total"] / 3.0, 2) if r else 0.0
+    except Exception:
+        monthly_expense_est = 0.0
+    recurring_monthly = round(monthly_expense_est + recurring_monthly_outflow, 2)
+    if recurring_monthly > 0:
+        m, y = now.month, now.year
+        for _ in range((days // 28) + 1):
+            if m == 12:
+                m, y = 1, y + 1
+            else:
+                m += 1
+            event_date = datetime(y, m, 1)
+            if 0 <= (event_date.date() - now.date()).days <= days:
+                outflow_events.append(
+                    {
+                        "date": event_date.date().isoformat(),
+                        "amount": recurring_monthly,
+                        "label": "Recurring (expenses/payroll est.)",
+                    }
+                )
+
+    forecast = cashflow.build_forecast(
+        opening_cash, inflow_events, outflow_events, now.date().isoformat(), days
+    )
+    forecast["assumptions"] = {
+        "collection_lag_days": collection_lag_days,
+        "monthly_expense_estimate": monthly_expense_est,
+        "recurring_monthly_outflow_input": recurring_monthly_outflow,
+        "recurring_monthly_total": recurring_monthly,
+    }
+    return forecast
 
 
 # === Period Lock ===

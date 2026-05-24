@@ -73,6 +73,7 @@ const AddProductPage = lazy(() => import('./pages/catalog/AddProductPage'));
 const CatalogAutopilotPage = lazy(() => import('./pages/catalog/CatalogAutopilotPage'));
 const ExpenseTracker = lazy(() => import('./pages/finance/ExpenseTracker'));
 const FinanceDashboard = lazy(() => import('./pages/finance/FinanceDashboard'));
+const CashFlowPage = lazy(() => import('./pages/finance/CashFlowPage'));
 const WalkoutsPage = lazy(() => import('./pages/walkouts/WalkoutsPage').then(m => ({ default: m.WalkoutsPage })));
 const WalkoutDetailPage = lazy(() => import('./pages/walkouts/WalkoutDetailPage').then(m => ({ default: m.WalkoutDetailPage })));
 const WalkoutsDashboardPage = lazy(() => import('./pages/walkouts/WalkoutsDashboardPage').then(m => ({ default: m.WalkoutsDashboardPage })));
@@ -798,6 +799,14 @@ function App() {
                     element={
                       <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT']}>
                         <FinanceDashboard />
+                      </ProtectedRoute>
+                    }
+                  />
+                  <Route
+                    path="finance/cash-flow"
+                    element={
+                      <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'ACCOUNTANT']}>
+                        <CashFlowPage />
                       </ProtectedRoute>
                     }
                   />
