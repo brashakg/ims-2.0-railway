@@ -8,6 +8,7 @@ import { useAuth } from '../../context/AuthContext';
 import { useAppearance } from '../../context/AppearanceContext';
 import { Icon, type IconName } from './Icon';
 import type { UserRole } from '../../types';
+import { ecommerceSsoApi } from '../../services/api/ecommerceSso';
 
 const COLLAPSED_GROUPS_KEY = 'ims_rail_collapsed_groups';
 
@@ -41,6 +42,7 @@ interface NavItem {
   icon: IconName;
   requireRoles?: UserRole[]; // if set, only visible to users holding one of these roles
   external?: boolean; // render as <a target=_blank> instead of an in-app route
+  sso?: boolean; // external app reached via an SSO handoff (mint token, then open)
 }
 
 // The consolidated e-commerce (BVI) admin. Configurable per-env so the URL can
@@ -118,7 +120,7 @@ const RAIL_GROUPS: NavGroup[] = [
     title: 'Growth',
     items: [
       { id: 'marketing', label: 'Marketing', to: '/customers/campaigns', icon: 'megaphone', requireRoles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER'] },
-      { id: 'online-store', label: 'Online Store', to: ECOMMERCE_URL, icon: 'tag', external: true, requireRoles: ['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER'] },
+      { id: 'online-store', label: 'Online Store', to: ECOMMERCE_URL, icon: 'tag', external: true, sso: true, requireRoles: ['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER'] },
     ],
   },
   {
@@ -301,6 +303,30 @@ export function Rail({ brand = 'bv' }: { brand?: 'bv' | 'wizopt' }) {
               {group.items.map((item) => {
                 const IconCmp = Icon[item.icon];
                 if (item.external) {
+                  if (item.sso) {
+                    // SSO handoff: mint a short-lived token, then open the
+                    // external app already logged in. Falls back to a plain
+                    // open if SSO isn't configured / the user isn't allowed.
+                    return (
+                      <button
+                        key={item.id}
+                        type="button"
+                        className="rail-item"
+                        title={`${item.label} (opens in new tab)`}
+                        onClick={async () => {
+                          try {
+                            const r = await ecommerceSsoApi.getUrl();
+                            window.open(r.url, '_blank', 'noopener,noreferrer');
+                          } catch {
+                            window.open(item.to, '_blank', 'noopener,noreferrer');
+                          }
+                        }}
+                      >
+                        <IconCmp />
+                        <span className="rail-label">{item.label}</span>
+                      </button>
+                    );
+                  }
                   // External app (e.g. the e-commerce admin) — open in a new tab.
                   return (
                     <a
