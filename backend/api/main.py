@@ -137,6 +137,17 @@ async def lifespan(app: FastAPI):
                 get_db().ensure_indexes()
             except Exception as e:
                 logger.warning(f"[WARN] Index creation skipped: {e}")
+            # Seed the editable HSN -> GST rate master (idempotent; never
+            # overwrites owner edits). Powers POS GST resolution overrides
+            # via services/gst_rates.py.
+            try:
+                from .services.gst_rates import seed_hsn_gst_master
+
+                _n = seed_hsn_gst_master()
+                if _n:
+                    logger.info(f"[OK] Seeded {_n} HSN->GST master rows")
+            except Exception as e:
+                logger.warning(f"[WARN] HSN->GST seed skipped: {e}")
         else:
             logger.warning("[WARN] Database not connected - running in mock mode")
     else:

@@ -114,6 +114,58 @@ def test_helper_falls_back_to_18pct_for_unknown_category():
     assert out["tax"] == 180.0
 
 
+def test_helper_contact_lens_5pct():
+    """CONTACT_LENSES at ₹1000 → 5% GST (HSN 90013000, GST 2.0)."""
+    from api.routers.orders import _compute_per_category_gst
+    items = [{"item_total": 1000.0, "category": "CONTACT_LENSES"}]
+    out = _compute_per_category_gst(items, 0)
+    assert out["tax"] == 50.0
+    assert out["dominant_rate"] == 5.0
+    assert items[0]["gst_rate"] == 5.0
+
+
+def test_helper_colour_contacts_5pct():
+    """COLOUR_CONTACTS resolves to 5% (same CONTACT_LENS hint)."""
+    from api.routers.orders import _compute_per_category_gst
+    out = _compute_per_category_gst(
+        [{"item_total": 1000.0, "category": "COLOUR_CONTACTS"}], 0,
+    )
+    assert out["tax"] == 50.0
+
+
+def test_master_override_flows_into_order_tax(monkeypatch):
+    """If the editable HSN->GST master sets contacts to 12%, the POS recompute
+    must bill 12% — proving the master overrides the static table in billing."""
+    from api.services import gst_rates
+    monkeypatch.setattr(
+        gst_rates,
+        "_load_lookup",
+        lambda: {"by_hsn": {}, "by_cat": {"CONTACT_LENS": 12.0}},
+    )
+    from api.routers.orders import _compute_per_category_gst
+    items = [{"item_total": 1000.0, "category": "CONTACT_LENSES"}]
+    out = _compute_per_category_gst(items, 0)
+    assert items[0]["gst_rate"] == 12.0
+    assert out["tax"] == 120.0
+
+
+def test_item_hsn_overrides_category(monkeypatch):
+    """An explicit item hsn_code wins over the category hint."""
+    from api.services import gst_rates
+    monkeypatch.setattr(
+        gst_rates,
+        "_load_lookup",
+        lambda: {"by_hsn": {"900410": 18.0}, "by_cat": {"CONTACT_LENS": 5.0}},
+    )
+    from api.routers.orders import _compute_per_category_gst
+    items = [{
+        "item_total": 1000.0, "category": "CONTACT_LENSES", "hsn_code": "900410",
+    }]
+    out = _compute_per_category_gst(items, 0)
+    assert items[0]["gst_rate"] == 18.0
+    assert out["tax"] == 180.0
+
+
 # ============================================================================
 # E2E regression tests via TestClient
 # ============================================================================

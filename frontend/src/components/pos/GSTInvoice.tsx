@@ -5,7 +5,8 @@
 
 import { useRef } from 'react';
 import { Printer, Download } from 'lucide-react';
-import { calculateGST, calculateIGST, getGSTRateByCategory, getHSNByCategory } from '../../constants/gst';
+import { calculateGST, calculateIGST, getHSNByCategory } from '../../constants/gst';
+import { resolveGstRate } from '../../constants/gstRuntime';
 import { describeForReceipt } from '../../utils/receiptFormat';
 
 // Generate GST-compliant invoice serial number from order number
@@ -67,8 +68,8 @@ export function GSTInvoice({ order, store, onPrint }: GSTInvoiceProps) {
     // Taxable value = item finalPrice reduced by proportional order discount
     const taxableValue = Math.round(item.finalPrice * discountRatio * 100) / 100;
     const category = (item as any).category || (item as any).itemType || '';
-    const gstRate = (item as any).gstRate || getGSTRateByCategory(category);
     const hsnInfo = getHSNByCategory(category, true);
+    const gstRate = (item as any).gstRate || resolveGstRate(category, (item as any).hsnCode || hsnInfo?.code);
     const hsnCode = (item as any).hsnCode || hsnInfo?.code || '9004';
 
     let cgst = 0, sgst = 0, igst = 0;

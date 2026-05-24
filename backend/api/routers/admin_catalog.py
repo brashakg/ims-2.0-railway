@@ -36,6 +36,10 @@ import uuid
 
 from .admin import _require_admin_role
 from ..services.file_store import get_file_store, MAX_FILE_SIZE_BYTES
+from ..services.gst_rates import (
+    seed_hsn_gst_master,
+    invalidate_cache as invalidate_gst_cache,
+)
 
 
 router = APIRouter(dependencies=[Depends(_require_admin_role)])
@@ -206,6 +210,70 @@ async def update_category(category_id: str, payload: CategoryUpdate):
 @router.delete("/categories/{category_id}")
 async def delete_category(category_id: str):
     return _delete_doc("category_masters", "category_id", category_id)
+
+
+# ============================================================================
+# HSN -> GST RATE MASTER — /api/v1/admin/hsn
+# ============================================================================
+# Editable HSN->GST table that POS billing resolves against (overrides the
+# static canonical table in api/services/gst_rates.py). Lets SUPERADMIN/ADMIN
+# update rates in-app when the govt revises GST, no code change. Seeded with
+# GST 2.0 rates on first list. category_hint is the primary POS resolution key
+# (order items carry `category`, not HSN).
+
+
+class HsnRateCreate(BaseModel):
+    hsn_code: str = Field(..., min_length=4, max_length=12)
+    description: Optional[str] = None
+    gst_rate: float = Field(..., ge=0, le=40)
+    category_hint: Optional[str] = None
+    is_active: Optional[bool] = True
+
+
+class HsnRateUpdate(BaseModel):
+    hsn_code: Optional[str] = None
+    description: Optional[str] = None
+    gst_rate: Optional[float] = Field(None, ge=0, le=40)
+    category_hint: Optional[str] = None
+    is_active: Optional[bool] = None
+
+
+@router.get("/hsn")
+async def list_hsn_rates():
+    # Ensure the GST 2.0 baseline exists so the editor is never empty.
+    seed_hsn_gst_master()
+    return _list_envelope("hsn_gst_master", "hsn_rates", sort_field="hsn_code")
+
+
+@router.post("/hsn", status_code=201)
+async def create_hsn_rate(payload: HsnRateCreate):
+    coll = _coll("hsn_gst_master")
+    if coll is not None and coll.find_one({"hsn_code": payload.hsn_code}):
+        raise HTTPException(
+            status_code=409, detail=f"HSN code '{payload.hsn_code}' already exists"
+        )
+    doc = _create_doc("hsn_gst_master", payload.model_dump(), "hsn_id")
+    invalidate_gst_cache()
+    return doc
+
+
+@router.put("/hsn/{hsn_id}")
+async def update_hsn_rate(hsn_id: str, payload: HsnRateUpdate):
+    doc = _update_doc(
+        "hsn_gst_master",
+        "hsn_id",
+        hsn_id,
+        payload.model_dump(exclude_unset=True),
+    )
+    invalidate_gst_cache()
+    return doc
+
+
+@router.delete("/hsn/{hsn_id}")
+async def delete_hsn_rate(hsn_id: str):
+    doc = _delete_doc("hsn_gst_master", "hsn_id", hsn_id)
+    invalidate_gst_cache()
+    return doc
 
 
 # ============================================================================

@@ -117,3 +117,184 @@ def hsn_for_category(category: str) -> str | None:
     """Return the 6-digit HSN code for a product category, or None if unknown."""
     entry = GST_CATEGORY_TABLE.get((category or "").strip().upper())
     return entry[0] if entry else None
+
+
+# ============================================================================
+# EDITABLE HSN -> GST MASTER (DB override layer over the static table above)
+# ============================================================================
+# The GST_CATEGORY_TABLE above is the canonical CODE default. This layer adds an
+# OWNER-editable override: a Mongo `hsn_gst_master` collection managed by
+# SUPERADMIN in Settings -> HSN & GST Rates. When the govt revises GST, the
+# owner edits a rate here and POS bills the new rate with NO code change.
+#
+# resolve_gst_rate() is what billing calls. Resolution order:
+#   1. editable master, by exact HSN code
+#   2. editable master, by category_hint (POS items carry category, not HSN)
+#   3. fall back to the static GST_CATEGORY_TABLE via gst_rate_for_category()
+# Fail-soft: DB/cache down -> step 3 only -> identical to the #251 behaviour.
+
+_COLLECTION = "hsn_gst_master"
+_CACHE_KEY = "hsn_gst_master:lookup"
+
+# Map the many category spellings to the category_hint stored on master rows.
+_CATEGORY_HINT = {
+    "FRAME": "FRAME", "FRAMES": "FRAME", "EYEGLASS_FRAME": "FRAME",
+    "SPECTACLE_FRAME": "FRAME", "FR": "FRAME",
+    "OPTICAL_LENS": "LENS", "LENS": "LENS", "LENSES": "LENS", "RX_LENSES": "LENS",
+    "EYEGLASS_LENS": "LENS", "OPTICAL_LENSES": "LENS", "SPECTACLE_LENS": "LENS",
+    "SPECTACLE_LENSES": "LENS", "LS": "LENS",
+    "CONTACT_LENS": "CONTACT_LENS", "CONTACT_LENSES": "CONTACT_LENS",
+    "COLORED_CONTACT_LENS": "CONTACT_LENS", "COLORED_CONTACT_LENSES": "CONTACT_LENS",
+    "COLOUR_CONTACTS": "CONTACT_LENS", "CL": "CONTACT_LENS",
+    "READING_GLASSES": "SPECTACLE", "SPECTACLE": "SPECTACLE",
+    "COMPLETE_SPECTACLE": "SPECTACLE", "RG": "SPECTACLE",
+    "SUNGLASS": "SUNGLASSES", "SUNGLASSES": "SUNGLASSES", "SG": "SUNGLASSES",
+    "WATCH": "WATCH", "WRIST_WATCHES": "WATCH", "WATCHES": "WATCH", "WT": "WATCH",
+    "SMARTWATCH": "SMARTWATCH", "SMARTWATCHES": "SMARTWATCH",
+    "SMART_WATCH": "SMARTWATCH", "SMTWT": "SMARTWATCH",
+    "ACCESSORIES": "ACCESSORIES", "ACCESSORY": "ACCESSORIES", "ACC": "ACCESSORIES",
+    "SERVICE": "SERVICE", "SERVICES": "SERVICE", "SVC": "SERVICE",
+    "HEARING_AID": "HEARING_AID", "HEARING_AIDS": "HEARING_AID", "HA": "HEARING_AID",
+}
+
+# GST 2.0 seed for the editable master. Mirrors GST_CATEGORY_TABLE's rates +
+# 6-digit HSNs. Idempotent seeder inserts only missing codes; never overwrites
+# an owner/CA edit.
+HSN_GST_SEED = [
+    {"hsn_code": "900130", "description": "Contact lenses", "gst_rate": 5.0, "category_hint": "CONTACT_LENS"},
+    {"hsn_code": "900150", "description": "Spectacle / optical lenses", "gst_rate": 5.0, "category_hint": "LENS"},
+    {"hsn_code": "900311", "description": "Frames and mountings for spectacles", "gst_rate": 5.0, "category_hint": "FRAME"},
+    {"hsn_code": "900490", "description": "Corrective spectacles / goggles / readers", "gst_rate": 5.0, "category_hint": "SPECTACLE"},
+    {"hsn_code": "900410", "description": "Sunglasses (non-corrective)", "gst_rate": 18.0, "category_hint": "SUNGLASSES"},
+    {"hsn_code": "910111", "description": "Wrist watches", "gst_rate": 18.0, "category_hint": "WATCH"},
+    {"hsn_code": "910221", "description": "Smart watches", "gst_rate": 18.0, "category_hint": "SMARTWATCH"},
+    {"hsn_code": "392690", "description": "Spectacle cases & optical accessories", "gst_rate": 18.0, "category_hint": "ACCESSORIES"},
+    {"hsn_code": "998599", "description": "Optical repair / fitting services", "gst_rate": 18.0, "category_hint": "SERVICE"},
+    {"hsn_code": "902140", "description": "Hearing aids (NIL / exempt)", "gst_rate": 0.0, "category_hint": "HEARING_AID"},
+]
+
+
+def _get_collection():
+    try:
+        from database.connection import get_db
+
+        db = get_db()
+        if db and db.is_connected:
+            return db.get_collection(_COLLECTION)
+    except Exception:
+        pass
+    return None
+
+
+def _normalize_category(category) -> str:
+    if not category:
+        return ""
+    raw = str(category).strip().upper().replace("-", "_").replace(" ", "_")
+    return _CATEGORY_HINT.get(raw, raw)
+
+
+def _load_lookup() -> dict:
+    """Build (and cache) {by_hsn, by_cat} from the editable master. Returns
+    empty maps when the DB is offline (resolve then uses the static table)."""
+    cache = None
+    try:
+        from .cache import cache as _c
+
+        cache = _c
+        cached = cache.get(_CACHE_KEY)
+        if cached is not None:
+            return cached
+    except Exception:
+        pass
+
+    by_hsn: dict = {}
+    by_cat: dict = {}
+    coll = _get_collection()
+    if coll is not None:
+        try:
+            for doc in coll.find({"is_active": {"$ne": False}}):
+                rate = doc.get("gst_rate")
+                if rate is None:
+                    continue
+                try:
+                    rate_f = float(rate)
+                except (TypeError, ValueError):
+                    continue
+                hc = str(doc.get("hsn_code", "") or "").strip()
+                if hc:
+                    by_hsn[hc] = rate_f
+                ch = str(doc.get("category_hint", "") or "").strip().upper()
+                if ch:
+                    by_cat.setdefault(ch, rate_f)
+        except Exception:
+            pass
+
+    result = {"by_hsn": by_hsn, "by_cat": by_cat}
+    try:
+        if cache is not None:
+            cache.set(_CACHE_KEY, result, ttl=cache.TTL_LONG)
+    except Exception:
+        pass
+    return result
+
+
+def invalidate_cache() -> None:
+    """Drop the cached lookup so the next resolve re-reads the master.
+    Call after any create/update/delete on hsn_gst_master."""
+    try:
+        from .cache import cache
+
+        cache.delete(_CACHE_KEY)
+    except Exception:
+        pass
+
+
+def resolve_gst_rate(hsn_code=None, category=None) -> float:
+    """GST rate (%) for a sale line. Editable master (HSN -> category_hint)
+    overrides the static GST_CATEGORY_TABLE. Never raises."""
+    lookup = _load_lookup()
+    by_hsn = lookup.get("by_hsn", {})
+    by_cat = lookup.get("by_cat", {})
+
+    if hsn_code:
+        hc = str(hsn_code).strip()
+        if hc and hc in by_hsn:
+            return by_hsn[hc]
+
+    norm = _normalize_category(category)
+    if norm and norm in by_cat:
+        return by_cat[norm]
+
+    # Fall back to the canonical static table (#251). Use the normalized form so
+    # case / hyphen / space / non-string category variants still resolve (all
+    # category hints exist as keys in GST_CATEGORY_TABLE).
+    return gst_rate_for_category(norm)
+
+
+def seed_hsn_gst_master() -> int:
+    """Idempotently insert missing GST 2.0 seed rows. Returns count inserted.
+    Never overwrites existing rows (owner/CA edits preserved). Safe per-startup."""
+    coll = _get_collection()
+    if coll is None:
+        return 0
+    inserted = 0
+    try:
+        from datetime import datetime
+        import uuid
+
+        for row in HSN_GST_SEED:
+            if coll.find_one({"hsn_code": row["hsn_code"]}):
+                continue
+            doc = dict(row)
+            doc["hsn_id"] = str(uuid.uuid4())
+            doc["_id"] = doc["hsn_id"]
+            doc["is_active"] = True
+            doc["created_at"] = datetime.utcnow()
+            doc["updated_at"] = datetime.utcnow()
+            coll.insert_one(doc)
+            inserted += 1
+    except Exception:
+        pass
+    if inserted:
+        invalidate_cache()
+    return inserted

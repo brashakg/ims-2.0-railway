@@ -266,6 +266,23 @@ async def create_product(
     return {"product_id": str(uuid.uuid4()), "sku": product.sku}
 
 
+@router.get("/gst-rates")
+async def get_gst_rates(current_user: dict = Depends(get_current_user)):
+    """Read-only HSN->GST lookup for any authenticated user (POS cashiers
+    included) so the cart preview + invoice show the SAME rates the backend
+    bills from (the SUPERADMIN-editable master overrides the static table).
+    Edits live at /api/v1/admin/hsn. Fail-soft: empty maps when DB is offline
+    (frontend then uses its static GST 2.0 constants)."""
+    try:
+        from ..services.gst_rates import _load_lookup, seed_hsn_gst_master
+
+        seed_hsn_gst_master()
+        lk = _load_lookup()
+        return {"by_hsn": lk.get("by_hsn", {}), "by_cat": lk.get("by_cat", {})}
+    except Exception:
+        return {"by_hsn": {}, "by_cat": {}}
+
+
 # NOTE: Specific routes MUST come before /{product_id}
 @router.get("/brands/list")
 async def list_brands(

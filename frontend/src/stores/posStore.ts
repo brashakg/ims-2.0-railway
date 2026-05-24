@@ -8,7 +8,7 @@
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
 import type { Customer, Patient, Prescription } from '../types';
-import { getGSTRateByCategory } from '../constants/gst';
+import { resolveGstRate } from '../constants/gstRuntime';
 
 // ============================================================================
 // Debounced storage — prevents localStorage writes from blocking UI (fixes INP)
@@ -551,7 +551,7 @@ export const usePOSStore = create<POSState>()(
           const lineTotal = item.line_total || 0;
           const itemTaxable = Math.round(lineTotal * cartDiscountFactor * 100) / 100;
           taxable += itemTaxable;
-          const gstRate = getGSTRateByCategory(item.category);
+          const gstRate = resolveGstRate(item.category, (item as any).hsn_code || (item as any).hsnCode);
           totalTax += itemTaxable * (gstRate / 100);
         }
         // NOTE: never `set()` inside a getter. React 18+ / zustand 5
