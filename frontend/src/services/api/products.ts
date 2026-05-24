@@ -33,6 +33,12 @@ export interface CreateProductPayload {
   cl_axis?: number;
   cl_add?: number;
   pack_size?: number;
+  // ---- Spectacle-lens stock-power identity (drives the SPH x CYL Power Grid).
+  // Top-level on ProductCreate, optional. Only sent for the lens category. ----
+  sph?: number;
+  cyl?: number;
+  axis?: number;
+  add?: number;
   // Extra fields the form collects; the backend ignores keys it doesn't
   // model, so these are harmless passthrough until ProductCreate grows them.
   cost_price?: number;
