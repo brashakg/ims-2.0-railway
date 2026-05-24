@@ -24,6 +24,7 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import api from '../../services/api/client';
+import { IntegrationStatusCard } from '../../components/integrations/IntegrationStatusCard';
 
 // Types
 interface Message {
@@ -1615,6 +1616,12 @@ Is there a specific aspect you'd like me to dive deeper into? I can provide deta
           </div>
         )}
       </div>
+
+      {/* ── Integration status (read-only, NEXUS boundary) ── */}
+      <div className="eyebrow" style={{ marginBottom: 10, marginTop: 24 }}>
+        NEXUS · integration status
+      </div>
+      <IntegrationStatusCard />
 
       {/* Chat + insights/recommendations moved to top of page (see above). */}
     </div>
