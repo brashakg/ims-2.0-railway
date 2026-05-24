@@ -62,7 +62,7 @@ def _entity_payload(name="Test Entity"):
         "legal_name": name + " Pvt Ltd",
         "pan": "ABCDE1234F",
         "gstins": [
-            {"gstin": "20ABCDE1234F1Z5", "state_code": "JH", "state_name": "Jharkhand"}
+            {"gstin": "20ABCDE1234F1ZE", "state_code": "20", "state_name": "Jharkhand"}
         ],
         "pf": {"registered": True, "establishment_code": "JHRAN1234567"},
         "esi": {"registered": True, "code": "12345678901234567"},
