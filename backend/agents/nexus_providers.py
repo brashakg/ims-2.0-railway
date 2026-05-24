@@ -71,6 +71,18 @@ def _is_destructive_allowed() -> bool:
     return dispatch_mode() == "live"
 
 
+def ims_shopify_writes_enabled() -> bool:
+    """The e-commerce app (BVI) is now the SINGLE owner of the Shopify catalog,
+    so IMS Shopify WRITES are retired by default -- this prevents two systems
+    pushing to the same Shopify store. Set IMS_SHOPIFY_WRITES=1 only if BVI is
+    ever decommissioned and IMS must own Shopify again."""
+    import os
+
+    return os.getenv("IMS_SHOPIFY_WRITES", "").strip().lower() in (
+        "1", "true", "on", "yes",
+    )
+
+
 # ============================================================================
 # SHOPIFY — product push + order pull
 # ============================================================================
@@ -109,7 +121,14 @@ async def shopify_pull_orders(db, since_hours: int = 2) -> SyncResult:
 
 
 async def shopify_push_product(db, product: Dict[str, Any]) -> SyncResult:
-    """Push one product to Shopify (create or update). Gated on DISPATCH_MODE=live."""
+    """Push one product to Shopify (create or update). RETIRED: Shopify is owned
+    by the e-commerce app (BVI). Gated on IMS_SHOPIFY_WRITES, then DISPATCH_MODE."""
+    if not ims_shopify_writes_enabled():
+        return SyncResult(
+            ok=True, provider="shopify", kind="push",
+            notes="RETIRED — Shopify catalog is owned by the e-commerce app (BVI); "
+                  "IMS Shopify writes are disabled (set IMS_SHOPIFY_WRITES=1 to re-enable)",
+        )
     if not _is_destructive_allowed():
         return SyncResult(ok=True, provider="shopify", kind="push",
                           notes=f"SIMULATED — dispatch_mode={dispatch_mode()}")
