@@ -12,6 +12,7 @@ import uuid
 import logging
 
 from .auth import get_current_user, require_roles
+from ..services import power_grid
 from ..dependencies import (
     get_stock_repository,
     get_product_repository,
@@ -95,6 +96,34 @@ def _get_db():
     except Exception:
         pass
     return None
+
+
+def _on_hand_by_product(db, product_ids: List[str], store_id: Optional[str] = None) -> Dict[str, int]:
+    """Count on-hand units per product from the serialized `stock` collection
+    (one row per unit). A unit is on-hand when its status is an available one
+    (or absent) and quantity > 0. Optionally scoped to a store. Fail-soft -> {}.
+    """
+    if db is None or not product_ids:
+        return {}
+    avail = ["AVAILABLE", "available", "IN_STOCK", "in_stock"]
+    match: dict = {
+        "product_id": {"$in": list(product_ids)},
+        "$or": [{"status": {"$in": avail}}, {"status": {"$exists": False}}, {"status": None}],
+    }
+    if store_id:
+        match["store_id"] = store_id
+    out: Dict[str, int] = {}
+    try:
+        for row in db.get_collection("stock").aggregate(
+            [
+                {"$match": match},
+                {"$group": {"_id": "$product_id", "n": {"$sum": {"$ifNull": ["$quantity", 1]}}}},
+            ]
+        ):
+            out[row["_id"]] = int(row.get("n", 0) or 0)
+    except Exception:
+        pass
+    return out
 
 
 # ----------------------------------------------------------------------------
@@ -1445,47 +1474,94 @@ async def get_lens_power_grid(
     """
     db = _get_db()
     if db is None:
-        raise HTTPException(status_code=500, detail="Database connection error")
+        return {
+            "sph_range": power_grid.sph_range(),
+            "cyl_range": power_grid.cyl_range(),
+            "grid": {},
+            "total_units": 0,
+        }
 
     try:
-        stock_coll = db.get_collection("stock")
-        products_coll = db.get_collection("products")
-
-        # Define SPH and CYL ranges
-        sph_values = [str(x / 2) for x in range(-16, 13)]  # -8.00 to +6.00
-        cyl_values = [str(x / 2) for x in range(0, -9, -1)]  # 0 to -4.00
-
-        # Initialize grid
-        grid = {}
-        for sph in sph_values:
-            grid[sph] = {}
-            for cyl in cyl_values:
-                grid[sph][cyl] = {"count": 0, "in_stock": False}
-
-        # Populate grid from stock
-        optical_lenses = list(
-            products_coll.find({"category": {"$in": ["LS", "OPTICAL_LENS"]}})
+        # Lens category codes across the schema (short + full enums).
+        lens_cats = [
+            "LS", "OPTICAL_LENS", "OPTICAL_LENSES", "RX_LENSES", "LENS",
+            "LENSES", "EYEGLASS_LENS", "SPECTACLE_LENS", "SPECTACLE_LENSES",
+        ]
+        lenses = list(
+            db.get_collection("products").find(
+                {"category": {"$in": lens_cats}},
+                {"_id": 0, "product_id": 1, "sph": 1, "cyl": 1, "brand": 1, "model": 1},
+            )
         )
-
-        for product in optical_lenses:
-            sph = product.get("attributes", {}).get("sph", "")
-            cyl = product.get("attributes", {}).get("cyl", "")
-
-            if sph in grid and cyl in grid.get(sph, {}):
-                stock = stock_coll.find_one({"product_id": str(product.get("_id"))})
-                count = stock.get("quantity", 0) if stock else 0
-                grid[sph][cyl]["count"] = count
-                grid[sph][cyl]["in_stock"] = count > 0
-
-        return {
-            "grid": grid,
-            "sph_range": sph_values,
-            "cyl_range": cyl_values,
-        }
+        pids = [p.get("product_id") for p in lenses if p.get("product_id")]
+        on_hand = _on_hand_by_product(db, pids, store_id)
+        result = power_grid.build_lens_grid(lenses, on_hand)
+        result["lens_skus"] = len(lenses)
+        return result
 
     except Exception as e:
         logger.error(f"get_lens_power_grid error: {e}")
         raise HTTPException(status_code=500, detail="Error fetching lens grid")
+
+
+@router.get("/contact-lenses/power-grid")
+async def get_cl_power_grid(
+    store_id: Optional[str] = Query(None),
+    near_expiry_days: int = Query(90, ge=1, le=365),
+    current_user: dict = Depends(get_current_user),
+):
+    """Contact-lens availability matrix: power (rows) x base-curve (cols).
+
+    Counts on-hand units from the serialized `stock` collection and flags cells
+    that hold near-expiry stock (within near_expiry_days).
+    GET /inventory/contact-lenses/power-grid
+    """
+    db = _get_db()
+    if db is None:
+        return {"power_range": [], "curve_range": [], "grid": {}, "total_units": 0}
+
+    try:
+        cls = list(
+            db.get_collection("products").find(
+                {"category": {"$in": CL_CATEGORY_CODES}},
+                {
+                    "_id": 0, "product_id": 1, "cl_power": 1, "base_curve": 1,
+                    "brand": 1, "cl_series": 1,
+                },
+            )
+        )
+        pids = [p.get("product_id") for p in cls if p.get("product_id")]
+        on_hand = _on_hand_by_product(db, pids, store_id)
+
+        # Near-expiry flag: any on-hand unit for the product expiring within the
+        # window. Fail-soft.
+        near: Dict[str, bool] = {}
+        if pids:
+            avail = ["AVAILABLE", "available", "IN_STOCK", "in_stock"]
+            match: dict = {"product_id": {"$in": pids}, "expiry_date": {"$exists": True}}
+            if store_id:
+                match["store_id"] = store_id
+            try:
+                for row in db.get_collection("stock").find(
+                    match, {"_id": 0, "product_id": 1, "expiry_date": 1, "status": 1}
+                ):
+                    st = row.get("status")
+                    if st is not None and st not in avail:
+                        continue
+                    days = compute_days_until_expiry(row.get("expiry_date"))
+                    if days is not None and days <= near_expiry_days:
+                        near[row.get("product_id")] = True
+            except Exception:
+                pass
+
+        result = power_grid.build_cl_grid(cls, on_hand, near)
+        result["cl_skus"] = len(cls)
+        result["near_expiry_days"] = near_expiry_days
+        return result
+
+    except Exception as e:
+        logger.error(f"get_cl_power_grid error: {e}")
+        raise HTTPException(status_code=500, detail="Error fetching CL grid")
 
 
 # ============================================================================
