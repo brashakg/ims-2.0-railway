@@ -2,6 +2,7 @@ import { NextAuthOptions } from "next-auth";
 import CredentialsProvider from "next-auth/providers/credentials";
 import { compare } from "bcryptjs";
 import { prisma } from "./prisma";
+import { verifyImsToken } from "./imsSso";
 
 declare module "next-auth" {
   interface Session {
@@ -57,6 +58,30 @@ export const authOptions: NextAuthOptions = {
           return null;
         }
 
+        return {
+          id: user.id,
+          name: user.name,
+          email: user.email,
+          role: user.role,
+          locationId: user.locationId,
+          enabledFeatures: (user as any).enabledFeatures ?? null,
+        } as any;
+      },
+    }),
+    // SSO from IMS: accept a short-lived RS256 exchange token, verify it, and
+    // map to an EXISTING user by email (never create an account). Dormant until
+    // IMS_SSO_PUBLIC_KEY is set.
+    CredentialsProvider({
+      id: "ims-sso",
+      name: "IMS SSO",
+      credentials: { token: { label: "Token", type: "text" } },
+      async authorize(credentials) {
+        const claims = verifyImsToken(credentials?.token);
+        if (!claims) return null;
+        const user = await prisma.user.findUnique({
+          where: { email: claims.email },
+        });
+        if (!user) return null;
         return {
           id: user.id,
           name: user.name,

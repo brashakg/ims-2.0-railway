@@ -556,6 +556,58 @@ async def get_me(current_user: dict = Depends(get_current_user)):
     return current_user
 
 
+@router.get("/ecommerce-sso")
+async def ecommerce_sso(current_user: dict = Depends(get_current_user)):
+    """Single-sign-on handoff into the online-store (e-commerce/BVI) admin.
+
+    Mints a short-lived RS256 exchange token (NOT the IMS session token) for an
+    authorised user and returns the URL to open. Deny-by-default by role; the
+    online store maps the token's email to an EXISTING online-store user.
+    """
+    from ..services import ecommerce_sso as sso
+
+    role = sso.mapped_bvi_role(current_user.get("roles"))
+    if role is None:
+        raise HTTPException(
+            status_code=403, detail="Your role does not have online-store admin access"
+        )
+    if not sso.sso_configured():
+        raise HTTPException(
+            status_code=503, detail="Online-store SSO is not configured yet"
+        )
+
+    # The online store maps users by email, so we need the IMS account's email.
+    email = current_user.get("email")
+    if not email:
+        try:
+            from ..dependencies import get_user_repository
+
+            urepo = get_user_repository()
+            rec = urepo.find_by_id(current_user.get("user_id")) if urepo else None
+            email = (rec or {}).get("email")
+        except Exception:
+            email = None
+    if not email:
+        raise HTTPException(
+            status_code=400,
+            detail="Your account has no email; add one to use online-store SSO",
+        )
+
+    token = sso.mint_sso_token(
+        {
+            "user_id": current_user.get("user_id"),
+            "email": email,
+            "username": current_user.get("username"),
+            "roles": current_user.get("roles"),
+        }
+    )
+    if not token:
+        raise HTTPException(status_code=503, detail="Online-store SSO is unavailable")
+
+    base = (os.getenv("ECOMMERCE_URL") or "https://uniparallel.com").rstrip("/")
+    return {"url": f"{base}/sso?token={token}", "expires_in": 300}
+
+
 @router.post("/refresh")
 async def refresh_token(request: RefreshTokenRequest):
     """
