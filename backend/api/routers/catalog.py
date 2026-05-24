@@ -1439,17 +1439,18 @@ async def get_product_inventory(
 async def _sync_product_to_shopify(
     product: Dict, shopify_config: ShopifySyncInput
 ) -> Dict:
-    """Sync a product to Shopify (mock implementation)"""
-    shopify_product_id = f"shopify_{uuid.uuid4().hex[:12]}"
-
+    """RETIRED. The Shopify catalog is now owned solely by the e-commerce app
+    (BVI) -- IMS no longer pushes products to Shopify (this was a mock that
+    minted fake Shopify ids anyway). Manage online listings in the Online Store
+    admin. Returns a 'retired' marker instead of faking a sync."""
+    _ = shopify_config  # retained for signature compat; no longer used
     return {
-        "synced": True,
-        "shopify_product_id": shopify_product_id,
-        "shopify_handle": product["seo"]["url_handle"],
-        "last_sync": datetime.now().isoformat(),
-        "published_channels": {
-            "pos": shopify_config.publish_to_pos,
-        },
+        "synced": False,
+        "retired": True,
+        "owner": "ecommerce_app_bvi",
+        "message": "Shopify is managed by the Online Store app. Add or edit this "
+                   "product's online listing there.",
+        "last_sync": None,
     }
 
 
@@ -1478,7 +1479,9 @@ async def sync_product_to_shopify(
     return {
         "product_id": product_id,
         "shopify_sync": result,
-        "message": "Product synced to Shopify successfully",
+        "retired": True,
+        "message": "Shopify is managed by the Online Store app (BVI). "
+                   "IMS product->Shopify sync is retired; manage the listing there.",
     }
 
 
@@ -1512,7 +1515,9 @@ async def bulk_sync_products_to_shopify(
     return {
         "synced_count": synced,
         "errors": errors,
-        "message": f"{synced} products synced to Shopify",
+        "retired": True,
+        "message": "Shopify is managed by the Online Store app (BVI). "
+                   "IMS product->Shopify sync is retired; manage listings there.",
     }
 
 
