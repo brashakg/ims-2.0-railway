@@ -7,6 +7,7 @@ import { Eye, EyeOff, Zap, Calendar, Copy, Check, Loader2, Download, RefreshCw, 
 import clsx from 'clsx';
 import { useToast } from '../../context/ToastContext';
 import { settingsApi, adminIntegrationApi } from '../../services/api/settings';
+import { IntegrationStatusCard } from '../integrations/IntegrationStatusCard';
 
 interface Integration {
   id: string;
@@ -112,6 +113,9 @@ export function IntegrationSettings() {
 
   return (
     <div className="space-y-6">
+      {/* Read-only, SUPERADMIN-only honest status (renders null otherwise) */}
+      <IntegrationStatusCard />
+
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         {integrations.map(integration => (
           <div
