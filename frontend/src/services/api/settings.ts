@@ -220,6 +220,8 @@ export const settingsApi = {
     auto_print_receipt?: boolean;
     auto_print_job_card?: boolean;
     copies_per_print?: number;
+    qz_enabled?: boolean;
+    auto_print_stage_sticker?: boolean;
   }) => {
     const response = await api.put('/settings/printers', settings);
     return response.data;

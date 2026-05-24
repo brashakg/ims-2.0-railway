@@ -17,13 +17,24 @@ import {
   Timer,
   Loader2,
   RefreshCw,
+  Printer,
+  Tag,
 } from 'lucide-react';
 import { WorkshopJobCardPrint } from '../../components/print/WorkshopJobCardPrint';
 import type { JobStatus, JobPriority } from '../../types';
 import { workshopApi, orderApi, vendorsApi } from '../../services/api';
+import { settingsApi } from '../../services/api/settings';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import clsx from 'clsx';
+// Thermal label system (scan-to-advance + labels). Imported DIRECTLY from
+// their modules (not via the services/api barrel — new-service barrel
+// re-exports fail to resolve, TS2614).
+import { ScanToAdvance } from '../../components/labels/ScanToAdvance';
+import { StageMonitorBoard } from '../../components/labels/StageMonitorBoard';
+import { LabelPreviewModal } from '../../components/labels/LabelPreviewModal';
+import type { LabelModalSpec } from '../../components/labels/LabelPreviewModal';
+import { printJobLabel } from '../../components/labels/printLabel';
 
 // Job type
 interface Job {
@@ -237,7 +248,10 @@ const loadJobs = async () => {
   };
 
   const [showCreateJob, setShowCreateJob] = useState(false);
-  const [printJob, setPrintJob] = useState<Job | null>(null);  const [storeInfo, setStoreInfo] = useState<any>(null);
+  const [printJob, setPrintJob] = useState<Job | null>(null);
+  // Thermal label modal (traveler / stage / ready / product).
+  const [labelSpec, setLabelSpec] = useState<LabelModalSpec | null>(null);
+  const [storeInfo, setStoreInfo] = useState<any>(null);
   const [createOrderSearch, setCreateOrderSearch] = useState('');
   const [createOrders, setCreateOrders] = useState<any[]>([]);
   const [createSelectedOrder, setCreateSelectedOrder] = useState<any>(null);
@@ -264,7 +278,7 @@ const loadJobs = async () => {
     setCreateLoading(true);
     try {
       const rxItem = (createSelectedOrder.items || []).find((i: any) => i.category === 'RX_LENSES' || i.is_optical);
-      await workshopApi.createJob({
+      const created = await workshopApi.createJob({
         order_id: createSelectedOrder.id,
         frame_details: { items: (createSelectedOrder.items || []).filter((i: any) => i.category === 'FRAMES' || i.category === 'SUNGLASSES') },
         lens_details: rxItem?.lens_details || { type: 'STANDARD' },
@@ -278,6 +292,12 @@ const loadJobs = async () => {
       setCreateFitting('');
       setCreateNotes('');
       await loadJobs();
+      // Offer the work-order traveler label for the freshly created job so it
+      // can be attached to the physical job + scanned through the workflow.
+      const newJobId = created?.job_id || created?.id;
+      if (newJobId) {
+        setLabelSpec({ kind: 'job', jobId: newJobId, type: 'traveler' });
+      }
     } catch {
       // Error handling — silently retry
     } finally {
@@ -291,6 +311,21 @@ const loadJobs = async () => {
       toast.success(`Job status updated to ${newStatus}`);
       setSelectedJob(null);
       await loadJobs();
+      // Auto-print the appropriate label on a forward transition (fail-soft;
+      // printJobLabel falls back to an HTML print window when QZ is absent and
+      // is a no-op silent failure on error). READY -> pickup label, else the
+      // stage sticker. Honours the auto_print_stage_sticker printer setting.
+      if (!['QC_FAILED', 'CANCELLED'].includes(newStatus)) {
+        try {
+          const s = await settingsApi.getPrinterSettings();
+          if ((s as any)?.auto_print_stage_sticker !== false) {
+            const labelType = newStatus === 'READY' ? 'ready' : 'stage';
+            printJobLabel(jobId, labelType).catch(() => { /* fail-soft */ });
+          }
+        } catch {
+          /* settings unavailable -> skip auto-print, never block */
+        }
+      }
     } catch {
       toast.error('Failed to update job status');
     }
@@ -427,6 +462,44 @@ const loadJobs = async () => {
           </div>
         </div>
       </div>
+
+      {/* Scan-to-advance box (keyboard-wedge). Resolves a scanned code to a
+          job in THIS store, advances its stage (gated, no skip), auto-prints
+          the next stage sticker, and refreshes on success. */}
+      <ScanToAdvance
+        resolveJobId={(code) => {
+          const c = code.trim().toUpperCase();
+          const match = jobs.find(
+            (j) =>
+              (j.jobNumber || '').toUpperCase() === c ||
+              (j.id || '').toUpperCase() === c ||
+              (!!j.jobNumber && c.includes(j.jobNumber.toUpperCase())) ||
+              (!!j.id && c.includes(j.id.toUpperCase())),
+          );
+          return match ? match.id : null;
+        }}
+        onAdvanced={(res) => {
+          toast.success(res.message);
+          loadJobs();
+        }}
+      />
+
+      {/* Jobs-by-stage monitor board (store-scoped live visibility). */}
+      <StageMonitorBoard
+        jobs={jobs.map((j) => ({
+          id: j.id,
+          jobNumber: j.jobNumber,
+          customerName: j.customerName,
+          status: j.status,
+          priority: j.priority,
+          promisedDate: j.promisedDate,
+        }))}
+        onPrintStage={(jobId) => setLabelSpec({ kind: 'job', jobId, type: 'stage' })}
+        onSelectJob={(jobId) => {
+          const j = jobs.find((x) => x.id === jobId);
+          if (j) setSelectedJob(j);
+        }}
+      />
 
       {/* Filters */}
       <div className="card">
@@ -775,6 +848,31 @@ const loadJobs = async () => {
                   )}
                 </div>
 
+                {/* Thermal label actions: traveler/work-order always; stage
+                    sticker any time; ready/pickup label at READY. */}
+                <div className="flex gap-2 flex-wrap">
+                  <button
+                    onClick={() => setLabelSpec({ kind: 'job', jobId: selectedJob.id, type: 'traveler' })}
+                    className="btn-outline text-sm flex items-center gap-1"
+                  >
+                    <Tag className="w-4 h-4" /> Traveler label
+                  </button>
+                  <button
+                    onClick={() => setLabelSpec({ kind: 'job', jobId: selectedJob.id, type: 'stage' })}
+                    className="btn-outline text-sm flex items-center gap-1"
+                  >
+                    <Printer className="w-4 h-4" /> Stage sticker
+                  </button>
+                  {selectedJob.status === 'READY' && (
+                    <button
+                      onClick={() => setLabelSpec({ kind: 'job', jobId: selectedJob.id, type: 'ready' })}
+                      className="btn-outline text-sm flex items-center gap-1 text-green-700 border-green-600"
+                    >
+                      <Tag className="w-4 h-4" /> Pickup label
+                    </button>
+                  )}
+                </div>
+
                 <div className="flex gap-2">
                   <button
                     onClick={() => {
@@ -820,6 +918,11 @@ const loadJobs = async () => {
           store={storeInfo}
           onClose={() => setPrintJob(null)}
         />
+      )}
+
+      {/* Thermal Label Preview + Print modal (QZ silent or HTML fallback) */}
+      {labelSpec && (
+        <LabelPreviewModal spec={labelSpec} onClose={() => setLabelSpec(null)} />
       )}
 
       {/* CREATE JOB MODAL */}
