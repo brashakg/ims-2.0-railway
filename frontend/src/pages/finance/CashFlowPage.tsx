@@ -71,7 +71,7 @@ export default function CashFlowPage() {
       <div className="flex gap-1 border-b border-gray-200 mb-5">
         {(['overview', 'forecast', 'aging'] as Tab[]).map((t) => (
           <button key={t} type="button" onClick={() => setTab(t)}
-            className={`px-4 py-2 text-sm font-medium border-b-2 -mb-px ${tab === t ? 'border-blue-600 text-blue-700' : 'border-transparent text-gray-500 hover:text-gray-700'}`}>
+            className={`px-4 py-2 text-sm font-medium border-b-2 -mb-px ${tab === t ? 'border-bv text-bv' : 'border-transparent text-gray-500 hover:text-gray-700'}`}>
             {t === 'overview' ? 'Overview' : t === 'forecast' ? 'Forecast' : 'AP Aging'}
           </button>
         ))}
@@ -172,7 +172,7 @@ function Forecast({ forecast, openingCash, setOpeningCash, onApply }: { forecast
           <input type="number" value={openingCash} onChange={(e) => setOpeningCash(parseFloat(e.target.value) || 0)}
             className="border border-gray-300 rounded-lg px-3 py-1.5 text-sm w-48" />
         </div>
-        <button type="button" onClick={onApply} className="text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg px-4 py-1.5">Apply</button>
+        <button type="button" onClick={onApply} className="text-sm font-medium text-white bg-bv hover:bg-bv-600 rounded-lg px-4 py-1.5">Apply</button>
       </div>
 
       {crunch && (
@@ -235,7 +235,7 @@ function Aging({ aging, onVendor }: { aging: ApAgingByVendor; onVendor: (id: str
             <tr><td colSpan={7} className="px-3 py-6 text-center text-gray-400">No outstanding payables.</td></tr>
           ) : aging.vendors.map((v) => (
             <tr key={v.vendor_id} className="hover:bg-gray-50 cursor-pointer" onClick={() => onVendor(v.vendor_id, v.vendor_name || v.vendor_id)}>
-              <td className="px-3 py-2 font-medium text-blue-700">{v.vendor_name || v.vendor_id}</td>
+              <td className="px-3 py-2 font-medium text-bv">{v.vendor_name || v.vendor_id}</td>
               {AP_BUCKETS.map((b) => <td key={b} className="px-3 py-2 text-right text-gray-600">{inr(v.buckets[b])}</td>)}
               <td className="px-3 py-2 text-right font-semibold text-gray-900">{inr(v.net_payable)}</td>
             </tr>
@@ -293,7 +293,7 @@ function VendorLedgerDrawer({ vendorId, vendorName, onClose, onChanged }: { vend
               </div>
 
               <div className="flex gap-2 mb-4">
-                <button type="button" onClick={() => setRecording('bill')} className="inline-flex items-center gap-1 text-xs font-medium text-blue-700 bg-blue-50 hover:bg-blue-100 rounded-lg px-2.5 py-1.5"><Plus className="w-3 h-3" /> Bill</button>
+                <button type="button" onClick={() => setRecording('bill')} className="inline-flex items-center gap-1 text-xs font-medium text-bv bg-bv-soft hover:bg-bv-50 rounded-lg px-2.5 py-1.5"><Plus className="w-3 h-3" /> Bill</button>
                 <button type="button" onClick={() => setRecording('payment')} className="inline-flex items-center gap-1 text-xs font-medium text-green-700 bg-green-50 hover:bg-green-100 rounded-lg px-2.5 py-1.5"><Plus className="w-3 h-3" /> Payment</button>
                 <button type="button" onClick={() => setRecording('debit')} className="inline-flex items-center gap-1 text-xs font-medium text-amber-700 bg-amber-50 hover:bg-amber-100 rounded-lg px-2.5 py-1.5"><Plus className="w-3 h-3" /> Debit note</button>
               </div>
@@ -398,7 +398,7 @@ function RecordForm({ kind, vendorId, onClose, onSaved }: { kind: 'bill' | 'paym
         </>}
       </div>
       <div className="flex justify-end mt-2">
-        <button type="button" onClick={save} disabled={saving} className="inline-flex items-center gap-1.5 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg px-4 py-1.5 disabled:opacity-60">
+        <button type="button" onClick={save} disabled={saving} className="inline-flex items-center gap-1.5 text-sm font-medium text-white bg-bv hover:bg-bv-600 rounded-lg px-4 py-1.5 disabled:opacity-60">
           {saving && <Loader2 className="w-4 h-4 animate-spin" />} Save
         </button>
       </div>
