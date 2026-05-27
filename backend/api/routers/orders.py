@@ -6,7 +6,7 @@ Sales order management endpoints
 
 from fastapi import APIRouter, HTTPException, Depends, Query
 from pydantic import BaseModel, Field
-from typing import List, Optional
+from typing import Dict, List, Optional
 from datetime import datetime, date, timedelta
 from enum import Enum
 import uuid
@@ -315,6 +315,11 @@ class OrderItemCreate(BaseModel):
     prescription_id: Optional[str] = None
     lens_options: Optional[dict] = None  # coating, tint, etc.
     lens_details: Optional[dict] = None  # type, material, coatings
+    # Optional explicit serialized stock unit (when the POS knows which unit
+    # is being sold, e.g. barcode-scan flow). Used by _mark_units_sold to flip
+    # the unit to SOLD with the order_id so a future return can re-activate
+    # exactly the unit that left. Absent -> FIFO allocation by product+store.
+    stock_id: Optional[str] = None
 
 
 class PaymentCreate(BaseModel):
@@ -596,6 +601,125 @@ def _resolve_product_doc(product_repo, pid: str):
         return None
 
 
+# Item types / product_id prefixes that have NO serialized stock to mark sold.
+# SERVICE = labour line (eg fitting); custom-/lens-/lens-sug- = virtual POS
+# items the configurator/suggestion helper generates on the fly. These never
+# carry a stock_unit row, so trying to mark_sold them is a no-op (not an error).
+_VIRTUAL_PID_PREFIXES = ("custom-", "lens-", "lens-sug-")
+_NON_SERIALIZED_ITEM_TYPES = {"SERVICE"}
+
+
+def _mark_units_sold(
+    order_id: str,
+    items_data: List[dict],
+    store_id: Optional[str],
+) -> List[str]:
+    """For each serialized item on a created order, flip its stock_unit row to
+    SOLD with the order_id stamped on it. Returns the list of stock_ids marked.
+
+    Two paths:
+      1. Item carries an explicit stock_id (POS knew the unit; barcode-scan
+         flow). Just call mark_sold(stock_id, order_id).
+      2. No stock_id but a real product_id + store_id. FIFO-allocate the first
+         AVAILABLE unit via find_by_product_store and mark THAT sold.
+
+    Virtual items (SERVICE / custom-/ lens-/ lens-sug-) and items without a
+    product_id are skipped silently - they have no serialized row to mark.
+
+    Fail-soft: any lookup or write failure is logged. Order creation must
+    NEVER be blocked by stock-side issues; if we can't mark a unit, the
+    returns flow will fall back to the no-order-id path (any non-AVAILABLE
+    unit for that product+store).
+    """
+    if not order_id or not items_data:
+        return []
+    try:
+        stock_repo = get_stock_repository()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[STOCK] mark_sold: stock repo unavailable: %s", exc)
+        return []
+    if stock_repo is None:
+        return []
+
+    marked: List[str] = []
+    # Track stock_ids consumed within this order so two lines for the same
+    # product_id don't grab the same unit twice.
+    used: set = set()
+
+    for line in items_data or []:
+        if not isinstance(line, dict):
+            continue
+        item_type = (line.get("item_type") or "").upper()
+        if item_type in _NON_SERIALIZED_ITEM_TYPES:
+            continue
+        pid = line.get("product_id") or ""
+        if not pid or pid.startswith(_VIRTUAL_PID_PREFIXES):
+            continue
+        qty = int(line.get("quantity") or 1)
+        if qty < 1:
+            continue
+
+        explicit_sid = line.get("stock_id")
+        for _ in range(qty):
+            sid: Optional[str] = None
+            if explicit_sid and explicit_sid not in used:
+                # Path 1: POS told us exactly which unit.
+                try:
+                    ok = stock_repo.mark_sold(explicit_sid, order_id)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "[STOCK] mark_sold(stock_id=%s) failed: %s",
+                        explicit_sid,
+                        exc,
+                    )
+                    ok = False
+                if ok:
+                    sid = explicit_sid
+                # Only consume the explicit stock_id once per line; the
+                # remaining qty falls through to FIFO.
+                explicit_sid = None
+            else:
+                # Path 2: FIFO-allocate from product+store.
+                if not store_id:
+                    continue
+                try:
+                    available = (
+                        stock_repo.find_by_product_store(pid, store_id) or []
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "[STOCK] find_by_product_store(%s,%s) failed: %s",
+                        pid,
+                        store_id,
+                        exc,
+                    )
+                    available = []
+                pick: Optional[Dict] = None
+                for unit in available:
+                    uid = unit.get("stock_id") or unit.get("_id")
+                    if uid and uid not in used:
+                        pick = unit
+                        break
+                if not pick:
+                    continue
+                pick_sid = pick.get("stock_id") or pick.get("_id")
+                try:
+                    ok = stock_repo.mark_sold(str(pick_sid), order_id)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "[STOCK] mark_sold(fifo=%s) failed: %s", pick_sid, exc
+                    )
+                    ok = False
+                if ok:
+                    sid = str(pick_sid)
+
+            if sid:
+                used.add(sid)
+                marked.append(sid)
+
+    return marked
+
+
 @router.post("", status_code=201)
 async def create_order(
     order: OrderCreate, current_user: dict = Depends(get_current_user)
@@ -854,6 +978,10 @@ async def create_order(
                     "lens_options": item.lens_options,
                     "lens_details": item.lens_details,
                     "incentive_tag": incentive_tag,
+                    # Carry the explicit serialized unit so a future return can
+                    # re-activate exactly the unit that left. Optional; FIFO
+                    # allocation by product+store fills the gap when missing.
+                    "stock_id": getattr(item, "stock_id", None),
                 }
             )
             subtotal += item_subtotal
@@ -916,6 +1044,18 @@ async def create_order(
 
         created = order_repo.create(order_data)
         if created:
+            created_order_id = created.get("order_id") or ""
+            # Flip serialized stock units to SOLD with this order_id stamped on
+            # them. This is what lets returns.py reactivate THE EXACT unit that
+            # left (preferred path in _reactivate_original_unit; the fallback
+            # is "any non-AVAILABLE unit for this product+store" which can
+            # collide across orders). Fail-soft: a stock-side failure logs and
+            # never blocks the POS sale - bad stock data must not break revenue.
+            try:
+                _mark_units_sold(created_order_id, items_data, store_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[STOCK] mark_units_sold failed: %s", exc)
+
             # Pune-incentive walk-in counter (Module i, Phase 4): bump
             # the per-store-per-day counter, dedup'd by mobile.
             try:

@@ -201,6 +201,18 @@ class _FakeResult:
         self.modified_count = matched
 
 
+def _doc_matches(d, query):
+    """Tiny mongo-like matcher: scalar equality + $ne. All other operators
+    are not used by the returns flow today, so we keep this minimal."""
+    for k, v in (query or {}).items():
+        if isinstance(v, dict) and "$ne" in v:
+            if d.get(k) == v["$ne"]:
+                return False
+        elif d.get(k) != v:
+            return False
+    return True
+
+
 class _FakeColl:
     def __init__(self):
         self.docs = []
@@ -211,7 +223,7 @@ class _FakeColl:
 
     def find_one(self, query=None, projection=None):
         for d in self.docs:
-            if all(d.get(k) == v for k, v in (query or {}).items()):
+            if _doc_matches(d, query):
                 out = dict(d)
                 out.pop("_id", None)
                 return out
@@ -219,10 +231,19 @@ class _FakeColl:
 
     def update_one(self, query, update):
         for d in self.docs:
-            if all(d.get(k) == v for k, v in (query or {}).items()):
+            if _doc_matches(d, query):
                 d.update(update.get("$set", {}))
                 return _FakeResult(1)
         return _FakeResult(0)
+
+    def find_one_and_update(self, query, update, return_document=None):
+        for d in self.docs:
+            if _doc_matches(d, query):
+                d.update(update.get("$set", {}))
+                out = dict(d)
+                out.pop("_id", None)
+                return out
+        return None
 
 
 class _FakeCustomerRepo:
@@ -283,6 +304,7 @@ def ctx(monkeypatch):
     customer_repo = _FakeCustomerRepo()
     returns_coll = _FakeColl()
     ledger_coll = _FakeColl()
+    stock_audit_coll = _FakeColl()
     # The original unit that was SOLD on ORD-1 for PRD-1 - eligible for reactivate.
     stock_repo = _FakeStockRepo(
         [
@@ -296,6 +318,10 @@ def ctx(monkeypatch):
         ]
     )
 
+    # Cache extra-collection lookups so a second call returns the SAME _FakeColl
+    # instance - lets tests inspect stock_audit / any future collection.
+    extra_colls: dict = {}
+
     class _FakeDB:
         is_connected = True
 
@@ -303,10 +329,16 @@ def ctx(monkeypatch):
             self.db = self
 
         def get_collection(self, name):
-            return {
+            mapping = {
                 "returns": returns_coll,
                 "credit_note_ledger": ledger_coll,
-            }.get(name, _FakeColl())
+                "stock_audit": stock_audit_coll,
+            }
+            if name in mapping:
+                return mapping[name]
+            if name not in extra_colls:
+                extra_colls[name] = _FakeColl()
+            return extra_colls[name]
 
     fake_db = _FakeDB()
 
@@ -325,6 +357,7 @@ def ctx(monkeypatch):
         "client": TestClient(app),
         "stock_repo": stock_repo,
         "returns_coll": returns_coll,
+        "stock_audit_coll": stock_audit_coll,
     }
 
 
@@ -512,3 +545,331 @@ def test_multi_unit_return_reactivates_one_mints_rest(ctx):
     assert line["reactivated"] == 1
     assert line["minted"] == 1
     assert line["quantity"] == 2
+
+
+# ============================================================================
+# B3 - DAMAGED/RETURNED stock units must NOT be reactivated
+# ============================================================================
+
+
+def test_damaged_unit_not_reactivated_mints_fresh_instead(monkeypatch):
+    """B3 guard: a stock_unit with status DAMAGED is NEVER flipped to AVAILABLE.
+
+    Before B3 the reactivation query was `$ne: AVAILABLE` so DAMAGED, SCRAPPED,
+    TRANSFERRED, RETURNED units were all eligible candidates. That's wrong: a
+    return is the undo of a SALE, and only SOLD units are reversible. With B3
+    in place the reactivation skips the DAMAGED row entirely and the restock
+    flow mints a fresh AVAILABLE unit, leaving the damaged one DAMAGED.
+    """
+    app = FastAPI()
+    app.include_router(returns_router.router, prefix="/api/v1/returns")
+
+    order = {
+        "order_id": "ORD-9",
+        "order_number": "INV-9009",
+        "customer_id": "CUST-1",
+        "customer_name": "Asha",
+        "payment_method": "UPI",
+        "store_id": "BV-PUN-01",
+    }
+    order_repo = _FakeOrderRepo(order)
+    customer_repo = _FakeCustomerRepo()
+    returns_coll = _FakeColl()
+    ledger_coll = _FakeColl()
+    stock_audit_coll = _FakeColl()
+    # The ONLY prior unit for PRD-9 is DAMAGED - it must NOT be reactivated.
+    stock_repo = _FakeStockRepo(
+        [
+            {
+                "stock_id": "STK-DAMAGED",
+                "product_id": "PRD-9",
+                "store_id": "BV-PUN-01",
+                "status": "DAMAGED",
+                "order_id": "ORD-9",
+            }
+        ]
+    )
+
+    extra_colls: dict = {}
+
+    class _FakeDB:
+        is_connected = True
+
+        def __init__(self):
+            self.db = self
+
+        def get_collection(self, name):
+            mapping = {
+                "returns": returns_coll,
+                "credit_note_ledger": ledger_coll,
+                "stock_audit": stock_audit_coll,
+            }
+            if name in mapping:
+                return mapping[name]
+            if name not in extra_colls:
+                extra_colls[name] = _FakeColl()
+            return extra_colls[name]
+
+    fake_db = _FakeDB()
+    monkeypatch.setattr(returns_router, "get_order_repository", lambda: order_repo)
+    monkeypatch.setattr(
+        returns_router, "get_customer_repository", lambda: customer_repo
+    )
+    monkeypatch.setattr(returns_router, "get_product_repository", lambda: None)
+    monkeypatch.setattr(returns_router, "get_stock_repository", lambda: stock_repo)
+    monkeypatch.setattr("api.dependencies.get_db", lambda: fake_db, raising=False)
+    monkeypatch.setattr(
+        "api.dependencies.get_audit_repository", lambda: None, raising=False
+    )
+
+    client = TestClient(app)
+    tok = _staff_token(["CASHIER"])
+    payload = {
+        "order_id": "ORD-9",
+        "store_id": "BV-PUN-01",
+        "return_type": "RETURN",
+        "items": [
+            {
+                "order_item_id": "li9",
+                "product_id": "PRD-9",
+                "product_name": "Some Frame",
+                "sku": "F-9",
+                "return_qty": 1,
+                "unit_price": 1500,
+                "reason": "CHANGED_MIND",
+                "condition": "GOOD",
+            }
+        ],
+    }
+    r = client.post(
+        "/api/v1/returns", json=payload, headers={"Authorization": f"Bearer {tok}"}
+    )
+    assert r.status_code == 201
+    data = r.json()
+    # The DAMAGED unit MUST still be DAMAGED - never resurrected.
+    damaged = [u for u in stock_repo.units if u["stock_id"] == "STK-DAMAGED"][0]
+    assert damaged["status"] == "DAMAGED"
+    # The restock flow falls back to minting a fresh AVAILABLE unit.
+    minted = [u for u in stock_repo.units if u.get("stock_id", "").startswith("NEW-")]
+    assert len(minted) == 1
+    assert minted[0]["status"] == "AVAILABLE"
+    assert data["restocked"][0]["reactivated"] == 0
+    assert data["restocked"][0]["minted"] == 1
+
+
+def test_returned_unit_not_reactivated_either(monkeypatch):
+    """B3 guard: status RETURNED (a unit returned earlier and not yet
+    re-shelved) is also NOT eligible for reactivation. Only SOLD is."""
+    app = FastAPI()
+    app.include_router(returns_router.router, prefix="/api/v1/returns")
+    order = {
+        "order_id": "ORD-10",
+        "order_number": "INV-9010",
+        "customer_id": "CUST-1",
+        "customer_name": "Asha",
+        "payment_method": "UPI",
+        "store_id": "BV-PUN-01",
+    }
+    order_repo = _FakeOrderRepo(order)
+    customer_repo = _FakeCustomerRepo()
+    returns_coll = _FakeColl()
+    ledger_coll = _FakeColl()
+    stock_audit_coll = _FakeColl()
+    stock_repo = _FakeStockRepo(
+        [
+            {
+                "stock_id": "STK-PREVIOUSLY-RETURNED",
+                "product_id": "PRD-10",
+                "store_id": "BV-PUN-01",
+                "status": "RETURNED",
+                "order_id": "ORD-10",
+            }
+        ]
+    )
+    extra_colls: dict = {}
+
+    class _FakeDB:
+        is_connected = True
+
+        def __init__(self):
+            self.db = self
+
+        def get_collection(self, name):
+            mapping = {
+                "returns": returns_coll,
+                "credit_note_ledger": ledger_coll,
+                "stock_audit": stock_audit_coll,
+            }
+            if name in mapping:
+                return mapping[name]
+            if name not in extra_colls:
+                extra_colls[name] = _FakeColl()
+            return extra_colls[name]
+
+    fake_db = _FakeDB()
+    monkeypatch.setattr(returns_router, "get_order_repository", lambda: order_repo)
+    monkeypatch.setattr(
+        returns_router, "get_customer_repository", lambda: customer_repo
+    )
+    monkeypatch.setattr(returns_router, "get_product_repository", lambda: None)
+    monkeypatch.setattr(returns_router, "get_stock_repository", lambda: stock_repo)
+    monkeypatch.setattr("api.dependencies.get_db", lambda: fake_db, raising=False)
+    monkeypatch.setattr(
+        "api.dependencies.get_audit_repository", lambda: None, raising=False
+    )
+
+    client = TestClient(app)
+    tok = _staff_token(["CASHIER"])
+    payload = {
+        "order_id": "ORD-10",
+        "store_id": "BV-PUN-01",
+        "return_type": "RETURN",
+        "items": [
+            {
+                "order_item_id": "li10",
+                "product_id": "PRD-10",
+                "product_name": "Item",
+                "sku": "X-10",
+                "return_qty": 1,
+                "unit_price": 500,
+                "reason": "CHANGED_MIND",
+                "condition": "GOOD",
+            }
+        ],
+    }
+    r = client.post(
+        "/api/v1/returns", json=payload, headers={"Authorization": f"Bearer {tok}"}
+    )
+    assert r.status_code == 201
+    prev = [u for u in stock_repo.units if u["stock_id"] == "STK-PREVIOUSLY-RETURNED"][0]
+    assert prev["status"] == "RETURNED"  # untouched
+    minted = [u for u in stock_repo.units if u.get("stock_id", "").startswith("NEW-")]
+    assert len(minted) == 1
+
+
+# ============================================================================
+# B4 - Atomic claim+commit idempotency on retry
+# ============================================================================
+
+
+def test_retry_when_already_in_progress_returns_busy(ctx, monkeypatch):
+    """Two retries race: the FIRST claims the doc and starts; the SECOND must
+    see restock_in_progress=True and bail out without re-doing the stock writes."""
+    # 1) Save a return with applied=False so it's eligible for retry.
+    monkeypatch.setattr(returns_router, "get_stock_repository", lambda: None)
+    tok = _staff_token(["ADMIN"])
+    created = ctx["client"].post(
+        "/api/v1/returns",
+        json=_payload(),
+        headers={"Authorization": f"Bearer {tok}"},
+    ).json()
+    assert created["restock_applied"] is False
+    rid = created["return_id"]
+
+    # 2) Simulate worker A having taken the claim - flip the in-progress flag.
+    ctx["returns_coll"].update_one(
+        {"return_id": rid},
+        {"$set": {"restock_in_progress": True}},
+    )
+
+    # 3) Worker B's retry must see "in progress" and not touch stock.
+    monkeypatch.setattr(
+        returns_router, "get_stock_repository", lambda: ctx["stock_repo"]
+    )
+    units_before = len(ctx["stock_repo"].units)
+    statuses_before = [u.get("status") for u in ctx["stock_repo"].units]
+
+    r = ctx["client"].post(
+        f"/api/v1/returns/{rid}/restock",
+        headers={"Authorization": f"Bearer {tok}"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["restock_applied"] is False
+    assert "in progress" in body["message"].lower()
+    # No new units, no status flips.
+    assert len(ctx["stock_repo"].units) == units_before
+    assert [u.get("status") for u in ctx["stock_repo"].units] == statuses_before
+
+
+def test_retry_merges_existing_stock_ids_no_duplicate(ctx, monkeypatch):
+    """A partial earlier run left some stock_ids on the doc. A successful retry
+    must MERGE its new units with the existing list (dedup, preserve order) so
+    the doc isn't lying about how many units are back on the shelf."""
+    monkeypatch.setattr(returns_router, "get_stock_repository", lambda: None)
+    tok = _staff_token(["ADMIN"])
+    created = ctx["client"].post(
+        "/api/v1/returns",
+        json=_payload(),
+        headers={"Authorization": f"Bearer {tok}"},
+    ).json()
+    rid = created["return_id"]
+
+    # Simulate that a previous partial run already recorded ONE stock id.
+    ctx["returns_coll"].update_one(
+        {"return_id": rid},
+        {"$set": {"restock_stock_ids": ["PARTIAL-OLD-1"]}},
+    )
+
+    monkeypatch.setattr(
+        returns_router, "get_stock_repository", lambda: ctx["stock_repo"]
+    )
+    r = ctx["client"].post(
+        f"/api/v1/returns/{rid}/restock",
+        headers={"Authorization": f"Bearer {tok}"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["restock_applied"] is True
+    # PARTIAL-OLD-1 is preserved + new reactivation appended; no dup.
+    assert "PARTIAL-OLD-1" in body["restock_stock_ids"]
+    assert "STK-OLD-1" in body["restock_stock_ids"]
+    assert len(body["restock_stock_ids"]) == len(set(body["restock_stock_ids"]))
+
+
+# ============================================================================
+# B5 - Per-stock-id audit rows on every status transition
+# ============================================================================
+
+
+def test_audit_row_written_on_reactivation(ctx):
+    """The reactivate path emits an audit row recording SOLD->AVAILABLE."""
+    tok = _staff_token(["CASHIER"])
+    r = ctx["client"].post(
+        "/api/v1/returns", json=_payload(), headers={"Authorization": f"Bearer {tok}"}
+    )
+    assert r.status_code == 201
+    docs = ctx["stock_audit_coll"].docs
+    assert any(
+        d.get("stock_id") == "STK-OLD-1"
+        and d.get("prior_status") == "SOLD"
+        and d.get("new_status") == "AVAILABLE"
+        and d.get("source") == "RETURN_RESTOCK"
+        for d in docs
+    )
+
+
+def test_audit_row_written_on_mint(ctx):
+    """The mint path emits an audit row recording None -> AVAILABLE (new unit)."""
+    tok = _staff_token(["CASHIER"])
+    payload = _payload()
+    payload["items"][0]["product_id"] = "PRD-FRESH-MINT"
+    r = ctx["client"].post(
+        "/api/v1/returns", json=payload, headers={"Authorization": f"Bearer {tok}"}
+    )
+    assert r.status_code == 201
+    docs = ctx["stock_audit_coll"].docs
+    # New unit was minted; audit row should record it with prior_status=None.
+    mint_rows = [
+        d
+        for d in docs
+        if d.get("prior_status") is None
+        and d.get("new_status") == "AVAILABLE"
+        and d.get("source") == "RETURN_RESTOCK"
+    ]
+    assert len(mint_rows) == 1
+    # The stock_id on the row should match the newly-minted unit.
+    minted = [
+        u for u in ctx["stock_repo"].units if u["product_id"] == "PRD-FRESH-MINT"
+    ][0]
+    assert mint_rows[0]["stock_id"] == minted["stock_id"]

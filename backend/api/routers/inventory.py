@@ -114,7 +114,7 @@ def _on_hand_by_product(db, product_ids: List[str], store_id: Optional[str] = No
         match["store_id"] = store_id
     out: Dict[str, int] = {}
     try:
-        for row in db.get_collection("stock").aggregate(
+        for row in db.get_collection("stock_units").aggregate(
             [
                 {"$match": match},
                 {"$group": {"_id": "$product_id", "n": {"$sum": {"$ifNull": ["$quantity", 1]}}}},
@@ -1116,7 +1116,7 @@ async def get_non_moving_stock(
     try:
         products_coll = db.get_collection("products")
         orders_coll = db.get_collection("orders")
-        stock_coll = db.get_collection("stock")
+        stock_coll = db.get_collection("stock_units")
 
         # Get all products (optionally filtered by category)
         query = {} if not category else {"category": category}
@@ -1212,7 +1212,7 @@ async def scan_barcode_for_count(
         raise HTTPException(status_code=500, detail="Database connection error")
 
     try:
-        stock_coll = db.get_collection("stock")
+        stock_coll = db.get_collection("stock_units")
         products_coll = db.get_collection("products")
 
         # Find stock by barcode
@@ -1261,7 +1261,7 @@ def _load_cl_stock_rows(db, store_id: Optional[str]) -> List[dict]:
     if db is None:
         return []
     try:
-        stock_coll = db.get_collection("stock")
+        stock_coll = db.get_collection("stock_units")
         products_coll = db.get_collection("products")
 
         # 1. Resolve the CL product ids first (category lives on the PRODUCT).
@@ -1542,7 +1542,7 @@ async def get_cl_power_grid(
             if store_id:
                 match["store_id"] = store_id
             try:
-                for row in db.get_collection("stock").find(
+                for row in db.get_collection("stock_units").find(
                     match, {"_id": 0, "product_id": 1, "expiry_date": 1, "status": 1}
                 ):
                     st = row.get("status")
@@ -1586,7 +1586,7 @@ async def get_sell_through_analysis(
 
     try:
         orders_coll = db.get_collection("orders")
-        stock_coll = db.get_collection("stock")
+        stock_coll = db.get_collection("stock_units")
         products_coll = db.get_collection("products")
 
         cutoff_date = datetime.utcnow() - timedelta(days=days)
@@ -1673,7 +1673,7 @@ async def get_overstock_analysis(
 
     try:
         orders_coll = db.get_collection("orders")
-        stock_coll = db.get_collection("stock")
+        stock_coll = db.get_collection("stock_units")
         products_coll = db.get_collection("products")
 
         cutoff_date = datetime.utcnow() - timedelta(days=days)

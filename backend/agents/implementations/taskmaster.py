@@ -208,7 +208,7 @@ class TaskmasterAgent(JarvisAgent):
     async def _draft_reorders(self) -> List[Dict[str, Any]]:
         """For SKUs below reorder_point, draft a PO. Tier 2 — DRAFT only,
         not auto-sent. Sending the PO requires Superadmin approval."""
-        stock_coll = self.get_collection("stock")
+        stock_coll = self.get_collection("stock_units")
         po_coll = self.get_collection("purchase_orders")
         if stock_coll is None or po_coll is None:
             return []
