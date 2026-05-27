@@ -12,7 +12,10 @@ What each return_type does:
   - EXCHANGE    -> settle returned_value against replacement_items; record the
                    COLLECT / REFUND difference (REFUND may be issued as credit).
 
-For every type, returned units in GOOD condition are restocked (fail-soft).
+For every type, returned units in GOOD condition are put BACK into sellable
+serialized stock (the `stock_units` collection - re-activate the original unit
+or mint a fresh AVAILABLE one), idempotently + fail-soft. See restock_engine
+for the resellable-vs-hold decision logic.
 
 Conventions mirrored from the rest of the codebase:
   - get_current_user / require_roles for auth + RBAC.
@@ -36,7 +39,9 @@ from ..dependencies import (
     get_customer_repository,
     get_order_repository,
     get_product_repository,
+    get_stock_repository,
 )
+from ..services import restock_engine
 from ..services import returns_engine as engine
 from ..services import store_credit_ledger as scl
 
@@ -70,6 +75,10 @@ class ReturnLine(BaseModel):
     unit_price: float = Field(..., ge=0)
     reason: Optional[str] = None
     condition: ItemCondition = "GOOD"
+    # Whether this returned unit should go back into sellable stock. Defaults
+    # True; only GOOD-condition units are ever restocked (see restock_engine).
+    # The till can set this False to hold a GOOD-looking unit off the shelf.
+    restock: bool = True
     notes: Optional[str] = None
 
 
@@ -244,41 +253,197 @@ def _issue_store_credit(
     return entry
 
 
-def _restock_good_items(
-    items: List[ReturnLine], store_id: Optional[str]
-) -> List[Dict[str, Any]]:
-    """RECORD which GOOD-condition returned units should go back on the shelf.
+def _reactivate_original_unit(
+    stock_repo: Any,
+    product_id: str,
+    store_id: Optional[str],
+    order_id: Optional[str],
+    used_ids: set,
+) -> Optional[str]:
+    """Find the original serialized unit sold for this product and flip it back
+    to AVAILABLE. Returns its stock_id, or None when no candidate is found.
 
-    Restock is intentionally recorded but NOT applied to live stock here. The
-    authoritative per-store on-hand is the serialized `stock` collection (one
-    row per physical unit - see inventory.py get_stock + POST /stock/add), NOT
-    the product-level `stock_quantity` aggregate. Re-activating a sold unit's
-    stock row (or minting a fresh AVAILABLE row) is a deliberate follow-up;
-    writing a different field here would desync the reports from the real
-    sellable stock. So we capture the intent on the return doc (applied=False)
-    and never half-apply an inventory change. Damaged / opened units are not
-    recorded.
+    Preference order (most-specific first):
+      1. a unit for (product_id, store_id) tied to THIS order_id and not
+         already AVAILABLE - i.e. the exact unit that was sold on this order;
+      2. any non-AVAILABLE unit for (product_id, store_id).
+    A unit already reactivated earlier in this same return (`used_ids`) is
+    skipped so two returned units never collapse onto one stock row.
     """
-    restocked: List[Dict[str, Any]] = []
-    good = [
-        it
-        for it in (items or [])
-        if it.condition == "GOOD" and it.return_qty > 0 and it.product_id
-    ]
-    for it in good:
-        qty = int(round(it.return_qty))
-        if qty <= 0:
+    if stock_repo is None or not product_id:
+        return None
+
+    candidates: List[Dict[str, Any]] = []
+    base = {"product_id": product_id}
+    if store_id:
+        base["store_id"] = store_id
+    not_available = {"status": {"$ne": "AVAILABLE"}}
+
+    try:
+        if order_id:
+            q = dict(base)
+            q["order_id"] = order_id
+            q.update(not_available)
+            candidates = stock_repo.find_many(q) or []
+        if not candidates:
+            q = dict(base)
+            q.update(not_available)
+            candidates = stock_repo.find_many(q) or []
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[RETURNS] stock lookup failed: %s", exc)
+        return None
+
+    for unit in candidates:
+        sid = unit.get("stock_id") or unit.get("_id")
+        if not sid or sid in used_ids:
             continue
-        restocked.append(
+        try:
+            ok = stock_repo.update(
+                sid,
+                {
+                    "status": "AVAILABLE",
+                    "returned_at": datetime.now().isoformat(),
+                    "reserved_at": None,
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[RETURNS] stock reactivate failed: %s", exc)
+            continue
+        if ok:
+            used_ids.add(sid)
+            return str(sid)
+    return None
+
+
+def _restock_good_items(
+    items: List[ReturnLine],
+    store_id: Optional[str],
+    return_id: str,
+    order_id: Optional[str] = None,
+    already_applied: bool = False,
+) -> Dict[str, Any]:
+    """Put GOOD-condition returned units BACK into sellable serialized stock.
+
+    Real per-store on-hand is the serialized `stock` collection (one row per
+    physical unit - see inventory.py + get_stock_repository), NOT the
+    product-level `stock_quantity` aggregate. For each resellable unit we:
+      * RE-ACTIVATE the original serialized unit (status -> AVAILABLE) if we can
+        find the SOLD/RETURNED row that left when it was sold; OTHERWISE
+      * MINT a fresh AVAILABLE unit {quantity:1, source_type:"RETURN",
+        source_id:<return_id>}.
+
+    Idempotent: pass already_applied=True (when the return doc was restocked
+    before) and this is a no-op. Fully fail-soft: any stock-write failure is
+    logged and leaves applied=False on the return so it can be retried, never
+    breaking the return record. Damaged / opened / opted-out units are skipped
+    and listed under `skipped`.
+
+    Returns a dict with `restocked` (per-line summary for the return doc),
+    `restock_stock_ids` (every stock row touched), `applied`, and `skipped`.
+    """
+    plan = restock_engine.plan_restock(
+        [it.model_dump() for it in (items or [])],
+        already_applied=already_applied,
+    )
+
+    result: Dict[str, Any] = {
+        "restocked": [],
+        "restock_stock_ids": [],
+        "applied": False,
+        "skipped": plan.get("skipped", []),
+    }
+    if plan.get("already_applied"):
+        result["applied"] = True
+        return result
+
+    units = plan.get("units", [])
+    if not units:
+        # Nothing resellable -> trivially "applied" (no work left to retry).
+        result["applied"] = True
+        return result
+
+    stock_repo = None
+    try:
+        stock_repo = get_stock_repository()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[RETURNS] stock repo unavailable: %s", exc)
+
+    # No DB / stock repo -> record intent only, leave applied=False to retry.
+    if stock_repo is None:
+        per_line: Dict[str, Dict[str, Any]] = {}
+        for u in units:
+            pid = u.get("product_id")
+            row = per_line.setdefault(
+                pid,
+                {
+                    "product_id": pid,
+                    "sku": u.get("sku", ""),
+                    "product_name": u.get("product_name", ""),
+                    "quantity": 0,
+                    "applied": False,
+                },
+            )
+            row["quantity"] += 1
+        result["restocked"] = list(per_line.values())
+        result["applied"] = False
+        return result
+
+    # We have a stock repo - actually re-add each unit.
+    used_ids: set = set()
+    per_line_applied: Dict[str, Dict[str, Any]] = {}
+    all_ok = True
+    for u in units:
+        pid = u.get("product_id")
+        row = per_line_applied.setdefault(
+            pid,
             {
-                "product_id": it.product_id,
-                "sku": it.sku,
-                "product_name": it.product_name,
-                "quantity": qty,
-                "applied": False,
-            }
+                "product_id": pid,
+                "sku": u.get("sku", ""),
+                "product_name": u.get("product_name", ""),
+                "quantity": 0,
+                "reactivated": 0,
+                "minted": 0,
+                "applied": True,
+            },
         )
-    return restocked
+        sid = _reactivate_original_unit(
+            stock_repo, pid, store_id, order_id, used_ids
+        )
+        if sid:
+            row["reactivated"] += 1
+            row["quantity"] += 1
+            result["restock_stock_ids"].append(sid)
+            continue
+        # Mint a fresh AVAILABLE serialized unit.
+        try:
+            created = stock_repo.create(
+                {
+                    "store_id": store_id,
+                    "product_id": pid,
+                    "quantity": 1,
+                    "status": "AVAILABLE",
+                    "source_type": "RETURN",
+                    "source_id": return_id,
+                }
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[RETURNS] stock mint failed: %s", exc)
+            created = None
+        if created:
+            new_id = created.get("stock_id") or created.get("_id")
+            row["minted"] += 1
+            row["quantity"] += 1
+            if new_id:
+                result["restock_stock_ids"].append(str(new_id))
+        else:
+            all_ok = False
+            row["applied"] = False
+
+    result["restocked"] = list(per_line_applied.values())
+    # Applied only if every unit landed somewhere; otherwise leave False so a
+    # later retry can finish the job (the stock_ids already added are recorded).
+    result["applied"] = all_ok
+    return result
 
 
 def _reason_summary(items: List[ReturnLine]) -> str:
@@ -372,14 +537,31 @@ async def create_return(
                 current_user=current_user,
             )
 
-    # 3. Restock GOOD items (fail-soft).
-    restocked = _restock_good_items(active_lines, store_id)
+    # 3. Restock resellable (GOOD) units back into serialized stock (fail-soft).
+    resolved_order_id = body.order_id or (order or {}).get("order_id")
+    restock_result: Dict[str, Any] = {
+        "restocked": [],
+        "restock_stock_ids": [],
+        "applied": False,
+        "skipped": [],
+    }
+    try:
+        restock_result = _restock_good_items(
+            active_lines, store_id, return_id, order_id=resolved_order_id
+        )
+    except Exception as exc:  # noqa: BLE001
+        # A stock-write failure must never break the return record - leave
+        # applied=False so it can be retried later.
+        logger.warning("[RETURNS] restock failed (recorded, not applied): %s", exc)
+    restocked = restock_result.get("restocked", [])
+    restock_applied = bool(restock_result.get("applied"))
+    restock_stock_ids = restock_result.get("restock_stock_ids", [])
 
     # 4. Persist the return doc.
     now = datetime.now().isoformat()
     doc: Dict[str, Any] = {
         "return_id": return_id,
-        "order_id": body.order_id or (order or {}).get("order_id"),
+        "order_id": resolved_order_id,
         "order_number": body.order_number or (order or {}).get("order_number"),
         "customer_id": customer_id,
         "customer_name": customer_name,
@@ -394,6 +576,8 @@ async def create_return(
         "collect_amount": collect_amount,
         "settlement": settlement,
         "restocked": restocked,
+        "restock_applied": restock_applied,
+        "restock_stock_ids": restock_stock_ids,
         "credit_entry": credit_entry,
         "status": "COMPLETED",
         "reason_summary": _reason_summary(active_lines),
@@ -455,6 +639,8 @@ async def create_return(
         "collect_amount": collect_amount,
         "settlement": settlement,
         "restocked": restocked,
+        "restock_applied": restock_applied,
+        "restock_stock_ids": restock_stock_ids,
         "message": message,
     }
 
@@ -520,3 +706,67 @@ async def get_return(
     if not doc:
         raise HTTPException(status_code=404, detail="Return not found")
     return doc
+
+
+@router.post("/{return_id}/restock")
+async def retry_restock(
+    return_id: str = Path(..., description="Return ID"),
+    current_user: dict = Depends(require_roles(*_RETURN_ROLES)),
+):
+    """Re-run restock for a return whose units never made it back to stock.
+
+    Idempotent: if the return was already restocked (restock_applied=True) this
+    is a no-op. Otherwise it re-reads the saved return lines and re-activates /
+    mints the serialized units, then persists restock_applied + the stock ids.
+    Lets a transient DB failure during create() be retried without re-recording
+    any money movement.
+    """
+    coll = _returns_coll()
+    if coll is None:
+        raise HTTPException(status_code=404, detail="Return not found")
+    try:
+        doc = coll.find_one({"return_id": return_id}, {"_id": 0})
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[RETURNS] restock retry lookup failed: %s", exc)
+        raise HTTPException(status_code=404, detail="Return not found")
+    if not doc:
+        raise HTTPException(status_code=404, detail="Return not found")
+
+    already = bool(doc.get("restock_applied"))
+    if already:
+        return {
+            "return_id": return_id,
+            "restock_applied": True,
+            "restock_stock_ids": doc.get("restock_stock_ids", []),
+            "message": "Already restocked",
+        }
+
+    lines = [ReturnLine(**it) for it in (doc.get("items") or [])]
+    restock_result = _restock_good_items(
+        lines,
+        doc.get("store_id"),
+        return_id,
+        order_id=doc.get("order_id"),
+        already_applied=False,
+    )
+
+    update = {
+        "restocked": restock_result.get("restocked", []),
+        "restock_applied": bool(restock_result.get("applied")),
+        "restock_stock_ids": restock_result.get("restock_stock_ids", []),
+    }
+    try:
+        coll.update_one({"return_id": return_id}, {"$set": update})
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[RETURNS] restock retry persist failed: %s", exc)
+
+    return {
+        "return_id": return_id,
+        "restock_applied": update["restock_applied"],
+        "restock_stock_ids": update["restock_stock_ids"],
+        "message": (
+            "Restock applied"
+            if update["restock_applied"]
+            else "Restock partial - retry again"
+        ),
+    }
