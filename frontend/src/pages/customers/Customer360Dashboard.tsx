@@ -274,7 +274,9 @@ export function Customer360Dashboard() {
       // No interaction log API exists yet; start with empty state
       setInteractions([]);
 
-      toast.success('Customer data loaded successfully');
+      // Removed the noisy "Customer data loaded successfully" toast — it
+      // fired on every Customer 360 page open and was useless feedback
+      // (the data is already visible on the page). QA polish, 2026-05-27.
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : 'Failed to load customer data';
       setError(errorMessage);

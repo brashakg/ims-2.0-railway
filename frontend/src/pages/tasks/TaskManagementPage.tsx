@@ -1005,8 +1005,21 @@ function TasksV2View({ tasks, counts, selected, onSelect }: TasksV2ViewProps) {
   );
 }
 
+// Render a minute count as a human-friendly time-left string. Raw "1892319m"
+// (~3.6 years) is useless to a store manager; "3y" or "44mo" is readable.
+// Uses round-number breakpoints so the ladder still looks like a ladder
+// (`+30m` -> `+1h` -> `+1d` -> `+1mo`). 2026-05-27 QA P2.
+function humanizeMinutes(min: number): string {
+  if (min < 60) return `${min}m`;
+  if (min < 60 * 24) return `${Math.round(min / 60)}h`;
+  if (min < 60 * 24 * 30) return `${Math.round(min / 60 / 24)}d`;
+  if (min < 60 * 24 * 365) return `${Math.round(min / 60 / 24 / 30)}mo`;
+  return `${Math.round(min / 60 / 24 / 365)}y`;
+}
+
 function TaskDetailPanel({ task, onClose }: { task: Task; onClose: () => void }) {
   const minLeft = Math.max(0, task.dueInMin);
+  const minLeftLabel = humanizeMinutes(minLeft);
   const showTimer = task.pCode === 'P0' || task.pCode === 'P1';
   const created = task.createdDate
     ? new Date(task.createdDate).toLocaleString('en-IN', {
@@ -1048,8 +1061,7 @@ function TaskDetailPanel({ task, onClose }: { task: Task; onClose: () => void })
             <div>
               <div className="l">Auto-escalates in</div>
               <div className="v">
-                {minLeft}
-                <span style={{ fontSize: 20 }}>m</span>
+                {minLeftLabel}
               </div>
             </div>
             <div
@@ -1089,18 +1101,20 @@ function TaskDetailPanel({ task, onClose }: { task: Task; onClose: () => void })
               <div className="rung">2</div>
               <div className="who">{task.assignedToName || 'Owner'} (current)</div>
               <div className="when">
-                {task.dueInMin < 0 ? `${Math.abs(task.dueInMin)}m overdue` : `${minLeft}m left`}
+                {task.dueInMin < 0
+                  ? `${humanizeMinutes(Math.abs(task.dueInMin))} overdue`
+                  : `${minLeftLabel} left`}
               </div>
             </div>
             <div className="ladder-step">
               <div className="rung">3</div>
               <div className="who">ASM</div>
-              <div className="when">+{minLeft || 30}m</div>
+              <div className="when">+{humanizeMinutes(minLeft || 30)}</div>
             </div>
             <div className="ladder-step">
               <div className="rung">4</div>
               <div className="who">Ops Head</div>
-              <div className="when">+{(minLeft || 30) + 30}m</div>
+              <div className="when">+{humanizeMinutes((minLeft || 30) + 30)}</div>
             </div>
           </div>
         </div>
