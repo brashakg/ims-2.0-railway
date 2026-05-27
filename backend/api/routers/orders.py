@@ -6,7 +6,7 @@ Sales order management endpoints
 
 from fastapi import APIRouter, HTTPException, Depends, Query
 from pydantic import BaseModel, Field
-from typing import List, Optional
+from typing import Dict, List, Optional
 from datetime import datetime, date, timedelta
 from enum import Enum
 import uuid
@@ -674,6 +674,31 @@ async def create_order(
             customer.get("phone") or customer.get("mobile") if customer else ""
         )
 
+        # Pre-fetch cost_price for every product on the order so we can
+        # snapshot it onto each line as cost_at_sale. This freezes COGS at
+        # sale time so historical P&L doesn't drift when cost_price is
+        # edited later. Virtual SKUs (custom-/lens-/lens-sug-) don't have
+        # a product doc -> cost_at_sale stays None and the finance layer
+        # falls back to 60% of line total.
+        _cost_by_pid: Dict[str, float] = {}
+        try:
+            if product_repo is not None:
+                for it in order.items:
+                    pid = it.product_id or ""
+                    if not pid or pid in _cost_by_pid:
+                        continue
+                    if pid.startswith(("custom-", "lens-", "lens-sug-")):
+                        continue
+                    pdoc = _resolve_product_doc(product_repo, pid)
+                    if pdoc and pdoc.get("cost_price") is not None:
+                        try:
+                            _cost_by_pid[pid] = float(pdoc["cost_price"])
+                        except (TypeError, ValueError):
+                            pass
+        except Exception:
+            # Cost snapshot is fail-soft -- never block order create.
+            _cost_by_pid = {}
+
         # Calculate totals
         items_data = []
         subtotal = 0.0
@@ -850,6 +875,10 @@ async def create_order(
                     "discount_percent": item.discount_percent,
                     "discount_amount": discount_amount,
                     "item_total": item_subtotal,
+                    # COGS-freeze: snapshot the product cost at sale time so
+                    # historical P&L stays stable when cost_price is edited.
+                    # None when the cost is unknown (virtual / no product doc).
+                    "cost_at_sale": _cost_by_pid.get(item.product_id or ""),
                     "prescription_id": item.prescription_id,
                     "lens_options": item.lens_options,
                     "lens_details": item.lens_details,

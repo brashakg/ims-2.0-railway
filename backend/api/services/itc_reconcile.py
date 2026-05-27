@@ -4,8 +4,9 @@ IMS 2.0 - GST input-tax-credit (ITC) reconciliation
 Pure, DB-free helpers for the purchase-side GST:
 
   * build_itc_register(bills): the input credit available from vendor bills,
-    grouped by tax period (CGST/SGST split intra-state, like the sales-side
-    GST reconciliation).
+    grouped by tax period. Detects inter-state bills via place_of_supply vs
+    entity primary state and routes the tax to IGST (intra-state splits to
+    CGST/SGST as before).
   * reconcile_gstr2b(book_rows, gstr2b_rows): match what you booked (vendor
     bills) against GSTR-2B (what your suppliers actually reported to the GST
     portal). Buckets:
@@ -15,6 +16,11 @@ Pure, DB-free helpers for the purchase-side GST:
                           -> ITC AT RISK (chase the vendor; may need reversal)
       - only_in_2b     -> supplier reported it but you have no bill booked
                           -> missing purchase entry (book it, then claim)
+
+    The sum identity (P0 #1): every rupee booked must land somewhere -- the
+    return now reports itc_safe + itc_in_mismatch + itc_at_risk == total
+    booked ITC. Mismatched ITC is in its own bucket (it was silently dropped
+    in the pre-fix code) and adds back into total_itc.
 
 Matching key = (supplier GSTIN, normalised invoice number). Tax amounts are
 compared with a small rupee tolerance. Also flags bills older than 180 days
@@ -59,25 +65,89 @@ def _period(date_iso) -> str:
         return ""
 
 
-def build_itc_register(bills: List[dict]) -> dict:
+def _state_code(value) -> str:
+    """Pull a two-digit state code from a place_of_supply or GSTIN-like value.
+
+    Accepts '27' / '27-Maharashtra' / 'Maharashtra (27)' / a full GSTIN
+    (first 2 chars). Returns '' if no two-digit prefix can be derived.
+    """
+    if value is None:
+        return ""
+    s = str(value).strip().upper()
+    if not s:
+        return ""
+    # Numeric prefix (e.g. "27", "20-JHARKHAND", "27 Maharashtra").
+    m = re.match(r"(\d{2})", s)
+    if m:
+        return m.group(1)
+    # GSTIN: first 2 chars are the state code, then a digit/letter pattern.
+    m = re.search(r"(\d{2})[A-Z]{5}\d{4}[A-Z]", s)
+    if m:
+        return m.group(1)
+    # Parenthetical numeric (e.g. "Maharashtra (27)").
+    m = re.search(r"\((\d{2})\)", s)
+    if m:
+        return m.group(1)
+    return ""
+
+
+def _is_interstate(bill_pos, entity_state) -> bool:
+    """True if the bill's place_of_supply state differs from the entity's
+    primary state. Missing place_of_supply -> default to intra-state (False)
+    so existing bills aren't misclassified."""
+    pos = _state_code(bill_pos)
+    ent = _state_code(entity_state)
+    if not pos or not ent:
+        return False
+    return pos != ent
+
+
+def build_itc_register(
+    bills: List[dict], entity_state: Optional[str] = None
+) -> dict:
     """Input credit available from booked vendor bills, grouped by period.
-    Intra-state assumption: CGST = SGST = tax/2 (mirrors the sales-side recon)."""
+
+    Splits tax into CGST + SGST (intra-state) vs IGST (inter-state, when the
+    bill's place_of_supply differs from `entity_state`). When place_of_supply
+    is missing or entity_state is None, falls back to intra-state (CGST/SGST
+    half-and-half) -- so existing data without place_of_supply behaves the
+    same as before.
+    """
     periods: dict = {}
     total_taxable = 0.0
     total_tax = 0.0
+    total_cgst = 0.0
+    total_sgst = 0.0
+    total_igst = 0.0
     for b in bills or []:
         if not isinstance(b, dict):
             continue
         taxable = _f(b.get("taxable_amount"))
         tax = _f(b.get("tax_amount"))
         p = _period(b.get("bill_date")) or "unknown"
+        interstate = _is_interstate(b.get("place_of_supply"), entity_state)
         d = periods.setdefault(
-            p, {"period": p, "taxable": 0.0, "tax": 0.0, "cgst": 0.0, "sgst": 0.0, "bills": 0}
+            p,
+            {
+                "period": p,
+                "taxable": 0.0,
+                "tax": 0.0,
+                "cgst": 0.0,
+                "sgst": 0.0,
+                "igst": 0.0,
+                "bills": 0,
+            },
         )
         d["taxable"] = round(d["taxable"] + taxable, 2)
         d["tax"] = round(d["tax"] + tax, 2)
-        d["cgst"] = round(d["cgst"] + tax / 2, 2)
-        d["sgst"] = round(d["sgst"] + tax / 2, 2)
+        if interstate:
+            d["igst"] = round(d["igst"] + tax, 2)
+            total_igst += tax
+        else:
+            d["cgst"] = round(d["cgst"] + tax / 2, 2)
+            d["sgst"] = round(d["sgst"] + tax / 2, 2)
+            total_cgst += tax / 2
+            total_sgst += tax / 2
         d["bills"] += 1
         total_taxable += taxable
         total_tax += tax
@@ -85,6 +155,9 @@ def build_itc_register(bills: List[dict]) -> dict:
         "periods": sorted(periods.values(), key=lambda x: x["period"], reverse=True),
         "total_taxable": round(total_taxable, 2),
         "total_itc": round(total_tax, 2),
+        "total_cgst": round(total_cgst, 2),
+        "total_sgst": round(total_sgst, 2),
+        "total_igst": round(total_igst, 2),
     }
 
 
@@ -98,6 +171,11 @@ def reconcile_gstr2b(
 
     book_rows:   [{gstin, invoice_no, taxable, tax, bill_id, vendor_name, bill_date}]
     gstr2b_rows: [{gstin, invoice_no, taxable, tax}]
+
+    Sum identity (P0 #1): total booked ITC == itc_safe + itc_in_mismatch +
+    itc_at_risk. The pre-fix code dropped mismatched book_tax from BOTH the
+    safe bucket AND the at-risk bucket, so the three buckets didn't reconcile
+    against total booked ITC. Now mismatched ITC has its own line.
     """
     as_of = None
     try:
@@ -117,13 +195,16 @@ def reconcile_gstr2b(
     matched, mismatch, only_books = [], [], []
     seen_2b = set()
     itc_safe = 0.0
+    itc_in_mismatch = 0.0
     itc_at_risk = 0.0
+    total_book_tax = 0.0
 
     for row in book_rows or []:
         if not isinstance(row, dict):
             continue
         key = (_norm_gstin(row.get("gstin")), _norm_inv(row.get("invoice_no")))
         book_tax = _f(row.get("tax"))
+        total_book_tax += book_tax
         bill_date = row.get("bill_date")
         days_old = None
         bd = None
@@ -150,6 +231,7 @@ def reconcile_gstr2b(
                 itc_safe += book_tax
             else:
                 mismatch.append({**base, "portal_tax": portal_tax, "diff": round(book_tax - portal_tax, 2)})
+                itc_in_mismatch += book_tax
         else:
             only_books.append(base)
             itc_at_risk += book_tax
@@ -168,7 +250,9 @@ def reconcile_gstr2b(
             "only_in_books": len(only_books),
             "only_in_2b": len(only_2b),
             "itc_safe_to_claim": round(itc_safe, 2),
+            "itc_in_mismatch": round(itc_in_mismatch, 2),
             "itc_at_risk": round(itc_at_risk, 2),
+            "total_book_itc": round(total_book_tax, 2),
         },
         "matched": matched,
         "mismatch": mismatch,
