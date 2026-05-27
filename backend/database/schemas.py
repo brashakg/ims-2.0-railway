@@ -556,6 +556,75 @@ NOTIFICATION_SCHEMA = {
     }
 }
 
+# ----------------------------------------------------------------------------
+# Display fixture / placement (v2-2a). User-requested optical-retail system:
+# every SKU lives on a SPECIFIC fixture (wall/counter/pillar/drawer/fridge/...)
+# inside the store. `display_fixtures` is the master list of physical fixtures
+# per store; `display_placements` maps each SKU to the fixture(s) it sits on,
+# with the quantity at that fixture + a free-form human position ("shelf-2 .
+# slot-04"). One SKU can have MULTIPLE placement rows -- typically one primary
+# display + one back-stock (drawer / fridge) -- so qty stacks across rows,
+# not within a row. The GRN Receive flow (v2-2c) and Stock count sheet (v2-2c)
+# both compose against these collections.
+# ----------------------------------------------------------------------------
+
+DISPLAY_FIXTURE_SCHEMA = {
+    "bsonType": "object",
+    "required": ["fixture_id", "store_id", "code", "name", "type", "floor",
+                 "zone", "capacity", "is_active"],
+    "properties": {
+        "fixture_id": {"bsonType": "string"},  # slug, e.g. wd-01
+        "store_id": {"bsonType": "string"},
+        "code": {"bsonType": "string"},  # WD-01 / W-01 / C-02 (shown to staff)
+        "name": {"bsonType": "string"},
+        # Physical type. window/wall/pillar/counter/cabinet are customer-zone;
+        # drawer is back-stock; fridge is temp-controlled (CL chamber).
+        "type": {"enum": ["window", "wall", "pillar", "counter", "cabinet",
+                          "gondola", "drawer", "fridge"]},
+        "floor": {"enum": ["ground", "storage", "clinic"]},
+        "zone": {"enum": ["A", "B", "C", "-"]},  # - = back-stock, not in customer zones
+        "capacity": {"bsonType": "int", "minimum": 1},  # max units this fixture holds
+        "lockable": {"bsonType": "bool"},
+        # Which catalog types this fixture is designed for: any subset of
+        # ["Frame", "Lens", "CL", "Access."]. The GRN modal filters per-line.
+        "merch": {"bsonType": "array", "items": {"bsonType": "string"}},
+        "last_audit_at": {"bsonType": "date"},  # set by count-sheet workflow
+        # Optional flags -- present only when relevant:
+        "mannequin": {"bsonType": "bool"},  # window/wall with mannequin
+        "spotlit": {"bsonType": "bool"},  # has dedicated spotlight
+        "temp_ctrl": {"bsonType": "string"},  # e.g. "2-8C" for CL fridge
+        "no_qr": {"bsonType": "bool"},  # legacy fixture cannot accept QR codes
+        "key_holder": {"bsonType": "string"},  # who holds the key, e.g. "SM only"
+        "is_active": {"bsonType": "bool"},
+        "notes": {"bsonType": "string"},
+        "created_at": {"bsonType": "date"},
+        "updated_at": {"bsonType": "date"},
+        "created_by": {"bsonType": "string"}
+    }
+}
+
+DISPLAY_PLACEMENT_SCHEMA = {
+    "bsonType": "object",
+    "required": ["placement_id", "sku", "store_id", "fixture_id", "qty"],
+    "properties": {
+        "placement_id": {"bsonType": "string"},
+        "sku": {"bsonType": "string"},  # FK to products.sku (human handle)
+        "store_id": {"bsonType": "string"},  # must match fixture's store_id
+        "fixture_id": {"bsonType": "string"},  # FK to display_fixtures.fixture_id
+        "qty": {"bsonType": "int", "minimum": 1},
+        # Free-form human-readable spot WITHIN the fixture -- shelf and slot,
+        # bin and tray, or whatever convention the floor uses. Optional.
+        "position": {"bsonType": "string"},
+        # One placement per (sku, store) can be the primary (customer-facing
+        # display); others are back-stock. Enforced at write time, not at DB.
+        "is_primary": {"bsonType": "bool"},
+        "created_at": {"bsonType": "date"},
+        "updated_at": {"bsonType": "date"},
+        "created_by": {"bsonType": "string"},
+        "last_moved_at": {"bsonType": "date"}
+    }
+}
+
 
 # ============================================================================
 # INDEX DEFINITIONS
@@ -659,6 +728,26 @@ INDEXES = {
         {"keys": [("user_id", 1), ("created_at", -1)]},
         {"keys": [("status", 1)]},
         {"keys": [("created_at", -1)]}
+    ],
+    "display_fixtures": [
+        # One code per store -- two fixtures in the same store can't share a
+        # code (W-01 must be unique within Bokaro, but Bokaro W-01 and Pune
+        # W-01 can coexist).
+        {"keys": [("store_id", 1), ("code", 1)], "unique": True},
+        {"keys": [("store_id", 1), ("is_active", 1)]},
+        {"keys": [("store_id", 1), ("type", 1), ("zone", 1)]}
+    ],
+    "display_placements": [
+        # List all placements for a SKU at a store -- the hot path on the
+        # Display Layout tab + product detail pane.
+        {"keys": [("sku", 1), ("store_id", 1)]},
+        # List all SKUs at a fixture -- powers the fixture side panel + the
+        # Stock count sheet (groups by fixture).
+        {"keys": [("fixture_id", 1)]},
+        # One row per (sku, fixture) combo: stacking happens by bumping qty,
+        # not by inserting a duplicate row. Stops accidental double-writes
+        # from the GRN modal and the move endpoint.
+        {"keys": [("store_id", 1), ("sku", 1), ("fixture_id", 1)], "unique": True}
     ]
 }
 
@@ -680,7 +769,15 @@ COLLECTIONS = {
     "tasks": {"schema": TASK_SCHEMA, "indexes": INDEXES["tasks"]},
     "expenses": {"schema": EXPENSE_SCHEMA, "indexes": INDEXES["expenses"]},
     "audit_logs": {"schema": AUDIT_LOG_SCHEMA, "indexes": INDEXES["audit_logs"]},
-    "notifications": {"schema": NOTIFICATION_SCHEMA, "indexes": INDEXES["notifications"]}
+    "notifications": {"schema": NOTIFICATION_SCHEMA, "indexes": INDEXES["notifications"]},
+    "display_fixtures": {
+        "schema": DISPLAY_FIXTURE_SCHEMA,
+        "indexes": INDEXES["display_fixtures"]
+    },
+    "display_placements": {
+        "schema": DISPLAY_PLACEMENT_SCHEMA,
+        "indexes": INDEXES["display_placements"]
+    }
 }
 
 
