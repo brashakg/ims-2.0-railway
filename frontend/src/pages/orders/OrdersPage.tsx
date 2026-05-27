@@ -68,6 +68,9 @@ export function OrdersPage() {
   const pageSize = 50;
 
   // Sync status filter from URL query params (e.g. /orders?status=READY)
+  // Also honour order_id deep-links from the global command palette so the
+  // list pre-filters to the picked order instead of dumping the user on the
+  // full unfiltered list.
   useEffect(() => {
     const statusParam = searchParams.get('status');
     if (statusParam && statusParam !== statusFilter) {
@@ -76,6 +79,11 @@ export function OrdersPage() {
         setStatusFilter(statusParam as OrderStatus);
       }
     }
+    const orderIdParam = searchParams.get('order_id');
+    if (orderIdParam && orderIdParam !== searchQuery) {
+      setSearchQuery(orderIdParam);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchParams]);
 
   // Loading state
