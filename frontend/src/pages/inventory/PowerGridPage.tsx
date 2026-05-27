@@ -88,8 +88,17 @@ export default function PowerGridPage() {
 
 function LensGridView({ grid }: { grid: LensGrid | null }) {
   if (!grid) return null;
-  if ((grid.lens_skus || 0) === 0) {
-    return <Empty msg="No spectacle-lens SKUs with power (sph/cyl) set yet. Add lens products with SPH/CYL to populate the grid." />;
+  const skus = grid.lens_skus || 0;
+  const totalUnits = grid.total_units || 0;
+  if (skus === 0) {
+    return <Empty msg="No spectacle-lens SKUs with power (SPH/CYL) set yet. Add lens products with SPH/CYL to populate the grid." />;
+  }
+  if (totalUnits === 0) {
+    return (
+      <Empty
+        msg={`${skus} spectacle-lens SKU${skus === 1 ? '' : 's'} in the catalog, but 0 units on hand for the current scope. Add stock via Inventory or pick another store.`}
+      />
+    );
   }
   return (
     <>
@@ -132,8 +141,18 @@ function LensGridView({ grid }: { grid: LensGrid | null }) {
 
 function ClGridView({ grid }: { grid: ClGrid | null }) {
   if (!grid) return null;
-  if ((grid.power_range || []).length === 0) {
+  const skus = grid.cl_skus || 0;
+  const totalUnits = grid.total_units || 0;
+  const hasPowers = (grid.power_range || []).length > 0;
+  if (!hasPowers) {
     return <Empty msg="No contact-lens SKUs with power set yet. Add CL products with power/base-curve to populate the grid." />;
+  }
+  if (totalUnits === 0) {
+    return (
+      <Empty
+        msg={`${skus} contact-lens SKU${skus === 1 ? '' : 's'} with power set, but 0 units on hand for the current scope. Add stock via Inventory or pick another store.`}
+      />
+    );
   }
   return (
     <>
