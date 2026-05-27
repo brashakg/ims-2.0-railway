@@ -141,15 +141,24 @@ export function AuthProvider({ children }: AuthProviderProps) {
             const profile = await authApi.getProfile();
 
             // Restore client-side selections (activeStoreId + activeRole) from
-            // the cached user. The server doesn't track these — they are picks
-            // the user made via the topbar dropdowns — so without this, a
-            // browser refresh would reset to the first role + no store
-            // selected. (Reported by the owner: "pressing refresh on any page
-            // resets the store selected".)
+            // the cached user. The server's /auth/me returns active_store_id
+            // from the JWT — which defaults to storeIds[0] at LOGIN TIME and
+            // is NOT updated when the user picks a different store via the
+            // topbar dropdown (that's a pure client-side change persisted to
+            // localStorage). So on every browser refresh, the server hands
+            // back the original-login store, overwriting the user's pick.
+            // We must prefer the cached value over the server's "default"
+            // whenever the user still has access to it.
+            //
+            // First attempt (#278) only restored when !profile.activeStoreId,
+            // which failed because the server's default is always populated.
+            // Owner verified: F5 still reset to Bokaro (their first assigned
+            // store). This fix always overrides with the cached pick when
+            // it's still permitted.
             try {
               const cached = JSON.parse(userJson) as User;
               const cachedStoreId = cached?.activeStoreId;
-              if (cachedStoreId && !profile.activeStoreId) {
+              if (cachedStoreId) {
                 const hasCrossStoreAccess = (profile.roles || []).some(r =>
                   r === 'SUPERADMIN' || r === 'ADMIN' || r === 'AREA_MANAGER',
                 );
