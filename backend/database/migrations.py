@@ -67,7 +67,13 @@ class DatabaseMigration:
                 result = self._create_index(name, index_config)
                 results.append(result)
                 print(f"  {result}")
-        
+
+        # 2b. SSO jti single-use TTL index (Council Branch C). Auto-purges
+        # expired sso_jti rows so the collection stays bounded.
+        result = self._create_sso_jti_ttl_index()
+        results.append(result)
+        print(f"  {result}")
+
         # 3. Create default data
         print("\n📝 Creating Default Data...")
         result = self._create_default_data()
@@ -144,7 +150,30 @@ class DatabaseMigration:
         
         except Exception as e:
             return MigrationResult(False, f"Index on {collection_name} failed: {e}")
-    
+
+    def _create_sso_jti_ttl_index(self) -> MigrationResult:
+        """Create the TTL index on sso_jti.exp (Council Branch C).
+
+        Mongo deletes a doc when its `exp` Date passes (expireAfterSeconds=0).
+        Idempotent: pymongo create_index is a no-op if an identical index
+        already exists with the same name.
+        """
+        try:
+            collection = self.db["sso_jti"]
+            index_name = collection.create_index(
+                "exp",
+                expireAfterSeconds=0,
+                name="sso_jti_exp_ttl",
+                background=True,
+            )
+            return MigrationResult(
+                True,
+                "TTL index on sso_jti.exp",
+                {"index_name": index_name},
+            )
+        except Exception as e:
+            return MigrationResult(False, f"TTL index on sso_jti failed: {e}")
+
     def _create_default_data(self) -> MigrationResult:
         """Create default/seed data"""
         try:
