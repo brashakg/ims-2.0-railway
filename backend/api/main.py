@@ -83,6 +83,8 @@ from .routers import (
     notifications_router,
     shipping_router,
     labels_router,
+    display_fixtures_router,
+    display_placements_router,
 )
 from .routers.auth import require_roles
 
@@ -755,6 +757,19 @@ app.include_router(
 )
 app.include_router(handoffs_router, prefix="/api/v1/handoffs", tags=["Handoffs"])
 app.include_router(entities_router, prefix="/api/v1/entities", tags=["Entities"])
+# v2-2a: Display fixture / placement system (one row per physical fixture per
+# store + one row per SKU x fixture combo with qty). Surfaces in the Display
+# Layout tab (v2-2b) + the GRN Receive modal (v2-2c) + the Stock count sheet.
+app.include_router(
+    display_fixtures_router,
+    prefix="/api/v1/display-fixtures",
+    tags=["Display Fixtures"],
+)
+app.include_router(
+    display_placements_router,
+    prefix="/api/v1/display-placements",
+    tags=["Display Placements"],
+)
 app.include_router(
     transfers_router, prefix="/api/v1/transfers", tags=["Stock Transfers"]
 )

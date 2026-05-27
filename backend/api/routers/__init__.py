@@ -50,6 +50,8 @@ from .entities import router as entities_router
 from .notifications import router as notifications_router
 from .shipping import router as shipping_router
 from .labels import router as labels_router
+from .display_fixtures import router as display_fixtures_router
+from .display_placements import router as display_placements_router
 
 __all__ = [
     "auth_router",
@@ -99,4 +101,6 @@ __all__ = [
     "notifications_router",
     "shipping_router",
     "labels_router",
+    "display_fixtures_router",
+    "display_placements_router",
 ]
