@@ -338,6 +338,63 @@ class WalkoutRepository(BaseRepository):
             return None
         return self.find_by_walkout_id(walkout_id)
 
+    def approve_followup(
+        self,
+        walkout_id: str,
+        round_num: int,
+        *,
+        approver_user_id: str,
+        approver_name: Optional[str],
+        decision: str,
+        manager_note: Optional[str] = None,
+    ) -> Optional[Dict]:
+        """Stamp the approval/rejection decision on a DONE follow-up.
+
+        Anti-fake-closure: a salesperson who marked a follow-up DONE
+        leaves it in PENDING_APPROVAL until a manager flips it via
+        this path. The router enforces the role-gate; this method only
+        does the atomic write + return.
+
+        `decision` must be 'APPROVED' or 'REJECTED'. Returns the
+        post-update walkout doc or None on failure / missing walkout /
+        missing round.
+        """
+        existing = self.find_by_walkout_id(walkout_id)
+        if not existing:
+            return None
+        followups = list(existing.get("followups") or [])
+        idx = next(
+            (i for i, fu in enumerate(followups) if fu.get("round") == round_num),
+            None,
+        )
+        if idx is None:
+            return None
+        now = datetime.now()
+        followups[idx] = {
+            **followups[idx],
+            "approval_required": True,
+            "approval_status": decision,
+            "approved_by_user_id": approver_user_id,
+            "approved_by_name": approver_name,
+            "approved_at": now,
+            "manager_note": manager_note,
+        }
+        try:
+            self.collection.update_one(
+                {"walkout_id": walkout_id, "deleted_at": None},
+                {
+                    "$set": {
+                        "followups": followups,
+                        "updated_at": now,
+                        "updated_by": approver_user_id,
+                    }
+                },
+            )
+        except Exception as e:
+            print(f"[WALKOUT] approve_followup failed: {e}")
+            return None
+        return self.find_by_walkout_id(walkout_id)
+
     def set_result(
         self,
         walkout_id: str,

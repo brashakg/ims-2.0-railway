@@ -141,9 +141,12 @@ export function WalkoutDetailPage() {
 
   const handleSave = async () => {
     if (!walkout || !isDirty) return;
-    if (draft.mobile !== undefined && !MOBILE_RE.test(draft.mobile || '')) {
-      toast.error('Mobile must be 10 digits');
-      return;
+    if (draft.mobile !== undefined) {
+      const mob = (draft.mobile || '').trim();
+      if (mob !== '' && !MOBILE_RE.test(mob)) {
+        toast.error('Mobile must be 10 digits or left blank');
+        return;
+      }
     }
     setIsSaving(true);
     try {

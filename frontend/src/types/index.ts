@@ -474,6 +474,9 @@ export type PurchasePlan =
 export type FollowUpMode = 'CALL' | 'WHATSAPP' | 'SMS' | 'EMAIL' | 'IN-PERSON';
 export type FollowUpStatus =
   | 'PENDING' | 'DONE' | 'NOT REACHABLE' | 'NOT REQUIRED' | 'ESCALATED';
+export type FollowUpApprovalStatus =
+  | 'PENDING_APPROVAL' | 'APPROVED' | 'REJECTED';
+export type FollowUpApprovalDecision = 'APPROVED' | 'REJECTED';
 export type WalkoutResultValue = 'DUE' | 'NEGATIVE' | 'CONVERTED';
 
 export interface WalkoutFollowUp {
@@ -488,10 +491,18 @@ export interface WalkoutFollowUp {
   completed_at?: string | null;
   completed_by?: string | null;
   escalation_task_id?: string | null;
+  // Manager approval (anti-fake-closure). approval_required + status
+  // are only meaningful when status === 'DONE'.
+  approval_required?: boolean;
+  approval_status?: FollowUpApprovalStatus | null;
+  approved_by_user_id?: string | null;
+  approved_by_name?: string | null;
+  approved_at?: string | null;
+  manager_note?: string | null;
 }
 
 export interface CreateFollowUpRequest {
-  round: 1 | 2;
+  round: 1 | 2 | 3;
   scheduled_date: string;       // YYYY-MM-DD
   scheduled_time?: string;      // HH:MM
   mode: FollowUpMode;
@@ -505,6 +516,11 @@ export interface UpdateFollowUpRequest {
   scheduled_date?: string;
   scheduled_time?: string;
   mode?: FollowUpMode;
+}
+
+export interface ApproveFollowUpRequest {
+  decision: FollowUpApprovalDecision;
+  manager_note?: string;
 }
 
 export interface SetWalkoutResultRequest {
