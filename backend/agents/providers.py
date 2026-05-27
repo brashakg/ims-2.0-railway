@@ -49,7 +49,14 @@ MSG91_API_KEY = os.getenv("MSG91_API_KEY", "")
 MSG91_SENDER = os.getenv("MSG91_SENDER", "BVOPTL")  # DLT-registered sender ID
 MSG91_WHATSAPP_INTEGRATED_NUMBER = os.getenv("MSG91_WHATSAPP_INTEGRATED_NUMBER", "")
 MSG91_SMS_TEMPLATE_ID = os.getenv("MSG91_SMS_TEMPLATE_ID", "")
-MSG91_BASE_URL = "https://control.msg91.com/api/v5"
+_MSG91_DEFAULT_HOST = "api.msg91.com"  # MSG91 doc-canonical hostname (2026).
+# `control.msg91.com` is the legacy alias and still serves the same endpoints;
+# we accept either via env override so an environment with an older MSG91
+# allowlist (firewall, IP rules) can keep using control.msg91.com without a
+# code change.
+MSG91_BASE_URL = (
+    os.getenv("MSG91_BASE_URL") or f"https://{_MSG91_DEFAULT_HOST}/api/v5"
+).rstrip("/")
 
 PROVIDER_TIMEOUT = float(os.getenv("PROVIDER_TIMEOUT", "15.0"))
 

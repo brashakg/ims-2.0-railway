@@ -812,6 +812,19 @@ function App() {
                     }
                   />
 
+                  {/* Bare /finance → /finance/dashboard. QA 2026-05-27 reported a 404
+                      on /finance because no route was defined. Same for the sidebar's
+                      old /cash-flow path. Hard 404s are user-hostile when the
+                      intent is clearly the canonical module landing screen. */}
+                  <Route
+                    path="finance"
+                    element={<Navigate to="/finance/dashboard" replace />}
+                  />
+                  <Route
+                    path="cash-flow"
+                    element={<Navigate to="/finance/cash-flow" replace />}
+                  />
+
                   {/* Finance Dashboard */}
                   <Route
                     path="finance/dashboard"
