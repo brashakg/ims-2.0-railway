@@ -189,6 +189,7 @@ def test_full_round_trip_catalog_stock_reserve_commit(mongo_db, monkeypatch):
     assert "create" in actions
     assert "reserve" in actions
     assert "commit" in actions
-
-    # Cleanup
-    asyncio.run(catalog_router.delete_lens_line(lens_line_id, user))
+    # Cleanup is module-scope drop_database -- intentionally do NOT call
+    # delete_lens_line here: it 409s (correctly) because the cell still
+    # carries on_hand=8 + reserved=1. The fixture tears down the whole
+    # test DB after the module runs.
