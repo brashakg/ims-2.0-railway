@@ -20,9 +20,20 @@ const STATUS_COLORS: Record<string, { icon: string; color: string; bgColor: stri
 };
 
 export function OrderStatusTimeline({ statusHistory, createdAt, createdBy }: OrderStatusTimelineProps) {
+  // FORCE IST: `toLocaleString('en-IN')` defaults to the BROWSER's local zone,
+  // so the same UTC instant rendered as "27 May 2026 at 8:49 pm" on the
+  // Orders list (a different formatter that already pins IST) showed as
+  // "27/5/2026 03:19 pm" here — that's 15:19 UTC. Indian retail must show
+  // wall-clock IST everywhere. Explicit timeZone:'Asia/Kolkata' fixes it.
   const formatDateTime = (dateStr: string) => {
     const date = new Date(dateStr);
-    return date.toLocaleDateString('en-IN') + ' ' + date.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' });
+    const datePart = date.toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata' });
+    const timePart = date.toLocaleTimeString('en-IN', {
+      timeZone: 'Asia/Kolkata',
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+    return `${datePart} ${timePart}`;
   };
 
   // Build timeline from creation + status history
