@@ -19,7 +19,10 @@
 
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Printer, FileText, Eye, Ticket, Package, Receipt, RotateCcw, ExternalLink } from 'lucide-react';
+import { Printer, FileText, Eye, Ticket, Package, Receipt, RotateCcw, ExternalLink, Pencil } from 'lucide-react';
+import { useAuth } from '../../context/AuthContext';
+import { PrintTemplateContentEditor } from '../../components/print/PrintTemplateContentEditor';
+import type { PrintTemplateKey } from '../../services/api/printOverrides';
 
 type TemplateKind = 'paper' | 'thermal';
 type PaperSize = 'A4' | 'A5' | 'A6' | '80mm';
@@ -38,6 +41,13 @@ interface PrintTemplate {
     | { type: 'route'; to: string; label: string }
     | { type: 'inline'; label: string; helper: string }
     | null;
+  /** Editable-via-content-editor key. When set, SUPERADMIN/ADMIN sees the
+   *  "Customise content" affordance on this template. The other ~20 templates
+   *  beyond the 6 in-use are not (yet) wired to the editor. */
+  editKey?: PrintTemplateKey;
+  /** Whether the template uses the minimal staff header (true) or the full
+   *  customer-facing legal header (false). Drives the live preview shape. */
+  staffHeader?: boolean;
 }
 
 const TEMPLATES: PrintTemplate[] = [
@@ -58,6 +68,8 @@ const TEMPLATES: PrintTemplate[] = [
       ['sign.signatory', 'store config'],
     ],
     trigger: { type: 'route', to: '/pos', label: 'Open POS → complete a sale → Print from Step 6' },
+    editKey: 'tax_invoice',
+    staffHeader: false,
   },
   {
     id: 'rx',
@@ -74,6 +86,8 @@ const TEMPLATES: PrintTemplate[] = [
       ['doctor.signature', 'e-sign'],
     ],
     trigger: { type: 'route', to: '/clinical', label: 'Open Clinical → pick a completed test → Print Rx' },
+    editKey: 'rx_card',
+    staffHeader: false,
   },
   {
     id: 'job',
@@ -91,6 +105,8 @@ const TEMPLATES: PrintTemplate[] = [
       ['checklist.steps[]', 'workflow'],
     ],
     trigger: { type: 'route', to: '/workshop', label: 'Open Workshop → select a job → Print job card' },
+    editKey: 'job_card',
+    staffHeader: true,
   },
   {
     id: 'token',
@@ -141,8 +157,8 @@ const TEMPLATES: PrintTemplate[] = [
   },
   {
     id: 'dayend',
-    name: 'Day-end shift close',
-    sub: 'A4 · reconciliation + tender split',
+    name: 'Day-end Z-report',
+    sub: 'A4 · reconciliation + tender split (staff)',
     size: 'A4',
     kind: 'paper',
     icon: Receipt,
@@ -154,14 +170,62 @@ const TEMPLATES: PrintTemplate[] = [
       ['signatory', 'closing cashier'],
     ],
     trigger: { type: 'route', to: '/reports/day-end', label: 'Open Day-End report → Print' },
+    editKey: 'z_report',
+    staffHeader: true,
+  },
+  {
+    id: 'thermal',
+    name: 'Thermal receipt',
+    sub: '80mm · POS tax receipt (Rule 46 compact)',
+    size: '80mm',
+    kind: 'thermal',
+    icon: Receipt,
+    meta: { lastEdited: '12 Apr 2026', usage30d: 2840 },
+    fields: [
+      ['bill.number', 'POS'],
+      ['lines[]', 'POS'],
+      ['tax.cgst / sgst', 'GST engine'],
+      ['amount.in_words', 'helper'],
+    ],
+    trigger: { type: 'route', to: '/pos', label: 'Open POS → finalise sale → Print thermal' },
+    editKey: 'thermal_receipt',
+    staffHeader: false,
+  },
+  {
+    id: 'grn',
+    name: 'Goods Receipt Note',
+    sub: 'A4 · vendor inwarding (audit + Rule 56)',
+    size: 'A4',
+    kind: 'paper',
+    icon: Package,
+    meta: { lastEdited: '08 Apr 2026', usage30d: 64 },
+    fields: [
+      ['grn.number', 'system'],
+      ['po.number', 'vendor module'],
+      ['lines[]', 'inward count'],
+      ['qc.status', 'workshop QC'],
+    ],
+    trigger: { type: 'route', to: '/vendors', label: 'Open Vendors → GRN inward → Print' },
+    editKey: 'grn',
+    staffHeader: false,
   },
 ];
 
 export default function PrintPage() {
   const navigate = useNavigate();
+  const { user } = useAuth();
   const [selId, setSelId] = useState(TEMPLATES[0].id);
+  const [editorOpen, setEditorOpen] = useState(false);
   const sel = TEMPLATES.find((t) => t.id === selId) ?? TEMPLATES[0];
   const SelIcon = sel.icon;
+
+  // Content editor is gated to SUPERADMIN/ADMIN. Entity-level content edits
+  // affect every print across that entity, same blast radius as the HSN/GST
+  // master edits.
+  const canEdit = (() => {
+    const roles = user?.roles || [];
+    return roles.some((r) => r === 'SUPERADMIN' || r === 'ADMIN');
+  })();
 
   return (
     <div
@@ -419,8 +483,28 @@ export default function PrintPage() {
           <button type="button" className="btn sm" onClick={() => window.print()}>
             <Printer className="w-4 h-4" /> Print preview (stub)
           </button>
+          {sel.editKey && canEdit && (
+            <button
+              type="button"
+              className="btn sm primary"
+              onClick={() => setEditorOpen(true)}
+              style={{ width: '100%' }}
+            >
+              <Pencil className="w-3.5 h-3.5" /> Customise content
+            </button>
+          )}
         </div>
       </aside>
+
+      {/* Per-entity content editor drawer */}
+      {editorOpen && sel.editKey && (
+        <PrintTemplateContentEditor
+          templateKey={sel.editKey}
+          templateLabel={sel.name}
+          usesStaffHeader={!!sel.staffHeader}
+          onClose={() => setEditorOpen(false)}
+        />
+      )}
     </div>
   );
 }

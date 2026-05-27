@@ -1,10 +1,22 @@
 // ============================================================================
-// IMS 2.0 - Workshop Job Card Print Component
+// IMS 2.0 - Workshop Job Card Print (v2-3: statutory polish)
 // ============================================================================
-// A5 format job card for workshop tracking with QC checklist
+// A5 staff-facing job card. NOT a customer document -- uses the minimal
+// internal `StaffHeader` (no GSTIN / CIN / supplier identity block) per the
+// council decision to keep statutory ID off internal docs.
 
 import { useRef } from 'react';
 import { Printer, X } from 'lucide-react';
+import {
+  buildStaffHeader,
+  StaffHeaderView,
+  declarations,
+  formatDate,
+  statutoryFooter,
+  type EntityLike,
+  type OverrideFields,
+  type StoreLike,
+} from './legalPrimitives';
 
 interface JobCardPrintData {
   jobNumber: string;
@@ -31,40 +43,37 @@ interface StoreInfo {
   city: string;
   state: string;
   pincode: string;
+  stateCode?: string;
 }
 
 interface WorkshopJobCardPrintProps {
   job: JobCardPrintData;
   store: StoreInfo;
+  entity?: EntityLike | null;
+  overrides?: OverrideFields | null;
   onClose: () => void;
-}
-
-function formatDate(dateStr: string): string {
-  return new Date(dateStr).toLocaleDateString('en-IN', {
-    day: '2-digit',
-    month: 'short',
-    year: 'numeric',
-  });
 }
 
 const getPriorityColor = (priority: string): string => {
   switch (priority.toUpperCase()) {
     case 'URGENT':
-      return '#dc2626';
+      return '#a01c1c';
     case 'HIGH':
-      return '#f97316';
+      return '#a06d00';
     case 'NORMAL':
-      return '#3b82f6';
+      return '#1a4a7a';
     case 'LOW':
-      return '#6b7280';
+      return '#4a4a45';
     default:
-      return '#3b82f6';
+      return '#1a4a7a';
   }
 };
 
 export function WorkshopJobCardPrint({
   job,
   store,
+  entity,
+  overrides,
   onClose,
 }: WorkshopJobCardPrintProps) {
   const printRef = useRef<HTMLDivElement>(null);
@@ -72,6 +81,29 @@ export function WorkshopJobCardPrint({
   const handlePrint = () => {
     window.print();
   };
+
+  const effectiveEntity: EntityLike = entity || { name: store.storeName };
+  const effectiveStore: StoreLike = {
+    name: store.storeName,
+    address: store.address,
+    city: store.city,
+    state: store.state,
+    state_code: store.stateCode,
+    pincode: store.pincode,
+  };
+  const header = buildStaffHeader(effectiveEntity, effectiveStore, 'job_card', {
+    docNumber: job.jobNumber,
+    docDate: job.createdDate,
+    overrides,
+    extraMeta: [
+      ['Order', job.orderNumber],
+      ['Priority', job.priority.toUpperCase()],
+      ['Due', formatDate(job.dueDate)],
+    ],
+  });
+
+  const declarationText = overrides?.declaration_text || declarations('job_card');
+  const footerLine = statutoryFooter('job_card');
 
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
@@ -93,230 +125,142 @@ export function WorkshopJobCardPrint({
           </div>
         </div>
 
-        {/* Printable Document - A5 size */}
+        {/* Printable Document - A5 staff aesthetic */}
         <div
           ref={printRef}
-          className="job-card-print-area bg-white p-4"
-          style={{ maxWidth: '148mm', margin: '0 auto' }}
+          className="job-card-print-area bg-white text-black"
+          style={{
+            maxWidth: '148mm',
+            margin: '0 auto',
+            fontFamily: 'Inter, system-ui, sans-serif',
+            color: '#1a1a19',
+            border: '1px solid #1a1a19',
+          }}
         >
-          {/* Header */}
-          <div className="text-center mb-3 pb-2 border-b-2 border-gray-800">
-            <h1 className="text-sm font-bold text-gray-900 uppercase">{store.storeName}</h1>
-            <p className="text-gray-700 text-[10px]">{store.city}, {store.state}</p>
-          </div>
+          {/* Staff header */}
+          <StaffHeaderView header={header} docTypeLabel="WORKSHOP JOB CARD" />
 
-          {/* Title */}
-          <div className="text-center mb-3">
-            <h2 className="text-lg font-bold text-gray-900 uppercase tracking-widest">
-              WORKSHOP JOB CARD
-            </h2>
-          </div>
-
-          {/* Job & Order Details - Two columns */}
-          <div className="grid grid-cols-2 gap-2 mb-3 text-xs">
-            <div className="border-b border-gray-300 pb-1">
-              <p className="text-gray-600 font-semibold">Job Number</p>
-              <p className="text-gray-900 font-mono font-bold text-sm">{job.jobNumber}</p>
-            </div>
-            <div className="border-b border-gray-300 pb-1">
-              <p className="text-gray-600 font-semibold">Order Ref</p>
-              <p className="text-gray-900 font-mono font-bold text-sm">{job.orderNumber}</p>
-            </div>
-            <div className="border-b border-gray-300 pb-1">
-              <p className="text-gray-600 font-semibold">Priority</p>
-              <p
-                className="font-bold text-xs"
-                style={{ color: getPriorityColor(job.priority) }}
-              >
-                {job.priority.toUpperCase()}
-              </p>
-            </div>
-            <div className="border-b border-gray-300 pb-1">
-              <p className="text-gray-600 font-semibold">Status</p>
-              <p className="text-gray-900 font-semibold text-xs">{job.status}</p>
+          {/* Customer + frame + lens block */}
+          <div style={{ padding: '10px 14px' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+              <div>
+                <div style={{ fontSize: 9, color: '#4a4a45', textTransform: 'uppercase', letterSpacing: '.1em', fontWeight: 500 }}>Customer</div>
+                <div style={{ fontSize: 11.5, fontWeight: 600, marginTop: 2 }}>{job.customerName}</div>
+                <div style={{ fontSize: 10, color: '#4a4a45', marginTop: 1 }}>{job.customerPhone}</div>
+              </div>
+              <div>
+                <div style={{ fontSize: 9, color: '#4a4a45', textTransform: 'uppercase', letterSpacing: '.1em', fontWeight: 500 }}>Priority</div>
+                <div style={{ fontSize: 11, fontWeight: 700, color: getPriorityColor(job.priority), marginTop: 2, textTransform: 'uppercase' }}>
+                  {job.priority.toUpperCase()}
+                </div>
+                <div style={{ fontSize: 10, color: '#4a4a45', marginTop: 1 }}>Status: {job.status}</div>
+              </div>
             </div>
           </div>
 
-          {/* Customer Details */}
-          <div className="mb-3 p-2 bg-gray-50 border border-gray-300 rounded text-xs">
-            <p className="text-gray-600 font-semibold mb-1">Customer</p>
-            <p className="text-gray-900 font-medium">{job.customerName}</p>
-            <p className="text-gray-700">Ph: {job.customerPhone}</p>
-          </div>
-
-          {/* Frame Details */}
-          <div className="mb-3 border-l-4 border-blue-600 pl-2 text-xs">
-            <p className="text-gray-600 font-semibold mb-1">Frame Details</p>
-            <p className="text-gray-900">
-              <span className="font-semibold">{job.frameBrand}</span> {job.frameModel}
-            </p>
-            <p className="text-gray-700">Color: {job.frameColor}</p>
-          </div>
-
-          {/* Lens Details */}
-          <div className="mb-3 border-l-4 border-green-600 pl-2 text-xs">
-            <p className="text-gray-600 font-semibold mb-1">Lens Details</p>
-            <p className="text-gray-900">Type: {job.lensType}</p>
-            {job.lensPower && <p className="text-gray-700">Power: {job.lensPower}</p>}
-            {job.lensCoating && <p className="text-gray-700">Coating: {job.lensCoating}</p>}
-            {job.lensTint && <p className="text-gray-700">Tint: {job.lensTint}</p>}
-          </div>
-
-          {/* Dates & Assignment */}
-          <div className="grid grid-cols-2 gap-2 mb-3 text-xs">
-            <div className="border border-gray-300 p-1 rounded">
-              <p className="text-gray-600 font-semibold text-[9px]">Created</p>
-              <p className="text-gray-900 font-mono text-xs">{formatDate(job.createdDate)}</p>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', borderTop: '1px solid #aaa9a3' }}>
+            <div style={{ padding: '10px 14px', borderRight: '1px solid #aaa9a3' }}>
+              <div style={{ fontSize: 9, color: '#4a4a45', textTransform: 'uppercase', letterSpacing: '.1em', fontWeight: 500 }}>Frame</div>
+              <div style={{ fontSize: 11, marginTop: 2 }}>
+                <span style={{ fontWeight: 600 }}>{job.frameBrand}</span> {job.frameModel}
+              </div>
+              <div style={{ fontSize: 10, color: '#4a4a45', marginTop: 1 }}>Colour: {job.frameColor}</div>
             </div>
-            <div className="border border-gray-300 p-1 rounded">
-              <p className="text-gray-600 font-semibold text-[9px]">Due Date</p>
-              <p className="text-gray-900 font-mono text-xs">{formatDate(job.dueDate)}</p>
+            <div style={{ padding: '10px 14px' }}>
+              <div style={{ fontSize: 9, color: '#4a4a45', textTransform: 'uppercase', letterSpacing: '.1em', fontWeight: 500 }}>Lens</div>
+              <div style={{ fontSize: 11, marginTop: 2 }}>{job.lensType}</div>
+              {job.lensPower && <div style={{ fontSize: 10, color: '#4a4a45', marginTop: 1 }}>Power: {job.lensPower}</div>}
+              {job.lensCoating && <div style={{ fontSize: 10, color: '#4a4a45', marginTop: 1 }}>Coating: {job.lensCoating}</div>}
+              {job.lensTint && <div style={{ fontSize: 10, color: '#4a4a45', marginTop: 1 }}>Tint: {job.lensTint}</div>}
             </div>
           </div>
 
           {job.assignedTechnician && (
-            <div className="mb-3 text-xs">
-              <p className="text-gray-600 font-semibold">Assigned To</p>
-              <p className="text-gray-900">{job.assignedTechnician}</p>
+            <div style={{ padding: '8px 14px', borderTop: '1px solid #aaa9a3', fontSize: 10.5 }}>
+              <span style={{ color: '#4a4a45', textTransform: 'uppercase', letterSpacing: '.08em', fontSize: 9 }}>Assigned To:</span>{' '}
+              <span style={{ color: '#1a1a19', fontWeight: 600 }}>{job.assignedTechnician}</span>
             </div>
           )}
 
-          {/* QC Checklist */}
-          <div className="mb-3 border border-gray-300 rounded p-2 bg-gray-50">
-            <p className="text-gray-900 font-bold text-xs uppercase mb-2">QC Checklist</p>
-            <div className="space-y-1.5 text-xs">
-              <label className="flex items-start gap-2">
-                <input
-                  type="checkbox"
-                  className="w-3.5 h-3.5 mt-0.5 border-gray-300 rounded"
-                />
-                <span className="text-gray-700">Power Verification</span>
-              </label>
-              <label className="flex items-start gap-2">
-                <input
-                  type="checkbox"
-                  className="w-3.5 h-3.5 mt-0.5 border-gray-300 rounded"
-                />
-                <span className="text-gray-700">Frame Fitting</span>
-              </label>
-              <label className="flex items-start gap-2">
-                <input
-                  type="checkbox"
-                  className="w-3.5 h-3.5 mt-0.5 border-gray-300 rounded"
-                />
-                <span className="text-gray-700">Cosmetic Check</span>
-              </label>
-              <label className="flex items-start gap-2">
-                <input
-                  type="checkbox"
-                  className="w-3.5 h-3.5 mt-0.5 border-gray-300 rounded"
-                />
-                <span className="text-gray-700">Alignment Check</span>
-              </label>
-              <label className="flex items-start gap-2">
-                <input
-                  type="checkbox"
-                  className="w-3.5 h-3.5 mt-0.5 border-gray-300 rounded"
-                />
-                <span className="text-gray-700">Lens Centration</span>
-              </label>
+          {/* QC Checklist (bordered, ALL-CAPS labels) */}
+          <div style={{ padding: '10px 14px', borderTop: '1px solid #aaa9a3' }}>
+            <div style={{ fontSize: 9, color: '#4a4a45', textTransform: 'uppercase', letterSpacing: '.1em', fontWeight: 500, marginBottom: 6 }}>
+              QC Checklist
             </div>
-          </div>
-
-          {/* Status Pipeline */}
-          <div className="mb-3 text-xs">
-            <p className="text-gray-600 font-semibold mb-2">Status Pipeline</p>
-            <div className="flex items-center justify-between gap-0">
-              {['Pending', 'In Progress', 'QC', 'Ready'].map((_, idx) => (
-                <div key={idx} className="flex items-center">
-                  <div
-                    className="w-6 h-6 rounded-full flex items-center justify-center text-[9px] font-bold"
-                    style={{
-                      backgroundColor:
-                        idx <= 1 ? '#3b82f6' : idx === 2 ? '#f97316' : '#d1d5db',
-                      color: idx <= 1 ? '#fff' : idx === 2 ? '#fff' : '#6b7280',
-                    }}
-                  >
-                    {idx + 1}
-                  </div>
-                  {idx < 3 && <div className="flex-1 h-0.5 mx-0.5 bg-gray-300" />}
-                </div>
-              ))}
-            </div>
-            <div className="grid grid-cols-4 gap-1 mt-1 text-[9px] text-gray-600 text-center">
-              <span>Pending</span>
-              <span>Progress</span>
-              <span>QC</span>
-              <span>Ready</span>
-            </div>
-          </div>
-
-          {/* Signature/Notes Line */}
-          <div className="mt-4 pt-2 border-t border-gray-200">
-            <div className="grid grid-cols-2 gap-4 text-xs">
-              <div className="text-center">
-                <div className="w-20 h-12 border-b border-gray-400 mx-auto" />
-                <p className="text-gray-600 text-[9px] mt-1">Technician Sign</p>
+            {[
+              'Power Verification',
+              'Frame Fitting',
+              'Cosmetic Check',
+              'Alignment Check',
+              'Lens Centration',
+            ].map((label) => (
+              <div key={label} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 10.5, padding: '3px 0' }}>
+                <span
+                  style={{
+                    display: 'inline-block',
+                    width: 12,
+                    height: 12,
+                    border: '1px solid #4a4a45',
+                  }}
+                ></span>
+                <span style={{ color: '#1a1a19' }}>{label}</span>
               </div>
-              <div className="text-center">
-                <div className="w-20 h-12 border-b border-gray-400 mx-auto" />
-                <p className="text-gray-600 text-[9px] mt-1">QC Sign</p>
+            ))}
+          </div>
+
+          {/* Signatures */}
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', borderTop: '1px solid #1a1a19', padding: '10px 14px', gap: 24 }}>
+            <div>
+              <div style={{ height: 36, borderBottom: '0.5px solid #4a4a45' }}></div>
+              <div style={{ fontSize: 9, color: '#4a4a45', textTransform: 'uppercase', letterSpacing: '.08em', marginTop: 2 }}>
+                Technician Sign
+              </div>
+            </div>
+            <div>
+              <div style={{ height: 36, borderBottom: '0.5px solid #4a4a45' }}></div>
+              <div style={{ fontSize: 9, color: '#4a4a45', textTransform: 'uppercase', letterSpacing: '.08em', marginTop: 2 }}>
+                QC Sign
               </div>
             </div>
           </div>
 
-          {/* Footer */}
-          <div className="mt-2 pt-1 border-t border-gray-200 text-center">
-            <p className="text-[8px] text-gray-500">
-              {store.storeName} • {job.jobNumber}
-            </p>
+          {declarationText && (
+            <div style={{ padding: '8px 14px', fontSize: 9.5, color: '#4a4a45', borderTop: '1px solid #aaa9a3' }}>
+              {declarationText}
+            </div>
+          )}
+          {header.footer_terms && (
+            <div style={{ padding: '8px 14px', fontSize: 9.5, color: '#4a4a45', borderTop: '1px solid #aaa9a3' }}>
+              {header.footer_terms}
+            </div>
+          )}
+          <div
+            style={{
+              padding: '7px 14px',
+              fontSize: 9,
+              color: '#7a7a72',
+              textTransform: 'uppercase',
+              letterSpacing: '.08em',
+              textAlign: 'center',
+            }}
+          >
+            {footerLine} · {job.jobNumber}
           </div>
         </div>
       </div>
 
-      {/* Print-specific CSS for A5 page */}
       <style>{`
         @media print {
-          body * {
-            visibility: hidden;
-          }
-          .job-card-print-area,
-          .job-card-print-area * {
-            visibility: visible;
-          }
+          body * { visibility: hidden; }
+          .job-card-print-area, .job-card-print-area * { visibility: visible; }
           .job-card-print-area {
-            position: absolute;
-            left: 0;
-            top: 0;
-            width: 100%;
-            padding: 6mm;
-            margin: 0;
-            max-width: none;
+            position: absolute; left: 0; top: 0;
+            width: 100%; padding: 0; margin: 0; max-width: none;
+            border: none !important;
           }
-
-          .no-print {
-            display: none !important;
-          }
-
-          @page {
-            size: A5;
-            margin: 6mm;
-          }
-
-          .job-card-print-area {
-            font-size: 9pt;
-            color: #000;
-            background: #fff;
-          }
-          .job-card-print-area h1 {
-            font-size: 11pt;
-          }
-          .job-card-print-area h2 {
-            font-size: 10pt;
-          }
-          table {
-            page-break-inside: avoid;
-          }
+          .no-print { display: none !important; }
+          @page { size: A5; margin: 6mm; }
+          table { page-break-inside: avoid; }
         }
       `}</style>
     </div>

@@ -1,13 +1,33 @@
+// ============================================================================
+// IMS 2.0 - POS Receipt Preview (v2-3: statutory polish)
+// ============================================================================
+// Thermal (80mm) + A4 fallback. Thermal carries a compact statutory header
+// (trade name, GSTIN, doc no, copy-marker pseudo strip, amount-in-words,
+// retention-line footer) since per Sec. 31 CGST any tax-bearing receipt is a
+// statutory document -- just rendered in a 58/80mm friendly layout.
+
 import { useState } from 'react';
 import { Printer, Mail, Share2, Download, FileText, Receipt } from 'lucide-react';
 import { describeForReceipt } from '../../utils/receiptFormat';
+import {
+  amountInWords,
+  declarations,
+  formatDateTimeIST,
+  statutoryFooter,
+  type OverrideFields,
+} from '../print/legalPrimitives';
 
 interface ReceiptPreviewProps {
   billData: any;
   selectedCustomer: any;
   cartItems: any[];
   onClose: () => void;
-  storeData?: { name?: string; address?: string; phone?: string; gst?: string };
+  storeData?: { name?: string; address?: string; phone?: string; gst?: string; stateCode?: string };
+  /** Per-entity content overrides surfaced from the editor. */
+  overrides?: OverrideFields | null;
+  /** Entity trade name override (e.g. "Better Vision") -- thermal can only
+   *  fit a short name; defaults to storeData.name. */
+  entityTradeName?: string;
 }
 
 type ReceiptFormat = 'thermal' | 'a4';
@@ -18,6 +38,8 @@ export function ReceiptPreview({
   cartItems,
   onClose,
   storeData,
+  overrides,
+  entityTradeName,
 }: ReceiptPreviewProps) {
   const [format, setFormat] = useState<ReceiptFormat>('thermal');
   const storeInfo = {
@@ -26,6 +48,15 @@ export function ReceiptPreview({
     phone: storeData?.phone || '',
     gst: storeData?.gst || '',
   };
+  const tradeName = entityTradeName || overrides?.header_subtitle || storeInfo.name;
+  const subtitle = overrides?.header_subtitle || '';
+  const declarationText = overrides?.declaration_text || declarations('thermal_receipt');
+  const footerLine = statutoryFooter('thermal_receipt', overrides?.retention_years || 7);
+  const grandTotalRupees = typeof billData?.total_amount === 'number'
+    ? billData.total_amount
+    : Number(String(billData?.total_amount ?? '0').replace(/[^\d.-]/g, '')) || 0;
+  const totalWords = amountInWords(grandTotalRupees);
+  const docNumber = billData?.bill_number || '';
 
   const handlePrint = () => {
     window.print();
@@ -45,7 +76,6 @@ export function ReceiptPreview({
   };
 
   const handleDownloadPDF = () => {
-    // Use browser print dialog — user can save as PDF from there
     window.print();
   };
 
@@ -86,53 +116,88 @@ export function ReceiptPreview({
         {/* Receipt Content */}
         <div className="p-6">
           {format === 'thermal' ? (
-            // Thermal Receipt (80mm width - ~300px in screen)
-            <div className="mx-auto bg-white text-black p-4 font-mono text-xs rounded border border-gray-300" style={{ width: '300px' }}>
-              {/* Store Header */}
-              <div className="text-center border-b border-black pb-2 mb-2">
-                <p className="font-bold text-sm">{storeInfo.name}</p>
-                <p className="text-xs">{storeInfo.address}</p>
-                <p className="text-xs">{storeInfo.phone}</p>
+            // Thermal Receipt — compact statutory layout (80mm)
+            <div
+              className="mx-auto"
+              style={{
+                width: '300px',
+                background: '#fff',
+                color: '#1a1a19',
+                padding: '12px 12px',
+                fontFamily: 'Inter, system-ui, sans-serif',
+                fontSize: 10.5,
+                lineHeight: 1.35,
+                border: '1px solid #aaa9a3',
+              }}
+            >
+              {/* Compact statutory header */}
+              <div style={{ textAlign: 'center', borderBottom: '1px solid #1a1a19', paddingBottom: 6 }}>
+                <div style={{ fontSize: 12, fontWeight: 700, letterSpacing: '.01em' }}>{tradeName.toUpperCase()}</div>
+                {subtitle && <div style={{ fontSize: 9, color: '#4a4a45', letterSpacing: '.08em', textTransform: 'uppercase' }}>{subtitle}</div>}
+                <div style={{ fontSize: 9, color: '#4a4a45', marginTop: 2 }}>{storeInfo.address}</div>
+                {storeInfo.phone && <div style={{ fontSize: 9, color: '#4a4a45' }}>{storeInfo.phone}</div>}
+                {storeInfo.gst && (
+                  <div style={{ fontSize: 9, color: '#4a4a45', marginTop: 2, fontFamily: 'JetBrains Mono, Menlo, monospace' }}>
+                    GSTIN: {storeInfo.gst}
+                  </div>
+                )}
               </div>
 
-              {/* Bill Details */}
-              <div className="space-y-1 text-xs mb-2">
-                <div className="flex justify-between">
-                  <span>Bill #:</span>
-                  <span className="font-bold">{billData.bill_number}</span>
+              {/* Doc strip — compact copy-marker pseudo */}
+              <div
+                style={{
+                  background: '#1a1a19',
+                  color: '#fff',
+                  textAlign: 'center',
+                  fontSize: 8.5,
+                  fontWeight: 600,
+                  letterSpacing: '.16em',
+                  padding: '3px 0',
+                  marginTop: 6,
+                }}
+              >
+                TAX INVOICE · ORIGINAL FOR RECIPIENT
+              </div>
+
+              {/* Bill meta */}
+              <div style={{ marginTop: 6, fontSize: 9.5 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                  <span style={{ color: '#4a4a45', textTransform: 'uppercase', letterSpacing: '.06em', fontSize: 8.5 }}>Bill No.</span>
+                  <span style={{ fontFamily: 'JetBrains Mono, Menlo, monospace', fontWeight: 600 }}>{docNumber}</span>
                 </div>
-                <div className="flex justify-between">
-                  <span>Date:</span>
-                  <span>{new Date().toLocaleDateString('en-IN')}</span>
-                </div>
-                <div className="flex justify-between">
-                  <span>Time:</span>
-                  <span>{new Date().toLocaleTimeString('en-IN')}</span>
+                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                  <span style={{ color: '#4a4a45', textTransform: 'uppercase', letterSpacing: '.06em', fontSize: 8.5 }}>Date · Time</span>
+                  <span style={{ fontFamily: 'JetBrains Mono, Menlo, monospace' }}>{formatDateTimeIST(new Date())}</span>
                 </div>
                 {selectedCustomer && (
-                  <div className="flex justify-between">
-                    <span>Customer:</span>
-                    <span className="font-semibold">{selectedCustomer.name}</span>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 1 }}>
+                    <span style={{ color: '#4a4a45', textTransform: 'uppercase', letterSpacing: '.06em', fontSize: 8.5 }}>Customer</span>
+                    <span style={{ fontWeight: 600 }}>{selectedCustomer.name}</span>
                   </div>
                 )}
               </div>
 
               {/* Items */}
-              <div className="border-t border-b border-black py-2 mb-2">
-                <div className="flex justify-between font-bold mb-1 border-b border-black pb-1">
-                  <span className="flex-1">Item</span>
-                  <span className="w-12 text-right">Qty</span>
-                  <span className="w-16 text-right">Amt</span>
+              <div style={{ marginTop: 6, borderTop: '1px solid #1a1a19', borderBottom: '1px solid #1a1a19', padding: '4px 0' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 8.5, color: '#4a4a45', textTransform: 'uppercase', letterSpacing: '.06em', fontWeight: 600, borderBottom: '1px solid #aaa9a3', paddingBottom: 2, marginBottom: 2 }}>
+                  <span style={{ flex: 1 }}>Item · HSN</span>
+                  <span style={{ width: 30, textAlign: 'right' }}>Qty</span>
+                  <span style={{ width: 56, textAlign: 'right' }}>Amount</span>
                 </div>
                 {cartItems.map((item, idx) => (
-                  <div key={idx} className="text-xs space-y-1">
-                    <div className="flex justify-between">
-                      <span className="flex-1">{describeForReceipt(item)}</span>
-                      <span className="w-12 text-right">{item.quantity}</span>
-                      <span className="w-16 text-right">₹{(item.unit_price * item.quantity).toFixed(2)}</span>
+                  <div key={idx} style={{ fontSize: 9.5, marginBottom: 2 }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                      <span style={{ flex: 1 }}>
+                        {describeForReceipt(item)}
+                        {item.hsn_code ? <span style={{ color: '#7a7a72', fontFamily: 'JetBrains Mono, Menlo, monospace', marginLeft: 4 }}>·{item.hsn_code}</span> : null}
+                      </span>
+                      <span style={{ width: 30, textAlign: 'right' }}>{item.quantity}</span>
+                      <span style={{ width: 56, textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>
+                        ₹{(item.unit_price * item.quantity).toFixed(2)}
+                      </span>
                     </div>
                     {item.discount_percent && (
-                      <div className="text-right text-gray-600">
+                      <div style={{ textAlign: 'right', color: '#4a4a45', fontSize: 9 }}>
                         -{item.discount_percent}% = -₹{(item.unit_price * item.quantity * item.discount_percent / 100).toFixed(2)}
                       </div>
                     )}
@@ -141,44 +206,54 @@ export function ReceiptPreview({
               </div>
 
               {/* Totals */}
-              <div className="space-y-1 text-xs mb-2">
-                <div className="flex justify-between">
-                  <span>Subtotal:</span>
-                  <span>₹{billData.subtotal.toFixed(2)}</span>
+              <div style={{ marginTop: 4, fontSize: 9.5 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                  <span style={{ color: '#4a4a45' }}>Subtotal</span>
+                  <span style={{ fontVariantNumeric: 'tabular-nums' }}>₹{billData.subtotal.toFixed(2)}</span>
                 </div>
                 {(billData.item_discount + billData.order_discount_amount) > 0 && (
-                  <div className="flex justify-between text-gray-600">
-                    <span>Discount:</span>
-                    <span>-₹{(billData.item_discount + billData.order_discount_amount).toFixed(2)}</span>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', color: '#4a4a45' }}>
+                    <span>Discount</span>
+                    <span style={{ fontVariantNumeric: 'tabular-nums' }}>-₹{(billData.item_discount + billData.order_discount_amount).toFixed(2)}</span>
                   </div>
                 )}
-                <div className="flex justify-between text-gray-600">
-                  <span>{billData.igst_amount > 0 ? 'IGST' : 'CGST+SGST'} (18%):</span>
-                  <span>₹{billData.total_gst.toFixed(2)}</span>
+                <div style={{ display: 'flex', justifyContent: 'space-between', color: '#4a4a45' }}>
+                  <span>{billData.igst_amount > 0 ? 'IGST' : 'CGST+SGST'}</span>
+                  <span style={{ fontVariantNumeric: 'tabular-nums' }}>₹{billData.total_gst.toFixed(2)}</span>
                 </div>
                 {Math.abs(billData.roundoff_amount) > 0.01 && (
-                  <div className="flex justify-between text-gray-600">
-                    <span>Round-off:</span>
-                    <span>₹{billData.roundoff_amount.toFixed(2)}</span>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', color: '#4a4a45' }}>
+                    <span>Round-off</span>
+                    <span style={{ fontVariantNumeric: 'tabular-nums' }}>₹{billData.roundoff_amount.toFixed(2)}</span>
                   </div>
                 )}
-                <div className="border-t border-black pt-1 flex justify-between font-bold">
-                  <span>TOTAL:</span>
-                  <span>₹{billData.total_amount}</span>
+                <div style={{ display: 'flex', justifyContent: 'space-between', borderTop: '1px solid #1a1a19', marginTop: 3, paddingTop: 3, fontWeight: 700, fontSize: 11 }}>
+                  <span>TOTAL</span>
+                  <span style={{ fontVariantNumeric: 'tabular-nums' }}>₹{billData.total_amount}</span>
                 </div>
               </div>
 
-              {/* Footer */}
-              <div className="text-center border-t border-black pt-2 text-xs">
-                <p>Thank you for shopping!</p>
-                <p>GST: {storeInfo.gst}</p>
-                <p className="mt-1 text-gray-600">Returns within 7 days with receipt</p>
+              {/* Amount in words */}
+              <div style={{ marginTop: 6, fontSize: 9, color: '#4a4a45', borderTop: '1px solid #aaa9a3', paddingTop: 4 }}>
+                <span style={{ textTransform: 'uppercase', letterSpacing: '.06em', fontWeight: 600, fontSize: 8.5 }}>In words:</span>{' '}
+                <span style={{ color: '#1a1a19' }}>{totalWords}</span>
+              </div>
+
+              {/* Declaration */}
+              <div style={{ marginTop: 4, fontSize: 8.5, color: '#4a4a45', textAlign: 'center', lineHeight: 1.4 }}>
+                {declarationText}
+              </div>
+              {/* Statutory footer */}
+              <div style={{ marginTop: 4, fontSize: 8, color: '#7a7a72', textAlign: 'center', textTransform: 'uppercase', letterSpacing: '.08em' }}>
+                {footerLine}
+              </div>
+              <div style={{ marginTop: 2, fontSize: 8, color: '#aaa9a3', textAlign: 'center' }}>
+                Thank you for shopping with us
               </div>
             </div>
           ) : (
-            // A4 Tax Invoice
+            // A4 Tax Invoice (simplified fallback — full statutory render is GSTInvoice.tsx)
             <div className="bg-white text-black p-8 rounded border-2 border-gray-300 space-y-4">
-              {/* Header */}
               <div className="grid grid-cols-2 gap-8 pb-4 border-b-2 border-black">
                 <div>
                   <h1 className="text-2xl font-bold">{storeInfo.name}</h1>
@@ -192,8 +267,6 @@ export function ReceiptPreview({
                   <p className="text-sm"><strong>Date:</strong> {new Date().toLocaleDateString('en-IN')}</p>
                 </div>
               </div>
-
-              {/* Bill To */}
               {selectedCustomer && (
                 <div className="grid grid-cols-2 gap-8 py-4 border-b border-gray-300">
                   <div>
@@ -202,18 +275,14 @@ export function ReceiptPreview({
                     <p className="text-sm">{selectedCustomer.phone}</p>
                     {selectedCustomer.email && <p className="text-sm">{selectedCustomer.email}</p>}
                   </div>
-                  <div className="text-right text-sm">
-                    {/* Space for additional info */}
-                  </div>
                 </div>
               )}
-
-              {/* Items Table */}
               <div className="mb-4">
                 <table className="w-full text-sm border-collapse">
                   <thead>
                     <tr className="border-b-2 border-black">
                       <th className="text-left py-2">Description</th>
+                      <th className="text-center py-2">HSN</th>
                       <th className="text-center py-2">Qty</th>
                       <th className="text-right py-2">Unit Price</th>
                       <th className="text-right py-2">Amount</th>
@@ -222,19 +291,16 @@ export function ReceiptPreview({
                   <tbody>
                     {cartItems.map((item, idx) => (
                       <tr key={idx} className="border-b border-gray-300">
-                        <td className="py-2">
-                          <p className="font-semibold">{describeForReceipt(item)}</p>
-                        </td>
+                        <td className="py-2 font-semibold">{describeForReceipt(item)}</td>
+                        <td className="text-center py-2 font-mono text-xs">{item.hsn_code || '—'}</td>
                         <td className="text-center py-2">{item.quantity}</td>
-                        <td className="text-right py-2">₹{item.unit_price.toLocaleString('en-IN')}</td>
-                        <td className="text-right py-2">₹{(item.unit_price * item.quantity).toLocaleString('en-IN')}</td>
+                        <td className="text-right py-2 tabular-nums">₹{item.unit_price.toLocaleString('en-IN')}</td>
+                        <td className="text-right py-2 tabular-nums">₹{(item.unit_price * item.quantity).toLocaleString('en-IN')}</td>
                       </tr>
                     ))}
                   </tbody>
                 </table>
               </div>
-
-              {/* Totals */}
               <div className="flex justify-end mb-4">
                 <div className="w-64 space-y-1 text-sm border-t-2 border-black pt-2">
                   <div className="flex justify-between">
@@ -280,11 +346,11 @@ export function ReceiptPreview({
                   </div>
                 </div>
               </div>
-
-              {/* Footer */}
-              <div className="text-center text-xs text-gray-600 pt-4 border-t border-gray-300">
-                <p>Thank you for your purchase!</p>
-                <p>Returns accepted within 7 days with original receipt</p>
+              {/* Amount in words + declaration + statutory line on A4 fallback */}
+              <div className="border-t border-gray-300 pt-3 text-xs">
+                <p><strong>In words:</strong> {totalWords}</p>
+                <p className="text-gray-600 mt-2">{declarationText}</p>
+                <p className="text-gray-500 mt-2 uppercase tracking-wider text-[10px]">{footerLine}</p>
               </div>
             </div>
           )}
