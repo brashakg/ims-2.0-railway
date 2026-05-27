@@ -270,7 +270,7 @@ export default function ItcReconcilePage() {
           <input type="file" accept=".csv,text/csv" className="hidden" onChange={(e) => onFile(e.target.files?.[0])} />
         </label>
         <button type="button" onClick={runReconcile} disabled={running}
-          className="inline-flex items-center gap-1.5 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg px-4 py-1.5 disabled:opacity-60">
+          className="inline-flex items-center gap-1.5 text-sm font-medium text-white bg-bv hover:bg-bv-600 rounded-lg px-4 py-1.5 disabled:opacity-60">
           {running && <Loader2 className="w-4 h-4 animate-spin" />} Reconcile
         </button>
       </div>

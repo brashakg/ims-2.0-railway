@@ -101,7 +101,7 @@ export default function OrganizationPage() {
         <button
           type="button"
           onClick={() => setEntityModal('new')}
-          className="inline-flex items-center gap-1.5 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg px-3 py-1.5"
+          className="inline-flex items-center gap-1.5 text-sm font-medium text-white bg-bv hover:bg-bv-600 rounded-lg px-3 py-1.5"
         >
           <Plus className="w-4 h-4" /> Add entity
         </button>
@@ -129,7 +129,7 @@ export default function OrganizationPage() {
                     className="flex items-center gap-2 text-left flex-1 min-w-0"
                   >
                     {open ? <ChevronDown className="w-4 h-4 text-gray-400" /> : <ChevronRight className="w-4 h-4 text-gray-400" />}
-                    <Landmark className="w-4 h-4 text-blue-600 shrink-0" />
+                    <Landmark className="w-4 h-4 text-bv shrink-0" />
                     <span className="font-medium text-gray-900 truncate">{ent.name}</span>
                     {ent.entity_type && (
                       <span className="text-xs text-gray-500 bg-gray-100 rounded px-1.5 py-0.5">{ent.entity_type}</span>
@@ -144,7 +144,7 @@ export default function OrganizationPage() {
                   </button>
                   <div className="flex items-center gap-2 shrink-0">
                     <button type="button" onClick={() => setStoreModal({ entity: ent, store: 'new' })}
-                      className="inline-flex items-center gap-1 text-xs text-blue-700 hover:bg-blue-50 rounded px-2 py-1">
+                      className="inline-flex items-center gap-1 text-xs text-bv hover:bg-bv-50 rounded px-2 py-1">
                       <Plus className="w-3 h-3" /> Store
                     </button>
                     <button type="button" onClick={() => setEntityModal(ent)}
@@ -163,7 +163,7 @@ export default function OrganizationPage() {
                           <span key={g.gstin} className="text-xs border border-gray-200 rounded px-2 py-1 text-gray-700">
                             <span className="font-mono">{g.gstin}</span>
                             <span className="text-gray-400"> &middot; {g.state_name || stateName(g.state_code)}</span>
-                            {g.is_primary && <span className="text-blue-600"> &middot; primary</span>}
+                            {g.is_primary && <span className="text-bv"> &middot; primary</span>}
                           </span>
                         ))}
                       </div>
@@ -412,7 +412,7 @@ function StoreModal({
       <SectionHeader icon={<StoreIcon className="w-3.5 h-3.5" />} title="Enabled categories" />
       <div className="flex flex-wrap gap-2">
         {STORE_CATEGORIES.map((c) => (
-          <label key={c} className={`text-xs border rounded px-2 py-1 cursor-pointer ${cats.includes(c) ? 'bg-blue-50 border-blue-300 text-blue-700' : 'border-gray-200 text-gray-600'}`}>
+          <label key={c} className={`text-xs border rounded px-2 py-1 cursor-pointer ${cats.includes(c) ? 'bg-bv-50 border-bv text-bv' : 'border-gray-200 text-gray-600'}`}>
             <input type="checkbox" className="hidden" checked={cats.includes(c)}
               onChange={() => set('enabled_categories', cats.includes(c) ? cats.filter((x) => x !== c) : [...cats, c])} />
             {c}
@@ -452,7 +452,7 @@ function SectionHeader({ icon, title, onAdd }: { icon: ReactNode; title: string;
     <div className="flex items-center justify-between mt-4 mb-2">
       <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wide flex items-center gap-1.5">{icon}{title}</h4>
       {onAdd && (
-        <button type="button" onClick={onAdd} className="inline-flex items-center gap-1 text-xs text-blue-700 hover:underline">
+        <button type="button" onClick={onAdd} className="inline-flex items-center gap-1 text-xs text-bv hover:underline">
           <Plus className="w-3 h-3" /> Add
         </button>
       )}
@@ -479,7 +479,7 @@ function ModalFooter({ saving, onClose, onSave }: { saving: boolean; onClose: ()
     <div className="flex items-center justify-end gap-2 mt-5 pt-3 border-t border-gray-100">
       <button type="button" onClick={onClose} className="text-sm text-gray-600 hover:bg-gray-100 rounded-lg px-3 py-1.5">Cancel</button>
       <button type="button" onClick={onSave} disabled={saving}
-        className="inline-flex items-center gap-1.5 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg px-4 py-1.5 disabled:opacity-60">
+        className="inline-flex items-center gap-1.5 text-sm font-medium text-white bg-bv hover:bg-bv-600 rounded-lg px-4 py-1.5 disabled:opacity-60">
         {saving && <Loader2 className="w-4 h-4 animate-spin" />} Save
       </button>
     </div>
