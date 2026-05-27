@@ -84,7 +84,7 @@ def _get_integrations_collection():
 def _get_integration_config(integration_type: str) -> dict:
     """Get a specific integration config from database"""
     collection = _get_integrations_collection()
-    if collection:
+    if collection is not None:
         config = collection.find_one({"type": integration_type.lower()})
         if config:
             config.pop("_id", None)
@@ -95,7 +95,7 @@ def _get_integration_config(integration_type: str) -> dict:
 def _save_integration_config(integration_type: str, config_data: dict) -> bool:
     """Save integration config to database"""
     collection = _get_integrations_collection()
-    if collection:
+    if collection is not None:
         collection.update_one(
             {"type": integration_type.lower()},
             {"$set": {**config_data, "type": integration_type.lower()}},

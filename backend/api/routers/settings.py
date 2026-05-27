@@ -149,7 +149,7 @@ def _get_settings_collection(collection_name: str):
 def _get_business_settings_from_db() -> Optional[dict]:
     """Fetch business settings from database"""
     collection = _get_settings_collection("business_settings")
-    if collection:
+    if collection is not None:
         settings = collection.find_one({"_id": "default"})
         if settings:
             settings.pop("_id", None)
@@ -160,7 +160,7 @@ def _get_business_settings_from_db() -> Optional[dict]:
 def _get_tax_settings_from_db() -> Optional[dict]:
     """Fetch tax settings from database"""
     collection = _get_settings_collection("tax_settings")
-    if collection:
+    if collection is not None:
         settings = collection.find_one({"_id": "default"})
         if settings:
             settings.pop("_id", None)
@@ -171,7 +171,7 @@ def _get_tax_settings_from_db() -> Optional[dict]:
 def _get_invoice_settings_from_db() -> Optional[dict]:
     """Fetch invoice settings from database"""
     collection = _get_settings_collection("invoice_settings")
-    if collection:
+    if collection is not None:
         settings = collection.find_one({"_id": "default"})
         if settings:
             settings.pop("_id", None)
@@ -182,7 +182,7 @@ def _get_invoice_settings_from_db() -> Optional[dict]:
 def _get_printer_settings_from_db() -> Optional[dict]:
     """Fetch printer settings from database"""
     collection = _get_settings_collection("printer_settings")
-    if collection:
+    if collection is not None:
         settings = collection.find_one({"_id": "default"})
         if settings:
             settings.pop("_id", None)
@@ -193,7 +193,7 @@ def _get_printer_settings_from_db() -> Optional[dict]:
 def _get_notification_templates_from_db() -> List[dict]:
     """Fetch notification templates from database"""
     collection = _get_settings_collection("notification_templates")
-    if collection:
+    if collection is not None:
         templates = list(collection.find({}))
         for t in templates:
             t.pop("_id", None)
@@ -204,7 +204,7 @@ def _get_notification_templates_from_db() -> List[dict]:
 def _get_discount_rules_from_db() -> Optional[dict]:
     """Fetch discount rules from database"""
     collection = _get_settings_collection("discount_rules")
-    if collection:
+    if collection is not None:
         rules = collection.find_one({"_id": "default"})
         if rules:
             rules.pop("_id", None)
@@ -218,7 +218,7 @@ def _get_integrations_from_db(mask: bool = True) -> List[dict]:
     mask=False: decrypts for internal use (e.g., actually calling Shopify API).
     """
     collection = _get_settings_collection("integrations")
-    if collection:
+    if collection is not None:
         integrations = list(collection.find({}))
         for i in integrations:
             i.pop("_id", None)
@@ -868,7 +868,7 @@ async def update_integration(
     cfg = payload.get("config") if isinstance(payload.get("config"), dict) else {}
 
     collection = _get_settings_collection("integrations")
-    if collection:
+    if collection is not None:
         collection.update_one(
             {"type": integration_type.lower()},
             {
@@ -1076,7 +1076,7 @@ async def get_system_settings(current_user: dict = Depends(get_current_user)):
     if not any(role in current_user["roles"] for role in ["SUPERADMIN", "ADMIN"]):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
     collection = _get_settings_collection("system_settings")
-    if collection:
+    if collection is not None:
         settings = collection.find_one({"_id": "default"})
         if settings:
             settings.pop("_id", None)
@@ -1162,7 +1162,7 @@ async def get_admin_controls(current_user: dict = Depends(get_current_user)):
     if "SUPERADMIN" not in current_user["roles"]:
         raise HTTPException(status_code=403, detail="Superadmin access required")
     collection = _get_settings_collection("admin_controls")
-    if collection:
+    if collection is not None:
         settings = collection.find_one({"_id": "default"})
         if settings:
             settings.pop("_id", None)
@@ -1182,7 +1182,7 @@ async def update_admin_controls(
     if "SUPERADMIN" not in current_user["roles"]:
         raise HTTPException(status_code=403, detail="Superadmin access required")
     collection = _get_settings_collection("admin_controls")
-    if collection:
+    if collection is not None:
         collection.update_one(
             {"_id": "default"},
             {"$set": controls},
@@ -1289,7 +1289,7 @@ async def get_approval_workflows(current_user: dict = Depends(get_current_user))
     if not any(role in current_user["roles"] for role in ["SUPERADMIN", "ADMIN"]):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
     collection = _get_settings_collection("approval_workflows")
-    if collection:
+    if collection is not None:
         doc = collection.find_one({"_id": "default"})
         if doc:
             doc.pop("_id", None)
@@ -1307,7 +1307,7 @@ async def update_approval_workflows(
         raise HTTPException(status_code=403, detail="Insufficient permissions")
     data = {"workflows": [w.model_dump() for w in payload.workflows]}
     collection = _get_settings_collection("approval_workflows")
-    if collection:
+    if collection is not None:
         collection.update_one(
             {"_id": "default"},
             {"$set": {**data, "updated_at": datetime.utcnow().isoformat()}},
@@ -1360,7 +1360,7 @@ async def get_feature_toggles(
         return cached
 
     collection = _get_settings_collection("feature_toggles")
-    if collection:
+    if collection is not None:
         doc = collection.find_one({"_id": store_id})
         if doc:
             doc.pop("_id", None)
@@ -1391,7 +1391,7 @@ async def update_feature_toggles_put(
             status_code=403, detail="Superadmin or store manager access required"
         )
     collection = _get_settings_collection("feature_toggles")
-    if collection:
+    if collection is not None:
         collection.update_one(
             {"_id": store_id},
             {
@@ -1430,7 +1430,7 @@ async def update_feature_toggles_patch(
             status_code=403, detail="Superadmin or store manager access required"
         )
     collection = _get_settings_collection("feature_toggles")
-    if collection:
+    if collection is not None:
         collection.update_one(
             {"_id": store_id},
             {
