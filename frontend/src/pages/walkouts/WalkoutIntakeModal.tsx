@@ -12,7 +12,7 @@
 import { useEffect, useState } from 'react';
 import { X, Loader2, AlertTriangle, PhoneOff } from 'lucide-react';
 import { walkoutsApi } from '../../services/api';
-import { adminUserApi } from '../../services/api/stores';
+import { adminStoreApi } from '../../services/api/stores';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import {
@@ -97,12 +97,30 @@ export function WalkoutIntakeModal({ isOpen, onClose, onSaved }: WalkoutIntakeMo
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen]);
 
+  // Sales-attributable roles only. Mirrors POS SalespersonPicker (PR #276)
+  // so the same staff list drives POS + Walkouts — see POSLayout.tsx.
+  // adminUserApi.getUsers required ADMIN role + ignored the storeId filter,
+  // which is why this dropdown rendered EMPTY for SUPERADMIN-as-store-staff
+  // and for every non-admin (the QA agent saw empty for BV-BOK-01 with 3
+  // active sales staff). storesApi.getStoreUsers is public-ish, store-scoped,
+  // and accepts the same role + active-only filters POS uses.
+  const SALES_ATTRIBUTABLE_ROLES = [
+    'STORE_MANAGER',
+    'SALES_CASHIER',
+    'SALES_STAFF',
+    'OPTICIAN',
+    'CASHIER',
+  ];
+
   const loadStaff = async () => {
+    if (!user?.activeStoreId) {
+      setStaffOptions([]);
+      return;
+    }
     try {
-      // Filter to roles allowed to attribute walkouts. Falls back to
-      // all users at this store if the API doesn't accept the filter.
-      const resp: any = await (adminUserApi as any).getUsers?.({
-        storeId: user?.activeStoreId,
+      const resp: any = await adminStoreApi.getStoreUsers(user.activeStoreId, {
+        roles: SALES_ATTRIBUTABLE_ROLES,
+        activeOnly: true,
       });
       const list = resp?.users || resp || [];
       setStaffOptions(
@@ -111,7 +129,7 @@ export function WalkoutIntakeModal({ isOpen, onClose, onSaved }: WalkoutIntakeMo
               user_id: u.user_id || u.id,
               name: u.name || u.full_name || u.username || u.user_id,
             }))
-          : []
+          : [],
       );
     } catch {
       setStaffOptions([]);
