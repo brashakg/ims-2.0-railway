@@ -87,6 +87,23 @@
 .audit-row .diff .now { color: var(--ok); }
 .audit-row .who { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: var(--ink-3); margin-top: 4px; }
 .audit-row .who .av { width: 16px; height: 16px; border-radius: 50%; background: var(--ink); color: #fff; display: grid; place-items: center; font-size: 9px; font-weight: 600; }
+
+/* Small polish · setup */
+.s-nav a { transition: background .12s, color .12s; }
+.s-section { transition: border-color .12s; }
+.s-section:hover { border-color: var(--line-strong); }
+.s-section-head h3 {
+  display: flex; align-items: center; gap: 8px;
+}
+.s-section-head h3::before {
+  content: ''; width: 4px; height: 12px; background: var(--ink); border-radius: 1px;
+}
+.s-row { transition: background .1s; }
+.s-row:hover { background: var(--bg-sunk); }
+.tgl { transition: background .15s, box-shadow .15s; }
+.tgl.on { box-shadow: 0 0 0 2px rgba(0,0,0,.04); }
+.audit-row { transition: background .1s; margin: 0 -8px; padding: 12px 8px; }
+.audit-row:hover { background: var(--bg-sunk); }
 </style>
 </head>
 <body>

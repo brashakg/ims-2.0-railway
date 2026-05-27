@@ -51,4 +51,41 @@ window.MOCK = {
     { id:'AG-ATT', name:'Attendance Sentinel',desc:'Shift & break anomaly detection',    on:true,  lastRun:'6m ago',  actions24h: 2 },
     { id:'AG-COPY',name:'Copy & Content',   desc:'Generates SMS/WhatsApp offers',        on:false, lastRun:'paused',  actions24h: 0 },
   ],
+
+  /* ── Display fixtures (where SKUs physically live) ─────────────────
+     Code · type · floor · zone · capacity (pieces it can hold) · lockable
+     · merch: which categories belong here · last audit date. */
+  fixtures: [
+    { id:'WD-01', code:'WD-01', name:'Window display · street-facing',  type:'window',  floor:'ground', zone:'A', capacity:16,  lockable:false, merch:['Frame','Sun'],         lastAudit:'14-Apr', mannequin:true },
+    { id:'W-01',  code:'W-01',  name:'Wall · Designer & Heritage',      type:'wall',    floor:'ground', zone:'A', capacity:80,  lockable:false, merch:['Frame'],               lastAudit:'15-Apr' },
+    { id:'W-02',  code:'W-02',  name:'Wall · Sport & Outdoor',          type:'wall',    floor:'ground', zone:'B', capacity:60,  lockable:false, merch:['Frame','Sun'],         lastAudit:'15-Apr' },
+    { id:'W-03',  code:'W-03',  name:'Wall · Kids & Teen',              type:'wall',    floor:'ground', zone:'C', capacity:48,  lockable:false, merch:['Frame'],               lastAudit:'12-Apr' },
+    { id:'P-01',  code:'P-01',  name:'Pillar · entrance statement',     type:'pillar',  floor:'ground', zone:'A', capacity:32,  lockable:false, merch:['Frame','Sun'],         lastAudit:'15-Apr', spotlit:true },
+    { id:'P-02',  code:'P-02',  name:'Pillar · mid-floor capsule',      type:'pillar',  floor:'ground', zone:'B', capacity:24,  lockable:false, merch:['Frame'],               lastAudit:'16-Apr' },
+    { id:'C-01',  code:'C-01',  name:'Counter · Sunglasses & Polarised',type:'counter', floor:'ground', zone:'A', capacity:40,  lockable:false, merch:['Sun','Frame'],         lastAudit:'17-Apr' },
+    { id:'C-02',  code:'C-02',  name:'Counter · CL & Accessories',      type:'counter', floor:'ground', zone:'B', capacity:60,  lockable:false, merch:['Access.','CL'],        lastAudit:'17-Apr' },
+    { id:'LC-01', code:'LC-01', name:'Locked cabinet · Premium',        type:'cabinet', floor:'ground', zone:'A', capacity:18,  lockable:true,  merch:['Frame'],               lastAudit:'12-Apr', key:'SM only' },
+    { id:'GP-01', code:'GP-01', name:'Gondola · Try-me',                type:'gondola', floor:'ground', zone:'B', capacity:24,  lockable:false, merch:['Frame'],               lastAudit:'14-Apr', noQR:true },
+    { id:'D-01',  code:'D-01',  name:'Back drawer · Lens overflow',     type:'drawer',  floor:'storage',zone:'—', capacity:300, lockable:true,  merch:['Lens'],                lastAudit:'10-Apr', key:'SM+ASM' },
+    { id:'D-02',  code:'D-02',  name:'Back drawer · Frame overflow',    type:'drawer',  floor:'storage',zone:'—', capacity:200, lockable:true,  merch:['Frame'],               lastAudit:'10-Apr', key:'SM+ASM' },
+    { id:'CF-01', code:'CF-01', name:'CL fridge · clinical chamber',    type:'fridge',  floor:'clinic', zone:'—', capacity:120, lockable:true,  merch:['CL'],                  lastAudit:'18-Apr', tempCtrl:'2-8°C' },
+  ],
+
+  /* ── Placements (SKU → fixture mapping) ─────────────────────────────
+     Some SKUs split across primary display fixture + back overflow. */
+  placements: [
+    { sku:'BV-RB-AV-5823', fixture:'WD-01', qty:1, position:'mannequin · centre' },
+    { sku:'BV-RB-AV-5823', fixture:'P-01',  qty:1, position:'shelf-2 · slot-04' },
+    { sku:'BV-RB-AV-5823', fixture:'D-02',  qty:1, position:'tray-3' },
+    { sku:'BV-OK-HX-1120', fixture:'W-02',  qty:5, position:'row-2 · slot 8–12' },
+    { sku:'BV-OK-HX-1120', fixture:'D-02',  qty:2, position:'tray-1' },
+    { sku:'BV-VO-VO5485',  fixture:'C-01',  qty:2, position:'tray-A · slot-3' },
+    { sku:'BV-TT-TI-102',  fixture:'LC-01', qty:4, position:'top shelf · slot-2' },
+    { sku:'BV-TT-TI-102',  fixture:'D-02',  qty:1, position:'tray-2' },
+    { sku:'BV-VL-ORMA-15', fixture:'D-01',  qty:99, position:'bin-A1 · power matrix' },
+    { sku:'BV-CZ-BLUE-16', fixture:'D-01',  qty:99, position:'bin-A2 · power matrix' },
+    { sku:'BV-AC-JJ-DP30', fixture:'CF-01', qty:14, position:'shelf-2 · power −2.50 to −3.50' },
+    { sku:'BV-CN-MICRO',   fixture:'C-02',  qty:60,  position:'jar-1' },
+    { sku:'BV-CN-MICRO',   fixture:'D-02',  qty:160, position:'box-12' },
+  ],
 };
