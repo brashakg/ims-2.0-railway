@@ -10,7 +10,7 @@
 // schema + field list.
 
 import { useEffect, useState } from 'react';
-import { X, Loader2, AlertTriangle } from 'lucide-react';
+import { X, Loader2, AlertTriangle, PhoneOff } from 'lucide-react';
 import { walkoutsApi } from '../../services/api';
 import { adminUserApi } from '../../services/api/stores';
 import { useAuth } from '../../context/AuthContext';
@@ -77,6 +77,7 @@ export function WalkoutIntakeModal({ isOpen, onClose, onSaved }: WalkoutIntakeMo
   const [staffOptions, setStaffOptions] = useState<StaffOption[]>([]);
   const [isSaving, setIsSaving] = useState(false);
   const [errors, setErrors] = useState<Partial<Record<keyof CreateWalkoutRequest, string>>>({});
+  const [showNoMobileWarning, setShowNoMobileWarning] = useState(false);
 
   // Reset on open + load staff dropdown options scoped to active store.
   // Always default sales_person_id to the logged-in user (the backend
@@ -86,6 +87,7 @@ export function WalkoutIntakeModal({ isOpen, onClose, onSaved }: WalkoutIntakeMo
     setForm({ ...emptyForm(), sales_person_id: userId });
     setErrors({});
     setIsSaving(false);
+    setShowNoMobileWarning(false);
     if (showSalesPersonPicker) {
       loadStaff();
     } else {
@@ -125,11 +127,17 @@ export function WalkoutIntakeModal({ isOpen, onClose, onSaved }: WalkoutIntakeMo
 
   // -------------------------------------------------------------------------
   // Validation — fast client-side; server re-validates.
+  // Mobile is now OPTIONAL (some customers don't share their number).
+  // Empty is valid; any digits 1-9 long or non-numeric is rejected so
+  // the operator doesn't end up with a half-typed junk number.
   // -------------------------------------------------------------------------
   const validate = (): boolean => {
     const e: typeof errors = {};
     if (!form.customer_name?.trim()) e.customer_name = 'Required';
-    if (!MOBILE_RE.test(form.mobile || '')) e.mobile = 'Mobile must be 10 digits';
+    const mob = (form.mobile || '').trim();
+    if (mob !== '' && !MOBILE_RE.test(mob)) {
+      e.mobile = 'Mobile must be 10 digits or left blank';
+    }
     if (!form.age_group) e.age_group = 'Required';
     if (!form.gender) e.gender = 'Required';
     if (!form.product_interested) e.product_interested = 'Required';
@@ -143,14 +151,15 @@ export function WalkoutIntakeModal({ isOpen, onClose, onSaved }: WalkoutIntakeMo
     return Object.keys(e).length === 0;
   };
 
-  const handleSubmit = async () => {
-    if (!validate()) {
-      toast.error('Please fix the highlighted fields');
-      return;
-    }
+  const performSave = async () => {
     setIsSaving(true);
     try {
-      const saved = await walkoutsApi.createWalkout(form);
+      // Send mobile as the trimmed string (or empty); the server
+      // normalizes empty -> None and skips customer auto-create.
+      const saved = await walkoutsApi.createWalkout({
+        ...form,
+        mobile: (form.mobile || '').trim(),
+      });
       toast.success(`Walkout logged · ${saved.walkout_id}`);
       onSaved(saved.walkout_id);
       onClose();
@@ -165,7 +174,29 @@ export function WalkoutIntakeModal({ isOpen, onClose, onSaved }: WalkoutIntakeMo
     }
   };
 
+  const handleSubmit = async () => {
+    if (!validate()) {
+      toast.error('Please fix the highlighted fields');
+      return;
+    }
+    // Mobile optional path: open the confirmation modal before saving
+    // so the operator can either go back and ask for a number or
+    // explicitly acknowledge that follow-up SMS/WhatsApp/call routes
+    // will be impossible.
+    if ((form.mobile || '').trim() === '') {
+      setShowNoMobileWarning(true);
+      return;
+    }
+    await performSave();
+  };
+
+  const handleConfirmNoMobile = async () => {
+    setShowNoMobileWarning(false);
+    await performSave();
+  };
+
   return (
+    <>
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
       <div className="bg-white rounded-xl w-full max-w-3xl max-h-[92vh] overflow-hidden flex flex-col shadow-2xl">
         {/* Header */}
@@ -196,13 +227,17 @@ export function WalkoutIntakeModal({ isOpen, onClose, onSaved }: WalkoutIntakeMo
                 autoFocus
               />
             </Field>
-            <Field label="Mobile *" error={errors.mobile}>
+            <Field
+              label="Mobile"
+              hint="Optional — leave blank if the customer didn't share"
+              error={errors.mobile}
+            >
               <input
                 type="tel"
                 inputMode="numeric"
-                value={form.mobile}
+                value={form.mobile || ''}
                 onChange={e => set('mobile', e.target.value.replace(/\D/g, '').slice(0, 10))}
-                placeholder="10 digits"
+                placeholder="10 digits, or leave blank"
                 className="input font-mono"
               />
             </Field>
@@ -362,6 +397,50 @@ export function WalkoutIntakeModal({ isOpen, onClose, onSaved }: WalkoutIntakeMo
         </div>
       </div>
     </div>
+
+    {showNoMobileWarning && (
+      <div className="fixed inset-0 z-[60] bg-black/50 flex items-center justify-center p-4">
+        <div className="bg-white rounded-xl w-full max-w-md shadow-2xl overflow-hidden">
+          <div className="px-5 py-4 border-b border-gray-200 flex items-start gap-3">
+            <div className="rounded-full p-2 bg-amber-50 text-amber-700 mt-0.5 shrink-0">
+              <PhoneOff className="w-5 h-5" />
+            </div>
+            <div>
+              <h3 className="text-base font-semibold text-gray-900">
+                Save without mobile number?
+              </h3>
+              <p className="text-xs text-gray-500 mt-1">
+                The customer didn&apos;t share their phone.
+              </p>
+            </div>
+          </div>
+          <div className="px-5 py-4 text-sm text-gray-700">
+            You won&apos;t be able to schedule call / WhatsApp / SMS follow-ups,
+            only in-person.
+          </div>
+          <div className="px-5 py-3 bg-gray-50 border-t border-gray-200 flex justify-end gap-2">
+            <button
+              type="button"
+              onClick={() => setShowNoMobileWarning(false)}
+              disabled={isSaving}
+              className="px-4 py-2 rounded text-sm font-semibold text-gray-700 hover:bg-gray-100 disabled:opacity-50"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={handleConfirmNoMobile}
+              disabled={isSaving}
+              className="px-5 py-2 rounded text-sm font-semibold bg-bv-red-600 text-white hover:bg-bv-red-700 disabled:opacity-50 inline-flex items-center gap-2"
+            >
+              {isSaving && <Loader2 className="w-4 h-4 animate-spin" />}
+              Save anyway
+            </button>
+          </div>
+        </div>
+      </div>
+    )}
+    </>
   );
 }
 
@@ -405,16 +484,21 @@ function Row({ children }: { children: React.ReactNode }) {
 function Field({
   label,
   error,
+  hint,
   children,
 }: {
   label: string;
   error?: string;
+  hint?: string;
   children: React.ReactNode;
 }) {
   return (
     <div>
       <label className="text-xs font-medium text-gray-700 block mb-1">{label}</label>
       {children}
+      {hint && !error && (
+        <p className="mt-1 text-xs text-gray-500">{hint}</p>
+      )}
       {error && (
         <p className="mt-1 text-xs text-red-600 inline-flex items-center gap-1">
           <AlertTriangle className="w-3 h-3" />

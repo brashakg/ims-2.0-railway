@@ -13,6 +13,7 @@ import type {
   ListWalkoutsResponse,
   CreateFollowUpRequest,
   UpdateFollowUpRequest,
+  ApproveFollowUpRequest,
   SetWalkoutResultRequest,
   FollowUpsDueResponse,
   WalkinTodayResponse,
@@ -87,11 +88,25 @@ export const walkoutsApi = {
    * completed_at + completed_by when status flips to DONE. */
   updateFollowUp: async (
     walkoutId: string,
-    round: 1 | 2,
+    round: 1 | 2 | 3,
     patch: UpdateFollowUpRequest,
   ): Promise<Walkout> => {
     const response = await api.patch(
       `/walkouts/${walkoutId}/followups/${round}`, patch,
+    );
+    return response.data;
+  },
+
+  /** Manager approval / rejection of a DONE follow-up. Role-gated on
+   * the server to STORE_MANAGER / AREA_MANAGER / ADMIN / SUPERADMIN —
+   * salespeople hit 403 if they try to self-approve. */
+  approveFollowUp: async (
+    walkoutId: string,
+    round: 1 | 2 | 3,
+    payload: ApproveFollowUpRequest,
+  ): Promise<Walkout> => {
+    const response = await api.post(
+      `/walkouts/${walkoutId}/followups/${round}/approve`, payload,
     );
     return response.data;
   },

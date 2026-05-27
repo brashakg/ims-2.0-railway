@@ -25,7 +25,7 @@ Side effects on POST:
 
 from datetime import datetime, date as date_type
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 import logging
 import re
 import uuid
@@ -136,6 +136,22 @@ class FollowUpStatus(str, Enum):
     ESCALATED = "ESCALATED"
 
 
+class ApprovalStatus(str, Enum):
+    """Anti-fake-closure: a DONE follow-up logged by a salesperson must
+    be approved by a manager. Statuses not requiring approval (NOT
+    REACHABLE / NOT REQUIRED / ESCALATED) leave approval_status = None.
+    """
+
+    PENDING_APPROVAL = "PENDING_APPROVAL"
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
+
+
+class ApprovalDecision(str, Enum):
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
+
+
 class WalkoutResult(str, Enum):
     DUE = "DUE"
     NEGATIVE = "NEGATIVE"
@@ -151,10 +167,19 @@ _MOBILE_RE = re.compile(r"^\d{10}$")
 
 
 class CreateWalkoutRequest(BaseModel):
-    """Phase 1 intake payload. See doc §"Schema — walkouts collection"."""
+    """Phase 1 intake payload. See doc §"Schema — walkouts collection".
+
+    Mobile is now optional (some customers don't share their number).
+    When omitted/empty, the auto-create skeleton customer step is
+    skipped and the walkout doc carries customer_id=None. The frontend
+    surfaces a confirmation warning in that case because follow-up
+    SMS/WhatsApp/call routes are unavailable without a number.
+    """
 
     customer_name: str = Field(..., min_length=1, max_length=120)
-    mobile: str = Field(..., description="10-digit Indian mobile")
+    mobile: Optional[str] = Field(
+        None, description="10-digit Indian mobile; optional"
+    )
     age_group: AgeGroup
     gender: Gender
     product_interested: ProductCategory
@@ -172,10 +197,15 @@ class CreateWalkoutRequest(BaseModel):
 
     @field_validator("mobile")
     @classmethod
-    def _validate_mobile(cls, v: str) -> str:
+    def _validate_mobile(cls, v):
+        # Empty string -> None (omitted); a present value must be 10 digits.
+        if v is None:
+            return None
         v = (v or "").strip()
+        if v == "":
+            return None
         if not _MOBILE_RE.match(v):
-            raise ValueError("Mobile must be exactly 10 digits")
+            raise ValueError("Mobile must be exactly 10 digits or left blank")
         return v
 
 
@@ -226,11 +256,15 @@ class UpdateWalkoutRequest(BaseModel):
     @field_validator("mobile")
     @classmethod
     def _validate_mobile(cls, v):
+        # Same shape as CreateWalkoutRequest: None / "" -> None; else
+        # must be 10 digits. Mirrors the optional-mobile policy.
         if v is None:
-            return v
+            return None
         v = (v or "").strip()
+        if v == "":
+            return None
         if not _MOBILE_RE.match(v):
-            raise ValueError("Mobile must be exactly 10 digits")
+            raise ValueError("Mobile must be exactly 10 digits or left blank")
         return v
 
 
@@ -241,9 +275,15 @@ class DeleteWalkoutRequest(BaseModel):
 
 
 class CreateFollowUpRequest(BaseModel):
-    """Phase 3 — append a new follow-up sub-doc."""
+    """Phase 3 — append a new follow-up sub-doc.
 
-    round: int = Field(..., ge=1, le=2, description="Only rounds 1 and 2 supported")
+    Owner now requires three rounds of follow-up (was two) so manager
+    can verify each round actually happened (anti-fake-closure).
+    """
+
+    round: Literal[1, 2, 3] = Field(
+        ..., description="Follow-up round 1, 2, or 3"
+    )
     scheduled_date: date_type
     scheduled_time: Optional[str] = Field(
         None, max_length=5, description="HH:MM 24-hour"
@@ -251,6 +291,17 @@ class CreateFollowUpRequest(BaseModel):
     mode: FollowUpMode
     supervisor_id: Optional[str] = None
     notes: str = ""
+
+
+class ApproveFollowUpRequest(BaseModel):
+    """Manager approval / rejection for a DONE follow-up.
+
+    Issued by STORE_MANAGER / AREA_MANAGER / ADMIN / SUPERADMIN only.
+    Salespeople cannot self-approve a follow-up they marked DONE.
+    """
+
+    decision: ApprovalDecision
+    manager_note: Optional[str] = Field(None, max_length=400)
 
 
 class UpdateFollowUpRequest(BaseModel):
@@ -299,6 +350,14 @@ _DELETE_ROLES = {"SUPERADMIN", "STORE_MANAGER"}
 # themselves (per UX spec: managers / admin / accountant + above can
 # pick from a dropdown; everyone below is auto-locked to self).
 _REATTRIBUTE_ROLES = _GLOBAL_EDIT_ROLES | _STORE_EDIT_ROLES | {"ACCOUNTANT"}
+# Roles that can APPROVE / REJECT a DONE follow-up. Anti-fake-closure:
+# the salesperson who marked the follow-up DONE cannot self-approve.
+# ACCOUNTANT is intentionally excluded — approval is a manager judgment
+# about whether the follow-up actually happened, not a finance check.
+_APPROVE_FOLLOWUP_ROLES = _GLOBAL_EDIT_ROLES | _STORE_EDIT_ROLES
+# Roles trusted to self-approve when they mark a follow-up DONE
+# themselves. Same set as approvers (managers + admins).
+_SELF_APPROVE_ROLES = _APPROVE_FOLLOWUP_ROLES
 
 
 def _user_role_set(current_user: dict) -> set:
@@ -409,7 +468,7 @@ def _resolve_sales_person_name(sales_person_id: str) -> Optional[str]:
 
 
 def _ensure_customer(
-    mobile: str,
+    mobile: Optional[str],
     customer_name: str,
     store_id: str,
     current_user: dict,
@@ -425,7 +484,17 @@ def _ensure_customer(
 
     Returns None if the customer repo is unreachable; caller decides
     whether to proceed with `customer_id=None` or 503.
+
+    When mobile is empty/None (some customers don't share their
+    number), skip the auto-link/create entirely and return None. The
+    walkout doc stores customer_id=None and downstream follow-ups via
+    call/SMS/WhatsApp won't be possible — only IN-PERSON.
     """
+    # Mobile is optional now; without it there's no key to link a
+    # customer record by, so don't auto-create.
+    if not mobile:
+        return None
+
     customer_repo = get_customer_repository()
     if customer_repo is None:
         return None
@@ -762,7 +831,9 @@ async def escalate_overdue_followups(
 ):
     """Cron-callable: turns every PENDING follow-up whose scheduled_date
     is in the past into a Task assigned to the supervisor (or, if absent,
-    to the sales person). Round 1 → P2 priority, round 2 → P1.
+    to the sales person). Round 1 -> P2 priority, round 2 / 3 -> P1
+    (later rounds reflect a customer who's been slipping through the
+    cracks and needs an urgent push).
 
     Only SUPERADMIN/ADMIN/STORE_MANAGER can invoke (it writes to
     multiple users' task queues).
@@ -1280,11 +1351,12 @@ async def dashboard_fu_status(
     store_id: Optional[str] = Query(None),
     days: int = Query(30, ge=1, le=365),
 ):
-    """Per-round breakdown of FU statuses: { fu1: {DONE, PENDING, ...}, fu2: {...} }."""
+    """Per-round breakdown of FU statuses:
+    `{ fu1: {DONE, PENDING, ...}, fu2: {...}, fu3: {...} }`."""
     store = _resolve_dashboard_store(current_user, store_id)
     repo = _walkout_repo()
     if repo is None:
-        return {"store_id": store, "fu1": {}, "fu2": {}}
+        return {"store_id": store, "fu1": {}, "fu2": {}, "fu3": {}}
     from datetime import timedelta
 
     today = datetime.now().date()
@@ -1295,13 +1367,18 @@ async def dashboard_fu_status(
         date_to=today.isoformat(),
         limit=5000,
     )
-    out: Dict[str, Dict[str, int]] = {"fu1": {}, "fu2": {}}
+    out: Dict[str, Dict[str, int]] = {"fu1": {}, "fu2": {}, "fu3": {}}
     for w in walkouts:
         for fu in w.get("followups") or []:
+            round_num = fu.get("round")
             key = (
                 "fu1"
-                if fu.get("round") == 1
-                else ("fu2" if fu.get("round") == 2 else None)
+                if round_num == 1
+                else (
+                    "fu2"
+                    if round_num == 2
+                    else ("fu3" if round_num == 3 else None)
+                )
             )
             if not key:
                 continue
@@ -1321,7 +1398,8 @@ async def append_followup(
     payload: CreateFollowUpRequest,
     current_user: dict = Depends(get_current_user),
 ):
-    """Append round 1 or 2. Reject 3+ as well as duplicate rounds."""
+    """Append round 1, 2, or 3. Rejects duplicate rounds (409) and any
+    round outside 1-3 (422 via pydantic Literal)."""
     repo = _walkout_repo()
     if repo is None:
         raise HTTPException(status_code=503, detail="Database unavailable")
@@ -1356,6 +1434,13 @@ async def append_followup(
         "completed_at": None,
         "completed_by": None,
         "escalation_task_id": None,
+        # Approval starts empty — only relevant once the FU is DONE.
+        "approval_required": False,
+        "approval_status": None,
+        "approved_by_user_id": None,
+        "approved_by_name": None,
+        "approved_at": None,
+        "manager_note": None,
         "created_at": datetime.now(),
     }
 
@@ -1384,9 +1469,21 @@ async def update_followup(
     payload: UpdateFollowUpRequest,
     current_user: dict = Depends(get_current_user),
 ):
-    """Update FU status / notes / scheduling. Stamps completed_at +
-    completed_by when status flips to DONE."""
-    if round_num not in (1, 2):
+    """Update FU status / notes / scheduling.
+
+    When status flips to DONE, stamps `completed_at`+`completed_by`
+    AND sets the approval state per anti-fake-closure rules:
+      - Manager-tier actor (STORE_MANAGER / AREA_MANAGER / ADMIN /
+        SUPERADMIN) self-approves: approval_status=APPROVED with their
+        stamp; approval_required is True for record-keeping.
+      - Salesperson actor: approval_status=PENDING_APPROVAL, awaiting
+        a manager review on the dedicated /approve endpoint.
+
+    Other DONE-adjacent statuses (NOT REACHABLE / NOT REQUIRED /
+    ESCALATED) do not require approval — approval_required stays False
+    and approval_status stays None.
+    """
+    if round_num not in (1, 2, 3):
         raise HTTPException(status_code=400, detail="Invalid round")
 
     repo = _walkout_repo()
@@ -1425,8 +1522,41 @@ async def update_followup(
             changes[key] = {"from": old_val, "to": new_val}
 
     if "status" in patch and patch["status"] == FollowUpStatus.DONE.value:
-        patch["completed_at"] = datetime.now()
+        now = datetime.now()
+        patch["completed_at"] = now
         patch["completed_by"] = current_user.get("user_id")
+        # Approval gate: salespeople -> PENDING_APPROVAL; managers
+        # self-approve. The audit trail captures both branches.
+        patch["approval_required"] = True
+        if _user_role_set(current_user) & _SELF_APPROVE_ROLES:
+            patch["approval_status"] = ApprovalStatus.APPROVED.value
+            patch["approved_by_user_id"] = current_user.get("user_id")
+            patch["approved_by_name"] = (
+                _resolve_sales_person_name(current_user.get("user_id"))
+                or current_user.get("username")
+            )
+            patch["approved_at"] = now
+        else:
+            patch["approval_status"] = ApprovalStatus.PENDING_APPROVAL.value
+            patch["approved_by_user_id"] = None
+            patch["approved_by_name"] = None
+            patch["approved_at"] = None
+    elif (
+        "status" in patch
+        and patch["status"] in (
+            FollowUpStatus.NOT_REACHABLE.value,
+            FollowUpStatus.NOT_REQUIRED.value,
+            FollowUpStatus.ESCALATED.value,
+        )
+    ):
+        # Non-DONE terminal statuses don't require approval. Clear any
+        # stale approval state from a prior DONE flip.
+        patch["approval_required"] = False
+        patch["approval_status"] = None
+        patch["approved_by_user_id"] = None
+        patch["approved_by_name"] = None
+        patch["approved_at"] = None
+        patch["manager_note"] = None
 
     if not patch:
         return _serialize_walkout(existing)
@@ -1443,6 +1573,114 @@ async def update_followup(
         store_id=existing.get("store_id", ""),
         current_user=current_user,
         detail={"round": round_num, "changes": changes},
+    )
+    return _serialize_walkout(updated)
+
+
+@router.post("/{walkout_id}/followups/{round_num}/approve")
+async def approve_followup(
+    walkout_id: str,
+    round_num: int,
+    payload: ApproveFollowUpRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """Manager approves / rejects a DONE follow-up.
+
+    Anti-fake-closure: only STORE_MANAGER / AREA_MANAGER / ADMIN /
+    SUPERADMIN can approve; salespeople and accountants cannot
+    rubber-stamp their own claimed follow-ups. STORE_MANAGER /
+    AREA_MANAGER are scoped to their own store; ADMIN/SUPERADMIN can
+    approve in any store.
+
+    Each call writes an audit row (`walkout.followup.approve` for
+    APPROVED, `walkout.followup.reject` for REJECTED) carrying the
+    walkout_id, round, the from/to approval_status, the approver
+    user_id, and the manager_note when provided.
+    """
+    if round_num not in (1, 2, 3):
+        raise HTTPException(status_code=400, detail="Invalid round")
+
+    roles = _user_role_set(current_user)
+    if not (roles & _APPROVE_FOLLOWUP_ROLES):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Only store managers / area managers / admins can approve "
+                "follow-ups"
+            ),
+        )
+
+    repo = _walkout_repo()
+    if repo is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    existing = repo.find_by_walkout_id(walkout_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Walkout not found")
+
+    # Store scoping for non-global approvers.
+    if not (roles & _GLOBAL_EDIT_ROLES):
+        if existing.get("store_id") != _user_store_id(current_user):
+            raise HTTPException(
+                status_code=403,
+                detail="You can only approve follow-ups for your own store",
+            )
+
+    fu = next(
+        (
+            f
+            for f in (existing.get("followups") or [])
+            if f.get("round") == round_num
+        ),
+        None,
+    )
+    if not fu:
+        raise HTTPException(
+            status_code=404, detail=f"Follow-up round {round_num} not found"
+        )
+    if fu.get("status") != FollowUpStatus.DONE.value:
+        raise HTTPException(
+            status_code=422,
+            detail="Only DONE follow-ups can be approved or rejected",
+        )
+
+    prior_status = fu.get("approval_status")
+    approver_id = current_user.get("user_id") or ""
+    approver_name = (
+        _resolve_sales_person_name(approver_id)
+        or current_user.get("username")
+        or approver_id
+    )
+    updated = repo.approve_followup(
+        walkout_id,
+        round_num,
+        approver_user_id=approver_id,
+        approver_name=approver_name,
+        decision=payload.decision.value,
+        manager_note=payload.manager_note,
+    )
+    if updated is None:
+        raise HTTPException(
+            status_code=500, detail="Failed to record approval decision"
+        )
+
+    action = (
+        "walkout.followup.approve"
+        if payload.decision == ApprovalDecision.APPROVED
+        else "walkout.followup.reject"
+    )
+    _audit_walkout_action(
+        action=action,
+        walkout_id=walkout_id,
+        store_id=existing.get("store_id", ""),
+        current_user=current_user,
+        detail={
+            "round": round_num,
+            "from": prior_status,
+            "to": payload.decision.value,
+            "approver_user_id": approver_id,
+            "manager_note": payload.manager_note,
+        },
     )
     return _serialize_walkout(updated)
 

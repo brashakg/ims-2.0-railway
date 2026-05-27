@@ -293,11 +293,13 @@ def test_create_walkout_full_30_fields(client, auth_headers, patched_walkouts):
     assert body["purchase_planned_in"] == "1-7 DAYS"
 
 
-@pytest.mark.parametrize("bad_mobile", ["123456789", "12345678901", "abcdefghij", ""])
+@pytest.mark.parametrize("bad_mobile", ["123456789", "12345678901", "abcdefghij"])
 def test_mobile_validation_rejects_non_10_digits(
     client, auth_headers, patched_walkouts, bad_mobile
 ):
-    """9 / 11 digit / empty / non-numeric mobiles are 422."""
+    """9 / 11 digit / non-numeric mobiles are 422. Empty string is now
+    accepted (mobile is optional) — see
+    test_walkouts_mobile_optional.py."""
     resp = client.post(
         "/api/v1/walkouts",
         json=_full_payload(mobile=bad_mobile),
@@ -762,12 +764,14 @@ def test_followup_append_round_1_and_2(client, auth_headers, patched_walkouts):
     assert rounds == [1, 2]
 
 
-def test_followup_round_3_rejected(client, auth_headers, patched_walkouts):
-    """Round 3+ is a 422 (Pydantic ge=1, le=2 validator)."""
+def test_followup_round_4_rejected(client, auth_headers, patched_walkouts):
+    """Round 4+ is a 422 (Pydantic Literal[1, 2, 3] validator).
+    Round 3 is now accepted — see test_walkouts_followup_approval.py.
+    """
     walkout = _create_walkout(client, auth_headers)
     resp = client.post(
         f"/api/v1/walkouts/{walkout['walkout_id']}/followups",
-        json={"round": 3, "scheduled_date": _today_iso(), "mode": "CALL"},
+        json={"round": 4, "scheduled_date": _today_iso(), "mode": "CALL"},
         headers=auth_headers,
     )
     assert resp.status_code == 422
