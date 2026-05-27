@@ -139,10 +139,47 @@ export function AuthProvider({ children }: AuthProviderProps) {
           // Try to verify token is still valid with API
           try {
             const profile = await authApi.getProfile();
-            // Auto-set activeRole if not set
+
+            // Restore client-side selections (activeStoreId + activeRole) from
+            // the cached user. The server doesn't track these — they are picks
+            // the user made via the topbar dropdowns — so without this, a
+            // browser refresh would reset to the first role + no store
+            // selected. (Reported by the owner: "pressing refresh on any page
+            // resets the store selected".)
+            try {
+              const cached = JSON.parse(userJson) as User;
+              const cachedStoreId = cached?.activeStoreId;
+              if (cachedStoreId && !profile.activeStoreId) {
+                const hasCrossStoreAccess = (profile.roles || []).some(r =>
+                  r === 'SUPERADMIN' || r === 'ADMIN' || r === 'AREA_MANAGER',
+                );
+                const isAssigned = (profile.storeIds || []).includes(cachedStoreId);
+                if (hasCrossStoreAccess || isAssigned) {
+                  profile.activeStoreId = cachedStoreId;
+                }
+              }
+              const cachedRole = cached?.activeRole;
+              if (cachedRole && (profile.roles || []).includes(cachedRole)) {
+                profile.activeRole = cachedRole;
+              }
+            } catch {
+              // cached parsing failed — fall through to the fallback below.
+            }
+
+            // Auto-set activeRole if still not set (fresh user, no cache).
             if (!profile.activeRole && profile.roles && profile.roles.length > 0) {
               profile.activeRole = profile.roles[0];
             }
+
+            // Re-persist so the cache stays in lockstep with what we just
+            // dispatched (matters when the cached user was missing some field
+            // we just filled in above).
+            try {
+              localStorage.setItem('ims_user', JSON.stringify(profile));
+            } catch {
+              // localStorage may be unavailable in some browser modes — non-fatal.
+            }
+
             dispatch({
               type: 'LOGIN_SUCCESS',
               payload: { user: profile, token },
