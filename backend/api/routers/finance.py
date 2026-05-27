@@ -1,5 +1,7 @@
 # Finance & Accounting Router — _get_db() pattern (matches working routers)
 
+import csv
+import io
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -43,17 +45,40 @@ def _order_total(o: dict) -> float:
     return float(v or 0)
 
 
+def _item_cost(it: dict, cost_by_product: dict):
+    """Resolve the unit cost for an order line. Prefers the snapshot
+    item.cost_at_sale (frozen at order create time) so historical P&L
+    doesn't drift when products.cost_price is edited after the sale.
+    Falls back to the live products.cost_price (for orders booked
+    before the snapshot was introduced). Returns None if unknown."""
+    snap = it.get("cost_at_sale")
+    if snap is not None:
+        try:
+            return float(snap)
+        except (TypeError, ValueError):
+            pass
+    pid = it.get("product_id")
+    cost = cost_by_product.get(pid) if pid else None
+    if cost is None:
+        return None
+    try:
+        return float(cost)
+    except (TypeError, ValueError):
+        return None
+
+
 def compute_cogs(orders, cost_by_product: dict, fallback_rate: float = 0.0) -> float:
-    """Real COGS: sum cost_price * qty over order line items. Falls back to
-    fallback_rate * line-total only when a product's cost is unknown. Pure."""
+    """Real COGS: sum unit cost * qty over order line items. Prefers each
+    line's cost_at_sale snapshot; falls back to the live product
+    cost_price; finally falls back to fallback_rate * line-total when the
+    cost is unknown. Pure."""
     cogs = 0.0
     for o in orders:
         for it in (o.get("items") or []):
-            pid = it.get("product_id")
             qty = it.get("quantity", 1) or 1
-            cost = cost_by_product.get(pid) if pid else None
+            cost = _item_cost(it, cost_by_product)
             if cost is not None:
-                cogs += float(cost) * float(qty)
+                cogs += cost * float(qty)
             elif fallback_rate:
                 cogs += float(it.get("total", 0) or 0) * fallback_rate
     return round(cogs, 2)
@@ -180,7 +205,8 @@ def _store_maps(db):
 
 def pnl_by_category(orders, cost_by_product: dict) -> list:
     """Revenue + COGS per product category (item_type), from order line items.
-    Pure. 60%-of-line COGS fallback when a product's cost is unknown."""
+    Pure. Prefers item.cost_at_sale snapshot; 60%-of-line COGS fallback when
+    a product's cost is unknown."""
     acc: dict = {}
     for o in orders:
         for it in (o.get("items") or []):
@@ -189,8 +215,8 @@ def pnl_by_category(orders, cost_by_product: dict) -> list:
             rev = float(it.get("total", 0) or 0)
             d = acc.setdefault(cat, {"revenue": 0.0, "cogs": 0.0})
             d["revenue"] += rev
-            cost = cost_by_product.get(it.get("product_id"))
-            d["cogs"] += (float(cost) * qty) if cost is not None else rev * 0.6
+            cost = _item_cost(it, cost_by_product)
+            d["cogs"] += (cost * float(qty)) if cost is not None else rev * 0.6
     rows = []
     for cat, d in acc.items():
         r, c = round(d["revenue"], 2), round(d["cogs"], 2)
@@ -486,11 +512,83 @@ async def get_gst_summary(
 # === Outstanding Receivables ===
 
 
+_DEFAULT_AR_CREDIT_TERMS_DAYS = 30
+
+
+def _customer_credit_terms(db) -> dict:
+    """customer_id -> credit_terms_days. Defaults to 30 days when missing.
+
+    Threaded through AR so aging is computed from the due_date (= created +
+    terms) rather than the create date -- a sale booked today with NET-45
+    terms is NOT overdue tomorrow.
+    """
+    out: dict = {}
+    try:
+        for c in db.get_collection("customers").find(
+            {},
+            {
+                "_id": 0,
+                "customer_id": 1,
+                "credit_terms_days": 1,
+                "payment_terms_days": 1,
+                "payment_terms": 1,
+            },
+        ):
+            cid = c.get("customer_id")
+            if not cid:
+                continue
+            terms = (
+                c.get("credit_terms_days")
+                or c.get("payment_terms_days")
+                or c.get("payment_terms")
+            )
+            try:
+                out[cid] = int(terms) if terms is not None else _DEFAULT_AR_CREDIT_TERMS_DAYS
+            except (TypeError, ValueError):
+                out[cid] = _DEFAULT_AR_CREDIT_TERMS_DAYS
+    except Exception:
+        pass
+    return out
+
+
+def _ar_due_date(order: dict, terms_by_customer: dict) -> Optional[datetime]:
+    """Compute the due date for an order: created_at + customer.credit_terms_days
+    (fallback _DEFAULT_AR_CREDIT_TERMS_DAYS days when missing). Returns None when
+    created_at can't be parsed."""
+    created = ap_engine.parse_date(order.get("created_at"))
+    if created is None:
+        return None
+    cid = order.get("customer_id")
+    terms = terms_by_customer.get(cid)
+    if terms is None:
+        # Per-order override wins when a customer doc isn't in the map.
+        try:
+            terms = int(order.get("payment_terms_days") or _DEFAULT_AR_CREDIT_TERMS_DAYS)
+        except (TypeError, ValueError):
+            terms = _DEFAULT_AR_CREDIT_TERMS_DAYS
+    return created + timedelta(days=int(terms))
+
+
+def _ar_days_overdue(now: datetime, due: Optional[datetime]) -> int:
+    """Days past the due date. <=0 means not yet due (current). None due ->
+    treat as current."""
+    if due is None:
+        return 0
+    return (now - due).days
+
+
 @router.get("/outstanding")
 async def get_outstanding(
     store_id: Optional[str] = None,
     current_user: dict = Depends(get_current_user),
 ):
+    """Customer receivables aged by DUE date, not order create date.
+
+    Due date = order.created_at + customer.credit_terms_days (fallback 30).
+    The old "days overdue" was actually order age which mislabels everything
+    over 30 days as overdue even when the customer is within their NET-60
+    terms. Real overdue = days past the due_date.
+    """
     db = _get_db()
     match = {"payment_status": {"$in": UNPAID_STATUSES}}
     if store_id:
@@ -502,49 +600,60 @@ async def get_outstanding(
             {
                 "_id": 0,
                 "order_id": 1,
+                "customer_id": 1,
                 "customer_name": 1,
                 "customer_phone": 1,
                 "total": 1,
                 "grand_total": 1,
                 "amount_paid": 1,
                 "created_at": 1,
+                "payment_terms_days": 1,
             },
         )
     )
 
+    terms_by_customer = _customer_credit_terms(db)
     now = datetime.utcnow()
-    buckets = {"0_30": 0, "31_60": 0, "61_90": 0, "90_plus": 0}
+    buckets = {"0_30": 0.0, "31_60": 0.0, "61_90": 0.0, "90_plus": 0.0, "current": 0.0}
     items = []
 
     for o in orders:
         balance = _order_total(o) - (o.get("amount_paid", 0) or 0)
         if balance <= 0:
             continue
-        created = datetime.fromisoformat(o.get("created_at", now.isoformat()))
-        days = (now - created).days
+        due = _ar_due_date(o, terms_by_customer)
+        days_overdue = _ar_days_overdue(now, due)
 
-        if days <= 30:
+        if days_overdue <= 0:
+            buckets["current"] += balance
+        elif days_overdue <= 30:
             buckets["0_30"] += balance
-        elif days <= 60:
+        elif days_overdue <= 60:
             buckets["31_60"] += balance
-        elif days <= 90:
+        elif days_overdue <= 90:
             buckets["61_90"] += balance
         else:
             buckets["90_plus"] += balance
 
+        cid = o.get("customer_id")
         items.append(
             {
                 "order_id": o.get("order_id"),
                 "customer_name": o.get("customer_name", "Unknown"),
                 "customer_phone": o.get("customer_phone", ""),
-                "amount": balance,
-                "days_overdue": days,
+                "amount": round(balance, 2),
+                "days_overdue": max(0, days_overdue),
+                "due_date": due.date().isoformat() if due else None,
+                "payment_terms_days": terms_by_customer.get(cid)
+                or o.get("payment_terms_days")
+                or _DEFAULT_AR_CREDIT_TERMS_DAYS,
             }
         )
 
+    buckets = {k: round(v, 2) for k, v in buckets.items()}
     return {
         "buckets": buckets,
-        "total_outstanding": sum(buckets.values()),
+        "total_outstanding": round(sum(buckets.values()), 2),
         "items": sorted(items, key=lambda x: -x["days_overdue"]),
     }
 
@@ -728,8 +837,23 @@ def _ap_rows(db):
 
 
 def _ar_aging(db, now: datetime) -> dict:
-    """Customer receivables aged by order age (mirror of /outstanding)."""
-    buckets = {"0_30": 0.0, "31_60": 0.0, "61_90": 0.0, "90_plus": 0.0}
+    """Customer receivables aged by DUE date.
+
+    due_date = order.created_at + customer.credit_terms_days (fallback 30).
+    Buckets: 'current' (not yet due), then 0_30 / 31_60 / 61_90 / 90_plus
+    measured from days PAST due. 'overdue' totals anything past due.
+
+    Pre-fix this aged by (now - created_at), which mislabeled current-status
+    receivables (NET-60 customer, sold 25 days ago) as already in the 0-30
+    overdue bucket. The mirror /outstanding is also fixed to match.
+    """
+    buckets = {
+        "current": 0.0,
+        "0_30": 0.0,
+        "31_60": 0.0,
+        "61_90": 0.0,
+        "90_plus": 0.0,
+    }
     total = 0.0
     try:
         orders = list(
@@ -737,32 +861,40 @@ def _ar_aging(db, now: datetime) -> dict:
                 {"payment_status": {"$in": UNPAID_STATUSES}},
                 {
                     "_id": 0,
+                    "customer_id": 1,
                     "grand_total": 1,
                     "total": 1,
                     "amount_paid": 1,
                     "created_at": 1,
+                    "payment_terms_days": 1,
                 },
             )
         )
     except Exception:
         orders = []
+    terms_by_customer = _customer_credit_terms(db)
     for o in orders:
         bal = _order_total(o) - float(o.get("amount_paid", 0) or 0)
         if bal <= 0:
             continue
-        created = ap_engine.parse_date(o.get("created_at")) or now
-        days = (now - created).days
-        if days <= 30:
+        due = _ar_due_date(o, terms_by_customer)
+        days_overdue = _ar_days_overdue(now, due)
+        if days_overdue <= 0:
+            buckets["current"] += bal
+        elif days_overdue <= 30:
             buckets["0_30"] += bal
-        elif days <= 60:
+        elif days_overdue <= 60:
             buckets["31_60"] += bal
-        elif days <= 90:
+        elif days_overdue <= 90:
             buckets["61_90"] += bal
         else:
             buckets["90_plus"] += bal
         total += bal
     buckets = {k: round(v, 2) for k, v in buckets.items()}
-    overdue = round(buckets["31_60"] + buckets["61_90"] + buckets["90_plus"], 2)
+    # 'Overdue' is everything past the due date (any bucket except current).
+    overdue = round(
+        buckets["0_30"] + buckets["31_60"] + buckets["61_90"] + buckets["90_plus"], 2
+    )
     return {"total": round(total, 2), "buckets": buckets, "overdue": overdue}
 
 
@@ -832,20 +964,37 @@ async def owner_dashboard(current_user: dict = Depends(get_current_user)):
         "$amount",
     )
 
+    # Structured alerts: emit `amount` + `label_template` (with a '{}' slot for
+    # the FE-rendered INR symbol). `message` keeps an ASCII-only fallback so
+    # existing consumers don't break (no Rupee sign in Python source -- breaks
+    # Windows cp1252 on print/logger). The FE renders the rupee glyph via
+    # inr() over the `amount` value.
     alerts = []
     if ap_overdue > 0:
         alerts.append(
-            {"level": "warning", "message": f"Rs {ap_overdue:.0f} of vendor payables overdue"}
+            {
+                "level": "warning",
+                "amount": ap_overdue,
+                "label_template": "{} of vendor payables overdue",
+                "message": f"INR {ap_overdue:.0f} of vendor payables overdue",
+            }
         )
     if due_7d > 0:
         alerts.append(
-            {"level": "info", "message": f"Rs {due_7d:.0f} of vendor bills due within 7 days"}
+            {
+                "level": "info",
+                "amount": due_7d,
+                "label_template": "{} of vendor bills due within 7 days",
+                "message": f"INR {due_7d:.0f} of vendor bills due within 7 days",
+            }
         )
     if ar["overdue"] > 0:
         alerts.append(
             {
                 "level": "warning",
-                "message": f"Rs {ar['overdue']:.0f} of receivables overdue 30+ days",
+                "amount": ar["overdue"],
+                "label_template": "{} of receivables past due date",
+                "message": f"INR {ar['overdue']:.0f} of receivables past due date",
             }
         )
 
@@ -974,22 +1123,79 @@ async def cash_flow_forecast(
 # === GST input-tax-credit (ITC) reconciliation (ADMIN / ACCOUNTANT) ===
 
 
+def _primary_entity_state(db, entity_id: Optional[str] = None) -> Optional[str]:
+    """Resolve the primary state code for the entity.
+
+    When `entity_id` is given, take that entity's `primary_state` / `state`.
+    Otherwise pick the first entity in the DB. Returns None when no entity
+    matches -- in that case the ITC register falls back to intra-state
+    behaviour (existing rows aren't reclassified).
+    """
+    try:
+        coll = db.get_collection("entities")
+        if entity_id:
+            doc = coll.find_one(
+                {"entity_id": entity_id},
+                {"_id": 0, "primary_state": 1, "state": 1, "state_code": 1},
+            )
+        else:
+            doc = coll.find_one(
+                {}, {"_id": 0, "primary_state": 1, "state": 1, "state_code": 1}
+            )
+        if not doc:
+            return None
+        return (
+            doc.get("primary_state")
+            or doc.get("state_code")
+            or doc.get("state")
+            or None
+        )
+    except Exception:
+        return None
+
+
 @router.get("/itc-register")
-async def itc_register(current_user: dict = Depends(get_current_user)):
-    """Input tax credit available from booked vendor bills, grouped by period."""
+async def itc_register(
+    period: Optional[str] = Query(None, description="YYYY-MM filter; omit for all"),
+    entity_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Input tax credit available from booked vendor bills, grouped by period.
+
+    When `period` (YYYY-MM) is given, only that period is returned in
+    `periods[]` (totals still represent the full bill set so the FE can show
+    a "Total booked ITC" anchor)."""
     _require_finance_admin(current_user)
     db = _get_db()
     if db is None:
-        return {"periods": [], "total_taxable": 0, "total_itc": 0}
+        return {
+            "periods": [],
+            "total_taxable": 0,
+            "total_itc": 0,
+            "total_cgst": 0,
+            "total_sgst": 0,
+            "total_igst": 0,
+        }
     try:
         bills = list(
             db.get_collection("vendor_bills").find(
-                {}, {"_id": 0, "bill_date": 1, "taxable_amount": 1, "tax_amount": 1}
+                {},
+                {
+                    "_id": 0,
+                    "bill_date": 1,
+                    "taxable_amount": 1,
+                    "tax_amount": 1,
+                    "place_of_supply": 1,
+                },
             )
         )
     except Exception:
         bills = []
-    return itc_reconcile.build_itc_register(bills)
+    entity_state = _primary_entity_state(db, entity_id)
+    out = itc_reconcile.build_itc_register(bills, entity_state=entity_state)
+    if period:
+        out["periods"] = [p for p in out["periods"] if p.get("period") == period]
+    return out
 
 
 class Gstr2bRow(BaseModel):
@@ -1004,19 +1210,8 @@ class Gstr2bReconcileBody(BaseModel):
     as_of: Optional[str] = None
 
 
-@router.post("/gstr2b-reconcile")
-async def gstr2b_reconcile(
-    body: Gstr2bReconcileBody, current_user: dict = Depends(get_current_user)
-):
-    """Reconcile booked vendor bills against an uploaded GSTR-2B (rows parsed
-    client-side from the portal download). Returns matched / mismatch /
-    only-in-books (ITC at risk) / only-in-2B buckets."""
-    _require_finance_admin(current_user)
-    rows = [r.model_dump() for r in body.rows]
-    db = _get_db()
-    if db is None:
-        return itc_reconcile.reconcile_gstr2b([], rows, as_of_iso=body.as_of)
-
+def _book_rows_from_db(db) -> List[dict]:
+    """Pull all vendor bills + their vendor GSTIN, formatted for the reconciler."""
     gstin_by_vendor: Dict[str, str] = {}
     try:
         for v in db.get_collection("vendors").find(
@@ -1025,11 +1220,10 @@ async def gstr2b_reconcile(
             gstin_by_vendor[v.get("vendor_id")] = v.get("gstin")
     except Exception:
         pass
-
-    book_rows = []
+    rows = []
     try:
         for b in db.get_collection("vendor_bills").find({}, {"_id": 0}):
-            book_rows.append(
+            rows.append(
                 {
                     "gstin": gstin_by_vendor.get(b.get("vendor_id")),
                     "invoice_no": b.get("bill_number"),
@@ -1038,12 +1232,91 @@ async def gstr2b_reconcile(
                     "bill_id": b.get("bill_id"),
                     "vendor_name": b.get("vendor_name"),
                     "bill_date": b.get("bill_date"),
+                    "place_of_supply": b.get("place_of_supply"),
                 }
             )
     except Exception:
-        book_rows = []
+        pass
+    return rows
 
-    return itc_reconcile.reconcile_gstr2b(book_rows, rows, as_of_iso=body.as_of)
+
+@router.post("/gstr2b-reconcile")
+async def gstr2b_reconcile(
+    body: Gstr2bReconcileBody, current_user: dict = Depends(get_current_user)
+):
+    """Reconcile booked vendor bills against an uploaded GSTR-2B (rows parsed
+    client-side from the portal download). Returns matched / mismatch /
+    only-in-books (ITC at risk) / only-in-2B buckets, plus a sum-identity
+    summary (matched + mismatch + at-risk == total booked ITC)."""
+    _require_finance_admin(current_user)
+    rows = [r.model_dump() for r in body.rows]
+    db = _get_db()
+    if db is None:
+        return itc_reconcile.reconcile_gstr2b([], rows, as_of_iso=body.as_of)
+    return itc_reconcile.reconcile_gstr2b(
+        _book_rows_from_db(db), rows, as_of_iso=body.as_of
+    )
+
+
+_ITC_CSV_HEADERS = {
+    "matched": [
+        "vendor_name",
+        "gstin",
+        "invoice_no",
+        "bill_date",
+        "book_tax",
+        "portal_tax",
+    ],
+    "mismatch": [
+        "vendor_name",
+        "gstin",
+        "invoice_no",
+        "bill_date",
+        "book_tax",
+        "portal_tax",
+        "diff",
+    ],
+    "only_in_books": [
+        "vendor_name",
+        "gstin",
+        "invoice_no",
+        "bill_date",
+        "book_tax",
+        "days_old",
+    ],
+    "only_in_2b": ["gstin", "invoice_no", "taxable", "tax"],
+}
+
+
+@router.post("/itc-export")
+async def itc_export_csv(
+    body: Gstr2bReconcileBody,
+    bucket: str = Query(..., pattern="^(matched|mismatch|only_in_books|only_in_2b)$"),
+    current_user: dict = Depends(get_current_user),
+):
+    """CSV export of a single reconciliation bucket. POST instead of GET
+    because the GSTR-2B rows live client-side (the FE keeps the upload in
+    memory; re-uploading on every download would be terrible UX)."""
+    _require_finance_admin(current_user)
+    rows = [r.model_dump() for r in body.rows]
+    db = _get_db()
+    book_rows = _book_rows_from_db(db) if db is not None else []
+    recon = itc_reconcile.reconcile_gstr2b(book_rows, rows, as_of_iso=body.as_of)
+    bucket_rows = recon.get(bucket) or []
+    headers = _ITC_CSV_HEADERS[bucket]
+
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(headers)
+    for r in bucket_rows:
+        writer.writerow([r.get(h, "") for h in headers])
+    csv_bytes = buf.getvalue().encode("utf-8")
+    fname = f"itc_{bucket}.csv"
+    return Response(
+        content=csv_bytes,
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
 
 
 # === Period Lock ===
