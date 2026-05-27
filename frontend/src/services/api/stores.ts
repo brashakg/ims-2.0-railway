@@ -135,8 +135,18 @@ export const adminStoreApi = {
     return response.data;
   },
 
-  getStoreUsers: async (storeId: string) => {
-    const response = await api.get(`/stores/${storeId}/users`);
+  getStoreUsers: async (
+    storeId: string,
+    opts?: { roles?: string[]; activeOnly?: boolean },
+  ) => {
+    const params: Record<string, string> = {};
+    if (opts?.roles?.length) {
+      params.roles = opts.roles.join(',');
+    }
+    if (opts?.activeOnly === false) {
+      params.active_only = 'false';
+    }
+    const response = await api.get(`/stores/${storeId}/users`, { params });
     return response.data;
   },
 };

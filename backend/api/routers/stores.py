@@ -384,27 +384,55 @@ async def get_store_stats(
 
 @router.get("/{store_id}/users")
 async def get_store_users(
-    store_id: str, current_user: dict = Depends(get_current_user)
+    store_id: str,
+    roles: Optional[str] = Query(
+        None,
+        description=(
+            "Optional CSV of role names to filter to "
+            "(e.g. 'SALES_CASHIER,SALES_STAFF,STORE_MANAGER,OPTICIAN'). "
+            "Case-insensitive, whitespace tolerant."
+        ),
+    ),
+    active_only: bool = Query(
+        True,
+        description="If true (default), excludes users with is_active=false.",
+    ),
+    current_user: dict = Depends(get_current_user),
 ):
-    """List users with access to this store. Frontend storeApi.getStoreUsers
-    was 404'ing."""
+    """List users **explicitly assigned** to this store.
+
+    Match criteria: ``store_ids`` contains store_id, OR ``home_store_id`` equals
+    store_id. We deliberately do NOT match ``active_store_id`` -- that was a
+    bug where a logged-in SUPERADMIN/ADMIN (or any cross-store role) viewing
+    this store would appear here even though they are not assigned to it, and
+    show up in the POS salesperson picker. ``active_store_id`` reflects the
+    user's currently-selected store context, not a permanent assignment.
+
+    Defaults to active users only. Pass ``active_only=false`` for admin
+    deactivated-staff views. Pass ``roles=...`` to narrow to specific role(s);
+    the POS salesperson picker passes the sales-attributable role set so it
+    never shows accountants/optometrists/superadmins.
+    """
     user_repo = get_user_repository()
     if user_repo is None:
         return {"users": [], "total": 0}
-    # Match either the home store or the multi-store access list
-    users = (
-        user_repo.find_many(
-            {
-                "$or": [
-                    {"store_ids": store_id},
-                    {"home_store_id": store_id},
-                    {"active_store_id": store_id},
-                ]
-            }
-        )
-        or []
-    )
-    # Strip password hashes defensively
+
+    query: dict = {
+        "$or": [
+            {"store_ids": store_id},
+            {"home_store_id": store_id},
+        ]
+    }
+    if active_only:
+        # Treat a missing is_active flag as "active" (legacy docs); explicit
+        # False excludes.
+        query["is_active"] = {"$ne": False}
+    if roles:
+        role_list = [r.strip().upper() for r in roles.split(",") if r.strip()]
+        if role_list:
+            query["roles"] = {"$in": role_list}
+
+    users = user_repo.find_many(query) or []
     safe = []
     for u in users:
         u.pop("password", None)

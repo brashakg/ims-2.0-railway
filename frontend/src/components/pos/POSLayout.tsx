@@ -1127,8 +1127,15 @@ function SalespersonPicker() {
     if (!sid) return;
     let cancelled = false;
     setLoading(true);
+    // Sales-attributable roles only. SUPERADMIN/ADMIN/AREA_MANAGER are
+    // cross-store and never on the shop floor; ACCOUNTANT is back-office;
+    // OPTOMETRIST runs the exam chamber not the till. Anyone else is a
+    // future role we'll add by request.
     adminStoreApi
-      .getStoreUsers(sid)
+      .getStoreUsers(sid, {
+        roles: ['STORE_MANAGER', 'SALES_CASHIER', 'SALES_STAFF', 'OPTICIAN', 'CASHIER'],
+        activeOnly: true,
+      })
       .then((r: any) => {
         if (cancelled) return;
         const list = (r?.users || r || []) as any[];
