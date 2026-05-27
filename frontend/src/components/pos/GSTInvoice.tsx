@@ -1,30 +1,61 @@
 // ============================================================================
-// IMS 2.0 - GST Invoice Template
+// IMS 2.0 - GST Tax Invoice Template (v2-3: statutory polish)
 // ============================================================================
-// GST-compliant invoice with HSN codes and tax breakup
+// GST-compliant tax invoice (Rule 46 CGST). Refactored to the statutory
+// aesthetic: bordered, ALL-CAPS, sans-only, copy markers, HSN-wise summary,
+// amount-in-words, declaration, signatory block, retention footer.
+//
+// Real data is sourced from the entity + store + order props. Per-entity
+// overrides (signatory_name, declaration_text, footer_terms) are merged
+// on top of CGST-compliant defaults at render time (see legalPrimitives.tsx).
 
 import { useRef } from 'react';
 import { Printer, Download } from 'lucide-react';
 import { calculateGST, calculateIGST, getHSNByCategory } from '../../constants/gst';
 import { resolveGstRate } from '../../constants/gstRuntime';
 import { describeForReceipt } from '../../utils/receiptFormat';
+import {
+  buildLegalHeader,
+  LegalHeaderView,
+  LegalFooterBlock,
+  HsnSummaryTable,
+  hsnTaxSummary,
+  amountInWords,
+  declarations,
+  inr,
+  formatDate,
+  tblHead,
+  tblCell,
+  tblNum,
+  type EntityLike,
+  type OverrideFields,
+  type StoreLike,
+} from '../print/legalPrimitives';
+import type { Order, Store } from '../../types';
 
 // Generate GST-compliant invoice serial number from order number
 // Format: BV/FY25-26/BOK01/0001 (Brand/FinancialYear/Store/Sequence)
 function generateInvoiceNumber(orderNumber: string, storeCode: string): string {
   const now = new Date();
   const fy = now.getMonth() >= 3 ? `${now.getFullYear()}-${(now.getFullYear() + 1) % 100}` : `${now.getFullYear() - 1}-${now.getFullYear() % 100}`;
-  // Extract sequence from order number (last 6 chars)
   const seq = orderNumber?.replace(/[^A-Z0-9]/gi, '').slice(-6) || String(Date.now()).slice(-6);
   const brand = storeCode?.includes('WIZ') ? 'WO' : 'BV';
   const store = storeCode?.replace(/^BV-|^WO-/g, '').slice(0, 5) || 'HQ';
   return `${brand}/${fy}/${store}/${seq}`;
 }
-import type { Order, Store } from '../../types';
 
 interface GSTInvoiceProps {
   order: Order;
   store: Store;
+  /** Optional entity for full statutory identity. If absent, the store name
+   *  alone is shown (legacy callers that don't have the entity in scope). */
+  entity?: EntityLike | null;
+  /** Per-entity content overrides (declaration_text, signatory_name, etc.). */
+  overrides?: OverrideFields | null;
+  /** Copy marker preset (ORIGINAL / DUPLICATE / TRIPLICATE). */
+  copyMarker?: 'ORIGINAL' | 'DUPLICATE' | 'TRIPLICATE';
+  /** Optional override for the printed declaration text. */
+  declarationOverride?: string;
   onPrint?: () => void;
 }
 
@@ -42,30 +73,33 @@ interface InvoiceLineItem {
   totalAmount: number;
 }
 
-export function GSTInvoice({ order, store, onPrint }: GSTInvoiceProps) {
+export function GSTInvoice({
+  order,
+  store,
+  entity,
+  overrides,
+  copyMarker = 'ORIGINAL',
+  declarationOverride,
+  onPrint,
+}: GSTInvoiceProps) {
   const invoiceRef = useRef<HTMLDivElement>(null);
 
-  // Check if transaction is inter-state (IGST) or intra-state (CGST + SGST)
-  // Compare store's state with customer's billing state
+  // Inter-state (IGST) vs intra-state (CGST + SGST) routing.
   const storeState = store?.state?.toLowerCase?.()?.trim() || '';
   const customerState = (order as any)?.customer_state?.toLowerCase?.()?.trim()
     || (order as any)?.billing_address?.state?.toLowerCase?.()?.trim() || '';
   const isInterState = !!(storeState && customerState && storeState !== customerState);
 
-  // Calculate order-level discount (total discount minus sum of item-level discounts)
+  // Order-level discount distribution (proportional across line items).
   const itemDiscountTotal = order.items.reduce((sum, item) => sum + (item.discountAmount ?? 0), 0);
   const orderLevelDiscount = Math.max(0, (order.totalDiscount ?? 0) - itemDiscountTotal);
-
-  // Item subtotal (after item-level discounts, before order discount)
   const itemSubtotal = order.items.reduce((sum, item) => sum + item.finalPrice, 0);
-  // Ratio to proportionally distribute order discount across items
   const discountRatio = itemSubtotal > 0 && orderLevelDiscount > 0
     ? (itemSubtotal - orderLevelDiscount) / itemSubtotal
     : 1;
 
-  // Convert order items to invoice line items with GST calculation
+  // Line items -> invoice rows with GST calculation.
   const lineItems: InvoiceLineItem[] = order.items.map(item => {
-    // Taxable value = item finalPrice reduced by proportional order discount
     const taxableValue = Math.round(item.finalPrice * discountRatio * 100) / 100;
     const category = (item as any).category || (item as any).itemType || '';
     const hsnInfo = getHSNByCategory(category, true);
@@ -73,7 +107,6 @@ export function GSTInvoice({ order, store, onPrint }: GSTInvoiceProps) {
     const hsnCode = (item as any).hsnCode || hsnInfo?.code || '9004';
 
     let cgst = 0, sgst = 0, igst = 0;
-
     if (isInterState) {
       const gstCalc = calculateIGST(taxableValue, gstRate);
       igst = gstCalc.igst;
@@ -84,28 +117,25 @@ export function GSTInvoice({ order, store, onPrint }: GSTInvoiceProps) {
     }
 
     return {
-      // Customer-facing description: "Brand Category" (e.g. "Ray-Ban Sunglass").
-      // The HSN + GST math below still identifies the item for tax purposes.
       productName: describeForReceipt({
         brand: (item as any).brand,
         subbrand: (item as any).subbrand,
         category: (item as any).category || (item as any).itemType,
         name: item.productName,
       }),
-      hsnCode: hsnCode,
+      hsnCode,
       quantity: item.quantity,
       unitPrice: item.unitPrice,
       discount: item.discountAmount + (item.finalPrice - taxableValue),
-      taxableValue: taxableValue,
-      gstRate: gstRate,
-      cgst: cgst,
-      sgst: sgst,
-      igst: igst,
+      taxableValue,
+      gstRate,
+      cgst,
+      sgst,
+      igst,
       totalAmount: taxableValue + cgst + sgst + igst,
     };
   });
 
-  // Calculate totals
   const subtotal = lineItems.reduce((sum, item) => sum + item.taxableValue, 0);
   const totalCGST = lineItems.reduce((sum, item) => sum + item.cgst, 0);
   const totalSGST = lineItems.reduce((sum, item) => sum + item.sgst, 0);
@@ -113,40 +143,74 @@ export function GSTInvoice({ order, store, onPrint }: GSTInvoiceProps) {
   const totalTax = totalCGST + totalSGST + totalIGST;
   const grandTotal = subtotal + totalTax;
 
+  // HSN-wise consolidated summary for Rule 46 + GSTR-1 staging.
+  const hsnSummary = hsnTaxSummary(
+    lineItems.map(li => ({
+      hsn_code: li.hsnCode,
+      taxableValue: li.taxableValue,
+      taxable_value: li.taxableValue,
+      gst_rate: li.gstRate,
+      rate: li.gstRate,
+      qty: li.quantity,
+      description: li.productName,
+    })),
+    isInterState ? customerState : storeState,
+    storeState
+  );
+
+  const docNumber = generateInvoiceNumber(order.orderNumber, store.storeCode);
+
+  // Build header from real entity + store (no mock identities).
+  // If the caller didn't pass an entity, synthesize a thin one from `store`
+  // so existing call sites keep working (legacy contract preserved).
+  const effectiveEntity: EntityLike = entity || {
+    legal_name: store.storeName,
+    name: store.storeName,
+    pan: '',
+    cin: '',
+    registered_address: store.address,
+    registered_phone: '',
+    registered_email: '',
+    website: '',
+    gstins: store.gstin ? [{
+      gstin: store.gstin,
+      state_code: store.stateCode || '',
+      state_name: store.state || '',
+      is_primary: true,
+    }] : [],
+  };
+  const effectiveStore: StoreLike = {
+    name: store.storeName,
+    store_code: store.storeCode,
+    address: store.address,
+    city: store.city,
+    state: store.state,
+    state_code: store.stateCode,
+    pincode: store.pincode,
+  };
+  const header = buildLegalHeader(effectiveEntity, effectiveStore, 'tax_invoice', {
+    docNumber,
+    docDate: new Date(order.createdAt),
+    placeOfSupply: customerState || store.state,
+    reverseCharge: false,
+    copyMarker,
+    overrides,
+    copyMarkerMode: 'rule_48',
+  });
+
   const handlePrint = () => {
     window.print();
     if (onPrint) onPrint();
   };
 
   const handleDownloadPDF = () => {
-    // In production, use a library like jsPDF or call backend API to generate PDF
-    // PDF download — future backend integration
     console.info('PDF download will be available with backend wkhtmltopdf integration');
   };
 
-  // Convert number to words (for amount in words)
-  const numberToWords = (num: number): string => {
-    // Simplified implementation - in production use a proper library
-    const ones = ['', 'One', 'Two', 'Three', 'Four', 'Five', 'Six', 'Seven', 'Eight', 'Nine'];
-    const tens = ['', '', 'Twenty', 'Thirty', 'Forty', 'Fifty', 'Sixty', 'Seventy', 'Eighty', 'Ninety'];
-    const teens = ['Ten', 'Eleven', 'Twelve', 'Thirteen', 'Fourteen', 'Fifteen', 'Sixteen', 'Seventeen', 'Eighteen', 'Nineteen'];
-
-    if (num === 0) return 'Zero';
-    if (num < 10) return ones[num];
-    if (num < 20) return teens[num - 10];
-    if (num < 100) return tens[Math.floor(num / 10)] + (num % 10 ? ' ' + ones[num % 10] : '');
-
-    const thousands = Math.floor(num / 1000);
-    const hundreds = Math.floor((num % 1000) / 100);
-    const remainder = num % 100;
-
-    let result = '';
-    if (thousands > 0) result += numberToWords(thousands) + ' Thousand ';
-    if (hundreds > 0) result += ones[hundreds] + ' Hundred ';
-    if (remainder > 0) result += numberToWords(remainder);
-
-    return result.trim() + ' Rupees Only';
-  };
+  const amountWords = amountInWords(grandTotal);
+  const declarationText = declarationOverride
+    || overrides?.declaration_text
+    || declarations('tax_invoice');
 
   return (
     <div className="space-y-4">
@@ -162,272 +226,160 @@ export function GSTInvoice({ order, store, onPrint }: GSTInvoiceProps) {
         </button>
       </div>
 
-      {/* Invoice Document */}
+      {/* Tax Invoice — statutory aesthetic */}
       <div
         ref={invoiceRef}
-        className="bg-white p-8 border border-gray-300 print:border-none"
-        style={{ maxWidth: '210mm', margin: '0 auto' }}
+        className="bg-white text-black tax-invoice-print"
+        style={{ maxWidth: '210mm', margin: '0 auto', fontFamily: 'Inter, system-ui, sans-serif', color: '#1a1a19', border: '1px solid #1a1a19' }}
       >
-        {/* Header */}
-        <div className="text-center mb-6 pb-4 border-b-2 border-gray-300">
-          <h1 className="text-2xl font-bold text-gray-900">{store.storeName}</h1>
-          <p className="text-sm text-gray-600 mt-1">{store.address}</p>
-          <p className="text-sm text-gray-600">
-            {store.city}, {store.state} - {store.pincode}
-          </p>
-          <div className="mt-2 text-sm">
-            <span className="font-medium">GSTIN:</span> {store.gstin}
+        {/* Statutory header */}
+        <LegalHeaderView header={header} docTypeLabel="TAX INVOICE · RULE 46 CGST" />
+
+        {/* Bill To */}
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', borderBottom: '1.5px solid #1a1a19' }}>
+          <div style={{ padding: '10px 16px', borderRight: '1px solid #7a7a72' }}>
+            <div style={{ fontSize: 9, color: '#4a4a45', textTransform: 'uppercase', letterSpacing: '.1em', fontWeight: 500 }}>Bill To</div>
+            <div style={{ fontSize: 12.5, fontWeight: 600, marginTop: 4, color: '#1a1a19' }}>{order.customerName || '—'}</div>
+            <div style={{ fontSize: 10.5, color: '#4a4a45', marginTop: 2 }}>{order.customerPhone || ''}</div>
+            {order.patientName && (
+              <div style={{ fontSize: 10, color: '#4a4a45', marginTop: 2 }}>Patient: {order.patientName}</div>
+            )}
+          </div>
+          <div style={{ padding: '10px 16px' }}>
+            <div style={{ fontSize: 9, color: '#4a4a45', textTransform: 'uppercase', letterSpacing: '.1em', fontWeight: 500 }}>Ship To / Outlet</div>
+            <div style={{ fontSize: 11.5, color: '#1a1a19', marginTop: 4, lineHeight: 1.4 }}>{header.store_name}</div>
+            <div style={{ fontSize: 10.5, color: '#4a4a45', marginTop: 2, lineHeight: 1.4 }}>{header.store_address}</div>
           </div>
         </div>
 
-        {/* Invoice Info */}
-        <div className="grid grid-cols-2 gap-4 mb-6">
-          <div>
-            <h2 className="text-lg font-semibold text-gray-900 mb-2">Tax Invoice</h2>
-            <div className="text-sm space-y-1">
-              <div>
-                <span className="font-medium">Invoice No:</span> {generateInvoiceNumber(order.orderNumber, store.storeCode)}
-              </div>
-              <div>
-                <span className="font-medium">Date:</span>{' '}
-                {new Date(order.createdAt).toLocaleDateString('en-IN', {
-                  day: '2-digit',
-                  month: 'short',
-                  year: 'numeric',
-                })}
-              </div>
-              <div>
-                <span className="font-medium">Place of Supply:</span> {store.state}
-              </div>
-            </div>
-          </div>
-
-          <div>
-            <h3 className="font-semibold text-gray-900 mb-2">Bill To:</h3>
-            <div className="text-sm space-y-1">
-              <div className="font-medium">{order.customerName}</div>
-              <div>{order.customerPhone}</div>
-              {order.patientName && (
-                <div className="text-gray-600">Patient: {order.patientName}</div>
-              )}
-            </div>
-          </div>
-        </div>
-
-        {/* Items Table */}
-        <div className="mb-6">
-          <table className="w-full border-collapse border border-gray-300 text-sm">
+        {/* Line items table */}
+        <div style={{ padding: '12px 16px 0' }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
             <thead>
-              <tr className="bg-gray-100">
-                <th className="border border-gray-300 px-2 py-2 text-left">#</th>
-                <th className="border border-gray-300 px-2 py-2 text-left">Product Description</th>
-                <th className="border border-gray-300 px-2 py-2 text-center">HSN</th>
-                <th className="border border-gray-300 px-2 py-2 text-center">Qty</th>
-                <th className="border border-gray-300 px-2 py-2 text-right">Rate</th>
-                <th className="border border-gray-300 px-2 py-2 text-right">Discount</th>
-                <th className="border border-gray-300 px-2 py-2 text-right">Taxable Value</th>
-                <th className="border border-gray-300 px-2 py-2 text-center">GST%</th>
+              <tr>
+                <th style={{ ...tblHead, width: '4%' }}>#</th>
+                <th style={{ ...tblHead, textAlign: 'left' }}>Description</th>
+                <th style={{ ...tblHead, width: '8%' }}>HSN/SAC</th>
+                <th style={{ ...tblHead, width: '6%' }}>Qty</th>
+                <th style={{ ...tblHead, width: '9%' }}>Rate</th>
+                <th style={{ ...tblHead, width: '8%' }}>Discount</th>
+                <th style={{ ...tblHead, width: '10%' }}>Taxable</th>
+                <th style={{ ...tblHead, width: '5%' }}>GST%</th>
                 {!isInterState ? (
                   <>
-                    <th className="border border-gray-300 px-2 py-2 text-right">CGST</th>
-                    <th className="border border-gray-300 px-2 py-2 text-right">SGST</th>
+                    <th style={{ ...tblHead, width: '8%' }}>CGST</th>
+                    <th style={{ ...tblHead, width: '8%' }}>SGST</th>
                   </>
                 ) : (
-                  <th className="border border-gray-300 px-2 py-2 text-right">IGST</th>
+                  <th style={{ ...tblHead, width: '10%' }}>IGST</th>
                 )}
-                <th className="border border-gray-300 px-2 py-2 text-right">Total</th>
+                <th style={{ ...tblHead, width: '10%' }}>Line Total</th>
               </tr>
             </thead>
             <tbody>
               {lineItems.map((item, index) => (
                 <tr key={index}>
-                  <td className="border border-gray-300 px-2 py-2">{index + 1}</td>
-                  <td className="border border-gray-300 px-2 py-2">{item.productName}</td>
-                  <td className="border border-gray-300 px-2 py-2 text-center">{item.hsnCode}</td>
-                  <td className="border border-gray-300 px-2 py-2 text-center">{item.quantity}</td>
-                  <td className="border border-gray-300 px-2 py-2 text-right">
-                    ₹{item.unitPrice.toFixed(2)}
-                  </td>
-                  <td className="border border-gray-300 px-2 py-2 text-right">
-                    ₹{item.discount.toFixed(2)}
-                  </td>
-                  <td className="border border-gray-300 px-2 py-2 text-right">
-                    ₹{item.taxableValue.toFixed(2)}
-                  </td>
-                  <td className="border border-gray-300 px-2 py-2 text-center">{item.gstRate}%</td>
+                  <td style={tblCell}>{index + 1}</td>
+                  <td style={{ ...tblCell, textAlign: 'left' }}>{item.productName}</td>
+                  <td style={{ ...tblCell, fontFamily: 'JetBrains Mono, Menlo, monospace' }}>{item.hsnCode}</td>
+                  <td style={tblCell}>{item.quantity}</td>
+                  <td style={tblNum}>{inr(item.unitPrice, { withPaise: true })}</td>
+                  <td style={tblNum}>{inr(item.discount, { withPaise: true })}</td>
+                  <td style={tblNum}>{inr(item.taxableValue, { withPaise: true })}</td>
+                  <td style={tblCell}>{item.gstRate}%</td>
                   {!isInterState ? (
                     <>
-                      <td className="border border-gray-300 px-2 py-2 text-right">
-                        ₹{item.cgst.toFixed(2)}
-                      </td>
-                      <td className="border border-gray-300 px-2 py-2 text-right">
-                        ₹{item.sgst.toFixed(2)}
-                      </td>
+                      <td style={tblNum}>{inr(item.cgst, { withPaise: true })}</td>
+                      <td style={tblNum}>{inr(item.sgst, { withPaise: true })}</td>
                     </>
                   ) : (
-                    <td className="border border-gray-300 px-2 py-2 text-right">
-                      ₹{item.igst.toFixed(2)}
-                    </td>
+                    <td style={tblNum}>{inr(item.igst, { withPaise: true })}</td>
                   )}
-                  <td className="border border-gray-300 px-2 py-2 text-right font-medium">
-                    ₹{item.totalAmount.toFixed(2)}
-                  </td>
+                  <td style={{ ...tblNum, fontWeight: 600 }}>{inr(item.totalAmount, { withPaise: true })}</td>
                 </tr>
               ))}
-            </tbody>
-            <tfoot>
               {orderLevelDiscount > 0 && (
-              <tr className="bg-yellow-50">
-                <td colSpan={isInterState ? 9 : 10} className="border border-gray-300 px-2 py-2 text-right text-sm text-green-700">
-                  Order Discount:
-                </td>
-                <td className="border border-gray-300 px-2 py-2 text-right text-sm text-green-700">
-                  -₹{orderLevelDiscount.toFixed(2)}
-                </td>
-              </tr>
+                <tr>
+                  <td colSpan={isInterState ? 9 : 10} style={{ ...tblCell, textAlign: 'right', fontWeight: 500 }}>
+                    Order discount
+                  </td>
+                  <td style={{ ...tblNum }}>-{inr(orderLevelDiscount, { withPaise: true })}</td>
+                </tr>
               )}
-              <tr className="bg-gray-50 font-medium">
-                <td colSpan={6} className="border border-gray-300 px-2 py-2 text-right">
-                  Taxable Amount:
-                </td>
-                <td className="border border-gray-300 px-2 py-2 text-right">
-                  ₹{subtotal.toFixed(2)}
-                </td>
-                <td className="border border-gray-300 px-2 py-2"></td>
+              <tr>
+                <td colSpan={6} style={{ ...tblCell, textAlign: 'right', fontWeight: 700 }}>Taxable Amount</td>
+                <td style={{ ...tblNum, fontWeight: 700 }}>{inr(subtotal, { withPaise: true })}</td>
+                <td style={tblCell}></td>
                 {!isInterState ? (
                   <>
-                    <td className="border border-gray-300 px-2 py-2 text-right">
-                      ₹{totalCGST.toFixed(2)}
-                    </td>
-                    <td className="border border-gray-300 px-2 py-2 text-right">
-                      ₹{totalSGST.toFixed(2)}
-                    </td>
+                    <td style={{ ...tblNum, fontWeight: 700 }}>{inr(totalCGST, { withPaise: true })}</td>
+                    <td style={{ ...tblNum, fontWeight: 700 }}>{inr(totalSGST, { withPaise: true })}</td>
                   </>
                 ) : (
-                  <td className="border border-gray-300 px-2 py-2 text-right">
-                    ₹{totalIGST.toFixed(2)}
-                  </td>
+                  <td style={{ ...tblNum, fontWeight: 700 }}>{inr(totalIGST, { withPaise: true })}</td>
                 )}
-                <td className="border border-gray-300 px-2 py-2 text-right"></td>
+                <td style={tblCell}></td>
               </tr>
-              <tr className="bg-gray-100 font-bold">
-                <td colSpan={isInterState ? 9 : 10} className="border border-gray-300 px-2 py-2 text-right">
-                  Grand Total:
+              <tr>
+                <td colSpan={isInterState ? 9 : 10} style={{ ...tblCell, textAlign: 'right', fontWeight: 700, fontSize: 12.5 }}>
+                  Grand Total
                 </td>
-                <td className="border border-gray-300 px-2 py-2 text-right">
-                  ₹{grandTotal.toFixed(2)}
-                </td>
+                <td style={{ ...tblNum, fontWeight: 700, fontSize: 12.5 }}>{inr(grandTotal, { withPaise: true })}</td>
               </tr>
-            </tfoot>
+            </tbody>
           </table>
         </div>
 
-        {/* Tax Summary */}
-        <div className="mb-6 p-3 bg-gray-50 border border-gray-300">
-          <h3 className="font-semibold text-sm mb-2">Tax Summary</h3>
-          <div className="grid grid-cols-2 gap-4 text-sm">
-            <div>
-              <div className="flex justify-between">
-                <span>Taxable Amount:</span>
-                <span className="font-medium">₹{subtotal.toFixed(2)}</span>
-              </div>
-              {!isInterState ? (
-                <>
-                  <div className="flex justify-between">
-                    <span>CGST:</span>
-                    <span className="font-medium">₹{totalCGST.toFixed(2)}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span>SGST:</span>
-                    <span className="font-medium">₹{totalSGST.toFixed(2)}</span>
-                  </div>
-                </>
-              ) : (
-                <div className="flex justify-between">
-                  <span>IGST:</span>
-                  <span className="font-medium">₹{totalIGST.toFixed(2)}</span>
-                </div>
-              )}
-            </div>
-            <div>
-              <div className="flex justify-between font-bold">
-                <span>Total Tax:</span>
-                <span>₹{totalTax.toFixed(2)}</span>
-              </div>
-              <div className="flex justify-between font-bold text-base mt-2">
-                <span>Invoice Total:</span>
-                <span>₹{grandTotal.toFixed(2)}</span>
-              </div>
-            </div>
+        {/* HSN-wise consolidated tax summary (Rule 46 / GSTR-1) */}
+        <div style={{ padding: '12px 16px' }}>
+          <div style={{ fontSize: 9, color: '#4a4a45', textTransform: 'uppercase', letterSpacing: '.1em', fontWeight: 500, marginBottom: 4 }}>
+            HSN-wise tax summary
           </div>
+          <HsnSummaryTable summary={hsnSummary} />
         </div>
 
-        {/* Amount in Words */}
-        <div className="mb-6 p-3 bg-gray-50 border border-gray-300">
-          <div className="text-sm">
-            <span className="font-semibold">Amount in Words:</span>{' '}
-            {numberToWords(Math.round(grandTotal))}
-          </div>
-        </div>
-
-        {/* Payment Details */}
+        {/* Payment Details (kept) */}
         {order.payments && order.payments.length > 0 && (
-          <div className="mb-6">
-            <h3 className="font-semibold text-sm mb-2">Payment Details</h3>
-            <div className="text-sm space-y-1">
-              {order.payments.map((payment, idx) => (
-                <div key={idx} className="flex justify-between">
-                  <span>{payment.mode}:</span>
-                  <span className="font-medium">₹{payment.amount.toFixed(2)}</span>
-                </div>
-              ))}
-              {order.balanceDue > 0 && (
-                <div className="flex justify-between text-red-600 font-medium pt-2 border-t">
-                  <span>Balance Due:</span>
-                  <span>₹{order.balanceDue.toFixed(2)}</span>
-                </div>
-              )}
+          <div style={{ padding: '0 16px 12px' }}>
+            <div style={{ fontSize: 9, color: '#4a4a45', textTransform: 'uppercase', letterSpacing: '.1em', fontWeight: 500, marginBottom: 4 }}>
+              Payment details
             </div>
+            <table style={{ width: '100%', fontSize: 10.5, borderCollapse: 'collapse' }}>
+              <tbody>
+                {order.payments.map((payment, idx) => (
+                  <tr key={idx}>
+                    <td style={{ padding: '2px 0', color: '#4a4a45' }}>{payment.mode}</td>
+                    <td style={{ padding: '2px 0', textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{inr(payment.amount, { withPaise: true })}</td>
+                  </tr>
+                ))}
+                {order.balanceDue > 0 && (
+                  <tr>
+                    <td style={{ padding: '4px 0', borderTop: '1px solid #aaa9a3', color: '#1a1a19', fontWeight: 600 }}>Balance Due</td>
+                    <td style={{ padding: '4px 0', borderTop: '1px solid #aaa9a3', textAlign: 'right', fontWeight: 600, fontVariantNumeric: 'tabular-nums' }}>
+                      {inr(order.balanceDue, { withPaise: true })}
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
           </div>
         )}
 
-        {/* Terms & Conditions */}
-        <div className="mb-6 text-xs text-gray-600">
-          <h3 className="font-semibold text-sm mb-2 text-gray-900">Terms & Conditions:</h3>
-          <ul className="list-disc list-inside space-y-1">
-            <li>Goods once sold cannot be returned or exchanged</li>
-            <li>Subject to {store.city} jurisdiction</li>
-            <li>All disputes are subject to {store.city} jurisdiction only</li>
-            <li>Warranty as per manufacturer's terms and conditions</li>
-          </ul>
-        </div>
-
-        {/* Footer */}
-        <div className="text-right pt-4 border-t border-gray-300">
-          <div className="text-sm font-semibold text-gray-900">For {store.storeName}</div>
-          <div className="mt-12 text-sm text-gray-600">Authorized Signatory</div>
-        </div>
-
-        {/* Footer Note */}
-        <div className="mt-6 text-center text-xs text-gray-500">
-          <p>This is a computer-generated invoice and does not require a physical signature</p>
-        </div>
+        {/* Amount-in-words + Declaration + Signatory + Statutory footer */}
+        <LegalFooterBlock
+          header={header}
+          amountInWordsText={amountWords}
+          declarationText={declarationText}
+        />
       </div>
 
       {/* Print Styles */}
       <style>{`
         @media print {
-          .no-print {
-            display: none !important;
-          }
-          body {
-            margin: 0;
-            padding: 0;
-          }
-          @page {
-            size: A4;
-            margin: 10mm;
-          }
+          .no-print { display: none !important; }
+          body { margin: 0; padding: 0; }
+          @page { size: A4; margin: 10mm; }
+          .tax-invoice-print { border: none !important; }
         }
       `}</style>
     </div>
@@ -435,3 +387,5 @@ export function GSTInvoice({ order, store, onPrint }: GSTInvoiceProps) {
 }
 
 export default GSTInvoice;
+// Re-export the format helper for callers that need the same date formatting.
+export { formatDate as formatInvoiceDate };

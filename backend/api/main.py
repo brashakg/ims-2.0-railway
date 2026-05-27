@@ -85,6 +85,7 @@ from .routers import (
     labels_router,
     display_fixtures_router,
     display_placements_router,
+    print_overrides_router,
 )
 from .routers.auth import require_roles
 
@@ -813,6 +814,13 @@ app.include_router(
     techcherry_import_router,
     prefix="/api/v1/admin/techcherry",
     tags=["TechCherry Migration"],
+)
+# Per-entity print template content overrides (v2-3). SUPERADMIN/ADMIN can
+# edit; any authenticated user can read so the renderer resolves overrides.
+app.include_router(
+    print_overrides_router,
+    prefix="/api/v1/print-overrides",
+    tags=["Print Overrides"],
 )
 
 
