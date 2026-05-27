@@ -167,12 +167,22 @@ export function CustomersPage() {
     }
   }, []);
 
-  // Filter customers locally
+  // Filter customers locally.
+  // DEFENSIVE: server rows occasionally have null/missing name or phone (data-import
+  // residue, legacy customers without a phone, B2B-only entries). Bare
+  // `customer.name.toLowerCase()` then crashes the WHOLE list page on the first
+  // keystroke — the React error boundary fires and the topbar + sidebar
+  // disappear. The owner reported "search bar is useless" because of this. Coerce
+  // every field to '' before calling string methods.
   const filteredCustomers = customers.filter(customer => {
+    const q = searchQuery.toLowerCase();
+    const name = (customer.name || '').toLowerCase();
+    const phone = customer.phone || '';
+    const email = (customer.email || '').toLowerCase();
     const matchesSearch = !searchQuery ||
-      customer.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      customer.phone.includes(searchQuery) ||
-      customer.email?.toLowerCase().includes(searchQuery.toLowerCase());
+      name.includes(q) ||
+      phone.includes(searchQuery) ||
+      email.includes(q);
 
     const matchesType = filterType === 'ALL' || customer.customerType === filterType;
 
