@@ -604,8 +604,33 @@ async def ecommerce_sso(current_user: dict = Depends(get_current_user)):
     if not token:
         raise HTTPException(status_code=503, detail="Online-store SSO is unavailable")
 
+    # Claim the jti to prevent the SAME token (same jti) from being re-minted
+    # within its lifetime. BVI cannot easily check IMS's Mongo (different DB,
+    # different runtime), so this single-use guard is enforced at mint-time on
+    # the IMS side. Fail-soft when db is None -- BVI still enforces aud/iss/
+    # scope/exp on the wire.
+    try:
+        _claims = jwt.decode(token, options={"verify_signature": False})
+        jti = _claims.get("jti")
+        exp = int(_claims.get("exp") or 0)
+    except Exception:
+        jti, exp = None, 0
+    try:
+        from ..dependencies import get_db as _get_db_dep
+
+        _wrapper = _get_db_dep()
+        _db = getattr(_wrapper, "db", None) if _wrapper is not None else None
+    except Exception:
+        _db = None
+    if jti and exp and not sso.claim_jti(_db, jti, exp):
+        # Fresh uuid4 collision is astronomically unlikely; if it happens, fail
+        # closed rather than reuse a jti.
+        raise HTTPException(
+            status_code=500, detail="SSO token jti collision; please retry"
+        )
+
     base = (os.getenv("ECOMMERCE_URL") or "https://uniparallel.com").rstrip("/")
-    return {"url": f"{base}/sso?token={token}", "expires_in": 300}
+    return {"url": f"{base}/sso?token={token}", "expires_in": 90}
 
 
 @router.post("/refresh")
