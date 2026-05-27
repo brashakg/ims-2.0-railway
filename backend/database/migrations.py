@@ -79,6 +79,14 @@ class DatabaseMigration:
         result = self._create_default_data()
         results.append(result)
         print(f"  {result}")
+
+        # 3b. Seed lens_enum_config (Branch B' sub-PR 1, Q6 defaults).
+        # Idempotent: never overwrites owner edits. Only technical
+        # dimensions are seeded (coatings, indexes, materials, lens_types);
+        # brands + series start empty so the owner enters their own.
+        result = self._seed_lens_enum_config()
+        results.append(result)
+        print(f"  {result}")
         
         # Summary
         success_count = len([r for r in results if r.success])
@@ -173,6 +181,52 @@ class DatabaseMigration:
             )
         except Exception as e:
             return MigrationResult(False, f"TTL index on sso_jti failed: {e}")
+
+    def _seed_lens_enum_config(self) -> MigrationResult:
+        """Seed lens_enum_config defaults (Branch B' sub-PR 1, Q6).
+
+        Idempotent: for each enum_type, INSERT only when the row doesn't
+        already exist. Owner edits via PATCH /lens-enums/{enum_type} are
+        preserved across restarts (the upsert from migrations never runs
+        for a row that already exists).
+
+        Only technical-dimension lists are seeded; brands + series start
+        empty so the owner enters them via Settings.
+        """
+        try:
+            # Import here so an early import error in the service file
+            # cannot break the whole migration run.
+            from api.services.lens_catalog_validation import DEFAULT_ENUM_ITEMS
+
+            coll = self.db["lens_enum_config"]
+            seeded = []
+            for enum_type, items in DEFAULT_ENUM_ITEMS.items():
+                if coll.count_documents({"enum_id": enum_type}) > 0:
+                    # Already exists -- preserve owner edits.
+                    continue
+                coll.insert_one(
+                    {
+                        "enum_id": enum_type,
+                        "items": list(items),
+                        "updated_at": datetime.now(),
+                        "updated_by": "system-migration",
+                    }
+                )
+                seeded.append(enum_type)
+            if seeded:
+                return MigrationResult(
+                    True,
+                    "Seeded lens_enum_config: {seeded}".format(
+                        seeded=", ".join(seeded)
+                    ),
+                )
+            return MigrationResult(
+                True, "lens_enum_config already populated (no seed needed)"
+            )
+        except Exception as e:
+            return MigrationResult(
+                False, "lens_enum_config seed failed: {e}".format(e=e)
+            )
 
     def _create_default_data(self) -> MigrationResult:
         """Create default/seed data"""

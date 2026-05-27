@@ -86,6 +86,9 @@ from .routers import (
     display_fixtures_router,
     display_placements_router,
     print_overrides_router,
+    lens_catalog_router,
+    lens_stock_router,
+    lens_enums_router,
 )
 from .routers.auth import require_roles
 
@@ -770,6 +773,27 @@ app.include_router(
     display_placements_router,
     prefix="/api/v1/display-placements",
     tags=["Display Placements"],
+)
+# Branch B' sub-PR 1: lens catalog backend foundation. Three new routers
+# build the typed lens-line + per-power stock model that replaces the old
+# inventory.py::get_lens_power_grid endpoint (which B'2 swaps over).
+# Atomic reserve/commit/release endpoints under /api/v1/lens-stock are
+# wired to POS Step 6 + Workshop dispatch in B'4. Enums under
+# /api/v1/lens-enums are SUPERADMIN/ADMIN-only.
+app.include_router(
+    lens_catalog_router,
+    prefix="/api/v1/lens-catalog",
+    tags=["Lens Catalog"],
+)
+app.include_router(
+    lens_stock_router,
+    prefix="/api/v1/lens-stock",
+    tags=["Lens Stock"],
+)
+app.include_router(
+    lens_enums_router,
+    prefix="/api/v1/lens-enums",
+    tags=["Lens Enums"],
 )
 app.include_router(
     transfers_router, prefix="/api/v1/transfers", tags=["Stock Transfers"]
