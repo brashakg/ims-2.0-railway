@@ -1089,8 +1089,39 @@ async def dashboard_per_staff(
     current_user: dict = Depends(get_current_user),
     store_id: Optional[str] = Query(None),
 ):
-    """Per-staff dashboard cards: walkouts MTD/today + walk-ins today/MTD
-    + conversion% (CONVERTED / walkouts) + FU-due-today count."""
+    """Per-staff dashboard cards.
+
+    Canonical aggregation contract (so the per-staff grid reconciles
+    with the top-card "Walk-ins today" KPI):
+
+      - WALK-INS TODAY headline (GET /walkins/today)
+        = pos_auto_count + manual_topup
+        = sum(per_staff.values()) + unattributed_walk_ins_today
+
+      - Per-staff `walk_ins_today` here is sourced from the SAME
+        ``walkin_counter_repository.get_today(store).per_staff`` dict
+        the headline uses. They share one source of truth.
+
+      - When a walk-in is logged without ``sales_person_id`` (allowed by
+        POS hook + manual-topup), it counts in the headline ``total``
+        but NOT in any attributable per-staff row. We surface those
+        as a synthetic ``sales_person_id="unattributed"`` row when
+        non-zero, so the grid rows always sum to the headline.
+
+      - All other per-row metrics (walkouts MTD/today, converted_mtd,
+        walk_ins_mtd, fu_due_today) follow the same rule: sum across
+        rows reconciles to the corresponding aggregate.
+
+    Display names:
+      - Every row carries ``sales_person_name`` resolved via the
+        priority chain ``full_name -> username -> user_id`` (mirroring
+        PR #276 POS resolver), never the raw user_id.
+      - Salespersons appearing ONLY via the walk-in counter (not via a
+        walkout record) get their name resolved from ``users`` here so
+        no raw ``user-*`` id leaks into the UI.
+      - Missing/deleted users fall back to ``"Unknown user"`` (not the
+        raw id).
+    """
     store = _resolve_dashboard_store(current_user, store_id)
     walkout_repo = _walkout_repo()
     walkin_repo = get_walkin_counter_repository()
@@ -1128,6 +1159,8 @@ async def dashboard_per_staff(
 
     for w in mtd_walkouts:
         sp = w.get("sales_person_id") or ""
+        if not sp:
+            continue
         slot = _slot(sp)
         slot["sales_person_name"] = (
             w.get("sales_person_name") or slot["sales_person_name"]
@@ -1137,21 +1170,70 @@ async def dashboard_per_staff(
             slot["converted_mtd"] += 1
     for w in today_walkouts:
         sp = w.get("sales_person_id") or ""
+        if not sp:
+            continue
         _slot(sp)["walkouts_today"] += 1
 
+    # Track headline totals to surface the unattributed remainder.
+    total_walk_ins_today = 0
+    attributed_walk_ins_today = 0
+    total_walk_ins_mtd = 0
+    attributed_walk_ins_mtd = 0
     if walkin_repo is not None:
         today_doc = walkin_repo.get_today(store)
+        total_walk_ins_today = int(today_doc.get("total") or 0)
         for sp, count in (today_doc.get("per_staff") or {}).items():
+            if not sp:
+                continue
             _slot(sp)["walk_ins_today"] = int(count)
+            attributed_walk_ins_today += int(count)
         mtd_doc = walkin_repo.get_mtd(store, now.year, now.month)
+        total_walk_ins_mtd = int(mtd_doc.get("total") or 0)
         for sp, count in (mtd_doc.get("per_staff") or {}).items():
+            if not sp:
+                continue
             _slot(sp)["walk_ins_mtd"] = int(count)
+            attributed_walk_ins_mtd += int(count)
 
     # FU-due-today per staff
     due_rows = walkout_repo.list_followups_due_today(today, store_id=store)
     for r in due_rows:
         sp = r.get("sales_person_id") or ""
+        if not sp:
+            continue
         _slot(sp)["fu_due_today"] += 1
+
+    # Surface the unattributed walk-in remainder so the grid reconciles
+    # with the headline KPI. We only synthesize a row when there IS a
+    # remainder (else the grid stays clean).
+    unattributed_today = max(0, total_walk_ins_today - attributed_walk_ins_today)
+    unattributed_mtd = max(0, total_walk_ins_mtd - attributed_walk_ins_mtd)
+    if unattributed_today > 0 or unattributed_mtd > 0:
+        slot = _slot("unattributed")
+        slot["sales_person_name"] = "Unattributed"
+        slot["walk_ins_today"] = unattributed_today
+        slot["walk_ins_mtd"] = unattributed_mtd
+
+    # Resolve display names for rows that don't already have one (the
+    # walk-in-only or fu-only sources don't carry the name). Cache per
+    # request so one user_repo lookup serves multiple appearances.
+    name_cache: Dict[str, str] = {}
+
+    def _resolve_name(sp: str) -> str:
+        if sp == "unattributed":
+            return "Unattributed"
+        if sp in name_cache:
+            return name_cache[sp]
+        resolved = _resolve_sales_person_name(sp)
+        # _resolve_sales_person_name returns the raw id as a last-resort
+        # fallback when the user is found but has no name field; it
+        # returns None when the user lookup itself fails. We treat the
+        # latter as a deleted/missing user and surface "Unknown user"
+        # so the raw id never reaches the UI.
+        if not resolved or resolved == sp:
+            resolved = "Unknown user"
+        name_cache[sp] = resolved
+        return resolved
 
     # Conversion% (Module ii will use the formal scoring; this is the
     # raw MTD ratio for the dashboard chip).
@@ -1161,10 +1243,22 @@ async def dashboard_per_staff(
         slot["conversion_pct_mtd"] = (
             round(100.0 * slot["converted_mtd"] / denom, 1) if denom else 0.0
         )
+        if not slot["sales_person_name"]:
+            slot["sales_person_name"] = _resolve_name(sp)
         items.append(slot)
 
     items.sort(key=lambda s: (-s["walkouts_mtd"], s["sales_person_id"]))
-    return {"store_id": store, "as_of": today, "items": items}
+    return {
+        "store_id": store,
+        "as_of": today,
+        "items": items,
+        "totals": {
+            "walk_ins_today": total_walk_ins_today,
+            "walk_ins_mtd": total_walk_ins_mtd,
+            "walkouts_mtd": sum(s["walkouts_mtd"] for s in items),
+            "walkouts_today": sum(s["walkouts_today"] for s in items),
+        },
+    }
 
 
 @router.get("/dashboard/top-reasons")
