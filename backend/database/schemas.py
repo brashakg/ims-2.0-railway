@@ -1101,3 +1101,255 @@ COLLECTIONS.update({
         {"keys": [("state_code", 1)], "unique": True},
     ]},
 })
+
+
+# ============================================================================
+# LENS CATALOG SCHEMAS (Branch B' sub-PR 1 - lens-catalog rebuild)
+# ============================================================================
+# Owner-typed lens lines (brand x series x index x material x lens_type x
+# coating combos) replace the per-SKU `products` rows the legacy Power Grid
+# tried to map. Each LINE has a 3D power matrix (sph x cyl x add) of per-cell
+# stock rows. Multifocals key on (sph, cyl, add); SV has add=null.
+# See docs/LENS_CATALOG_REBUILD_SPEC.md for the full contract + owner Q&A
+# (PR #270). Decisions baked into the shape here:
+#   Q1 single `coating: str` column (not array) -- combos like DUAL_COAT are
+#      their own coating codes; the owner edits the coating list in Settings.
+#   Q2 (sph, cyl, add) cell key on lens_stock_lines. add is null on SV.
+#   Q3 no migration -- owner re-enters via UI + bulk-import CSV/JSON matrix.
+#   Q4 atomic reserve/commit/release using Mongo CAS on (on_hand - reserved).
+#   Q5 lens_enum_config = single source of truth for editable enum lists.
+#   Q6 seeded technical-dimension defaults only (indexes/materials/types/
+#      coatings); brands + series start empty.
+
+LENS_CATALOG_SCHEMA = {
+    "bsonType": "object",
+    "required": ["lens_line_id", "brand", "series", "index", "material",
+                 "lens_type", "coating", "mrp", "is_active"],
+    "properties": {
+        # Slug: brand-series-index-material-lens_type-coating, lower-kebab.
+        # Built by slugify_lens_line() in lens_catalog_validation.py.
+        "lens_line_id": {"bsonType": "string"},
+        "brand": {"bsonType": "string"},
+        "series": {"bsonType": "string"},
+        # Refractive index (1.50 / 1.56 / 1.60 / 1.67 / 1.74). Validated
+        # against the live lens_enum_config["indexes"] list on write.
+        "index": {"bsonType": "double", "minimum": 1.0, "maximum": 3.0},
+        # Material code (CR39 / POLY / MR8 / MR174 / TRIVEX / GLASS / ...).
+        # Validated against lens_enum_config["materials"].
+        "material": {"bsonType": "string"},
+        # Lens type (SV / BIFOCAL / PROGRESSIVE / OFFICE / READING / ...).
+        # Validated against lens_enum_config["lens_types"].
+        "lens_type": {"bsonType": "string"},
+        # Q1: single string. Combos are their own codes (DUAL_COAT, etc.).
+        # Validated against lens_enum_config["coatings"].
+        "coating": {"bsonType": "string"},
+        # Power range the LINE supports. Used by the cell-create validator
+        # to refuse cells outside the supported sph/cyl/add boundaries.
+        "sph_range": {
+            "bsonType": "object",
+            "properties": {
+                "min": {"bsonType": "double"},
+                "max": {"bsonType": "double"},
+                "step": {"bsonType": "double", "minimum": 0.0},
+            },
+        },
+        "cyl_range": {
+            "bsonType": "object",
+            "properties": {
+                "min": {"bsonType": "double"},
+                "max": {"bsonType": "double"},
+                "step": {"bsonType": "double", "minimum": 0.0},
+            },
+        },
+        # has_add discriminates SV (false -> add must be null in stock cells)
+        # vs multifocal (true -> add_range required and cells must carry add).
+        "has_add": {"bsonType": "bool"},
+        "add_range": {
+            "bsonType": ["object", "null"],
+            "properties": {
+                "min": {"bsonType": "double"},
+                "max": {"bsonType": "double"},
+                "step": {"bsonType": "double", "minimum": 0.0},
+            },
+        },
+        # Default MRP for the line. Per-power-band overrides land in mrp_table
+        # (deferred to sub-PR B'2; today this field carries the catalogue
+        # default + the cell-level resolver falls back to it).
+        "mrp": {"bsonType": "double", "minimum": 0},
+        "cost_price": {"bsonType": "double", "minimum": 0},
+        # Optional power-banded MRP table -- shape deferred to B'2; today we
+        # accept any array so the field can ride along on imports.
+        "mrp_table": {"bsonType": ["array", "null"]},
+        # GST. Defaults to 5% per the editable hsn_gst_master; per-line
+        # override only when the owner has a reason (e.g. polarized lens
+        # banded into a different HSN).
+        "gst_rate": {"bsonType": "double", "minimum": 0, "maximum": 28},
+        "hsn_code": {"bsonType": "string"},
+        "is_active": {"bsonType": "bool"},
+        "notes": {"bsonType": ["string", "null"]},
+        "created_at": {"bsonType": "date"},
+        "updated_at": {"bsonType": "date"},
+        "created_by": {"bsonType": "string"},
+    },
+}
+
+LENS_STOCK_LINE_SCHEMA = {
+    "bsonType": "object",
+    "required": ["line_stock_id", "lens_line_id", "store_id", "sph", "cyl",
+                 "on_hand", "reserved"],
+    "properties": {
+        "line_stock_id": {"bsonType": "string"},
+        "lens_line_id": {"bsonType": "string"},  # FK to lens_catalog
+        "store_id": {"bsonType": "string"},
+        # Discrete power cell. cyl=0 for spherical-only powers; add is null
+        # for SV (Q2). Floats are kept in 0.25 steps by the validator -- the
+        # JSON schema only checks the type because Mongo's $jsonSchema can't
+        # express "multiple of 0.25".
+        "sph": {"bsonType": "double"},
+        "cyl": {"bsonType": "double"},
+        "add": {"bsonType": ["double", "null"]},
+        # on_hand = physical units in the bin. reserved = units earmarked by
+        # open POS orders that have not yet been dispatched. Effective
+        # available = on_hand - reserved (computed by compute_available()).
+        # Q4: atomic CAS in the reserve/commit/release endpoints keeps
+        # (on_hand - reserved) >= 0 even with concurrent POS terminals.
+        "on_hand": {"bsonType": "int", "minimum": 0},
+        "reserved": {"bsonType": "int", "minimum": 0},
+        "reorder_point": {"bsonType": "int", "minimum": 0},
+        "safety_stock": {"bsonType": "int", "minimum": 0},
+        "last_counted_at": {"bsonType": ["date", "null"]},
+        "last_counted_by": {"bsonType": ["string", "null"]},
+        "last_movement_at": {"bsonType": "date"},
+    },
+}
+
+LENS_STOCK_AUDIT_SCHEMA = {
+    "bsonType": "object",
+    "required": ["audit_id", "line_stock_id", "lens_line_id", "store_id",
+                 "action", "at"],
+    "properties": {
+        "audit_id": {"bsonType": "string"},
+        "line_stock_id": {"bsonType": "string"},
+        "lens_line_id": {"bsonType": "string"},
+        "store_id": {"bsonType": "string"},
+        # action: how the stock row was touched.
+        #   create        - first time this (line, store, cell) was seen.
+        #   set_on_hand   - absolute on_hand update (PATCH).
+        #   reserve       - POS Step 6 reserve (increments .reserved).
+        #   commit        - Workshop dispatch (decrements both fields).
+        #   release       - Order cancel before dispatch (decrements .reserved).
+        #   bulk_import   - CSV/JSON paste-matrix upsert.
+        "action": {"enum": ["create", "set_on_hand", "reserve", "commit",
+                            "release", "bulk_import"]},
+        # Signed deltas. For 'set_on_hand' delta_on_hand carries the diff
+        # (new - prior). For absolute writes the prior+after fields still hold.
+        "delta_on_hand": {"bsonType": "int"},
+        "delta_reserved": {"bsonType": "int"},
+        "prior": {
+            "bsonType": "object",
+            "properties": {
+                "on_hand": {"bsonType": "int"},
+                "reserved": {"bsonType": "int"},
+            },
+        },
+        "after": {
+            "bsonType": "object",
+            "properties": {
+                "on_hand": {"bsonType": "int"},
+                "reserved": {"bsonType": "int"},
+            },
+        },
+        # Who/what triggered the movement. POS / WORKSHOP / ORDER_CANCEL /
+        # MANUAL / IMPORT. source_id is the order_id / workshop_job_id when
+        # known, so the auditor can trace a unit back to its sale.
+        "source_type": {"bsonType": ["string", "null"]},
+        "source_id": {"bsonType": ["string", "null"]},
+        "by_user_id": {"bsonType": "string"},
+        "by_user_name": {"bsonType": "string"},
+        "notes": {"bsonType": ["string", "null"]},
+        "at": {"bsonType": "date"},
+    },
+}
+
+LENS_ENUM_CONFIG_SCHEMA = {
+    "bsonType": "object",
+    "required": ["enum_id", "items"],
+    "properties": {
+        # Primary key: the enum_type name (coatings / brands / series /
+        # indexes / materials / lens_types). The router refuses any other.
+        "enum_id": {"bsonType": "string"},
+        # The editable list. Stored as a heterogeneous array so:
+        #   coatings/brands/materials/lens_types  -- strings
+        #   indexes                                -- doubles
+        #   series                                 -- dicts {brand: [series]}
+        # The validation service narrows this at write time.
+        "items": {"bsonType": "array"},
+        "updated_at": {"bsonType": "date"},
+        "updated_by": {"bsonType": "string"},
+    },
+}
+
+
+COLLECTIONS.update({
+    "lens_catalog": {
+        "schema": LENS_CATALOG_SCHEMA,
+        "indexes": [
+            # One row per (brand, series, index, material, lens_type,
+            # coating) combo -- UNIQUE so a duplicate insert raises E11000.
+            # Slug (lens_line_id) is also unique; that's enforced by a
+            # second unique index below.
+            {
+                "keys": [
+                    ("brand", 1),
+                    ("series", 1),
+                    ("index", 1),
+                    ("material", 1),
+                    ("lens_type", 1),
+                    ("coating", 1),
+                ],
+                "unique": True,
+            },
+            {"keys": [("lens_line_id", 1)], "unique": True},
+            {"keys": [("brand", 1), ("is_active", 1)]},
+            {"keys": [("is_active", 1)]},
+        ],
+    },
+    "lens_stock_lines": {
+        "schema": LENS_STOCK_LINE_SCHEMA,
+        "indexes": [
+            # One row per (line, store, cell). add is sparse-null on SV so
+            # the unique index uses partialFilterExpression workaround in
+            # plain (multikey) form; pymongo creates the index identically
+            # whether or not add is null in any given doc.
+            {
+                "keys": [
+                    ("lens_line_id", 1),
+                    ("store_id", 1),
+                    ("sph", 1),
+                    ("cyl", 1),
+                    ("add", 1),
+                ],
+                "unique": True,
+            },
+            # Store-level low-stock queries (gap planner) sort by available.
+            {"keys": [("store_id", 1), ("on_hand", 1)]},
+            {"keys": [("line_stock_id", 1)], "unique": True},
+        ],
+    },
+    "lens_stock_audit": {
+        "schema": LENS_STOCK_AUDIT_SCHEMA,
+        "indexes": [
+            # Per-cell history -- ordered desc by `at` is the hot path.
+            {"keys": [("line_stock_id", 1), ("at", -1)]},
+            # Trace by source (e.g. all movements triggered by order X).
+            {"keys": [("source_id", 1)]},
+            {"keys": [("audit_id", 1)], "unique": True},
+        ],
+    },
+    "lens_enum_config": {
+        "schema": LENS_ENUM_CONFIG_SCHEMA,
+        "indexes": [
+            {"keys": [("enum_id", 1)], "unique": True},
+        ],
+    },
+})
