@@ -13,7 +13,7 @@
 <style>
 .cl-body {
   display: grid;
-  grid-template-columns: 360px 1fr 380px;
+  grid-template-columns: 320px 1fr 360px;
   height: calc(100vh - 52px);
   min-height: 0;
 }
@@ -23,6 +23,44 @@
 .queue-col { border-right: 1px solid var(--line); background: var(--surface); }
 .detail-col { padding: 24px 28px; background: var(--bg); }
 .rx-col { border-left: 1px solid var(--line); background: var(--surface); padding: 20px; }
+
+/* iPad horizontal: collapse Rx column into a drawer toggle */
+@media (max-width: 1280px) {
+  .cl-body { grid-template-columns: 290px 1fr; }
+  .rx-col { display: none; }
+  .rx-col.open {
+    display: block; position: fixed; right: 0; top: 52px; bottom: 0; width: min(420px, 90vw);
+    z-index: 60; box-shadow: -8px 0 28px rgba(0,0,0,.18); border-left: 1px solid var(--line);
+  }
+  .rx-toggle { display: inline-flex !important; }
+}
+.rx-toggle { display: none; }
+
+/* iPad vertical: queue becomes a drawer too */
+@media (max-width: 1024px) {
+  .cl-body { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
+  .queue-col {
+    display: none; position: fixed; left: 0; top: 52px; bottom: 0; width: min(360px, 88vw);
+    z-index: 60; box-shadow: 8px 0 28px rgba(0,0,0,.18); border-right: 1px solid var(--line); background: var(--surface);
+  }
+  .queue-col.open { display: block; }
+  .queue-toggle { display: inline-flex !important; }
+  .detail-col { padding: 20px 22px; }
+  .dhead h2 { font-size: 28px; }
+  .exam-grid { grid-template-columns: 1fr; }
+}
+.queue-toggle { display: none; }
+
+/* Mobile */
+@media (max-width: 640px) {
+  .detail-col { padding: 16px 14px; }
+  .dhead { flex-direction: column; align-items: stretch; gap: 14px; }
+  .dhead h2 { font-size: 24px; }
+  .dhead .actions { width: 100%; }
+  .dhead .actions .btn { flex: 1; }
+  .pretest { grid-template-columns: 1fr 1fr; }
+  .eyepad { grid-template-columns: 36px repeat(7, minmax(56px, 1fr)); overflow-x: auto; }
+}
 
 .qhead {
   padding: 16px 18px; border-bottom: 1px solid var(--line);
@@ -61,14 +99,15 @@
 .exam-card h3 { margin: 0 0 12px; font: 500 11px/1 var(--font-mono); color: var(--ink-4); text-transform: uppercase; letter-spacing: .1em; }
 
 .eyepad {
-  display: grid; grid-template-columns: repeat(6, 1fr);
+  display: grid; grid-template-columns: 38px repeat(7, 1fr);
   gap: 6px; text-align: center;
   font: 500 10px/1 var(--font-mono); color: var(--ink-4); text-transform: uppercase;
 }
 .eyepad .eye-label { font: 600 12px/1 var(--font-mono); background: var(--bg-sunk); padding: 10px 4px; border-radius: 6px; display: grid; place-items: center; }
-.eyepad input { height: 36px; text-align: center; font-family: var(--font-mono); font-size: 13px; border: 1px solid var(--line-strong); border-radius: 6px; background: var(--surface); }
+.eyepad input { height: 36px; text-align: center; font-family: var(--font-mono); font-size: 13px; border: 1px solid var(--line-strong); border-radius: 6px; background: var(--surface); min-width: 0; }
 .eyepad input:focus { outline: none; border-color: var(--ink); }
 .eyepad .hh { padding: 4px 0 8px; }
+.eyepad .hh small { display: block; color: var(--ink-5); font-family: var(--font-sans); font-size: 9px; margin-top: 2px; text-transform: none; letter-spacing: 0; }
 
 .opt-grid {
   display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px;
@@ -81,6 +120,26 @@
 .opt.on { border-color: var(--ink); background: var(--ink); color: #fff; }
 .opt .chk { font-family: var(--font-mono); font-size: 10px; opacity: .6; }
 .opt.on .chk { opacity: 1; }
+
+/* Patient profile card (Indianized: honorific, Hindi name, family, KYC, WhatsApp) */
+.profile-card {
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-lg);
+  padding: 14px 16px; margin-bottom: 16px;
+  display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 12px 18px;
+}
+@media (max-width: 1024px) { .profile-card { grid-template-columns: 1fr 1fr; } }
+@media (max-width: 640px)  { .profile-card { grid-template-columns: 1fr; } }
+.profile-card .l { font: 500 9.5px/1 var(--font-mono); color: var(--ink-4); text-transform: uppercase; letter-spacing: .08em; margin-bottom: 4px; display: flex; gap: 6px; align-items: baseline; }
+.profile-card .l .hi { font-family: var(--font-sans); color: var(--ink-5); font-size: 11px; text-transform: none; letter-spacing: 0; font-weight: 400; }
+.profile-card .v { font: 500 13px/1.3 var(--font-sans); color: var(--ink); }
+.profile-card .v.mono { font-family: var(--font-mono); font-size: 12px; }
+.profile-card .v .sub { font: 400 11px/1.3 var(--font-sans); color: var(--ink-4); margin-top: 2px; }
+.profile-card .quick-actions { grid-column: 1 / -1; display: flex; gap: 6px; padding-top: 10px; border-top: 1px solid var(--line-soft); flex-wrap: wrap; }
+.profile-card .quick-actions button { font-size: 11.5px; height: 28px; }
+
+/* WhatsApp brand-colored button */
+.btn.wa { background: #25D366; color: #fff; border-color: #25D366; }
+.btn.wa:hover { background: #1da851; border-color: #1da851; }
 
 /* Rx card (A5, right column) */
 .rx-card-title { margin-bottom: 12px; }
@@ -132,6 +191,19 @@
 .pre-cell { border: 1px solid var(--line); border-radius: 8px; padding: 10px; }
 .pre-cell .l { font: 500 10px/1 var(--font-mono); color: var(--ink-4); text-transform: uppercase; letter-spacing: .08em; margin-bottom: 6px; }
 .pre-cell .v { font-family: var(--font-mono); font-size: 14px; color: var(--ink); }
+
+/* Small polish · queue items, options, pre-cells, exam card heads */
+.q-item.sel .tok { font-size: 14px; }
+.q-item .chips .chip .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; display: inline-block; margin-right: 5px; }
+.opt { transition: background .12s, border-color .12s; }
+.opt:hover:not(.on) { background: var(--bg-sunk); border-color: var(--ink-4); }
+.pre-cell { transition: background .12s; }
+.pre-cell:hover { background: var(--bg-sunk); }
+.exam-card h3 {
+  display: flex; align-items: center; gap: 8px;
+  padding-bottom: 10px; border-bottom: 1px solid var(--line-soft); margin-bottom: 14px;
+}
+.exam-card h3::before { content: ''; width: 4px; height: 12px; background: var(--ink); border-radius: 1px; }
 </style>
 </head>
 <body>
@@ -149,6 +221,8 @@ const { useState } = React;
 function Clinical() {
   const [tab, setTab] = useState('Waiting');
   const [sel, setSel] = useState(MOCK.queue[1]); // Meera is in exam
+  const [queueOpen, setQueueOpen] = useState(false);
+  const [rxOpen, setRxOpen] = useState(false);
 
   const filtered = MOCK.queue.filter(q => tab === 'All' || q.status === tab);
 
@@ -160,7 +234,7 @@ function Clinical() {
       </>}>
       <div className="cl-body">
         {/* Queue */}
-        <div className="queue-col">
+        <div className={'queue-col' + (queueOpen ? ' open' : '')}>
           <div className="qhead">
             <div style={{display:'flex', justifyContent:'space-between', alignItems:'baseline', marginBottom:10}}>
               <span className="eyebrow">Today's queue</span>
@@ -204,6 +278,8 @@ function Clinical() {
               </div>
             </div>
             <div className="actions">
+              <button className="btn sm queue-toggle" onClick={()=>setQueueOpen(o=>!o)} style={{padding:'0 10px'}}>☰ Queue</button>
+              <button className="btn sm rx-toggle" onClick={()=>setRxOpen(o=>!o)} style={{padding:'0 10px'}}>Rx →</button>
               <button className="btn"><Icon.printer width="14" height="14" /> Print Rx card</button>
               <button className="btn primary">Save & send to POS →</button>
             </div>
@@ -223,13 +299,20 @@ function Clinical() {
             </div>
 
             <div className="exam-card" style={{gridColumn:'1 / -1'}}>
-              <h3>Refraction · subjective</h3>
+              <h3>Refraction · subjective · cuts to Rx card</h3>
               <div className="eyepad">
-                <span></span><span className="hh">Sph</span><span className="hh">Cyl</span><span className="hh">Axis</span><span className="hh">Add</span><span className="hh">VA</span>
+                <span></span>
+                <span className="hh">Sph</span>
+                <span className="hh">Cyl</span>
+                <span className="hh">Axis</span>
+                <span className="hh">Add</span>
+                <span className="hh">Prism</span>
+                <span className="hh">Base</span>
+                <span className="hh">VA</span>
                 <span className="eye-label">OD</span>
-                <input defaultValue="−2.25" /><input defaultValue="−0.75" /><input defaultValue="180" /><input defaultValue="—" /><input defaultValue="6/6" />
+                <input defaultValue="−2.25" /><input defaultValue="−0.75" /><input defaultValue="180" /><input defaultValue="—" /><input defaultValue="—" /><input defaultValue="—" /><input defaultValue="6/6" />
                 <span className="eye-label">OS</span>
-                <input defaultValue="−2.50" /><input defaultValue="−0.50" /><input defaultValue="175" /><input defaultValue="—" /><input defaultValue="6/6" />
+                <input defaultValue="−2.50" /><input defaultValue="−0.50" /><input defaultValue="175" /><input defaultValue="—" /><input defaultValue="—" /><input defaultValue="—" /><input defaultValue="6/6" />
               </div>
               <div className="row" style={{gap:10, marginTop:14, flexWrap:'wrap'}}>
                 <span className="eyebrow" style={{flexBasis:'100%', marginBottom:2}}>PD · mm</span>
@@ -280,7 +363,7 @@ function Clinical() {
         </div>
 
         {/* A5 Rx Card preview */}
-        <aside className="rx-col">
+        <aside className={'rx-col' + (rxOpen ? ' open' : '')}>
           <div className="rx-card-title">
             <div className="eyebrow" style={{marginBottom:4}}>A5 Prescription Card</div>
             <div className="hint">Prints to Epson TM-T88 · portrait</div>
@@ -302,10 +385,10 @@ function Clinical() {
               <span className="k">Token</span><span>{sel?.tok}</span>
             </div>
             <table>
-              <thead><tr><th>Eye</th><th>Sph</th><th>Cyl</th><th>Axis</th><th>Add</th><th>PD</th></tr></thead>
+              <thead><tr><th>Eye</th><th>Sph</th><th>Cyl</th><th>Axis</th><th>Add</th><th>Prism</th><th>Base</th><th>VA</th><th>PD</th></tr></thead>
               <tbody>
-                <tr><td>OD</td><td>−2.25</td><td>−0.75</td><td>180</td><td>—</td><td>32</td></tr>
-                <tr><td>OS</td><td>−2.50</td><td>−0.50</td><td>175</td><td>—</td><td>31</td></tr>
+                <tr><td>OD</td><td>−2.25</td><td>−0.75</td><td>180</td><td>—</td><td>—</td><td>—</td><td>6/6</td><td>32</td></tr>
+                <tr><td>OS</td><td>−2.50</td><td>−0.50</td><td>175</td><td>—</td><td>—</td><td>—</td><td>6/6</td><td>31</td></tr>
               </tbody>
             </table>
             <div className="notes">
@@ -316,7 +399,8 @@ function Clinical() {
               <div>
                 <div>Optometrist</div>
                 <div className="drname">Dr. R. Malhotra</div>
-                <div>Reg. DOPT/2019/4421</div>
+                <div>DMC reg. 4412/2014</div>
+                <div>NCAHP UID OPT-IN-22-04412</div>
               </div>
               <div style={{textAlign:'right'}}>
                 <div style={{fontSize:28, color:'var(--bv)', fontFamily:'var(--font-display)'}}>Rx</div>

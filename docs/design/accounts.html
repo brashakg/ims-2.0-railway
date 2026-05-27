@@ -1,0 +1,799 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>IMS 2.0 · Accounts</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="shell/tokens.css" />
+<link rel="stylesheet" href="shell/shell.css" />
+<link rel="stylesheet" href="shell/mobile.css" />
+<style>
+.acc-body { padding: 24px 28px; overflow-y: auto; height: calc(100vh - 52px); background: var(--bg); }
+.acc-head { display: flex; justify-content: space-between; align-items: flex-end; margin-bottom: 20px; }
+.acc-head h2 { margin: 0 0 4px; font-family: var(--font-display); font-size: 32px; letter-spacing: -0.01em; }
+
+.acc-tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--line); margin-bottom: 18px; }
+.acc-tabs button {
+  height: 36px; padding: 0 14px; border: 0; background: transparent;
+  font: 500 12.5px/1 var(--font-sans); color: var(--ink-4); cursor: pointer;
+  position: relative; border-bottom: 2px solid transparent; margin-bottom: -1px;
+}
+.acc-tabs button.on { color: var(--ink); border-bottom-color: var(--ink); }
+.acc-tabs button:hover:not(.on) { color: var(--ink-2); }
+.acc-tabs .count { font-family: var(--font-mono); font-size: 10px; color: var(--ink-4); margin-left: 4px; }
+
+/* Stat strip — same family as inventory */
+.acc-stats {
+  display: grid; grid-template-columns: repeat(5, 1fr); gap: 0;
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-lg);
+  margin-bottom: 18px;
+}
+.acc-stats > div { padding: 14px 18px; border-right: 1px solid var(--line); }
+.acc-stats > div:last-child { border-right: 0; }
+.acc-stats .l { font: 500 10.5px/1 var(--font-mono); color: var(--ink-4); text-transform: uppercase; letter-spacing: .08em; margin-bottom: 8px; }
+.acc-stats .v { font-family: var(--font-figure); font-weight: 600; font-variant-numeric: tabular-nums; font-size: 26px; line-height: 1; letter-spacing: -.02em; }
+.acc-stats .d { font-size: 11.5px; color: var(--ink-4); margin-top: 4px; }
+.acc-stats .d.good { color: var(--ok); }
+.acc-stats .d.bad { color: var(--err); }
+.acc-stats .d.warn { color: var(--warn); }
+
+.acc-filter { display: flex; gap: 8px; margin-bottom: 12px; align-items: center; }
+
+/* Detail layout — list + side panel */
+.acc-layout { display: grid; grid-template-columns: 1fr 380px; gap: 16px; align-items: start; }
+
+/* Approval inbox — Email-style list */
+.appr-list { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-lg); overflow: hidden; }
+.appr-row {
+  display: grid; grid-template-columns: 50px 1fr auto auto; gap: 14px; padding: 14px 18px;
+  border-bottom: 1px solid var(--line-soft); cursor: pointer; align-items: center;
+  transition: background .1s;
+}
+.appr-row:hover { background: var(--bg-sunk); }
+.appr-row.on { background: var(--bg-sunk); border-left: 3px solid var(--ink); padding-left: 15px; }
+.appr-row:last-child { border-bottom: 0; }
+.appr-row .pri {
+  width: 38px; height: 38px; border-radius: 50%;
+  background: var(--bg-sunk); border: 1px solid var(--line-strong);
+  display: grid; place-items: center; font: 700 11px/1 var(--font-mono);
+  color: var(--ink-3); flex-shrink: 0;
+}
+.appr-row.urg .pri { background: var(--warn-50); border-color: var(--warn); color: var(--warn); }
+.appr-row .ref { font: 500 10.5px/1 var(--font-mono); color: var(--ink-4); text-transform: uppercase; letter-spacing: .04em; margin-bottom: 4px; }
+.appr-row .ttl { font: 500 13px/1.3 var(--font-sans); color: var(--ink); margin-bottom: 2px; }
+.appr-row .sub { font-size: 11.5px; color: var(--ink-3); }
+.appr-row .amt { font-family: var(--font-figure); font-weight: 700; font-variant-numeric: tabular-nums; font-size: 17px; letter-spacing: -.01em; }
+.appr-row .age { font-family: var(--font-mono); font-size: 11px; color: var(--ink-4); }
+
+.appr-panel { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-lg); padding: 0; position: sticky; top: 16px; overflow: hidden; }
+.appr-panel-head { padding: 14px 18px 12px; border-bottom: 1px solid var(--line); background: var(--surface-2); }
+.appr-panel-head .ref { font: 500 10px/1 var(--font-mono); color: var(--ink-4); text-transform: uppercase; letter-spacing: .08em; }
+.appr-panel-head h3 { margin: 6px 0 0; font: 600 15px/1.2 var(--font-sans); }
+.appr-panel-head .amt {
+  font-family: var(--font-figure); font-weight: 700; font-variant-numeric: tabular-nums;
+  font-size: 30px; letter-spacing: -.02em; margin-top: 8px; line-height: 1;
+}
+.appr-panel-section { padding: 12px 18px; border-bottom: 1px solid var(--line); }
+.appr-panel-section .lbl { font: 500 10px/1 var(--font-mono); color: var(--ink-4); text-transform: uppercase; letter-spacing: .08em; margin-bottom: 6px; }
+.appr-meta { display: grid; grid-template-columns: auto 1fr; gap: 4px 14px; font-size: 12px; }
+.appr-meta .k { color: var(--ink-4); }
+.appr-meta .v { color: var(--ink); font-family: var(--font-sans); }
+.appr-meta .v.mono { font-family: var(--font-mono); font-size: 11.5px; }
+
+.appr-chain { display: grid; gap: 8px; }
+.appr-chain .step { display: grid; grid-template-columns: 24px 1fr auto; gap: 10px; align-items: flex-start; }
+.appr-chain .step .dot { width: 10px; height: 10px; border-radius: 50%; margin-top: 6px; }
+.appr-chain .step.done .dot { background: var(--ok); }
+.appr-chain .step.cur .dot { background: var(--warn); box-shadow: 0 0 0 4px rgba(180, 106, 0, .15); }
+.appr-chain .step.pending .dot { background: var(--ink-5); }
+.appr-chain .step .who { font: 500 12px/1.3 var(--font-sans); }
+.appr-chain .step .when { font: 500 10px/1 var(--font-mono); color: var(--ink-4); }
+
+.appr-actions { padding: 14px 18px; display: grid; grid-template-columns: 1fr 1fr; gap: 8px; background: var(--surface-2); }
+
+/* Receipt scan placeholder */
+.appr-scan {
+  background: var(--bg-sunk); border: 1px dashed var(--line-strong); border-radius: var(--r-sm);
+  padding: 22px 12px; text-align: center; font-size: 11px; color: var(--ink-4); font-family: var(--font-mono);
+}
+
+/* Damage log */
+.dmg-table { width: 100%; }
+.dmg-table tr.bad td { background: rgba(180, 35, 24, .04); }
+.dmg-photo {
+  width: 32px; height: 32px; background: var(--bg-sunk); border: 1px solid var(--line-strong);
+  border-radius: 3px; display: grid; place-items: center; font: 500 8px/1 var(--font-mono); color: var(--ink-4); text-transform: uppercase;
+}
+
+/* Ledger view */
+.led-search { display: flex; gap: 8px; margin-bottom: 14px; align-items: center; }
+.led-search .seg { display: flex; gap: 2px; padding: 2px; background: var(--bg-sunk); border: 1px solid var(--line); border-radius: 8px; }
+.led-search .seg button { height: 30px; padding: 0 12px; border: 0; background: transparent; font: 500 12px/1 var(--font-sans); color: var(--ink-4); cursor: pointer; border-radius: 6px; }
+.led-search .seg button.on { background: var(--surface); color: var(--ink); box-shadow: var(--sh-xs); }
+
+.led-grid { display: grid; grid-template-columns: 300px 1fr; gap: 16px; align-items: start; }
+.led-list { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-lg); overflow: hidden; }
+.led-list-item {
+  padding: 12px 16px; border-bottom: 1px solid var(--line-soft); cursor: pointer;
+  display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: center;
+}
+.led-list-item:hover { background: var(--bg-sunk); }
+.led-list-item.on { background: var(--bg-sunk); border-left: 3px solid var(--ink); padding-left: 13px; }
+.led-list-item:last-child { border-bottom: 0; }
+.led-list-item .n { font: 600 13px/1.2 var(--font-sans); color: var(--ink); }
+.led-list-item .c { font: 500 10.5px/1 var(--font-mono); color: var(--ink-4); margin-top: 3px; text-transform: uppercase; letter-spacing: .04em; }
+.led-list-item .bal { font-family: var(--font-figure); font-weight: 600; font-variant-numeric: tabular-nums; font-size: 13px; }
+.led-list-item .bal.cr { color: var(--err); }
+.led-list-item .bal.dr { color: var(--ok); }
+
+.led-detail { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-lg); overflow: hidden; }
+.led-detail-head { padding: 18px 22px; border-bottom: 1px solid var(--line); display: grid; grid-template-columns: 1fr auto; gap: 14px; align-items: flex-start; }
+.led-detail-head h3 { margin: 0; font: 600 18px/1.2 var(--font-sans); }
+.led-detail-head .meta { font-size: 11px; color: var(--ink-3); margin-top: 4px; }
+.led-detail-bal {
+  display: grid; grid-template-columns: repeat(4, 1fr); border-bottom: 1px solid var(--line);
+}
+.led-detail-bal > div { padding: 12px 16px; border-right: 1px solid var(--line); }
+.led-detail-bal > div:last-child { border-right: 0; }
+.led-detail-bal .l { font: 500 10px/1 var(--font-mono); color: var(--ink-4); text-transform: uppercase; letter-spacing: .08em; margin-bottom: 6px; }
+.led-detail-bal .v { font-family: var(--font-figure); font-weight: 600; font-variant-numeric: tabular-nums; font-size: 18px; letter-spacing: -.01em; }
+
+/* ── Cash register tab ──────────────────────────────────── */
+.cash-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px; align-items: start; }
+@media (max-width: 1024px) { .cash-grid { grid-template-columns: 1fr; } }
+
+.cash-card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-lg); overflow: hidden; }
+.cash-card-head { padding: 12px 18px; border-bottom: 1px solid var(--line); display: flex; justify-content: space-between; align-items: center; }
+.cash-card-head h3 { margin: 0; font: 600 13px/1 var(--font-sans); }
+.cash-card-head .meta { font: 500 10.5px/1 var(--font-mono); color: var(--ink-4); text-transform: uppercase; letter-spacing: .08em; }
+
+.denom-row {
+  display: grid; grid-template-columns: 1fr 130px 120px;
+  align-items: center; padding: 10px 18px;
+  border-bottom: 1px solid var(--line-soft);
+}
+.denom-row:last-of-type { border-bottom: 0; }
+.denom-row .label { font: 600 13px/1 var(--font-sans); font-variant-numeric: tabular-nums; }
+.denom-row .label .hint { font: 500 10px/1 var(--font-mono); color: var(--ink-4); margin-top: 4px; text-transform: uppercase; letter-spacing: .08em; }
+.denom-row .pcs { display: flex; gap: 6px; align-items: center; justify-content: center; }
+.denom-row .pcs button {
+  width: 26px; height: 26px; border: 1px solid var(--line-strong); background: var(--surface);
+  border-radius: 4px; cursor: pointer; font-family: var(--font-mono); font-weight: 600; color: var(--ink-3);
+}
+.denom-row .pcs input {
+  width: 52px; height: 30px; padding: 0 6px; text-align: center;
+  border: 1px solid var(--line-strong); border-radius: 6px;
+  font: 600 13px/1 var(--font-mono); font-variant-numeric: tabular-nums;
+}
+.denom-row .pcs input:focus { outline: none; border-color: var(--ink); }
+.denom-row .val {
+  text-align: right; font: 600 13px/1 var(--font-sans);
+  font-variant-numeric: tabular-nums;
+}
+.denom-total {
+  display: grid; grid-template-columns: 1fr 120px;
+  align-items: baseline; padding: 12px 18px;
+  background: var(--bg-sunk); border-top: 1.5px solid var(--ink);
+}
+.denom-total .l { font: 500 10.5px/1 var(--font-mono); color: var(--ink-4); text-transform: uppercase; letter-spacing: .12em; }
+.denom-total .v { text-align: right; font-family: var(--font-figure); font-weight: 700; font-variant-numeric: tabular-nums; font-size: 22px; letter-spacing: -.02em; }
+
+.recon-row {
+  display: grid; grid-template-columns: 1fr 140px;
+  padding: 8px 18px; font-size: 12.5px;
+  border-bottom: 1px solid var(--line-soft);
+}
+.recon-row:last-child { border-bottom: 0; }
+.recon-row .k { color: var(--ink-3); }
+.recon-row .v { text-align: right; font-family: var(--font-mono); font-variant-numeric: tabular-nums; color: var(--ink); }
+.recon-row.expected { background: var(--bg-sunk); font-weight: 600; border-top: 2px solid var(--ink); }
+.recon-row.expected .k, .recon-row.expected .v { color: var(--ink); font-weight: 700; }
+.recon-row.var { background: var(--warn-50); }
+.recon-row.var .k { color: var(--warn); font-weight: 700; }
+.recon-row.var .v { color: var(--warn); font-weight: 700; font-size: 14px; }
+
+.cash-actions { padding: 14px 18px; display: grid; gap: 8px; background: var(--surface-2); border-top: 1px solid var(--line); }
+
+.cash-meta-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px 22px; padding: 12px 18px; font-size: 12px; border-bottom: 1px solid var(--line-soft); }
+.cash-meta-grid .k { font: 500 9.5px/1 var(--font-mono); color: var(--ink-4); text-transform: uppercase; letter-spacing: .08em; margin-bottom: 4px; }
+.cash-meta-grid .v { font: 500 13px/1.3 var(--font-sans); color: var(--ink); }
+
+/* Small polish · accounts shared */
+.acc-stats > div { transition: background .12s; }
+.acc-stats > div:hover { background: var(--surface-2); }
+.acc-stats .v { letter-spacing: -.02em; }
+.appr-row { transition: background .1s, padding .12s; }
+.led-list-item { transition: background .1s; }
+.appr-panel-head .amt { letter-spacing: -.03em; }
+.recon-row { transition: background .1s; }
+.recon-row:hover:not(.expected):not(.var) { background: var(--bg-sunk); }
+.denom-row { transition: background .1s; }
+.denom-row:hover { background: var(--bg-sunk); }
+.denom-row .pcs button:hover { background: var(--ink); color: #fff; border-color: var(--ink); }
+/* ── Responsive breakpoints (iPad H / iPad V / mobile) ───────── */
+@media (max-width: 1280px) {
+  .acc-stats { grid-template-columns: repeat(3, 1fr); }
+  .acc-stats > div:nth-child(4), .acc-stats > div:nth-child(5) { border-top: 1px solid var(--line); }
+  .acc-layout { grid-template-columns: 1fr 320px; }
+  .acc-tabs { overflow-x: auto; white-space: nowrap; flex-wrap: nowrap; }
+  .led-grid { grid-template-columns: 260px 1fr; }
+}
+@media (max-width: 1024px) {
+  .acc-body { padding: 20px 18px; }
+  .acc-stats { grid-template-columns: repeat(2, 1fr); }
+  .acc-layout { grid-template-columns: 1fr; }
+  .appr-panel { position: static; }
+  .led-grid { grid-template-columns: 1fr; }
+  .led-detail-bal { grid-template-columns: repeat(2, 1fr); }
+  .led-detail-bal > div:nth-child(3), .led-detail-bal > div:nth-child(4) { border-top: 1px solid var(--line); }
+}
+@media (max-width: 640px) {
+  .acc-body { padding: 16px 12px; }
+  .acc-stats { grid-template-columns: 1fr; }
+  .acc-stats > div { border-right: 0; border-bottom: 1px solid var(--line); }
+  .appr-row { grid-template-columns: 40px 1fr; gap: 10px 12px; }
+  .appr-row > div:nth-child(3) { grid-column: 1 / -1; text-align: left; }
+  .appr-row > div:nth-child(4) { grid-column: 2; }
+  .led-detail-bal { grid-template-columns: 1fr; }
+  .led-detail-bal > div { border-right: 0; border-bottom: 1px solid var(--line); border-top: 0; }
+  .led-detail-head { grid-template-columns: 1fr; gap: 10px; }
+}
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+
+<script src="shell/data.js"></script>
+<script type="text/babel" src="shell/shell.jsx"></script>
+<script type="text/babel">
+const { useState } = React;
+const fmt = (n) => '₹ ' + Number(n).toLocaleString('en-IN');
+
+/* ── Mock data for the back-office screens ─────────────────────────── */
+const EXPENSES = [
+  { id: 'EXP/0419-09', who: 'Karan T.',  role: 'Optician',         amt: 320,  head: 'Petty cash · Cleaning supply', bill: 'Khanna Optical · INV-4498', date: '19-Apr · 13:02', pri: 'P3', urgent: false },
+  { id: 'EXP/0419-08', who: 'Riya P.',   role: 'Optician',         amt: 180,  head: 'Petty cash · Tea & snacks',     bill: 'Local · receipt-22',           date: '19-Apr · 15:40', pri: 'P4', urgent: false },
+  { id: 'EXP/0419-07', who: 'Karan T.',  role: 'Optician',         amt: 1240, head: '5320 · Workshop tools',         bill: 'K-OPT/INV-2026/4498',          date: '19-Apr · 16:14', pri: 'P3', urgent: false },
+  { id: 'EXP/0419-06', who: 'Ankit V.',  role: 'WH Lead',          amt: 4200, head: '5440 · Courier (HQ → store)',   bill: 'BlueDart · BB-DL-22100',       date: '19-Apr · 10:18', pri: 'P2', urgent: true },
+  { id: 'EXP/0418-04', who: 'Sonia K.',  role: 'Store Manager',    amt: 8800, head: '5210 · Facility · AC service',  bill: 'CoolMart · CM-INV-3340',       date: '18-Apr · 09:30', pri: 'P1', urgent: true },
+  { id: 'EXP/0418-03', who: 'Sonia K.',  role: 'Store Manager',    amt: 480,  head: 'Petty cash · Stationery',       bill: 'Sangam · receipt-88',          date: '18-Apr · 14:10', pri: 'P3', urgent: false },
+];
+
+const DAMAGE = [
+  { id: 'DMG/0419-04', sku: 'FRM-RB-4171-TOR', d: 'Ray-Ban RB4171 Erika · Tortoise',  qty: 1, cost: 1760, reason: 'R-1 · Dropped during display refresh', who: 'Karan T.', date: '17-Apr · 11:14', fixture: 'W-01', status: 'Logged · no claim' },
+  { id: 'DMG/0419-03', sku: 'FRM-VO-5234-RG',  d: 'Vogue VO5234 · Rose gold',         qty: 1, cost: 1485, reason: 'R-3 · Hinge defective at QC',          who: 'Riya P.',  date: '18-Apr · 09:55', fixture: 'D-02', status: 'Vendor claim raised' },
+  { id: 'DMG/0419-02', sku: 'BV-AC-OAS-250',   d: 'Acuvue Oasys 1-Day · −2.50',        qty: 2, cost: 1485, reason: 'R-2 · Cold-chain expiry',              who: 'Sonia K.', date: '15-Apr · 18:02', fixture: 'CF-01', status: 'Destroyed · SOP' },
+  { id: 'DMG/0419-01', sku: 'BV-CN-MICRO',     d: 'Microfibre cloth · L',              qty: 6, cost: 82,    reason: 'R-4 · Soiled in transit',              who: 'Ankit V.', date: '12-Apr · 08:50', fixture: 'D-02', status: 'Return to vendor' },
+];
+
+const VENDORS = [
+  { id: 'V-0044', n: 'Johnson & Johnson India', code: 'V-0044 · MUM · CL',     bal: -81312, gstin: '27AAACJ4863N1ZE', terms: 'Net-30' },
+  { id: 'V-0021', n: 'Essilor India',           code: 'V-0021 · PUN · Lens',   bal: -42100, gstin: '27AAACE2280P1ZB', terms: 'Net-45' },
+  { id: 'V-0008', n: 'Luxottica (Ray-Ban)',     code: 'V-0008 · DEL · Frame',  bal: -38500, gstin: '07AAACL5566D1Z3', terms: 'Net-30' },
+  { id: 'V-0015', n: 'Carl Zeiss India',        code: 'V-0015 · BLR · Lens',   bal: -12400, gstin: '29AAACZ1187M1ZF', terms: 'Net-45' },
+  { id: 'V-0033', n: 'Titan Company Ltd.',      code: 'V-0033 · BLR · Frame',  bal: 0,       gstin: '29AAACT1080A1ZJ', terms: 'Net-30' },
+  { id: 'V-0061', n: 'BlueDart Express',        code: 'V-0061 · DEL · Logistics', bal: -4200, gstin: '07AAACB0421J1Z2', terms: 'Net-15' },
+];
+
+const CUSTOMERS = [
+  { id: 'CUS-00214', n: 'Aanya Sharma',  code: 'CUS-00214 · Silver',  bal: 420,   phone: '+91 98115 22100' },
+  { id: 'CUS-10390', n: 'Rohan Iyer',    code: 'CUS-10390 · Gold',    bal: 0,     phone: '+91 98933 40127' },
+  { id: 'CUS-10842', n: 'Ananya Mehta',  code: 'CUS-10842 · Silver',  bal: 420,   phone: '+91 98110 22104' },
+  { id: 'CUS-00188', n: 'Rahul Sinha',   code: 'CUS-00188 · Silver',  bal: 0,     phone: '+91 98104 33200' },
+  { id: 'CUS-11562', n: 'Priya Nair',    code: 'CUS-11562 · —',       bal: 120,   phone: '+91 97123 55840' },
+];
+
+const VENDOR_TXNS = {
+  'V-0044': [
+    { d: '01-Apr-26', ref: 'OB',                  typ: 'Opening', desc: 'Brought forward',                       dr: 0,    cr: 4500,  bal: -4500 },
+    { d: '03-Apr-26', ref: 'PMT-2611',            typ: 'Payment', desc: 'NEFT · HDFC ****4421',                  dr: 4500, cr: 0,     bal: 0 },
+    { d: '13-Apr-26', ref: 'JJ/24/04/2204',       typ: 'Bill',    desc: 'Vendor invoice (PO/.../0038)',          dr: 0,    cr: 41580, bal: -41580 },
+    { d: '17-Apr-26', ref: 'JJ/24/04/2240',       typ: 'Bill',    desc: 'Vendor invoice (PO/.../0042)',          dr: 0,    cr: 41580, bal: -83160 },
+    { d: '19-Apr-26', ref: 'DN/.../0418-04',      typ: 'Debit',   desc: 'Short shipment debit (incl. IGST)',     dr: 1848, cr: 0,     bal: -81312 },
+  ],
+};
+
+const CUSTOMER_TXNS = {
+  'CUS-00214': [
+    { d: '01-Apr-26', ref: 'OB',                   typ: 'Opening',    desc: 'Brought forward',                    dr: 0,     cr: 420,   bal: 420 },
+    { d: '04-Apr-26', ref: 'BV/GK1/…248120',       typ: 'Invoice',    desc: 'Annual eye exam + CL trial',         dr: 1980,  cr: 0,     bal: 420 },
+    { d: '04-Apr-26', ref: 'PAY-31204',            typ: 'Payment',    desc: 'UPI · GPay',                          dr: 0,     cr: 1980,  bal: 420 },
+    { d: '11-Apr-26', ref: 'BV/GK1/…248904',       typ: 'Invoice',    desc: 'Ray-Ban Aviator + Crizal',           dr: 8950,  cr: 0,     bal: 420 },
+    { d: '11-Apr-26', ref: 'PAY-31288',            typ: 'Payment',    desc: 'HDFC ****4421',                       dr: 0,     cr: 8950,  bal: 420 },
+    { d: '19-Apr-26', ref: 'CN/.../0418-03',       typ: 'Credit',     desc: 'Exchange · BV-Wallet',                dr: 0,     cr: 8950,  bal: 9370 },
+    { d: '19-Apr-26', ref: 'BV/GK1/…249220',       typ: 'Invoice',    desc: 'Wayfarer exchange',                   dr: 8950,  cr: 0,     bal: 420 },
+    { d: '19-Apr-26', ref: 'BV/GK1/…249183',       typ: 'Invoice',    desc: 'Wayfarer + Varilux + Acuvue',        dr: 28110, cr: 0,     bal: 420 },
+    { d: '19-Apr-26', ref: 'PAY-31402',            typ: 'Payment',    desc: 'Card 20,000 + UPI 8,110',            dr: 0,     cr: 28110, bal: 420 },
+  ],
+};
+
+function Accounts() {
+  const [tab, setTab] = useState('expense');
+  const [selExp, setSelExp] = useState('EXP/0419-07');
+  const [selDmg, setSelDmg] = useState('DMG/0419-04');
+  const [ledMode, setLedMode] = useState('vendor');
+  const [ledSel, setLedSel] = useState('V-0044');
+  const [ledQuery, setLedQuery] = useState('');
+
+  const pending = EXPENSES.length;
+  const totalPending = EXPENSES.reduce((a, e) => a + e.amt, 0);
+  const sel = EXPENSES.find(e => e.id === selExp);
+
+  const damageYtd = DAMAGE.reduce((a, d) => a + d.qty * d.cost, 0);
+  const dmg = DAMAGE.find(d => d.id === selDmg);
+
+  const partyList = ledMode === 'vendor' ? VENDORS : CUSTOMERS;
+  const filteredList = partyList.filter(p => !ledQuery || (p.n + ' ' + p.code).toLowerCase().includes(ledQuery.toLowerCase()));
+  const ledParty = partyList.find(p => p.id === ledSel) || filteredList[0];
+  const ledTxns = (ledMode === 'vendor' ? VENDOR_TXNS : CUSTOMER_TXNS)[ledParty?.id] || [];
+
+  return (
+    <Shell active="accounts" crumbs={['Accounts']} role="Store Manager"
+      actions={<>
+        <button className="btn sm"><Icon.file width="14" height="14" /> Export</button>
+        <button className="btn sm primary">+ Log entry</button>
+      </>}>
+      <div className="acc-body">
+        <div className="acc-head">
+          <div>
+            <div className="eyebrow" style={{marginBottom:6}}>Back-office</div>
+            <h2>Money in. Money out.</h2>
+          </div>
+        </div>
+
+        <div className="acc-tabs">
+          {[
+            ['expense', 'Expense approval', pending],
+            ['cash',    'Cash register',    1],
+            ['damage',  'Damage register',  DAMAGE.length],
+            ['vledger', 'Vendor ledger',    VENDORS.length],
+            ['cledger', 'Customer ledger',  CUSTOMERS.length],
+          ].map(([k, n, c]) => (
+            <button key={k} className={tab===k?'on':''} onClick={()=>setTab(k)}>
+              {n}<span className="count">· {c}</span>
+            </button>
+          ))}
+        </div>
+
+        {/* ─── Expense approval ─────────────────────────────────────────── */}
+        {tab === 'expense' && (
+          <>
+            <div className="acc-stats">
+              <div>
+                <div className="l">Pending</div>
+                <div className="v">{pending}</div>
+                <div className="d">{EXPENSES.filter(e=>e.urgent).length} urgent</div>
+              </div>
+              <div>
+                <div className="l">Total pending value</div>
+                <div className="v">{fmt(totalPending)}</div>
+                <div className="d">incl. {fmt(EXPENSES.filter(e=>e.amt>=2000).reduce((a,e)=>a+e.amt,0))} above SM threshold</div>
+              </div>
+              <div>
+                <div className="l">Approved · this week</div>
+                <div className="v">{fmt(24800)}</div>
+                <div className="d good">+₹ 2.1k vs LW</div>
+              </div>
+              <div>
+                <div className="l">Approved · MTD</div>
+                <div className="v">{fmt(86200)}</div>
+                <div className="d">avg ₹ 4.5k / day</div>
+              </div>
+              <div>
+                <div className="l">Auto-cleared (≤ ₹2k)</div>
+                <div className="v">68%</div>
+                <div className="d good">faster than LM</div>
+              </div>
+            </div>
+
+            <div className="acc-filter">
+              <input className="input" style={{maxWidth:280}} placeholder="Search reference, requester, head…" />
+              <select className="input" style={{maxWidth:160}}>
+                <option>All approvers</option><option>SM auto-clear</option><option>ASM</option><option>Ops Head</option>
+              </select>
+              <select className="input" style={{maxWidth:160}}>
+                <option>All heads</option><option>Petty cash</option><option>Workshop</option><option>Facility</option><option>Courier</option>
+              </select>
+              <span className="spacer" style={{flex:1}}></span>
+              <div className="chip warn">{EXPENSES.filter(e=>e.urgent).length} urgent</div>
+              <div className="chip info">2 above SM limit · ASM review</div>
+            </div>
+
+            <div className="acc-layout">
+              <div className="appr-list">
+                {EXPENSES.map(e => (
+                  <div key={e.id} className={'appr-row' + (e.urgent ? ' urg' : '') + (selExp===e.id ? ' on' : '')} onClick={()=>setSelExp(e.id)}>
+                    <div className="pri">{e.pri}</div>
+                    <div>
+                      <div className="ref">{e.id}</div>
+                      <div className="ttl">{e.head}</div>
+                      <div className="sub">{e.who} · {e.role} · <span className="mono">{e.bill}</span></div>
+                    </div>
+                    <div style={{textAlign:'right'}}>
+                      <div className="amt">{fmt(e.amt)}</div>
+                      <div className="age">{e.date}</div>
+                    </div>
+                    <div>
+                      {e.amt >= 2000 ? <span className="chip accent">ASM</span> : <span className="chip ok">SM auto</span>}
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              <aside className="appr-panel">
+                {sel && <>
+                  <div className="appr-panel-head">
+                    <div className="ref">{sel.id} · {sel.head}</div>
+                    <h3>Reimburse {sel.who}</h3>
+                    <div className="amt">{fmt(sel.amt)}</div>
+                  </div>
+
+                  <div className="appr-panel-section">
+                    <div className="lbl">Request meta</div>
+                    <div className="appr-meta">
+                      <span className="k">Requested by</span><span className="v">{sel.who} · {sel.role}</span>
+                      <span className="k">When</span><span className="v mono">{sel.date}</span>
+                      <span className="k">Account head</span><span className="v">{sel.head}</span>
+                      <span className="k">Bill ref.</span><span className="v mono">{sel.bill}</span>
+                      <span className="k">Tax (GST input)</span><span className="v">₹ {(sel.amt * 0.18 / 1.18).toFixed(2)} (18%)</span>
+                      <span className="k">Approval rule</span><span className="v">{sel.amt >= 2000 ? 'ASM PIN' : 'SM auto-clear'}</span>
+                    </div>
+                  </div>
+
+                  <div className="appr-panel-section">
+                    <div className="lbl">Receipt scan</div>
+                    <div className="appr-scan">— scanned bill placeholder —<br />tap to enlarge · OCR confirmed</div>
+                  </div>
+
+                  <div className="appr-panel-section">
+                    <div className="lbl">Approval chain</div>
+                    <div className="appr-chain">
+                      <div className="step done">
+                        <div className="dot"></div>
+                        <div>
+                          <div className="who">Raised by {sel.who}</div>
+                          <div className="when">{sel.date}</div>
+                        </div>
+                        <span></span>
+                      </div>
+                      <div className={'step ' + (sel.amt >= 2000 ? 'cur' : 'done')}>
+                        <div className="dot"></div>
+                        <div>
+                          <div className="who">Sonia K. · Store Manager {sel.amt >= 2000 ? '— PIN required' : '— auto-cleared'}</div>
+                          <div className="when">{sel.amt >= 2000 ? 'pending' : 'auto · ' + sel.date}</div>
+                        </div>
+                        <span></span>
+                      </div>
+                      <div className={'step ' + (sel.amt >= 100000 ? 'cur' : 'pending')}>
+                        <div className="dot"></div>
+                        <div>
+                          <div className="who">Priya B. · Ops Head{sel.amt >= 100000 ? ' — required' : ' — not required (≤ ₹1L)'}</div>
+                          <div className="when">{sel.amt >= 100000 ? 'pending' : '○'}</div>
+                        </div>
+                        <span></span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="appr-actions">
+                    <button className="btn block">Reject</button>
+                    <button className="btn block primary">Approve & pay</button>
+                  </div>
+                </>}
+              </aside>
+            </div>
+          </>
+        )}
+
+        {/* ─── Damage register ──────────────────────────────────────────── */}
+        {tab === 'cash' && (() => {
+          const denoms = [
+            { label: '₹ 500',  face: 500,  hint: 'grey note', pcs: 5 },
+            { label: '₹ 200',  face: 200,  hint: 'yellow note', pcs: 8 },
+            { label: '₹ 100',  face: 100,  hint: 'lavender note', pcs: 12 },
+            { label: '₹ 50',   face: 50,   hint: 'fluorescent blue', pcs: 10 },
+            { label: '₹ 20',   face: 20,   hint: 'greenish yellow', pcs: 18 },
+            { label: '₹ 10',   face: 10,   hint: 'brown note', pcs: 16 },
+            { label: '₹ 10 coin', face: 10, hint: 'bi-metallic', pcs: 4 },
+            { label: '₹ 5 coin',  face: 5,  hint: 'nickel-brass', pcs: 6 },
+            { label: '₹ 2 coin',  face: 2,  hint: 'nickel-brass', pcs: 5 },
+            { label: '₹ 1 coin',  face: 1,  hint: 'stainless steel', pcs: 10 },
+          ];
+          const opening = 2000, cashSales = 6420, refunds = 0, expenses = 500, deposit = 5000;
+          const realCounted = denoms.reduce((a,d)=>a+d.face*d.pcs,0);
+          const expected = opening + cashSales - refunds - expenses - deposit;
+          const variance = realCounted - expected;
+          return (
+          <>
+            <div className="acc-stats">
+              <div><div className="l">Open since</div><div className="v" style={{fontSize:22}}>10:00 IST</div><div className="d">11h 14m elapsed</div></div>
+              <div><div className="l">Responsible</div><div className="v" style={{fontSize:18}}>Sonia K.</div><div className="d">SM · EMP-0142</div></div>
+              <div><div className="l">Counted cash</div><div className="v">{fmt(realCounted)}</div><div className="d">notes + coin breakdown</div></div>
+              <div><div className="l">Variance</div><div className="v" style={{color: variance > 0 ? 'var(--warn)' : variance < 0 ? 'var(--err)' : 'var(--ok)'}}>{variance === 0 ? '—' : (variance > 0 ? '+ ' : '− ') + fmt(Math.abs(variance))}</div><div className={'d ' + (Math.abs(variance) <= 200 ? 'warn' : 'bad')}>{Math.abs(variance) <= 200 ? 'within ±₹ 200 tol.' : 'ASM PIN required'}</div></div>
+              <div><div className="l">MTD variance</div><div className="v">+ ₹ 380</div><div className="d">across 38 sessions</div></div>
+            </div>
+
+            <div className="cash-grid">
+              <div className="cash-card">
+                <div className="cash-card-head"><h3>Drawer denomination count</h3><span className="meta">19-Apr · evening close · RBI denoms</span></div>
+                <div className="cash-meta-grid">
+                  <div><div className="k">Counter</div><div className="v">Sonia K.</div></div>
+                  <div><div className="k">Witness</div><div className="v">Riya P.</div></div>
+                  <div><div className="k">Drawer ID</div><div className="v" style={{fontFamily:'var(--font-mono)', fontSize:12}}>POS-01 · lock OK</div></div>
+                </div>
+                {denoms.map((d, i) => {
+                  const val = d.face * d.pcs;
+                  return (
+                    <div key={d.label} className="denom-row">
+                      <div className="label">{d.label}<div className="hint">{d.hint}</div></div>
+                      <div className="pcs"><button>−</button><input type="number" defaultValue={d.pcs} min="0" /><button>+</button></div>
+                      <div className="val">{fmt(val)}</div>
+                    </div>
+                  );
+                })}
+                <div className="denom-total"><span className="l">Total counted</span><span className="v">{fmt(realCounted)}</span></div>
+              </div>
+
+              <div className="cash-card">
+                <div className="cash-card-head"><h3>Reconciliation</h3><span className="meta">Auto · from POS · SOP-FIN-02</span></div>
+                <div className="recon-row"><span className="k">Opening float · 10:00 IST</span><span className="v">{fmt(opening)}</span></div>
+                <div className="recon-row"><span className="k">+ Cash sales today</span><span className="v" style={{color:'var(--ok)'}}>+ {fmt(cashSales)}</span></div>
+                <div className="recon-row"><span className="k">− Cash refunds (CN)</span><span className="v">{fmt(refunds)}</span></div>
+                <div className="recon-row"><span className="k">− Cash expenses (vouchers)</span><span className="v" style={{color:'var(--err)'}}>− {fmt(expenses)}</span></div>
+                <div className="recon-row"><span className="k">− Bank deposit · 20:15 slip</span><span className="v" style={{color:'var(--err)'}}>− {fmt(deposit)}</span></div>
+                <div className="recon-row expected"><span className="k">Expected closing cash</span><span className="v">{fmt(expected)}</span></div>
+                <div className="recon-row"><span className="k">Counted (from drawer)</span><span className="v" style={{fontWeight:600}}>{fmt(realCounted)}</span></div>
+                <div className="recon-row var"><span className="k">Variance</span><span className="v">{variance === 0 ? '—' : (variance > 0 ? '+ ' : '− ') + fmt(Math.abs(variance))}</span></div>
+                <div className="cash-actions">
+                  <div style={{display:'grid', gridTemplateColumns:'1fr 1fr', gap:8}}>
+                    <a className="btn" href="print.html"><Icon.printer width="14" height="14" /> Print Z-report</a>
+                    <button className="btn">Save as draft</button>
+                  </div>
+                  <button className="btn primary block">Confirm count &amp; close drawer</button>
+                  {Math.abs(variance) > 200 && (<button className="btn block">Open variance investigation (TSK-2211)</button>)}
+                </div>
+              </div>
+            </div>
+
+            <div className="card" style={{marginBottom:16}}>
+              <div className="card-head"><h3>Cash register history</h3><span className="meta">Last 7 sessions · retained 7 years (CGST Rule 56)</span></div>
+              <table className="tbl">
+                <thead><tr><th>Session</th><th>Date</th><th>Responsible</th><th>Shift</th><th className="right">Opening</th><th className="right">Cash sales</th><th className="right">Closing</th><th className="right">Variance</th><th>Sign-off</th><th></th></tr></thead>
+                <tbody>
+                  {[
+                    ['CR/2026/0419/PM','19-Apr-26','Sonia K. · SM',  '15:00→21:14', 4900, 6420, 3040,  120, 'pending'],
+                    ['CR/2026/0419/AM','19-Apr-26','Riya P. · OPT', '10:00→15:00', 2000, 2900, 4900,  0,   'auto-cleared'],
+                    ['CR/2026/0418/PM','18-Apr-26','Sonia K. · SM',  '15:00→21:08', 4800, 5840, 3220,  60,  'ASM cleared'],
+                    ['CR/2026/0418/AM','18-Apr-26','Riya P. · OPT', '10:00→15:00', 2000, 2800, 4800,  0,   'auto-cleared'],
+                    ['CR/2026/0417/PM','17-Apr-26','Sonia K. · SM',  '15:00→21:30', 4400, 5680, 2980, -40,  'auto-cleared'],
+                    ['CR/2026/0417/AM','17-Apr-26','Riya P. · OPT', '10:00→15:00', 2000, 2400, 4400,  0,   'auto-cleared'],
+                    ['CR/2026/0416/PM','16-Apr-26','Sonia K. · SM',  '15:00→21:00', 4200, 6100, 3400,-180,  'ASM cleared'],
+                  ].map((r, i) => (
+                    <tr key={i}>
+                      <td className="mono" style={{fontSize:11}}>{r[0]}</td>
+                      <td>{r[1]}</td>
+                      <td><strong>{r[2].split(' · ')[0]}</strong><div className="hint" style={{fontSize:10}}>{r[2].split(' · ')[1]}</div></td>
+                      <td className="mono" style={{fontSize:11}}>{r[3]}</td>
+                      <td className="right mono tnum">{fmt(r[4])}</td>
+                      <td className="right mono tnum">{fmt(r[5])}</td>
+                      <td className="right mono tnum strong">{fmt(r[6])}</td>
+                      <td className="right"><span className={'chip ' + (r[7] === 0 ? 'ok' : Math.abs(r[7]) <= 100 ? 'warn' : 'err')}>{r[7] === 0 ? '0' : (r[7] > 0 ? '+ ' : '− ') + Math.abs(r[7])}</span></td>
+                      <td><span className={'chip ' + (r[8] === 'pending' ? 'warn' : '')}>{r[8]}</span></td>
+                      <td><a className="btn sm ghost" href="print.html">View Z</a></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            <div className="card" style={{padding:'14px 18px'}}>
+              <div className="eyebrow" style={{marginBottom:8}}>Cash policy summary</div>
+              <div style={{display:'grid', gridTemplateColumns:'repeat(3, 1fr)', gap:'10px 22px', fontSize:11.5, color:'var(--ink-3)', lineHeight:1.55}}>
+                <div><b style={{color:'var(--ink)'}}>Opening float</b> · ₹ 2,000 (SM tops up next morning if used)</div>
+                <div><b style={{color:'var(--ink)'}}>Tolerance</b> · ±₹ 200 (±₹ 50 triggers note)</div>
+                <div><b style={{color:'var(--ink)'}}>Approval</b> · ≤₹ 200 SM · ₹ 200–1,000 ASM · &gt;₹ 1k Ops Head</div>
+                <div><b style={{color:'var(--ink)'}}>Deposit</b> · daily at 20:15 to HDFC ****4421 (drop slip)</div>
+                <div><b style={{color:'var(--ink)'}}>Drawer lock</b> · RFID · SM + ASM badges only</div>
+                <div><b style={{color:'var(--ink)'}}>Retention</b> · 7 yrs per CGST Rule 56</div>
+              </div>
+            </div>
+          </>
+          );
+        })()}
+
+        {tab === 'damage' && (
+          <>
+            <div className="acc-stats">
+              <div>
+                <div className="l">Damaged this week</div>
+                <div className="v">{DAMAGE.length}</div>
+                <div className="d">across 4 fixtures</div>
+              </div>
+              <div>
+                <div className="l">Cost-loss · week</div>
+                <div className="v">{fmt(damageYtd)}</div>
+                <div className="d bad">+ ₹ 1.2k vs LW</div>
+              </div>
+              <div>
+                <div className="l">Recoverable</div>
+                <div className="v" style={{color:'var(--ok)'}}>{fmt(1485 + 6*82)}</div>
+                <div className="d good">vendor + insurance</div>
+              </div>
+              <div>
+                <div className="l">Net P&amp;L impact</div>
+                <div className="v" style={{color:'var(--err)'}}>{fmt(damageYtd - 1485 - 6*82)}</div>
+                <div className="d">posted · 5520 GL</div>
+              </div>
+              <div>
+                <div className="l">ITC reversal</div>
+                <div className="v">{fmt(Math.round((damageYtd - 1485 - 6*82) * 0.12))}</div>
+                <div className="d">GSTR-3B · April</div>
+              </div>
+            </div>
+
+            <div className="acc-filter">
+              <input className="input" style={{maxWidth:280}} placeholder="Search SKU, reason, reporter…" />
+              <select className="input" style={{maxWidth:160}}>
+                <option>All reason codes</option><option>R-1 · Handling</option><option>R-2 · Expiry</option><option>R-3 · Vendor defect</option><option>R-4 · Transit</option><option>R-5 · Customer return</option>
+              </select>
+              <select className="input" style={{maxWidth:160}}>
+                <option>This week</option><option>This month</option><option>Quarter</option>
+              </select>
+              <span className="spacer" style={{flex:1}}></span>
+              <button className="btn sm"><Icon.printer width="14" height="14" /> Print weekly register</button>
+              <button className="btn sm primary">+ Log damage</button>
+            </div>
+
+            <div className="card">
+              <table className="tbl dmg-table">
+                <thead><tr>
+                  <th></th><th>Entry</th><th>SKU</th><th>Product</th>
+                  <th className="right">Qty</th><th className="right">Cost loss</th>
+                  <th>Reason</th><th>Reported</th><th>Last fixture</th><th>Status</th><th></th>
+                </tr></thead>
+                <tbody>
+                  {DAMAGE.map(d => (
+                    <tr key={d.id} className={d.cost * d.qty > 1000 ? 'bad' : ''} onClick={()=>setSelDmg(d.id)}>
+                      <td><div className="dmg-photo">PIC</div></td>
+                      <td className="mono">{d.id}</td>
+                      <td className="mono">{d.sku}</td>
+                      <td><div className="strong">{d.d}</div></td>
+                      <td className="right mono">{d.qty}</td>
+                      <td className="right mono tnum strong">{fmt(d.qty * d.cost)}</td>
+                      <td className="hint" style={{fontSize:11}}>{d.reason}</td>
+                      <td>{d.who}<div className="hint" style={{fontSize:10}}>{d.date}</div></td>
+                      <td><span className="chip">{d.fixture}</span></td>
+                      <td><span className={'chip ' + (d.status.includes('Vendor') ? 'info' : d.status.includes('Destroyed') ? 'err' : '')}>{d.status}</span></td>
+                      <td><button className="btn sm ghost">Investigate</button></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            <div className="card" style={{marginTop:14, padding:'14px 18px'}}>
+              <div className="eyebrow" style={{marginBottom:8}}>Damage code reference</div>
+              <div style={{display:'grid', gridTemplateColumns:'repeat(3, 1fr)', gap:'10px 22px', fontSize:11.5}}>
+                <div><b style={{fontFamily:'var(--font-mono)', fontSize:11}}>R-1</b> · In-store handling / drop</div>
+                <div><b style={{fontFamily:'var(--font-mono)', fontSize:11}}>R-2</b> · Expiry / cold-chain breach</div>
+                <div><b style={{fontFamily:'var(--font-mono)', fontSize:11}}>R-3</b> · Vendor / manufacturing defect</div>
+                <div><b style={{fontFamily:'var(--font-mono)', fontSize:11}}>R-4</b> · Damage in transit</div>
+                <div><b style={{fontFamily:'var(--font-mono)', fontSize:11}}>R-5</b> · Customer return-damage</div>
+                <div><b style={{fontFamily:'var(--font-mono)', fontSize:11}}>R-6</b> · Theft / shrinkage (separate SOP-LOSS-01)</div>
+              </div>
+              <div className="hint" style={{marginTop:10}}>SOP-INV-12 · damaged items are removed from saleable stock · ITC reversed per Sec. 17(5)(h) CGST · weekly register printed for ASM and Accounts.</div>
+            </div>
+          </>
+        )}
+
+        {/* ─── Vendor / Customer ledger ─────────────────────────────────── */}
+        {(tab === 'vledger' || tab === 'cledger') && (
+          <>
+            <div className="led-search">
+              <input className="input" style={{maxWidth:300}} placeholder={'Search ' + (tab==='vledger'?'vendor':'customer') + ' name / code / phone…'} value={ledQuery} onChange={e=>setLedQuery(e.target.value)} />
+              <div className="seg">
+                <button className={ledMode==='vendor'?'on':''} onClick={()=>{setLedMode('vendor'); setTab('vledger'); setLedSel(VENDORS[0].id);}}>Vendor</button>
+                <button className={ledMode==='customer'?'on':''} onClick={()=>{setLedMode('customer'); setTab('cledger'); setLedSel(CUSTOMERS[0].id);}}>Customer</button>
+              </div>
+              <span className="spacer" style={{flex:1}}></span>
+              <select className="input" style={{maxWidth:160}}>
+                <option>This month</option><option>Last 30 days</option><option>This FY</option><option>Custom range</option>
+              </select>
+              <button className="btn sm"><Icon.printer width="14" height="14" /> Print statement</button>
+              <button className="btn sm"><Icon.file width="14" height="14" /> Send by email</button>
+            </div>
+
+            <div className="led-grid">
+              <div className="led-list">
+                {filteredList.map(p => (
+                  <div key={p.id} className={'led-list-item' + (ledSel === p.id ? ' on' : '')} onClick={()=>setLedSel(p.id)}>
+                    <div>
+                      <div className="n">{p.n}</div>
+                      <div className="c">{p.code}</div>
+                    </div>
+                    <div className={'bal ' + (p.bal < 0 ? 'cr' : p.bal > 0 ? 'cr' : '')}>
+                      {p.bal === 0 ? fmt(0) : (p.bal < 0 ? fmt(Math.abs(p.bal)) + ' Cr' : fmt(p.bal) + ' Dr')}
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              <div className="led-detail">
+                {ledParty && <>
+                  <div className="led-detail-head">
+                    <div>
+                      <h3>{ledParty.n}</h3>
+                      <div className="meta">{ledParty.code} · GSTIN <span className="mono">{ledParty.gstin || '—'}</span> · {ledParty.terms ? 'Terms ' + ledParty.terms : 'Phone ' + ledParty.phone}</div>
+                    </div>
+                    <div style={{display:'flex', gap:6}}>
+                      {ledMode === 'vendor' && <button className="btn sm primary">Raise payment</button>}
+                      {ledMode === 'customer' && <button className="btn sm primary">Open in POS</button>}
+                    </div>
+                  </div>
+
+                  <div className="led-detail-bal">
+                    <div>
+                      <div className="l">{ledMode === 'vendor' ? 'Payable now' : 'Wallet balance'}</div>
+                      <div className="v" style={{color: ledMode==='vendor' && ledParty.bal<0 ? 'var(--err)' : 'var(--ink)'}}>{fmt(Math.abs(ledParty.bal))}</div>
+                    </div>
+                    <div>
+                      <div className="l">{ledMode === 'vendor' ? '30-day spend' : 'YTD spend'}</div>
+                      <div className="v">{fmt(ledMode==='vendor' ? 83160 : 82460)}</div>
+                    </div>
+                    <div>
+                      <div className="l">{ledMode === 'vendor' ? 'Lifetime' : 'Lifetime value'}</div>
+                      <div className="v">{fmt(ledMode==='vendor' ? 1840000 : 124800)}</div>
+                    </div>
+                    <div>
+                      <div className="l">{ledMode === 'vendor' ? 'Avg pay days' : 'NPS · last'}</div>
+                      <div className="v">{ledMode==='vendor' ? '28 d' : '9 / 10'}</div>
+                    </div>
+                  </div>
+
+                  <table className="tbl">
+                    <thead><tr>
+                      <th>Date</th><th>Reference</th><th>Type</th><th>Description</th>
+                      <th className="right">Debit</th><th className="right">Credit</th><th className="right">Balance</th>
+                    </tr></thead>
+                    <tbody>
+                      {ledTxns.map((t, i) => (
+                        <tr key={i}>
+                          <td className="mono" style={{fontSize:11}}>{t.d}</td>
+                          <td className="mono" style={{fontSize:11}}>{t.ref}</td>
+                          <td>{t.typ}</td>
+                          <td>{t.desc}</td>
+                          <td className="right mono tnum">{t.dr ? t.dr.toFixed(2) : '—'}</td>
+                          <td className="right mono tnum">{t.cr ? t.cr.toFixed(2) : '—'}</td>
+                          <td className={'right mono tnum strong ' + (t.bal < 0 ? '' : '')} style={{color: t.bal < 0 ? 'var(--err)' : 'var(--ink)'}}>
+                            {t.bal === 0 ? fmt(0) : (t.bal < 0 ? fmt(Math.abs(t.bal)) + ' Cr' : fmt(t.bal) + ' Dr')}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  {ledTxns.length === 0 && (
+                    <div style={{padding:'30px 22px', textAlign:'center', color:'var(--ink-4)', fontSize:12}}>
+                      No transactions in selected period.
+                    </div>
+                  )}
+                </>}
+              </div>
+            </div>
+          </>
+        )}
+      </div>
+    </Shell>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<Accounts />);
+</script>
+</body>
+</html>

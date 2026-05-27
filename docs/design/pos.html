@@ -242,6 +242,23 @@
 
 .cart-actions { padding: 12px 14px; border-top: 1px solid var(--line); display: flex; gap: 8px; }
 
+/* Small polish · cart hover, kbd hints, grand-total contrast */
+.cart-item { transition: background .12s; }
+.cart-item:hover { background: var(--bg-sunk); }
+.cart-tot .grand { padding-top: 12px; border-top-width: 1.5px; border-top-color: var(--ink); }
+.cart-tot .grand .l { font-weight: 600; letter-spacing: .12em; }
+.cart-tot .grand .r { letter-spacing: -.03em; }
+.action-bar .hotkeys span { padding: 3px 8px; border: 1px solid var(--line); border-radius: 4px; background: var(--surface); }
+.action-bar .hotkeys span b, .action-bar .hotkeys span kbd {
+  display: inline-block; padding: 1px 5px; min-width: 16px;
+  background: var(--bg-sunk); border: 1px solid var(--line-strong);
+  border-bottom-width: 2px; border-radius: 3px;
+  font: 600 10.5px/1.2 var(--font-mono); color: var(--ink-2);
+}
+.step:not(.active):not(.done) .step-num { background: var(--surface); }
+.step.done { background: rgba(13, 123, 76, .04); }
+.step.done .step-title { color: var(--ink-3); }
+
 /* Bottom action bar */
 .action-bar {
   position: sticky; bottom: 0; left: 0; right: 0;
@@ -251,10 +268,26 @@
   margin: 24px -28px 0;
   box-shadow: 0 -6px 16px -12px rgba(0,0,0,.18);
   z-index: 5;
+  flex-wrap: wrap;
 }
 .action-bar .spacer { flex: 1; }
-.action-bar .hotkeys { display: flex; gap: 12px; font-size: 11.5px; color: var(--ink-4); }
+.action-bar .hotkeys { display: flex; gap: 12px; font-size: 11.5px; color: var(--ink-4); flex-wrap: wrap; }
 .action-bar .hotkeys span { display: inline-flex; align-items: center; gap: 4px; }
+
+/* On mobile the pos-body becomes a stacked grid (auto rows), so .pos-work
+   is no longer the scrolling container — the sticky bar would stick to the
+   viewport bottom and overlap the cart panel below. Inline it instead. */
+@media (max-width: 900px) {
+  .pos-work { padding: 20px 18px 24px; }
+  .action-bar {
+    position: static;
+    margin: 16px -18px 0;
+    padding: 12px 18px;
+    box-shadow: none;
+  }
+  .action-bar .hotkeys { display: none; } /* keyboard shortcuts irrelevant on touch */
+  .action-bar .btn { flex: 1 1 auto; }
+}
 
 /* Receipt overlay */
 .receipt {
@@ -314,6 +347,36 @@ body.dense-rail .steps-rail .step-sub { display: none; }
 .tweaks-panel .tgl-t::after { content:''; position:absolute; top:2px; left:2px; width:14px; height:14px; border-radius:50%; background:#fff; box-shadow: 0 1px 2px rgba(0,0,0,.25); transition: transform .14s; }
 .tweaks-panel .tgl-t.on { background: var(--ok); }
 .tweaks-panel .tgl-t.on::after { transform: translateX(14px); }
+/* ── Responsive breakpoints (iPad H / iPad V / mobile) ───────── */
+@media (max-width: 1280px) {
+  .pos-body { grid-template-columns: 72px 1fr var(--cart-w, 320px); }
+  .steps-rail .step-sub { display: none; }
+  .steps-rail .step { padding: 9px 8px; text-align: center; }
+}
+@media (max-width: 1024px) {
+  .pos-body { grid-template-columns: 64px 1fr; }
+  .cart { display: none; }
+  .cart.open {
+    display: flex; position: fixed; right: 0; top: 52px; bottom: 0;
+    width: min(380px, 90vw); z-index: 60;
+    box-shadow: -8px 0 28px rgba(0,0,0,.18);
+  }
+  .pay-grid, .review-grid { grid-template-columns: 1fr; }
+  .rx-grid { grid-template-columns: 50px 1fr 1fr 1fr 1fr; }
+}
+@media (max-width: 640px) {
+  .pos-body { grid-template-columns: 1fr; grid-template-rows: auto auto 1fr; }
+  .steps-rail {
+    grid-row: auto; display: flex; gap: 6px; overflow-x: auto;
+    padding: 10px 14px; border-right: 0; border-bottom: 1px solid var(--line);
+    background: var(--surface); white-space: nowrap;
+  }
+  .steps-rail .step { flex: 0 0 auto; }
+  .work-head h2 { font-size: 24px; }
+  .cust-grid { grid-template-columns: 1fr; }
+  .rx-grid { grid-template-columns: 50px 1fr 1fr 1fr; gap: 6px; }
+  .split-line { grid-template-columns: 100px 1fr 90px 28px; gap: 6px; }
+}
 </style>
 </head>
 <body>

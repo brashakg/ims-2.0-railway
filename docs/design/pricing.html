@@ -1,0 +1,693 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>IMS 2.0 · Pricing & Offers</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="shell/tokens.css" />
+<link rel="stylesheet" href="shell/shell.css" />
+<link rel="stylesheet" href="shell/mobile.css" />
+<style>
+.pr-body { padding: 24px 28px; overflow-y: auto; height: calc(100vh - 52px); background: var(--bg); }
+.pr-head { display: flex; justify-content: space-between; align-items: flex-end; margin-bottom: 20px; }
+.pr-head h2 { margin: 0 0 4px; font-family: var(--font-display); font-size: 32px; letter-spacing: -0.01em; }
+
+.pr-tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--line); margin-bottom: 18px; }
+.pr-tabs button {
+  height: 36px; padding: 0 14px; border: 0; background: transparent;
+  font: 500 12.5px/1 var(--font-sans); color: var(--ink-4); cursor: pointer;
+  border-bottom: 2px solid transparent; margin-bottom: -1px;
+}
+.pr-tabs button.on { color: var(--ink); border-bottom-color: var(--ink); }
+
+.pr-stats {
+  display: grid; grid-template-columns: repeat(5, 1fr); gap: 0;
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-lg);
+  margin-bottom: 18px;
+}
+.pr-stats > div { padding: 14px 18px; border-right: 1px solid var(--line); }
+.pr-stats > div:last-child { border-right: 0; }
+.pr-stats .l { font: 500 10.5px/1 var(--font-mono); color: var(--ink-4); text-transform: uppercase; letter-spacing: .08em; margin-bottom: 8px; }
+.pr-stats .v { font-family: var(--font-figure); font-weight: 600; font-variant-numeric: tabular-nums; font-size: 26px; line-height: 1; letter-spacing: -.02em; }
+.pr-stats .d { font-size: 11.5px; color: var(--ink-4); margin-top: 4px; }
+.pr-stats .d.good { color: var(--ok); }
+.pr-stats .d.warn { color: var(--warn); }
+
+.pr-layout { display: grid; grid-template-columns: 280px 1fr; gap: 16px; align-items: start; }
+
+/* Scope picker (left rail) */
+.scope-card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-lg); padding: 0; }
+.scope-section { padding: 12px 16px; border-bottom: 1px solid var(--line-soft); }
+.scope-section:last-child { border-bottom: 0; }
+.scope-section .ttl { font: 500 10.5px/1 var(--font-mono); color: var(--ink-4); text-transform: uppercase; letter-spacing: .08em; margin-bottom: 8px; }
+.scope-section label { display: flex; gap: 8px; padding: 5px 0; font-size: 12.5px; cursor: pointer; }
+.scope-section input[type="checkbox"] { accent-color: var(--ink); }
+.scope-section .count { font-family: var(--font-mono); font-size: 10.5px; color: var(--ink-4); margin-left: auto; }
+
+/* Bulk action bar */
+.pr-bulk {
+  background: var(--ink); color: #fff;
+  border-radius: var(--r-md); padding: 14px 18px;
+  display: grid; grid-template-columns: auto 1fr auto; gap: 14px; align-items: center;
+  margin-bottom: 14px;
+}
+.pr-bulk .sel-count {
+  font-family: var(--font-figure); font-weight: 700; font-variant-numeric: tabular-nums;
+  font-size: 26px; letter-spacing: -.02em; line-height: 1;
+}
+.pr-bulk .sel-count .sub { font: 500 10px/1 var(--font-mono); color: #b6b6ae; text-transform: uppercase; letter-spacing: .08em; margin-top: 4px; }
+.pr-bulk .op {
+  display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+}
+.pr-bulk .op select, .pr-bulk .op input {
+  background: #2a2a28; border: 1px solid #3a3a37; color: #fff;
+  height: 32px; padding: 0 10px; border-radius: var(--r-sm); font: 500 12px/1 var(--font-sans);
+  font-variant-numeric: tabular-nums;
+}
+.pr-bulk .op input[type="number"] { width: 80px; }
+.pr-bulk .op .lbl { font: 500 10px/1 var(--font-mono); color: #b6b6ae; text-transform: uppercase; letter-spacing: .08em; }
+.pr-bulk button {
+  height: 36px; padding: 0 18px; background: var(--bv); color: #fff;
+  border: 0; border-radius: var(--r-sm); font: 600 12.5px/1 var(--font-sans);
+  cursor: pointer;
+}
+.pr-bulk button:hover { background: var(--bv-600); }
+.pr-bulk button.ghost { background: transparent; color: #b6b6ae; border: 1px solid #3a3a37; }
+
+/* Editable price grid */
+.pr-grid { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-lg); overflow: hidden; }
+.pr-grid table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.pr-grid thead th {
+  padding: 10px 12px; background: var(--surface-2); font: 500 10.5px/1 var(--font-mono);
+  color: var(--ink-4); text-transform: uppercase; letter-spacing: .08em;
+  border-bottom: 1px solid var(--line); text-align: left;
+  position: sticky; top: 0; z-index: 1;
+}
+.pr-grid thead th.r { text-align: right; }
+.pr-grid tbody td { padding: 10px 12px; border-bottom: 1px solid var(--line-soft); vertical-align: middle; }
+.pr-grid tbody tr.dirty td { background: rgba(180, 106, 0, .06); }
+.pr-grid tbody tr.dirty td:first-child { box-shadow: inset 3px 0 0 var(--warn); }
+.pr-grid .ph { width: 36px; height: 28px; background: var(--bg-sunk); border: 1px solid var(--line-strong); border-radius: 3px; display: grid; place-items: center; font: 500 8px/1 var(--font-mono); color: var(--ink-4); }
+.pr-grid input.px {
+  width: 84px; height: 28px; border: 1px solid var(--line-strong); border-radius: var(--r-sm);
+  padding: 0 8px; text-align: right; font: 500 12px/1 var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+.pr-grid input.px:focus { border-color: var(--ink); outline: none; }
+.pr-grid input[type="checkbox"] { accent-color: var(--ink); transform: scale(1.1); }
+.pr-grid .delta { font-family: var(--font-mono); font-size: 11px; font-weight: 600; padding: 2px 6px; border-radius: 3px; }
+.pr-grid .delta.up { background: var(--ok-50); color: var(--ok); }
+.pr-grid .delta.down { background: var(--err-50); color: var(--err); }
+.pr-grid .delta.zero { color: var(--ink-4); }
+
+/* Offer cards */
+.off-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; margin-bottom: 16px; }
+.off-card {
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-md);
+  padding: 16px; display: grid; grid-template-rows: auto 1fr auto; gap: 12px;
+  position: relative; overflow: hidden;
+}
+.off-card.live { border-color: var(--ok); }
+.off-card.scheduled { border-color: var(--info); }
+.off-card.ended { opacity: 0.55; }
+.off-card.draft { border-style: dashed; }
+.off-card .head { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; }
+.off-card .badge {
+  font: 600 9.5px/1 var(--font-mono); padding: 4px 8px; border-radius: 3px;
+  letter-spacing: .08em; text-transform: uppercase;
+}
+.off-card .badge.live { background: var(--ok-50); color: var(--ok); }
+.off-card .badge.scheduled { background: var(--info-50); color: var(--info); }
+.off-card .badge.ended { background: var(--bg-sunk); color: var(--ink-4); }
+.off-card .badge.draft { background: var(--warn-50); color: var(--warn); }
+.off-card .code { font: 500 10px/1 var(--font-mono); color: var(--ink-4); text-transform: uppercase; letter-spacing: .04em; }
+.off-card .ttl { font: 600 16px/1.2 var(--font-sans); margin-top: 4px; }
+.off-card .pitch { font-family: var(--font-display); font-size: 30px; line-height: 1.05; letter-spacing: -0.01em; color: var(--ink); margin-top: 4px; }
+.off-card .pitch em { font-style: italic; color: var(--bv); }
+.off-card .meta-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; font-size: 11px; padding-top: 10px; border-top: 1px solid var(--line); }
+.off-card .meta-grid .k { color: var(--ink-4); font: 500 9px/1 var(--font-mono); text-transform: uppercase; letter-spacing: .06em; margin-bottom: 2px; }
+.off-card .meta-grid .v { font: 500 12px/1.3 var(--font-sans); color: var(--ink); }
+.off-card .actions { display: flex; gap: 6px; }
+
+.off-empty { padding: 22px; text-align: center; border: 1px dashed var(--line-strong); border-radius: var(--r-md); color: var(--ink-4); font-size: 12px; }
+
+/* Calendar timeline */
+.off-cal { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-lg); padding: 16px; }
+.off-cal-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; }
+.off-cal-head h3 { margin: 0; font: 600 14px/1 var(--font-sans); }
+.cal-grid { position: relative; }
+.cal-row { display: grid; grid-template-columns: 180px 1fr; padding: 8px 0; align-items: center; border-bottom: 1px solid var(--line-soft); gap: 10px; }
+.cal-row:last-child { border-bottom: 0; }
+.cal-row .name { font-size: 12px; font-weight: 500; }
+.cal-row .name .meta { font: 500 9.5px/1 var(--font-mono); color: var(--ink-4); text-transform: uppercase; letter-spacing: .06em; margin-top: 3px; }
+.cal-track { position: relative; height: 22px; background: var(--bg-sunk); border-radius: 3px; }
+.cal-bar {
+  position: absolute; top: 2px; bottom: 2px; border-radius: 2px;
+  padding: 0 8px; display: flex; align-items: center; font: 500 10.5px/1 var(--font-mono); color: #fff;
+  white-space: nowrap; overflow: hidden;
+}
+.cal-bar.live { background: var(--ok); }
+.cal-bar.scheduled { background: var(--info); }
+.cal-bar.ended { background: var(--ink-4); }
+.cal-bar.draft { background: var(--warn); }
+.cal-marker { position: absolute; top: -3px; bottom: -3px; width: 1px; background: var(--ink); }
+.cal-marker::after { content: 'today'; position: absolute; top: -16px; transform: translateX(-50%); font: 500 9px/1 var(--font-mono); color: var(--ink); text-transform: uppercase; letter-spacing: .08em; }
+.cal-axis { display: grid; grid-template-columns: 180px 1fr; gap: 10px; padding-bottom: 6px; border-bottom: 1px solid var(--line); margin-bottom: 6px; }
+.cal-axis .ticks { display: grid; grid-template-columns: repeat(8, 1fr); font: 500 9.5px/1 var(--font-mono); color: var(--ink-4); text-transform: uppercase; letter-spacing: .06em; }
+
+/* Audit log */
+.audit-card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-lg); padding: 14px 18px; margin-top: 14px; }
+.audit-row { display: grid; grid-template-columns: 120px 1fr 1fr 180px; gap: 14px; padding: 8px 0; font-size: 12px; border-bottom: 1px solid var(--line-soft); align-items: center; }
+.audit-row:last-child { border-bottom: 0; }
+.audit-row .ts { font-family: var(--font-mono); font-size: 10.5px; color: var(--ink-4); }
+.audit-row .msg { color: var(--ink-2); }
+.audit-row .diff { font-family: var(--font-mono); font-size: 11px; }
+.audit-row .diff .was { color: var(--ink-4); text-decoration: line-through; }
+.audit-row .diff .now { color: var(--ok); font-weight: 600; }
+.audit-row .who { font-size: 11px; }
+
+/* Small polish · scope, grid, offers, timeline */
+.scope-section label { transition: background .1s; padding-left: 4px; padding-right: 4px; margin: 0 -4px; border-radius: 4px; }
+.scope-section label:hover { background: var(--bg-sunk); }
+.pr-grid tbody tr { transition: background .1s; }
+.pr-grid tbody tr:hover:not(.dirty) { background: var(--bg-sunk); }
+.pr-grid input.px:focus { box-shadow: 0 0 0 3px rgba(20,20,19,.08); }
+.off-card { transition: border-color .12s, box-shadow .12s, transform .12s; }
+.off-card:hover { border-color: var(--ink-4); box-shadow: var(--sh-sm); transform: translateY(-1px); }
+.off-card.ended:hover { transform: none; opacity: .7; }
+.cal-bar { transition: filter .12s; }
+.cal-bar:hover { filter: brightness(1.1); }
+.audit-row { transition: background .1s; margin: 0 -8px; padding-left: 8px; padding-right: 8px; }
+.audit-row:hover { background: var(--bg-sunk); }
+.pr-stats > div { transition: background .12s; }
+.pr-stats > div:hover { background: var(--surface-2); }
+/* ── Responsive breakpoints (iPad H / iPad V / mobile) ───────── */
+@media (max-width: 1280px) {
+  .pr-stats { grid-template-columns: repeat(3, 1fr); }
+  .pr-stats > div:nth-child(4), .pr-stats > div:nth-child(5) { border-top: 1px solid var(--line); }
+  .pr-layout { grid-template-columns: 240px 1fr; }
+  .off-grid { grid-template-columns: 1fr 1fr; }
+  .pr-tabs { overflow-x: auto; white-space: nowrap; }
+  .pr-bulk { grid-template-columns: auto 1fr; }
+  .pr-bulk > div:last-child { grid-column: 1 / -1; justify-content: flex-end; }
+}
+@media (max-width: 1024px) {
+  .pr-body { padding: 20px 18px; }
+  .pr-stats { grid-template-columns: repeat(2, 1fr); }
+  .pr-layout { grid-template-columns: 1fr; }
+  .pr-bulk { grid-template-columns: 1fr; gap: 10px; }
+  .pr-bulk .op { width: 100%; flex-wrap: wrap; }
+  .pr-grid { overflow-x: auto; }
+  .off-grid { grid-template-columns: 1fr; }
+  .cal-row { grid-template-columns: 140px 1fr; }
+}
+@media (max-width: 640px) {
+  .pr-body { padding: 16px 12px; }
+  .pr-stats { grid-template-columns: 1fr; }
+  .pr-stats > div { border-right: 0; border-bottom: 1px solid var(--line); }
+  .audit-row { grid-template-columns: 1fr; gap: 4px; padding: 10px 0; }
+  .cal-row { grid-template-columns: 1fr; }
+  .off-card { padding: 14px; }
+}
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+
+<script src="shell/data.js"></script>
+<script type="text/babel" src="shell/shell.jsx"></script>
+<script type="text/babel">
+const { useState, useMemo } = React;
+const fmt = (n) => '₹ ' + Number(n).toLocaleString('en-IN');
+
+/* ── Offers mock data ───────────────────────────────────────────────── */
+const OFFERS = [
+  { id: 'OFF-MEMBER-5', n: 'BV-Member 5% off everything',
+    pitch: 'Loyalty members get 5% off every order',
+    discount: '5% off', scope: 'All Members (Silver, Gold)', items: 'All SKUs (1,240)',
+    starts: '01-Apr-2026', ends: '31-Dec-2026', status: 'live', priority: 1,
+    used: 412, revenue: 18420, code: 'BV-MEMBER' },
+  { id: 'OFF-WEEKEND-12', n: 'Weekend Vibes · Sunglasses 12% off',
+    pitch: 'Sunglasses 12% off · Saturday + Sunday',
+    discount: '12% off', scope: 'Sunglasses only', items: 'Sun · 184 SKUs',
+    starts: '19-Apr-2026', ends: '20-Apr-2026', status: 'live', priority: 2,
+    used: 18, revenue: 2900, code: 'BV-WKND-SUN' },
+  { id: 'OFF-AKSHAYA-15', n: 'Akshaya Tritiya · 15% on premium frames',
+    pitch: 'Akshaya Tritiya · 15% off premium frames (MRP ≥ ₹10k)',
+    discount: '15% off', scope: 'Premium frames (MRP ≥ ₹10k)', items: 'Frame · 56 SKUs',
+    starts: '08-May-2026', ends: '10-May-2026', status: 'scheduled', priority: 1,
+    used: 0, revenue: 0, code: 'BV-AKSHAYA' },
+  { id: 'OFF-BOGO-CL', n: 'Acuvue Buy-3-Get-1 free',
+    pitch: 'Acuvue 1-Day · buy 3 boxes, get 1 free',
+    discount: 'BOGO 3+1', scope: 'Acuvue CL boxes only', items: 'CL · 8 SKUs',
+    starts: '15-Apr-2026', ends: '15-May-2026', status: 'live', priority: 2,
+    used: 22, revenue: 2640, code: 'BV-ACUVUE-B3G1' },
+  { id: 'OFF-SUMMER-LAUNCH', n: 'Summer launch · TBA',
+    pitch: 'Summer lookbook · pending creative review',
+    discount: 'TBD', scope: 'Frames + Sun · TBD', items: 'TBD',
+    starts: '—', ends: '—', status: 'draft', priority: 3,
+    used: 0, revenue: 0, code: 'BV-SUMMER' },
+  { id: 'OFF-HOLI-2026', n: 'Holi · 10% off accessories',
+    pitch: 'Holi · 10% off accessories (mar 14–18)',
+    discount: '10% off', scope: 'Accessories', items: 'Access. · 22 SKUs',
+    starts: '14-Mar-2026', ends: '18-Mar-2026', status: 'ended', priority: 3,
+    used: 84, revenue: 6800, code: 'BV-HOLI' },
+];
+
+/* ── Audit log ──────────────────────────────────────────────────────── */
+const AUDIT = [
+  { ts: '19-Apr · 18:14', msg: '6 SKUs · Frame · Ray-Ban', was: 'avg MRP ₹ 8,690', now: 'avg MRP ₹ 9,124 (+5%)', who: 'Priya B. · Ops Head' },
+  { ts: '19-Apr · 11:02', msg: 'Bulk price · 18 lens SKUs',  was: 'Crizal 1.6 ₹ 7,800', now: 'Crizal 1.6 ₹ 7,500 (−3.8%)', who: 'Priya B. · Ops Head' },
+  { ts: '17-Apr · 09:40', msg: 'New offer launched',          was: 'BV-WKND-SUN', now: '12% off · 184 SKUs · 2-day window', who: 'Karan T. · Optician' },
+  { ts: '15-Apr · 16:22', msg: '4 SKUs · Vogue · Frame',      was: 'Sell 4,800', now: 'Sell 4,560 (−5% clearance)', who: 'Sonia K. · SM' },
+  { ts: '12-Apr · 10:18', msg: 'Holi offer ended',            was: 'BV-HOLI · live', now: 'BV-HOLI · ended · revenue ₹ 6,800', who: 'system' },
+];
+
+/* ── Pricing tab ────────────────────────────────────────────────────── */
+function PricingTab() {
+  // Build editable rows: original MRP + sell, plus user-edited values
+  const initial = MOCK.catalog.map(c => ({
+    ...c,
+    sel: false,
+    newMrp: c.mrp,
+    newSell: c.price,
+  }));
+  const [rows, setRows] = useState(initial);
+  const [op, setOp] = useState('pct');     // pct | abs
+  const [field, setField] = useState('sell'); // sell | mrp | both
+  const [amt, setAmt] = useState(-5);
+  const [scopeBrand, setScopeBrand] = useState({ 'Ray-Ban': true, 'Oakley': true, 'Vogue': true, 'Titan': true, 'Varilux': true, 'Crizal': true, 'Acuvue': true, 'Better Vision': true });
+  const [scopeType, setScopeType] = useState({ 'Frame': true, 'Lens': true, 'CL': true, 'Access.': true });
+
+  const filtered = rows.filter(r => scopeBrand[r.brand] && scopeType[r.type]);
+  const selectedRows = filtered.filter(r => r.sel);
+  const selectedCount = selectedRows.length;
+  const dirtyRows = rows.filter(r => r.newMrp !== r.mrp || r.newSell !== r.price);
+
+  const applyBulk = () => {
+    setRows(arr => arr.map(r => {
+      if (!r.sel) return r;
+      const apply = (orig) => op === 'pct' ? Math.round(orig * (1 + amt / 100)) : Math.round(orig + Number(amt));
+      const next = { ...r };
+      if (field === 'sell' || field === 'both') next.newSell = apply(r.price);
+      if (field === 'mrp'  || field === 'both') next.newMrp  = apply(r.mrp);
+      return next;
+    }));
+  };
+
+  const selectAll = (v) => setRows(arr => arr.map(r => (scopeBrand[r.brand] && scopeType[r.type]) ? { ...r, sel: v } : r));
+  const setRow = (sku, k, v) => setRows(arr => arr.map(r => r.sku === sku ? { ...r, [k]: v } : r));
+
+  const newValueSelected = selectedRows.reduce((a, r) => a + r.newSell * r.stock, 0);
+  const oldValueSelected = selectedRows.reduce((a, r) => a + r.price * r.stock, 0);
+  const valueDelta = newValueSelected - oldValueSelected;
+
+  return (
+    <>
+      <div className="pr-stats">
+        <div>
+          <div className="l">SKUs in catalog</div>
+          <div className="v">{rows.length.toLocaleString('en-IN')}</div>
+          <div className="d">across 4 categories</div>
+        </div>
+        <div>
+          <div className="l">In scope (filters)</div>
+          <div className="v">{filtered.length}</div>
+          <div className="d">{Object.entries(scopeBrand).filter(([_,v])=>v).length} brands · {Object.entries(scopeType).filter(([_,v])=>v).length} types</div>
+        </div>
+        <div>
+          <div className="l">Selected for update</div>
+          <div className="v" style={{color: selectedCount ? 'var(--ink)' : 'var(--ink-4)'}}>{selectedCount}</div>
+          <div className="d">{selectedCount ? 'Ready to apply' : 'Tick rows to begin'}</div>
+        </div>
+        <div>
+          <div className="l">Dirty rows · unsaved</div>
+          <div className="v" style={{color: dirtyRows.length ? 'var(--warn)' : 'var(--ink)'}}>{dirtyRows.length}</div>
+          <div className="d warn">{dirtyRows.length ? 'Save before leaving' : 'No pending edits'}</div>
+        </div>
+        <div>
+          <div className="l">Impact on stock value</div>
+          <div className="v" style={{color: valueDelta > 0 ? 'var(--ok)' : valueDelta < 0 ? 'var(--err)' : 'var(--ink)'}}>
+            {valueDelta === 0 ? fmt(0) : (valueDelta > 0 ? '+' : '−') + ' ' + fmt(Math.abs(valueDelta))}
+          </div>
+          <div className="d">if applied to selected</div>
+        </div>
+      </div>
+
+      {/* Bulk operation bar */}
+      <div className="pr-bulk">
+        <div className="sel-count">
+          {selectedCount}
+          <div className="sub">SKUs selected</div>
+        </div>
+        <div className="op">
+          <span className="lbl">Apply</span>
+          <select value={op} onChange={e=>setOp(e.target.value)}>
+            <option value="pct">Percentage</option>
+            <option value="abs">Absolute ₹</option>
+          </select>
+          <input type="number" value={amt} onChange={e=>setAmt(+e.target.value)} />
+          <span className="lbl">to</span>
+          <select value={field} onChange={e=>setField(e.target.value)}>
+            <option value="sell">Selling price</option>
+            <option value="mrp">MRP</option>
+            <option value="both">Both</option>
+          </select>
+          <span className="lbl">·</span>
+          <span className="lbl">Schedule</span>
+          <select>
+            <option>Apply now</option>
+            <option>Start tomorrow · 00:00</option>
+            <option>Pick date…</option>
+          </select>
+        </div>
+        <div style={{display:'flex', gap:8}}>
+          <button className="ghost" onClick={()=>selectAll(false)} disabled={!selectedCount}>Deselect all</button>
+          <button onClick={applyBulk} disabled={!selectedCount}>Apply to {selectedCount} SKU{selectedCount===1?'':'s'}</button>
+        </div>
+      </div>
+
+      <div className="pr-layout">
+        {/* Scope picker */}
+        <aside className="scope-card">
+          <div className="scope-section">
+            <div className="ttl">Scope · Brand</div>
+            {Object.keys(scopeBrand).map(b => {
+              const c = rows.filter(r => r.brand === b).length;
+              return (
+                <label key={b}>
+                  <input type="checkbox" checked={scopeBrand[b]} onChange={e=>setScopeBrand(s=>({...s, [b]:e.target.checked}))} />
+                  <span>{b}</span>
+                  <span className="count">{c}</span>
+                </label>
+              );
+            })}
+          </div>
+          <div className="scope-section">
+            <div className="ttl">Scope · Type</div>
+            {Object.keys(scopeType).map(t => {
+              const c = rows.filter(r => r.type === t).length;
+              return (
+                <label key={t}>
+                  <input type="checkbox" checked={scopeType[t]} onChange={e=>setScopeType(s=>({...s, [t]:e.target.checked}))} />
+                  <span>{t}</span>
+                  <span className="count">{c}</span>
+                </label>
+              );
+            })}
+          </div>
+          <div className="scope-section">
+            <div className="ttl">Quick preset</div>
+            <label><input type="checkbox" /><span>All Ray-Ban Aviators</span><span className="count">12</span></label>
+            <label><input type="checkbox" /><span>Non-moving 90+ days</span><span className="count">38</span></label>
+            <label><input type="checkbox" /><span>MRP &gt; ₹10,000</span><span className="count">56</span></label>
+            <label><input type="checkbox" /><span>Stock &lt; 3 (low)</span><span className="count">17</span></label>
+          </div>
+          <div className="scope-section">
+            <div className="ttl">Margin gate</div>
+            <label><input type="checkbox" defaultChecked /><span>Block if margin &lt; 25%</span></label>
+            <label><input type="checkbox" defaultChecked /><span>Require ASM PIN if &gt; 10% drop</span></label>
+            <label><input type="checkbox" /><span>Auto-create offer record</span></label>
+          </div>
+        </aside>
+
+        {/* Editable grid */}
+        <div className="pr-grid">
+          <table>
+            <thead>
+              <tr>
+                <th style={{width:30}}><input type="checkbox" onChange={e=>selectAll(e.target.checked)} checked={selectedCount === filtered.length && filtered.length > 0} /></th>
+                <th></th>
+                <th>SKU</th>
+                <th>Brand · Model</th>
+                <th>Type</th>
+                <th className="r">Cost</th>
+                <th className="r">MRP</th>
+                <th className="r">New MRP</th>
+                <th className="r">Sell</th>
+                <th className="r">New Sell</th>
+                <th className="r">Δ</th>
+                <th className="r">Margin</th>
+                <th className="r">Stock</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filtered.map(r => {
+                const dirty = r.newMrp !== r.mrp || r.newSell !== r.price;
+                const cost = Math.round(r.mrp * 0.55);
+                const delta = r.newSell - r.price;
+                const margin = Math.round(((r.newSell - cost) / r.newSell) * 100);
+                return (
+                  <tr key={r.sku} className={dirty ? 'dirty' : ''}>
+                    <td><input type="checkbox" checked={r.sel} onChange={e=>setRow(r.sku, 'sel', e.target.checked)} /></td>
+                    <td><div className="ph">{r.type.slice(0,3)}</div></td>
+                    <td className="mono" style={{fontSize:11}}>{r.sku}</td>
+                    <td>
+                      <div style={{fontSize:10, color:'var(--ink-4)', textTransform:'uppercase', letterSpacing:'.04em'}}>{r.brand}</div>
+                      <div className="strong">{r.model}</div>
+                    </td>
+                    <td><span className="chip">{r.type}</span></td>
+                    <td className="right mono tnum mute">{fmt(cost)}</td>
+                    <td className="right mono tnum">{fmt(r.mrp)}</td>
+                    <td className="right">
+                      <input className="px" type="number" value={r.newMrp} onChange={e=>setRow(r.sku,'newMrp',+e.target.value || 0)} />
+                    </td>
+                    <td className="right mono tnum">{fmt(r.price)}</td>
+                    <td className="right">
+                      <input className="px" type="number" value={r.newSell} onChange={e=>setRow(r.sku,'newSell',+e.target.value || 0)} />
+                    </td>
+                    <td className="right">
+                      <span className={'delta ' + (delta > 0 ? 'up' : delta < 0 ? 'down' : 'zero')}>
+                        {delta === 0 ? '—' : (delta > 0 ? '+' : '') + delta}
+                      </span>
+                    </td>
+                    <td className="right mono tnum" style={{color: margin < 25 ? 'var(--err)' : margin < 40 ? 'var(--warn)' : 'var(--ok)', fontWeight: 600}}>{margin}%</td>
+                    <td className="right mono">{r.stock}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div className="audit-card">
+        <div className="eyebrow" style={{marginBottom:8}}>Audit log · last 5 actions</div>
+        {AUDIT.map((a, i) => (
+          <div key={i} className="audit-row">
+            <div className="ts">{a.ts}</div>
+            <div className="msg">{a.msg}</div>
+            <div className="diff"><span className="was">{a.was}</span> → <span className="now">{a.now}</span></div>
+            <div className="who">{a.who}</div>
+          </div>
+        ))}
+      </div>
+    </>
+  );
+}
+
+/* ── Offers tab ─────────────────────────────────────────────────────── */
+function OffersTab() {
+  const live = OFFERS.filter(o => o.status === 'live').length;
+  const sched = OFFERS.filter(o => o.status === 'scheduled').length;
+  const draft = OFFERS.filter(o => o.status === 'draft').length;
+  const usedThisMonth = OFFERS.reduce((a, o) => a + (o.used || 0), 0);
+  const revThisMonth = OFFERS.reduce((a, o) => a + (o.revenue || 0), 0);
+
+  return (
+    <>
+      <div className="pr-stats">
+        <div>
+          <div className="l">Live now</div>
+          <div className="v" style={{color:'var(--ok)'}}>{live}</div>
+          <div className="d good">+1 vs LW</div>
+        </div>
+        <div>
+          <div className="l">Scheduled</div>
+          <div className="v" style={{color:'var(--info)'}}>{sched}</div>
+          <div className="d">next launch in 19 days</div>
+        </div>
+        <div>
+          <div className="l">Drafts</div>
+          <div className="v">{draft}</div>
+          <div className="d warn">awaiting creative</div>
+        </div>
+        <div>
+          <div className="l">Redemptions · MTD</div>
+          <div className="v">{usedThisMonth}</div>
+          <div className="d">avg ₹ {Math.round(revThisMonth / Math.max(1, usedThisMonth))} / order</div>
+        </div>
+        <div>
+          <div className="l">Discount given · MTD</div>
+          <div className="v">{fmt(revThisMonth)}</div>
+          <div className="d">2.4% of GMV</div>
+        </div>
+      </div>
+
+      <div className="pr-bulk">
+        <div className="sel-count">
+          0
+          <div className="sub">offers selected</div>
+        </div>
+        <div className="op">
+          <span className="lbl">Bulk action</span>
+          <select>
+            <option>Pause selected</option>
+            <option>Extend end date by…</option>
+            <option>Duplicate as draft</option>
+            <option>Boost priority +1</option>
+            <option>Tag for review</option>
+          </select>
+          <span className="lbl">·</span>
+          <span className="lbl">Stacking</span>
+          <select>
+            <option>One offer per cart (recommended)</option>
+            <option>Allow stacking · highest priority</option>
+            <option>Allow stacking · best for customer</option>
+          </select>
+        </div>
+        <div style={{display:'flex', gap:8}}>
+          <button className="ghost">Import CSV</button>
+          <button>+ New offer</button>
+        </div>
+      </div>
+
+      <div className="off-grid">
+        {OFFERS.map(o => (
+          <div key={o.id} className={'off-card ' + o.status}>
+            <div className="head">
+              <div>
+                <div className="code">{o.id} · <span className="mono" style={{color:'var(--ink-3)'}}>{o.code}</span></div>
+                <div className="ttl">{o.n}</div>
+              </div>
+              <span className={'badge ' + o.status}>
+                {o.status === 'live' && '● live'}
+                {o.status === 'scheduled' && '○ scheduled'}
+                {o.status === 'ended' && '— ended'}
+                {o.status === 'draft' && '✎ draft'}
+              </span>
+            </div>
+            <div>
+              <div className="pitch">{o.pitch}</div>
+            </div>
+            <div className="meta-grid">
+              <div>
+                <div className="k">Discount</div>
+                <div className="v">{o.discount}</div>
+              </div>
+              <div>
+                <div className="k">Items in scope</div>
+                <div className="v">{o.items}</div>
+              </div>
+              <div>
+                <div className="k">Window</div>
+                <div className="v"><span className="mono" style={{fontSize:11}}>{o.starts} → {o.ends}</span></div>
+              </div>
+              <div>
+                <div className="k">Redemptions · revenue</div>
+                <div className="v">{o.used} · {fmt(o.revenue)}</div>
+              </div>
+              <div className="actions" style={{gridColumn:'span 2', marginTop:8, justifyContent:'flex-end'}}>
+                <button className="btn sm ghost">Duplicate</button>
+                <button className="btn sm">Edit</button>
+                {o.status === 'live' && <button className="btn sm primary">View redemptions</button>}
+                {o.status === 'scheduled' && <button className="btn sm primary">Launch early</button>}
+                {o.status === 'draft' && <button className="btn sm primary">Send for review</button>}
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {/* Timeline */}
+      <div className="off-cal">
+        <div className="off-cal-head">
+          <h3>Offer schedule · April – May 2026</h3>
+          <div style={{display:'flex', gap:6}}>
+            <button className="btn sm ghost">← Month</button>
+            <button className="btn sm">Today</button>
+            <button className="btn sm ghost">Month →</button>
+          </div>
+        </div>
+
+        <div className="cal-axis">
+          <div></div>
+          <div className="ticks">
+            <span>14-Mar</span><span>21-Mar</span><span>1-Apr</span><span>8-Apr</span><span>15-Apr</span><span>22-Apr</span><span>1-May</span><span>15-May</span>
+          </div>
+        </div>
+
+        <div className="cal-grid">
+          {OFFERS.map((o, i) => {
+            // crude positioning — purely visual
+            const positions = {
+              'OFF-MEMBER-5':       { left: '28%', width: '70%' },
+              'OFF-WEEKEND-12':     { left: '60%', width: '4%' },
+              'OFF-AKSHAYA-15':     { left: '78%', width: '6%' },
+              'OFF-BOGO-CL':        { left: '52%', width: '36%' },
+              'OFF-SUMMER-LAUNCH':  { left: '90%', width: '10%', opacity: 0.6 },
+              'OFF-HOLI-2026':      { left: '0%',  width: '14%' },
+            };
+            const p = positions[o.id] || { left: '0%', width: '20%' };
+            return (
+              <div key={o.id} className="cal-row">
+                <div className="name">
+                  {o.n.length > 24 ? o.n.slice(0, 24) + '…' : o.n}
+                  <div className="meta">{o.code} · {o.discount}</div>
+                </div>
+                <div className="cal-track">
+                  <div className={'cal-bar ' + o.status} style={p}>
+                    {o.starts.split('-')[0]} → {o.ends.split('-')[0]}
+                  </div>
+                  {/* "today" marker at 56% */}
+                  {i === 0 && <div className="cal-marker" style={{left: '56%'}}></div>}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </>
+  );
+}
+
+function Pricing() {
+  const [tab, setTab] = useState('price');
+
+  return (
+    <Shell active="pricing" crumbs={['Pricing & Offers']} role="Ops Head"
+      actions={<>
+        <button className="btn sm"><Icon.file width="14" height="14" /> Export plan</button>
+        <button className="btn sm primary">Save & schedule</button>
+      </>}>
+      <div className="pr-body">
+        <div className="pr-head">
+          <div>
+            <div className="eyebrow" style={{marginBottom:6}}>Pricing & Offers</div>
+            <h2>Edit many SKUs at once.</h2>
+          </div>
+        </div>
+
+        <div className="pr-tabs">
+          <button className={tab==='price'?'on':''} onClick={()=>setTab('price')}>Bulk price update</button>
+          <button className={tab==='offer'?'on':''} onClick={()=>setTab('offer')}>Bulk offer update</button>
+        </div>
+
+        {tab === 'price' && <PricingTab />}
+        {tab === 'offer' && <OffersTab />}
+      </div>
+    </Shell>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<Pricing />);
+</script>
+</body>
+</html>

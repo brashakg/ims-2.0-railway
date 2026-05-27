@@ -63,6 +63,28 @@
 .agent-card .meta strong { color: var(--ink); font-family: var(--font-sans); font-weight: 600; font-size: 12px; }
 .agent-card.off .ic { filter: grayscale(1); opacity: .6; }
 
+/* Small polish · agent cards, hero pulse, log rows */
+.agent-card { transition: border-color .12s, background .12s, transform .12s; }
+.agent-card:hover { border-color: var(--line-strong); background: var(--surface-2); }
+.agent-card:not(.off) h3::after {
+  content: ''; display: inline-block; width: 6px; height: 6px;
+  background: var(--ok); border-radius: 50%;
+  margin-left: 8px; vertical-align: middle;
+  box-shadow: 0 0 0 3px rgba(13, 123, 76, .15);
+  animation: pulse 2.5s ease-in-out infinite;
+}
+@keyframes pulse { 0%, 100% { box-shadow: 0 0 0 3px rgba(13, 123, 76, .15); } 50% { box-shadow: 0 0 0 5px rgba(13, 123, 76, .05); } }
+.agent-card.off h3::after {
+  content: ''; display: inline-block; width: 6px; height: 6px;
+  background: var(--ink-5); border-radius: 50%;
+  margin-left: 8px; vertical-align: middle;
+}
+.agent-card .meta strong { letter-spacing: -.01em; }
+.j-hero .pulse > div { transition: opacity .15s; }
+.j-hero .pulse:hover > div:not(:hover) { opacity: .6; }
+.log-row { transition: background .1s; }
+.log-row:hover { background: var(--bg-sunk); }
+
 /* Toggle */
 .tgl {
   width: 40px; height: 22px; border-radius: 11px; background: var(--line-strong);

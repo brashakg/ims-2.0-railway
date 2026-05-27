@@ -77,6 +77,7 @@
 .paper.a5       { width: 559px; min-height: 794px; }
 .paper.a6       { width: 420px; min-height: 594px; }
 .paper.thermal  { width: 302px; min-height: 460px; font-size: 11px; }
+.paper.sticker  { width: 226px; min-height: 340px; font-size: 10px; }
 
 .pr-caption {
   font: 500 11px/1 var(--font-mono); color: var(--ink-4);
@@ -103,6 +104,18 @@
 .field-list .v { font-family: var(--font-mono); font-size: 10.5px; color: var(--ink-4); }
 
 .pr-btn-stack { display: grid; gap: 8px; }
+
+/* Small polish · template list + inspector */
+.pr-tpl { transition: border-color .12s, background .12s; }
+.pr-tpl:hover .mini { border-color: var(--ink-4); }
+.pr-tpl.on .mini::before { background: rgba(255,255,255,.45); }
+.pr-insp-sec .lbl::before {
+  content: ''; display: inline-block; width: 5px; height: 5px;
+  background: var(--ink-4); margin-right: 7px; vertical-align: middle;
+}
+.field-list .row { transition: background .1s; margin: 0 -8px; padding: 6px 8px; }
+.field-list .row:hover { background: var(--bg-sunk); }
+.pr-caption { padding: 8px 12px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-sm); }
 </style>
 </head>
 <body>
@@ -114,7 +127,11 @@
 
 <script src="shell/data.js"></script>
 <script type="text/babel" src="shell/shell.jsx"></script>
+<script type="text/babel" src="print/legal_helpers.jsx"></script>
 <script type="text/babel" src="print/templates.jsx"></script>
+<script type="text/babel" src="print/templates2.jsx"></script>
+<script type="text/babel" src="print/templates3.jsx"></script>
+<script type="text/babel" src="print/templates4.jsx"></script>
 <script type="text/babel">
 const { useState } = React;
 
@@ -131,6 +148,46 @@ const TEMPLATES = [
     printers:['Laser · HP-M404 (A4)'], fields:[['dispatch.consignor/consignee','warehouse'],['lines[]','WH pick list'],['eway.number','GST portal'],['transport.vehicle','logistics']] },
   { id:'credit',  n:'Credit note',      sub:'A5 · refund / exchange',size:'A5',      kind:'paper',   Cmp: TplCreditNote,
     printers:['Laser · HP-M404 (A5)'], fields:[['cn.againstInvoice','POS lookup'],['reason','SOP-CX-04'],['approver','manager PIN'],['wallet.credit','ledger']] },
+  { id:'labels',  n:'Barcode shelf labels', sub:'A4 sheet · 32-up · 50 × 30 mm', size:'A4',  kind:'paper',  Cmp: TplBarcodeLabels,
+    printers:['Brother QL-820NWB','Laser · HP-M404 (A4)'], fields:[['catalog[].sku','inventory.stock_ledger'],['catalog[].brand','catalog'],['catalog[].mrp','pricing'],['catalog[].color/size','catalog']] },
+  { id:'count',   n:'Stock count sheet', sub:'A4 · grouped by fixture · SOP-INV-04', size:'A4', kind:'paper', Cmp: TplCountSheet,
+    printers:['Laser · HP-M404 (A4)'], fields:[['fixtures[]','inventory.layout'],['placements[]','SKU \u2194 fixture map'],['par.level','inventory.config'],['counter,witness','staff roster']] },
+  { id:'receipt', n:'Thermal receipt',   sub:'80mm · POS customer copy', size:'80mm', kind:'thermal', Cmp: TplThermalReceipt,
+    printers:['Thermal · Epson TM-T82','Thermal · Star TSP143'], fields:[['cart.lines[]','POS step 3'],['payments[]','POS step 5'],['loyalty.delta','wallet engine'],['hsn.split','GST engine']] },
+  { id:'po',      n:'Purchase order',    sub:'A4 · vendor · GST-ready',  size:'A4',  kind:'paper',  Cmp: TplPurchaseOrder,
+    printers:['Laser · HP-M404 (A4)'], fields:[['vendor.*','vendor master'],['lines[]','reorder draft'],['approver','approval matrix'],['payment.terms','vendor master']] },
+  { id:'grn',     n:'Goods receipt note',sub:'A4 · GRN · PO match',     size:'A4',  kind:'paper',  Cmp: TplGRN,
+    printers:['Laser · HP-M404 (A4)'], fields:[['po.reference','procurement'],['batch,expiry','vendor invoice'],['variance.flags','QA module'],['debit.note','finance']] },
+  { id:'zreport', n:'Day-end Z-report',  sub:'A4 · cash close · SOP-FIN-02', size:'A4', kind:'paper', Cmp: TplZReport,
+    printers:['Laser · HP-M404 (A4)'], fields:[['tenders[]','POS ledger'],['cash.denominations','drawer count'],['hsn.summary','GST engine'],['ops.events','audit log']] },
+  { id:'appt',    n:'Appointment slip',  sub:'A5 · booked eye exam',     size:'A5', kind:'paper', Cmp: TplAppointment,
+    printers:['Laser · HP-M404 (A5)'], fields:[['patient.*','Clinical booking'],['slot.dateTime','queue engine'],['doctor.regNo','staff master'],['prep.checklist','SOP-CLN-02']] },
+  { id:'warranty',n:'Warranty card',     sub:'A6 · frame + lens cover', size:'A6', kind:'paper', Cmp: TplWarranty,
+    printers:['Laser · HP-M404 (A6)'], fields:[['invoice.ref','POS step 5'],['frame.sku','catalog'],['lens.sku','catalog'],['warranty.expiry','rules engine']] },
+  { id:'voucher', n:'Gift voucher',      sub:'A5 · bearer instrument',  size:'A5', kind:'paper', Cmp: TplGiftVoucher,
+    printers:['Laser · HP-M404 (A5) · security paper'], fields:[['voucher.number','wallet engine'],['purchaser.*','POS step 1'],['recipient.*','POS optional'],['check.digits','HMAC']] },
+  { id:'ledger',  n:'Customer statement',sub:'A4 · monthly account',    size:'A4', kind:'paper', Cmp: TplLedger,
+    printers:['Laser · HP-M404 (A4)'], fields:[['customer.*','CRM'],['txns[]','accounts ledger'],['loyalty.*','wallet engine'],['ytd.summary','reports']] },
+  { id:'debit',   n:'Debit note',        sub:'A4 · raised against vendor', size:'A4', kind:'paper', Cmp: TplDebitNote,
+    printers:['Laser · HP-M404 (A4)'], fields:[['vendor.*','vendor master'],['grn.shortage','inventory'],['gst.itc.reversal','GST engine'],['settlement','AP module']] },
+  { id:'handover',n:'Shift handover',    sub:'A4 · between cashiers',    size:'A4', kind:'paper', Cmp: TplShiftHandover,
+    printers:['Laser · HP-M404 (A4)'], fields:[['shift.in/out','staff roster'],['cash.carry','drawer count'],['open.items[]','POS + Tasks'],['notes','free-form']] },
+  { id:'so',      n:'Sale order / Estimate', sub:'A4 · advance confirmed',  size:'A4',  kind:'paper',  Cmp: TplSaleOrder,
+    printers:['Laser · HP-M404 (A4)'], fields:[['customer.*','POS step 1'],['lines[]','POS step 3'],['advance.received','wallet engine'],['valid.until','rules engine']] },
+  { id:'sr',      n:'Sale return',       sub:'A5 · against invoice',     size:'A5',  kind:'paper',  Cmp: TplSaleReturn,
+    printers:['Laser · HP-M404 (A5)'], fields:[['original.invoice','POS lookup'],['reason.code','SOP-CX-04'],['condition','QC at return'],['refund.mode','wallet / ledger']] },
+  { id:'tally',   n:'Stock purchase tally', sub:'A4 · delivery person',  size:'A4',  kind:'paper',  Cmp: TplStockTally,
+    printers:['Laser · HP-M404 (A4)'], fields:[['delivery.person','counter staff'],['vendor.docket','vendor master'],['lines[]','manifest'],['discrepancy','QA module']] },
+  { id:'daybook',  n:'Day book',          sub:'A4 · financial journal',   size:'A4',  kind:'paper',  Cmp: TplDayBook,
+    printers:['Laser · HP-M404 (A4)'], fields:[['txns[]','accounts ledger'],['cash.recon','drawer count'],['gstr.staging','GST engine'],['variance','tasks']] },
+  { id:'damage',  n:'Damage / write-off', sub:'A4 · weekly register',     size:'A4',  kind:'paper',  Cmp: TplDamageReport,
+    printers:['Laser · HP-M404 (A4)'], fields:[['items[]','inventory.damage'],['reason.code','SOP-INV-12'],['recovery','vendor + insurance'],['itc.reversal','GSTR-3B']] },
+  { id:'qc',      n:'Workshop QC sticker',sub:'Sticker 60 × 90 mm · lens',size:'60mm', kind:'thermal', Cmp: TplQcSticker,
+    printers:['Thermal · Brother QL-820NWB','Thermal · Epson TM-T82'], fields:[['job.number','lab queue'],['rx.values','clinical'],['qc.officer','workshop staff'],['fit.height','optician']] },
+  { id:'expense', n:'Expense voucher',    sub:'A6 · petty cash + approval',size:'A6',  kind:'paper',  Cmp: TplExpenseVoucher,
+    printers:['Laser · HP-M404 (A6)'], fields:[['expense.head','GL accounts'],['approver','approval matrix'],['bill.ref','external'],['gst.input','GSTR-3B']] },
+  { id:'vledger', n:'Vendor ledger',      sub:'A4 · AP statement',         size:'A4',  kind:'paper',  Cmp: TplVendorLedger,
+    printers:['Laser · HP-M404 (A4)'], fields:[['vendor.*','vendor master'],['bills[]','AP module'],['payments[]','bank ledger'],['aging.buckets','AP report']] },
 ];
 
 function App() {
@@ -205,7 +262,7 @@ function App() {
               <span className="k">Size</span><span className="v">{tpl.size}</span>
               <span className="k">Last edited</span><span className="v">12-Apr-2026</span>
               <span className="k">Author</span><span className="v">Priya B.</span>
-              <span className="k">Used · 30d</span><span className="v">{ {invoice:1284, rx:312, job:218, token:942, challan:24, credit:18}[tpl.id] }×</span>
+              <span className="k">Used · 30d</span><span className="v">{ ({invoice:1284, rx:312, job:218, token:942, challan:24, credit:18, labels:540, count:9, receipt:1284, po:42, grn:38, zreport:30, appt:188, warranty:284, voucher:36, ledger:204, debit:6, handover:60, so:104, sr:42, tally:24, daybook:30, damage:7, qc:312, expense:62, vledger:18})[tpl.id] }×</span>
             </div>
           </div>
 
@@ -248,6 +305,26 @@ function App() {
               {tpl.id==='token'   && 'SOP-CLN-01 · token issued on walk-in or appointment confirm. Auto-called by queue agent.'}
               {tpl.id==='challan' && 'SOP-INV-07 · all inter-store stock movement must carry challan + e-way bill if > ₹50k.'}
               {tpl.id==='credit'  && 'SOP-CX-04 · refunds and exchanges require manager approval and a credit note within 24h.'}
+              {tpl.id==='labels'  && 'SOP-INV-02 · every floor SKU carries a printed barcode label. Reprint when MRP changes.'}
+              {tpl.id==='count'   && 'SOP-INV-04 · cycle counts run weekly on rotating shelves. Variance · ASM signs off > ₹500.'}
+              {tpl.id==='receipt' && 'SOP-FIN-01 · thermal copy printed at POS. A4 tax invoice issued separately on demand.'}
+              {tpl.id==='po'      && 'SOP-PRC-01 · every reorder draft becomes a PO once approved. Vendor invoice must reference PO #.'}
+              {tpl.id==='grn'     && 'SOP-INV-08 · every inbound consignment is GRN’d against a PO. Variances raise debit notes within 24h.'}
+              {tpl.id==='zreport' && 'SOP-FIN-02 · Z-report printed at shift close. Variances > ₹50 require ASM sign-off.'}
+              {tpl.id==='appt'    && 'SOP-CLN-02 · every booked eye exam generates an A5 slip with prep, doctor and cancellation policy.'}
+              {tpl.id==='warranty'&& 'SOP-CX-08 · issued with every frame + lens sale. Cover: 12m frame, 6m lens. Lifetime adjustments free.'}
+              {tpl.id==='voucher' && 'SOP-CX-09 · bearer instrument; secured by check-digits + redemption OTP. Reported as deferred revenue until redeemed.'}
+              {tpl.id==='ledger'  && 'SOP-CX-12 · monthly statement auto-emailed; printed on request. Reconciles invoice / CN / wallet / loyalty.'}
+              {tpl.id==='debit'   && 'Sec. 34 CGST Act 2017 r/w Rule 53 · raised against vendor for short shipment / damage / price variance. ITC reversed in GSTR-3B.'}
+              {tpl.id==='handover'&& 'SOP-OPS-05 · mandatory between every shift change. Cash drawer + open items + signed by both. Retained 90 days.'}
+              {tpl.id==='so'      && 'Pro-forma estimate · NOT a tax invoice. Advance non-refundable but adjustable. GST liability arises only at invoice.'}
+              {tpl.id==='sr'      && 'SOP-CX-04 · sale return against invoice. Linked credit note reverses tax. Stock re-inducted to display fixture.'}
+              {tpl.id==='tally'   && 'SOP-INV-09 · informal tally at delivery-person handoff. Precedes GRN; not a GST document.'}
+              {tpl.id==='daybook' && 'Sec. 35 CGST r/w Rule 56 · primary daily journal. All vouchers cross-verified against Z-report and GSTR-1.'}
+              {tpl.id==='damage'  && 'SOP-INV-12 · damaged stock written off; ITC reversed per Sec. 17(5)(h) CGST. Vendor / insurance recovery tracked.'}
+              {tpl.id==='qc'      && 'SOP-LAB-04 · QC pass sticker affixed to every dispensed lens packet. Power confirmed within ±0.12 D tolerance.'}
+              {tpl.id==='expense' && 'SOP-ACC-03 · petty cash expense voucher. Approval matrix: ≤₹2,000 SM; ₹2,000–1L ASM; >₹1L Ops Head.'}
+              {tpl.id==='vledger' && 'SOP-ACC-05 · vendor AP statement of account. Reconciled monthly with vendor; aging buckets drive payment priority.'}
             </div>
             <a href="tasks.html" style={{fontSize:11, fontFamily:'var(--font-mono)', color:'var(--bv)', textTransform:'uppercase', letterSpacing:'.1em'}}>View SOP tasks →</a>
           </div>

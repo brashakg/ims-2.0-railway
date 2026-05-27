@@ -226,6 +226,17 @@
   border-radius: 10px; display: grid; grid-template-columns: auto 1fr; gap: 12px;
 }
 .prv-task.overdue { border-color: var(--err); background: var(--err-50); }
+
+/* Small polish · pri-strip + task items + modal chips */
+.pri-strip > div { transition: background .12s; }
+.pri-strip > div:hover { background: var(--surface-2); }
+.pri-strip .v { letter-spacing: -.02em; }
+.t-item { transition: border-color .12s, background .12s, box-shadow .12s; }
+.t-item:hover:not(.sel):not(.overdue) { background: var(--bg-sunk); }
+.pri-chip { transition: border-color .1s, background .1s, box-shadow .1s; }
+.pri-chip:hover:not(.on) { background: var(--bg-sunk); }
+.preset { transition: background .1s, border-color .1s; }
+.preset:hover:not(.on) { background: var(--bg-sunk); }
 .prv-task .pill { align-self: start; }
 .prv-ladder {
   background: var(--surface); border: 1px solid var(--line); border-radius: 10px;

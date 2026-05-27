@@ -35,6 +35,8 @@ const Icon = {
   printer: I('M6 9V3h12v6M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2M6 14h12v8H6z'),
   lock:    I('M5 11h14v10H5zM8 11V7a4 4 0 0 1 8 0v4'),
   store:   I('M3 9l2-5h14l2 5M3 9v11a1 1 0 0 0 1 1h16a1 1 0 0 0 1-1V9M3 9h18M9 21V13h6v8'),
+  wallet:  I('M20 12V8a2 2 0 0 0-2-2H4a2 2 0 0 0 0-4h14v4M20 12v6a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V8M16 14h4'),
+  tag:     I('M20.6 13.4L12 4.8 4 4l-.8 8 8.6 8.6a2 2 0 0 0 2.8 0l6-6a2 2 0 0 0 0-3zM7 8a1 1 0 1 0 0-2 1 1 0 0 0 0 2z'),
 };
 
 /* ── Left rail ─────────────────────────────────────────────── */
@@ -46,6 +48,8 @@ function Rail({ active, brand = 'bv' }) {
     { id: 'inventory', label: 'Inventory',      icon: Icon.box,      href: 'inventory.html' },
     { id: 'tasks',     label: 'Tasks & SOPs',   icon: Icon.check,    href: 'tasks.html' },
     { id: 'reports',   label: 'Reports',        icon: Icon.chart,    href: 'reports.html' },
+    { id: 'accounts',  label: 'Accounts',       icon: Icon.wallet,   href: 'accounts.html' },
+    { id: 'pricing',   label: 'Pricing & offers', icon: Icon.tag,    href: 'pricing.html' },
     { id: 'print',     label: 'Print',          icon: Icon.printer,  href: 'print.html' },
     { id: 'jarvis',    label: 'Jarvis',         icon: Icon.cpu,      href: 'jarvis.html' },
     { id: 'setup',     label: 'Store Setup',    icon: Icon.settings, href: 'setup.html' },
@@ -98,7 +102,7 @@ function Topbar({ crumbs = [], actions, role = 'Manager', store = 'BV-DELHI-GK1'
         <span className="code">· {store}</span>
         <Icon.chevronDown width="12" height="12" />
       </button>
-      <span className="role-pill"><span className="k">Role</span>{role}</span>
+      <span className="role-pill"><span className="k">Role</span><span className="v">{role}</span></span>
       <button className="btn icon ghost" title="Notifications"><Icon.bell /></button>
       {actions}
     </header>
@@ -143,7 +147,7 @@ function Seg({ value, onChange, options }) {
   return (
     <div className="seg">
       {options.map(o => (
-        <button key={o} className={value === o ? 'on' : ''} onClick={() => onChange(o)}>{o}</button>
+        <button key={o} className={value === o ? 'on' : ''} onClick={() => onChange(o)}><span>{o}</span></button>
       ))}
     </div>
   );
