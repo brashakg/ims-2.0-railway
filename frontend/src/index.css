@@ -1506,6 +1506,295 @@
 .inv-tabs button.on .count { color: var(--ink-3); }
 
 /* ============================================================================
+   Display Layout (v2-2b) — floor map of fixtures + side detail panel.
+   Ported from docs/design/inventory.html (Display layout tab). Replaces the
+   --font-figure token (only used in the design prototype) with --font-sans
+   so the build doesn't trip on a missing variable.
+   ============================================================================ */
+.fl-body {
+  display: grid;
+  grid-template-columns: 1fr 360px;
+  gap: 16px;
+  align-items: start;
+}
+@media (max-width: 1280px) {
+  .fl-body { grid-template-columns: 1fr 320px; }
+}
+@media (max-width: 1024px) {
+  .fl-body { grid-template-columns: 1fr; }
+  .fix-panel { position: static !important; }
+}
+
+.fl-summary {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 0;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  margin-bottom: 14px;
+}
+.fl-summary > div {
+  padding: 12px 16px;
+  border-right: 1px solid var(--line);
+}
+.fl-summary > div:last-child { border-right: 0; }
+@media (max-width: 640px) {
+  .fl-summary { grid-template-columns: 1fr; }
+  .fl-summary > div { border-right: 0; border-bottom: 1px solid var(--line); }
+  .fl-summary > div:last-child { border-bottom: 0; }
+}
+.fl-summary .l {
+  font: 500 10px/1 var(--font-mono);
+  color: var(--ink-4);
+  text-transform: uppercase;
+  letter-spacing: .08em;
+  margin-bottom: 6px;
+}
+.fl-summary .v {
+  font-family: var(--font-sans);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  font-size: 22px;
+  line-height: 1;
+  letter-spacing: -.02em;
+  color: var(--ink);
+}
+.fl-summary .d { font-size: 11px; color: var(--ink-4); margin-top: 3px; }
+
+.fl-floor { margin-bottom: 16px; }
+.fl-floor-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+.fl-floor-head .ttl { font: 600 13px/1 var(--font-sans); color: var(--ink); }
+.fl-floor-head .meta {
+  font: 500 10.5px/1 var(--font-mono);
+  color: var(--ink-4);
+  text-transform: uppercase;
+  letter-spacing: .08em;
+}
+.fl-floor-head .line { flex: 1; height: 1px; background: var(--line); }
+
+.fix-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+}
+@media (max-width: 1280px) { .fix-grid { grid-template-columns: repeat(2, 1fr); } }
+@media (max-width: 768px)  { .fix-grid { grid-template-columns: 1fr; } }
+
+.fix-card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  padding: 12px 14px 10px;
+  cursor: pointer;
+  transition: border-color .12s, box-shadow .12s, transform .12s, background-color .12s;
+  display: grid;
+  grid-template-rows: auto auto 1fr auto;
+  gap: 8px;
+  min-height: 122px;
+  position: relative;
+}
+.fix-card:hover { border-color: var(--line-strong); box-shadow: var(--sh-xs); }
+/* BV-brand selected state — bv red border + bv-50 fill, per CLAUDE.md tokens. */
+.fix-card.on {
+  border-color: var(--bv);
+  background: var(--bv-50);
+  box-shadow: 0 0 0 1px var(--bv);
+}
+.fix-card .top {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 8px;
+}
+.fix-card .code {
+  font-family: var(--font-mono);
+  font-weight: 700;
+  font-size: 13px;
+  letter-spacing: .04em;
+  color: var(--ink);
+}
+.fix-card .tname {
+  font: 500 12.5px/1.3 var(--font-sans);
+  color: var(--ink);
+  margin-top: 2px;
+}
+.fix-card .ticon {
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-sm);
+  display: grid;
+  place-items: center;
+  color: var(--ink-3);
+  background: var(--bg-sunk);
+}
+.fix-card .badges { display: flex; gap: 4px; flex-wrap: wrap; }
+.fix-card .b {
+  font: 500 9px/1 var(--font-mono);
+  color: var(--ink-3);
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  padding: 3px 5px;
+  border: 1px solid var(--line-strong);
+  border-radius: 3px;
+  background: var(--surface);
+}
+.fix-card .b.lock { color: var(--warn); border-color: var(--warn); }
+.fix-card .b.cold { color: var(--info); border-color: var(--info); }
+.fix-card .b.signature { color: var(--bv); border-color: var(--bv); }
+.fix-card .cap {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 10px;
+  align-items: center;
+}
+.fix-card .cap-bar {
+  height: 6px;
+  background: var(--bg-sunk);
+  border-radius: 1px;
+  overflow: hidden;
+  position: relative;
+}
+.fix-card .cap-bar > div { height: 100%; background: var(--bv); }
+.fix-card .cap-bar.lo > div { background: var(--ink-4); }
+.fix-card .cap-bar.hi > div { background: var(--warn); }
+.fix-card .cap-bar.full > div { background: var(--err); }
+.fix-card .cap-pct {
+  font: 600 10.5px/1 var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-3);
+  min-width: 32px;
+  text-align: right;
+}
+.fix-card .stats {
+  display: flex;
+  justify-content: space-between;
+  padding-top: 8px;
+  border-top: 1px solid var(--line-soft);
+  font: 500 10.5px/1 var(--font-mono);
+  color: var(--ink-4);
+}
+.fix-card .stats .strong { color: var(--ink); font-weight: 600; }
+
+/* Detail panel ---------------------------------------------------------- */
+.fix-panel {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  padding: 0;
+  position: sticky;
+  top: 16px;
+  overflow: hidden;
+}
+.fix-panel-head {
+  padding: 14px 16px 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-2);
+}
+.fix-panel-head .code {
+  font-family: var(--font-mono);
+  font-weight: 700;
+  font-size: 16px;
+  letter-spacing: .04em;
+  color: var(--ink);
+}
+.fix-panel-head .name { font-size: 13px; color: var(--ink-3); margin-top: 3px; }
+.fix-panel-head .meta-row { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; }
+.fix-panel-head .b {
+  font: 500 9.5px/1 var(--font-mono);
+  color: var(--ink-3);
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  padding: 4px 6px;
+  border: 1px solid var(--line-strong);
+  border-radius: 3px;
+  background: var(--surface);
+}
+.fix-panel-head .b.warn { color: var(--warn); border-color: var(--warn); }
+.fix-panel-meta {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px 14px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--line);
+  font-size: 11.5px;
+}
+.fix-panel-meta .k {
+  color: var(--ink-4);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: .08em;
+}
+.fix-panel-meta .v { color: var(--ink); font-family: var(--font-sans); }
+.fix-panel-list { padding: 6px 0; max-height: 420px; overflow-y: auto; }
+.fix-panel-list .row {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  gap: 10px;
+  padding: 10px 16px;
+  align-items: flex-start;
+  border-bottom: 1px solid var(--line-soft);
+}
+.fix-panel-list .row:last-child { border-bottom: 0; }
+.fix-panel-list .sku {
+  font: 500 11.5px/1.3 var(--font-mono);
+  color: var(--ink);
+  letter-spacing: .02em;
+}
+.fix-panel-list .pos { font: 400 10px/1.3 var(--font-mono); color: var(--ink-3); margin-top: 3px; }
+.fix-panel-list .qty {
+  font-family: var(--font-sans);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  font-size: 16px;
+  text-align: right;
+  letter-spacing: -.01em;
+  color: var(--ink);
+}
+.fix-panel-list .qty-unit {
+  font: 500 9px/1 var(--font-mono);
+  color: var(--ink-4);
+  text-transform: uppercase;
+  letter-spacing: .08em;
+  margin-top: 2px;
+  text-align: right;
+}
+.fix-panel-actions {
+  padding: 12px 16px;
+  border-top: 1px solid var(--line);
+  display: grid;
+  gap: 6px;
+  background: var(--surface-2);
+}
+
+/* Zone chip — used on the Stock Ledger Zone column and on the fixture
+   form modal. Keeps the look in sync with the design's `.zone-chip`. */
+.zone-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 6px;
+  border: 1px solid var(--line-strong);
+  border-radius: 4px;
+  background: var(--surface);
+  font: 500 10.5px/1 var(--font-mono);
+  letter-spacing: .04em;
+  color: var(--ink);
+  cursor: pointer;
+  transition: border-color .12s, background-color .12s;
+}
+.zone-chip:hover { border-color: var(--bv); background: var(--bv-50); }
+.zone-chip.warn { color: var(--warn); border-color: var(--warn); }
+
+/* ============================================================================
    Reports — KPI grid + chart cards.
    Ported from docs/design/reports.html. Shares .inv-tabs with Inventory.
    ============================================================================ */
