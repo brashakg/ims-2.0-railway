@@ -136,6 +136,31 @@ def _validate_category_or_422(category) -> str:
     return norm
 
 
+def _assert_mrp_ge_offer(mrp, offer_price) -> None:
+    """Enforce the non-negotiable MRP >= offer_price rule via the SHARED
+    pricing_caps validator -- the single source of truth also used by the
+    bulk-price / bulk-offer endpoints (see services/pricing_caps.py). Sharing
+    it keeps the "offer can never exceed MRP" check (incl. its float tolerance)
+    in one place instead of duplicated inline comparisons.
+
+    Single-product create/update intentionally enforce ONLY this rule:
+      - A CAP_EXCEEDED verdict (discount-cap breach) is NOT raised here -- caps
+        are a bulk-pricing / POS concern; the single-product path has never
+        enforced them and doing so now could block legitimate catalog edits.
+      - INVALID_MRP is left to pydantic's gt=0 field guards (create) and to
+        fail-soft handling of legacy data (update); we act solely on the
+        MRP-below-offer verdict so behavior is unchanged. Skips silently when
+        either value is missing (partial update with no price merge).
+    """
+    if mrp is None or offer_price is None:
+        return
+    from ..services.pricing_caps import evaluate_offer_price
+
+    verdict = evaluate_offer_price(mrp, offer_price)
+    if verdict["reason"] == "MRP_BELOW_OFFER":
+        raise HTTPException(status_code=400, detail="Offer price cannot exceed MRP")
+
+
 class ProductCreate(BaseModel):
     sku: str
     category: str
@@ -326,9 +351,8 @@ async def create_product(
     # default GST rate). Normalizes the category to the validated value.
     product.category = _validate_category_or_422(product.category)
 
-    # Validate MRP >= Offer Price
-    if product.offer_price > product.mrp:
-        raise HTTPException(status_code=400, detail="Offer price cannot exceed MRP")
+    # Validate MRP >= Offer Price via the shared pricing_caps validator.
+    _assert_mrp_ge_offer(product.mrp, product.offer_price)
 
     repo = get_product_repository()
 
@@ -909,22 +933,12 @@ async def update_product(
         # raising offer_price above the existing mrp -- slipped a product into
         # an MRP < offer state. We merge the incoming change onto the existing
         # doc and validate regardless of which field(s) are present, mirroring
-        # the create-path guard. (The bulk-price path enforces the same rule;
-        # once services/pricing_caps.py lands, both can share one validator.)
+        # the create-path guard. Both share services/pricing_caps via the
+        # _assert_mrp_ge_offer helper so the MRP-rule lives in one place.
         if "mrp" in update_data or "offer_price" in update_data:
             eff_mrp = update_data.get("mrp", existing.get("mrp"))
             eff_offer = update_data.get("offer_price", existing.get("offer_price"))
-            if eff_mrp is not None and eff_offer is not None:
-                try:
-                    violates = float(eff_offer) > float(eff_mrp)
-                except (TypeError, ValueError):
-                    # Non-numeric legacy price data on the existing doc -- don't
-                    # crash the update; the create path guards all new writes.
-                    violates = False
-                if violates:
-                    raise HTTPException(
-                        status_code=400, detail="Offer price cannot exceed MRP"
-                    )
+            _assert_mrp_ge_offer(eff_mrp, eff_offer)
 
         update_data["updated_by"] = current_user.get("user_id")
 
