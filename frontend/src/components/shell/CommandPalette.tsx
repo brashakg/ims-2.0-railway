@@ -103,6 +103,7 @@ const ALL_PAGES: JumpPage[] = [
   { label: 'Workshop', route: '/workshop', requireRoles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'WORKSHOP_STAFF'] },
   { label: 'Catalog', route: '/catalog/add', requireRoles: ['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER'] },
   { label: 'Catalog Autopilot', route: '/catalog/autopilot', requireRoles: ['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER'] },
+  { label: 'Pricing & Offers', route: '/catalog/pricing', requireRoles: ['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER'] },
   { label: 'Tasks & SOPs', route: '/tasks', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'] },
   { label: 'Expenses', route: '/finance/expenses' },
   { label: 'HR', route: '/hr', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'] },

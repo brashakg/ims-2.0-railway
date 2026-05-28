@@ -126,6 +126,88 @@ export const productApi = {
 };
 
 // ============================================================================
+// Bulk pricing / offers API  (v2 Pricing & Offers screen)
+// ----------------------------------------------------------------------------
+// Dry-run-first + cap-enforced. The backend returns per-row before/after plus
+// a per-row cap classification; the UI previews on dry-run then commits the
+// valid rows. Import this DIRECTLY from this module (not the api barrel).
+
+export interface BulkScope {
+  category?: string;
+  brand?: string;
+  store_id?: string;
+  limit?: number;
+}
+
+export interface BulkRowResult {
+  product_id: string;
+  sku?: string;
+  brand?: string;
+  model?: string;
+  category?: string;
+  discount_category?: string;
+  // bulk-price returns old_mrp/new_mrp; bulk-offer returns mrp.
+  old_mrp?: number;
+  new_mrp?: number;
+  mrp?: number;
+  old_offer_price: number;
+  new_offer_price: number;
+  effective_cap_pct: number;
+  implied_discount_pct: number;
+  ok: boolean;
+  reason: string | null;
+  message: string | null;
+  changed: boolean;
+  applied?: boolean;
+}
+
+export interface BulkSummary {
+  operation: string;
+  store_id?: string | null;
+  category?: string | null;
+  brand?: string | null;
+  reason?: string | null;
+  applied: boolean;
+  counts: { total: number; valid: number; violations: number; unchanged: number };
+  committed: number;
+  [k: string]: unknown;
+}
+
+export interface BulkResponse {
+  dry_run: boolean;
+  summary: BulkSummary;
+  rows: BulkRowResult[];
+}
+
+export interface BulkPricePayload extends BulkScope {
+  mode: 'PERCENT' | 'FLAT';
+  target: 'OFFER' | 'MRP' | 'BOTH';
+  amount: number;
+  apply?: boolean;
+  reason?: string;
+}
+
+export interface BulkOfferPayload extends BulkScope {
+  action: 'SET' | 'CLEAR';
+  discount_percent?: number;
+  offer_price?: number;
+  apply?: boolean;
+  reason?: string;
+}
+
+export const pricingApi = {
+  bulkPrice: async (payload: BulkPricePayload): Promise<BulkResponse> => {
+    const response = await api.post('/products/bulk-price', payload);
+    return response.data;
+  },
+
+  bulkOffer: async (payload: BulkOfferPayload): Promise<BulkResponse> => {
+    const response = await api.post('/products/bulk-offer', payload);
+    return response.data;
+  },
+};
+
+// ============================================================================
 // Admin API - Product Master
 // ============================================================================
 

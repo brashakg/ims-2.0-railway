@@ -73,6 +73,7 @@ const StockAudit = lazy(() => import('./pages/inventory/StockAudit').then(m => (
 const JarvisPage = lazy(() => import('./pages/jarvis/JarvisPage').then(m => ({ default: m.JarvisPage })));
 const AddProductPage = lazy(() => import('./pages/catalog/AddProductPage'));
 const CatalogAutopilotPage = lazy(() => import('./pages/catalog/CatalogAutopilotPage'));
+const PricingOffersPage = lazy(() => import('./pages/pricing/PricingOffersPage'));
 const ExpenseTracker = lazy(() => import('./pages/finance/ExpenseTracker'));
 const FinanceDashboard = lazy(() => import('./pages/finance/FinanceDashboard'));
 const CashFlowPage = lazy(() => import('./pages/finance/CashFlowPage'));
@@ -797,6 +798,16 @@ function App() {
                     element={
                       <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER']}>
                         <CatalogAutopilotPage />
+                      </ProtectedRoute>
+                    }
+                  />
+
+                  {/* Pricing & Offers — bulk price + bulk offer (cap-enforced, dry-run-first) */}
+                  <Route
+                    path="catalog/pricing"
+                    element={
+                      <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER']}>
+                        <PricingOffersPage />
                       </ProtectedRoute>
                     }
                   />
