@@ -15,6 +15,9 @@ import {
   adminDiscountApi,
 } from '../../services/api';
 import { entitiesApi, type Entity } from '../../services/api/entities';
+// Canonical store CRUD (same path the Organization screen uses). Imported
+// directly from the module (not the api barrel) per the known re-export gotcha.
+import { orgStoreApi } from '../../services/api/stores';
 import type { StoreData, Category, Brand } from './settingsTypes';
 import { CATEGORY_DEFINITIONS } from './settingsTypes';
 
@@ -98,29 +101,35 @@ export function StoreManagementSection() {
   const handleSaveStore = async (storeData: Partial<StoreData>) => {
     try {
       setIsLoading(true);
-      const apiData = {
-        name: storeData.storeName || '',
-        code: storeData.storeCode || '',
+      // Canonical store path: orgStoreApi -> POST/PUT /stores with the backend
+      // StoreCreate/StoreUpdate shape (store_name/store_code/brand/entity_id;
+      // GSTIN is derived server-side from the entity). SAME path the Organization
+      // screen uses -- one place to save a store, no more 422s from the old admin
+      // {name,code,gst} shape the backend ignored.
+      const payload = {
+        store_name: storeData.storeName || '',
+        store_code: storeData.storeCode || '',
+        brand: (storeData as any).brand || 'BETTER_VISION',
+        entity_id: storeData.entityId || undefined,
         address: storeData.address || '',
         city: storeData.city || '',
         state: storeData.state || '',
-        phone: storeData.phone || '',
-        email: storeData.email || '',
-        gst: storeData.gstin || '',
         pincode: storeData.pincode || '',
-        opening_time: storeData.openingTime || '10:00',
-        closing_time: storeData.closingTime || '20:00',
-        geo_fence_radius: storeData.geoFenceRadius || 100,
+        phone: storeData.phone || '',
+        email: storeData.email || undefined,
         enabled_categories: storeData.enabledCategories || [],
-        status: storeData.isActive ? 'ACTIVE' : 'INACTIVE',
+        geofence_radius_m: storeData.geoFenceRadius ?? undefined,
+        latitude: (storeData as any).geoLat ?? undefined,
+        longitude: (storeData as any).geoLng ?? undefined,
+        is_active: storeData.isActive,
       };
 
       let storeId: string | undefined = editingStore?.id;
       if (editingStore?.id) {
-        await adminStoreApi.updateStore(editingStore.id, apiData);
+        await orgStoreApi.update(editingStore.id, payload);
       } else {
-        const created: any = await adminStoreApi.createStore(apiData);
-        storeId = created?.store_id || created?.id || created?.store?.store_id || created?.data?.store_id || storeId;
+        const created: any = await orgStoreApi.create(payload);
+        storeId = created?.store_id || created?.id || storeId;
       }
       // Reconcile the legal-entity link (stored as entity_id on the store via
       // the entities API). Non-fatal: the store still saves if this fails.
@@ -148,7 +157,7 @@ export function StoreManagementSection() {
   const handleDeleteStore = async (storeId: string) => {
     if (!window.confirm('Are you sure you want to delete this store?')) return;
     try {
-      await adminStoreApi.deleteStore(storeId);
+      await orgStoreApi.remove(storeId);
       toast.success('Store deleted successfully');
       loadStores();
     } catch {
