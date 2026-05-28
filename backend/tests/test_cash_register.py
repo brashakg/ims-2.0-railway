@@ -21,7 +21,6 @@ from __future__ import annotations
 import os
 import sys
 import uuid
-from datetime import datetime, timedelta
 
 import pytest
 
@@ -443,15 +442,6 @@ def test_cash_register_roundtrip_real_mongo(mongo_db):
     """open -> close writes/reads through real Mongo; expected cash reflects a
     real CASH order persisted to the orders collection."""
     db = _DBShim(mongo_db)
-    now = datetime.utcnow()
-    mongo_db["orders"].insert_one(
-        {
-            "order_id": "ord-cr-1",
-            "store_id": "store-rt",
-            "created_at": (now + timedelta(minutes=1)).isoformat(),
-            "payments": [{"method": "CASH", "amount": 1500}],
-        }
-    )
     c = _client(db, roles=["ADMIN"], active_store="store-rt", store_ids=[])
 
     opened = c.post(
@@ -459,6 +449,19 @@ def test_cash_register_roundtrip_real_mongo(mongo_db):
         json={"store_id": "store-rt", "opening_float": 1000, "denominations": []},
     ).json()
     sid = opened["session_id"]
+
+    # Seed the CASH order INSIDE the session window: anchor created_at to the
+    # session's opened_at so it lands between open and close regardless of
+    # wall-clock skew (close stamps end_iso at call time -- an order at
+    # open+1min would fall after the window and be excluded).
+    mongo_db["orders"].insert_one(
+        {
+            "order_id": "ord-cr-1",
+            "store_id": "store-rt",
+            "created_at": opened["opened_at"],
+            "payments": [{"method": "CASH", "amount": 1500}],
+        }
+    )
 
     # expected = 1000 + 1500 = 2500. Count 2500 -> balanced.
     closed = c.post(
