@@ -31,6 +31,17 @@ _VENDOR_ROLES = ("ADMIN", "AREA_MANAGER", "STORE_MANAGER", "ACCOUNTANT")
 # is limited to ADMIN / ACCOUNTANT (SUPERADMIN auto-passes via require_roles).
 _AP_ROLES = ("ADMIN", "ACCOUNTANT")
 
+# A PO can have goods received against it while it is en route or partially
+# delivered. "PARTIAL" is the legacy single-word status; "PARTIALLY_RECEIVED"
+# is what the PO repository's find_pending/find_overdue use -- accept both so a
+# part-received PO stays receivable for the remaining lines.
+_RECEIVABLE_PO_STATUSES = (
+    "SENT",
+    "ACKNOWLEDGED",
+    "PARTIAL",
+    "PARTIALLY_RECEIVED",
+)
+
 
 def _get_db():
     """Direct DB handle for the accounts-payable collections (vendor_bills,
@@ -95,6 +106,9 @@ class GRNItemCreate(BaseModel):
     accepted_qty: int
     rejected_qty: int = 0
     rejection_reason: Optional[str] = None
+    # Receiving location for the minted serialized units (optional; falls back
+    # to "DEFAULT" on the stock unit). Lets the receiver bin goods at post time.
+    location_code: Optional[str] = None
 
 
 class GRNCreate(BaseModel):
@@ -122,6 +136,89 @@ def generate_grn_number(store_id: str) -> str:
     prefix = store_id[:3].upper() if store_id else "HQ"
     timestamp = datetime.now().strftime("%y%m%d%H%M")
     return f"GRN-{prefix}-{timestamp}"
+
+
+def classify_grn_line_variance(received_qty, ordered_qty, tolerance: int = 0) -> str:
+    """Classify a single received line against what was ordered on the PO.
+
+    Returns one of:
+      * "UNMATCHED" -- the line could not be matched to a PO line (ordered_qty
+        is None), so there is nothing to compare against.
+      * "SHORT"     -- received fewer units than ordered (beyond tolerance).
+      * "OVER"      -- received more units than ordered (beyond tolerance).
+      * "EXACT"     -- received exactly what was ordered (within tolerance).
+
+    Pure + total: garbage/missing numbers coerce to 0 so this never raises.
+    Used both to stamp a per-line `variance_status` on the GRN at create time
+    and to drive the receiving UI's short/exact/over flags.
+    """
+
+    def _int(v) -> int:
+        try:
+            return int(v or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    if ordered_qty is None:
+        return "UNMATCHED"
+
+    tol = abs(_int(tolerance))
+    delta = _int(received_qty) - _int(ordered_qty)
+    if delta < -tol:
+        return "SHORT"
+    if delta > tol:
+        return "OVER"
+    return "EXACT"
+
+
+def compute_po_receipt_state(
+    po_items, received_by_product: dict, tolerance: int = 0
+) -> str:
+    """Decide whether a PO is fully or partially received.
+
+    Compares the cumulative received quantity per product (summed across every
+    ACCEPTED GRN for the PO) against the ordered quantity on each PO line.
+
+    Returns "RECEIVED" when every ordered line has been received in full (or
+    over-received) within tolerance, otherwise "PARTIALLY_RECEIVED". A PO with
+    no line items resolves to "RECEIVED" (nothing left to receive).
+
+    Pure + total: bad fields coerce to 0; never raises. This is the core
+    partial-vs-full decision and is unit-tested without a database.
+    """
+
+    def _int(v) -> int:
+        try:
+            return int(v or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    tol = abs(_int(tolerance))
+    items = po_items if isinstance(po_items, list) else []
+    received_by_product = received_by_product or {}
+
+    # Roll the ordered quantity up per product so multiple PO lines for the same
+    # product are compared against the combined received count.
+    ordered_by_product: dict = {}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        pid = item.get("product_id")
+        if pid is None:
+            continue
+        ordered_by_product[pid] = ordered_by_product.get(pid, 0) + _int(
+            item.get("quantity")
+        )
+
+    if not ordered_by_product:
+        return "RECEIVED"
+
+    for pid, ordered in ordered_by_product.items():
+        received = _int(received_by_product.get(pid))
+        if received < ordered - tol:
+            return "PARTIALLY_RECEIVED"
+
+    return "RECEIVED"
 
 
 def grn_has_discrepancy(grn: dict, qty_tolerance: int = 0) -> bool:
@@ -168,6 +265,99 @@ def grn_has_discrepancy(grn: dict, qty_tolerance: int = 0) -> bool:
             return True
 
     return False
+
+
+def _grn_barcode(store_id: Optional[str], product_id: Optional[str]) -> str:
+    """Generate a barcode for a GRN-minted serialized unit.
+
+    Reuses inventory.generate_barcode (the canonical stock-barcode format) so a
+    unit received via GRN is indistinguishable from one added via the inventory
+    /stock/add screen. Fail-soft: if that helper can't be imported for any
+    reason, fall back to a uuid-derived barcode so the stock write still
+    succeeds (a missing barcode must never block receiving goods).
+    """
+    try:
+        from .inventory import generate_barcode
+
+        return generate_barcode(store_id, product_id)
+    except Exception:  # noqa: BLE001
+        return f"BC-{uuid.uuid4().hex[:12].upper()}"
+
+
+def _grn_stock_audit(
+    stock_id: str,
+    new_status: str,
+    grn_id: str,
+    po_id: Optional[str],
+    store_id: Optional[str],
+    user_id: Optional[str],
+) -> None:
+    """Cheap, fail-soft insert into the stock_audit collection for every unit
+    minted while posting a GRN. Mirrors the returns-restock audit shape so the
+    audit trail answers "which unit entered stock when, and from which GRN/PO".
+
+    Any error is swallowed -- the audit row must never break (or roll back) the
+    stock write that already happened. This is the Fail-Loudly-but-not-here
+    boundary: losing an audit row is acceptable; losing received stock is not.
+    """
+    if not stock_id:
+        return
+    try:
+        from ..dependencies import get_db
+
+        db = get_db()
+        if db is None or not getattr(db, "is_connected", False):
+            return
+        coll = db.db.get_collection("stock_audit")
+        if coll is None:
+            return
+        coll.insert_one(
+            {
+                "stock_id": str(stock_id),
+                "prior_status": None,
+                "new_status": new_status,
+                "source": "GRN_RECEIPT",
+                "grn_id": grn_id,
+                "po_id": po_id,
+                "store_id": store_id,
+                "by_user": user_id,
+                "at": datetime.now().isoformat(),
+            }
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _cumulative_received_by_product(grn_repo, po_id: str) -> dict:
+    """Sum accepted_qty per product across every ACCEPTED GRN for a PO.
+
+    This is the running on-hand-received tally used to decide whether the PO is
+    now fully or partially received. Fail-soft: any read error returns {} so the
+    caller degrades to "partial" rather than crashing the accept.
+    """
+    totals: dict = {}
+    if grn_repo is None or not po_id:
+        return totals
+    try:
+        accepted_grns = grn_repo.find_many(
+            {"po_id": po_id, "status": "ACCEPTED"}, limit=1000
+        )
+    except Exception:  # noqa: BLE001
+        return totals
+    for grn in accepted_grns or []:
+        if not isinstance(grn, dict):
+            continue
+        for item in grn.get("items", []) or []:
+            if not isinstance(item, dict):
+                continue
+            pid = item.get("product_id")
+            if pid is None:
+                continue
+            try:
+                totals[pid] = totals.get(pid, 0) + int(item.get("accepted_qty", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+    return totals
 
 
 # ============================================================================
@@ -504,7 +694,7 @@ async def create_grn(
         if not po:
             raise HTTPException(status_code=404, detail="Purchase order not found")
 
-        if po.get("status") not in ["SENT", "PARTIAL"]:
+        if po.get("status") not in _RECEIVABLE_PO_STATUSES:
             raise HTTPException(
                 status_code=400, detail="PO is not in receivable status"
             )
@@ -540,8 +730,13 @@ async def create_grn(
     item_docs = []
     for item in grn.items:
         doc = item.model_dump()
-        if item.product_id in ordered_by_product:
-            doc["ordered_qty"] = ordered_by_product[item.product_id]
+        ordered = ordered_by_product.get(item.product_id)
+        if ordered is not None:
+            doc["ordered_qty"] = ordered
+        # Stamp the per-line short/exact/over flag so the GRN doc is
+        # self-describing and the receiving UI / discrepancy report don't have
+        # to recompute it. UNMATCHED when the line isn't on the PO.
+        doc["variance_status"] = classify_grn_line_variance(item.received_qty, ordered)
         item_docs.append(doc)
 
     grn_doc = {
@@ -629,7 +824,25 @@ async def get_grn(grn_id: str, current_user: dict = Depends(get_current_user)):
 async def accept_grn(
     grn_id: str, current_user: dict = Depends(require_roles(*_VENDOR_ROLES))
 ):
-    """Accept GRN and add stock"""
+    """Post a goods-receipt note: mint serialized stock for the accepted units,
+    advance the PO to PARTIALLY_RECEIVED / RECEIVED, and write an audit trail.
+
+    Stock is written one row per physical unit into the canonical serialized
+    `stock_units` collection via get_stock_repository -- the SAME path the
+    inventory /stock/add screen uses (barcode + location + AVAILABLE status), so
+    a GRN-received unit is a first-class sellable unit. There is NO parallel
+    stock write.
+
+    Idempotent: a re-POST is guarded by the PENDING status check, and -- belt
+    and suspenders -- the minting loop skips any (grn_id, product_id) that
+    already has units in stock_units, so a partially-failed accept can be safely
+    retried without double-counting.
+
+    Fail-soft ordering: the stock write happens first; the GRN status flip, the
+    PO state update, and the per-unit stock_audit rows all follow and are each
+    wrapped so that a logging/secondary failure can never lose the stock that
+    was already received.
+    """
     grn_repo = get_grn_repository()
     stock_repo = get_stock_repository()
     po_repo = get_purchase_order_repository()
@@ -644,43 +857,126 @@ async def accept_grn(
     if grn.get("status") != "PENDING":
         raise HTTPException(status_code=400, detail="GRN is not pending")
 
-    # Add stock for accepted items
-    if stock_repo is not None:
-        for item in grn.get("items", []):
-            accepted_qty = item.get("accepted_qty", 0) or 0
-            if accepted_qty > 0:
-                # Create individual stock units for each accepted quantity
-                for _ in range(int(accepted_qty)):
-                    stock_repo.create(
-                        {
-                            "store_id": grn.get("store_id"),
-                            "product_id": item.get("product_id"),
-                            "quantity": 1,
-                            "status": "AVAILABLE",
-                            "source_type": "GRN",
-                            "source_id": grn_id,
-                        }
-                    )
+    store_id = grn.get("store_id")
+    po_id = grn.get("po_id")
+    grn_number = grn.get("grn_number")
+    user_id = current_user.get("user_id")
 
-    # Update GRN status
+    minted_stock_ids: List[str] = []
+    units_added = 0
+
+    if stock_repo is not None:
+        for item in grn.get("items", []) or []:
+            try:
+                accepted_qty = int(item.get("accepted_qty", 0) or 0)
+            except (TypeError, ValueError):
+                accepted_qty = 0
+            product_id = item.get("product_id")
+            if accepted_qty <= 0 or not product_id:
+                continue
+
+            # Idempotency guard: if this GRN already minted units for this
+            # product (a previous accept that failed mid-way), don't mint again.
+            try:
+                already = stock_repo.count(
+                    {
+                        "source_type": "GRN",
+                        "source_id": grn_id,
+                        "product_id": product_id,
+                    }
+                )
+            except Exception:  # noqa: BLE001
+                already = 0
+            if already >= accepted_qty:
+                continue
+            to_mint = accepted_qty - already
+
+            location_code = item.get("location_code") or "DEFAULT"
+            for _ in range(to_mint):
+                created = stock_repo.create(
+                    {
+                        "store_id": store_id,
+                        "product_id": product_id,
+                        "barcode": _grn_barcode(store_id, product_id),
+                        "location_code": location_code,
+                        "quantity": 1,
+                        "status": "AVAILABLE",
+                        "is_reserved": False,
+                        "barcode_printed": False,
+                        "source_type": "GRN",
+                        "source_id": grn_id,
+                        "grn_number": grn_number,
+                        "po_id": po_id,
+                        "created_by": user_id,
+                    }
+                )
+                if created:
+                    units_added += 1
+                    stock_id = created.get("stock_id") or created.get("_id")
+                    if stock_id:
+                        minted_stock_ids.append(str(stock_id))
+                        # Fail-soft audit row per unit -- never blocks receiving.
+                        _grn_stock_audit(
+                            str(stock_id),
+                            "AVAILABLE",
+                            grn_id,
+                            po_id,
+                            store_id,
+                            user_id,
+                        )
+
+    # Mark the GRN accepted.
     grn_repo.update(
         grn_id,
         {
             "status": "ACCEPTED",
             "accepted_at": datetime.now().isoformat(),
-            "accepted_by": current_user.get("user_id"),
+            "accepted_by": user_id,
+            "units_added": units_added,
         },
     )
 
-    # Update PO status
-    if po_repo is not None and grn.get("po_id"):
-        po_repo.update(grn.get("po_id"), {"status": "RECEIVED"})
+    # Advance the PO received state. Sum the accepted qty across EVERY accepted
+    # GRN for this PO (this one is now ACCEPTED) and compare against the ordered
+    # lines: full receipt -> RECEIVED, otherwise PARTIALLY_RECEIVED. Fail-soft.
+    po_status = None
+    if po_repo is not None and po_id:
+        try:
+            po = po_repo.find_by_id(po_id)
+            received_by_product = _cumulative_received_by_product(grn_repo, po_id)
+            po_status = compute_po_receipt_state(
+                po.get("items") if po else [], received_by_product
+            )
+            po_repo.update(
+                po_id,
+                {
+                    "status": po_status,
+                    "received_qty_by_product": received_by_product,
+                    "total_received_qty": sum(received_by_product.values()),
+                    "last_received_at": datetime.now().isoformat(),
+                },
+            )
+        except Exception:  # noqa: BLE001
+            # Never lose the stock write on a PO-update failure. Best effort:
+            # at least flag the PO as partially received.
+            try:
+                po_repo.update(po_id, {"status": "PARTIALLY_RECEIVED"})
+                po_status = "PARTIALLY_RECEIVED"
+            except Exception:  # noqa: BLE001
+                pass
 
     return {
         "message": "GRN accepted, stock added",
         "grn_id": grn_id,
+        "units_added": units_added,
+        "stock_ids": minted_stock_ids,
+        "po_status": po_status,
         "items_added": len(
-            [i for i in grn.get("items", []) if i.get("accepted_qty", 0) > 0]
+            [
+                i
+                for i in (grn.get("items", []) or [])
+                if (i.get("accepted_qty", 0) or 0) > 0
+            ]
         ),
     }
 
