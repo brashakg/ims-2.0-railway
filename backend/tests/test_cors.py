@@ -21,11 +21,19 @@ ALLOWED_ORIGINS = [
     "https://some-preview-abc123.vercel.app",  # matches *.vercel.app rule
     "http://localhost:3000",
     "http://localhost:5173",
+    # Unified custom-domain plan (Option A — subdomains under uniparallel.com).
+    "https://uniparallel.com",  # apex (BVI admin)
+    "https://app.uniparallel.com",  # IMS frontend
+    "https://api.uniparallel.com",  # IMS backend
+    "https://anything.uniparallel.com",  # any subdomain matches the pattern
 ]
 
 FORBIDDEN_ORIGINS = [
     "https://evil.example.com",
     "http://attacker.local",
+    # Look-alike: ends with "uniparallel.com" but NOT ".uniparallel.com", so the
+    # subdomain rule must reject it. Guards against a too-loose substring match.
+    "https://eviluniparallel.com",
 ]
 
 

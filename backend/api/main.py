@@ -279,6 +279,14 @@ DEFAULT_CORS_ORIGINS = [
     "https://ims-20-railway.vercel.app",
     "https://ims-2-0-railway-production.up.railway.app",
     "https://ims-20-railway-production.up.railway.app",
+    # Unified custom-domain plan (Option A — subdomains under uniparallel.com):
+    #   app.uniparallel.com = IMS frontend, api.uniparallel.com = this backend,
+    #   uniparallel.com (apex) = BVI admin. Listed explicitly here so they show
+    #   in the startup CORS log; any other *.uniparallel.com subdomain is also
+    #   accepted by the pattern in _is_allowed_origin().
+    "https://uniparallel.com",
+    "https://app.uniparallel.com",
+    "https://api.uniparallel.com",
 ]
 
 
@@ -314,6 +322,15 @@ def _is_allowed_origin(origin: str) -> bool:
 
     # Allow Railway preview deployments (*.up.railway.app)
     if origin.startswith("https://") and ".up.railway.app" in origin:
+        return True
+
+    # Allow the unified uniparallel.com app + ANY subdomain (Option A):
+    # app.uniparallel.com (IMS frontend) calls api.uniparallel.com (backend),
+    # and the apex hosts the BVI admin. ".uniparallel.com" (with the leading
+    # dot) means only true subdomains match -- "eviluniparallel.com" does NOT.
+    if origin.startswith("https://") and (
+        origin == "https://uniparallel.com" or origin.endswith(".uniparallel.com")
+    ):
         return True
 
     return False
@@ -430,7 +447,8 @@ async def add_security_headers(request: Request, call_next):
         "script-src 'self' 'unsafe-inline'; "
         "style-src 'self' 'unsafe-inline'; "
         "img-src 'self' data: https:; "
-        "connect-src 'self' https://*.vercel.app https://*.up.railway.app"
+        "connect-src 'self' https://*.vercel.app https://*.up.railway.app "
+        "https://*.uniparallel.com"
     )
     return response
 
