@@ -93,30 +93,42 @@ def _noop_close(*_args, **_kwargs):
     return None
 
 
-@pytest.fixture(scope="session")
-def app():
-    """Create the FastAPI app for testing."""
-    # Set test env vars before importing the app
+@pytest.fixture(scope="session", autouse=True)
+def _patch_close_db():
+    """Runs once before ANY test (session + autouse): neuter close_db so NO
+    TestClient lifespan teardown closes the shared singleton Mongo client. The
+    teardown fires from the session `client` fixture AND from any test that
+    opens its own `with TestClient(app)`; either one calling the real close_db
+    made every later test fail with 'pymongo.errors.InvalidOperation: Cannot
+    use MongoClient after close'. Patching here (autouse, not inside the `app`
+    fixture) guarantees it applies even for tests that never request
+    `app`/`client`. init_db is idempotent so the live client is reused across
+    tests; the process exit reclaims it. Other shutdown steps still run."""
     os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-for-unit-tests")
-    os.environ.setdefault("MONGODB_URI", "")  # empty = no DB
-    import api.main as _main
+    try:
+        import api.main as _main
 
-    # Neuter close_db for the whole test session. A TestClient lifespan teardown
-    # -- from the session `client` fixture OR from any test that opens its own
-    # `with TestClient(app)` -- otherwise calls close_db(), which closes the
-    # shared singleton Mongo client and makes every later test fail with
-    # 'pymongo.errors.InvalidOperation: Cannot use MongoClient after close'.
-    # init_db is idempotent, so the live client is simply reused across tests;
-    # the OS reclaims it at process exit. Other shutdown steps still run.
-    _main.close_db = _noop_close
+        _main.close_db = _noop_close
+    except Exception:  # noqa: BLE001
+        pass
     try:
         import database.connection as _conn
 
         _conn.close_db = _noop_close
     except Exception:  # noqa: BLE001
         pass
+    yield
 
-    return _main.app
+
+@pytest.fixture(scope="session")
+def app():
+    """Create the FastAPI app for testing."""
+    # Set test env vars before importing the app
+    os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-for-unit-tests")
+    os.environ.setdefault("MONGODB_URI", "")  # empty = no DB
+    from api.main import app as _app
+
+    return _app
 
 
 @pytest.fixture(scope="session")
