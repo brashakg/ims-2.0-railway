@@ -89,6 +89,7 @@ from .routers import (
     lens_catalog_router,
     lens_stock_router,
     lens_enums_router,
+    product_templates_router,
 )
 from .routers.auth import require_roles
 
@@ -734,6 +735,11 @@ app.include_router(auth_router, prefix="/api/v1/auth", tags=["Authentication"])
 app.include_router(users_router, prefix="/api/v1/users", tags=["Users"])
 app.include_router(stores_router, prefix="/api/v1/stores", tags=["Stores"])
 app.include_router(products_router, prefix="/api/v1/products", tags=["Products"])
+app.include_router(
+    product_templates_router,
+    prefix="/api/v1/product-templates",
+    tags=["Product Templates"],
+)
 app.include_router(inventory_router, prefix="/api/v1/inventory", tags=["Inventory"])
 app.include_router(customers_router, prefix="/api/v1/customers", tags=["Customers"])
 app.include_router(crm_router, prefix="/api/v1/crm", tags=["CRM"])

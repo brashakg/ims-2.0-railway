@@ -326,3 +326,113 @@ export function resolveHsnGst(category: string, use6Digit: boolean): { hsnCode: 
     gstRate: getGSTRateByCategory(category).toString(),
   };
 }
+
+// ============================================================================
+// Clone support (Phase C): map a persisted product doc back into the Quick Add
+// form-values shape so the user can tweak it and save it as a NEW SKU.
+// ----------------------------------------------------------------------------
+// The create payload flattens attributes (see buildProductPayload); cloning is
+// the inverse. We rebuild `attributes` from the product's stored `attributes`
+// dict (the canonical home of the category-specific fields), falling back to a
+// few top-level identity fields so a clone still prefills brand/model even for
+// older docs that didn't persist them under attributes.
+
+// String coercion that turns null/undefined/NaN into '' so blank inputs stay
+// blank (and number 0 / 0.0 survives as "0").
+const str = (v: unknown): string => {
+  if (v === null || v === undefined) return '';
+  const s = String(v);
+  return s === 'NaN' ? '' : s;
+};
+
+// A product doc as returned by GET /products/{id} (only the fields we read).
+export interface ProductDoc {
+  category?: string;
+  brand?: string;
+  model?: string;
+  attributes?: Record<string, unknown> | null;
+  description?: string;
+  hsn_code?: string;
+  gst_rate?: number | string;
+  weight?: number | string;
+  mrp?: number | string;
+  offer_price?: number | string;
+  cost_price?: number | string;
+  discount_category?: string;
+  // CL / lens identity (top-level on the doc; mirrored back into attributes).
+  cl_series?: unknown;
+  modality?: unknown;
+  base_curve?: unknown;
+  diameter?: unknown;
+  cl_power?: unknown;
+  cl_cyl?: unknown;
+  cl_axis?: unknown;
+  cl_add?: unknown;
+  pack_size?: unknown;
+  sph?: unknown;
+  cyl?: unknown;
+  axis?: unknown;
+  add?: unknown;
+  [k: string]: unknown;
+}
+
+export function productToFormValues(product: ProductDoc): ProductFormValues {
+  const category = str(product.category);
+
+  // Start from the stored attributes (canonical), then ensure the top-level
+  // identity + power fields are represented so the form prefills fully.
+  const attributes: Record<string, string> = {};
+  const srcAttrs = product.attributes || {};
+  Object.keys(srcAttrs).forEach((k) => {
+    attributes[k] = str(srcAttrs[k]);
+  });
+
+  // Backfill brand/model from the top-level fields when the attributes dict
+  // didn't carry them (older docs). The form maps brand_name/model_no back to
+  // top-level brand/model on save, so this keeps the round-trip lossless.
+  if (!attributes.brand_name && product.brand) attributes.brand_name = str(product.brand);
+  if (!attributes.model_no && !attributes.model_name && product.model) {
+    attributes.model_no = str(product.model);
+  }
+
+  // Mirror the top-level CL / lens identity fields back onto the attribute
+  // names the form uses (buildProductPayload reads these names).
+  const mirror: Array<[keyof ProductDoc, string]> = [
+    ['cl_series', 'cl_series'],
+    ['modality', 'modality'],
+    ['base_curve', 'base_curve'],
+    ['diameter', 'diameter'],
+    ['cl_power', 'power'],
+    ['cl_cyl', 'cl_cyl'],
+    ['cl_axis', 'cl_axis'],
+    ['cl_add', 'cl_add'],
+    ['pack_size', 'pack'],
+    ['sph', 'sph'],
+    ['cyl', 'cyl'],
+    ['axis', 'axis'],
+    ['add', 'add'],
+  ];
+  mirror.forEach(([docKey, attrKey]) => {
+    const v = product[docKey];
+    if (v !== null && v !== undefined && !attributes[attrKey]) {
+      attributes[attrKey] = str(v);
+    }
+  });
+
+  return {
+    category,
+    attributes,
+    description: str(product.description),
+    hsnCode: str(product.hsn_code),
+    gstRate: str(product.gst_rate) || '18',
+    weight: str(product.weight),
+    mrp: str(product.mrp),
+    offerPrice: str(product.offer_price),
+    costPrice: str(product.cost_price),
+    discountCategory: str(product.discount_category) || 'MASS',
+    // Online flags are NOT cloned: a new SKU shouldn't inherit Shopify sync.
+    syncToShopify: false,
+    shopifyTags: [],
+    publishPOS: true,
+  };
+}

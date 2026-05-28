@@ -11,7 +11,7 @@
 // productAddShared.ts so the two modes are field- and contract-identical.
 
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { useNavigate, Link } from 'react-router-dom';
+import { useNavigate, useSearchParams, Link } from 'react-router-dom';
 import {
   Save,
   RotateCcw,
@@ -24,10 +24,17 @@ import {
   Globe,
   Sparkles,
   Keyboard,
+  LayoutTemplate,
+  Copy,
+  Trash2,
+  Search,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { productApi } from '../../services/api/products';
+// Import the templates service DIRECTLY from its module (not the api barrel —
+// the barrel re-export fails to resolve for new services, TS2614).
+import { productTemplatesApi, type ProductTemplate } from '../../services/api/productTemplates';
 import { getHSNOptions } from '../../constants/gst';
 import {
   CATEGORIES,
@@ -36,8 +43,10 @@ import {
   validateProductForm,
   buildProductPayload,
   resolveHsnGst,
+  productToFormValues,
   type CategoryField,
   type ProductFormValues,
+  type ProductDoc,
 } from './productAddShared';
 import clsx from 'clsx';
 
@@ -47,6 +56,7 @@ export function QuickAddPage() {
   const { hasRole } = useAuth();
   const toast = useToast();
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
 
   // ---- Form state (mirrors the wizard's fields exactly) --------------------
   const [selectedCategory, setSelectedCategory] = useState<string>('');
@@ -84,11 +94,30 @@ export function QuickAddPage() {
     online: false, // collapsed by default per the design
   });
 
+  // ---- Templates + clone state (Phase C) -----------------------------------
+  const [templatesOpen, setTemplatesOpen] = useState(false);
+  const [templates, setTemplates] = useState<ProductTemplate[]>([]);
+  const [templatesLoading, setTemplatesLoading] = useState(false);
+  const [templatesLoaded, setTemplatesLoaded] = useState(false);
+  const [saveName, setSaveName] = useState('');
+  const [savingTemplate, setSavingTemplate] = useState(false);
+  const [cloneSku, setCloneSku] = useState('');
+  const [cloning, setCloning] = useState(false);
+
   const firstFieldRef = useRef<HTMLSelectElement | HTMLInputElement | null>(null);
+  // When a template/clone is loaded we set category AND an explicit HSN/GST.
+  // This flag tells the category-change autofill below to skip exactly one
+  // cycle so the loaded HSN/GST (which may be a 6-digit / overridden value)
+  // isn't immediately clobbered by the category default.
+  const skipHsnAutofillRef = useRef(false);
 
   // Auto-fill HSN + GST when category (or 4/6-digit toggle) changes — same
   // behaviour as the wizard's useEffect.
   useEffect(() => {
+    if (skipHsnAutofillRef.current) {
+      skipHsnAutofillRef.current = false;
+      return;
+    }
     if (selectedCategory) {
       const { hsnCode: hc, gstRate: gr } = resolveHsnGst(selectedCategory, useAdvancedHSN);
       if (hc) setHsnCode(hc);
@@ -152,6 +181,32 @@ export function QuickAddPage() {
     [attributes.brand_name]
   );
 
+  // Apply a ProductFormValues blob to every form field. The inverse of
+  // currentValues(); used by BOTH "load template" and "clone product" so the
+  // two prefill paths stay identical. Does NOT touch the SKU/barcode/qty
+  // (inventory) fields — a loaded shape is a starting point, not a real SKU.
+  const applyFormValues = useCallback((v: ProductFormValues) => {
+    // Preserve the loaded HSN/GST: skip the next category-driven autofill so a
+    // saved 6-digit / overridden HSN survives. If the blob has no HSN, let the
+    // autofill run so the category default still fills in.
+    if (v.hsnCode) skipHsnAutofillRef.current = true;
+    setSelectedCategory(v.category || '');
+    setAttributes(v.attributes || {});
+    setDescription(v.description || '');
+    setHsnCode(v.hsnCode || '');
+    setGstRate(v.gstRate || '18');
+    setWeight(v.weight || '');
+    setMrp(v.mrp || '');
+    setOfferPrice(v.offerPrice || '');
+    setCostPrice(v.costPrice || '');
+    setDiscountCategory(v.discountCategory || 'MASS');
+    setSyncToShopify(Boolean(v.syncToShopify));
+    setShopifyTags(Array.isArray(v.shopifyTags) ? v.shopifyTags : []);
+    setPublishPOS(v.publishPOS !== false);
+    setErrors({});
+    setOpenSections((s) => ({ ...s, identity: true, pricing: true }));
+  }, []);
+
   const handleSubmit = useCallback(
     async (saveAndNew: boolean) => {
       const values = currentValues();
@@ -201,6 +256,144 @@ export function QuickAddPage() {
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [handleSubmit, isSubmitting]);
+
+  // ---- Templates: list / load / save / delete ------------------------------
+  const loadTemplates = useCallback(async () => {
+    setTemplatesLoading(true);
+    try {
+      const res = await productTemplatesApi.list();
+      setTemplates(res.templates || []);
+      setTemplatesLoaded(true);
+    } catch {
+      toast.error('Could not load templates.');
+    } finally {
+      setTemplatesLoading(false);
+    }
+  }, [toast]);
+
+  // Lazy-load the list the first time the panel is opened.
+  useEffect(() => {
+    if (templatesOpen && !templatesLoaded && !templatesLoading) {
+      void loadTemplates();
+    }
+  }, [templatesOpen, templatesLoaded, templatesLoading, loadTemplates]);
+
+  const handleLoadTemplate = useCallback(
+    (tpl: ProductTemplate) => {
+      applyFormValues(tpl.payload);
+      setTemplatesOpen(false);
+      toast.success(`Loaded template "${tpl.name}". Edit and save as a new product.`);
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    },
+    [applyFormValues, toast]
+  );
+
+  const handleSaveTemplate = useCallback(async () => {
+    const name = saveName.trim();
+    if (!name) {
+      toast.error('Give the template a name first.');
+      return;
+    }
+    if (!selectedCategory) {
+      toast.error('Pick a category before saving a template.');
+      return;
+    }
+    setSavingTemplate(true);
+    try {
+      const created = await productTemplatesApi.create(name, currentValues(), selectedCategory);
+      // Prepend so it shows at the top of the (newest-first) list.
+      setTemplates((prev) => [created, ...prev.filter((t) => t.template_id !== created.template_id)]);
+      setSaveName('');
+      toast.success(`Saved template "${created.name}".`);
+    } catch {
+      toast.error('Failed to save template.');
+    } finally {
+      setSavingTemplate(false);
+    }
+  }, [saveName, selectedCategory, currentValues, toast]);
+
+  const handleDeleteTemplate = useCallback(
+    async (tpl: ProductTemplate) => {
+      try {
+        await productTemplatesApi.remove(tpl.template_id);
+        setTemplates((prev) => prev.filter((t) => t.template_id !== tpl.template_id));
+        toast.success(`Deleted template "${tpl.name}".`);
+      } catch {
+        toast.error('Could not delete this template (you may not own it).');
+      }
+    },
+    [toast]
+  );
+
+  // ---- Clone: prefill from an existing product -----------------------------
+  const cloneFromProduct = useCallback(
+    (product: ProductDoc) => {
+      applyFormValues(productToFormValues(product));
+      toast.success('Cloned into the form. Tweak the details and save as a NEW SKU.');
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    },
+    [applyFormValues, toast]
+  );
+
+  const handleCloneFromSku = useCallback(async () => {
+    const sku = cloneSku.trim();
+    if (!sku) {
+      toast.error('Enter a SKU or barcode to clone.');
+      return;
+    }
+    setCloning(true);
+    try {
+      // searchProducts hits GET /products?search= — match the exact SKU/barcode.
+      const res = await productApi.searchProducts(sku);
+      const list: ProductDoc[] = (res?.products || res || []) as ProductDoc[];
+      const match =
+        list.find(
+          (p) =>
+            String(p.sku || '').toLowerCase() === sku.toLowerCase() ||
+            String(p.barcode || '').toLowerCase() === sku.toLowerCase()
+        ) || list[0];
+      if (!match) {
+        toast.error(`No product found for "${sku}".`);
+        return;
+      }
+      cloneFromProduct(match);
+      setCloneSku('');
+      setTemplatesOpen(false);
+    } catch {
+      toast.error('Could not look up that product.');
+    } finally {
+      setCloning(false);
+    }
+  }, [cloneSku, cloneFromProduct, toast]);
+
+  // Deep-link clone: /catalog/add?clone=<productId> prefills from that product
+  // (e.g. a "Clone" button on the inventory list can link straight here). Runs
+  // once per id; clears the param so a manual reset isn't re-clobbered.
+  const cloneId = searchParams.get('clone');
+  useEffect(() => {
+    if (!cloneId) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const product = (await productApi.getProduct(cloneId)) as ProductDoc;
+        if (!cancelled && product) {
+          cloneFromProduct(product);
+        }
+      } catch {
+        if (!cancelled) toast.error('Could not load the product to clone.');
+      } finally {
+        if (!cancelled) {
+          const next = new URLSearchParams(searchParams);
+          next.delete('clone');
+          setSearchParams(next, { replace: true });
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cloneId]);
 
   if (!canAddProduct) {
     return (
@@ -317,6 +510,148 @@ export function QuickAddPage() {
             Fill the essentials and hit <kbd className="qa-kbd">Ctrl</kbd>+<kbd className="qa-kbd">Enter</kbd> to save.
             Category sets HSN + GST automatically.
           </div>
+        </div>
+
+        {/* Templates + clone affordance */}
+        <div className="relative">
+          <button
+            type="button"
+            onClick={() => setTemplatesOpen((v) => !v)}
+            className="btn-secondary flex items-center gap-2"
+            aria-expanded={templatesOpen}
+            aria-haspopup="dialog"
+          >
+            <LayoutTemplate className="w-4 h-4" />
+            Templates
+            <ChevronDown className={clsx('w-4 h-4 transition-transform', templatesOpen && 'rotate-180')} />
+          </button>
+
+          {templatesOpen && (
+            <>
+              {/* Click-away backdrop */}
+              <button
+                type="button"
+                aria-label="Close templates"
+                className="fixed inset-0 z-40 cursor-default"
+                onClick={() => setTemplatesOpen(false)}
+              />
+              <div
+                role="dialog"
+                aria-label="Templates and clone"
+                className="absolute right-0 z-50 mt-2 w-[340px] max-w-[92vw] rounded-xl border border-gray-200 bg-white shadow-xl"
+              >
+                {/* Save current as template */}
+                <div className="p-4 border-b border-gray-100">
+                  <p className="text-sm font-semibold text-gray-900 mb-2">Save as template</p>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="text"
+                      value={saveName}
+                      onChange={(e) => setSaveName(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          e.preventDefault();
+                          void handleSaveTemplate();
+                        }
+                      }}
+                      placeholder="Template name"
+                      className="input-field w-full"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => handleSaveTemplate()}
+                      disabled={savingTemplate}
+                      className="btn-primary shrink-0 flex items-center gap-1.5"
+                    >
+                      {savingTemplate ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+                      Save
+                    </button>
+                  </div>
+                  <p className="text-xs text-gray-400 mt-1.5">Saves the current field values for reuse.</p>
+                </div>
+
+                {/* Clone from an existing SKU */}
+                <div className="p-4 border-b border-gray-100">
+                  <p className="text-sm font-semibold text-gray-900 mb-2">Clone a product</p>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="text"
+                      value={cloneSku}
+                      onChange={(e) => setCloneSku(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          e.preventDefault();
+                          void handleCloneFromSku();
+                        }
+                      }}
+                      placeholder="Enter SKU or barcode"
+                      className="input-field w-full"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => handleCloneFromSku()}
+                      disabled={cloning}
+                      className="btn-secondary shrink-0 flex items-center gap-1.5"
+                    >
+                      {cloning ? <Loader2 className="w-4 h-4 animate-spin" /> : <Copy className="w-4 h-4" />}
+                      Clone
+                    </button>
+                  </div>
+                  <p className="text-xs text-gray-400 mt-1.5">Prefills the form; saves as a brand-new SKU.</p>
+                </div>
+
+                {/* Saved templates list */}
+                <div className="p-4">
+                  <div className="flex items-center justify-between mb-2">
+                    <p className="text-sm font-semibold text-gray-900">Saved templates</p>
+                    {templates.length > 0 && (
+                      <span className="text-xs text-gray-400">{templates.length}</span>
+                    )}
+                  </div>
+
+                  {templatesLoading ? (
+                    <div className="flex items-center gap-2 text-sm text-gray-500 py-3">
+                      <Loader2 className="w-4 h-4 animate-spin" /> Loading…
+                    </div>
+                  ) : templates.length === 0 ? (
+                    <div className="flex items-start gap-2 text-sm text-gray-500 py-2">
+                      <Search className="w-4 h-4 mt-0.5 shrink-0" />
+                      <span>No templates yet. Fill the form and save one above.</span>
+                    </div>
+                  ) : (
+                    <ul className="max-h-64 overflow-auto -mx-1 space-y-0.5">
+                      {templates.map((tpl) => (
+                        <li
+                          key={tpl.template_id}
+                          className="flex items-center gap-2 px-1 py-1.5 rounded-lg hover:bg-gray-50"
+                        >
+                          <button
+                            type="button"
+                            onClick={() => handleLoadTemplate(tpl)}
+                            className="flex-1 min-w-0 text-left"
+                          >
+                            <span className="block text-sm font-medium text-gray-900 truncate">{tpl.name}</span>
+                            <span className="block text-xs text-gray-400 truncate">
+                              {categoryName(tpl.category || tpl.payload?.category) || '—'}
+                              {tpl.created_by_name ? ` · ${tpl.created_by_name}` : ''}
+                            </span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteTemplate(tpl)}
+                            aria-label={`Delete template ${tpl.name}`}
+                            className="shrink-0 p-1.5 rounded-md text-gray-400 hover:text-red-600 hover:bg-red-50"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              </div>
+            </>
+          )}
         </div>
       </div>
 
