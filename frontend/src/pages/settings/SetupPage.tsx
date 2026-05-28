@@ -2,6 +2,7 @@
 // IMS 2.0 — Store Setup & Employee Onboarding
 // ============================================================================
 import { useState, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { adminStoreApi } from '../../services/api';
@@ -114,6 +115,7 @@ export default function SetupPage() {
   const [, setEditEmployee] = useState<NewEmployee | null>(null);
   const [showStoreForm, setShowStoreForm] = useState(false);
   const [showEmployeeForm, setShowEmployeeForm] = useState(false);
+  const navigate = useNavigate();
 
   const isHQ = user?.roles?.some((r: string) => ['ADMIN', 'SUPERADMIN'].includes(r));
   if (!isHQ) {
@@ -191,21 +193,15 @@ export default function SetupPage() {
           {/* Store Form Modal */}
           {showStoreForm && <StoreFormModal
             store={editStore}
-            onSave={async (s) => {
-              try {
-                const apiData = { name: s.name, code: s.code, address: s.address, city: s.city, state: s.state, phone: s.phone, email: s.email, gst: s.gstNumber };
-                if (editStore) {
-                  await adminStoreApi.updateStore(editStore.id!, apiData);
-                  setStores(prev => prev.map(st => st.id === editStore.id ? { ...st, ...s } : st));
-                } else {
-                  const result = await adminStoreApi.createStore(apiData);
-                  setStores(prev => [...prev, { ...s, id: result?.store_id || `STORE-${Date.now()}`, isActive: true }]);
-                }
-                setShowStoreForm(false);
-                toast.success(editStore ? 'Store updated' : 'Store created');
-              } catch (err) {
-                toast.error('Failed to save store');
-              }
+            onSave={async () => {
+              // Stores are created/edited in ONE place now: the Organization
+              // screen (orgStoreApi -> /stores, which captures the required
+              // entity link + derives GSTIN). This onboarding modal can't
+              // supply entity_id, so send the user there instead of posting the
+              // old admin {name,code,gst} shape the backend rejected (422).
+              setShowStoreForm(false);
+              toast.info('Add and edit stores in Organization');
+              navigate('/organization');
             }}
             onClose={() => setShowStoreForm(false)}
           />}
