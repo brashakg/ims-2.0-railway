@@ -161,6 +161,69 @@ def _assert_mrp_ge_offer(mrp, offer_price) -> None:
         raise HTTPException(status_code=400, detail="Offer price cannot exceed MRP")
 
 
+# Fields persisted top-level on the product doc only when provided (additive).
+# Shared by the single + bulk create paths so neither drifts.
+_OPTIONAL_PRODUCT_FIELDS = (
+    "cl_series",
+    "modality",
+    "base_curve",
+    "diameter",
+    "cl_power",
+    "cl_cyl",
+    "cl_axis",
+    "cl_add",
+    "pack_size",
+    "sph",
+    "cyl",
+    "axis",
+    "add",
+)
+
+
+def _build_product_data(product: "ProductCreate", created_by) -> dict:
+    """Map a validated ProductCreate into the persisted product doc.
+
+    Single source of truth for the create payload shape, shared by the single
+    create_product path and the batch bulk_create_products path so the two can
+    never drift. Assumes the caller has ALREADY run _validate_category_or_422
+    (so product.category is normalized) and _assert_mrp_ge_offer.
+
+    HSN / GST: an explicit value wins; otherwise fall back to the canonical
+    category->(hsn, rate) table so the master rate a product is created with
+    equals what POS bills it (see api/services/gst_rates.py).
+    """
+    hsn_code = product.hsn_code or hsn_for_category(product.category)
+    if product.gst_rate is not None:
+        gst_rate = product.gst_rate
+    else:
+        gst_rate = gst_rate_for_category(product.category)
+
+    product_data = {
+        "sku": product.sku,
+        "category": product.category,
+        "brand": product.brand,
+        "model": product.model,
+        "variant": product.variant,
+        "color": product.color,
+        "size": product.size,
+        "mrp": product.mrp,
+        "offer_price": product.offer_price,
+        "hsn_code": hsn_code,
+        "gst_rate": gst_rate,
+        "attributes": product.attributes or {},
+        "is_active": True,
+        "created_by": created_by,
+    }
+
+    # Persist optional identity fields top-level only when provided (additive).
+    for _f in _OPTIONAL_PRODUCT_FIELDS:
+        _v = getattr(product, _f, None)
+        if _v is not None:
+            product_data[_f] = _v
+
+    return product_data
+
+
 class ProductCreate(BaseModel):
     sku: str
     category: str
@@ -218,6 +281,26 @@ class ProductUpdate(BaseModel):
     cyl: Optional[float] = None
     axis: Optional[int] = Field(None, ge=0, le=180)
     add: Optional[float] = None
+
+
+# ----------------------------------------------------------------------------
+# Bulk CREATE schema (Rapid Grid -- Phase B of the product-add redesign)
+# ----------------------------------------------------------------------------
+# Accepts many ProductCreate-shaped rows in one call. The in-app Rapid Grid
+# (frontend RapidGridPage) is the only caller; there is NO CSV / file import.
+# Each row reuses the SAME validators + persist helper as the single-create
+# path -- valid rows are created, invalid rows are skipped and reported.
+
+
+class BulkCreateRequest(BaseModel):
+    """A batch of products to create. Each item is ProductCreate-shaped.
+
+    Capped at 500 rows per call -- the Rapid Grid is a manual, in-app entry
+    surface (the owner forbade file import), so a single batch is never huge;
+    the cap is a guard against an accidental/abusive oversized POST.
+    """
+
+    products: List[ProductCreate] = Field(..., min_length=1, max_length=500)
 
 
 # ----------------------------------------------------------------------------
@@ -364,60 +447,17 @@ async def create_product(
                 status_code=400, detail="Product with this SKU already exists"
             )
 
-        is_cl = product.category in CL_CATEGORIES
         if product.modality and product.modality not in CL_MODALITIES:
             raise HTTPException(
                 status_code=400,
                 detail=f"Invalid modality. Allowed: {', '.join(CL_MODALITIES)}",
             )
 
-        # HSN / GST: explicit value wins; otherwise fall back to the canonical
-        # category->(hsn, rate) table so the master rate a product is created
-        # with equals what POS bills it (see api/services/gst_rates.py). This
-        # gives OPTICAL_LENS / READING_GLASSES / COLORED_CONTACT_LENS their
-        # correct 5% instead of the old blanket 18% non-CL default.
-        hsn_code = product.hsn_code or hsn_for_category(product.category)
-        if product.gst_rate is not None:
-            gst_rate = product.gst_rate
-        else:
-            gst_rate = gst_rate_for_category(product.category)
-
-        product_data = {
-            "sku": product.sku,
-            "category": product.category,
-            "brand": product.brand,
-            "model": product.model,
-            "variant": product.variant,
-            "color": product.color,
-            "size": product.size,
-            "mrp": product.mrp,
-            "offer_price": product.offer_price,
-            "hsn_code": hsn_code,
-            "gst_rate": gst_rate,
-            "attributes": product.attributes or {},
-            "is_active": True,
-            "created_by": current_user.get("user_id"),
-        }
-
-        # Persist CL identity fields top-level only when provided (additive).
-        for _f in (
-            "cl_series",
-            "modality",
-            "base_curve",
-            "diameter",
-            "cl_power",
-            "cl_cyl",
-            "cl_axis",
-            "cl_add",
-            "pack_size",
-            "sph",
-            "cyl",
-            "axis",
-            "add",
-        ):
-            _v = getattr(product, _f, None)
-            if _v is not None:
-                product_data[_f] = _v
+        # Build the persisted doc via the shared helper so the single + bulk
+        # create paths stay byte-identical (HSN/GST defaults, additive CL/lens
+        # identity fields). OPTICAL_LENS / READING_GLASSES / COLORED_CONTACT_LENS
+        # get their correct 5% instead of the old blanket 18% non-CL default.
+        product_data = _build_product_data(product, current_user.get("user_id"))
 
         created = repo.create(product_data)
         if created:
@@ -432,6 +472,170 @@ async def create_product(
         raise HTTPException(status_code=500, detail="Failed to create product")
 
     return {"product_id": str(uuid.uuid4()), "sku": product.sku}
+
+
+# ============================================================================
+# BULK CREATE  (Rapid Grid -- Phase B of the product-add redesign)
+# ============================================================================
+# POST /products/bulk-create -- create many products in one call. Each row is
+# validated with the SAME helpers as the single-create path
+# (_validate_category_or_422, _assert_mrp_ge_offer, _build_product_data so the
+# HSN/GST defaults match). Valid rows are created; invalid rows are SKIPPED and
+# reported with per-row error reasons. SKUs are deduped within the batch and
+# against existing products. There is NO CSV / file import -- the in-app Rapid
+# Grid is the only caller.
+
+
+def _validate_bulk_row(product: ProductCreate, seen_skus: set) -> List[str]:
+    """Validate one bulk-create row WITHOUT raising. Returns a list of human
+    error strings (empty == valid). Mirrors the single-create checks:
+      - category present + recognized (_validate_category_or_422)
+      - MRP >= offer_price (_assert_mrp_ge_offer)
+      - modality (CL) within the allowed set
+      - SKU not duplicated earlier in THIS batch
+    Normalizes product.category in place on success so the persist step uses
+    the canonical value. (pydantic already enforced mrp/offer_price > 0 and the
+    cl_axis/axis 0-180 + pack_size >= 1 ranges before this is reached.)
+    """
+    errors: List[str] = []
+
+    # Category (reuse the single-create validator; capture its 422 message).
+    try:
+        product.category = _validate_category_or_422(product.category)
+    except HTTPException as exc:
+        errors.append(str(exc.detail))
+
+    # MRP >= offer_price (reuse the single-create validator; capture its 400).
+    try:
+        _assert_mrp_ge_offer(product.mrp, product.offer_price)
+    except HTTPException as exc:
+        errors.append(str(exc.detail))
+
+    if product.modality and product.modality not in CL_MODALITIES:
+        errors.append(f"Invalid modality. Allowed: {', '.join(CL_MODALITIES)}")
+
+    sku_norm = str(product.sku or "").strip()
+    if not sku_norm:
+        errors.append("SKU is required")
+    elif sku_norm in seen_skus:
+        errors.append("Duplicate SKU within this batch")
+
+    return errors
+
+
+@router.post("/bulk-create", status_code=201)
+async def bulk_create_products(
+    body: BulkCreateRequest,
+    current_user: dict = Depends(require_roles(*_CATALOG_ROLES)),
+):
+    """Create many products in one call (Rapid Grid).
+
+    For each row: validate via the shared single-create validators, skip the
+    invalid ones (reporting why), and create only the valid rows. Returns a
+    per-row result array plus a summary. SKUs are deduped within the batch and
+    against existing products. Catalog-write gated (ADMIN / CATALOG_MANAGER;
+    SUPERADMIN auto-passes)."""
+    repo = get_product_repository()
+
+    results: List[dict] = []
+    created_count = 0
+    failed_count = 0
+    # SKUs already accepted/seen in THIS batch (in-batch dedupe). Seeded as we
+    # iterate so an earlier row "wins" a duplicate SKU and later ones fail.
+    seen_skus: set = set()
+
+    for index, product in enumerate(body.products):
+        sku_norm = str(product.sku or "").strip()
+        errors = _validate_bulk_row(product, seen_skus)
+
+        # Cross-batch dedupe: reject a SKU that already exists in the catalog.
+        # Only checked once the SKU is otherwise valid (avoids a pointless DB
+        # hit on a row that's already failing for another reason).
+        if not errors and repo is not None:
+            try:
+                if repo.find_by_sku(sku_norm) is not None:
+                    errors.append("Product with this SKU already exists")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[BULK-CREATE] SKU lookup failed for %s: %s", sku_norm, exc
+                )
+                errors.append("Could not verify SKU uniqueness")
+
+        if errors:
+            failed_count += 1
+            results.append(
+                {"index": index, "ok": False, "errors": errors, "sku": sku_norm}
+            )
+            continue
+
+        # Reserve the SKU in-batch BEFORE the write so a later duplicate fails
+        # even if the create itself errors.
+        seen_skus.add(sku_norm)
+
+        if repo is None:
+            # No DB (local dev / mock mode): echo a synthetic id so the shape is
+            # stable. Mirrors create_product's no-repo fallback.
+            created_count += 1
+            results.append(
+                {
+                    "index": index,
+                    "ok": True,
+                    "errors": [],
+                    "sku": product.sku,
+                    "product_id": str(uuid.uuid4()),
+                }
+            )
+            continue
+
+        try:
+            product_data = _build_product_data(product, current_user.get("user_id"))
+            created = repo.create(product_data)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[BULK-CREATE] create failed for %s: %s", sku_norm, exc)
+            created = None
+
+        if created:
+            created_count += 1
+            results.append(
+                {
+                    "index": index,
+                    "ok": True,
+                    "errors": [],
+                    "sku": created.get("sku", product.sku),
+                    "product_id": created.get("product_id"),
+                }
+            )
+        else:
+            failed_count += 1
+            # Roll back the in-batch reservation so the SKU isn't wrongly
+            # blocked for a (hypothetical) later retry row.
+            seen_skus.discard(sku_norm)
+            results.append(
+                {
+                    "index": index,
+                    "ok": False,
+                    "errors": ["Failed to create product"],
+                    "sku": sku_norm,
+                }
+            )
+
+    # Invalidate the product list cache once if anything was actually created.
+    if created_count and repo is not None:
+        try:
+            from ..services.cache import cache
+
+            cache.delete_pattern("products:*")
+        except Exception:  # noqa: BLE001
+            pass
+
+    return {
+        "summary": {
+            "total": len(body.products),
+            "created": created_count,
+            "failed": failed_count,
+        },
+        "results": results,
+    }
 
 
 # ============================================================================
