@@ -195,13 +195,14 @@ async def book_shipment(
     order = _resolve_order(body.order_id)
     if order is None:
         # Allow booking even if the order can't be loaded (mock/no-DB), but warn.
-        logger.info("[SHIPROCKET] order %s not found - booking with request data only", body.order_id)
+        logger.info(
+            "[SHIPROCKET] order %s not found - booking with request data only",
+            body.order_id,
+        )
         order = {"order_id": body.order_id}
 
     store_id = (
-        body.store_id
-        or order.get("store_id")
-        or current_user.get("active_store_id")
+        body.store_id or order.get("store_id") or current_user.get("active_store_id")
     )
     address = _merge_address(body.address, order)
 
@@ -305,14 +306,9 @@ async def list_shipments(
     try:
         total = coll.count_documents(query)
         cursor = (
-            coll.find(query, {"_id": 0})
-            .sort("created_at", -1)
-            .skip(skip)
-            .limit(limit)
+            coll.find(query, {"_id": 0}).sort("created_at", -1).skip(skip).limit(limit)
         )
-        shipments: List[Dict[str, Any]] = [
-            _shipment_to_response(d) for d in cursor
-        ]
+        shipments: List[Dict[str, Any]] = [_shipment_to_response(d) for d in cursor]
     except Exception as exc:  # noqa: BLE001
         logger.warning("[SHIPROCKET] list failed: %s", exc)
         return {"shipments": [], "total": 0}

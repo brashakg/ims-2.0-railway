@@ -297,9 +297,7 @@ def copy_marker_block(
 
     marks = [" "] * 3
     marks[idx] = "X"
-    rendered = " | ".join(
-        "{0} ({1})".format(labels[i], marks[i]) for i in range(3)
-    )
+    rendered = " | ".join("{0} ({1})".format(labels[i], marks[i]) for i in range(3))
     return {
         "mode": used_mode,
         "active": labels[idx],
@@ -522,9 +520,7 @@ def _state_code_of(value: Any) -> str:
     return ""
 
 
-def _is_interstate_for(
-    place_of_supply: Any, supplier_state: Any
-) -> bool:
+def _is_interstate_for(place_of_supply: Any, supplier_state: Any) -> bool:
     """True when the supply is inter-state -> IGST. Missing data defaults to
     False so existing intra-state behaviour never regresses."""
     pos = _state_code_of(place_of_supply)
@@ -573,7 +569,11 @@ def hsn_tax_summary(
         taxable = _f(
             raw.get("taxable_value")
             if raw.get("taxable_value") is not None
-            else (raw.get("taxable") if raw.get("taxable") is not None else raw.get("amount"))
+            else (
+                raw.get("taxable")
+                if raw.get("taxable") is not None
+                else raw.get("amount")
+            )
         )
         try:
             rate = float(raw.get("gst_rate") or raw.get("rate") or 0)
@@ -583,9 +583,7 @@ def hsn_tax_summary(
             qty = float(raw.get("qty") or raw.get("quantity") or 0)
         except (TypeError, ValueError):
             qty = 0.0
-        description = str(
-            raw.get("description") or raw.get("name") or ""
-        ).strip()
+        description = str(raw.get("description") or raw.get("name") or "").strip()
 
         # Group by (hsn, rate) so a single HSN with two rates (e.g. tax
         # holiday on a line) doesn't aggregate incorrectly.
@@ -656,7 +654,9 @@ def _pick(entity: Optional[Dict[str, Any]], *keys: str) -> str:
     return ""
 
 
-def _gstin_for_state(entity: Optional[Dict[str, Any]], state_code: str) -> Tuple[str, str]:
+def _gstin_for_state(
+    entity: Optional[Dict[str, Any]], state_code: str
+) -> Tuple[str, str]:
     """Return (gstin, state_name) for the entity's registration that matches
     `state_code`. Falls back to the primary registration; finally to ("", "")."""
     if not isinstance(entity, dict):
@@ -795,7 +795,9 @@ def LegalHeader(  # noqa: N802 - intentionally mirror the JSX export name
         else (state_name or "")
     )
 
-    cmb = copy_marker_block(copy_marker, mode=COPY_MARKER_MODES.get(doc_type, "rule_48"))
+    cmb = copy_marker_block(
+        copy_marker, mode=COPY_MARKER_MODES.get(doc_type, "rule_48")
+    )
 
     meta_rows: List[Tuple[str, str]] = []
     if doc_number:
@@ -819,12 +821,24 @@ def LegalHeader(  # noqa: N802 - intentionally mirror the JSX export name
         ("Place of supply", store_addr_full),
         (
             "Contact",
-            " | ".join(p for p in [applied["registered_phone"], applied["registered_email"], applied["website"]] if p),
+            " | ".join(
+                p
+                for p in [
+                    applied["registered_phone"],
+                    applied["registered_email"],
+                    applied["website"],
+                ]
+                if p
+            ),
         ),
         ("GSTIN / UIN", gstin),
         (
             "State / Code",
-            (state_name + (" / " + store_state_code if store_state_code else "")) if state_name else store_state_code,
+            (
+                (state_name + (" / " + store_state_code if store_state_code else ""))
+                if state_name
+                else store_state_code
+            ),
         ),
         ("PAN", applied["pan"]),
         ("CIN", applied["cin"]),
@@ -859,7 +873,9 @@ def LegalHeader(  # noqa: N802 - intentionally mirror the JSX export name
         "reverse_charge": rc_value,
         "meta": meta_rows,
         "signatory_name": applied.get("signatory_name", ""),
-        "signatory_designation": applied.get("signatory_designation", "Authorised Signatory"),
+        "signatory_designation": applied.get(
+            "signatory_designation", "Authorised Signatory"
+        ),
         "footer_terms": applied.get("footer_terms", ""),
         "logo_url": applied.get("logo_url", ""),
         "retention_years": int(applied.get("retention_years") or 7),

@@ -652,7 +652,11 @@ def _determine_lifecycle_phase(customer: dict, orders: list) -> dict:
 
 
 _SEGMENT_DEFS = [
-    ("champions", "Champions", "Recent, frequent, high-value purchases. VIP tier customers."),
+    (
+        "champions",
+        "Champions",
+        "Recent, frequent, high-value purchases. VIP tier customers.",
+    ),
     ("loyal", "Loyal Customers", "Consistent, regular purchases. Repeat buyers."),
     ("big_spenders", "Big Spenders", "High lifetime value regardless of recency."),
     ("at_risk", "At Risk", "Were regular, now declining engagement."),
@@ -662,10 +666,18 @@ _SEGMENT_DEFS = [
 # Order statuses that count as a real sale (both cases — TechCherry uses
 # uppercase "DELIVERED"). Mirrors inventory._SOLD_STATUSES.
 _SOLD_STATUSES = [
-    "DELIVERED", "delivered", "Delivered",
-    "COMPLETED", "completed", "Completed",
-    "PAID", "paid", "Paid",
-    "FULFILLED", "fulfilled", "Fulfilled",
+    "DELIVERED",
+    "delivered",
+    "Delivered",
+    "COMPLETED",
+    "completed",
+    "Completed",
+    "PAID",
+    "paid",
+    "Paid",
+    "FULFILLED",
+    "fulfilled",
+    "Fulfilled",
 ]
 
 
@@ -740,7 +752,9 @@ def _perform_rfm_segmentation(customers: list) -> list:
             ):
                 if not key:
                     continue
-                rec = key_map.setdefault(key, {"count": 0, "monetary": 0.0, "last": None})
+                rec = key_map.setdefault(
+                    key, {"count": 0, "monetary": 0.0, "last": None}
+                )
                 rec["count"] += 1
                 rec["monetary"] += amt
                 if dt and (rec["last"] is None or dt > rec["last"]):

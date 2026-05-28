@@ -43,26 +43,29 @@ HSN choice (turnover <= Rs 5 Cr) is handled by the frontend at data entry.
 # previously billed at 5% regresses.
 GST_CATEGORY_TABLE: dict = {
     # --- canonical product categories (schemas.py PRODUCT_SCHEMA.category) ---
-    "FRAME": ("900311", 5.0),                 # 9003 frames -> 5%
-    "OPTICAL_LENS": ("900150", 5.0),          # 9001 spectacle lenses -> 5%
-    "READING_GLASSES": ("900490", 5.0),       # 9004 corrective (readymade readers) -> 5%
-    "CONTACT_LENS": ("900130", 5.0),          # 9001 contact lenses -> 5%
+    "FRAME": ("900311", 5.0),  # 9003 frames -> 5%
+    "OPTICAL_LENS": ("900150", 5.0),  # 9001 spectacle lenses -> 5%
+    "READING_GLASSES": ("900490", 5.0),  # 9004 corrective (readymade readers) -> 5%
+    "CONTACT_LENS": ("900130", 5.0),  # 9001 contact lenses -> 5%
     "COLORED_CONTACT_LENS": ("900130", 5.0),  # 9001 contact lenses -> 5%
-    "SUNGLASS": ("900410", 18.0),             # 9004 non-corrective sunglasses -> 18%
-    "WATCH": ("910111", 18.0),                # 9101 watches -> 18%
-    "SMARTWATCH": ("910221", 18.0),           # 9102 / 8517 smartwatches -> 18%
-    "SMARTGLASSES": ("852580", 18.0),         # GST-REVIEW: electronic eyewear; 18% (see module docstring)
-    "WALL_CLOCK": ("910500", 18.0),           # 9105 clocks -> 18%
-    "ACCESSORIES": ("392690", 18.0),          # cases / cloths / accessories -> 18%
-    "SERVICES": ("998599", 18.0),             # optical services -> 18%
+    "SUNGLASS": ("900410", 18.0),  # 9004 non-corrective sunglasses -> 18%
+    "WATCH": ("910111", 18.0),  # 9101 watches -> 18%
+    "SMARTWATCH": ("910221", 18.0),  # 9102 / 8517 smartwatches -> 18%
+    "SMARTGLASSES": (
+        "852580",
+        18.0,
+    ),  # GST-REVIEW: electronic eyewear; 18% (see module docstring)
+    "WALL_CLOCK": ("910500", 18.0),  # 9105 clocks -> 18%
+    "ACCESSORIES": ("392690", 18.0),  # cases / cloths / accessories -> 18%
+    "SERVICES": ("998599", 18.0),  # optical services -> 18%
     # Hearing aids: HSN 9021 complete devices are NIL/exempt; parts are 18%.
     # (Not in the PRODUCT_SCHEMA enum yet, but the AddProductPage UI offers it,
     # so map it here so master == billing if a hearing aid is ever sold.)
     "HEARING_AID": ("902140", 0.0),
     # --- canonical ORDER item_type values that differ from product category ---
-    "LENS": ("900150", 5.0),                  # order item_type for a spectacle lens -> 5%
-    "ACCESSORY": ("392690", 18.0),            # order item_type (singular) -> 18%
-    "SERVICE": ("998599", 18.0),              # order item_type (singular) -> 18%
+    "LENS": ("900150", 5.0),  # order item_type for a spectacle lens -> 5%
+    "ACCESSORY": ("392690", 18.0),  # order item_type (singular) -> 18%
+    "SERVICE": ("998599", 18.0),  # order item_type (singular) -> 18%
     # --- legacy / alternate aliases kept for back-compat (no regression) ---
     "FRAMES": ("900311", 5.0),
     "EYEGLASS_FRAME": ("900311", 5.0),
@@ -86,15 +89,15 @@ GST_CATEGORY_TABLE: dict = {
     # --- short UI codes used at product create on AddProductPage.tsx ---
     # (mirrors the frontend CATEGORIES list so the master rate matches even if
     # a product is persisted with a short code).
-    "FR": ("900311", 5.0),      # Frame
-    "LS": ("900150", 5.0),      # Optical Lens
-    "RG": ("900490", 5.0),      # Reading Glasses (corrective)
-    "CL": ("900130", 5.0),      # Contact Lens
-    "SG": ("900410", 18.0),     # Sunglass
-    "WT": ("910111", 18.0),     # Wrist Watch
-    "CK": ("910500", 18.0),     # Clock
-    "HA": ("902140", 0.0),      # Hearing Aid (NIL/exempt)
-    "ACC": ("392690", 18.0),    # Accessories
+    "FR": ("900311", 5.0),  # Frame
+    "LS": ("900150", 5.0),  # Optical Lens
+    "RG": ("900490", 5.0),  # Reading Glasses (corrective)
+    "CL": ("900130", 5.0),  # Contact Lens
+    "SG": ("900410", 18.0),  # Sunglass
+    "WT": ("910111", 18.0),  # Wrist Watch
+    "CK": ("910500", 18.0),  # Clock
+    "HA": ("902140", 0.0),  # Hearing Aid (NIL/exempt)
+    "ACC": ("392690", 18.0),  # Accessories
     "SMTSG": ("852580", 18.0),  # Smart Sunglass     (GST-REVIEW)
     "SMTFR": ("852580", 18.0),  # Smart Glasses      (GST-REVIEW)
     "SMTWT": ("910221", 18.0),  # Smart Watch
@@ -126,7 +129,9 @@ def gst_rate_for_category(category: str) -> float:
     categories. See the DEFAULT_GST_RATE comment above for why the fallback is
     5% and not the 18% standard rate.
     """
-    return GST_CATEGORY_TABLE.get((category or "").strip().upper(), (None, DEFAULT_GST_RATE))[1]
+    return GST_CATEGORY_TABLE.get(
+        (category or "").strip().upper(), (None, DEFAULT_GST_RATE)
+    )[1]
 
 
 def hsn_for_category(category: str) -> str | None:
@@ -154,39 +159,116 @@ _CACHE_KEY = "hsn_gst_master:lookup"
 
 # Map the many category spellings to the category_hint stored on master rows.
 _CATEGORY_HINT = {
-    "FRAME": "FRAME", "FRAMES": "FRAME", "EYEGLASS_FRAME": "FRAME",
-    "SPECTACLE_FRAME": "FRAME", "FR": "FRAME",
-    "OPTICAL_LENS": "LENS", "LENS": "LENS", "LENSES": "LENS", "RX_LENSES": "LENS",
-    "EYEGLASS_LENS": "LENS", "OPTICAL_LENSES": "LENS", "SPECTACLE_LENS": "LENS",
-    "SPECTACLE_LENSES": "LENS", "LS": "LENS",
-    "CONTACT_LENS": "CONTACT_LENS", "CONTACT_LENSES": "CONTACT_LENS",
-    "COLORED_CONTACT_LENS": "CONTACT_LENS", "COLORED_CONTACT_LENSES": "CONTACT_LENS",
-    "COLOUR_CONTACTS": "CONTACT_LENS", "CL": "CONTACT_LENS",
-    "READING_GLASSES": "SPECTACLE", "SPECTACLE": "SPECTACLE",
-    "COMPLETE_SPECTACLE": "SPECTACLE", "RG": "SPECTACLE",
-    "SUNGLASS": "SUNGLASSES", "SUNGLASSES": "SUNGLASSES", "SG": "SUNGLASSES",
-    "WATCH": "WATCH", "WRIST_WATCHES": "WATCH", "WATCHES": "WATCH", "WT": "WATCH",
-    "SMARTWATCH": "SMARTWATCH", "SMARTWATCHES": "SMARTWATCH",
-    "SMART_WATCH": "SMARTWATCH", "SMTWT": "SMARTWATCH",
-    "ACCESSORIES": "ACCESSORIES", "ACCESSORY": "ACCESSORIES", "ACC": "ACCESSORIES",
-    "SERVICE": "SERVICE", "SERVICES": "SERVICE", "SVC": "SERVICE",
-    "HEARING_AID": "HEARING_AID", "HEARING_AIDS": "HEARING_AID", "HA": "HEARING_AID",
+    "FRAME": "FRAME",
+    "FRAMES": "FRAME",
+    "EYEGLASS_FRAME": "FRAME",
+    "SPECTACLE_FRAME": "FRAME",
+    "FR": "FRAME",
+    "OPTICAL_LENS": "LENS",
+    "LENS": "LENS",
+    "LENSES": "LENS",
+    "RX_LENSES": "LENS",
+    "EYEGLASS_LENS": "LENS",
+    "OPTICAL_LENSES": "LENS",
+    "SPECTACLE_LENS": "LENS",
+    "SPECTACLE_LENSES": "LENS",
+    "LS": "LENS",
+    "CONTACT_LENS": "CONTACT_LENS",
+    "CONTACT_LENSES": "CONTACT_LENS",
+    "COLORED_CONTACT_LENS": "CONTACT_LENS",
+    "COLORED_CONTACT_LENSES": "CONTACT_LENS",
+    "COLOUR_CONTACTS": "CONTACT_LENS",
+    "CL": "CONTACT_LENS",
+    "READING_GLASSES": "SPECTACLE",
+    "SPECTACLE": "SPECTACLE",
+    "COMPLETE_SPECTACLE": "SPECTACLE",
+    "RG": "SPECTACLE",
+    "SUNGLASS": "SUNGLASSES",
+    "SUNGLASSES": "SUNGLASSES",
+    "SG": "SUNGLASSES",
+    "WATCH": "WATCH",
+    "WRIST_WATCHES": "WATCH",
+    "WATCHES": "WATCH",
+    "WT": "WATCH",
+    "SMARTWATCH": "SMARTWATCH",
+    "SMARTWATCHES": "SMARTWATCH",
+    "SMART_WATCH": "SMARTWATCH",
+    "SMTWT": "SMARTWATCH",
+    "ACCESSORIES": "ACCESSORIES",
+    "ACCESSORY": "ACCESSORIES",
+    "ACC": "ACCESSORIES",
+    "SERVICE": "SERVICE",
+    "SERVICES": "SERVICE",
+    "SVC": "SERVICE",
+    "HEARING_AID": "HEARING_AID",
+    "HEARING_AIDS": "HEARING_AID",
+    "HA": "HEARING_AID",
 }
 
 # GST 2.0 seed for the editable master. Mirrors GST_CATEGORY_TABLE's rates +
 # 6-digit HSNs. Idempotent seeder inserts only missing codes; never overwrites
 # an owner/CA edit.
 HSN_GST_SEED = [
-    {"hsn_code": "900130", "description": "Contact lenses", "gst_rate": 5.0, "category_hint": "CONTACT_LENS"},
-    {"hsn_code": "900150", "description": "Spectacle / optical lenses", "gst_rate": 5.0, "category_hint": "LENS"},
-    {"hsn_code": "900311", "description": "Frames and mountings for spectacles", "gst_rate": 5.0, "category_hint": "FRAME"},
-    {"hsn_code": "900490", "description": "Corrective spectacles / goggles / readers", "gst_rate": 5.0, "category_hint": "SPECTACLE"},
-    {"hsn_code": "900410", "description": "Sunglasses (non-corrective)", "gst_rate": 18.0, "category_hint": "SUNGLASSES"},
-    {"hsn_code": "910111", "description": "Wrist watches", "gst_rate": 18.0, "category_hint": "WATCH"},
-    {"hsn_code": "910221", "description": "Smart watches", "gst_rate": 18.0, "category_hint": "SMARTWATCH"},
-    {"hsn_code": "392690", "description": "Spectacle cases & optical accessories", "gst_rate": 18.0, "category_hint": "ACCESSORIES"},
-    {"hsn_code": "998599", "description": "Optical repair / fitting services", "gst_rate": 18.0, "category_hint": "SERVICE"},
-    {"hsn_code": "902140", "description": "Hearing aids (NIL / exempt)", "gst_rate": 0.0, "category_hint": "HEARING_AID"},
+    {
+        "hsn_code": "900130",
+        "description": "Contact lenses",
+        "gst_rate": 5.0,
+        "category_hint": "CONTACT_LENS",
+    },
+    {
+        "hsn_code": "900150",
+        "description": "Spectacle / optical lenses",
+        "gst_rate": 5.0,
+        "category_hint": "LENS",
+    },
+    {
+        "hsn_code": "900311",
+        "description": "Frames and mountings for spectacles",
+        "gst_rate": 5.0,
+        "category_hint": "FRAME",
+    },
+    {
+        "hsn_code": "900490",
+        "description": "Corrective spectacles / goggles / readers",
+        "gst_rate": 5.0,
+        "category_hint": "SPECTACLE",
+    },
+    {
+        "hsn_code": "900410",
+        "description": "Sunglasses (non-corrective)",
+        "gst_rate": 18.0,
+        "category_hint": "SUNGLASSES",
+    },
+    {
+        "hsn_code": "910111",
+        "description": "Wrist watches",
+        "gst_rate": 18.0,
+        "category_hint": "WATCH",
+    },
+    {
+        "hsn_code": "910221",
+        "description": "Smart watches",
+        "gst_rate": 18.0,
+        "category_hint": "SMARTWATCH",
+    },
+    {
+        "hsn_code": "392690",
+        "description": "Spectacle cases & optical accessories",
+        "gst_rate": 18.0,
+        "category_hint": "ACCESSORIES",
+    },
+    {
+        "hsn_code": "998599",
+        "description": "Optical repair / fitting services",
+        "gst_rate": 18.0,
+        "category_hint": "SERVICE",
+    },
+    {
+        "hsn_code": "902140",
+        "description": "Hearing aids (NIL / exempt)",
+        "gst_rate": 0.0,
+        "category_hint": "HEARING_AID",
+    },
 ]
 
 

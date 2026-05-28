@@ -34,7 +34,7 @@ _PRIORITY_MAP = {
 
 # Quiet hours (server local clock): no WhatsApp between these hours.
 QUIET_START_HOUR = 21  # 9 PM
-QUIET_END_HOUR = 9     # 9 AM
+QUIET_END_HOUR = 9  # 9 AM
 # Priorities that bypass quiet hours (true emergencies).
 _ALWAYS_WHATSAPP = {"P0", "P1"}
 
@@ -55,9 +55,7 @@ def build_escalation_notification(
         "notification_type": "task_escalation",
         "user_id": target_user_id,
         "title": f"Escalated to you: {title}",
-        "message": (
-            f"[{priority}] '{title}' was escalated to you. Reason: {reason}."
-        ),
+        "message": (f"[{priority}] '{title}' was escalated to you. Reason: {reason}."),
         "entity_type": "task",
         "entity_id": task.get("task_id"),
         "action_url": "/tasks",

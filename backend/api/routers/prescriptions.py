@@ -315,9 +315,7 @@ async def list_prescriptions(
 
         if rx_kind is not None:
             prescriptions = [
-                p
-                for p in prescriptions
-                if (p.get("rx_kind") or "SPECTACLE") == rx_kind
+                p for p in prescriptions if (p.get("rx_kind") or "SPECTACLE") == rx_kind
             ]
 
         return {"prescriptions": prescriptions, "total": len(prescriptions)}
@@ -629,9 +627,7 @@ def _build_cl_print_html(prescription: dict) -> str:
     series = prescription.get("cl_series") or "-"
     modality = prescription.get("modality") or "-"
     color = prescription.get("color")
-    color_row = (
-        f"<p><strong>Color:</strong> {color}</p>" if color else ""
-    )
+    color_row = f"<p><strong>Color:</strong> {color}</p>" if color else ""
     return f"""
         <!DOCTYPE html>
         <html>

@@ -29,6 +29,7 @@ Composition with display_fixtures:
   - if the caller supplies product_category on the create payload, we run
     a merch-compatibility check against fixture.merch.
 """
+
 from __future__ import annotations
 
 import logging
@@ -194,9 +195,7 @@ def _audit(
             }
         )
     except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "[PLACEMENTS] audit insert failed for %s: %s", placement_id, exc
-        )
+        logger.warning("[PLACEMENTS] audit insert failed for %s: %s", placement_id, exc)
 
 
 # ============================================================================
@@ -330,9 +329,7 @@ async def create_placement(
             )
         except Exception as exc:  # noqa: BLE001
             logger.error("[PLACEMENTS] stack-update failed: %s", exc)
-            raise HTTPException(
-                status_code=500, detail="Failed to stack placement"
-            )
+            raise HTTPException(status_code=500, detail="Failed to stack placement")
         cleaned_before = _clean(existing) or {}
         merged = coll.find_one({"placement_id": existing["placement_id"]})
         cleaned_after = _clean(merged) or {}

@@ -579,11 +579,7 @@ def _eye_block(rx: dict, key: str) -> dict:
 
 def _rx_date(rx: dict) -> str:
     """Best-effort human date for the Rx (prescription_date / test_date / created_at)."""
-    raw = (
-        rx.get("prescription_date")
-        or rx.get("test_date")
-        or rx.get("created_at")
-    )
+    raw = rx.get("prescription_date") or rx.get("test_date") or rx.get("created_at")
     if raw is None:
         return ""
     if isinstance(raw, datetime):
@@ -659,15 +655,11 @@ def _build_rx_card_html(rx: dict, store: Optional[dict]) -> str:
         )
 
     # Optional meta lines built only when present.
-    age_html = (
-        f"<span><b>Age:</b> {esc(age)}</span>" if age not in (None, "") else ""
-    )
+    age_html = f"<span><b>Age:</b> {esc(age)}</span>" if age not in (None, "") else ""
     phone_html = (
         f"<span><b>Phone:</b> {esc(phone)}</span>" if phone not in (None, "") else ""
     )
-    pd_html = (
-        f"<div class='pd'><b>PD:</b> {esc(pd_str)} mm</div>" if pd_str else ""
-    )
+    pd_html = f"<div class='pd'><b>PD:</b> {esc(pd_str)} mm</div>" if pd_str else ""
     gstin_html = (
         f"<div class='clinic-gstin'>GSTIN: {esc(clinic_gstin)}</div>"
         if clinic_gstin
@@ -835,9 +827,7 @@ async def create_prescription_redo(
         "redo_id": str(uuid.uuid4()),
         "reason": body.reason,
         "redo_by": current_user.get("user_id", ""),
-        "redo_by_name": current_user.get(
-            "full_name", current_user.get("username", "")
-        ),
+        "redo_by_name": current_user.get("full_name", current_user.get("username", "")),
         "redo_at": now.isoformat(),
     }
 
@@ -951,9 +941,7 @@ def _build_abuse_alerts(prescriptions: List[dict], now: datetime) -> List[dict]:
     for rx in prescriptions:
         if not isinstance(rx, dict):
             continue
-        opto_id = (
-            rx.get("optometrist_id") or rx.get("optometristId") or _opto_label(rx)
-        )
+        opto_id = rx.get("optometrist_id") or rx.get("optometristId") or _opto_label(rx)
         bucket = by_opto.setdefault(
             opto_id,
             {"name": _opto_label(rx), "rxs": [], "redos": 0, "oor": 0, "dates": []},

@@ -26,6 +26,7 @@ breaks the primary write.
 Empty state on first deploy. NO seed data. The owner creates the first
 fixtures via the UI (v2-2b).
 """
+
 from __future__ import annotations
 
 import logging
@@ -278,9 +279,7 @@ async def list_fixtures(
 
 
 @router.get("/{fixture_id}")
-async def get_fixture(
-    fixture_id: str, current_user: dict = Depends(get_current_user)
-):
+async def get_fixture(fixture_id: str, current_user: dict = Depends(get_current_user)):
     """Single fixture by id. 404 when missing or not in the user's store."""
     coll = _fixtures_coll()
     if coll is None:

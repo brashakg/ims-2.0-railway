@@ -143,9 +143,7 @@ async def list_customers(
 
         # Determine the effective store filter
         user_roles = current_user.get("roles", [])
-        is_hq = any(
-            r in user_roles for r in ["SUPERADMIN", "ADMIN", "AREA_MANAGER"]
-        )
+        is_hq = any(r in user_roles for r in ["SUPERADMIN", "ADMIN", "AREA_MANAGER"])
         if is_hq:
             # HQ roles: honour explicit ?store_id, otherwise no scope.
             effective_store = store_id
@@ -600,7 +598,9 @@ def _current_credit_balance(customer_id: str, customer_doc: Optional[dict]) -> f
     return float((customer_doc or {}).get("store_credit", 0) or 0)
 
 
-def _post_credit_entry(customer_id: str, entry_type: str, body: StoreCreditEntryRequest, current_user: dict):
+def _post_credit_entry(
+    customer_id: str, entry_type: str, body: StoreCreditEntryRequest, current_user: dict
+):
     from ..services import store_credit_ledger as scl
 
     repo = get_customer_repository()

@@ -959,7 +959,10 @@ async def update_lens_status(
         )
 
     now = datetime.now()
-    update = {"lens_status": target, "lens_status_updated_by": current_user.get("user_id")}
+    update = {
+        "lens_status": target,
+        "lens_status_updated_by": current_user.get("user_id"),
+    }
     ts_field = LENS_STATUS_TIMESTAMP_FIELD.get(target)
     if ts_field:
         update[ts_field] = now.isoformat()
@@ -1019,12 +1022,15 @@ async def update_lens_status(
                                 logger.warning(
                                     "[LENS_HOOK] commit on MOUNTED failed "
                                     "(order %s line %s): %s",
-                                    order_id, idx, cm_exc,
+                                    order_id,
+                                    idx,
+                                    cm_exc,
                                 )
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "[LENS_HOOK] MOUNTED commit outer error job=%s: %s",
-                job_id, exc,
+                job_id,
+                exc,
             )
 
     return {
@@ -1086,7 +1092,10 @@ async def notify_ready(
     try:
         repo.update(
             job_id,
-            {"ready_notified_at": now.isoformat(), "ready_notified_by": current_user.get("user_id")},
+            {
+                "ready_notified_at": now.isoformat(),
+                "ready_notified_by": current_user.get("user_id"),
+            },
         )
     except Exception as e:  # noqa: BLE001
         logger.warning("[WORKSHOP] notify-ready stamp failed: %s", e)

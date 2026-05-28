@@ -23,22 +23,26 @@ from typing import Optional
 
 PF_EMPLOYEE_RATE = 0.12
 PF_EMPLOYER_RATE = 0.12
-EPS_RATE = 0.0833          # employer's pension portion
-EPS_WAGE_CEILING = 15000   # EPS is always capped at this monthly wage
-PF_WAGE_CEILING = 15000    # PF contributory wage cap when ceiling is applied
-EDLI_RATE = 0.005          # employer EDLI (A/c 21), on the EPS-capped wage
-PF_ADMIN_RATE = 0.005      # employer PF admin charges (A/c 2)
+EPS_RATE = 0.0833  # employer's pension portion
+EPS_WAGE_CEILING = 15000  # EPS is always capped at this monthly wage
+PF_WAGE_CEILING = 15000  # PF contributory wage cap when ceiling is applied
+EDLI_RATE = 0.005  # employer EDLI (A/c 21), on the EPS-capped wage
+PF_ADMIN_RATE = 0.005  # employer PF admin charges (A/c 2)
 
 ESI_EMPLOYEE_RATE = 0.0075
 ESI_EMPLOYER_RATE = 0.0325
-ESI_WAGE_CEILING = 21000   # ESI applies only when monthly gross <= this
+ESI_WAGE_CEILING = 21000  # ESI applies only when monthly gross <= this
 
-DAYS_BASIS_DEFAULT = 30    # 30-day proration basis
+DAYS_BASIS_DEFAULT = 30  # 30-day proration basis
 
 # Map a store's state (full name / GST state code / 2-letter) -> PT slab code.
 STATE_TO_PT_CODE = {
-    "jharkhand": "JH", "jh": "JH", "20": "JH",
-    "maharashtra": "MH", "mh": "MH", "27": "MH",
+    "jharkhand": "JH",
+    "jh": "JH",
+    "20": "JH",
+    "maharashtra": "MH",
+    "mh": "MH",
+    "27": "MH",
 }
 
 
@@ -55,9 +59,21 @@ DEFAULT_PT_SLABS = {
         "slabs": [
             {"min": 0, "max": 7500, "amount": 0, "gender": "MALE"},
             {"min": 7500.01, "max": 10000, "amount": 175, "gender": "MALE"},
-            {"min": 10000.01, "max": None, "amount": 200, "amount_february": 300, "gender": "MALE"},
+            {
+                "min": 10000.01,
+                "max": None,
+                "amount": 200,
+                "amount_february": 300,
+                "gender": "MALE",
+            },
             {"min": 0, "max": 25000, "amount": 0, "gender": "FEMALE"},
-            {"min": 25000.01, "max": None, "amount": 200, "amount_february": 300, "gender": "FEMALE"},
+            {
+                "min": 25000.01,
+                "max": None,
+                "amount": 200,
+                "amount_february": 300,
+                "gender": "FEMALE",
+            },
         ],
         "notes": "EDITABLE default - verify current Maharashtra PT. Women nil up to 25,000; +100 in February for the top slab.",
     },
@@ -128,7 +144,9 @@ def _earnings(config: dict) -> dict:
     conveyance = float(config.get("conveyance", 0) or 0)
     medical = float(config.get("medical", 0) or 0)
     special = float(config.get("special_allowance", 0) or 0)
-    other = sum(float(a.get("amount", 0) or 0) for a in (config.get("other_allowances") or []))
+    other = sum(
+        float(a.get("amount", 0) or 0) for a in (config.get("other_allowances") or [])
+    )
     return {
         "basic": basic,
         "hra": hra,
@@ -211,16 +229,29 @@ def compute_payroll(
     # PF (on earned basic)
     pf_applicable = config.get("pf_applicable", True)
     if pf_applicable and earned_basic > 0:
-        pf = compute_pf(earned_basic, ceiling_cap=config.get("pf_wage_ceiling_cap", True))
+        pf = compute_pf(
+            earned_basic, ceiling_cap=config.get("pf_wage_ceiling_cap", True)
+        )
     else:
-        pf = {"contributory_wage": 0.0, "employee": 0.0, "employer_epf": 0.0,
-              "employer_eps": 0.0, "edli": 0.0, "admin": 0.0, "employer_total": 0.0}
+        pf = {
+            "contributory_wage": 0.0,
+            "employee": 0.0,
+            "employer_epf": 0.0,
+            "employer_eps": 0.0,
+            "edli": 0.0,
+            "admin": 0.0,
+            "employer_total": 0.0,
+        }
 
     # ESI (on earned gross; eligibility on full gross)
     esi_on = esi_eligible(config, full_gross)
     # round to paise before ceil so float drift can't push 81.0 -> 82.
-    esi_employee = float(math.ceil(round(earned_gross * 75 / 10000, 2))) if esi_on else 0.0
-    esi_employer = float(math.ceil(round(earned_gross * 325 / 10000, 2))) if esi_on else 0.0
+    esi_employee = (
+        float(math.ceil(round(earned_gross * 75 / 10000, 2))) if esi_on else 0.0
+    )
+    esi_employer = (
+        float(math.ceil(round(earned_gross * 325 / 10000, 2))) if esi_on else 0.0
+    )
 
     # Professional Tax: bracket determined by the full contracted gross, but
     # only charged when salary is actually earned this month (no pay -> no PT).

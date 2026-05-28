@@ -111,6 +111,7 @@ def _get_db():
     other routers."""
     try:
         from database.connection import get_db
+
         d = get_db()
         return d.db if d else None
     except Exception:
@@ -133,6 +134,7 @@ class ImportRequest(BaseModel):
     `overwrite=True` means duplicates get `$set` updated; `False` means
     skip and count as dedup'd.
     """
+
     type: Literal["products", "customers", "orders"]
     store_id: str = Field(..., min_length=1)
     rows: List[Dict[str, Any]] = Field(..., max_length=2000)
@@ -155,19 +157,25 @@ class ImportResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-def _map_product(row: Dict[str, Any], store_id: str, source: str) -> Optional[Dict[str, Any]]:
+def _map_product(
+    row: Dict[str, Any], store_id: str, source: str
+) -> Optional[Dict[str, Any]]:
     """TechCherry stock columns:
-       Prod Name, Prod Grp, Unit, HSN, Stock In_Hand, Stock Value, Barcode,
-       Qty, Pur Prc, Ttl Pur Val, Sale Prc, Ttl Sale Val, eCom
+    Prod Name, Prod Grp, Unit, HSN, Stock In_Hand, Stock Value, Barcode,
+    Qty, Pur Prc, Ttl Pur Val, Sale Prc, Ttl Sale Val, eCom
     """
-    name = (row.get("name") or row.get("prod_name") or row.get("Prod Name") or "").strip()
+    name = (
+        row.get("name") or row.get("prod_name") or row.get("Prod Name") or ""
+    ).strip()
     barcode = (row.get("barcode") or row.get("Barcode") or "").strip()
     if not name and not barcode:
         return None
     if barcode.upper() == "NA":
         barcode = ""
 
-    group = (row.get("group") or row.get("prod_grp") or row.get("Prod Grp") or "").strip()
+    group = (
+        row.get("group") or row.get("prod_grp") or row.get("Prod Grp") or ""
+    ).strip()
     # TechCherry concatenates brand + category in "Prod Grp" (e.g. "RAYBAN FRAME").
     # Heuristic: first word = brand, rest = category.
     brand = ""
@@ -205,12 +213,16 @@ def _map_product(row: Dict[str, Any], store_id: str, source: str) -> Optional[Di
     }
 
 
-def _map_customer(row: Dict[str, Any], store_id: str, source: str) -> Optional[Dict[str, Any]]:
+def _map_customer(
+    row: Dict[str, Any], store_id: str, source: str
+) -> Optional[Dict[str, Any]]:
     """TechCherry CRM customer fields (best-effort — exact column names
     will be confirmed once the customer report DOM is read):
        Name, Mobile/Phone, Email, Address, City, GSTIN, OpeningBal, ...
     """
-    name = (row.get("name") or row.get("Name") or row.get("customer_name") or "").strip()
+    name = (
+        row.get("name") or row.get("Name") or row.get("customer_name") or ""
+    ).strip()
     phone = _normalise_phone(row.get("phone") or row.get("Mobile") or row.get("Phone"))
     if not phone and not name:
         return None
@@ -230,10 +242,12 @@ def _map_customer(row: Dict[str, Any], store_id: str, source: str) -> Optional[D
     }
 
 
-def _map_order(row: Dict[str, Any], store_id: str, source: str) -> Optional[Dict[str, Any]]:
+def _map_order(
+    row: Dict[str, Any], store_id: str, source: str
+) -> Optional[Dict[str, Any]]:
     """TechCherry Transaction Detail fields (best-effort):
-       VchNo / InvoiceNo, Date, CustomerName, Mobile, GrandTotal,
-       TaxableAmount, TaxAmount, Discount, PaymentMode, Items[...]
+    VchNo / InvoiceNo, Date, CustomerName, Mobile, GrandTotal,
+    TaxableAmount, TaxAmount, Discount, PaymentMode, Items[...]
     """
     invoice = (
         row.get("invoice_no")
@@ -249,15 +263,21 @@ def _map_order(row: Dict[str, Any], store_id: str, source: str) -> Optional[Dict
     return {
         "order_number": invoice,
         "store_id": store_id,
-        "customer_name": (row.get("customer_name") or row.get("CustomerName") or "").strip(),
+        "customer_name": (
+            row.get("customer_name") or row.get("CustomerName") or ""
+        ).strip(),
         "customer_phone": _normalise_phone(row.get("phone") or row.get("Mobile")),
-        "created_at": _parse_date(row.get("date") or row.get("Date") or row.get("InvoiceDate"))
+        "created_at": _parse_date(
+            row.get("date") or row.get("Date") or row.get("InvoiceDate")
+        )
         or datetime.now(timezone.utc),
         "grand_total": _safe_float(row.get("grand_total") or row.get("GrandTotal")),
         "subtotal": _safe_float(row.get("taxable_amount") or row.get("TaxableAmount")),
         "tax_amount": _safe_float(row.get("tax_amount") or row.get("TaxAmount")),
         "total_discount": _safe_float(row.get("discount") or row.get("Discount")),
-        "payment_method": (row.get("payment_mode") or row.get("PaymentMode") or "").strip(),
+        "payment_method": (
+            row.get("payment_mode") or row.get("PaymentMode") or ""
+        ).strip(),
         "items": row.get("items") or [],
         "status": "DELIVERED",  # TechCherry historic orders are completed by definition
         "source": source,
@@ -307,7 +327,9 @@ async def import_batch(
 
     col = db.get_collection(collection_name)
     if col is None:
-        raise HTTPException(status_code=503, detail=f"{collection_name} collection unavailable")
+        raise HTTPException(
+            status_code=503, detail=f"{collection_name} collection unavailable"
+        )
 
     resp = ImportResponse(type=req.type, store_id=req.store_id)
     dedup_samples: List[str] = []
@@ -372,14 +394,16 @@ async def import_status(
             col = db.get_collection(name)
             out[name] = {
                 "total": col.count_documents({"source": "techcherry"}),
-                "this_month": col.count_documents({
-                    "source": "techcherry",
-                    "techcherry_imported_at": {
-                        "$gte": datetime.now(timezone.utc).replace(
-                            hour=0, minute=0, second=0, microsecond=0
-                        )
-                    },
-                }),
+                "this_month": col.count_documents(
+                    {
+                        "source": "techcherry",
+                        "techcherry_imported_at": {
+                            "$gte": datetime.now(timezone.utc).replace(
+                                hour=0, minute=0, second=0, microsecond=0
+                            )
+                        },
+                    }
+                ),
             }
         except Exception as e:
             out[name] = {"error": str(e)[:200]}

@@ -24,9 +24,17 @@ def _b(row: dict) -> dict:
 def statutory_summary(rows: Iterable[dict]) -> dict:
     """Aggregate PF/ESI/PT/TDS + gross/net/employer-cost across payroll rows."""
     s = {
-        "count": 0, "gross": 0.0, "pf_employee": 0.0, "pf_employer": 0.0,
-        "esi_employee": 0.0, "esi_employer": 0.0, "professional_tax": 0.0,
-        "tds": 0.0, "advance_recovery": 0.0, "net": 0.0, "employer_cost": 0.0,
+        "count": 0,
+        "gross": 0.0,
+        "pf_employee": 0.0,
+        "pf_employer": 0.0,
+        "esi_employee": 0.0,
+        "esi_employer": 0.0,
+        "professional_tax": 0.0,
+        "tds": 0.0,
+        "advance_recovery": 0.0,
+        "net": 0.0,
+        "employer_cost": 0.0,
     }
     for r in rows:
         b = _b(r)
@@ -127,15 +135,15 @@ def build_pf_ecr(rows: list, config_by_emp: Optional[dict] = None) -> str:
         fields = [
             cfg.get("uan", "") or "",
             r.get("employee_name", "") or emp,
-            int(round(earn.get("earned_gross", 0) or 0)),    # gross wages
-            int(round(pf_wage)),                              # EPF wages
-            int(round(eps_wage)),                             # EPS wages
-            int(round(eps_wage)),                             # EDLI wages
-            int(round(ded.get("pf_employee", 0) or 0)),      # EPF contribution
-            int(round(empc.get("pf_employer_eps", 0) or 0)), # EPS contribution
-            int(round(empc.get("pf_employer_epf", 0) or 0)), # EPF-EPS diff
-            int(round(b.get("lwp_days", 0) or 0)),           # NCP days
-            0,                                               # refund of advances
+            int(round(earn.get("earned_gross", 0) or 0)),  # gross wages
+            int(round(pf_wage)),  # EPF wages
+            int(round(eps_wage)),  # EPS wages
+            int(round(eps_wage)),  # EDLI wages
+            int(round(ded.get("pf_employee", 0) or 0)),  # EPF contribution
+            int(round(empc.get("pf_employer_eps", 0) or 0)),  # EPS contribution
+            int(round(empc.get("pf_employer_epf", 0) or 0)),  # EPF-EPS diff
+            int(round(b.get("lwp_days", 0) or 0)),  # NCP days
+            0,  # refund of advances
         ]
         lines.append("#~#".join(str(f) for f in fields))
     return "\n".join(lines)
@@ -148,14 +156,20 @@ def _inr(n) -> str:
         return "Rs. 0"
 
 
-def build_payslip_html(row: dict, entity: Optional[dict], employee: Optional[dict]) -> str:
+def build_payslip_html(
+    row: dict, entity: Optional[dict], employee: Optional[dict]
+) -> str:
     """Branded, printable HTML payslip for one computed payroll row."""
     b = _b(row)
     earn = b.get("earnings", {})
     ded = b.get("deductions", {})
     empc = b.get("employer_contributions", {})
     entity_name = escape((entity or {}).get("name", "") or "Payslip")
-    emp_name = escape(row.get("employee_name", "") or (employee or {}).get("full_name", "") or row.get("employee_id", ""))
+    emp_name = escape(
+        row.get("employee_name", "")
+        or (employee or {}).get("full_name", "")
+        or row.get("employee_id", "")
+    )
     designation = escape((employee or {}).get("designation", "") or "")
     month = row.get("month") or b.get("month") or 0
     year = row.get("year") or b.get("year") or 0
@@ -163,21 +177,25 @@ def build_payslip_html(row: dict, entity: Optional[dict], employee: Optional[dic
     def erow(label, value):
         return f"<tr><td>{escape(label)}</td><td style='text-align:right'>{_inr(value)}</td></tr>"
 
-    earnings_rows = "".join([
-        erow("Basic", earn.get("basic")),
-        erow("HRA", earn.get("hra")),
-        erow("Conveyance", earn.get("conveyance")),
-        erow("Medical", earn.get("medical")),
-        erow("Special Allowance", earn.get("special_allowance")),
-        erow("Incentive", earn.get("incentive")),
-    ])
-    deduction_rows = "".join([
-        erow("PF (Employee)", ded.get("pf_employee")),
-        erow("ESI", ded.get("esi_employee")),
-        erow("Professional Tax", ded.get("professional_tax")),
-        erow("TDS", ded.get("tds")),
-        erow("Advance Recovery", ded.get("advance_recovery")),
-    ])
+    earnings_rows = "".join(
+        [
+            erow("Basic", earn.get("basic")),
+            erow("HRA", earn.get("hra")),
+            erow("Conveyance", earn.get("conveyance")),
+            erow("Medical", earn.get("medical")),
+            erow("Special Allowance", earn.get("special_allowance")),
+            erow("Incentive", earn.get("incentive")),
+        ]
+    )
+    deduction_rows = "".join(
+        [
+            erow("PF (Employee)", ded.get("pf_employee")),
+            erow("ESI", ded.get("esi_employee")),
+            erow("Professional Tax", ded.get("professional_tax")),
+            erow("TDS", ded.get("tds")),
+            erow("Advance Recovery", ded.get("advance_recovery")),
+        ]
+    )
     return f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>Payslip - {emp_name}</title>
 <style>

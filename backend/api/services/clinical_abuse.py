@@ -34,28 +34,28 @@ from typing import Any, Dict, List, Optional
 
 # 1. Redo rate: flag an optometrist whose redos/tests exceeds this, but only
 #    once there are enough tests for the rate to mean anything.
-REDO_RATE_WARN = 0.15          # 15% -> WARNING
-REDO_RATE_CRITICAL = 0.30      # 30% -> CRITICAL
-REDO_MIN_SAMPLE = 5            # need >= 5 tests before a rate is trustworthy
+REDO_RATE_WARN = 0.15  # 15% -> WARNING
+REDO_RATE_CRITICAL = 0.30  # 30% -> CRITICAL
+REDO_MIN_SAMPLE = 5  # need >= 5 tests before a rate is trustworthy
 
 # 2. Out-of-range Rx: flag an optometrist who hits the validation bounds (or
 #    beyond) on an unusual share of their tests.
-OUT_OF_RANGE_RATE_WARN = 0.20      # 20% of tests at/over a bound -> WARNING
+OUT_OF_RANGE_RATE_WARN = 0.20  # 20% of tests at/over a bound -> WARNING
 OUT_OF_RANGE_RATE_CRITICAL = 0.40  # 40% -> CRITICAL
 OUT_OF_RANGE_MIN_SAMPLE = 5
-OUT_OF_RANGE_MIN_COUNT = 2         # and at least this many actual hits
+OUT_OF_RANGE_MIN_COUNT = 2  # and at least this many actual hits
 
 # 3. Repeat tests for the same patient inside a short window.
-REPEAT_WINDOW_DAYS = 7         # "short window"
-REPEAT_MIN_TESTS = 3           # >= 3 tests for one patient in the window
-REPEAT_CRITICAL_TESTS = 5      # >= 5 -> CRITICAL
+REPEAT_WINDOW_DAYS = 7  # "short window"
+REPEAT_MIN_TESTS = 3  # >= 3 tests for one patient in the window
+REPEAT_CRITICAL_TESTS = 5  # >= 5 -> CRITICAL
 
 # 4. Rapid entries: many tests entered by one optometrist in too short a span.
 #    A genuine refraction takes ~10-15 min; clearing this many in this few
 #    minutes implies copy/paste data-entry rather than real exams.
-RAPID_MIN_TESTS = 5            # need at least this many close-together tests
-RAPID_MAX_MINUTES = 10.0       # ... inside this many minutes (avg gap basis)
-RAPID_CRITICAL_MINUTES = 3.0   # avg gap at/under this -> CRITICAL
+RAPID_MIN_TESTS = 5  # need at least this many close-together tests
+RAPID_MAX_MINUTES = 10.0  # ... inside this many minutes (avg gap basis)
+RAPID_CRITICAL_MINUTES = 3.0  # avg gap at/under this -> CRITICAL
 
 # Rx validation bounds (IMS 2.0 business rules). A value AT or BEYOND a bound is
 # treated as "at the edge" / suspicious. AXIS is valid 1..180 inclusive, so
@@ -293,12 +293,12 @@ def find_rapid_burst(
             start += 1
         count = end - start + 1
         if count >= min_tests:
-            span_minutes = round(
-                (valid[end] - valid[start]).total_seconds() / 60.0, 2
-            )
+            span_minutes = round((valid[end] - valid[start]).total_seconds() / 60.0, 2)
             # Prefer the densest burst: more tests, or same tests in less time.
-            if (not found) or count > best_count or (
-                count == best_count and span_minutes < best_span
+            if (
+                (not found)
+                or count > best_count
+                or (count == best_count and span_minutes < best_span)
             ):
                 found = True
                 best_count = count

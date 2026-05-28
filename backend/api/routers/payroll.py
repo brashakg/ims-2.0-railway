@@ -71,7 +71,9 @@ class SalaryConfig(BaseModel):
 
     employee_id: str
     entity_id: Optional[str] = Field(default=None, description="Employing legal entity")
-    store_id: Optional[str] = Field(default=None, description="Primary work store (PT state)")
+    store_id: Optional[str] = Field(
+        default=None, description="Primary work store (PT state)"
+    )
     designation: Optional[str] = None
     department: Optional[str] = None
     date_of_joining: Optional[str] = None
@@ -1131,10 +1133,14 @@ class PayrollRunRequest(BaseModel):
     year: int = Field(..., ge=2000, le=2100)
     store_id: Optional[str] = None
     entity_id: Optional[str] = None
-    lwp_days: Dict[str, float] = Field(default_factory=dict)      # employee_id -> unpaid days
-    incentives: Optional[Dict[str, float]] = None                 # override; else auto-fetched
-    advances: Dict[str, float] = Field(default_factory=dict)      # employee_id -> recovery amount
-    dry_run: bool = False                                         # true = preview, do not persist
+    lwp_days: Dict[str, float] = Field(
+        default_factory=dict
+    )  # employee_id -> unpaid days
+    incentives: Optional[Dict[str, float]] = None  # override; else auto-fetched
+    advances: Dict[str, float] = Field(
+        default_factory=dict
+    )  # employee_id -> recovery amount
+    dry_run: bool = False  # true = preview, do not persist
 
 
 class PayrollBatchAction(BaseModel):
@@ -1244,7 +1250,9 @@ async def run_payroll(
                 "breakdown": breakdown,
                 "basic_salary": breakdown["earnings"]["basic"],
                 "allowances": round(
-                    breakdown["earnings"]["earned_gross"] - breakdown["earnings"]["basic"], 2
+                    breakdown["earnings"]["earned_gross"]
+                    - breakdown["earnings"]["basic"],
+                    2,
                 ),
                 "incentives": breakdown["earnings"]["incentive"],
                 "deductions": breakdown["deductions"]["total_deductions"],
@@ -1297,7 +1305,9 @@ async def run_payroll(
         raise
     except Exception as e:
         logger.error("Payroll run failed: %s", e)
-        raise HTTPException(status_code=500, detail="Payroll run failed. Please try again.")
+        raise HTTPException(
+            status_code=500, detail="Payroll run failed. Please try again."
+        )
 
 
 @router.get("/run/rows")
@@ -1322,7 +1332,9 @@ async def list_payroll_rows(
         totals = {
             "gross": round(
                 sum(
-                    (r.get("breakdown", {}).get("earnings", {}) or {}).get("total_earnings", 0)
+                    (r.get("breakdown", {}).get("earnings", {}) or {}).get(
+                        "total_earnings", 0
+                    )
                     for r in rows
                 ),
                 2,
@@ -1427,7 +1439,12 @@ async def payroll_statutory_summary(
     """PF/ESI/PT/TDS + gross/net totals for a month + scope (a filing aid)."""
     db = _get_db()
     if not db:
-        return {"summary": statutory_summary([]), "month": month, "year": year, "count": 0}
+        return {
+            "summary": statutory_summary([]),
+            "month": month,
+            "year": year,
+            "count": 0,
+        }
     try:
         rows = _payroll_rows(db, month, year, store_id, entity_id)
         return {
@@ -1458,7 +1475,9 @@ async def payroll_tally_jv(
     try:
         rows = _payroll_rows(db, month, year, store_id, entity_id)
         if not rows:
-            raise HTTPException(status_code=404, detail="No payroll rows for this month/scope")
+            raise HTTPException(
+                status_code=404, detail="No payroll rows for this month/scope"
+            )
         entity = None
         if entity_id:
             entity = db.get_collection("entities").find_one({"entity_id": entity_id})
@@ -1534,11 +1553,15 @@ async def payslip_print(
             {"employee_id": employee_id, "month": month, "year": year}
         )
         if not row:
-            raise HTTPException(status_code=404, detail="Payroll row not found for this month")
+            raise HTTPException(
+                status_code=404, detail="Payroll row not found for this month"
+            )
         row = _strip_id(row)
         entity = None
         if row.get("entity_id"):
-            entity = db.get_collection("entities").find_one({"entity_id": row["entity_id"]})
+            entity = db.get_collection("entities").find_one(
+                {"entity_id": row["entity_id"]}
+            )
         employee = _get_employee_details(db, employee_id)
         return HTMLResponse(build_payslip_html(row, entity, employee))
     except HTTPException:

@@ -70,6 +70,7 @@ class GstinEntry(BaseModel):
 class BankAccount(BaseModel):
     """A bank account, optionally tied to a specific GSTIN (so collections /
     payments can be routed per registration)."""
+
     label: Optional[str] = None
     account_no: str
     ifsc: str
@@ -91,6 +92,7 @@ class EntityDocument(BaseModel):
 class InvoiceIdentity(BaseModel):
     """Entity-level invoice defaults. Stores may override header/footer/terms
     slightly per outlet (same layout, per-store wording)."""
+
     legal_display_name: Optional[str] = None
     logo_url: Optional[str] = None
     header_lines: Optional[List[str]] = None
@@ -278,7 +280,12 @@ def resolve_entity_for_store(db, store_id: Optional[str]) -> Optional[dict]:
         entity_id = store.get("entity_id")
         if not entity_id:
             return None
-        return _clean(db.get_collection("entities").find_one({"entity_id": entity_id}) or {}) or None
+        return (
+            _clean(
+                db.get_collection("entities").find_one({"entity_id": entity_id}) or {}
+            )
+            or None
+        )
     except Exception as e:  # pragma: no cover - defensive
         logger.error("resolve_entity_for_store failed: %s", e)
         return None
@@ -401,7 +408,10 @@ async def update_entity(
                 )
         updates["updated_at"] = _now()
         coll.update_one({"entity_id": entity_id}, {"$set": updates})
-        return {"status": "success", "entity": _clean(coll.find_one({"entity_id": entity_id}))}
+        return {
+            "status": "success",
+            "entity": _clean(coll.find_one({"entity_id": entity_id})),
+        }
     except HTTPException:
         raise
     except Exception as e:
@@ -424,7 +434,8 @@ async def list_entity_stores(
         return {"stores": [], "total": 0}
     try:
         stores = [
-            _clean(s) for s in db.get_collection("stores").find({"entity_id": entity_id})
+            _clean(s)
+            for s in db.get_collection("stores").find({"entity_id": entity_id})
         ]
         return {"entity_id": entity_id, "stores": stores, "total": len(stores)}
     except Exception as e:

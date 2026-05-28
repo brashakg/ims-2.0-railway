@@ -41,11 +41,11 @@ from typing import List, Optional
 # the rate to the base it is GIVEN; it does not enforce the monetary threshold.
 TDS_SECTIONS = {
     "NONE": 0.0,
-    "194C_IND": 1.0,    # payment to contractor - individual / HUF
+    "194C_IND": 1.0,  # payment to contractor - individual / HUF
     "194C_OTHER": 2.0,  # payment to contractor - company / firm / others
-    "194J": 10.0,       # professional / technical services
-    "194Q": 0.1,        # purchase of goods (aggregate > Rs 50 lakh / payee)
-    "194H": 5.0,        # commission / brokerage
+    "194J": 10.0,  # professional / technical services
+    "194Q": 0.1,  # purchase of goods (aggregate > Rs 50 lakh / payee)
+    "194H": 5.0,  # commission / brokerage
     "194I_PLANT": 2.0,  # rent - plant & machinery
     "194I_LAND": 10.0,  # rent - land / building / furniture
 }
@@ -149,7 +149,9 @@ def _payment_gross(p: dict) -> float:
     return round(_f(p.get("amount")) + _f(p.get("tds_amount")), 2)
 
 
-def bill_outstanding(bill: dict, payments: List[dict], debit_notes: List[dict]) -> float:
+def bill_outstanding(
+    bill: dict, payments: List[dict], debit_notes: List[dict]
+) -> float:
     """Outstanding on a single bill = total - allocated payments - allocated
     debit-notes. Only rows whose bill_id matches this bill count. Never < 0."""
     if not isinstance(bill, dict):
@@ -264,8 +266,16 @@ def build_aging_by_vendor(
     grand_unalloc = 0.0
 
     for vendor_id, grp in by_vendor.items():
-        v_payments = [p for p in (payments or []) if isinstance(p, dict) and p.get("vendor_id") == vendor_id]
-        v_dn = [d for d in (debit_notes or []) if isinstance(d, dict) and d.get("vendor_id") == vendor_id]
+        v_payments = [
+            p
+            for p in (payments or [])
+            if isinstance(p, dict) and p.get("vendor_id") == vendor_id
+        ]
+        v_dn = [
+            d
+            for d in (debit_notes or [])
+            if isinstance(d, dict) and d.get("vendor_id") == vendor_id
+        ]
         ag = build_aging(grp["bills"], v_payments, v_dn, as_of_iso)
         name = next(
             (b.get("vendor_name") for b in grp["bills"] if b.get("vendor_name")),
@@ -377,7 +387,9 @@ def build_ledger(
 
     total_billed = round(sum(r["credit"] for r in rows if r["type"] == "BILL"), 2)
     total_paid = round(sum(r["debit"] for r in rows if r["type"] == "PAYMENT"), 2)
-    total_tds = round(sum(_f(p.get("tds_amount")) for p in (payments or []) if isinstance(p, dict)), 2)
+    total_tds = round(
+        sum(_f(p.get("tds_amount")) for p in (payments or []) if isinstance(p, dict)), 2
+    )
     total_dn = round(sum(r["debit"] for r in rows if r["type"] == "DEBIT_NOTE"), 2)
 
     return {

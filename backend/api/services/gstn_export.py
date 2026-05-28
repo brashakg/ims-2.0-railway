@@ -128,8 +128,9 @@ def _to_fp(period: str) -> str:
     return ""
 
 
-def _itm(rate: Any, taxable: Any, igst: Any, cgst: Any, sgst: Any,
-         cess: Any = 0.0) -> Dict[str, Any]:
+def _itm(
+    rate: Any, taxable: Any, igst: Any, cgst: Any, sgst: Any, cess: Any = 0.0
+) -> Dict[str, Any]:
     """Build one `itm_det` tax block in portal shape."""
     return {
         "rt": _num(rate),
@@ -227,9 +228,7 @@ def _build_b2cl(rows: List[Dict[str, Any]], store_state: str) -> List[Dict[str, 
     for r in rows:
         if not isinstance(r, dict):
             continue
-        pos = _state_code(
-            str(r.get("placeOfSupply") or r.get("customerState") or "")
-        )
+        pos = _state_code(str(r.get("placeOfSupply") or r.get("customerState") or ""))
         inv = {
             "inum": str(r.get("invoiceNumber") or r.get("inum") or ""),
             "idt": _fmt_date(r.get("invoiceDate") or r.get("idt") or ""),

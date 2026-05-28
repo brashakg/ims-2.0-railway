@@ -44,6 +44,7 @@ Idempotency:
 This module owns NO Mongo schema; it is a thin orchestration layer
 over the lens_stock router functions.
 """
+
 from __future__ import annotations
 
 import logging
@@ -112,7 +113,8 @@ def _extract_cell_key(
     except (TypeError, ValueError):
         logger.warning(
             "[LENS_HOOK] sph %r not numeric for line %s; skipping",
-            sph, lens_line_id,
+            sph,
+            lens_line_id,
         )
         return None
     try:
@@ -193,7 +195,9 @@ def _already_acted(
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "[LENS_HOOK] idempotency lookup failed for %s/%s: %s",
-            source_id, action, exc,
+            source_id,
+            action,
+            exc,
         )
         return None
 
@@ -246,7 +250,8 @@ async def reserve_for_order_item(
     if prior is not None:
         logger.info(
             "[LENS_HOOK] reserve already done for %s (line_stock=%s)",
-            source_id, prior.get("line_stock_id"),
+            source_id,
+            prior.get("line_stock_id"),
         )
         return {
             "status": "already_reserved",
@@ -291,9 +296,7 @@ async def reserve_for_order_item(
         # The router uses sync pymongo internally so the await is just
         # a coroutine wrapper, but FastAPI request handlers can naturally
         # await this from their own async context.
-        result = await stock_router.reserve_cell(
-            cell["lens_line_id"], payload, user
-        )
+        result = await stock_router.reserve_cell(cell["lens_line_id"], payload, user)
     except HTTPException as exc:
         if exc.status_code in (404, 409):
             # 404 (cell never seeded) is upgraded to 409 so POS sees a
@@ -305,7 +308,8 @@ async def reserve_for_order_item(
                     "Lens stock cell not configured for SPH {sph} CYL {cyl}"
                     " (lens_line={line}). Set on_hand via Power Grid "
                     "before selling.".format(
-                        sph=cell["sph"], cyl=cell["cyl"],
+                        sph=cell["sph"],
+                        cyl=cell["cyl"],
                         line=cell["lens_line_id"],
                     )
                 )
@@ -316,7 +320,9 @@ async def reserve_for_order_item(
     except Exception as exc:  # noqa: BLE001
         logger.error(
             "[LENS_HOOK] reserve unexpected error for %s: %s",
-            source_id, exc, exc_info=True,
+            source_id,
+            exc,
+            exc_info=True,
         )
         return {
             "status": "failed",
@@ -336,9 +342,7 @@ async def reserve_for_order_item(
         "add": cell["add"],
         "qty": qty,
         "cell": (result or {}).get("cell"),
-        "line_stock_id": ((result or {}).get("cell") or {}).get(
-            "line_stock_id"
-        ),
+        "line_stock_id": ((result or {}).get("cell") or {}).get("line_stock_id"),
     }
 
 
@@ -387,9 +391,7 @@ async def commit_for_workshop_dispatch(
     try:
         from ..routers import lens_stock as stock_router
     except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "[LENS_HOOK] commit: cannot import lens_stock router: %s", exc
-        )
+        logger.warning("[LENS_HOOK] commit: cannot import lens_stock router: %s", exc)
         return None
 
     payload = stock_router.ReserveCommitReleasePayload(
@@ -404,15 +406,15 @@ async def commit_for_workshop_dispatch(
     )
 
     try:
-        result = await stock_router.commit_cell(
-            cell["lens_line_id"], payload, user
-        )
+        result = await stock_router.commit_cell(cell["lens_line_id"], payload, user)
     except HTTPException as exc:
         # 409 here means reserved < qty -- a real data inconsistency we
         # cannot resolve from inside the workshop callback. Log + move on.
         logger.warning(
             "[LENS_HOOK] commit %s status=%s detail=%s",
-            source_id, exc.status_code, exc.detail,
+            source_id,
+            exc.status_code,
+            exc.detail,
         )
         return {
             "status": "failed",
@@ -426,7 +428,8 @@ async def commit_for_workshop_dispatch(
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "[LENS_HOOK] commit unexpected error for %s: %s",
-            source_id, exc,
+            source_id,
+            exc,
         )
         return {
             "status": "failed",
@@ -479,9 +482,7 @@ async def release_for_cancel(
 
     qty = _qty_for(order_item)
     reserve_source_id = "{oid}#{idx}".format(oid=order_id, idx=line_index)
-    release_source_id = "{oid}#{idx}#release".format(
-        oid=order_id, idx=line_index
-    )
+    release_source_id = "{oid}#{idx}#release".format(oid=order_id, idx=line_index)
 
     # If we already released, no-op.
     prior_rel = _already_acted(release_source_id, "release")
@@ -513,9 +514,7 @@ async def release_for_cancel(
 
     # If a commit row already exists, the lens was already cut -- there
     # are no reserved units to release. Skip.
-    commit_source_id = "{oid}#{idx}#commit".format(
-        oid=order_id, idx=line_index
-    )
+    commit_source_id = "{oid}#{idx}#commit".format(oid=order_id, idx=line_index)
     prior_com = _already_acted(commit_source_id, "commit")
     if prior_com is not None:
         return {
@@ -530,9 +529,7 @@ async def release_for_cancel(
     try:
         from ..routers import lens_stock as stock_router
     except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "[LENS_HOOK] release: cannot import lens_stock router: %s", exc
-        )
+        logger.warning("[LENS_HOOK] release: cannot import lens_stock router: %s", exc)
         return None
 
     payload = stock_router.ReserveCommitReleasePayload(
@@ -547,13 +544,13 @@ async def release_for_cancel(
     )
 
     try:
-        result = await stock_router.release_cell(
-            cell["lens_line_id"], payload, user
-        )
+        result = await stock_router.release_cell(cell["lens_line_id"], payload, user)
     except HTTPException as exc:
         logger.warning(
             "[LENS_HOOK] release %s status=%s detail=%s",
-            release_source_id, exc.status_code, exc.detail,
+            release_source_id,
+            exc.status_code,
+            exc.detail,
         )
         return {
             "status": "failed",
@@ -567,7 +564,8 @@ async def release_for_cancel(
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "[LENS_HOOK] release unexpected error for %s: %s",
-            release_source_id, exc,
+            release_source_id,
+            exc,
         )
         return {
             "status": "failed",

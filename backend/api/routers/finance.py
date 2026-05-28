@@ -75,7 +75,7 @@ def compute_cogs(orders, cost_by_product: dict, fallback_rate: float = 0.0) -> f
     cost is unknown. Pure."""
     cogs = 0.0
     for o in orders:
-        for it in (o.get("items") or []):
+        for it in o.get("items") or []:
             qty = it.get("quantity", 1) or 1
             cost = _item_cost(it, cost_by_product)
             if cost is not None:
@@ -90,7 +90,9 @@ def _cost_by_product(db) -> dict:
     imported orders may reference a product by its Mongo _id."""
     out: dict = {}
     try:
-        for p in db.get_collection("products").find({}, {"product_id": 1, "cost_price": 1}):
+        for p in db.get_collection("products").find(
+            {}, {"product_id": 1, "cost_price": 1}
+        ):
             cp = p.get("cost_price")
             if cp is None:
                 continue
@@ -109,6 +111,7 @@ def _cost_by_product(db) -> dict:
 
 def _months_in_range(from_date, to_date):
     """(year, month) tuples overlapping an ISO date range; current month if open."""
+
     def _parse(s):
         try:
             return datetime.fromisoformat(s[:10])
@@ -149,7 +152,9 @@ def _payroll_cost(db, store_id, from_date, to_date) -> float:
         return 0.0
 
 
-def gst_reconciliation(orders, purchases, store_to_entity: dict, entity_names: dict = None) -> dict:
+def gst_reconciliation(
+    orders, purchases, store_to_entity: dict, entity_names: dict = None
+) -> dict:
     """Group GST output (orders) vs input credit (purchases) by legal entity.
     CGST/SGST split intra-state (tax/2 each); IGST not modelled (orders don't
     capture inter-state). Pure."""
@@ -166,22 +171,26 @@ def gst_reconciliation(orders, purchases, store_to_entity: dict, entity_names: d
     for p in purchases:
         eid = _ent(p.get("delivery_store_id") or p.get("store_id"))
         tax = float(p.get("tax_amount") or 0)
-        acc.setdefault(eid, {"collected": 0.0, "input_credit": 0.0})["input_credit"] += tax
+        acc.setdefault(eid, {"collected": 0.0, "input_credit": 0.0})[
+            "input_credit"
+        ] += tax
 
     entities, tot_c, tot_i = [], 0.0, 0.0
     for eid, d in acc.items():
         c, i = round(d["collected"], 2), round(d["input_credit"], 2)
         tot_c += c
         tot_i += i
-        entities.append({
-            "entity_id": eid,
-            "entity_name": entity_names.get(eid, eid),
-            "gst_collected": c,
-            "cgst": round(c / 2, 2),
-            "sgst": round(c / 2, 2),
-            "input_credit": i,
-            "net_payable": round(c - i, 2),
-        })
+        entities.append(
+            {
+                "entity_id": eid,
+                "entity_name": entity_names.get(eid, eid),
+                "gst_collected": c,
+                "cgst": round(c / 2, 2),
+                "sgst": round(c / 2, 2),
+                "input_credit": i,
+                "net_payable": round(c - i, 2),
+            }
+        )
     return {
         "entities": sorted(entities, key=lambda e: -e["gst_collected"]),
         "total_collected": round(tot_c, 2),
@@ -194,10 +203,14 @@ def _store_maps(db):
     """Return (store_id -> entity_id, entity_id -> entity_name)."""
     s2e, enames = {}, {}
     try:
-        for s in db.get_collection("stores").find({}, {"_id": 0, "store_id": 1, "entity_id": 1}):
+        for s in db.get_collection("stores").find(
+            {}, {"_id": 0, "store_id": 1, "entity_id": 1}
+        ):
             if s.get("store_id"):
                 s2e[s["store_id"]] = s.get("entity_id")
-        for e in db.get_collection("entities").find({}, {"_id": 0, "entity_id": 1, "name": 1}):
+        for e in db.get_collection("entities").find(
+            {}, {"_id": 0, "entity_id": 1, "name": 1}
+        ):
             enames[e.get("entity_id")] = e.get("name")
     except Exception:
         pass
@@ -210,7 +223,7 @@ def pnl_by_category(orders, cost_by_product: dict) -> list:
     a product's cost is unknown."""
     acc: dict = {}
     for o in orders:
-        for it in (o.get("items") or []):
+        for it in o.get("items") or []:
             cat = it.get("item_type") or it.get("category") or "OTHER"
             qty = it.get("quantity", 1) or 1
             rev = float(it.get("total", 0) or 0)
@@ -221,20 +234,27 @@ def pnl_by_category(orders, cost_by_product: dict) -> list:
     rows = []
     for cat, d in acc.items():
         r, c = round(d["revenue"], 2), round(d["cogs"], 2)
-        rows.append({
-            "category": cat, "revenue": r, "cogs": c,
-            "gross_profit": round(r - c, 2),
-            "gross_margin": round((r - c) / r * 100, 1) if r > 0 else 0,
-        })
+        rows.append(
+            {
+                "category": cat,
+                "revenue": r,
+                "cogs": c,
+                "gross_profit": round(r - c, 2),
+                "gross_margin": round((r - c) / r * 100, 1) if r > 0 else 0,
+            }
+        )
     return sorted(rows, key=lambda x: -x["revenue"])
 
 
 def is_period_locked(db, month, year) -> bool:
     """True if the accounting period has been locked (closed)."""
     try:
-        return db.get_collection("period_locks").find_one(
-            {"month": int(month), "year": int(year)}
-        ) is not None
+        return (
+            db.get_collection("period_locks").find_one(
+                {"month": int(month), "year": int(year)}
+            )
+            is not None
+        )
     except Exception:
         return False
 
@@ -250,7 +270,9 @@ def _payroll_by_store(db, from_date, to_date) -> dict:
         for r in db.get_collection("payroll").find(q):
             sid = r.get("store_id")
             bd = r.get("breakdown") or {}
-            out[sid] = out.get(sid, 0) + (bd.get("ctc_cost", r.get("net_salary", 0)) or 0)
+            out[sid] = out.get(sid, 0) + (
+                bd.get("ctc_cost", r.get("net_salary", 0)) or 0
+            )
     except Exception:
         pass
     return out
@@ -544,7 +566,9 @@ def _customer_credit_terms(db) -> dict:
                 or c.get("payment_terms")
             )
             try:
-                out[cid] = int(terms) if terms is not None else _DEFAULT_AR_CREDIT_TERMS_DAYS
+                out[cid] = (
+                    int(terms) if terms is not None else _DEFAULT_AR_CREDIT_TERMS_DAYS
+                )
             except (TypeError, ValueError):
                 out[cid] = _DEFAULT_AR_CREDIT_TERMS_DAYS
     except Exception:
@@ -564,7 +588,9 @@ def _ar_due_date(order: dict, terms_by_customer: dict) -> Optional[datetime]:
     if terms is None:
         # Per-order override wins when a customer doc isn't in the map.
         try:
-            terms = int(order.get("payment_terms_days") or _DEFAULT_AR_CREDIT_TERMS_DAYS)
+            terms = int(
+                order.get("payment_terms_days") or _DEFAULT_AR_CREDIT_TERMS_DAYS
+            )
         except (TypeError, ValueError):
             terms = _DEFAULT_AR_CREDIT_TERMS_DAYS
     return created + timedelta(days=int(terms))
@@ -752,7 +778,10 @@ async def get_cash_flow(
 
     # Outflows (expenses + purchase orders) — scoped to the active store.
     # NOTE: POs store the store as `delivery_store_id`, expenses as `store_id`.
-    exp_match = {"date": {"$gte": start.isoformat()}, "status": {"$in": ["APPROVED", "PAID", "approved", "paid"]}}
+    exp_match = {
+        "date": {"$gte": start.isoformat()},
+        "status": {"$in": ["APPROVED", "PAID", "approved", "paid"]},
+    }
     if active_store:
         exp_match["store_id"] = active_store
     exp_out = list(
@@ -773,7 +802,16 @@ async def get_cash_flow(
         db.get_collection("purchase_orders").aggregate(
             [
                 {"$match": po_match},
-                {"$group": {"_id": None, "total": {"$sum": {"$ifNull": ["$total_amount", {"$ifNull": ["$total", 0]}]}}}},
+                {
+                    "$group": {
+                        "_id": None,
+                        "total": {
+                            "$sum": {
+                                "$ifNull": ["$total_amount", {"$ifNull": ["$total", 0]}]
+                            }
+                        },
+                    }
+                },
             ]
         )
     )
@@ -786,7 +824,11 @@ async def get_cash_flow(
             vp = list(
                 db.get_collection("vendor_payments").aggregate(
                     [
-                        {"$match": {"payment_date": {"$gte": start.date().isoformat()}}},
+                        {
+                            "$match": {
+                                "payment_date": {"$gte": start.date().isoformat()}
+                            }
+                        },
                         {"$group": {"_id": None, "total": {"$sum": "$amount"}}},
                     ]
                 )
@@ -1563,7 +1605,9 @@ async def get_pnl_by_store(
     """P&L (revenue - COGS - approved expenses - payroll) per store."""
     db = _get_db()
     s2e, _ = _store_maps(db)
-    store_ids = [sid for sid, eid in s2e.items() if eid == entity_id] if entity_id else None
+    store_ids = (
+        [sid for sid, eid in s2e.items() if eid == entity_id] if entity_id else None
+    )
 
     match: dict = {}
     if store_ids is not None:
@@ -1573,16 +1617,25 @@ async def get_pnl_by_store(
     if to_date:
         match.setdefault("created_at", {})["$lte"] = to_date
 
-    rev = list(db.get_collection("orders").aggregate(
-        [{"$match": match}, {"$group": {"_id": "$store_id", "revenue": {"$sum": _REVENUE_EXPR}}}]
-    ))
+    rev = list(
+        db.get_collection("orders").aggregate(
+            [
+                {"$match": match},
+                {"$group": {"_id": "$store_id", "revenue": {"$sum": _REVENUE_EXPR}}},
+            ]
+        )
+    )
     rev_by_store = {r["_id"]: r["revenue"] for r in rev}
 
     cost_map = _cost_by_product(db)
     cogs_by_store: dict = {}
-    for o in db.get_collection("orders").find(match, {"_id": 0, "store_id": 1, "items": 1}):
+    for o in db.get_collection("orders").find(
+        match, {"_id": 0, "store_id": 1, "items": 1}
+    ):
         sid = o.get("store_id")
-        cogs_by_store[sid] = cogs_by_store.get(sid, 0) + compute_cogs([o], cost_map, fallback_rate=0.6)
+        cogs_by_store[sid] = cogs_by_store.get(sid, 0) + compute_cogs(
+            [o], cost_map, fallback_rate=0.6
+        )
 
     exp_match: dict = {"status": {"$in": ["APPROVED", "PAID", "approved", "paid"]}}
     if store_ids is not None:
@@ -1591,25 +1644,39 @@ async def get_pnl_by_store(
         exp_match.setdefault("date", {})["$gte"] = from_date
     if to_date:
         exp_match.setdefault("date", {})["$lte"] = to_date
-    exp = list(db.get_collection("expenses").aggregate(
-        [{"$match": exp_match}, {"$group": {"_id": "$store_id", "amt": {"$sum": "$amount"}}}]
-    ))
+    exp = list(
+        db.get_collection("expenses").aggregate(
+            [
+                {"$match": exp_match},
+                {"$group": {"_id": "$store_id", "amt": {"$sum": "$amount"}}},
+            ]
+        )
+    )
     exp_by_store = {e["_id"]: e["amt"] for e in exp}
 
     pay_by_store = _payroll_by_store(db, from_date, to_date)
 
     rows = []
-    for sid in set(rev_by_store) | set(cogs_by_store) | set(exp_by_store) | set(pay_by_store):
+    for sid in (
+        set(rev_by_store) | set(cogs_by_store) | set(exp_by_store) | set(pay_by_store)
+    ):
         r = round(rev_by_store.get(sid, 0), 2)
         c = round(cogs_by_store.get(sid, 0), 2)
         e = round(exp_by_store.get(sid, 0), 2)
         p = round(pay_by_store.get(sid, 0), 2)
         net = round(r - c - e - p, 2)
-        rows.append({
-            "store_id": sid, "entity_id": s2e.get(sid),
-            "revenue": r, "cogs": c, "expenses": e, "payroll": p,
-            "net_profit": net, "net_margin": round(net / r * 100, 1) if r > 0 else 0,
-        })
+        rows.append(
+            {
+                "store_id": sid,
+                "entity_id": s2e.get(sid),
+                "revenue": r,
+                "cogs": c,
+                "expenses": e,
+                "payroll": p,
+                "net_profit": net,
+                "net_margin": round(net / r * 100, 1) if r > 0 else 0,
+            }
+        )
     return {
         "stores": sorted(rows, key=lambda x: -x["revenue"]),
         "total_net": round(sum(x["net_profit"] for x in rows), 2),

@@ -157,7 +157,10 @@ def grn_has_discrepancy(grn: dict, qty_tolerance: int = 0) -> bool:
         if _int(item.get("rejected_qty")) > 0:
             return True
         if "ordered_qty" in item:
-            if abs(_int(item.get("received_qty")) - _int(item.get("ordered_qty"))) > tol:
+            if (
+                abs(_int(item.get("received_qty")) - _int(item.get("ordered_qty")))
+                > tol
+            ):
                 return True
 
     if grn.get("total_ordered") is not None:
@@ -944,9 +947,7 @@ def _recompute_bill_status(db, bill_id: Optional[str]) -> None:
         if not bill:
             return
         payments = list(
-            db.get_collection("vendor_payments").find(
-                {"bill_id": bill_id}, {"_id": 0}
-            )
+            db.get_collection("vendor_payments").find({"bill_id": bill_id}, {"_id": 0})
         )
         debit_notes = list(
             db.get_collection("vendor_debit_notes").find(
@@ -1157,7 +1158,7 @@ async def create_debit_note(
         raise HTTPException(status_code=404, detail="Vendor not found")
 
     dn_id = str(uuid.uuid4())
-    prefix = (vendor_id[:3].upper() if vendor_id else "DN")
+    prefix = vendor_id[:3].upper() if vendor_id else "DN"
     doc = {
         "debit_note_id": dn_id,
         "debit_note_number": f"DN-{prefix}-{datetime.now().strftime('%y%m%d%H%M')}",

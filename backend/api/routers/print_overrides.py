@@ -158,7 +158,9 @@ async def _require_print_admin(
 def _coll():
     """Return the overrides Mongo collection, or None when the DB is offline."""
     try:
-        from database.connection import get_db  # local import keeps import-time fail-soft
+        from database.connection import (
+            get_db,
+        )  # local import keeps import-time fail-soft
 
         db = get_db()
         if db and db.is_connected:

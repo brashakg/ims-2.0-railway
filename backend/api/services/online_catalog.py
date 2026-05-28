@@ -153,8 +153,8 @@ def online_summary() -> Dict[str, Any]:
             # reconciliation: how many online variants already carry a
             # storeBarcode / barcode that an IMS product could match.
             cur.execute(
-                'SELECT '
-                "count(*) FILTER (WHERE \"storeBarcode\" IS NOT NULL AND \"storeBarcode\" <> ''), "
+                "SELECT "
+                'count(*) FILTER (WHERE "storeBarcode" IS NOT NULL AND "storeBarcode" <> \'\'), '
                 "count(*) FILTER (WHERE barcode IS NOT NULL AND barcode <> '') "
                 'FROM "ProductVariant"'
             )
@@ -219,7 +219,12 @@ def reconcile_store_barcodes(
         cleaned[nsku] = nbc
 
     if not cleaned:
-        return {"matched": 0, "updated": 0, "invalid_barcode": invalid, "applied": apply}
+        return {
+            "matched": 0,
+            "updated": 0,
+            "invalid_barcode": invalid,
+            "applied": apply,
+        }
 
     conn = _connect()
     if conn is None:

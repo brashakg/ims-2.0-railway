@@ -141,4 +141,7 @@ DEFAULT_SOP_TEMPLATES: List[Dict[str, Any]] = [
 
 def default_template_steps(items: List[str]) -> List[Dict[str, Any]]:
     """Turn a flat list of step strings into template step dicts."""
-    return [{"step_number": i + 1, "instruction": text, "warning": None} for i, text in enumerate(items)]
+    return [
+        {"step_number": i + 1, "instruction": text, "warning": None}
+        for i, text in enumerate(items)
+    ]

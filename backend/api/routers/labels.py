@@ -117,10 +117,10 @@ def next_stage(current: Optional[str]) -> Optional[str]:
 # move to IN_PROGRESS) is rejected loudly. station is optional -- when
 # omitted, any forward advance is allowed.
 STATION_TARGET_STAGE = {
-    "INTAKE": "IN_PROGRESS",      # received at counter -> start work
-    "FITTING": "COMPLETED",       # lab finished cutting/mounting -> QC queue
-    "QC": "READY",                # QC passed -> ready shelf
-    "PICKUP": "DELIVERED",        # handed to customer
+    "INTAKE": "IN_PROGRESS",  # received at counter -> start work
+    "FITTING": "COMPLETED",  # lab finished cutting/mounting -> QC queue
+    "QC": "READY",  # QC passed -> ready shelf
+    "PICKUP": "DELIVERED",  # handed to customer
 }
 
 

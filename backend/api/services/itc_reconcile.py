@@ -102,9 +102,7 @@ def _is_interstate(bill_pos, entity_state) -> bool:
     return pos != ent
 
 
-def build_itc_register(
-    bills: List[dict], entity_state: Optional[str] = None
-) -> dict:
+def build_itc_register(bills: List[dict], entity_state: Optional[str] = None) -> dict:
     """Input credit available from booked vendor bills, grouped by period.
 
     Splits tax into CGST + SGST (intra-state) vs IGST (inter-state, when the
@@ -179,7 +177,11 @@ def reconcile_gstr2b(
     """
     as_of = None
     try:
-        as_of = datetime.fromisoformat((as_of_iso or "")[:10]) if as_of_iso else datetime.utcnow()
+        as_of = (
+            datetime.fromisoformat((as_of_iso or "")[:10])
+            if as_of_iso
+            else datetime.utcnow()
+        )
     except ValueError:
         as_of = datetime.utcnow()
 
@@ -189,8 +191,12 @@ def reconcile_gstr2b(
         if not isinstance(r, dict):
             continue
         key = (_norm_gstin(r.get("gstin")), _norm_inv(r.get("invoice_no")))
-        b2[key] = {"gstin": r.get("gstin"), "invoice_no": r.get("invoice_no"),
-                   "taxable": _f(r.get("taxable")), "tax": _f(r.get("tax"))}
+        b2[key] = {
+            "gstin": r.get("gstin"),
+            "invoice_no": r.get("invoice_no"),
+            "taxable": _f(r.get("taxable")),
+            "tax": _f(r.get("tax")),
+        }
 
     matched, mismatch, only_books = [], [], []
     seen_2b = set()
@@ -209,7 +215,9 @@ def reconcile_gstr2b(
         days_old = None
         bd = None
         try:
-            bd = datetime.fromisoformat(str(bill_date or "")[:10]) if bill_date else None
+            bd = (
+                datetime.fromisoformat(str(bill_date or "")[:10]) if bill_date else None
+            )
         except ValueError:
             bd = None
         if bd:
@@ -230,14 +238,25 @@ def reconcile_gstr2b(
                 matched.append({**base, "portal_tax": portal_tax})
                 itc_safe += book_tax
             else:
-                mismatch.append({**base, "portal_tax": portal_tax, "diff": round(book_tax - portal_tax, 2)})
+                mismatch.append(
+                    {
+                        **base,
+                        "portal_tax": portal_tax,
+                        "diff": round(book_tax - portal_tax, 2),
+                    }
+                )
                 itc_in_mismatch += book_tax
         else:
             only_books.append(base)
             itc_at_risk += book_tax
 
     only_2b = [
-        {"gstin": v["gstin"], "invoice_no": v["invoice_no"], "taxable": v["taxable"], "tax": v["tax"]}
+        {
+            "gstin": v["gstin"],
+            "invoice_no": v["invoice_no"],
+            "taxable": v["taxable"],
+            "tax": v["tax"],
+        }
         for k, v in b2.items()
         if k not in seen_2b
     ]
