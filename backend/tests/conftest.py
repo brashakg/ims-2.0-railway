@@ -53,6 +53,8 @@ _CHURN_COLLECTIONS = (
     "audit_logs",
     "audit_log",
     "agent_events",
+    "health_checks",
+    "alert_history",
     "lens_catalog",
     "lens_stock_lines",
     "display_fixtures",
