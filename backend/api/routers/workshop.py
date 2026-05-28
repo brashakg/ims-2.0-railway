@@ -984,6 +984,49 @@ async def update_lens_status(
     except Exception as e:  # noqa: BLE001
         logger.warning("[WORKSHOP] lens_status audit failed: %s", e)
 
+    # Branch B' sub-PR 4 -- on lens MOUNTED, hard-commit the reserved
+    # lens-catalog cell (the unit physically left the tray and is in
+    # the customer's frame). Fail-soft: a missing reservation, mongo
+    # blip, or 409 here is logged but never blocks the lens-status
+    # transition (the workshop has already cut the lens).
+    if target == "MOUNTED":
+        try:
+            order_id = job.get("order_id")
+            if order_id and get_order_repository is not None:
+                order_repo = get_order_repository()
+                if order_repo is not None:
+                    order = order_repo.find_by_id(order_id)
+                    if order:
+                        from ..services.lens_stock_hook import (
+                            commit_for_workshop_dispatch,
+                        )
+
+                        items_for_commit = order.get("items") or []
+                        for idx, oi in enumerate(items_for_commit):
+                            try:
+                                await commit_for_workshop_dispatch(
+                                    order_item=oi,
+                                    order_id=order_id,
+                                    line_index=idx,
+                                    store_id=(
+                                        order.get("store_id")
+                                        or job.get("store_id")
+                                        or ""
+                                    ),
+                                    user=current_user,
+                                )
+                            except Exception as cm_exc:  # noqa: BLE001
+                                logger.warning(
+                                    "[LENS_HOOK] commit on MOUNTED failed "
+                                    "(order %s line %s): %s",
+                                    order_id, idx, cm_exc,
+                                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[LENS_HOOK] MOUNTED commit outer error job=%s: %s",
+                job_id, exc,
+            )
+
     return {
         "job_id": job_id,
         "lens_status": target,
