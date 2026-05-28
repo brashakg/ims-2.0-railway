@@ -187,9 +187,13 @@ export function ClinicalPage() {
         return;
       }
 
-      // Extract prescription data from finalRx for the API
-      const rightEye = data.finalRx?.rightEye || {};
-      const leftEye = data.finalRx?.leftEye || {};
+      // Extract prescription data from finalRx for the API. Forward the FULL
+      // Final-Rx field set (VA / prism / base per eye + IPD + lens type + next
+      // checkup) so the auto-created prescription carries the SAME data a
+      // POS-created Rx does (field + DB parity).
+      const fr = data.finalRx;
+      const re = fr?.rightEye;
+      const le = fr?.leftEye;
 
       // Convert string values to numbers, handling empty strings
       const parseValue = (val: string): number | null => {
@@ -199,18 +203,30 @@ export function ClinicalPage() {
 
       await clinicalApi.completeTest(currentTestId, {
         rightEye: {
-          sphere: parseValue(rightEye.sphere || ''),
-          cylinder: parseValue(rightEye.cylinder || ''),
-          axis: parseValue(rightEye.axis || ''),
-          add: parseValue(rightEye.add || ''),
+          sphere: parseValue(re?.sphere || ''),
+          cylinder: parseValue(re?.cylinder || ''),
+          axis: parseValue(re?.axis || ''),
+          // Near-vision ADD is captured in finalRx.rightAdd, not rightEye.add.
+          add: parseValue(fr?.rightAdd || re?.add || ''),
+          pd: parseValue(re?.pd || ''),
+          prism: re?.prism || null,
+          base: re?.base || null,
+          va: re?.va || null,
         },
         leftEye: {
-          sphere: parseValue(leftEye.sphere || ''),
-          cylinder: parseValue(leftEye.cylinder || ''),
-          axis: parseValue(leftEye.axis || ''),
-          add: parseValue(leftEye.add || ''),
+          sphere: parseValue(le?.sphere || ''),
+          cylinder: parseValue(le?.cylinder || ''),
+          axis: parseValue(le?.axis || ''),
+          add: parseValue(fr?.leftAdd || le?.add || ''),
+          pd: parseValue(le?.pd || ''),
+          prism: le?.prism || null,
+          base: le?.base || null,
+          va: le?.va || null,
         },
-        pd: parseValue(rightEye.pd || leftEye.pd || '') ?? undefined,
+        pd: parseValue(re?.pd || le?.pd || '') ?? undefined,
+        ipd: fr?.ipd || undefined,
+        lensRecommendation: fr?.lensType || undefined,
+        nextCheckup: fr?.nextCheckup || undefined,
         notes: data.chiefComplaint || '',
       });
 

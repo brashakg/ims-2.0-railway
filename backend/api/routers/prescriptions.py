@@ -158,6 +158,12 @@ class PrescriptionCreate(BaseModel):
     cl_product_id: Optional[str] = None  # bind to a CONTACT_LENS product
     lens_recommendation: Optional[str] = None
     coating_recommendation: Optional[str] = None
+    # IPD (single binocular inter-pupillary distance) + next-checkup date.
+    # Additive PARITY fields so a spectacle Rx created at POS carries the SAME
+    # data the clinical Final-Rx captures. Optional -> existing create calls
+    # (which omit them) behave exactly as before.
+    ipd: Optional[str] = None
+    next_checkup: Optional[str] = None
     remarks: Optional[str] = None
 
 
@@ -430,6 +436,8 @@ async def create_prescription(
             "left_eye": rx.left_eye.model_dump(),
             "lens_recommendation": rx.lens_recommendation,
             "coating_recommendation": rx.coating_recommendation,
+            "ipd": rx.ipd,
+            "next_checkup": rx.next_checkup,
             "remarks": rx.remarks,
             "created_by": current_user.get("user_id"),
         }
