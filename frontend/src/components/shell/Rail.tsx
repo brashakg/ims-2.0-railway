@@ -132,6 +132,7 @@ const RAIL_GROUPS: NavGroup[] = [
     title: 'AI',
     items: [
       { id: 'jarvis', label: 'Jarvis', to: '/jarvis', icon: 'cpu', requireRoles: ['SUPERADMIN'] },
+      { id: 'activity-log', label: 'Activity Log', to: '/admin/activity-log', icon: 'shield', requireRoles: ['SUPERADMIN'] },
     ],
   },
   {

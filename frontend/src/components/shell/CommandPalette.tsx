@@ -117,6 +117,7 @@ const ALL_PAGES: JumpPage[] = [
   { label: 'GST Credit (ITC)', route: '/finance/itc', requireRoles: ['SUPERADMIN', 'ADMIN', 'ACCOUNTANT'] },
   { label: 'Marketing', route: '/customers/campaigns', requireRoles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER'] },
   { label: 'Jarvis', route: '/jarvis', requireRoles: ['SUPERADMIN'] },
+  { label: 'Activity Log', route: '/admin/activity-log', requireRoles: ['SUPERADMIN'] },
   { label: 'Print', route: '/print', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT', 'CASHIER', 'SALES_CASHIER', 'SALES_STAFF'] },
   { label: 'Settings', route: '/settings', requireRoles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'AREA_MANAGER', 'CATALOG_MANAGER', 'ACCOUNTANT'] },
   { label: 'Store Onboarding', route: '/setup', requireRoles: ['SUPERADMIN', 'ADMIN'] },
