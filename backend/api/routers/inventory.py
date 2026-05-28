@@ -419,6 +419,17 @@ def _build_store_ledger(
         if pid in seen_pids:
             continue
         product = product_repo.find_by_id(pid) or {"product_id": pid}
+        # Respect the category filter here too. Step 2 already excluded
+        # off-category products from the active-catalog list; without this
+        # guard a stranded unit of a different category (e.g. a SUNGLASS unit
+        # at this store while filtering category=FRAME) would leak back into
+        # the filtered ledger. Rows with no/blank category (legacy or orphan
+        # units whose product master is gone) are still shown so genuinely
+        # stranded stock is never hidden from the write-off view.
+        if category:
+            stranded_cat = product.get("category")
+            if stranded_cat and stranded_cat != category:
+                continue
         items.append(
             _ledger_row(
                 product,
