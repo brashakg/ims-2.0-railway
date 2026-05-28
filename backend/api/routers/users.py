@@ -225,6 +225,9 @@ async def create_user(user: UserCreate, current_user: dict = Depends(require_adm
             "discount_cap": user.discount_cap,
             "is_active": True,
             "created_by": current_user.get("user_id"),
+            # The admin sets a temporary password; force the user to change it on
+            # first login. Cleared by /auth/change-password. See auth.py.
+            "must_change_password": True,
         }
 
         created = repo.create(user_data)

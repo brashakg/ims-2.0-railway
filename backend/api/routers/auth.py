@@ -489,6 +489,12 @@ async def login(request: LoginRequest, req: Request = None):
         if not any(r in ["ADMIN", "SUPERADMIN"] for r in user.get("roles", [])):
             raise HTTPException(status_code=403, detail="No access to this store")
 
+    # Whether this user must change their password before using the app. Set by
+    # an admin on user-create or password-reset; cleared by /change-password.
+    # Threaded through the token AND the login response so the frontend can gate
+    # the app and it survives a browser refresh (via /auth/me + /refresh).
+    must_change_password = bool(user.get("must_change_password", False))
+
     # Create token
     token_data = {
         "user_id": user.get("user_id", user.get("_id", "")),
@@ -498,6 +504,7 @@ async def login(request: LoginRequest, req: Request = None):
         "active_store_id": (
             active_store or (user_store_ids[0] if user_store_ids else None)
         ),
+        "must_change_password": must_change_password,
     }
 
     access_token = create_access_token(token_data)
@@ -526,6 +533,7 @@ async def login(request: LoginRequest, req: Request = None):
             "store_ids": user_store_ids,
             "active_store_id": token_data["active_store_id"],
             "discount_cap": eff_cap,
+            "must_change_password": must_change_password,
         },
     )
 
@@ -552,9 +560,28 @@ async def logout(
 @router.get("/me")
 async def get_me(current_user: dict = Depends(get_current_user)):
     """
-    Get current user info from token
+    Get current user info from token.
+
+    Ensures `must_change_password` is present so the frontend gate survives a
+    browser refresh. Tokens minted before this flag existed won't carry it, so
+    fall back to the live DB record (fail-soft -> False) for those.
     """
-    return current_user
+    me = dict(current_user)
+    if "must_change_password" not in me:
+        flag = False
+        try:
+            from ..dependencies import get_user_repository
+
+            user_repo = get_user_repository()
+            if user_repo is not None:
+                rec = user_repo.find_by_id(me.get("user_id")) or (
+                    user_repo.collection.find_one({"username": me.get("username")})
+                )
+                flag = bool((rec or {}).get("must_change_password", False))
+        except Exception:
+            flag = False
+        me["must_change_password"] = flag
+    return me
 
 
 @router.get("/ecommerce-sso")
@@ -641,13 +668,14 @@ async def refresh_token(request: RefreshTokenRequest):
     """
     payload = decode_token(request.token)
 
-    # Create new token
+    # Create new token (preserve the force-password-change flag across refresh)
     token_data = {
         "user_id": payload["user_id"],
         "username": payload["username"],
         "roles": payload["roles"],
         "store_ids": payload["store_ids"],
         "active_store_id": payload.get("active_store_id"),
+        "must_change_password": bool(payload.get("must_change_password", False)),
     }
 
     new_token = create_access_token(token_data)
@@ -685,13 +713,15 @@ async def change_password(
     if not verify_password(request.current_password, user.get("password_hash", "")):
         raise HTTPException(status_code=400, detail="Current password is incorrect")
 
-    # Hash new password and update
+    # Hash new password and update. Clear must_change_password so a forced
+    # first-login change unblocks the user (set by admin create / reset).
     new_hash = hash_password(request.new_password)
     user_repo.collection.update_one(
         {"_id": user["_id"]},
         {
             "$set": {
                 "password_hash": new_hash,
+                "must_change_password": False,
                 "updated_at": datetime.utcnow().isoformat(),
             }
         },
@@ -709,13 +739,14 @@ async def switch_store(store_id: str, current_user: dict = Depends(get_current_u
         if not any(r in ["ADMIN", "SUPERADMIN"] for r in current_user["roles"]):
             raise HTTPException(status_code=403, detail="No access to this store")
 
-    # Create new token with updated store
+    # Create new token with updated store (preserve force-password-change flag)
     token_data = {
         "user_id": current_user["user_id"],
         "username": current_user["username"],
         "roles": current_user["roles"],
         "store_ids": current_user["store_ids"],
         "active_store_id": store_id,
+        "must_change_password": bool(current_user.get("must_change_password", False)),
     }
 
     new_token = create_access_token(token_data)
