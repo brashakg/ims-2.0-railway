@@ -866,11 +866,14 @@ export function TaskManagementPage() {
           <div className="bg-white rounded-xl w-full max-w-md p-6 space-y-4" onClick={(e) => e.stopPropagation()}>
             <h3 className="font-semibold text-gray-900">Create a task</h3>
             <p className="text-sm text-gray-600">
-              Task creation with full fields is on the Tasks page. Click below to open it.
+              The full task-creation form (assignee, priority, due date, store)
+              lives on the Tasks Dashboard. Open it to create a task.
             </p>
             <div className="flex items-center justify-end gap-2">
               <button onClick={() => setShowCreateTask(false)} className="btn sm">Cancel</button>
-              <a href="/tasks" className="btn sm primary">Open Tasks page</a>
+              {/* QA F14: was href="/tasks" (this very page) -> a circular
+                  dead-end. The working create form is on TasksDashboard. */}
+              <a href="/tasks/dashboard" className="btn sm primary">Open Tasks Dashboard</a>
             </div>
           </div>
         </div>
@@ -1172,7 +1175,14 @@ function Countdown({ minutes }: { minutes: number }) {
   const hot = !late && m < 10;
   const warm = !late && m >= 10 && m < 30;
   const cls = 'count-pill' + (late || hot ? ' hot' : warm ? ' warm' : '');
-  const label = late ? `${Math.abs(m)}m late` : m < 1 ? '<1m' : `${m}m`;
+  // Humanize (QA F15): raw minutes like "1890631m" (~3.6y, when a task's
+  // due_at is set far out) are unreadable. humanizeMinutes keeps "Nm" for
+  // sub-hour values (the live-tick case) and rolls up to h/d/mo/y beyond that.
+  const label = late
+    ? `${humanizeMinutes(Math.abs(m))} late`
+    : m < 1
+      ? '<1m'
+      : humanizeMinutes(m);
 
   return (
     <span className={cls}>
