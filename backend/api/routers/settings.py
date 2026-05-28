@@ -431,11 +431,17 @@ async def get_profile(current_user: dict = Depends(get_current_user)):
 async def update_profile(
     profile: ProfileUpdate, current_user: dict = Depends(get_current_user)
 ):
-    """Update current user's profile"""
-    # In production, update database
+    """Update current user's profile (full_name / email / phone)"""
+    updates = profile.model_dump(exclude_none=True)
+    if updates:
+        from ..dependencies import get_user_repository
+
+        user_repo = get_user_repository()
+        if user_repo is not None:
+            user_repo.update(current_user.get("user_id"), updates)
     return {
         "message": "Profile updated successfully",
-        "updated_fields": profile.model_dump(exclude_none=True),
+        "updated_fields": updates,
     }
 
 
@@ -520,8 +526,12 @@ async def update_business_settings(
     """Update business settings (SUPERADMIN/ADMIN only)"""
     if not any(role in current_user["roles"] for role in ["SUPERADMIN", "ADMIN"]):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
-    # In production, update database
-    return {"message": "Business settings updated", "settings": settings.model_dump()}
+    payload = settings.model_dump()
+    collection = _get_settings_collection("business_settings")
+    if collection is not None:
+        collection.update_one({"_id": "default"}, {"$set": payload}, upsert=True)
+        return {"message": "Business settings updated", "settings": payload}
+    return {"message": "Business settings updated (no DB)", "settings": payload}
 
 
 @router.post("/business/logo")
@@ -556,7 +566,12 @@ async def update_tax_settings(
         role in current_user["roles"] for role in ["SUPERADMIN", "ADMIN", "ACCOUNTANT"]
     ):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
-    return {"message": "Tax settings updated", "settings": settings.model_dump()}
+    payload = settings.model_dump()
+    collection = _get_settings_collection("tax_settings")
+    if collection is not None:
+        collection.update_one({"_id": "default"}, {"$set": payload}, upsert=True)
+        return {"message": "Tax settings updated", "settings": payload}
+    return {"message": "Tax settings updated (no DB)", "settings": payload}
 
 
 # ============================================================================
@@ -583,7 +598,12 @@ async def update_invoice_settings(
         role in current_user["roles"] for role in ["SUPERADMIN", "ADMIN", "ACCOUNTANT"]
     ):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
-    return {"message": "Invoice settings updated", "settings": settings.model_dump()}
+    payload = settings.model_dump()
+    collection = _get_settings_collection("invoice_settings")
+    if collection is not None:
+        collection.update_one({"_id": "default"}, {"$set": payload}, upsert=True)
+        return {"message": "Invoice settings updated", "settings": payload}
+    return {"message": "Invoice settings updated (no DB)", "settings": payload}
 
 
 # ============================================================================
@@ -741,7 +761,12 @@ async def update_printer_settings(
     settings: PrinterSettings, current_user: dict = Depends(get_current_user)
 ):
     """Update printer settings"""
-    return {"message": "Printer settings updated", "settings": settings.model_dump()}
+    payload = settings.model_dump()
+    collection = _get_settings_collection("printer_settings")
+    if collection is not None:
+        collection.update_one({"_id": "default"}, {"$set": payload}, upsert=True)
+        return {"message": "Printer settings updated", "settings": payload}
+    return {"message": "Printer settings updated (no DB)", "settings": payload}
 
 
 @router.get("/printers/available")
