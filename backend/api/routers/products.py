@@ -903,12 +903,28 @@ async def update_product(
                 detail=f"Invalid modality. Allowed: {', '.join(CL_MODALITIES)}",
             )
 
-        # Validate MRP >= Offer Price if both are being updated
-        if "mrp" in update_data and "offer_price" in update_data:
-            if update_data["offer_price"] > update_data["mrp"]:
-                raise HTTPException(
-                    status_code=400, detail="Offer price cannot exceed MRP"
-                )
+        # Validate MRP >= Offer Price using the EFFECTIVE post-update values.
+        # The old check only fired when BOTH fields were in the payload, so a
+        # single-field edit -- lowering mrp below the existing offer_price, OR
+        # raising offer_price above the existing mrp -- slipped a product into
+        # an MRP < offer state. We merge the incoming change onto the existing
+        # doc and validate regardless of which field(s) are present, mirroring
+        # the create-path guard. (The bulk-price path enforces the same rule;
+        # once services/pricing_caps.py lands, both can share one validator.)
+        if "mrp" in update_data or "offer_price" in update_data:
+            eff_mrp = update_data.get("mrp", existing.get("mrp"))
+            eff_offer = update_data.get("offer_price", existing.get("offer_price"))
+            if eff_mrp is not None and eff_offer is not None:
+                try:
+                    violates = float(eff_offer) > float(eff_mrp)
+                except (TypeError, ValueError):
+                    # Non-numeric legacy price data on the existing doc -- don't
+                    # crash the update; the create path guards all new writes.
+                    violates = False
+                if violates:
+                    raise HTTPException(
+                        status_code=400, detail="Offer price cannot exceed MRP"
+                    )
 
         update_data["updated_by"] = current_user.get("user_id")
 
