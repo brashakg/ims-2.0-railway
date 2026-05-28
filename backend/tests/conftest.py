@@ -117,6 +117,19 @@ def _patch_close_db():
         _conn.close_db = _noop_close
     except Exception:  # noqa: BLE001
         pass
+    # Bulletproof: neuter MongoClient.close itself for the whole test session.
+    # Neutering close_db (above) only covers the lifespan path; the shared client
+    # was STILL torn down mid-session via some other route (a stray
+    # `with MongoClient(...)`, a duplicate-module disconnect, or GC), so every
+    # later test 500'd with 'Cannot use MongoClient after close'. Patching the
+    # method means NO path can close the shared client during the run; the CI
+    # process is ephemeral, so the OS reclaims the sockets at exit.
+    try:
+        from pymongo import MongoClient
+
+        MongoClient.close = lambda self, *a, **k: None  # type: ignore[method-assign]
+    except Exception:  # noqa: BLE001
+        pass
     yield
 
 
