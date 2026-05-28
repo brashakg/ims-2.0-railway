@@ -77,14 +77,14 @@ export default function OnlineStockPage() {
       <div className="flex flex-wrap items-end gap-3 mb-4">
         <div>
           <label className="block text-xs font-medium text-gray-600 mb-1">Store</label>
-          <select value={storeId} onChange={(e) => setStoreId(e.target.value)} className="border border-gray-300 rounded-lg px-3 py-1.5 text-sm">
+          <select aria-label="Filter by store" value={storeId} onChange={(e) => setStoreId(e.target.value)} className="border border-gray-300 rounded-lg px-3 py-1.5 text-sm">
             <option value="">All stores</option>
             {stores.map((st) => <option key={st.store_id} value={st.store_id}>{st.store_name || st.store_code || st.store_id}</option>)}
           </select>
         </div>
         <div>
           <label className="block text-xs font-medium text-gray-600 mb-1">Safety buffer (units held back from online)</label>
-          <input type="number" min={0} value={buffer} onChange={(e) => setBuffer(Math.max(0, parseInt(e.target.value, 10) || 0))}
+          <input type="number" aria-label="Safety buffer (units held back from online)" min={0} value={buffer} onChange={(e) => setBuffer(Math.max(0, parseInt(e.target.value, 10) || 0))}
             className="border border-gray-300 rounded-lg px-3 py-1.5 text-sm w-28" />
         </div>
         <label className="text-sm text-gray-600 flex items-center gap-1.5 pb-1.5">
