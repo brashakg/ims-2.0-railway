@@ -24,167 +24,14 @@ import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { productApi } from '../../services/api/products';
 import { getHSNByCategory, getHSNOptions, getGSTRateByCategory } from '../../constants/gst';
+import { CATEGORIES, CATEGORY_FIELDS, buildProductPayload } from './productAddShared';
 import clsx from 'clsx';
-
-// Product categories with display names
-const CATEGORIES = [
-  { code: 'SG', name: 'Sunglass', icon: '🕶️' },
-  { code: 'FR', name: 'Frame', icon: '👓' },
-  { code: 'CL', name: 'Contact Lens', icon: '👁️' },
-  { code: 'LS', name: 'Optical Lens', icon: '🔍' },
-  { code: 'RG', name: 'Reading Glasses', icon: '📖' },
-  { code: 'WT', name: 'Wrist Watch', icon: '⌚' },
-  { code: 'CK', name: 'Clock', icon: '🕐' },
-  { code: 'HA', name: 'Hearing Aid', icon: '🦻' },
-  { code: 'ACC', name: 'Accessories', icon: '🎒' },
-  { code: 'SMTSG', name: 'Smart Sunglass', icon: '🥽' },
-  { code: 'SMTFR', name: 'Smart Glasses', icon: '🤓' },
-  { code: 'SMTWT', name: 'Smart Watch', icon: '⌚' },
-];
-
-// Category-specific fields configuration
-const CATEGORY_FIELDS: Record<string, Array<{
-  name: string;
-  label: string;
-  type: 'text' | 'number' | 'select' | 'date';
-  required: boolean;
-  options?: string[];
-  placeholder?: string;
-}>> = {
-  SG: [
-    { name: 'brand_name', label: 'Brand Name', type: 'select', required: true, options: ['Ray-Ban', 'Oakley', 'Vogue', 'Prada', 'Gucci', 'Titan', 'Fastrack', 'Lenskart', 'Vincent Chase'] },
-    { name: 'subbrand', label: 'Sub Brand', type: 'text', required: false },
-    { name: 'model_no', label: 'Model No', type: 'text', required: true },
-    { name: 'colour_code', label: 'Colour Code', type: 'text', required: true },
-    { name: 'lens_size', label: 'Lens Size (mm)', type: 'number', required: false },
-    { name: 'bridge_width', label: 'Bridge Width (mm)', type: 'number', required: false },
-    { name: 'temple_length', label: 'Temple Length (mm)', type: 'number', required: false },
-  ],
-  FR: [
-    { name: 'brand_name', label: 'Brand Name', type: 'select', required: true, options: ['Ray-Ban', 'Oakley', 'Vogue', 'Prada', 'Titan', 'Fastrack', 'Lenskart', 'Vincent Chase', 'John Jacobs'] },
-    { name: 'subbrand', label: 'Sub Brand', type: 'text', required: false },
-    { name: 'model_no', label: 'Model No', type: 'text', required: true },
-    { name: 'colour_code', label: 'Colour Code', type: 'text', required: true },
-    { name: 'lens_size', label: 'Lens Size (mm)', type: 'number', required: false },
-    { name: 'bridge_width', label: 'Bridge Width (mm)', type: 'number', required: false },
-    { name: 'temple_length', label: 'Temple Length (mm)', type: 'number', required: false },
-  ],
-  CL: [
-    { name: 'brand_name', label: 'Brand Name', type: 'select', required: true, options: ['Bausch & Lomb', 'Johnson & Johnson', 'Alcon', 'CooperVision', 'Acuvue'] },
-    { name: 'cl_series', label: 'Series', type: 'text', required: false, placeholder: 'e.g. Acuvue Oasys' },
-    { name: 'model_name', label: 'Model Name', type: 'text', required: true },
-    { name: 'modality', label: 'Modality', type: 'select', required: false, options: ['DAILY', 'FORTNIGHTLY', 'MONTHLY', 'QUARTERLY', 'YEARLY', 'COLOR'] },
-    { name: 'colour_name', label: 'Colour Name', type: 'text', required: false },
-    { name: 'power', label: 'Power (SPH)', type: 'text', required: true, placeholder: '-6.00 to +6.00' },
-    { name: 'base_curve', label: 'Base Curve (BC)', type: 'number', required: false, placeholder: '8.6' },
-    { name: 'diameter', label: 'Diameter (DIA)', type: 'number', required: false, placeholder: '14.2' },
-    { name: 'cl_cyl', label: 'Cylinder (toric)', type: 'number', required: false },
-    { name: 'cl_axis', label: 'Axis (toric, 0-180)', type: 'number', required: false },
-    { name: 'cl_add', label: 'Add (multifocal)', type: 'number', required: false },
-    { name: 'pack', label: 'Pack Size', type: 'select', required: false, options: ['1', '3', '6', '30', '90'] },
-    { name: 'expiry_date', label: 'Expiry Date', type: 'date', required: false },
-  ],
-  LS: [
-    { name: 'brand_name', label: 'Brand Name', type: 'select', required: true, options: ['Essilor', 'Zeiss', 'Hoya', 'Crizal', 'Kodak', 'Nikon', 'Rodenstock'] },
-    { name: 'subbrand', label: 'Sub Brand', type: 'text', required: false },
-    { name: 'index', label: 'Index', type: 'select', required: true, options: ['1.50', '1.56', '1.59', '1.60', '1.67', '1.74'] },
-    { name: 'coating', label: 'Coating', type: 'select', required: true, options: ['UC', 'HC', 'ARC', 'Blue Cut', 'Photochromic', 'Transitions', 'Polarized'] },
-    { name: 'lens_category', label: 'Lens Category', type: 'select', required: false, options: ['Single Vision', 'Bifocal', 'Progressive', 'Office', 'Driving'] },
-    // Stock-power identity -> drives the SPH x CYL Power Grid. Leave blank for
-    // made-to-order lenses; fill for ready-made stock trays.
-    { name: 'sph', label: 'SPH (stock power)', type: 'number', required: false, placeholder: 'e.g. -2.00' },
-    { name: 'cyl', label: 'CYL (stock power)', type: 'number', required: false, placeholder: 'e.g. -0.50' },
-    { name: 'axis', label: 'Axis (0-180)', type: 'number', required: false },
-    { name: 'add', label: 'Add (bifocal/progressive)', type: 'number', required: false },
-    { name: 'add_on_1', label: 'Add-On 1', type: 'text', required: false },
-    { name: 'add_on_2', label: 'Add-On 2', type: 'text', required: false },
-    { name: 'add_on_3', label: 'Add-On 3', type: 'text', required: false },
-  ],
-  RG: [
-    { name: 'brand_name', label: 'Brand Name', type: 'select', required: true, options: ['Ray-Ban', 'Titan', 'Fastrack', 'Lenskart', 'Vincent Chase'] },
-    { name: 'subbrand', label: 'Sub Brand', type: 'text', required: false },
-    { name: 'model_no', label: 'Model No', type: 'text', required: true },
-    { name: 'colour_code', label: 'Colour Code', type: 'text', required: true },
-    { name: 'power', label: 'Power', type: 'select', required: false, options: ['+1.00', '+1.25', '+1.50', '+1.75', '+2.00', '+2.25', '+2.50', '+2.75', '+3.00', '+3.50'] },
-    { name: 'lens_size', label: 'Lens Size (mm)', type: 'number', required: false },
-    { name: 'bridge_width', label: 'Bridge Width (mm)', type: 'number', required: false },
-    { name: 'temple_length', label: 'Temple Length (mm)', type: 'number', required: false },
-  ],
-  WT: [
-    { name: 'brand_name', label: 'Brand Name', type: 'select', required: true, options: ['Titan', 'Fastrack', 'Casio', 'Fossil', 'Timex', 'Sonata', 'HMT'] },
-    { name: 'subbrand', label: 'Sub Brand', type: 'text', required: false },
-    { name: 'model_no', label: 'Model No', type: 'text', required: true },
-    { name: 'colour_code', label: 'Colour Code', type: 'text', required: true },
-    { name: 'dial_colour', label: 'Dial Colour', type: 'text', required: false },
-    { name: 'belt_colour', label: 'Belt Colour', type: 'text', required: false },
-    { name: 'dial_size', label: 'Dial Size (mm)', type: 'number', required: false },
-    { name: 'belt_size', label: 'Belt Size (mm)', type: 'number', required: false },
-    { name: 'watch_category', label: 'Watch Category', type: 'select', required: false, options: ['Analog', 'Digital', 'Analog-Digital', 'Chronograph', 'Automatic', 'Quartz'] },
-  ],
-  CK: [
-    { name: 'brand_name', label: 'Brand Name', type: 'select', required: true, options: ['Titan', 'Casio', 'Seiko', 'Ajanta', 'Generic'] },
-    { name: 'subbrand', label: 'Sub Brand', type: 'text', required: false },
-    { name: 'model_no', label: 'Model No', type: 'text', required: true },
-    { name: 'colour_code', label: 'Colour Code', type: 'text', required: true },
-    { name: 'dial_colour', label: 'Dial Colour', type: 'text', required: false },
-    { name: 'body_colour', label: 'Body Colour', type: 'text', required: false },
-    { name: 'dial_size', label: 'Dial Size (inches)', type: 'number', required: false },
-    { name: 'battery_size', label: 'Battery Size', type: 'text', required: false },
-    { name: 'clock_category', label: 'Clock Category', type: 'select', required: false, options: ['Wall Clock', 'Table Clock', 'Alarm Clock', 'Desk Clock', 'Decorative'] },
-  ],
-  HA: [
-    { name: 'brand_name', label: 'Brand Name', type: 'select', required: true, options: ['Phonak', 'Signia', 'Widex', 'Oticon', 'ReSound', 'Starkey'] },
-    { name: 'subbrand', label: 'Sub Brand', type: 'text', required: false },
-    { name: 'model_no', label: 'Model No', type: 'text', required: true },
-    { name: 'serial_no', label: 'Serial No', type: 'text', required: false },
-    { name: 'machine_capacity', label: 'Machine Capacity', type: 'select', required: false, options: ['Mild', 'Moderate', 'Severe', 'Profound'] },
-    { name: 'machine_type', label: 'Machine Type', type: 'select', required: false, options: ['BTE', 'ITE', 'ITC', 'CIC', 'RIC', 'Body Worn'] },
-  ],
-  ACC: [
-    { name: 'brand_name', label: 'Brand Name', type: 'select', required: true, options: ['Generic', 'Ray-Ban', 'Oakley', 'Titan'] },
-    { name: 'subbrand', label: 'Sub Brand', type: 'text', required: false },
-    { name: 'model_name', label: 'Model Name', type: 'text', required: true },
-    { name: 'accessory_type', label: 'Accessory Type', type: 'select', required: false, options: ['Case', 'Cloth', 'Chain', 'Nose Pad', 'Temple Tip', 'Screw Kit', 'Spray', 'Other'] },
-    { name: 'size', label: 'Size', type: 'text', required: false },
-    { name: 'pack', label: 'Pack Size', type: 'number', required: false },
-    { name: 'expiry_date', label: 'Expiry Date', type: 'date', required: false },
-  ],
-  SMTSG: [
-    { name: 'brand_name', label: 'Brand Name', type: 'select', required: true, options: ['Ray-Ban', 'Bose', 'Amazon', 'Meta'] },
-    { name: 'subbrand', label: 'Sub Brand', type: 'text', required: false },
-    { name: 'model_name', label: 'Model Name', type: 'text', required: true },
-    { name: 'colour_code', label: 'Colour Code', type: 'text', required: true },
-    { name: 'lens_size', label: 'Lens Size (mm)', type: 'number', required: false },
-    { name: 'bridge_width', label: 'Bridge Width (mm)', type: 'number', required: false },
-    { name: 'temple_length', label: 'Temple Length (mm)', type: 'number', required: false },
-    { name: 'year_of_launch', label: 'Year of Launch', type: 'number', required: false },
-  ],
-  SMTFR: [
-    { name: 'brand_name', label: 'Brand Name', type: 'select', required: true, options: ['Ray-Ban', 'Meta', 'Amazon', 'Google'] },
-    { name: 'subbrand', label: 'Sub Brand', type: 'text', required: false },
-    { name: 'model_name', label: 'Model Name', type: 'text', required: true },
-    { name: 'colour_code', label: 'Colour Code', type: 'text', required: true },
-    { name: 'lens_size', label: 'Lens Size (mm)', type: 'number', required: false },
-    { name: 'bridge_width', label: 'Bridge Width (mm)', type: 'number', required: false },
-    { name: 'temple_length', label: 'Temple Length (mm)', type: 'number', required: false },
-    { name: 'year_of_launch', label: 'Year of Launch', type: 'number', required: false },
-  ],
-  SMTWT: [
-    { name: 'brand_name', label: 'Brand Name', type: 'select', required: true, options: ['Apple', 'Samsung', 'Fitbit', 'Garmin', 'Amazfit', 'Noise', 'boAt'] },
-    { name: 'subbrand', label: 'Sub Brand', type: 'text', required: false },
-    { name: 'model_name', label: 'Model Name', type: 'text', required: true },
-    { name: 'colour_code', label: 'Colour Code', type: 'text', required: true },
-    { name: 'body_colour', label: 'Body Colour', type: 'text', required: false },
-    { name: 'belt_colour', label: 'Belt Colour', type: 'text', required: false },
-    { name: 'dial_size', label: 'Dial Size (mm)', type: 'number', required: false },
-    { name: 'belt_size', label: 'Belt Size (mm)', type: 'number', required: false },
-    { name: 'year_of_launch', label: 'Year of Launch', type: 'number', required: false },
-  ],
-};
 
 type Step = 'category' | 'details' | 'pricing' | 'inventory' | 'shopify' | 'review';
 
-export function AddProductPage() {
+// The step-by-step wizard. Surfaced as "Guided Add" in the product-add shell;
+// kept intact as a fallback to the faster one-screen Quick Add.
+export function GuidedAddProduct() {
   const { hasRole } = useAuth();
   const toast = useToast();
   const navigate = useNavigate();
@@ -315,86 +162,26 @@ export function AddProductPage() {
 
     setIsSubmitting(true);
     try {
-      // ProductCreate requires top-level sku/brand/model. The dynamic form
-      // collects these under category-specific attribute names (brand_name,
-      // model_no / model_name); map them here. SKU is not a form field, so
-      // generate a stable unique one when absent (avoids the 422 the flat
-      // payload otherwise hit).
-      const brand = String(attributes.brand_name || attributes.brand || '').trim();
-      const model = String(
-        attributes.model_no || attributes.model_name || attributes.subbrand || 'STD'
-      ).trim();
-      const sku =
-        String(attributes.sku || attributes.barcode || '').trim() ||
-        `${selectedCategory}-${(brand || 'GEN').replace(/\s+/g, '').slice(0, 6)}-${Date.now().toString(36)}`.toUpperCase();
-
-      // Contact lenses: map the CL attribute fields onto the top-level CL
-      // identity fields the backend ProductCreate models (the CL-Rx / sale
-      // modules read these). Only sent for the CL category; non-CL products
-      // are untouched. `power` is the SKU nominal power -> cl_power.
-      const isCL = selectedCategory === 'CL';
-      const num = (v: unknown): number | undefined => {
-        const n = parseFloat(String(v ?? '').trim());
-        return Number.isFinite(n) ? n : undefined;
-      };
-      const clFields = isCL
-        ? {
-            cl_series: String(attributes.cl_series || '').trim() || undefined,
-            modality: String(attributes.modality || '').trim() || undefined,
-            base_curve: num(attributes.base_curve),
-            diameter: num(attributes.diameter),
-            cl_power: num(attributes.power),
-            cl_cyl: num(attributes.cl_cyl),
-            cl_axis: num(attributes.cl_axis),
-            cl_add: num(attributes.cl_add),
-            pack_size: num(attributes.pack),
-          }
-        : {};
-
-      // Spectacle lenses: map the stock-power fields onto the top-level lens
-      // power identity (drives the SPH x CYL Power Grid). Only sent for LS.
-      const isLens = selectedCategory === 'LS';
-      const lsFields = isLens
-        ? {
-            sph: num(attributes.sph),
-            cyl: num(attributes.cyl),
-            axis: num(attributes.axis),
-            add: num(attributes.add),
-          }
-        : {};
-
-      await productApi.createProduct({
-        category: selectedCategory,
-        sku,
-        brand,
-        model,
-        attributes,
-        description: description || undefined,
-        // India: contact lenses default to HSN 9001 (90013000) at 5% GST under
-        // GST 2.0 when an HSN is not explicitly chosen.
-        hsn_code: hsnCode || (isCL ? '90013000' : undefined),
-        // Flat fields — ProductCreate is flat, not nested. Offer price falls
-        // back to MRP when left blank (matches the form hint). Stock qty is
-        // intentionally omitted: ProductCreate has no stock field; inventory
-        // is created via GRN, not at product-create time.
-        mrp: parseFloat(mrp),
-        offer_price: offerPrice ? parseFloat(offerPrice) : parseFloat(mrp),
-        gst_rate: parseFloat(gstRate),
-        ...clFields,
-        ...lsFields,
-        weight: weight ? parseFloat(weight) : undefined,
-        cost_price: costPrice ? parseFloat(costPrice) : undefined,
-        discount_category: discountCategory,
-        images: [],
-        shopify: {
-          // Shopify here is kept for future vendor sync only (NEXUS agent
-          // will push POS stock → Shopify). The in-app "online store"
-          // flag was removed since we don't render our own storefront.
-          sync_to_shopify: syncToShopify,
-          shopify_tags: shopifyTags,
-          publish_to_pos: publishPOS,
-        },
-      });
+      // Build the create payload via the shared mapper so Guided Add and Quick
+      // Add POST byte-identical payloads (brand/model/sku-gen, CL + LS identity
+      // fields, flat pricing, Shopify flags). See productAddShared.ts.
+      await productApi.createProduct(
+        buildProductPayload({
+          category: selectedCategory,
+          attributes,
+          description,
+          hsnCode,
+          gstRate,
+          weight,
+          mrp,
+          offerPrice,
+          costPrice,
+          discountCategory,
+          syncToShopify,
+          shopifyTags,
+          publishPOS,
+        })
+      );
 
       toast.success('Product created successfully!');
       navigate('/catalog/inventory');
@@ -1014,4 +801,4 @@ export function AddProductPage() {
   );
 }
 
-export default AddProductPage;
+export default GuidedAddProduct;
