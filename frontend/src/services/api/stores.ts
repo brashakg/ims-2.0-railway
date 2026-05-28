@@ -173,13 +173,43 @@ export const adminUserApi = {
   createUser: async (data: {
     name: string;
     email: string;
-    phone: string;
-    role: string;
-    storeId: string;
+    phone?: string;
+    role?: string;
+    storeId?: string;
     password?: string;
+    username?: string;
     status?: string;
   }) => {
-    const response = await api.post('/users', data);
+    // Map the UI's shape (name/role/storeId) onto the backend UserCreate
+    // contract (full_name/roles[]/store_ids[]). Sending the raw UI shape was
+    // a 422: `username` + `full_name` are required and were never sent, and
+    // `role`/`storeId` (wrong names) were silently dropped so the new user got
+    // no role/store. Derive a username from the email local-part when the form
+    // doesn't supply one.
+    const fullName = (data.name || '').trim();
+    const emailLocal = (data.email || '').split('@')[0] || '';
+    const derived = (data.username || emailLocal || fullName)
+      .toLowerCase()
+      .replace(/[^a-z0-9._-]+/g, '')
+      .slice(0, 40);
+    const username = derived.length >= 3 ? derived : `user${Date.now().toString().slice(-6)}`;
+    const hasRealPwd = !!(data.password && data.password.length >= 8);
+    const payload: Record<string, unknown> = {
+      username,
+      email: data.email,
+      full_name: fullName.length >= 2 ? fullName : username,
+      password: hasRealPwd ? data.password : 'Welcome@123',
+      // A temp/auto password must be changed on first login (not become the
+      // permanent password).
+      must_change_password: !hasRealPwd,
+    };
+    if (data.phone) payload.phone = data.phone;
+    if (data.role) payload.roles = [data.role];
+    if (data.storeId) {
+      payload.store_ids = [data.storeId];
+      payload.primary_store_id = data.storeId;
+    }
+    const response = await api.post('/users', payload);
     return response.data;
   },
 
@@ -191,7 +221,18 @@ export const adminUserApi = {
     storeId: string;
     status: string;
   }>) => {
-    const response = await api.put(`/users/${userId}`, data);
+    // Same name->full_name / role->roles[] / storeId->store_ids[] mapping the
+    // backend UserUpdate expects (raw UI shape silently dropped role + store).
+    const payload: Record<string, unknown> = {};
+    if (data.name !== undefined) payload.full_name = data.name;
+    if (data.phone !== undefined) payload.phone = data.phone;
+    if (data.role) payload.roles = [data.role];
+    if (data.storeId) {
+      payload.store_ids = [data.storeId];
+      payload.primary_store_id = data.storeId;
+    }
+    if (data.status !== undefined) payload.is_active = data.status === 'ACTIVE';
+    const response = await api.put(`/users/${userId}`, payload);
     return response.data;
   },
 

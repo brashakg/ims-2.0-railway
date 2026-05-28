@@ -32,6 +32,9 @@ class UserCreate(BaseModel):
     store_ids: List[str] = Field(default=[])
     primary_store_id: Optional[str] = None
     discount_cap: float = Field(default=10.0, ge=0, le=100)
+    # When True (admin created the account with a temporary password), the user
+    # must change it on first login instead of it becoming the permanent one.
+    must_change_password: bool = Field(default=False)
 
 
 class UserUpdate(BaseModel):
@@ -224,6 +227,7 @@ async def create_user(user: UserCreate, current_user: dict = Depends(require_adm
             or (user.store_ids[0] if user.store_ids else None),
             "discount_cap": user.discount_cap,
             "is_active": True,
+            "must_change_password": user.must_change_password,
             "created_by": current_user.get("user_id"),
         }
 
