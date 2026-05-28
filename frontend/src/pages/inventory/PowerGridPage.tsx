@@ -32,6 +32,7 @@ import {
   lensStockApi,
   type LensStockCell,
   type LensStockAuditRow,
+  type LensStockCellUpdate,
 } from '../../services/api/lensStock';
 import { storeApi } from '../../services/api/stores';
 import { useAuth } from '../../context/AuthContext';
@@ -109,9 +110,21 @@ function uniqAsc(values: number[]): number[] {
 // Top-level page
 // ----------------------------------------------------------------------------
 
+// Roles allowed to manually adjust stock cells. Mirrors the lens_stock
+// router's _WRITE_ROLES (STORE_MANAGER is store-scoped on the backend) plus
+// SUPERADMIN. Non-writers get a read-only drawer.
+const MANAGE_STOCK_ROLES = ['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER', 'STORE_MANAGER'];
+
 export default function PowerGridPage() {
   const { user } = useAuth();
   const toast = useToast();
+
+  // Can the current user manually adjust stock? Drives whether the cell
+  // drawer shows editable inputs or a read-only note.
+  const canManageStock = useMemo(() => {
+    const roles = user?.roles || (user?.activeRole ? [user.activeRole] : []);
+    return roles.some((r) => MANAGE_STOCK_ROLES.includes(r));
+  }, [user]);
 
   // Stores + active scope. Default to the user's active store; superadmin can
   // pick "All stores" (empty string). validate_store_access enforces this on
@@ -310,12 +323,20 @@ export default function PowerGridPage() {
         />
       )}
 
-      {/* ---- Cell drawer (placeholder for B'3 edits) ---- */}
+      {/* ---- Cell drawer (B'3 wires the manual-adjust controls live) ---- */}
       {drawerCell && activeLine ? (
         <CellDrawer
           cell={drawerCell}
           line={activeLine}
+          canEdit={canManageStock}
           onClose={() => setDrawerCell(null)}
+          onSaved={(updated) => {
+            setDrawerCell(updated);
+            // Bump the matrix so the heatmap reflects the new on_hand.
+            setMatrixRefreshKey((k) => k + 1);
+          }}
+          onError={(m) => toast.error(m)}
+          onSuccess={(m) => toast.success(m)}
         />
       ) : null}
     </div>
@@ -832,13 +853,19 @@ function MatrixTable({ sphList, cylList, cellMap, onCellClick }: MatrixTableProp
 interface CellDrawerProps {
   cell: LensStockCell;
   line: LensLine;
+  canEdit: boolean;
   onClose: () => void;
+  onSaved: (updated: LensStockCell) => void;
+  onError: (msg: string) => void;
+  onSuccess: (msg: string) => void;
 }
 
-function CellDrawer({ cell, line, onClose }: CellDrawerProps) {
+function CellDrawer({ cell, line, canEdit, onClose, onSaved, onError, onSuccess }: CellDrawerProps) {
   const [audit, setAudit] = useState<LensStockAuditRow[]>([]);
   const [auditLoading, setAuditLoading] = useState(true);
   const [auditError, setAuditError] = useState<string | null>(null);
+  // Re-load the audit history after a successful save (bump this key).
+  const [auditReloadKey, setAuditReloadKey] = useState(0);
 
   useEffect(() => {
     let alive = true;
@@ -851,7 +878,7 @@ function CellDrawer({ cell, line, onClose }: CellDrawerProps) {
       })
       .finally(() => { if (alive) setAuditLoading(false); });
     return () => { alive = false; };
-  }, [cell.line_stock_id]);
+  }, [cell.line_stock_id, auditReloadKey]);
 
   // Esc-key dismiss. Owner-requested per the coordinator note: click outside,
   // Esc, or X all close the drawer. Listener is window-level so focus on
@@ -913,31 +940,24 @@ function CellDrawer({ cell, line, onClose }: CellDrawerProps) {
             <div className="flex justify-between"><span>Last movement</span><span>{cell.last_movement_at ? cell.last_movement_at.slice(0, 10) : '-'}</span></div>
           </div>
 
-          {/* Adjust controls (B'3 wires the actual writes) */}
-          <div className="border border-bv-50 bg-bv-soft rounded-lg p-3">
-            <div className="flex items-center gap-2 mb-2">
-              <span className="text-xs font-semibold text-bv uppercase tracking-wide">Manual adjust</span>
-              <span className="text-[10px] text-ink-4">(read-only in B'2; edits land in B'3)</span>
+          {/* Manual adjust (B'3: live). reserved is intentionally NOT editable
+              here -- only reserve/commit/release move it (B'4). */}
+          {canEdit ? (
+            <ManualAdjustForm
+              cell={cell}
+              onSaved={(updated) => {
+                onSaved(updated);
+                setAuditReloadKey((k) => k + 1);
+              }}
+              onError={onError}
+              onSuccess={onSuccess}
+            />
+          ) : (
+            <div className="border border-line bg-bg-sunk rounded-lg p-3 text-xs text-ink-4">
+              You do not have permission to adjust stock. Manual adjust is
+              limited to store managers, catalog managers, and admins.
             </div>
-            <div className="grid grid-cols-2 gap-2 text-xs">
-              <button
-                type="button"
-                disabled
-                className="border border-line bg-white rounded px-2 py-1.5 text-ink-4 disabled:cursor-not-allowed"
-                title="Wired in B'3"
-              >
-                Adjust on-hand
-              </button>
-              <button
-                type="button"
-                disabled
-                className="border border-line bg-white rounded px-2 py-1.5 text-ink-4 disabled:cursor-not-allowed"
-                title="Wired in B'3"
-              >
-                Set reorder point
-              </button>
-            </div>
-          </div>
+          )}
 
           {/* Audit history */}
           <div>
@@ -984,6 +1004,154 @@ function CellDrawer({ cell, line, onClose }: CellDrawerProps) {
         </div>
       </div>
     </div>
+  );
+}
+
+// ----------------------------------------------------------------------------
+// Manual adjust form (B'3): live on_hand / reorder_point / safety_stock edits
+// ----------------------------------------------------------------------------
+
+interface ManualAdjustFormProps {
+  cell: LensStockCell;
+  onSaved: (updated: LensStockCell) => void;
+  onError: (msg: string) => void;
+  onSuccess: (msg: string) => void;
+}
+
+function ManualAdjustForm({ cell, onSaved, onError, onSuccess }: ManualAdjustFormProps) {
+  // String-backed inputs so the field can be cleared while editing; coerced
+  // to non-negative ints on save.
+  const [onHand, setOnHand] = useState<string>(String(cell.on_hand ?? 0));
+  const [reorderPoint, setReorderPoint] = useState<string>(String(cell.reorder_point ?? 0));
+  const [safetyStock, setSafetyStock] = useState<string>(String(cell.safety_stock ?? 0));
+  const [saving, setSaving] = useState(false);
+
+  // Re-sync the form when the drawer points at a different cell or the cell
+  // is refreshed after a save.
+  useEffect(() => {
+    setOnHand(String(cell.on_hand ?? 0));
+    setReorderPoint(String(cell.reorder_point ?? 0));
+    setSafetyStock(String(cell.safety_stock ?? 0));
+  }, [cell.line_stock_id, cell.on_hand, cell.reorder_point, cell.safety_stock]);
+
+  const parseField = (v: string): number | null => {
+    if (v.trim() === '') return null;
+    const n = Number(v);
+    if (!Number.isFinite(n) || n < 0 || !Number.isInteger(n)) return null;
+    return n;
+  };
+
+  // Which fields changed vs the loaded cell -> only send those (PATCH is
+  // partial). reserved is never in this set.
+  const buildBody = (): { body: LensStockCellUpdate; invalid: boolean } => {
+    const body: LensStockCellUpdate = {};
+    let invalid = false;
+    // Only the three numeric fields are editable here (never `notes`).
+    type NumField = 'on_hand' | 'reorder_point' | 'safety_stock';
+    const fields: Array<[string, NumField, number]> = [
+      [onHand, 'on_hand', cell.on_hand ?? 0],
+      [reorderPoint, 'reorder_point', cell.reorder_point ?? 0],
+      [safetyStock, 'safety_stock', cell.safety_stock ?? 0],
+    ];
+    for (const [raw, key, current] of fields) {
+      const parsed = parseField(raw);
+      if (parsed === null) { invalid = true; continue; }
+      if (parsed !== current) body[key] = parsed;
+    }
+    return { body, invalid };
+  };
+
+  const { body, invalid } = buildBody();
+  const dirty = Object.keys(body).length > 0;
+
+  const onSave = async () => {
+    if (invalid) {
+      onError('Values must be whole numbers (0 or more).');
+      return;
+    }
+    if (!dirty) return;
+    setSaving(true);
+    // Optimistic update: reflect the new numbers immediately, roll back on
+    // failure by re-saving the response (or the original on error).
+    const optimistic: LensStockCell = {
+      ...cell,
+      on_hand: body.on_hand ?? cell.on_hand,
+      reorder_point: body.reorder_point ?? cell.reorder_point,
+      safety_stock: body.safety_stock ?? cell.safety_stock,
+      available: Math.max(
+        0,
+        (body.on_hand ?? cell.on_hand ?? 0) - (cell.reserved ?? 0),
+      ),
+    };
+    onSaved(optimistic);
+    try {
+      const res = await lensStockApi.update(cell.line_stock_id, body);
+      // Re-fetch authoritative cell from the response (backend recomputes
+      // available + last_movement_at).
+      onSaved(res.cell);
+      onSuccess('Stock updated.');
+    } catch (e) {
+      // Roll back the optimistic change to the server's last-known state.
+      onSaved(cell);
+      onError(e instanceof Error ? e.message : 'Failed to update stock.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="border border-bv-50 bg-bv-soft rounded-lg p-3">
+      <div className="flex items-center gap-2 mb-2">
+        <span className="text-xs font-semibold text-bv uppercase tracking-wide">Manual adjust</span>
+        <span className="text-[10px] text-ink-4">reserved is set by reserve/commit/release, not here</span>
+      </div>
+      <div className="grid grid-cols-3 gap-2">
+        <AdjustField label="On hand" value={onHand} onChange={setOnHand} disabled={saving} />
+        <AdjustField label="Reorder point" value={reorderPoint} onChange={setReorderPoint} disabled={saving} />
+        <AdjustField label="Safety stock" value={safetyStock} onChange={setSafetyStock} disabled={saving} />
+      </div>
+      <div className="flex items-center justify-end gap-2 mt-3">
+        {dirty && !saving ? (
+          <span className="text-[11px] text-ink-4 mr-auto">Unsaved changes</span>
+        ) : null}
+        <button
+          type="button"
+          onClick={onSave}
+          disabled={saving || !dirty || invalid}
+          className="inline-flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 rounded-lg bg-bv text-white hover:bg-bv-600 disabled:opacity-50 disabled:cursor-not-allowed transition"
+        >
+          {saving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : null}
+          {saving ? 'Saving...' : 'Save'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function AdjustField({
+  label,
+  value,
+  onChange,
+  disabled,
+}: {
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+  disabled: boolean;
+}) {
+  return (
+    <label className="flex flex-col">
+      <span className="text-[10px] uppercase tracking-wide text-ink-4 font-medium mb-1">{label}</span>
+      <input
+        type="number"
+        min={0}
+        step={1}
+        value={value}
+        disabled={disabled}
+        onChange={(e) => onChange(e.target.value)}
+        className="border border-line rounded px-2 py-1.5 text-sm bg-white focus:outline-none focus:border-bv focus:ring-1 focus:ring-bv-50 disabled:bg-bg-sunk"
+      />
+    </label>
   );
 }
 

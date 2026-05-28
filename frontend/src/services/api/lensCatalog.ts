@@ -130,9 +130,66 @@ export interface LensEnumsResponse {
   };
 }
 
+/** Editable enum types that map 1:1 onto a lens_catalog column. `series`
+ *  is a per-brand list edited wholesale (out of scope for the simple editor)
+ *  so it is excluded here. */
+export type LensEnumType = 'brands' | 'coatings' | 'indexes' | 'materials' | 'lens_types';
+
+export interface LensEnumMutationResponse {
+  status: string;
+  enum: { enum_id?: string; items?: Array<string | number> };
+}
+
+export interface LensEnumRenameResponse extends LensEnumMutationResponse {
+  cascade: {
+    old_value: string | number;
+    new_value: string | number;
+    catalog_rows_updated: number;
+    stock_rows_stamped: number;
+    affected_lens_line_ids: string[];
+  };
+}
+
 export const lensEnumsApi = {
   list: async (): Promise<LensEnumsResponse> => {
     const res = await api.get('/lens-enums');
     return res.data as LensEnumsResponse;
+  },
+
+  /** Append one value to an enum list (idempotent -- dupes de-duped server
+   *  side). For indexes pass a number; everything else a string. */
+  addItem: async (
+    enumType: LensEnumType,
+    item: string | number,
+  ): Promise<LensEnumMutationResponse> => {
+    const res = await api.post(`/lens-enums/${encodeURIComponent(enumType)}/items`, { item });
+    return res.data as LensEnumMutationResponse;
+  },
+
+  /** Rename a value and CASCADE the change onto every lens_line + stock row
+   *  using it. Returns the cascade blast-radius counts. 409 if the rename
+   *  would collide two lens lines onto one identity. */
+  rename: async (
+    enumType: LensEnumType,
+    oldValue: string | number,
+    newValue: string | number,
+  ): Promise<LensEnumRenameResponse> => {
+    const res = await api.post(`/lens-enums/${encodeURIComponent(enumType)}/rename`, {
+      old_value: oldValue,
+      new_value: newValue,
+    });
+    return res.data as LensEnumRenameResponse;
+  },
+
+  /** Delete a value. 409 (with the in-use count in the message) if any active
+   *  lens line still references it. */
+  deleteItem: async (
+    enumType: LensEnumType,
+    item: string | number,
+  ): Promise<LensEnumMutationResponse> => {
+    const res = await api.delete(
+      `/lens-enums/${encodeURIComponent(enumType)}/items/${encodeURIComponent(String(item))}`,
+    );
+    return res.data as LensEnumMutationResponse;
   },
 };

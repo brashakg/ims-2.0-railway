@@ -6,9 +6,10 @@ Covers:
   - PATCH /lens-enums/{enum_type} replaces the list (wholesale)
   - POST /lens-enums/{enum_type}/items appends (de-duped)
   - DELETE /lens-enums/{enum_type}/items/{item} refuses when in use
-  - role gates (CATALOG_MANAGER cannot edit; ADMIN can)
+  - role gates (SALES_STAFF cannot edit; ADMIN + CATALOG_MANAGER can)
   - Q6 seed defaults present (technical dims only; brands/series empty)
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -71,11 +72,7 @@ class FakeColl:
         ]
 
     def count_documents(self, flt):
-        return sum(
-            1
-            for d in self._docs
-            if all(d.get(k) == v for k, v in flt.items())
-        )
+        return sum(1 for d in self._docs if all(d.get(k) == v for k, v in flt.items()))
 
 
 class _DBShim:
@@ -156,13 +153,20 @@ def test_get_unknown_enum_type_returns_404(fake_db):
 # ---------------------------------------------------------------------------
 
 
-def test_replace_enum_admin_only(fake_db):
-    """CATALOG_MANAGER cannot PATCH. ADMIN can."""
-    cm = _user(["CATALOG_MANAGER"])
+def test_replace_enum_write_roles(fake_db):
+    """SALES_STAFF cannot PATCH; ADMIN + CATALOG_MANAGER can.
+
+    B'3 widened the enum-editor write gate to include CATALOG_MANAGER
+    (mirrors lens_catalog.py's own _WRITE_ROLES) so the catalog manager who
+    owns the lens catalog can also edit the enum lists those lines draw from.
+    """
+    staff = _user(["SALES_STAFF"])
     dep = enums_router.require_roles(*enums_router._WRITE_ROLES)
     with pytest.raises(HTTPException) as exc:
-        asyncio.run(dep(cm))
+        asyncio.run(dep(staff))
     assert exc.value.status_code == 403
+    # CATALOG_MANAGER now passes the gate.
+    assert asyncio.run(dep(_user(["CATALOG_MANAGER"]))) is not None
     admin = _user(["ADMIN"])
     out = asyncio.run(
         enums_router.replace_enum(
@@ -178,9 +182,9 @@ def test_replace_enum_admin_only(fake_db):
 def test_append_dedupes(fake_db):
     admin = _user(["ADMIN"])
     # Append an already-present coating -> still only one entry.
-    before = list(fake_db["lens_enum_config"].find_one(
-        {"enum_id": "coatings"}
-    )["items"])
+    before = list(
+        fake_db["lens_enum_config"].find_one({"enum_id": "coatings"})["items"]
+    )
     out = asyncio.run(
         enums_router.append_item("coatings", {"item": "ANTI_BLUE"}, admin)
     )
@@ -191,9 +195,7 @@ def test_append_dedupes(fake_db):
 def test_append_new_index_coerced_to_float(fake_db):
     admin = _user(["ADMIN"])
     # Pass index as a string -- the router coerces to float.
-    out = asyncio.run(
-        enums_router.append_item("indexes", {"item": "1.59"}, admin)
-    )
+    out = asyncio.run(enums_router.append_item("indexes", {"item": "1.59"}, admin))
     assert 1.59 in out["enum"]["items"]
 
 
@@ -209,9 +211,7 @@ def test_remove_refused_when_in_use(fake_db):
         }
     )
     with pytest.raises(HTTPException) as exc:
-        asyncio.run(
-            enums_router.remove_item("coatings", "ANTI_BLUE", admin)
-        )
+        asyncio.run(enums_router.remove_item("coatings", "ANTI_BLUE", admin))
     assert exc.value.status_code == 409
     assert "1 active lens line" in exc.value.detail
 
@@ -226,9 +226,5 @@ def test_remove_succeeds_when_not_in_use(fake_db):
 def test_replace_indexes_validates_gt_one(fake_db):
     admin = _user(["ADMIN"])
     with pytest.raises(HTTPException) as exc:
-        asyncio.run(
-            enums_router.replace_enum(
-                "indexes", {"items": [1.50, 1.0]}, admin
-            )
-        )
+        asyncio.run(enums_router.replace_enum("indexes", {"items": [1.50, 1.0]}, admin))
     assert exc.value.status_code == 400
