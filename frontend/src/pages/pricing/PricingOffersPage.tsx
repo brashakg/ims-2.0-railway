@@ -12,7 +12,7 @@
 // /products/bulk-offer. The backend (api/services/pricing_caps.py) is the
 // single source of truth for the caps.
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Tag, Percent, RefreshCw, Loader2, AlertTriangle, ShieldAlert, CheckCircle2 } from 'lucide-react';
 import {
   pricingApi,
@@ -259,6 +259,20 @@ function BulkPriceTab({ categories, brands, stores }: { categories: string[]; br
     }
   }, [scope, mode, target, amount, user, toast]);
 
+  // Auto-run a dry-run preview so the SKU list populates on load and stays live
+  // as the scope/operation changes -- the operator shouldn't have to discover
+  // the Preview button to see any SKUs at all. Dry-run is read-only (apply=false);
+  // debounced to coalesce rapid edits. A ref keeps the latest `run` without
+  // re-firing the effect on every callback identity change.
+  const runRef = useRef(run);
+  useEffect(() => {
+    runRef.current = run;
+  }, [run]);
+  useEffect(() => {
+    const t = setTimeout(() => runRef.current(false), 450);
+    return () => clearTimeout(t);
+  }, [scope.category, scope.brand, scope.storeId, mode, target, amount]);
+
   return (
     <>
       <StatStrip result={result} />
@@ -267,7 +281,7 @@ function BulkPriceTab({ categories, brands, stores }: { categories: string[]; br
       <div className="bg-gray-900 text-white rounded-lg px-4 py-3 mb-4 flex flex-wrap items-center gap-3">
         <div className="text-[11px] font-mono uppercase tracking-wider text-gray-400">Apply</div>
         <select value={mode} onChange={(e) => setMode(e.target.value as 'PERCENT' | 'FLAT')}
-          className="bg-gray-800 border border-gray-700 text-white rounded px-2.5 py-1.5 text-sm">
+          className="bg-gray-800 border border-gray-700 text-white rounded px-2.5 py-1.5 text-sm [&>option]:bg-white [&>option]:text-gray-900">
           <option value="PERCENT">Percentage %</option>
           <option value="FLAT">Absolute &#8377;</option>
         </select>
@@ -275,7 +289,7 @@ function BulkPriceTab({ categories, brands, stores }: { categories: string[]; br
           className="bg-gray-800 border border-gray-700 text-white rounded px-2.5 py-1.5 text-sm w-24 tabular-nums" />
         <div className="text-[11px] font-mono uppercase tracking-wider text-gray-400">to</div>
         <select value={target} onChange={(e) => setTarget(e.target.value as 'OFFER' | 'MRP' | 'BOTH')}
-          className="bg-gray-800 border border-gray-700 text-white rounded px-2.5 py-1.5 text-sm">
+          className="bg-gray-800 border border-gray-700 text-white rounded px-2.5 py-1.5 text-sm [&>option]:bg-white [&>option]:text-gray-900">
           <option value="OFFER">Selling price</option>
           <option value="MRP">MRP</option>
           <option value="BOTH">Both</option>
@@ -351,6 +365,17 @@ function BulkOfferTab({ categories, brands, stores }: { categories: string[]; br
       setBusy(false);
     }
   }, [scope, action, valueMode, discountPct, flatPrice, user, toast]);
+
+  // Auto-run a dry-run preview (read-only) so the SKU list is never mysteriously
+  // empty -- mirrors the price tab. Debounced; latest `run` held in a ref.
+  const runRef = useRef(run);
+  useEffect(() => {
+    runRef.current = run;
+  }, [run]);
+  useEffect(() => {
+    const t = setTimeout(() => runRef.current(false), 450);
+    return () => clearTimeout(t);
+  }, [scope.category, scope.brand, scope.storeId, action, valueMode, discountPct, flatPrice]);
 
   return (
     <>
