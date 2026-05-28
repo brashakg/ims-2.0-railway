@@ -35,7 +35,7 @@ const inr = (n?: number | null) => `₹${Math.round(Number(n) || 0).toLocaleStri
 
 // Indian currency in circulation (no Rs 2000 -- RBI withdrew it).
 const NOTE_FACES = [500, 200, 100, 50, 20, 10];
-const COIN_FACES = [10, 5, 2, 1];
+const COIN_FACES = [20, 10, 5, 2, 1];
 
 interface DenomRow {
   face: number;
