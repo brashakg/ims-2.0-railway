@@ -23,6 +23,10 @@ type AuthAction =
 interface AuthContextType extends AuthState {
   login: (credentials: LoginCredentials) => Promise<LoginResponse>;
   logout: () => Promise<void>;
+  /** Re-fetch the signed-in user from the server and update state + cache.
+   *  Used after a forced password change so `mustChangePassword` flips to
+   *  false and the app gate lifts without a full re-login. */
+  refreshUser: () => Promise<void>;
   setActiveRole: (role: UserRole) => void;
   setActiveStore: (storeId: string) => void;
   hasPermission: (permission: string) => boolean;
@@ -287,6 +291,35 @@ export function AuthProvider({ children }: AuthProviderProps) {
     }
   };
 
+  // Re-fetch the signed-in user from the server (e.g. after a forced password
+  // change) and merge into state + cache. Preserves the client-side active
+  // store / role picks, which the server's /auth/me default would otherwise
+  // overwrite (same reasoning as the mount path above).
+  const refreshUser = async () => {
+    const profile = await authApi.getProfile();
+    const current = state.user;
+    if (current?.activeStoreId) {
+      const hasCrossStoreAccess = (profile.roles || []).some(r =>
+        r === 'SUPERADMIN' || r === 'ADMIN' || r === 'AREA_MANAGER',
+      );
+      const isAssigned = (profile.storeIds || []).includes(current.activeStoreId);
+      if (hasCrossStoreAccess || isAssigned) {
+        profile.activeStoreId = current.activeStoreId;
+      }
+    }
+    if (current?.activeRole && (profile.roles || []).includes(current.activeRole)) {
+      profile.activeRole = current.activeRole;
+    } else if (!profile.activeRole && profile.roles && profile.roles.length > 0) {
+      profile.activeRole = profile.roles[0];
+    }
+    try {
+      localStorage.setItem('ims_user', JSON.stringify(profile));
+    } catch {
+      // localStorage may be unavailable in some browser modes — non-fatal.
+    }
+    dispatch({ type: 'UPDATE_USER', payload: profile });
+  };
+
   // Set active role
   const setActiveRole = (role: UserRole) => {
     if (state.user?.roles.includes(role)) {
@@ -405,6 +438,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
     ...state,
     login,
     logout,
+    refreshUser,
     setActiveRole,
     setActiveStore,
     hasPermission,

@@ -10,6 +10,7 @@ import {
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { settingsApi } from '../../services/api';
+import { authApi } from '../../services/api/auth';
 
 // ============================================================================
 // Profile Tab
@@ -25,6 +26,43 @@ export function ProfileSection() {
     phone: string;
   } | null>(null);
   const [showChangePassword, setShowChangePassword] = useState(false);
+  const [pwCurrent, setPwCurrent] = useState('');
+  const [pwNew, setPwNew] = useState('');
+  const [pwConfirm, setPwConfirm] = useState('');
+  const [pwSubmitting, setPwSubmitting] = useState(false);
+
+  const handleChangePassword = async () => {
+    if (!pwCurrent || !pwNew || !pwConfirm) {
+      toast.error('Please fill in all password fields');
+      return;
+    }
+    if (pwNew.length < 8) {
+      toast.error('New password must be at least 8 characters');
+      return;
+    }
+    if (pwNew !== pwConfirm) {
+      toast.error('New password and confirmation do not match');
+      return;
+    }
+    setPwSubmitting(true);
+    try {
+      const res = await authApi.changePassword(pwCurrent, pwNew);
+      if (res && res.success === false) {
+        toast.error(res.message || 'Failed to change password');
+        return;
+      }
+      toast.success('Password changed successfully');
+      setPwCurrent('');
+      setPwNew('');
+      setPwConfirm('');
+      setShowChangePassword(false);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Failed to change password';
+      toast.error(msg.includes('incorrect') ? 'Current password is incorrect' : msg);
+    } finally {
+      setPwSubmitting(false);
+    }
+  };
 
   useEffect(() => {
     loadProfile();
@@ -128,10 +166,40 @@ export function ProfileSection() {
             <div className="p-4 bg-yellow-50 rounded-lg border border-yellow-200">
               <h4 className="font-medium text-gray-900 mb-3">Change Password</h4>
               <div className="space-y-3">
-                <input type="password" placeholder="Current Password" className="input-field" />
-                <input type="password" placeholder="New Password (min 8 chars)" className="input-field" />
-                <input type="password" placeholder="Confirm New Password" className="input-field" />
-                <button className="btn-primary">Update Password</button>
+                <input
+                  type="password"
+                  placeholder="Current Password"
+                  className="input-field"
+                  autoComplete="current-password"
+                  value={pwCurrent}
+                  onChange={e => setPwCurrent(e.target.value)}
+                  disabled={pwSubmitting}
+                />
+                <input
+                  type="password"
+                  placeholder="New Password (min 8 chars)"
+                  className="input-field"
+                  autoComplete="new-password"
+                  value={pwNew}
+                  onChange={e => setPwNew(e.target.value)}
+                  disabled={pwSubmitting}
+                />
+                <input
+                  type="password"
+                  placeholder="Confirm New Password"
+                  className="input-field"
+                  autoComplete="new-password"
+                  value={pwConfirm}
+                  onChange={e => setPwConfirm(e.target.value)}
+                  disabled={pwSubmitting}
+                />
+                <button
+                  className="btn-primary"
+                  onClick={handleChangePassword}
+                  disabled={pwSubmitting}
+                >
+                  {pwSubmitting ? 'Updating...' : 'Update Password'}
+                </button>
               </div>
             </div>
           )}

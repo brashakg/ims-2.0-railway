@@ -42,6 +42,9 @@ export const authApi = {
         // Optional because pre-fix backends won't include it — we fall
         // back to a local role lookup so old servers still work.
         discount_cap?: number;
+        // True when the user must change an admin-set temporary password
+        // before using the app. Optional for pre-fix backends.
+        must_change_password?: boolean;
       };
     }
 
@@ -68,6 +71,7 @@ export const authApi = {
           isActive: true,
           geoRestricted: false,
           createdAt: new Date().toISOString(),
+          mustChangePassword: data.user.must_change_password ?? false,
         },
       };
     } catch (error) {
@@ -117,6 +121,7 @@ export const authApi = {
       store_ids: string[];
       active_store_id: string;
       discount_cap?: number;
+      must_change_password?: boolean;
       exp?: number;
     }>('/auth/me');
     const raw = response.data;
@@ -133,6 +138,7 @@ export const authApi = {
       isActive: true,
       geoRestricted: false,
       createdAt: new Date().toISOString(),
+      mustChangePassword: raw.must_change_password ?? false,
     };
   },
 

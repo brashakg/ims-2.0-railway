@@ -11,6 +11,7 @@ import { Shell, type Crumb } from '../shell';
 import { useAppearance } from '../../context/AppearanceContext';
 import { useAuth } from '../../context/AuthContext';
 import { loadHsnRates } from '../../constants/gstRuntime';
+import { ForcePasswordChange } from '../../pages/auth/ForcePasswordChange';
 
 // Keep labels consistent with the Rail labels so the crumb matches the active item.
 const SEGMENT_LABELS: Record<string, string> = {
@@ -79,7 +80,7 @@ function pathToCrumbs(pathname: string): Crumb[] {
 export function AppLayout() {
   const location = useLocation();
   const { brand } = useAppearance();
-  const { isReadOnly } = useAuth();
+  const { isReadOnly, user } = useAuth();
 
   const crumbs = useMemo(() => pathToCrumbs(location.pathname), [location.pathname]);
 
@@ -87,6 +88,16 @@ export function AppLayout() {
   // invoice reflect the same (SUPERADMIN-edited) rates the backend bills from.
   // Fail-soft: resolveGstRate() falls back to static GST 2.0 constants.
   useEffect(() => { loadHsnRates(); }, []);
+
+  // Force-change-on-first-login gate: an admin-created / password-reset user
+  // signs in with a temporary password and MUST change it before reaching any
+  // part of the app. This blocks the whole authenticated shell (every route
+  // renders inside AppLayout) until the flag clears. The screen itself offers a
+  // "Sign out" escape hatch. Server-side, the temp password still works only
+  // for /auth/change-password's verify step — this is the UX enforcement.
+  if (user?.mustChangePassword) {
+    return <ForcePasswordChange />;
+  }
 
   return (
     <Shell crumbs={crumbs} brand={brand}>

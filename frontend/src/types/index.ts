@@ -68,6 +68,11 @@ export interface User {
   isActive: boolean;
   geoRestricted: boolean;
   createdAt: string;
+  /** When true, the user signed in with an admin-set temporary password and
+   *  must change it before using the app. Set by the backend on user-create /
+   *  password-reset; cleared once they change it. The frontend gates the whole
+   *  app on this flag (see AppLayout). */
+  mustChangePassword?: boolean;
 }
 
 export interface AuthState {
