@@ -22,7 +22,11 @@ interface ReturnItem {
   sku: string;
   quantity: number;
   returnQty: number;
+  // NET (pre-GST) unit price from the order line.
   unitPrice: number;
+  // GST rate (%) the line was billed at. Used to show the GST-inclusive gross
+  // the customer paid (refund = gross, not the net subtotal).
+  gstRate: number;
   reason: ReturnReason;
   notes: string;
   condition: 'GOOD' | 'DAMAGED' | 'OPENED';
@@ -57,6 +61,7 @@ export default function ReturnsPage() {
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [approvalNote, setApprovalNote] = useState('');
+  const [restockingFee, setRestockingFee] = useState(0);
   const [resultId, setResultId] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
@@ -101,11 +106,16 @@ export default function ReturnsPage() {
         quantity: item.quantity || 1,
         returnQty: 0,
         unitPrice: Math.round(item.unitPrice || item.unit_price || 0),
+        // Rate the line was billed at (stamped on the order item). Drives the
+        // GST-inclusive gross shown + sent so the customer is refunded what
+        // they actually paid, not the net subtotal.
+        gstRate: Number(item.gst_rate ?? item.gstRate ?? 0),
         reason: 'CUSTOMER_CHANGED_MIND' as ReturnReason,
         notes: '',
         condition: 'GOOD' as const,
       }))
     );
+    setRestockingFee(0);
     setStep('select');
   };
 
@@ -114,7 +124,16 @@ export default function ReturnsPage() {
   };
 
   const activeReturns = returnItems.filter(i => i.returnQty > 0);
-  const totalRefund = activeReturns.reduce((sum, i) => sum + i.returnQty * i.unitPrice, 0);
+  // GST-INCLUSIVE gross the customer paid: net unit_price grossed up by the
+  // line's GST rate. Mirrors the backend returns_engine (refund = gross, NOT
+  // the net subtotal). gstRate 0 -> unit_price treated as already gross.
+  const totalRefund = activeReturns.reduce(
+    (sum, i) => sum + i.returnQty * i.unitPrice * (1 + (i.gstRate || 0) / 100),
+    0
+  );
+  // Net refund after an optional restocking fee for damaged / opened goods.
+  const safeFee = Math.max(0, Math.min(restockingFee || 0, totalRefund));
+  const netRefund = Math.max(0, totalRefund - safeFee);
 
   // Exchange settlement: replacement total - returned value.
   const replacementTotal = replacementItems.reduce((sum, r) => sum + r.quantity * r.unitPrice, 0);
@@ -181,6 +200,7 @@ export default function ReturnsPage() {
           sku: i.sku,
           return_qty: i.returnQty,
           unit_price: i.unitPrice,
+          gst_rate: i.gstRate,
           reason: i.reason,
           condition: i.condition,
           notes: i.notes,
@@ -196,6 +216,9 @@ export default function ReturnsPage() {
               }))
             : undefined,
         approval_note: approvalNote || undefined,
+        // Restocking fee is a refund-path concept only (EXCHANGE is settled on
+        // the difference). Send it for RETURN / CREDIT_NOTE.
+        restocking_fee: returnType === 'EXCHANGE' ? undefined : safeFee || undefined,
       };
       const result = await returnsApi.create(payload);
       setResultId(result.return_id || null);
@@ -454,10 +477,32 @@ export default function ReturnsPage() {
                   </div>
                 </div>
               ) : (
-                <div className="flex items-center justify-between mb-3">
-                  <span className="text-sm text-gray-700">
-                    {returnType === 'CREDIT_NOTE' ? 'Credit Amount' : 'Refund Amount'}: <span className="font-bold text-lg">{fc(totalRefund)}</span>
-                  </span>
+                <div className="mb-3 space-y-2">
+                  <div className="flex items-center justify-between text-sm text-gray-700">
+                    <span>Gross paid (incl. GST)</span>
+                    <span className="font-medium">{fc(totalRefund)}</span>
+                  </div>
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <label className="text-sm text-gray-700 block">Restocking fee (Rs)</label>
+                      <p className="text-xs text-gray-500">for damaged/opened goods - leave 0 for a full refund</p>
+                    </div>
+                    <input type="number" min={0} max={Math.round(totalRefund)} value={restockingFee}
+                      onChange={e => setRestockingFee(Math.max(0, Number(e.target.value)))}
+                      className="w-28 px-2 py-1.5 border border-gray-300 rounded text-sm text-right" />
+                  </div>
+                  {safeFee > 0 && (
+                    <div className="flex items-center justify-between text-sm text-gray-500">
+                      <span>Less restocking fee</span>
+                      <span className="font-medium text-bv-red-600">-{fc(safeFee)}</span>
+                    </div>
+                  )}
+                  <div className="flex items-center justify-between mt-1 pt-2 border-t border-gray-200">
+                    <span className="text-sm text-gray-700">
+                      {returnType === 'CREDIT_NOTE' ? 'Net store credit' : 'Net refund'}
+                    </span>
+                    <span className="font-bold text-lg text-gray-900">{fc(netRefund)}</span>
+                  </div>
                 </div>
               )}
               <textarea value={approvalNote} onChange={e => setApprovalNote(e.target.value)}
@@ -485,7 +530,7 @@ export default function ReturnsPage() {
           </h3>
           <p className="text-gray-500 mt-2">Reference: {resultId}</p>
           <p className="text-2xl font-bold text-bv-red-600 mt-3">
-            {returnType === 'EXCHANGE' ? (exchangeDirection === 'EVEN' ? fc(0) : fc(Math.abs(exchangeDiff))) : fc(totalRefund)}
+            {returnType === 'EXCHANGE' ? (exchangeDirection === 'EVEN' ? fc(0) : fc(Math.abs(exchangeDiff))) : fc(netRefund)}
           </p>
           <p className="text-sm text-gray-500 mt-1">
             {returnType === 'CREDIT_NOTE' ? 'Store credit added to customer account' :
@@ -496,7 +541,7 @@ export default function ReturnsPage() {
                 : 'Refund to be processed via original payment method'}
           </p>
           <div className="flex gap-3 justify-center mt-6">
-            <button onClick={() => { setStep('search'); setSelectedOrder(null); setReturnItems([]); setResultId(null); setReplacementItems([]); setProductResults([]); setProductQuery(''); }}
+            <button onClick={() => { setStep('search'); setSelectedOrder(null); setReturnItems([]); setResultId(null); setReplacementItems([]); setProductResults([]); setProductQuery(''); setRestockingFee(0); }}
               className="px-6 py-2.5 bg-bv-red-600 text-white rounded-lg text-sm font-semibold">New Return</button>
           </div>
         </div>
