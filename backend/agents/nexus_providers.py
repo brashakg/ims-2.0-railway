@@ -28,6 +28,7 @@ import os
 import httpx
 
 from .providers import dispatch_mode  # reuse DISPATCH_MODE gate
+from api.utils.dates import to_date_str
 
 logger = logging.getLogger(__name__)
 
@@ -292,7 +293,7 @@ def tally_build_day_voucher_xml(
     vouchers = []
     for o in orders:
         order_id = o.get("order_id", "")
-        order_date = o.get("created_at", "")[:10].replace("-", "")  # yyyymmdd
+        order_date = to_date_str(o.get("created_at")).replace("-", "")  # yyyymmdd
         party = o.get("customer_name") or "Walk-in Customer"
         subtotal = float(o.get("subtotal", 0) or 0)
         cgst = float(o.get("cgst_amount", 0) or 0)

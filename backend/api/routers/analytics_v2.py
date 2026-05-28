@@ -99,7 +99,7 @@ async def discount_analysis(
     """Analyze discount patterns across orders."""
     active_store = store_id or current_user.get("active_store_id", "")
     db = _get_db()
-    if not db:
+    if db is None:
         return {
             "total_discount_amount": 0,
             "avg_discount_pct": 0,
@@ -225,7 +225,7 @@ async def demand_forecast(
 
     active_store = store_id or current_user.get("active_store_id", "")
     db = _get_db()
-    if not db:
+    if db is None:
         return {"forecasts": []}
 
     now = datetime.now()
@@ -325,7 +325,7 @@ async def dead_stock(
     """Identify products with zero or declining sales."""
     active_store = store_id or current_user.get("active_store_id", "")
     db = _get_db()
-    if not db:
+    if db is None:
         return {"dead_stock": [], "total_value": 0, "total_skus": 0}
 
     now = datetime.now()
@@ -462,7 +462,7 @@ async def loyalty_tiers(
     """Get loyalty tier distribution for the store."""
     active_store = store_id or current_user.get("active_store_id", "")
     db = _get_db()
-    if not db:
+    if db is None:
         return {"tiers": [], "total_customers": 0, "total_points_circulation": 0}
 
     customers = list(
@@ -515,7 +515,7 @@ async def loyalty_earn(
 ):
     """Award loyalty points (1 point per Rs.100 spent)."""
     db = _get_db()
-    if not db:
+    if db is None:
         raise HTTPException(status_code=503, detail="Database unavailable")
 
     points_earned = int(req.amount / 100)
@@ -556,7 +556,7 @@ async def loyalty_redeem(
 ):
     """Redeem loyalty points. 100 points = Rs.100 discount."""
     db = _get_db()
-    if not db:
+    if db is None:
         raise HTTPException(status_code=503, detail="Database unavailable")
 
     customer = db.get_collection("customers").find_one({"customer_id": req.customer_id})
@@ -610,7 +610,7 @@ async def cl_subscriptions(
     """Get contact lens subscription / reorder schedule."""
     active_store = store_id or current_user.get("active_store_id", "")
     db = _get_db()
-    if not db:
+    if db is None:
         return {"subscriptions": []}
 
     now = datetime.now()
@@ -689,7 +689,7 @@ async def cl_subscription_reminder(
 ):
     """Send contact lens reorder reminder."""
     db = _get_db()
-    if not db:
+    if db is None:
         raise HTTPException(status_code=503, detail="Database unavailable")
 
     customer = db.get_collection("customers").find_one({"customer_id": customer_id})
@@ -731,7 +731,7 @@ async def list_eye_camps(
     """List eye camps for the store."""
     active_store = store_id or current_user.get("active_store_id", "")
     db = _get_db()
-    if not db:
+    if db is None:
         return {"eye_camps": [], "total": 0}
 
     camps = list(
@@ -755,7 +755,7 @@ async def create_eye_camp(
     """Create a new eye camp."""
     active_store = store_id or current_user.get("active_store_id", "")
     db = _get_db()
-    if not db:
+    if db is None:
         raise HTTPException(status_code=503, detail="Database unavailable")
 
     camp_id = f"CAMP-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:8].upper()}"
@@ -791,7 +791,7 @@ async def update_eye_camp(
 ):
     """Update eye camp results."""
     db = _get_db()
-    if not db:
+    if db is None:
         raise HTTPException(status_code=503, detail="Database unavailable")
 
     update_fields: dict = {"updated_at": datetime.now().isoformat()}
@@ -830,7 +830,7 @@ async def family_deals(
     """Identify families with multiple members needing eyewear."""
     active_store = store_id or current_user.get("active_store_id", "")
     db = _get_db()
-    if not db:
+    if db is None:
         return {"families": []}
 
     customers = list(
@@ -904,7 +904,7 @@ async def staff_leaderboard(
     """Staff performance leaderboard with gamification."""
     active_store = store_id or current_user.get("active_store_id", "")
     db = _get_db()
-    if not db:
+    if db is None:
         return {"leaderboard": [], "period": period}
 
     now = datetime.now()
@@ -1006,7 +1006,7 @@ async def churn_prediction(
 
     active_store = store_id or current_user.get("active_store_id", "")
     db = _get_db()
-    if not db:
+    if db is None:
         return {
             "at_risk": [],
             "summary": {
@@ -1110,7 +1110,7 @@ async def anomaly_detection(
 
     active_store = store_id or current_user.get("active_store_id", "")
     db = _get_db()
-    if not db:
+    if db is None:
         return {"anomalies": [], "summary": {"total_anomalies": 0, "critical_count": 0}}
 
     now = datetime.now()
@@ -1277,7 +1277,7 @@ async def vendor_margins(
 
     active_store = store_id or current_user.get("active_store_id", "")
     db = _get_db()
-    if not db:
+    if db is None:
         return {"vendors": [], "best_margin_products": [], "worst_margin_products": []}
 
     products = list(
