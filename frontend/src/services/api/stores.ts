@@ -100,40 +100,10 @@ export const adminStoreApi = {
     return response.data;
   },
 
-  createStore: async (data: {
-    name: string;
-    code: string;
-    address: string;
-    city: string;
-    state: string;
-    phone: string;
-    email: string;
-    gst: string;
-    status?: string;
-  }) => {
-    const response = await api.post('/stores', data);
-    return response.data;
-  },
-
-  updateStore: async (storeId: string, data: Partial<{
-    name: string;
-    code: string;
-    address: string;
-    city: string;
-    state: string;
-    phone: string;
-    email: string;
-    gst: string;
-    status: string;
-  }>) => {
-    const response = await api.put(`/stores/${storeId}`, data);
-    return response.data;
-  },
-
-  deleteStore: async (storeId: string) => {
-    const response = await api.delete(`/stores/${storeId}`);
-    return response.data;
-  },
+  // createStore / updateStore / deleteStore removed: they posted the old
+  // {name,code,gst} shape the backend rejects (422). Store create/edit/delete is
+  // now the single canonical orgStoreApi (-> /stores) used by Organization and
+  // Settings. adminStoreApi keeps only the read helpers below.
 
   getStoreUsers: async (
     storeId: string,
