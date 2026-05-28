@@ -288,6 +288,15 @@ async def get_revenue(
     current_user: dict = Depends(get_current_user),
 ):
     db = _get_db()
+    if db is None:
+        return {
+            "total_revenue": 0,
+            "total_orders": 0,
+            "total_tax": 0,
+            "total_discount": 0,
+            "prev_revenue": 0,
+            "change_pct": None,
+        }
     now = datetime.utcnow()
 
     if period == "day":
@@ -388,6 +397,16 @@ async def get_pnl(
     current_user: dict = Depends(get_current_user),
 ):
     db = _get_db()
+    if db is None:
+        return {
+            "revenue": 0,
+            "tax": 0,
+            "expenses": 0,
+            "gross_profit": 0,
+            "net_profit": 0,
+            "gross_margin_pct": 0,
+            "net_margin_pct": 0,
+        }
     match = {}
     if store_id:
         match["store_id"] = store_id
@@ -464,6 +483,13 @@ async def get_gst_summary(
     current_user: dict = Depends(get_current_user),
 ):
     db = _get_db()
+    if db is None:
+        return {
+            "tax_collected": 0,
+            "tax_paid": 0,
+            "net_gst_liability": 0,
+            "gst_by_rate": {},
+        }
     now = datetime.utcnow()
     m = month or now.month
     y = year or now.year
@@ -617,6 +643,8 @@ async def get_outstanding(
     terms. Real overdue = days past the due_date.
     """
     db = _get_db()
+    if db is None:
+        return []
     match = {"payment_status": {"$in": UNPAID_STATUSES}}
     if store_id:
         match["store_id"] = store_id
@@ -694,6 +722,8 @@ async def get_vendor_payments(current_user: dict = Depends(get_current_user)):
     notes (via ap_engine). `balance` is the true outstanding payable; PO totals
     are kept only as context. Sorted by largest payable first."""
     db = _get_db()
+    if db is None:
+        return []
     vendors = list(
         db.get_collection("vendors").find(
             {}, {"_id": 0, "vendor_id": 1, "legal_name": 1, "trade_name": 1, "name": 1}
@@ -1377,6 +1407,9 @@ async def lock_period(
     ) and "ADMIN" not in current_user.get("roles", []):
         raise HTTPException(403, "Only admin/superadmin can lock periods")
 
+    if db is None:
+        raise HTTPException(503, "Database not available")
+
     existing = db.get_collection("period_locks").find_one(
         {"month": month, "year": year}
     )
@@ -1397,6 +1430,8 @@ async def lock_period(
 @router.get("/period-locks")
 async def get_period_locks(current_user: dict = Depends(get_current_user)):
     db = _get_db()
+    if db is None:
+        return []
     locks = list(db.get_collection("period_locks").find({}, {"_id": 0}))
     return locks
 

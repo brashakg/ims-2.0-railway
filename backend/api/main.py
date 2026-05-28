@@ -215,21 +215,32 @@ async def lifespan(app: FastAPI):
         logger.error(f"[AGENTS] Event bus start failed (non-fatal): {e}", exc_info=True)
         _event_bus = None
 
-    # Step 4: scheduler — only meaningful if registry has agents
-    try:
-        from agents.scheduler import AgentScheduler
-
-        _scheduler = AgentScheduler(db=db)
-        await _scheduler.start(AGENT_REGISTRY or {})
-        logger.info(
-            f"[AGENTS] Scheduler started with {len(AGENT_REGISTRY or {})} agents"
-        )
-        import agents as _agents_pkg
-
-        _agents_pkg._scheduler_instance = _scheduler
-    except Exception as e:
-        logger.error(f"[AGENTS] Scheduler start failed (non-fatal): {e}", exc_info=True)
+    # Step 4: scheduler — only meaningful if registry has agents.
+    # Skipped under pytest / ENVIRONMENT=test: the 60s SENTINEL tick (and other
+    # agents) would write health_checks / alert_history / agent_audit_log
+    # mid-session, polluting CI's shared mongo and adding non-determinism to
+    # every agent test (e.g. test_sentinel's "no data -> latest is None").
+    # Mirrors the rate-limit test-gate further below.
+    if os.getenv("PYTEST_CURRENT_TEST") or os.getenv("ENVIRONMENT") == "test":
+        logger.info("[AGENTS] Scheduler not started (test env)")
         _scheduler = None
+    else:
+        try:
+            from agents.scheduler import AgentScheduler
+
+            _scheduler = AgentScheduler(db=db)
+            await _scheduler.start(AGENT_REGISTRY or {})
+            logger.info(
+                f"[AGENTS] Scheduler started with {len(AGENT_REGISTRY or {})} agents"
+            )
+            import agents as _agents_pkg
+
+            _agents_pkg._scheduler_instance = _scheduler
+        except Exception as e:
+            logger.error(
+                f"[AGENTS] Scheduler start failed (non-fatal): {e}", exc_info=True
+            )
+            _scheduler = None
 
     yield
 

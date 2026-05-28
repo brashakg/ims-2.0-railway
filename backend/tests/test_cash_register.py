@@ -38,6 +38,26 @@ from api.routers.auth import get_current_user  # noqa: E402
 pytestmark = pytest.mark.asyncio
 
 
+@pytest.fixture(autouse=True)
+def _restore_finance_get_db():
+    """`_client()` below rebinds `finance._get_db` to an in-memory fake via a
+    raw module-level assignment (it has no teardown of its own). Save + restore
+    the real accessor around EVERY test here so that rebind stays strictly
+    test-local.
+
+    Without this, the LAST fake leaks past this module into the rest of the
+    session: `test_period_lock` then writes its lock through finance (-> the
+    leaked fake) but reads it back through `expenses._period_locked` (-> the
+    real CI Mongo), so the "locked" period looks unlocked and the 423-blocked
+    assertion fails. That was the single deterministic `test (3.x)` failure on
+    CI's shared mongo (collection order runs cash_register before period_lock)."""
+    original = finance._get_db
+    try:
+        yield
+    finally:
+        finance._get_db = original
+
+
 # ===========================================================================
 # 1. Pure money math
 # ===========================================================================
@@ -222,7 +242,10 @@ def _client(db, roles=None, active_store="store-001", store_ids=None):
         }
 
     app.dependency_overrides[get_current_user] = _fake_user
-    finance._get_db = lambda: db  # monkeypatch module-level DB accessor
+    # Raw rebind of the module-level DB accessor; the autouse
+    # `_restore_finance_get_db` fixture restores it after each test so it can't
+    # leak into later modules (see that fixture's docstring).
+    finance._get_db = lambda: db
     return TestClient(app)
 
 
