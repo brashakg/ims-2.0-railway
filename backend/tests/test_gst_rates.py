@@ -94,12 +94,16 @@ def test_gst_rate_is_case_insensitive():
     assert gst_rate_for_category("  contact_lens  ") == 5.0
 
 
-def test_gst_rate_unknown_defaults_to_18():
+def test_gst_rate_unknown_defaults_to_5():
+    # Optical-dominant fallback (changed 18% -> 5% on 2026-05-28 after QA found
+    # an uncategorized product billed at 18%). The real guard is the block-save
+    # in routers/products.py; this fallback just biases the unknown case to the
+    # dominant optical rate. See gst_rates.DEFAULT_GST_RATE.
     from api.services.gst_rates import gst_rate_for_category, DEFAULT_GST_RATE
-    assert DEFAULT_GST_RATE == 18.0
-    assert gst_rate_for_category("WIDGETS_THAT_DO_NOT_EXIST") == 18.0
-    assert gst_rate_for_category("") == 18.0
-    assert gst_rate_for_category(None) == 18.0  # type: ignore[arg-type]
+    assert DEFAULT_GST_RATE == 5.0
+    assert gst_rate_for_category("WIDGETS_THAT_DO_NOT_EXIST") == 5.0
+    assert gst_rate_for_category("") == 5.0
+    assert gst_rate_for_category(None) == 5.0  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize("category,expected_hsn", [

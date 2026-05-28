@@ -62,11 +62,59 @@ CL_CATEGORIES = ("CONTACT_LENS", "COLORED_CONTACT_LENS", "CL")
 # 12%). HSN/GST defaults for EVERY category come from the canonical table in
 # api/services/gst_rates.py, which the POS billing engine (orders.py) also
 # reads, so the product master rate always equals what POS bills.
-from ..services.gst_rates import gst_rate_for_category, hsn_for_category
+from ..services.gst_rates import (
+    gst_rate_for_category,
+    hsn_for_category,
+    GST_CATEGORY_TABLE,
+)
 
 CL_HSN_DEFAULT = "90013000"
 CL_GST_DEFAULT = 5.0
 CL_MODALITIES = ("DAILY", "FORTNIGHTLY", "MONTHLY", "QUARTERLY", "YEARLY", "COLOR")
+
+# Canonical set of accepted product categories. Pulled from the single source of
+# truth -- the GST/HSN table keys -- so master, billing and this guard never
+# drift. A category MUST normalize (upper/trim) to one of these keys; anything
+# blank/null/missing or unrecognized is rejected at create/update.
+_VALID_CATEGORY_KEYS = frozenset(GST_CATEGORY_TABLE.keys())
+# Short, human-friendly subset surfaced in the 422 message (the full key set also
+# carries legacy aliases + 2-letter UI codes, which would make the message
+# noisy). These are the canonical product categories from schemas.py.
+_VALID_CATEGORY_DISPLAY = (
+    "FRAME", "OPTICAL_LENS", "READING_GLASSES", "CONTACT_LENS",
+    "COLORED_CONTACT_LENS", "SUNGLASS", "WATCH", "SMARTWATCH",
+    "SMARTGLASSES", "WALL_CLOCK", "ACCESSORIES", "SERVICES", "HEARING_AID",
+)
+
+
+def _validate_category_or_422(category) -> str:
+    """Reject a blank / null / missing / unrecognized product category.
+
+    QA found an uncategorized product billed at the wrong GST rate. The
+    AddProductPage already forces category selection at Step 1; this is the
+    server-side guard so a direct API call cannot persist a category-less
+    product (which would then fall back to a default GST rate at POS).
+
+    Returns the trimmed category string on success; raises HTTP 422 otherwise.
+    """
+    norm = (str(category).strip() if category is not None else "")
+    if not norm:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Product category is required and cannot be blank. "
+                f"Valid categories: {', '.join(_VALID_CATEGORY_DISPLAY)}."
+            ),
+        )
+    if norm.upper() not in _VALID_CATEGORY_KEYS:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Unknown product category '{norm}'. "
+                f"Valid categories: {', '.join(_VALID_CATEGORY_DISPLAY)}."
+            ),
+        )
+    return norm
 
 
 class ProductCreate(BaseModel):
@@ -102,6 +150,7 @@ class ProductCreate(BaseModel):
 
 
 class ProductUpdate(BaseModel):
+    category: Optional[str] = None
     brand: Optional[str] = None
     model: Optional[str] = None
     color: Optional[str] = None
@@ -195,6 +244,11 @@ async def create_product(
     current_user: dict = Depends(require_roles(*_CATALOG_ROLES)),
 ):
     """Create a new product"""
+    # Block save when category is blank/null/missing (server-side guard for the
+    # GST-default bug: an uncategorized product would otherwise fall back to a
+    # default GST rate). Normalizes the category to the validated value.
+    product.category = _validate_category_or_422(product.category)
+
     # Validate MRP >= Offer Price
     if product.offer_price > product.mrp:
         raise HTTPException(status_code=400, detail="Offer price cannot exceed MRP")
@@ -354,6 +408,13 @@ async def update_product(
     current_user: dict = Depends(require_roles(*_CATALOG_ROLES)),
 ):
     """Update product details"""
+    # If the client explicitly sends `category`, it must be a valid non-blank
+    # category -- you cannot blank-out / null-out a product's category via update
+    # (same GST-default guard as create). Updates that omit `category` are
+    # unaffected.
+    if "category" in product.model_fields_set:
+        product.category = _validate_category_or_422(product.category)
+
     repo = get_product_repository()
 
     if repo is not None:
