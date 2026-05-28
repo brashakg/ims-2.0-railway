@@ -129,7 +129,9 @@ def _get_db():
         return None
 
 
-def _state_code_for(state_code: Optional[str], state_name: Optional[str]) -> Optional[str]:
+def _state_code_for(
+    state_code: Optional[str], state_name: Optional[str]
+) -> Optional[str]:
     """Best-effort 2-digit GST state code from an explicit code, abbreviation,
     or full state name (e.g. '20' / 'JH' / 'Jharkhand' -> '20')."""
     for candidate in (state_code, state_name):
@@ -140,7 +142,9 @@ def _state_code_for(state_code: Optional[str], state_name: Optional[str]) -> Opt
     return None
 
 
-def _derive_store_gstin(db, entity_id: Optional[str], state_code: Optional[str]) -> Optional[str]:
+def _derive_store_gstin(
+    db, entity_id: Optional[str], state_code: Optional[str]
+) -> Optional[str]:
     """Resolve the GSTIN a store bills under = its entity's GSTIN for the store's
     state (single source of truth). Falls back to the entity's primary GSTIN."""
     if db is None or not entity_id:
@@ -176,9 +180,12 @@ def _validate_store_payload(data: dict) -> None:
     st = data.get("store_type")
     if st and st not in STORE_TYPES:
         raise HTTPException(
-            status_code=400, detail=f"Invalid store_type. Allowed: {', '.join(STORE_TYPES)}"
+            status_code=400,
+            detail=f"Invalid store_type. Allowed: {', '.join(STORE_TYPES)}",
         )
-    bad = [c for c in (data.get("enabled_categories") or []) if c not in STORE_CATEGORIES]
+    bad = [
+        c for c in (data.get("enabled_categories") or []) if c not in STORE_CATEGORIES
+    ]
     if bad:
         raise HTTPException(
             status_code=400, detail=f"Unknown categories: {', '.join(bad)}"
@@ -193,7 +200,10 @@ def _store_active_dependents(db, store_id: str) -> Optional[str]:
     for coll in ("stock", "stock_units"):
         try:
             n = db.get_collection(coll).count_documents(
-                {"store_id": store_id, "status": {"$nin": ["SOLD", "RETURNED", "SCRAPPED"]}}
+                {
+                    "store_id": store_id,
+                    "status": {"$nin": ["SOLD", "RETURNED", "SCRAPPED"]},
+                }
             )
             if n:
                 return f"{n} on-hand stock unit(s)"

@@ -14,10 +14,10 @@ is_online} and calls reconcile_items().
 from typing import List, Optional
 
 # Status codes, worst first.
-OVERSELL_RISK = "OVERSELL_RISK"      # online listed > physical on-hand (can oversell)
-OVER_ALLOCATED = "OVER_ALLOCATED"    # online listed > safe allocation but <= on-hand
-OK = "OK"                            # online within the safe allocation
-NOT_ONLINE = "NOT_ONLINE"            # product isn't listed online -> not assessed
+OVERSELL_RISK = "OVERSELL_RISK"  # online listed > physical on-hand (can oversell)
+OVER_ALLOCATED = "OVER_ALLOCATED"  # online listed > safe allocation but <= on-hand
+OK = "OK"  # online within the safe allocation
+NOT_ONLINE = "NOT_ONLINE"  # product isn't listed online -> not assessed
 
 _ORDER = {OVERSELL_RISK: 0, OVER_ALLOCATED: 1, OK: 2, NOT_ONLINE: 3}
 
@@ -29,7 +29,9 @@ def _int(v) -> int:
         return 0
 
 
-def recommend_allocation(on_hand, safety_buffer: int = 0, max_online: Optional[int] = None) -> int:
+def recommend_allocation(
+    on_hand, safety_buffer: int = 0, max_online: Optional[int] = None
+) -> int:
     """Conservative online quantity = on_hand - safety_buffer, floored at 0 and
     optionally capped at max_online."""
     rec = max(0, _int(on_hand) - max(0, _int(safety_buffer)))
@@ -70,7 +72,7 @@ def reconcile_items(
         status = classify(in_store, online, rec, is_online)
         counts[status] = counts.get(status, 0) + 1
         if status == OVERSELL_RISK:
-            oversell_units += (online - in_store)
+            oversell_units += online - in_store
         rows.append(
             {
                 "sku": it.get("sku"),

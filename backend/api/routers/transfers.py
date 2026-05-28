@@ -231,7 +231,8 @@ async def list_transfers(
     # narrows further only if neither was set.
     if store_id and not (from_location_id or to_location_id):
         transfers = [
-            t for t in transfers
+            t
+            for t in transfers
             if t.get("from_location_id") == store_id
             or t.get("to_location_id") == store_id
         ]

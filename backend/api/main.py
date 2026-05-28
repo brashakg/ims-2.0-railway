@@ -734,7 +734,9 @@ app.include_router(shipping_router, prefix="/api/v1/shipping", tags=["Shipping"]
 # /api/v1/workshop/*, QZ signing under /api/v1/print/qz/*).
 app.include_router(labels_router, prefix="/api/v1", tags=["Labels"])
 app.include_router(tasks_router, prefix="/api/v1/tasks", tags=["Tasks"])
-app.include_router(notifications_router, prefix="/api/v1/notifications", tags=["Notifications"])
+app.include_router(
+    notifications_router, prefix="/api/v1/notifications", tags=["Notifications"]
+)
 app.include_router(expenses_router, prefix="/api/v1/expenses", tags=["Expenses"])
 app.include_router(
     finance_router,
@@ -800,7 +802,9 @@ app.include_router(
 )
 app.include_router(catalog_router, prefix="/api/v1/catalog", tags=["Catalog"])
 app.include_router(
-    catalog_autopilot_router, prefix="/api/v1/catalog-autopilot", tags=["Catalog Autopilot"]
+    catalog_autopilot_router,
+    prefix="/api/v1/catalog-autopilot",
+    tags=["Catalog Autopilot"],
 )
 app.include_router(jarvis_router, prefix="/api/v1/jarvis", tags=["JARVIS"])
 app.include_router(analytics_router, prefix="/api/v1/analytics", tags=["Analytics"])

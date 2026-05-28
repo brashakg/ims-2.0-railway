@@ -34,6 +34,7 @@ bulk_import, create) writes a row into the `lens_stock_audit` collection.
 Independent of the broader audit_logs collection so the lens-stock history
 is one focused, fast query.
 """
+
 from __future__ import annotations
 
 import logging
@@ -432,9 +433,7 @@ async def create_cell(
     if not lens_line:
         raise HTTPException(
             status_code=400,
-            detail="Lens line {id!r} does not exist".format(
-                id=payload.lens_line_id
-            ),
+            detail="Lens line {id!r} does not exist".format(id=payload.lens_line_id),
         )
 
     raw = payload.model_dump()
@@ -599,9 +598,7 @@ async def bulk_import(
         )
 
     try:
-        normalized_cells = validate_bulk_import_payload(
-            matrix_in, lens_line=lens_line
-        )
+        normalized_cells = validate_bulk_import_payload(matrix_in, lens_line=lens_line)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
@@ -655,9 +652,7 @@ async def bulk_import(
                 source_type="IMPORT",
                 source_id=payload.source_id,
             )
-            written.append(
-                {"line_stock_id": existing["line_stock_id"], "after": after}
-            )
+            written.append({"line_stock_id": existing["line_stock_id"], "after": after})
         else:
             line_stock_id = uuid.uuid4().hex
             doc = dict(cell)
@@ -705,7 +700,10 @@ async def bulk_import(
 
 
 def _cell_filter(
-    lens_line_id: str, store_id: str, sph: float, cyl: float,
+    lens_line_id: str,
+    store_id: str,
+    sph: float,
+    cyl: float,
     add: Optional[float],
 ) -> Dict[str, Any]:
     """The (lens_line, store, sph, cyl, add) lookup filter. add=None means
@@ -761,11 +759,7 @@ async def reserve_cell(
         lens_line_id, active_store, payload.sph, payload.cyl, payload.add
     )
     # CAS: only update when on_hand - reserved >= qty.
-    cas = {
-        "$expr": {
-            "$gte": [{"$subtract": ["$on_hand", "$reserved"]}, payload.qty]
-        }
-    }
+    cas = {"$expr": {"$gte": [{"$subtract": ["$on_hand", "$reserved"]}, payload.qty]}}
     update = {
         "$inc": {"reserved": payload.qty},
         "$set": {"last_movement_at": _now()},
@@ -781,9 +775,7 @@ async def reserve_cell(
         cell = coll.find_one(filt)
         if cell is None:
             raise HTTPException(status_code=404, detail="Stock cell not found")
-        avail = compute_available(
-            cell.get("on_hand", 0), cell.get("reserved", 0)
-        )
+        avail = compute_available(cell.get("on_hand", 0), cell.get("reserved", 0))
         raise HTTPException(
             status_code=409,
             detail=(
@@ -960,5 +952,3 @@ async def release_cell(
         notes=payload.notes,
     )
     return {"status": "success", "cell": _enrich(result)}
-
-

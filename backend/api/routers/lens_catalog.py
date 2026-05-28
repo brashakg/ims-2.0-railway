@@ -26,6 +26,7 @@ get_audit_repository(). Fail-soft -- audit failure never undoes the write.
 NO mock business data: empty state on first deploy except for the Q6 seed
 of the enum config (technical-dimension defaults, populated by migration).
 """
+
 from __future__ import annotations
 
 import logging
@@ -511,9 +512,7 @@ async def delete_lens_line(
                 status_code=409,
                 detail=(
                     "Cannot delete lens line: {n} stock cell(s) still carry "
-                    "on_hand or reserved units. Zero them out first.".format(
-                        n=n
-                    )
+                    "on_hand or reserved units. Zero them out first.".format(n=n)
                 ),
             )
 

@@ -691,9 +691,7 @@ def _mark_units_sold(
                 if not store_id:
                     continue
                 try:
-                    available = (
-                        stock_repo.find_by_product_store(pid, store_id) or []
-                    )
+                    available = stock_repo.find_by_product_store(pid, store_id) or []
                 except Exception as exc:  # noqa: BLE001
                     logger.warning(
                         "[STOCK] find_by_product_store(%s,%s) failed: %s",
@@ -840,6 +838,7 @@ async def create_order(
         # document field — that one defaults to 10% even for SUPERADMIN,
         # which was the long-standing "why is my cap 10%" bug.
         from api.services.role_caps import effective_discount_cap
+
         user_roles = current_user.get("roles", [])
         user_discount_cap = effective_discount_cap(
             user_roles, current_user.get("discount_cap")
@@ -1076,6 +1075,7 @@ async def create_order(
             reserve_for_order_item,
             release_for_cancel,
         )
+
         try:
             for idx, oi in enumerate(items_data):
                 rec = await reserve_for_order_item(
@@ -1107,11 +1107,14 @@ async def create_order(
                         except Exception as inner_rb:  # noqa: BLE001
                             logger.warning(
                                 "[LENS_HOOK] compensating release "
-                                "failed (line %s): %s", prev_idx, inner_rb,
+                                "failed (line %s): %s",
+                                prev_idx,
+                                inner_rb,
                             )
                 except Exception as rb_exc:  # noqa: BLE001
                     logger.warning(
-                        "[LENS_HOOK] rollback outer error: %s", rb_exc,
+                        "[LENS_HOOK] rollback outer error: %s",
+                        rb_exc,
                     )
             raise
         except Exception as exc:  # noqa: BLE001
@@ -1119,7 +1122,8 @@ async def create_order(
             # order and continue -- never crash POS create on a hook
             # error. Revenue protection takes priority.
             logger.warning(
-                "[LENS_HOOK] reserve fail-soft pre-create: %s", exc,
+                "[LENS_HOOK] reserve fail-soft pre-create: %s",
+                exc,
             )
             lens_reserve_failed = True
 
@@ -1165,10 +1169,12 @@ async def create_order(
             logger.error(
                 "[ORDERS] order_repo.create failed; releasing %d lens "
                 "reservations for order %s",
-                len(lens_reservations), precomputed_order_id,
+                len(lens_reservations),
+                precomputed_order_id,
             )
             try:
                 from ..services.lens_stock_hook import release_for_cancel
+
                 for idx, oi in enumerate(items_data):
                     try:
                         await release_for_cancel(
@@ -1750,12 +1756,15 @@ async def cancel_order(
                     logger.warning(
                         "[LENS_HOOK] release on cancel failed "
                         "(order %s line %s): %s",
-                        order_id, idx, rel_exc,
+                        order_id,
+                        idx,
+                        rel_exc,
                     )
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "[LENS_HOOK] cancel release outer error %s: %s",
-                order_id, exc,
+                order_id,
+                exc,
             )
 
         # Audit alert (May 2026) — every cancellation is CRITICAL severity

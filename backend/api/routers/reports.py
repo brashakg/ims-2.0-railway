@@ -2567,7 +2567,10 @@ async def footfall_audit(
         try:
             walkin_counters = list(
                 db.get_collection("walk_in_counters").find(
-                    {"store_id": active_store, "date_str": {"$gte": start.date().isoformat()}},
+                    {
+                        "store_id": active_store,
+                        "date_str": {"$gte": start.date().isoformat()},
+                    },
                 )
             )
         except Exception:
@@ -2586,9 +2589,16 @@ async def footfall_audit(
             walkouts = []
 
     order_repo = get_order_repository()
-    orders = _orders_in_window(
-        order_repo, store_id=active_store, start_dt=start, end_dt=now,
-    ) if order_repo is not None else []
+    orders = (
+        _orders_in_window(
+            order_repo,
+            store_id=active_store,
+            start_dt=start,
+            end_dt=now,
+        )
+        if order_repo is not None
+        else []
+    )
 
     # Index by YYYY-MM
     walkins_by_month: dict = defaultdict(int)
@@ -2615,8 +2625,12 @@ async def footfall_audit(
         orders_by_month[ca.strftime("%Y-%m")] += 1
 
     months = []
-    rolling = {"walkins_total": 0, "walkouts_total": 0,
-               "walkouts_converted": 0, "orders_total": 0}
+    rolling = {
+        "walkins_total": 0,
+        "walkouts_total": 0,
+        "walkouts_converted": 0,
+        "orders_total": 0,
+    }
     for y, m in _month_iter(start, now):
         key = f"{y:04d}-{m:02d}"
         wi = walkins_by_month.get(key, 0)
@@ -2624,38 +2638,45 @@ async def footfall_audit(
         wc = walkouts_conv_by_month.get(key, 0)
         ot = orders_by_month.get(key, 0)
         hidden = max(0, ot - wc)
-        months.append({
-            "month": key,
-            "walkins_total": wi,
-            "walkouts_total": wo,
-            "walkouts_converted": wc,
-            "orders_total": ot,
-            "hidden_sales": hidden,
-            "hidden_sales_pct": round(hidden / ot, 3) if ot else 0.0,
-            "staff_reported_conversion_pct": round(wc / wi, 3) if wi else 0.0,
-            "true_conversion_pct": round(ot / wi, 3) if wi else 0.0,
-        })
+        months.append(
+            {
+                "month": key,
+                "walkins_total": wi,
+                "walkouts_total": wo,
+                "walkouts_converted": wc,
+                "orders_total": ot,
+                "hidden_sales": hidden,
+                "hidden_sales_pct": round(hidden / ot, 3) if ot else 0.0,
+                "staff_reported_conversion_pct": round(wc / wi, 3) if wi else 0.0,
+                "true_conversion_pct": round(ot / wi, 3) if wi else 0.0,
+            }
+        )
         rolling["walkins_total"] += wi
         rolling["walkouts_total"] += wo
         rolling["walkouts_converted"] += wc
         rolling["orders_total"] += ot
 
     rolling_hidden = max(0, rolling["orders_total"] - rolling["walkouts_converted"])
-    rolling.update({
-        "hidden_sales": rolling_hidden,
-        "hidden_sales_pct": (
-            round(rolling_hidden / rolling["orders_total"], 3)
-            if rolling["orders_total"] else 0.0
-        ),
-        "staff_reported_conversion_pct": (
-            round(rolling["walkouts_converted"] / rolling["walkins_total"], 3)
-            if rolling["walkins_total"] else 0.0
-        ),
-        "true_conversion_pct": (
-            round(rolling["orders_total"] / rolling["walkins_total"], 3)
-            if rolling["walkins_total"] else 0.0
-        ),
-    })
+    rolling.update(
+        {
+            "hidden_sales": rolling_hidden,
+            "hidden_sales_pct": (
+                round(rolling_hidden / rolling["orders_total"], 3)
+                if rolling["orders_total"]
+                else 0.0
+            ),
+            "staff_reported_conversion_pct": (
+                round(rolling["walkouts_converted"] / rolling["walkins_total"], 3)
+                if rolling["walkins_total"]
+                else 0.0
+            ),
+            "true_conversion_pct": (
+                round(rolling["orders_total"] / rolling["walkins_total"], 3)
+                if rolling["walkins_total"]
+                else 0.0
+            ),
+        }
+    )
 
     return {
         "store_id": active_store,
@@ -2690,9 +2711,16 @@ async def sales_price_bands(
     current_fy_start_year = now.year if now.month >= 4 else now.year - 1
     start_year = current_fy_start_year - (fy_count - 1)
     start = datetime(start_year, 4, 1)
-    orders = _orders_in_window(
-        order_repo, store_id=active_store, start_dt=start, end_dt=now,
-    ) if order_repo is not None else []
+    orders = (
+        _orders_in_window(
+            order_repo,
+            store_id=active_store,
+            start_dt=start,
+            end_dt=now,
+        )
+        if order_repo is not None
+        else []
+    )
 
     # Tag each order with FY + net amount + band + month
     enriched: list = []
@@ -2701,13 +2729,15 @@ async def sales_price_bands(
         if ca is None:
             continue
         net = _order_net(o)
-        enriched.append({
-            "fy": _fy_of(ca),
-            "month": ca.strftime("%Y-%m"),
-            "net": net,
-            "band": _price_band_of(net),
-            "customer_id": o.get("customer_id"),
-        })
+        enriched.append(
+            {
+                "fy": _fy_of(ca),
+                "month": ca.strftime("%Y-%m"),
+                "net": net,
+                "band": _price_band_of(net),
+                "customer_id": o.get("customer_id"),
+            }
+        )
 
     # by_fy: per-FY counts + revenue + ATV per band
     fy_band_agg: dict = defaultdict(
@@ -2726,16 +2756,21 @@ async def sales_price_bands(
         invoices = [fy_band_agg[fy][b]["invoices"] for b in _PRICE_BAND_NAMES]
         revenue = [round(fy_band_agg[fy][b]["revenue"], 2) for b in _PRICE_BAND_NAMES]
         atv = [
-            round(fy_band_agg[fy][b]["revenue"] / fy_band_agg[fy][b]["invoices"], 2)
-            if fy_band_agg[fy][b]["invoices"] else 0.0
+            (
+                round(fy_band_agg[fy][b]["revenue"] / fy_band_agg[fy][b]["invoices"], 2)
+                if fy_band_agg[fy][b]["invoices"]
+                else 0.0
+            )
             for b in _PRICE_BAND_NAMES
         ]
-        by_fy.append({
-            "fy": fy,
-            "invoices_by_band": invoices,
-            "revenue_by_band": revenue,
-            "atv_by_band": atv,
-        })
+        by_fy.append(
+            {
+                "fy": fy,
+                "invoices_by_band": invoices,
+                "revenue_by_band": revenue,
+                "atv_by_band": atv,
+            }
+        )
 
     # Monthly trend per band — top `trend_bands` by total revenue across the whole period
     band_totals: dict = defaultdict(float)
@@ -2743,7 +2778,9 @@ async def sales_price_bands(
         band_totals[e["band"]] += e["net"]
     top_bands = sorted(_PRICE_BAND_NAMES, key=lambda b: -band_totals[b])[:trend_bands]
 
-    monthly_per_band: dict = {b: defaultdict(lambda: {"revenue": 0.0, "invoices": 0}) for b in top_bands}
+    monthly_per_band: dict = {
+        b: defaultdict(lambda: {"revenue": 0.0, "invoices": 0}) for b in top_bands
+    }
     for e in enriched:
         if e["band"] in monthly_per_band:
             monthly_per_band[e["band"]][e["month"]]["revenue"] += e["net"]
@@ -2840,9 +2877,16 @@ async def sales_lens_deep_dive(
 
     now = datetime.now()
     start = now - timedelta(days=30 * months_back)
-    orders = _orders_in_window(
-        order_repo, store_id=active_store, start_dt=start, end_dt=now,
-    ) if order_repo is not None else []
+    orders = (
+        _orders_in_window(
+            order_repo,
+            store_id=active_store,
+            start_dt=start,
+            end_dt=now,
+        )
+        if order_repo is not None
+        else []
+    )
 
     # Collect lens line items
     lens_items: list = []
@@ -2851,12 +2895,14 @@ async def sales_lens_deep_dive(
         for it in o.get("items") or []:
             t = (it.get("item_type") or it.get("category") or "").upper()
             if t in _LENS_ITEM_TYPES:
-                lens_items.append({
-                    "item_type": t,
-                    "product_id": it.get("product_id"),
-                    "quantity": int(it.get("quantity") or 1),
-                    "revenue": _item_revenue(it),
-                })
+                lens_items.append(
+                    {
+                        "item_type": t,
+                        "product_id": it.get("product_id"),
+                        "quantity": int(it.get("quantity") or 1),
+                        "revenue": _item_revenue(it),
+                    }
+                )
                 if it.get("product_id"):
                     product_ids.add(it["product_id"])
 
@@ -2879,7 +2925,7 @@ async def sales_lens_deep_dive(
     by_index: dict = defaultdict(lambda: {"units": 0, "revenue": 0.0})
     total_units = 0
     total_revenue = 0.0
-    parsed_units = 0   # units where at least lens_type was identified
+    parsed_units = 0  # units where at least lens_type was identified
     contact_units = 0
     contact_revenue = 0.0
 
@@ -2929,8 +2975,14 @@ async def sales_lens_deep_dive(
             "contact_lens_revenue": round(contact_revenue, 2),
         },
         "by_brand": [
-            {"brand": r["key"], "units": r["units"], "revenue": r["revenue"],
-             "share": round(r["revenue"] / total_revenue, 3) if total_revenue else 0.0}
+            {
+                "brand": r["key"],
+                "units": r["units"],
+                "revenue": r["revenue"],
+                "share": (
+                    round(r["revenue"] / total_revenue, 3) if total_revenue else 0.0
+                ),
+            }
             for r in _materialize(by_brand)
         ],
         "by_type": [
@@ -2970,13 +3022,32 @@ async def sales_seasonality(
     order_repo = get_order_repository()
     now = datetime.now()
     start = now - timedelta(days=365 * years_back)
-    orders = _orders_in_window(
-        order_repo, store_id=active_store, start_dt=start, end_dt=now,
-    ) if order_repo is not None else []
+    orders = (
+        _orders_in_window(
+            order_repo,
+            store_id=active_store,
+            start_dt=start,
+            end_dt=now,
+        )
+        if order_repo is not None
+        else []
+    )
 
     dow_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-    moy_names = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
-                 "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+    moy_names = [
+        "Jan",
+        "Feb",
+        "Mar",
+        "Apr",
+        "May",
+        "Jun",
+        "Jul",
+        "Aug",
+        "Sep",
+        "Oct",
+        "Nov",
+        "Dec",
+    ]
     dow_agg = {name: {"invoices": 0, "revenue": 0.0} for name in dow_names}
     moy_agg = {name: {"invoices": 0, "revenue": 0.0} for name in moy_names}
 
@@ -3010,8 +3081,7 @@ async def sales_seasonality(
     trough_moy = min(nonzero_moy, key=lambda d: d["revenue"], default=None)
     avg_dow_rev = sum(d["revenue"] for d in dow_out) / 7
     peak_lift = (
-        peak_dow["revenue"] / avg_dow_rev - 1.0
-        if peak_dow and avg_dow_rev else 0.0
+        peak_dow["revenue"] / avg_dow_rev - 1.0 if peak_dow and avg_dow_rev else 0.0
     )
 
     return {
@@ -3040,7 +3110,7 @@ async def sales_seasonality(
 # Lead time + reorder cycle = 60 days of cover the buyer wants on shelf.
 _DEFAULT_LEAD_TIME_DAYS = 30  # typical for frame imports / vendor cycles
 _DEFAULT_REORDER_CYCLE_DAYS = 30  # monthly purchase cadence
-_DEFAULT_SAFETY_BUFFER_DAYS = 7   # ~1 week extra to absorb demand spikes
+_DEFAULT_SAFETY_BUFFER_DAYS = 7  # ~1 week extra to absorb demand spikes
 
 
 def _confidence_for(velocity_90d: int) -> str:
@@ -3058,23 +3128,29 @@ async def purchase_recommendations(
     store_id: Optional[str] = Query(
         None, description="Defaults to current user's active store"
     ),
-    lookback_days: int = Query(
-        90, ge=14, le=365, description="Sales velocity window"
-    ),
+    lookback_days: int = Query(90, ge=14, le=365, description="Sales velocity window"),
     lead_time_days: int = Query(
-        _DEFAULT_LEAD_TIME_DAYS, ge=0, le=180,
+        _DEFAULT_LEAD_TIME_DAYS,
+        ge=0,
+        le=180,
         description="Vendor lead time used in suggested-qty math",
     ),
     reorder_cycle_days: int = Query(
-        _DEFAULT_REORDER_CYCLE_DAYS, ge=7, le=180,
+        _DEFAULT_REORDER_CYCLE_DAYS,
+        ge=7,
+        le=180,
         description="How often the buyer re-evaluates purchases",
     ),
     safety_buffer_days: int = Query(
-        _DEFAULT_SAFETY_BUFFER_DAYS, ge=0, le=30,
+        _DEFAULT_SAFETY_BUFFER_DAYS,
+        ge=0,
+        le=30,
         description="Extra cover above lead+cycle to absorb spikes",
     ),
     min_velocity: int = Query(
-        2, ge=0, le=100,
+        2,
+        ge=0,
+        le=100,
         description="Skip SKUs that sold fewer than this many units in the window (noise filter)",
     ),
     limit: int = Query(100, ge=1, le=500),
@@ -3110,7 +3186,9 @@ async def purchase_recommendations(
                 "lead_time_days": lead_time_days,
                 "reorder_cycle_days": reorder_cycle_days,
                 "safety_buffer_days": safety_buffer_days,
-                "cover_days_total": lead_time_days + reorder_cycle_days + safety_buffer_days,
+                "cover_days_total": lead_time_days
+                + reorder_cycle_days
+                + safety_buffer_days,
                 "min_velocity": min_velocity,
             },
             "as_of": datetime.now().isoformat(),
@@ -3125,21 +3203,27 @@ async def purchase_recommendations(
     try:
         orders_coll = db.get_collection("orders")
         pipeline = [
-            {"$match": {
-                "store_id": active_store,
-                "status": {"$nin": ["CANCELLED", "DRAFT"]},
-                "created_at": {"$gte": cutoff},
-            }},
+            {
+                "$match": {
+                    "store_id": active_store,
+                    "status": {"$nin": ["CANCELLED", "DRAFT"]},
+                    "created_at": {"$gte": cutoff},
+                }
+            },
             {"$unwind": "$items"},
-            {"$group": {
-                "_id": "$items.product_id",
-                "units_sold": {"$sum": {"$ifNull": ["$items.quantity", 1]}},
-                "revenue": {"$sum": {"$ifNull": ["$items.item_total", "$items.total"]}},
-                "avg_price": {"$avg": "$items.unit_price"},
-                "sample_name": {"$first": "$items.product_name"},
-                "sample_brand": {"$first": "$items.brand"},
-                "sample_category": {"$first": "$items.category"},
-            }},
+            {
+                "$group": {
+                    "_id": "$items.product_id",
+                    "units_sold": {"$sum": {"$ifNull": ["$items.quantity", 1]}},
+                    "revenue": {
+                        "$sum": {"$ifNull": ["$items.item_total", "$items.total"]}
+                    },
+                    "avg_price": {"$avg": "$items.unit_price"},
+                    "sample_name": {"$first": "$items.product_name"},
+                    "sample_brand": {"$first": "$items.brand"},
+                    "sample_category": {"$first": "$items.category"},
+                }
+            },
             {"$match": {"units_sold": {"$gte": min_velocity}}},
         ]
         for doc in orders_coll.aggregate(pipeline):
@@ -3202,6 +3286,7 @@ async def purchase_recommendations(
     # 2. Pull product master rows for the SKUs that have movement so we
     # know current stock + reorder point + cost + selling price.
     from bson import ObjectId  # local import; only needed here
+
     product_ids = list(sku_stats.keys())
     object_ids: list = []
     string_ids: list = []
@@ -3253,56 +3338,62 @@ async def purchase_recommendations(
             continue
         # If reorder_point breached even when desired_cover would tolerate
         # current stock, still recommend a minimum top-up of (reorder_point - current_stock).
-        suggested_qty = max(gap_units, reorder_point - current_stock if reorder_point > current_stock else 0)
+        suggested_qty = max(
+            gap_units,
+            reorder_point - current_stock if reorder_point > current_stock else 0,
+        )
         if suggested_qty <= 0:
             continue
 
-        avg_price = float(prod.get("offer_price") or prod.get("mrp") or stats["avg_price"] or 0.0)
+        avg_price = float(
+            prod.get("offer_price") or prod.get("mrp") or stats["avg_price"] or 0.0
+        )
         cost_price = float(prod.get("cost_price") or prod.get("landed_cost") or 0.0)
         unit_margin = max(0.0, avg_price - cost_price)
         est_revenue_impact = round(suggested_qty * avg_price, 2)
         est_purchase_cost = round(suggested_qty * cost_price, 2)
         est_margin = round(suggested_qty * unit_margin, 2)
 
-        category = (
-            prod.get("category")
-            or stats["sample_category"]
-            or "OTHER"
-        )
+        category = prod.get("category") or stats["sample_category"] or "OTHER"
         brand = prod.get("brand") or stats["sample_brand"] or ""
-        name = prod.get("name") or prod.get("product_name") or stats["sample_name"] or ""
+        name = (
+            prod.get("name") or prod.get("product_name") or stats["sample_name"] or ""
+        )
 
-        recs.append({
-            "product_id": pid,
-            "name": name,
-            "brand": brand,
-            "category": category,
-            "velocity_90d": velocity_90d,
-            "daily_velocity": round(daily_v, 2),
-            "current_stock": current_stock,
-            "reorder_point": reorder_point,
-            "desired_cover": desired_cover,
-            "gap_units": gap_units,
-            "suggested_order_qty": suggested_qty,
-            "avg_selling_price": round(avg_price, 2),
-            "cost_price": round(cost_price, 2),
-            "unit_margin": round(unit_margin, 2),
-            "estimated_revenue_impact": est_revenue_impact,
-            "estimated_purchase_cost": est_purchase_cost,
-            "estimated_margin": est_margin,
-            "confidence": _confidence_for(velocity_90d),
-            "reason": (
-                f"Sold {velocity_90d} in {lookback_days}d "
-                f"(~{round(daily_v, 1)}/day). Stock {current_stock}, "
-                f"reorder at {reorder_point}. Buy {suggested_qty} to cover "
-                f"{cover_days} days."
-            ),
-        })
+        recs.append(
+            {
+                "product_id": pid,
+                "name": name,
+                "brand": brand,
+                "category": category,
+                "velocity_90d": velocity_90d,
+                "daily_velocity": round(daily_v, 2),
+                "current_stock": current_stock,
+                "reorder_point": reorder_point,
+                "desired_cover": desired_cover,
+                "gap_units": gap_units,
+                "suggested_order_qty": suggested_qty,
+                "avg_selling_price": round(avg_price, 2),
+                "cost_price": round(cost_price, 2),
+                "unit_margin": round(unit_margin, 2),
+                "estimated_revenue_impact": est_revenue_impact,
+                "estimated_purchase_cost": est_purchase_cost,
+                "estimated_margin": est_margin,
+                "confidence": _confidence_for(velocity_90d),
+                "reason": (
+                    f"Sold {velocity_90d} in {lookback_days}d "
+                    f"(~{round(daily_v, 1)}/day). Stock {current_stock}, "
+                    f"reorder at {reorder_point}. Buy {suggested_qty} to cover "
+                    f"{cover_days} days."
+                ),
+            }
+        )
 
     # 4. Rank by revenue-at-risk × confidence weight.
     confidence_weight = {"HIGH": 1.0, "MEDIUM": 0.7, "LOW": 0.4}
     recs.sort(
-        key=lambda r: r["estimated_revenue_impact"] * confidence_weight[r["confidence"]],
+        key=lambda r: r["estimated_revenue_impact"]
+        * confidence_weight[r["confidence"]],
         reverse=True,
     )
     recs = recs[:limit]
@@ -3310,26 +3401,35 @@ async def purchase_recommendations(
     summary = {
         "total_recommendations": len(recs),
         "total_suggested_units": sum(r["suggested_order_qty"] for r in recs),
-        "estimated_revenue_at_risk": round(sum(r["estimated_revenue_impact"] for r in recs), 2),
-        "estimated_purchase_cost": round(sum(r["estimated_purchase_cost"] for r in recs), 2),
+        "estimated_revenue_at_risk": round(
+            sum(r["estimated_revenue_impact"] for r in recs), 2
+        ),
+        "estimated_purchase_cost": round(
+            sum(r["estimated_purchase_cost"] for r in recs), 2
+        ),
         "estimated_margin": round(sum(r["estimated_margin"] for r in recs), 2),
     }
 
     # By-category roll-up — useful for the UI's category badges.
     by_category: dict = {}
     for r in recs:
-        slot = by_category.setdefault(r["category"], {
-            "category": r["category"],
-            "count": 0,
-            "suggested_units": 0,
-            "estimated_revenue_impact": 0.0,
-        })
+        slot = by_category.setdefault(
+            r["category"],
+            {
+                "category": r["category"],
+                "count": 0,
+                "suggested_units": 0,
+                "estimated_revenue_impact": 0.0,
+            },
+        )
         slot["count"] += 1
         slot["suggested_units"] += r["suggested_order_qty"]
         slot["estimated_revenue_impact"] += r["estimated_revenue_impact"]
     by_category_list = sorted(
-        ({**v, "estimated_revenue_impact": round(v["estimated_revenue_impact"], 2)}
-         for v in by_category.values()),
+        (
+            {**v, "estimated_revenue_impact": round(v["estimated_revenue_impact"], 2)}
+            for v in by_category.values()
+        ),
         key=lambda x: x["estimated_revenue_impact"],
         reverse=True,
     )
@@ -3403,7 +3503,9 @@ End with: a single line stating the report's confidence level (HIGH / MEDIUM / L
 """
 
 
-async def _r3_assemble_inputs(store_id: Optional[str], current_user: dict) -> Dict[str, Any]:
+async def _r3_assemble_inputs(
+    store_id: Optional[str], current_user: dict
+) -> Dict[str, Any]:
     """Call the R1+R2 endpoints internally and bundle their outputs.
     Each call is wrapped — a single failing report shouldn't take down
     the whole blueprint. Returns a dict the LLM prompt can format."""
@@ -3411,33 +3513,45 @@ async def _r3_assemble_inputs(store_id: Optional[str], current_user: dict) -> Di
     # Direct function calls to avoid an HTTP round-trip back into ourselves
     try:
         inputs["footfall_audit"] = await footfall_audit(  # type: ignore[arg-type]
-            store_id=store_id, months_back=12, current_user=current_user,
+            store_id=store_id,
+            months_back=12,
+            current_user=current_user,
         )
     except Exception as e:
         inputs["footfall_audit"] = {"error": str(e)}
     try:
         inputs["price_bands"] = await sales_price_bands(  # type: ignore[arg-type]
-            store_id=store_id, fy_count=3, current_user=current_user,
+            store_id=store_id,
+            fy_count=3,
+            current_user=current_user,
         )
     except Exception as e:
         inputs["price_bands"] = {"error": str(e)}
     try:
         inputs["lens_deep_dive"] = await sales_lens_deep_dive(  # type: ignore[arg-type]
-            store_id=store_id, months_back=12, current_user=current_user,
+            store_id=store_id,
+            months_back=12,
+            current_user=current_user,
         )
     except Exception as e:
         inputs["lens_deep_dive"] = {"error": str(e)}
     try:
         inputs["seasonality"] = await sales_seasonality(  # type: ignore[arg-type]
-            store_id=store_id, years_back=2, current_user=current_user,
+            store_id=store_id,
+            years_back=2,
+            current_user=current_user,
         )
     except Exception as e:
         inputs["seasonality"] = {"error": str(e)}
     try:
         inputs["purchase_recommendations"] = await purchase_recommendations(  # type: ignore[arg-type]
-            store_id=store_id, lookback_days=90,
-            lead_time_days=30, reorder_cycle_days=30,
-            safety_buffer_days=7, min_velocity=2, limit=50,
+            store_id=store_id,
+            lookback_days=90,
+            lead_time_days=30,
+            reorder_cycle_days=30,
+            safety_buffer_days=7,
+            min_velocity=2,
+            limit=50,
             current_user=current_user,
         )
     except Exception as e:
@@ -3445,6 +3559,7 @@ async def _r3_assemble_inputs(store_id: Optional[str], current_user: dict) -> Di
     # Plus a summary overview so the blueprint has total revenue context
     try:
         from .jarvis import JarvisAnalyticsEngine  # local import to avoid cycle
+
         inputs["overview"] = JarvisAnalyticsEngine.get_business_overview()
     except Exception as e:
         inputs["overview"] = {"error": str(e)}
@@ -3487,8 +3602,13 @@ async def growth_blueprint(
             existing = cache_col.find_one({"cache_key": cache_key})
             if existing:
                 age_hours = (
-                    datetime.now() - existing.get("generated_at", datetime.min)
-                ).total_seconds() / 3600 if isinstance(existing.get("generated_at"), datetime) else 999
+                    (
+                        datetime.now() - existing.get("generated_at", datetime.min)
+                    ).total_seconds()
+                    / 3600
+                    if isinstance(existing.get("generated_at"), datetime)
+                    else 999
+                )
                 if age_hours <= 24:
                     return {
                         "narrative_markdown": existing.get("narrative_markdown", ""),
@@ -3591,19 +3711,29 @@ async def growth_blueprint(
             cache_col = db.get_collection("report_blueprints")
             cache_col.update_one(
                 {"cache_key": cache_key},
-                {"$set": {
-                    "cache_key": cache_key,
-                    "store_id": active_store,
-                    "month": month_key,
-                    "model_used": model_used,
-                    "narrative_markdown": narrative,
-                    "generated_at": generated_at,
-                    "inputs_meta": {
-                        "footfall_months": (inputs.get("footfall_audit") or {}).get("rolling", {}).get("orders_total"),
-                        "purchase_recs_count": (inputs.get("purchase_recommendations") or {}).get("summary", {}).get("total_recommendations"),
-                        "price_bands_fy_count": len((inputs.get("price_bands") or {}).get("bands", [])),
-                    },
-                }},
+                {
+                    "$set": {
+                        "cache_key": cache_key,
+                        "store_id": active_store,
+                        "month": month_key,
+                        "model_used": model_used,
+                        "narrative_markdown": narrative,
+                        "generated_at": generated_at,
+                        "inputs_meta": {
+                            "footfall_months": (inputs.get("footfall_audit") or {})
+                            .get("rolling", {})
+                            .get("orders_total"),
+                            "purchase_recs_count": (
+                                inputs.get("purchase_recommendations") or {}
+                            )
+                            .get("summary", {})
+                            .get("total_recommendations"),
+                            "price_bands_fy_count": len(
+                                (inputs.get("price_bands") or {}).get("bands", [])
+                            ),
+                        },
+                    }
+                },
                 upsert=True,
             )
         except Exception:

@@ -214,7 +214,9 @@ def _notifications_coll():
         return None
 
 
-async def _escalate_reassign_notify(repo, task: dict, *, reason: str, by: str, now: datetime):
+async def _escalate_reassign_notify(
+    repo, task: dict, *, reason: str, by: str, now: datetime
+):
     """Escalate + reassign (resolve owner) then alert the new owner in-app +
     WhatsApp. Returns the resolved target user dict (or None)."""
     target = _escalate_and_reassign(repo, task, reason=reason, by=by, now=now)
@@ -266,7 +268,9 @@ async def list_tasks(
     else:
         filters["store_id"] = current_user.get("active_store_id")
 
-    tasks = [_canon_task_out(t) for t in repo.find_many(filters, skip=skip, limit=limit)]
+    tasks = [
+        _canon_task_out(t) for t in repo.find_many(filters, skip=skip, limit=limit)
+    ]
     total = repo.count(filters)
 
     return {"tasks": tasks, "total": total}
@@ -347,7 +351,14 @@ async def get_my_tasks(
     else:
         # By default, exclude completed/cancelled (tolerant of legacy casing).
         filters["status"] = {
-            "$in": ["OPEN", "IN_PROGRESS", "ESCALATED", "open", "in_progress", "escalated"]
+            "$in": [
+                "OPEN",
+                "IN_PROGRESS",
+                "ESCALATED",
+                "open",
+                "in_progress",
+                "escalated",
+            ]
         }
 
     tasks = [
@@ -569,14 +580,16 @@ async def auto_generate_daily_tasks(
     scol = _sop_collection()
     if scol is not None:
         try:
-            templates = list(scol.find(
-                {
-                    "frequency": "DAILY",
-                    "is_active": {"$ne": False},
-                    "$or": [{"store_id": active_store}, {"store_id": None}],
-                },
-                {"_id": 0},
-            ))
+            templates = list(
+                scol.find(
+                    {
+                        "frequency": "DAILY",
+                        "is_active": {"$ne": False},
+                        "$or": [{"store_id": active_store}, {"store_id": None}],
+                    },
+                    {"_id": 0},
+                )
+            )
         except Exception:
             templates = []
 
@@ -695,19 +708,27 @@ async def escalate_task(
         # Explicit target chosen by the user -- reassign ownership to them.
         new_level = task.get("escalation_level", 0) + 1
         history_entry = {
-            "action": "escalated", "level": new_level, "reason": "manual",
-            "from": task.get("assigned_to"), "to": escalate_to, "by": by, "at": now,
+            "action": "escalated",
+            "level": new_level,
+            "reason": "manual",
+            "from": task.get("assigned_to"),
+            "to": escalate_to,
+            "by": by,
+            "at": now,
         }
-        repo.update(task_id, {
-            "status": "ESCALATED",
-            "assigned_to": escalate_to,
-            "escalated_to": escalate_to,
-            "escalated_at": now,
-            "updated_at": now,
-            "escalation_level": new_level,
-            "escalated_by": by,
-            "history": (task.get("history") or []) + [history_entry],
-        })
+        repo.update(
+            task_id,
+            {
+                "status": "ESCALATED",
+                "assigned_to": escalate_to,
+                "escalated_to": escalate_to,
+                "escalated_at": now,
+                "updated_at": now,
+                "escalation_level": new_level,
+                "escalated_by": by,
+                "history": (task.get("history") or []) + [history_entry],
+            },
+        )
         # Alert the explicit target (in-app + WhatsApp).
         user_repo = get_user_repository()
         target_user = None
@@ -717,22 +738,32 @@ async def escalate_task(
             except Exception:
                 target_user = None
         await notify_escalation(
-            _notifications_coll(), target_user or {"user_id": escalate_to}, task, "manual", now=now
+            _notifications_coll(),
+            target_user or {"user_id": escalate_to},
+            task,
+            "manual",
+            now=now,
         )
         return {
-            "task_id": task_id, "status": "ESCALATED", "escalation_level": new_level,
-            "escalated_to": escalate_to, "message": "Task escalated",
+            "task_id": task_id,
+            "status": "ESCALATED",
+            "escalation_level": new_level,
+            "escalated_to": escalate_to,
+            "message": "Task escalated",
         }
 
     # Auto-resolve up the ladder.
-    target = await _escalate_reassign_notify(repo, task, reason="manual", by=by, now=now)
+    target = await _escalate_reassign_notify(
+        repo, task, reason="manual", by=by, now=now
+    )
     return {
         "task_id": task_id,
         "status": "ESCALATED",
         "escalation_level": task.get("escalation_level", 0) + 1,
         "escalated_to": (target or {}).get("user_id"),
         "message": (
-            f"Task escalated to {target.get('user_id')}" if target
+            f"Task escalated to {target.get('user_id')}"
+            if target
             else "Task escalated (no higher owner found)"
         ),
     }
@@ -851,7 +882,17 @@ async def list_fake_closures(
     active_store = store_id or current_user.get("active_store_id")
     cutoff = datetime.now() - timedelta(days=days)
     filters: dict = {
-        "status": {"$in": ["COMPLETED", "DONE", "CLOSED", "RESOLVED", "completed", "done", "closed"]}
+        "status": {
+            "$in": [
+                "COMPLETED",
+                "DONE",
+                "CLOSED",
+                "RESOLVED",
+                "completed",
+                "done",
+                "closed",
+            ]
+        }
     }
     if active_store:
         filters["store_id"] = active_store
@@ -1025,7 +1066,13 @@ async def update_sla_config(
     now = datetime.now()
     col.update_one(
         {"config_id": "global"},
-        {"$set": {"matrix": clean, "updated_at": now, "updated_by": current_user.get("user_id")}},
+        {
+            "$set": {
+                "matrix": clean,
+                "updated_at": now,
+                "updated_by": current_user.get("user_id"),
+            }
+        },
         upsert=True,
     )
     merged = {p: {**DEFAULT_SLA[p], **(clean.get(p) or {})} for p in DEFAULT_SLA}
@@ -1308,7 +1355,7 @@ class SopChecklistItemToggle(BaseModel):
     template_id: str
     step_number: int = Field(..., ge=1)
     completed: bool
-    date: Optional[str] = None      # YYYY-MM-DD; defaults to today
+    date: Optional[str] = None  # YYYY-MM-DD; defaults to today
     store_id: Optional[str] = None
 
 
@@ -1342,7 +1389,9 @@ async def get_sop_checklist(
         except Exception:
             completion = None
 
-    items, progress = merge_checklist(tpl.get("steps") or [], (completion or {}).get("items"))
+    items, progress = merge_checklist(
+        tpl.get("steps") or [], (completion or {}).get("items")
+    )
     return {
         "template_id": template_id,
         "title": tpl.get("title"),
@@ -1378,9 +1427,12 @@ async def toggle_sop_checklist_item(
         {"template_id": payload.template_id, "store_id": active_store, "date": day}
     )
     items = apply_item_toggle(
-        (existing or {}).get("items") or [], steps,
-        payload.step_number, payload.completed,
-        by=current_user.get("user_id"), at=now,
+        (existing or {}).get("items") or [],
+        steps,
+        payload.step_number,
+        payload.completed,
+        by=current_user.get("user_id"),
+        at=now,
     )
     merged, progress = merge_checklist(steps, items)
     status = completion_status(progress)
@@ -1442,22 +1494,24 @@ async def seed_default_sop_templates(
     for tdef in DEFAULT_SOP_TEMPLATES:
         if col.find_one({"title": tdef["title"], "store_id": active_store}):
             continue  # already seeded for this store
-        col.insert_one({
-            "template_id": f"SOP-{uuid.uuid4().hex[:8].upper()}",
-            "title": tdef["title"],
-            "description": tdef["description"],
-            "category": tdef["category"],
-            "frequency": tdef["frequency"],
-            "estimated_time": tdef["estimated_time"],
-            "steps": default_template_steps(tdef["steps"]),
-            "assigned_roles": [],
-            "assigned_users": [],
-            "store_id": active_store,
-            "is_active": True,
-            "created_by": current_user.get("user_id"),
-            "created_at": now,
-            "updated_at": now,
-        })
+        col.insert_one(
+            {
+                "template_id": f"SOP-{uuid.uuid4().hex[:8].upper()}",
+                "title": tdef["title"],
+                "description": tdef["description"],
+                "category": tdef["category"],
+                "frequency": tdef["frequency"],
+                "estimated_time": tdef["estimated_time"],
+                "steps": default_template_steps(tdef["steps"]),
+                "assigned_roles": [],
+                "assigned_users": [],
+                "store_id": active_store,
+                "is_active": True,
+                "created_by": current_user.get("user_id"),
+                "created_at": now,
+                "updated_at": now,
+            }
+        )
         created += 1
     return {
         "created": created,

@@ -826,7 +826,9 @@ async def get_integration(
         if doc:
             config = doc.get("config") or {}
             masked = (
-                _mask_config(_decrypt_config(config)) if isinstance(config, dict) else {}
+                _mask_config(_decrypt_config(config))
+                if isinstance(config, dict)
+                else {}
             )
             return {
                 "type": integration_type.lower(),

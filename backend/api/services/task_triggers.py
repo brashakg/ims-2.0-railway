@@ -29,6 +29,7 @@ _ACTIVE = {"OPEN", "IN_PROGRESS", "ESCALATED", "open", "in_progress", "escalated
 # Pure threshold / detection logic
 # ---------------------------------------------------------------------------
 
+
 def stock_variance_priority(
     shrinkage_pct: float,
     var_pct: float,
@@ -53,7 +54,9 @@ def stock_variance_priority(
     return None
 
 
-def payment_anomalies(orders: List[Dict[str, Any]], tolerance: float = 1.0) -> List[Dict[str, Any]]:
+def payment_anomalies(
+    orders: List[Dict[str, Any]], tolerance: float = 1.0
+) -> List[Dict[str, Any]]:
     """Find orders whose money doesn't reconcile. Pure.
 
     - OVERPAID: amount_paid exceeds grand_total beyond tolerance.
@@ -75,14 +78,29 @@ def payment_anomalies(orders: List[Dict[str, Any]], tolerance: float = 1.0) -> L
         pay_sum = round(sum(float(p.get("amount", 0) or 0) for p in pays), 2)
 
         if paid - grand > tolerance:
-            out.append({"order_id": oid, "kind": "OVERPAID",
-                        "detail": f"paid {paid} vs total {grand}"})
+            out.append(
+                {
+                    "order_id": oid,
+                    "kind": "OVERPAID",
+                    "detail": f"paid {paid} vs total {grand}",
+                }
+            )
         elif pays and abs(pay_sum - paid) > tolerance:
-            out.append({"order_id": oid, "kind": "PAYMENTS_MISMATCH",
-                        "detail": f"payments sum {pay_sum} vs amount_paid {paid}"})
+            out.append(
+                {
+                    "order_id": oid,
+                    "kind": "PAYMENTS_MISMATCH",
+                    "detail": f"payments sum {pay_sum} vs amount_paid {paid}",
+                }
+            )
         elif status in closed and balance > tolerance:
-            out.append({"order_id": oid, "kind": "UNBALANCED_CLOSED",
-                        "detail": f"{status} but balance_due {balance}"})
+            out.append(
+                {
+                    "order_id": oid,
+                    "kind": "UNBALANCED_CLOSED",
+                    "detail": f"{status} but balance_due {balance}",
+                }
+            )
     return out
 
 
@@ -93,14 +111,18 @@ def is_suspicious_closure(task: Dict[str, Any], min_seconds: int = 20) -> bool:
     if status not in {"COMPLETED", "DONE", "CLOSED", "RESOLVED"}:
         return False
     created = _as_dt(task.get("created_at"))
-    closed = _as_dt(task.get("completed_at") or task.get("resolved_at") or task.get("updated_at"))
+    closed = _as_dt(
+        task.get("completed_at") or task.get("resolved_at") or task.get("updated_at")
+    )
     if created is None or closed is None:
         return False
     return 0 <= (closed - created).total_seconds() < min_seconds
 
 
 def silent_tasks(
-    tasks: List[Dict[str, Any]], now: Optional[datetime] = None, sla_config: Optional[dict] = None
+    tasks: List[Dict[str, Any]],
+    now: Optional[datetime] = None,
+    sla_config: Optional[dict] = None,
 ) -> List[Dict[str, Any]]:
     """OPEN (unacknowledged) tasks past their ack-SLA window. Pure."""
     now = now or datetime.now()
@@ -133,6 +155,7 @@ def _as_dt(v: Any) -> Optional[datetime]:
 # Persistence helper (repo passed in -> testable with a fake)
 # ---------------------------------------------------------------------------
 
+
 def create_system_task(
     repo: Any,
     *,
@@ -152,7 +175,10 @@ def create_system_task(
         return None
     try:
         existing = repo.find_many({"source_ref": dedupe_ref}) or []
-        if any(str(t.get("status", "")).upper() in {"OPEN", "IN_PROGRESS", "ESCALATED"} for t in existing):
+        if any(
+            str(t.get("status", "")).upper() in {"OPEN", "IN_PROGRESS", "ESCALATED"}
+            for t in existing
+        ):
             return None
     except Exception:  # noqa: BLE001
         pass  # dedupe is best-effort
@@ -178,7 +204,14 @@ def create_system_task(
         "created_at": now,
         "updated_at": now,
         "escalation_level": 0,
-        "history": [{"status": "OPEN", "timestamp": now, "by": "system", "notes": "Auto-created from variance"}],
+        "history": [
+            {
+                "status": "OPEN",
+                "timestamp": now,
+                "by": "system",
+                "notes": "Auto-created from variance",
+            }
+        ],
     }
     try:
         created = repo.create(task)

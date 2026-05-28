@@ -74,8 +74,12 @@ async def reconcile_store_barcodes_ep(
 
 @router.get("/online-stock-reconcile")
 async def online_stock_reconcile(
-    store_id: Optional[str] = Query(None, description="Limit in-store on-hand to one store"),
-    safety_buffer: int = Query(0, ge=0, le=1000, description="Units to hold back from online"),
+    store_id: Optional[str] = Query(
+        None, description="Limit in-store on-hand to one store"
+    ),
+    safety_buffer: int = Query(
+        0, ge=0, le=1000, description="Units to hold back from online"
+    ),
     limit: int = Query(1000, ge=1, le=5000),
     current_user: dict = Depends(get_current_user),
 ):
@@ -1449,7 +1453,7 @@ async def _sync_product_to_shopify(
         "retired": True,
         "owner": "ecommerce_app_bvi",
         "message": "Shopify is managed by the Online Store app. Add or edit this "
-                   "product's online listing there.",
+        "product's online listing there.",
         "last_sync": None,
     }
 
@@ -1481,7 +1485,7 @@ async def sync_product_to_shopify(
         "shopify_sync": result,
         "retired": True,
         "message": "Shopify is managed by the Online Store app (BVI). "
-                   "IMS product->Shopify sync is retired; manage the listing there.",
+        "IMS product->Shopify sync is retired; manage the listing there.",
     }
 
 
@@ -1517,7 +1521,7 @@ async def bulk_sync_products_to_shopify(
         "errors": errors,
         "retired": True,
         "message": "Shopify is managed by the Online Store app (BVI). "
-                   "IMS product->Shopify sync is retired; manage listings there.",
+        "IMS product->Shopify sync is retired; manage listings there.",
     }
 
 

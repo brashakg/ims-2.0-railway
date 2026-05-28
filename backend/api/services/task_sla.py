@@ -130,7 +130,9 @@ def should_escalate(
     # Ack clock -- only while still OPEN (unacknowledged).
     if status == "OPEN":
         created = _as_dt(task.get("created_at"))
-        if created is not None and now >= created + timedelta(minutes=sla["ack_minutes"]):
+        if created is not None and now >= created + timedelta(
+            minutes=sla["ack_minutes"]
+        ):
             return True, f"Not acknowledged within SLA ({sla['ack_minutes']}m)"
 
     return False, ""

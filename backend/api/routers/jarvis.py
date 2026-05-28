@@ -560,12 +560,23 @@ class JarvisAnalyticsEngine:
                 cursor = users_col.find(
                     {"is_active": {"$ne": False}},
                     {
-                        "_id": 1, "username": 1, "name": 1, "full_name": 1,
-                        "first_name": 1, "last_name": 1,
-                        "roles": 1, "role": 1, "active_role": 1,
-                        "active_store_id": 1, "store_id": 1, "stores": 1,
-                        "phone": 1, "email": 1,
-                        "joined_at": 1, "created_at": 1, "is_active": 1,
+                        "_id": 1,
+                        "username": 1,
+                        "name": 1,
+                        "full_name": 1,
+                        "first_name": 1,
+                        "last_name": 1,
+                        "roles": 1,
+                        "role": 1,
+                        "active_role": 1,
+                        "active_store_id": 1,
+                        "store_id": 1,
+                        "stores": 1,
+                        "phone": 1,
+                        "email": 1,
+                        "joined_at": 1,
+                        "created_at": 1,
+                        "is_active": 1,
                     },
                 ).limit(200)
                 for u in cursor:
@@ -575,25 +586,38 @@ class JarvisAnalyticsEngine:
                         or u.get("name")
                         or (
                             f"{u.get('first_name','')} {u.get('last_name','')}".strip()
-                            if (u.get("first_name") or u.get("last_name")) else None
+                            if (u.get("first_name") or u.get("last_name"))
+                            else None
                         )
                         or u.get("username")
                         or "Unnamed"
                     )
                     role_val = u.get("active_role") or u.get("role")
-                    roles = u.get("roles") if isinstance(u.get("roles"), list) else (
-                        [role_val] if role_val else []
+                    roles = (
+                        u.get("roles")
+                        if isinstance(u.get("roles"), list)
+                        else ([role_val] if role_val else [])
                     )
-                    store = u.get("active_store_id") or u.get("store_id") or (
-                        (u.get("stores") or [None])[0] if isinstance(u.get("stores"), list) else None
+                    store = (
+                        u.get("active_store_id")
+                        or u.get("store_id")
+                        or (
+                            (u.get("stores") or [None])[0]
+                            if isinstance(u.get("stores"), list)
+                            else None
+                        )
                     )
-                    roster.append({
-                        "name": name,
-                        "roles": roles,
-                        "store_id": store,
-                        "phone": u.get("phone") or "",
-                        "joined_at": str(u.get("joined_at") or u.get("created_at") or "")[:10],
-                    })
+                    roster.append(
+                        {
+                            "name": name,
+                            "roles": roles,
+                            "store_id": store,
+                            "phone": u.get("phone") or "",
+                            "joined_at": str(
+                                u.get("joined_at") or u.get("created_at") or ""
+                            )[:10],
+                        }
+                    )
             except Exception as e:
                 logger.warning("[JARVIS] staff roster fetch failed: %s", e)
 
@@ -603,7 +627,10 @@ class JarvisAnalyticsEngine:
             try:
                 today = datetime.now().strftime("%Y-%m-%d")
                 present_today = attendance_col.count_documents(
-                    {"date": today, "status": {"$in": ["PRESENT", "present", "PARTIAL"]}}
+                    {
+                        "date": today,
+                        "status": {"$in": ["PRESENT", "present", "PARTIAL"]},
+                    }
                 )
                 on_leave_today = attendance_col.count_documents(
                     {"date": today, "status": {"$in": ["LEAVE", "on_leave", "ABSENT"]}}
@@ -613,11 +640,13 @@ class JarvisAnalyticsEngine:
         if leaves_col is not None and on_leave_today == 0:
             try:
                 today = datetime.now().strftime("%Y-%m-%d")
-                on_leave_today = leaves_col.count_documents({
-                    "status": {"$in": ["APPROVED", "approved"]},
-                    "from_date": {"$lte": today},
-                    "to_date": {"$gte": today},
-                })
+                on_leave_today = leaves_col.count_documents(
+                    {
+                        "status": {"$in": ["APPROVED", "approved"]},
+                        "from_date": {"$lte": today},
+                        "to_date": {"$gte": today},
+                    }
+                )
             except Exception:
                 pass
 
@@ -628,9 +657,7 @@ class JarvisAnalyticsEngine:
                 "total_staff": total,
                 "present_today": present_today,
                 "on_leave": on_leave_today,
-                "present_rate": (
-                    round(present_today / total * 100, 1) if total else 0
-                ),
+                "present_rate": (round(present_today / total * 100, 1) if total else 0),
                 "late_arrivals_today": 0,
             },
             "orders_per_staff": 0,
@@ -690,10 +717,18 @@ class JarvisAnalyticsEngine:
         try:
             col = get_db_collection("purchase_orders")
             if col is not None:
-                open_pos = list(col.find(
-                    {"status": {"$in": ["DRAFT", "SENT", "PARTIAL", "OPEN"]}},
-                    {"vendor_name": 1, "status": 1, "total": 1, "created_at": 1, "po_number": 1},
-                ).limit(20))
+                open_pos = list(
+                    col.find(
+                        {"status": {"$in": ["DRAFT", "SENT", "PARTIAL", "OPEN"]}},
+                        {
+                            "vendor_name": 1,
+                            "status": 1,
+                            "total": 1,
+                            "created_at": 1,
+                            "po_number": 1,
+                        },
+                    ).limit(20)
+                )
                 ctx["purchases"] = {
                     "open_pos_count": col.count_documents(
                         {"status": {"$in": ["DRAFT", "SENT", "PARTIAL", "OPEN"]}}
@@ -716,9 +751,15 @@ class JarvisAnalyticsEngine:
         try:
             col = get_db_collection("grns")
             if col is not None:
-                ctx["grns_last_30d"] = col.count_documents({
-                    "created_at": {"$gte": (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")},
-                })
+                ctx["grns_last_30d"] = col.count_documents(
+                    {
+                        "created_at": {
+                            "$gte": (datetime.now() - timedelta(days=30)).strftime(
+                                "%Y-%m-%d"
+                            )
+                        },
+                    }
+                )
         except Exception:
             pass
 
@@ -727,27 +768,42 @@ class JarvisAnalyticsEngine:
             col = get_db_collection("tasks")
             if col is not None:
                 today = datetime.now().strftime("%Y-%m-%d")
-                open_count = col.count_documents({"status": {"$in": ["OPEN", "open", "IN_PROGRESS"]}})
-                overdue = col.count_documents({
-                    "status": {"$in": ["OPEN", "open", "IN_PROGRESS"]},
-                    "due_date": {"$lt": today},
-                })
+                open_count = col.count_documents(
+                    {"status": {"$in": ["OPEN", "open", "IN_PROGRESS"]}}
+                )
+                overdue = col.count_documents(
+                    {
+                        "status": {"$in": ["OPEN", "open", "IN_PROGRESS"]},
+                        "due_date": {"$lt": today},
+                    }
+                )
                 ctx["tasks"] = {
                     "open_count": open_count,
                     "overdue_count": overdue,
                     "open_sample": [
                         {
                             "title": t.get("title") or t.get("name") or "",
-                            "assignee": t.get("assignee_name") or t.get("assigned_to") or "",
+                            "assignee": t.get("assignee_name")
+                            or t.get("assigned_to")
+                            or "",
                             "due_date": str(t.get("due_date") or "")[:10],
                             "priority": t.get("priority") or "",
                             "type": t.get("task_type") or "",
                         }
                         for t in col.find(
                             {"status": {"$in": ["OPEN", "open", "IN_PROGRESS"]}},
-                            {"title": 1, "name": 1, "assignee_name": 1, "assigned_to": 1,
-                             "due_date": 1, "priority": 1, "task_type": 1},
-                        ).sort("due_date", 1).limit(15)
+                            {
+                                "title": 1,
+                                "name": 1,
+                                "assignee_name": 1,
+                                "assigned_to": 1,
+                                "due_date": 1,
+                                "priority": 1,
+                                "task_type": 1,
+                            },
+                        )
+                        .sort("due_date", 1)
+                        .limit(15)
                     ],
                 }
         except Exception as e:
@@ -761,16 +817,22 @@ class JarvisAnalyticsEngine:
                 ctx["workshop"] = {
                     "pending": col.count_documents({"status": "PENDING"}),
                     "in_progress": col.count_documents({"status": "IN_PROGRESS"}),
-                    "ready_for_pickup": col.count_documents({"status": "READY_FOR_PICKUP"}),
+                    "ready_for_pickup": col.count_documents(
+                        {"status": "READY_FOR_PICKUP"}
+                    ),
                     "qc_failed": col.count_documents({"status": "QC_FAILED"}),
-                    "completed_today": col.count_documents({
-                        "status": {"$in": ["COMPLETED", "DELIVERED"]},
-                        "completed_at": {"$gte": today},
-                    }),
-                    "overdue": col.count_documents({
-                        "status": {"$nin": ["COMPLETED", "DELIVERED", "CANCELLED"]},
-                        "promised_date": {"$lt": today},
-                    }),
+                    "completed_today": col.count_documents(
+                        {
+                            "status": {"$in": ["COMPLETED", "DELIVERED"]},
+                            "completed_at": {"$gte": today},
+                        }
+                    ),
+                    "overdue": col.count_documents(
+                        {
+                            "status": {"$nin": ["COMPLETED", "DELIVERED", "CANCELLED"]},
+                            "promised_date": {"$lt": today},
+                        }
+                    ),
                 }
         except Exception as e:
             logger.warning("[JARVIS] workshop ctx failed: %s", e)
@@ -782,7 +844,9 @@ class JarvisAnalyticsEngine:
                 month_start = datetime.now().strftime("%Y-%m-01")
                 ctx["prescriptions"] = {
                     "total": col.count_documents({}),
-                    "this_month": col.count_documents({"created_at": {"$gte": month_start}}),
+                    "this_month": col.count_documents(
+                        {"created_at": {"$gte": month_start}}
+                    ),
                 }
         except Exception:
             pass
@@ -794,7 +858,9 @@ class JarvisAnalyticsEngine:
                 today = datetime.now().strftime("%Y-%m-%d")
                 ctx["eye_tests"] = {
                     "today": col.count_documents({"test_date": today}),
-                    "pending": col.count_documents({"status": {"$in": ["PENDING", "SCHEDULED"]}}),
+                    "pending": col.count_documents(
+                        {"status": {"$in": ["PENDING", "SCHEDULED"]}}
+                    ),
                 }
         except Exception:
             pass
@@ -806,9 +872,15 @@ class JarvisAnalyticsEngine:
                 today = datetime.now().strftime("%Y-%m-%d")
                 ctx["walkouts"] = {
                     "today": col.count_documents({"date": today}),
-                    "this_week": col.count_documents({
-                        "date": {"$gte": (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")},
-                    }),
+                    "this_week": col.count_documents(
+                        {
+                            "date": {
+                                "$gte": (datetime.now() - timedelta(days=7)).strftime(
+                                    "%Y-%m-%d"
+                                )
+                            },
+                        }
+                    ),
                 }
         except Exception:
             pass
@@ -817,12 +889,20 @@ class JarvisAnalyticsEngine:
         try:
             col = get_db_collection("notification_logs")
             if col is not None:
-                today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+                today_start = datetime.now().replace(
+                    hour=0, minute=0, second=0, microsecond=0
+                )
                 ctx["marketing"] = {
-                    "sent_today": col.count_documents({"sent_at": {"$gte": today_start.isoformat()}}),
-                    "sent_this_week": col.count_documents({
-                        "sent_at": {"$gte": (datetime.now() - timedelta(days=7)).isoformat()},
-                    }),
+                    "sent_today": col.count_documents(
+                        {"sent_at": {"$gte": today_start.isoformat()}}
+                    ),
+                    "sent_this_week": col.count_documents(
+                        {
+                            "sent_at": {
+                                "$gte": (datetime.now() - timedelta(days=7)).isoformat()
+                            },
+                        }
+                    ),
                 }
         except Exception:
             pass
@@ -840,10 +920,17 @@ class JarvisAnalyticsEngine:
                         "run_count": a.get("run_count", 0),
                         "error_count": a.get("error_count", 0),
                     }
-                    for a in col.find({}, {
-                        "agent_id": 1, "enabled": 1, "last_run": 1,
-                        "last_status": 1, "run_count": 1, "error_count": 1,
-                    }).limit(20)
+                    for a in col.find(
+                        {},
+                        {
+                            "agent_id": 1,
+                            "enabled": 1,
+                            "last_run": 1,
+                            "last_status": 1,
+                            "run_count": 1,
+                            "error_count": 1,
+                        },
+                    ).limit(20)
                 ]
         except Exception:
             pass
@@ -854,16 +941,22 @@ class JarvisAnalyticsEngine:
             if orders_col is not None:
                 cutoff = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
                 pipeline = [
-                    {"$match": {
-                        "created_at": {"$gte": cutoff},
-                        "status": {"$in": ["CONFIRMED", "PROCESSING", "READY", "DELIVERED"]},
-                    }},
+                    {
+                        "$match": {
+                            "created_at": {"$gte": cutoff},
+                            "status": {
+                                "$in": ["CONFIRMED", "PROCESSING", "READY", "DELIVERED"]
+                            },
+                        }
+                    },
                     {"$unwind": "$items"},
-                    {"$group": {
-                        "_id": "$items.product_name",
-                        "qty": {"$sum": "$items.quantity"},
-                        "revenue": {"$sum": "$items.line_total"},
-                    }},
+                    {
+                        "$group": {
+                            "_id": "$items.product_name",
+                            "qty": {"$sum": "$items.quantity"},
+                            "revenue": {"$sum": "$items.line_total"},
+                        }
+                    },
                     {"$sort": {"qty": -1}},
                     {"$limit": 20},
                 ]
@@ -888,63 +981,102 @@ class JarvisAnalyticsEngine:
             if prod_col is not None:
                 # Top 20 most expensive — sorted by mrp/offer_price desc.
                 # Includes store_id so JARVIS can answer per-store queries.
-                top_by_price = list(prod_col.aggregate([
-                    {"$match": {"is_active": {"$ne": False}}},
-                    {"$addFields": {
-                        "_price": {"$ifNull": ["$offer_price", "$mrp"]},
-                    }},
-                    {"$match": {"_price": {"$gt": 0}}},
-                    {"$sort": {"_price": -1}},
-                    {"$limit": 20},
-                    {"$project": {
-                        "_id": 0, "name": 1, "brand": 1, "category": 1,
-                        "barcode": 1, "store_id": 1,
-                        "mrp": 1, "offer_price": 1, "cost_price": 1,
-                        "stock_quantity": 1,
-                        "price": "$_price",
-                    }},
-                ]))
+                top_by_price = list(
+                    prod_col.aggregate(
+                        [
+                            {"$match": {"is_active": {"$ne": False}}},
+                            {
+                                "$addFields": {
+                                    "_price": {"$ifNull": ["$offer_price", "$mrp"]},
+                                }
+                            },
+                            {"$match": {"_price": {"$gt": 0}}},
+                            {"$sort": {"_price": -1}},
+                            {"$limit": 20},
+                            {
+                                "$project": {
+                                    "_id": 0,
+                                    "name": 1,
+                                    "brand": 1,
+                                    "category": 1,
+                                    "barcode": 1,
+                                    "store_id": 1,
+                                    "mrp": 1,
+                                    "offer_price": 1,
+                                    "cost_price": 1,
+                                    "stock_quantity": 1,
+                                    "price": "$_price",
+                                }
+                            },
+                        ]
+                    )
+                )
                 ctx["top_products_by_price"] = top_by_price
 
                 # Top 20 by stock value (price * quantity_on_hand) —
                 # surfaces "which SKUs hold the most working capital".
-                top_by_value = list(prod_col.aggregate([
-                    {"$match": {"is_active": {"$ne": False}}},
-                    {"$addFields": {
-                        "_price": {"$ifNull": ["$offer_price", "$mrp"]},
-                        "_qty": {"$ifNull": ["$stock_quantity", 0]},
-                    }},
-                    {"$addFields": {
-                        "_stock_value": {"$multiply": ["$_price", "$_qty"]},
-                    }},
-                    {"$match": {"_stock_value": {"$gt": 0}}},
-                    {"$sort": {"_stock_value": -1}},
-                    {"$limit": 20},
-                    {"$project": {
-                        "_id": 0, "name": 1, "brand": 1, "category": 1,
-                        "store_id": 1,
-                        "price": "$_price",
-                        "stock_quantity": "$_qty",
-                        "stock_value": "$_stock_value",
-                    }},
-                ]))
+                top_by_value = list(
+                    prod_col.aggregate(
+                        [
+                            {"$match": {"is_active": {"$ne": False}}},
+                            {
+                                "$addFields": {
+                                    "_price": {"$ifNull": ["$offer_price", "$mrp"]},
+                                    "_qty": {"$ifNull": ["$stock_quantity", 0]},
+                                }
+                            },
+                            {
+                                "$addFields": {
+                                    "_stock_value": {"$multiply": ["$_price", "$_qty"]},
+                                }
+                            },
+                            {"$match": {"_stock_value": {"$gt": 0}}},
+                            {"$sort": {"_stock_value": -1}},
+                            {"$limit": 20},
+                            {
+                                "$project": {
+                                    "_id": 0,
+                                    "name": 1,
+                                    "brand": 1,
+                                    "category": 1,
+                                    "store_id": 1,
+                                    "price": "$_price",
+                                    "stock_quantity": "$_qty",
+                                    "stock_value": "$_stock_value",
+                                }
+                            },
+                        ]
+                    )
+                )
                 ctx["top_stock_value"] = top_by_value
 
                 # Catalog summary by category + brand, plus a per-store
                 # roll-up so JARVIS knows what each store's inventory
                 # looks like at a glance.
-                by_category = list(prod_col.aggregate([
-                    {"$match": {"is_active": {"$ne": False}}},
-                    {"$group": {
-                        "_id": "$category",
-                        "sku_count": {"$sum": 1},
-                        "total_units": {"$sum": {"$ifNull": ["$stock_quantity", 0]}},
-                        "avg_price": {"$avg": {"$ifNull": ["$offer_price", "$mrp"]}},
-                        "max_price": {"$max": {"$ifNull": ["$offer_price", "$mrp"]}},
-                    }},
-                    {"$sort": {"sku_count": -1}},
-                    {"$limit": 30},
-                ]))
+                by_category = list(
+                    prod_col.aggregate(
+                        [
+                            {"$match": {"is_active": {"$ne": False}}},
+                            {
+                                "$group": {
+                                    "_id": "$category",
+                                    "sku_count": {"$sum": 1},
+                                    "total_units": {
+                                        "$sum": {"$ifNull": ["$stock_quantity", 0]}
+                                    },
+                                    "avg_price": {
+                                        "$avg": {"$ifNull": ["$offer_price", "$mrp"]}
+                                    },
+                                    "max_price": {
+                                        "$max": {"$ifNull": ["$offer_price", "$mrp"]}
+                                    },
+                                }
+                            },
+                            {"$sort": {"sku_count": -1}},
+                            {"$limit": 30},
+                        ]
+                    )
+                )
                 ctx["catalog_by_category"] = [
                     {
                         "category": str(r.get("_id") or "UNCATEGORISED"),
@@ -956,20 +1088,32 @@ class JarvisAnalyticsEngine:
                     for r in by_category
                 ]
 
-                by_brand = list(prod_col.aggregate([
-                    {"$match": {
-                        "is_active": {"$ne": False},
-                        "brand": {"$ne": "", "$ne": None},
-                    }},
-                    {"$group": {
-                        "_id": "$brand",
-                        "sku_count": {"$sum": 1},
-                        "total_units": {"$sum": {"$ifNull": ["$stock_quantity", 0]}},
-                        "avg_price": {"$avg": {"$ifNull": ["$offer_price", "$mrp"]}},
-                    }},
-                    {"$sort": {"sku_count": -1}},
-                    {"$limit": 30},
-                ]))
+                by_brand = list(
+                    prod_col.aggregate(
+                        [
+                            {
+                                "$match": {
+                                    "is_active": {"$ne": False},
+                                    "brand": {"$ne": "", "$ne": None},
+                                }
+                            },
+                            {
+                                "$group": {
+                                    "_id": "$brand",
+                                    "sku_count": {"$sum": 1},
+                                    "total_units": {
+                                        "$sum": {"$ifNull": ["$stock_quantity", 0]}
+                                    },
+                                    "avg_price": {
+                                        "$avg": {"$ifNull": ["$offer_price", "$mrp"]}
+                                    },
+                                }
+                            },
+                            {"$sort": {"sku_count": -1}},
+                            {"$limit": 30},
+                        ]
+                    )
+                )
                 ctx["catalog_by_brand"] = [
                     {
                         "brand": str(r.get("_id") or "UNBRANDED"),
@@ -982,25 +1126,41 @@ class JarvisAnalyticsEngine:
 
                 # Per-store catalog roll-up — answers "how many SKUs in
                 # Pune?" without JARVIS having to count.
-                by_store = list(prod_col.aggregate([
-                    {"$match": {"is_active": {"$ne": False}}},
-                    {"$group": {
-                        "_id": "$store_id",
-                        "sku_count": {"$sum": 1},
-                        "total_stock_value": {"$sum": {
-                            "$multiply": [
-                                {"$ifNull": ["$offer_price", "$mrp", 0]},
-                                {"$ifNull": ["$stock_quantity", 0]},
-                            ],
-                        }},
-                        "max_price_sku_name": {"$first": "$name"},
-                    }},
-                ]))
+                by_store = list(
+                    prod_col.aggregate(
+                        [
+                            {"$match": {"is_active": {"$ne": False}}},
+                            {
+                                "$group": {
+                                    "_id": "$store_id",
+                                    "sku_count": {"$sum": 1},
+                                    "total_stock_value": {
+                                        "$sum": {
+                                            "$multiply": [
+                                                {
+                                                    "$ifNull": [
+                                                        "$offer_price",
+                                                        "$mrp",
+                                                        0,
+                                                    ]
+                                                },
+                                                {"$ifNull": ["$stock_quantity", 0]},
+                                            ],
+                                        }
+                                    },
+                                    "max_price_sku_name": {"$first": "$name"},
+                                }
+                            },
+                        ]
+                    )
+                )
                 ctx["catalog_by_store"] = [
                     {
                         "store_id": str(r.get("_id") or "UNASSIGNED"),
                         "sku_count": int(r.get("sku_count") or 0),
-                        "total_stock_value": round(float(r.get("total_stock_value") or 0), 2),
+                        "total_stock_value": round(
+                            float(r.get("total_stock_value") or 0), 2
+                        ),
                     }
                     for r in by_store
                 ]
@@ -1008,35 +1168,55 @@ class JarvisAnalyticsEngine:
                 # Low-stock items, sorted by value at risk (price * gap).
                 # More actionable than just "X items low" since it tells
                 # the operator WHICH stockouts hurt the most.
-                low_stock = list(prod_col.aggregate([
-                    {"$match": {
-                        "is_active": {"$ne": False},
-                        "$expr": {"$lte": [
-                            {"$ifNull": ["$stock_quantity", 0]},
-                            {"$ifNull": ["$reorder_point", 0]},
-                        ]},
-                        "reorder_point": {"$gt": 0},
-                    }},
-                    {"$addFields": {
-                        "_price": {"$ifNull": ["$offer_price", "$mrp"]},
-                        "_gap": {"$subtract": [
-                            {"$ifNull": ["$reorder_point", 0]},
-                            {"$ifNull": ["$stock_quantity", 0]},
-                        ]},
-                    }},
-                    {"$addFields": {
-                        "_at_risk": {"$multiply": ["$_price", "$_gap"]},
-                    }},
-                    {"$sort": {"_at_risk": -1}},
-                    {"$limit": 15},
-                    {"$project": {
-                        "_id": 0, "name": 1, "brand": 1, "category": 1,
-                        "store_id": 1,
-                        "stock_quantity": 1, "reorder_point": 1,
-                        "price": "$_price",
-                        "value_at_risk": "$_at_risk",
-                    }},
-                ]))
+                low_stock = list(
+                    prod_col.aggregate(
+                        [
+                            {
+                                "$match": {
+                                    "is_active": {"$ne": False},
+                                    "$expr": {
+                                        "$lte": [
+                                            {"$ifNull": ["$stock_quantity", 0]},
+                                            {"$ifNull": ["$reorder_point", 0]},
+                                        ]
+                                    },
+                                    "reorder_point": {"$gt": 0},
+                                }
+                            },
+                            {
+                                "$addFields": {
+                                    "_price": {"$ifNull": ["$offer_price", "$mrp"]},
+                                    "_gap": {
+                                        "$subtract": [
+                                            {"$ifNull": ["$reorder_point", 0]},
+                                            {"$ifNull": ["$stock_quantity", 0]},
+                                        ]
+                                    },
+                                }
+                            },
+                            {
+                                "$addFields": {
+                                    "_at_risk": {"$multiply": ["$_price", "$_gap"]},
+                                }
+                            },
+                            {"$sort": {"_at_risk": -1}},
+                            {"$limit": 15},
+                            {
+                                "$project": {
+                                    "_id": 0,
+                                    "name": 1,
+                                    "brand": 1,
+                                    "category": 1,
+                                    "store_id": 1,
+                                    "stock_quantity": 1,
+                                    "reorder_point": 1,
+                                    "price": "$_price",
+                                    "value_at_risk": "$_at_risk",
+                                }
+                            },
+                        ]
+                    )
+                )
                 ctx["low_stock_value_at_risk"] = low_stock
         except Exception as e:
             logger.warning("[JARVIS] catalog analytics ctx failed: %s", e)
@@ -1046,7 +1226,10 @@ class JarvisAnalyticsEngine:
             col = get_db_collection("period_locks")
             if col is not None:
                 ctx["period_locks"] = [
-                    {"period": str(p.get("period") or p.get("_id")), "locked": p.get("locked", False)}
+                    {
+                        "period": str(p.get("period") or p.get("_id")),
+                        "locked": p.get("locked", False),
+                    }
                     for p in col.find({}).sort("period", -1).limit(6)
                 ]
         except Exception:
@@ -1066,9 +1249,14 @@ class JarvisAnalyticsEngine:
                 month_start = datetime.now().strftime("%Y-%m-01")
                 total_month = 0.0
                 category_breakdown: Dict[str, float] = {}
-                for e in col.find({"date": {"$gte": month_start}}, {
-                    "amount": 1, "category": 1, "vendor": 1,
-                }).limit(500):
+                for e in col.find(
+                    {"date": {"$gte": month_start}},
+                    {
+                        "amount": 1,
+                        "category": 1,
+                        "vendor": 1,
+                    },
+                ).limit(500):
                     amt = float(e.get("amount") or 0)
                     total_month += amt
                     cat = e.get("category") or "OTHER"
@@ -1077,7 +1265,9 @@ class JarvisAnalyticsEngine:
                     "total_this_month": round(total_month, 2),
                     "by_category": [
                         {"category": k, "amount": round(v, 2)}
-                        for k, v in sorted(category_breakdown.items(), key=lambda kv: -kv[1])
+                        for k, v in sorted(
+                            category_breakdown.items(), key=lambda kv: -kv[1]
+                        )
                     ][:10],
                 }
         except Exception:
@@ -1104,20 +1294,29 @@ class JarvisAnalyticsEngine:
             if col is not None:
                 month_start = datetime.now().strftime("%Y-%m-01")
                 ctx["payroll_mtd"] = {
-                    "records_this_month": col.count_documents({"month": {"$gte": month_start[:7]}}),
-                    "total_paid_this_month": round(sum(
-                        float(r.get("net_pay") or 0)
-                        for r in col.find({"month": {"$gte": month_start[:7]}}).limit(500)
-                    ), 2),
+                    "records_this_month": col.count_documents(
+                        {"month": {"$gte": month_start[:7]}}
+                    ),
+                    "total_paid_this_month": round(
+                        sum(
+                            float(r.get("net_pay") or 0)
+                            for r in col.find(
+                                {"month": {"$gte": month_start[:7]}}
+                            ).limit(500)
+                        ),
+                        2,
+                    ),
                 }
         except Exception:
             pass
         try:
             col = get_db_collection("advances") or get_db_collection("salary_advances")
             if col is not None:
-                ctx["salary_advances_open"] = col.count_documents({
-                    "status": {"$in": ["OPEN", "open", "ACTIVE", "OUTSTANDING"]},
-                })
+                ctx["salary_advances_open"] = col.count_documents(
+                    {
+                        "status": {"$in": ["OPEN", "open", "ACTIVE", "OUTSTANDING"]},
+                    }
+                )
         except Exception:
             pass
 
@@ -1160,7 +1359,9 @@ class JarvisAnalyticsEngine:
                 today = datetime.now().strftime("%Y-%m-%d")
                 ctx["stock_counts"] = {
                     "today": col.count_documents({"count_date": today}),
-                    "open_discrepancies": col.count_documents({"has_discrepancy": True}),
+                    "open_discrepancies": col.count_documents(
+                        {"has_discrepancy": True}
+                    ),
                 }
         except Exception:
             pass
@@ -1168,10 +1369,16 @@ class JarvisAnalyticsEngine:
             col = get_db_collection("stock_transfers")
             if col is not None:
                 ctx["stock_transfers"] = {
-                    "in_transit": col.count_documents({"status": {"$in": ["IN_TRANSIT", "DISPATCHED"]}}),
-                    "received_this_week": col.count_documents({
-                        "received_at": {"$gte": (datetime.now() - timedelta(days=7)).isoformat()},
-                    }),
+                    "in_transit": col.count_documents(
+                        {"status": {"$in": ["IN_TRANSIT", "DISPATCHED"]}}
+                    ),
+                    "received_this_week": col.count_documents(
+                        {
+                            "received_at": {
+                                "$gte": (datetime.now() - timedelta(days=7)).isoformat()
+                            },
+                        }
+                    ),
                 }
         except Exception:
             pass
@@ -1179,10 +1386,14 @@ class JarvisAnalyticsEngine:
             col = get_db_collection("vendor_returns")
             if col is not None:
                 ctx["vendor_returns"] = {
-                    "open": col.count_documents({"status": {"$in": ["OPEN", "PENDING"]}}),
-                    "this_month": col.count_documents({
-                        "created_at": {"$gte": datetime.now().strftime("%Y-%m-01")},
-                    }),
+                    "open": col.count_documents(
+                        {"status": {"$in": ["OPEN", "PENDING"]}}
+                    ),
+                    "this_month": col.count_documents(
+                        {
+                            "created_at": {"$gte": datetime.now().strftime("%Y-%m-01")},
+                        }
+                    ),
                 }
         except Exception:
             pass
@@ -1192,7 +1403,9 @@ class JarvisAnalyticsEngine:
             col = get_db_collection("loyalty_accounts")
             if col is not None:
                 ctx["loyalty"] = {
-                    "active_accounts": col.count_documents({"status": {"$ne": "INACTIVE"}}),
+                    "active_accounts": col.count_documents(
+                        {"status": {"$ne": "INACTIVE"}}
+                    ),
                     "total_points_outstanding": sum(
                         int(a.get("points_balance") or 0)
                         for a in col.find({}, {"points_balance": 1}).limit(2000)
@@ -1241,20 +1454,26 @@ class JarvisAnalyticsEngine:
                         "kind": a.get("kind") or a.get("type") or "",
                         "severity": a.get("severity") or "",
                         "summary": (a.get("summary") or a.get("message") or "")[:200],
-                        "detected_at": str(a.get("detected_at") or a.get("created_at") or "")[:19],
+                        "detected_at": str(
+                            a.get("detected_at") or a.get("created_at") or ""
+                        )[:19],
                     }
-                    for a in col.find(
-                        {"status": {"$nin": ["RESOLVED", "DISMISSED"]}}
-                    ).sort("detected_at", -1).limit(15)
+                    for a in col.find({"status": {"$nin": ["RESOLVED", "DISMISSED"]}})
+                    .sort("detected_at", -1)
+                    .limit(15)
                 ]
         except Exception:
             pass
         try:
             col = get_db_collection("alert_history")
             if col is not None:
-                ctx["alerts_last_7d"] = col.count_documents({
-                    "created_at": {"$gte": (datetime.now() - timedelta(days=7)).isoformat()},
-                })
+                ctx["alerts_last_7d"] = col.count_documents(
+                    {
+                        "created_at": {
+                            "$gte": (datetime.now() - timedelta(days=7)).isoformat()
+                        },
+                    }
+                )
         except Exception:
             pass
         try:
@@ -1298,7 +1517,9 @@ class JarvisAnalyticsEngine:
                     {
                         "service": h.get("service") or h.get("target") or "",
                         "status": h.get("status") or "",
-                        "checked_at": str(h.get("checked_at") or h.get("created_at") or "")[:19],
+                        "checked_at": str(
+                            h.get("checked_at") or h.get("created_at") or ""
+                        )[:19],
                     }
                     for h in col.find({}).sort("checked_at", -1).limit(10)
                 ]
@@ -1328,7 +1549,9 @@ class JarvisAnalyticsEngine:
                         "provider": s.get("provider") or "",
                         "status": s.get("status") or "",
                         "records": s.get("records_synced") or 0,
-                        "at": str(s.get("started_at") or s.get("created_at") or "")[:19],
+                        "at": str(s.get("started_at") or s.get("created_at") or "")[
+                            :19
+                        ],
                     }
                     for s in col.find({}).sort("started_at", -1).limit(10)
                 ]
@@ -1337,9 +1560,13 @@ class JarvisAnalyticsEngine:
         try:
             col = get_db_collection("webhook_inbox")
             if col is not None:
-                ctx["webhook_inbox_recent"] = col.count_documents({
-                    "received_at": {"$gte": (datetime.now() - timedelta(days=1)).isoformat()},
-                })
+                ctx["webhook_inbox_recent"] = col.count_documents(
+                    {
+                        "received_at": {
+                            "$gte": (datetime.now() - timedelta(days=1)).isoformat()
+                        },
+                    }
+                )
         except Exception:
             pass
 
@@ -1347,9 +1574,13 @@ class JarvisAnalyticsEngine:
         try:
             col = get_db_collection("tally_exports")
             if col is not None:
-                ctx["tally_exports_recent"] = col.count_documents({
-                    "exported_at": {"$gte": (datetime.now() - timedelta(days=7)).isoformat()},
-                })
+                ctx["tally_exports_recent"] = col.count_documents(
+                    {
+                        "exported_at": {
+                            "$gte": (datetime.now() - timedelta(days=7)).isoformat()
+                        },
+                    }
+                )
         except Exception:
             pass
 
@@ -1360,10 +1591,19 @@ class JarvisAnalyticsEngine:
                 s = col.find_one({}) or {}
                 # Strip any obvious secret fields before exposing
                 safe_keys = {
-                    k: v for k, v in s.items()
-                    if not any(token in str(k).lower() for token in (
-                        "secret", "key", "password", "token", "private",
-                    )) and k != "_id"
+                    k: v
+                    for k, v in s.items()
+                    if not any(
+                        token in str(k).lower()
+                        for token in (
+                            "secret",
+                            "key",
+                            "password",
+                            "token",
+                            "private",
+                        )
+                    )
+                    and k != "_id"
                 }
                 if safe_keys:
                     ctx["settings"] = safe_keys
@@ -1375,7 +1615,11 @@ class JarvisAnalyticsEngine:
             col = get_db_collection("sop_templates")
             if col is not None:
                 ctx["sop_templates"] = [
-                    {"id": str(t.get("_id"))[-6:], "title": t.get("title") or "", "active": t.get("active", True)}
+                    {
+                        "id": str(t.get("_id"))[-6:],
+                        "title": t.get("title") or "",
+                        "active": t.get("active", True),
+                    }
                     for t in col.find({}).limit(20)
                 ]
         except Exception:
@@ -1388,9 +1632,11 @@ class JarvisAnalyticsEngine:
                 today = datetime.now().strftime("%Y-%m-%d")
                 ctx["eye_camps"] = {
                     "upcoming": col.count_documents({"camp_date": {"$gte": today}}),
-                    "this_month": col.count_documents({
-                        "camp_date": {"$gte": datetime.now().strftime("%Y-%m-01")},
-                    }),
+                    "this_month": col.count_documents(
+                        {
+                            "camp_date": {"$gte": datetime.now().strftime("%Y-%m-01")},
+                        }
+                    ),
                 }
         except Exception:
             pass
@@ -1399,9 +1645,11 @@ class JarvisAnalyticsEngine:
         try:
             col = get_db_collection("handoffs")
             if col is not None:
-                ctx["handoffs_open"] = col.count_documents({
-                    "status": {"$in": ["OPEN", "PENDING", "DRAFT"]},
-                })
+                ctx["handoffs_open"] = col.count_documents(
+                    {
+                        "status": {"$in": ["OPEN", "PENDING", "DRAFT"]},
+                    }
+                )
         except Exception:
             pass
 
@@ -1442,35 +1690,47 @@ class JarvisAnalyticsEngine:
             alerts = inv.get("critical_alerts") or []
             oos_count = sum(1 for a in alerts if a.get("type") == "out_of_stock")
             low_count = sum(1 for a in alerts if a.get("type") == "low_stock")
-            oos_names = [a.get("product_name") for a in alerts if a.get("type") == "out_of_stock" and a.get("product_name")][:3]
+            oos_names = [
+                a.get("product_name")
+                for a in alerts
+                if a.get("type") == "out_of_stock" and a.get("product_name")
+            ][:3]
             if oos_count:
-                detail_names = (", ".join(oos_names) + ("…" if oos_count > 3 else "")) if oos_names else ""
-                recs.append({
-                    "priority": "high",
-                    "category": "inventory",
-                    "title": f"{oos_count} SKU(s) out of stock",
-                    "description": (
-                        f"{detail_names} are at zero stock. Every walk-in asking for these is a lost sale."
-                        if detail_names else
-                        f"{oos_count} products show zero stock. Lost-sale risk grows by the hour."
-                    ),
-                    "action": "Reorder critical SKUs",
-                    "impact": "Prevents lost sales",
-                    "link": "/inventory?filter=out-of-stock",
-                })
+                detail_names = (
+                    (", ".join(oos_names) + ("…" if oos_count > 3 else ""))
+                    if oos_names
+                    else ""
+                )
+                recs.append(
+                    {
+                        "priority": "high",
+                        "category": "inventory",
+                        "title": f"{oos_count} SKU(s) out of stock",
+                        "description": (
+                            f"{detail_names} are at zero stock. Every walk-in asking for these is a lost sale."
+                            if detail_names
+                            else f"{oos_count} products show zero stock. Lost-sale risk grows by the hour."
+                        ),
+                        "action": "Reorder critical SKUs",
+                        "impact": "Prevents lost sales",
+                        "link": "/inventory?filter=out-of-stock",
+                    }
+                )
             if low_count:
-                recs.append({
-                    "priority": "medium",
-                    "category": "inventory",
-                    "title": f"{low_count} SKU(s) below reorder point",
-                    "description": (
-                        f"{low_count} products are at or under their reorder threshold. "
-                        "Acting now avoids a stock-out in the next 7-14 days."
-                    ),
-                    "action": "Raise purchase orders",
-                    "impact": "Avoids future stock-outs",
-                    "link": "/inventory?filter=low-stock",
-                })
+                recs.append(
+                    {
+                        "priority": "medium",
+                        "category": "inventory",
+                        "title": f"{low_count} SKU(s) below reorder point",
+                        "description": (
+                            f"{low_count} products are at or under their reorder threshold. "
+                            "Acting now avoids a stock-out in the next 7-14 days."
+                        ),
+                        "action": "Raise purchase orders",
+                        "impact": "Avoids future stock-outs",
+                        "link": "/inventory?filter=low-stock",
+                    }
+                )
         except Exception:
             pass
 
@@ -1481,20 +1741,27 @@ class JarvisAnalyticsEngine:
             if users_col is not None and attendance_col is not None:
                 today = datetime.now().strftime("%Y-%m-%d")
                 total_active = users_col.count_documents({"is_active": {"$ne": False}})
-                present = attendance_col.count_documents({"date": today, "status": {"$in": ["PRESENT", "present", "PARTIAL"]}})
+                present = attendance_col.count_documents(
+                    {
+                        "date": today,
+                        "status": {"$in": ["PRESENT", "present", "PARTIAL"]},
+                    }
+                )
                 if total_active > 0 and present / total_active < 0.5:
-                    recs.append({
-                        "priority": "high",
-                        "category": "staffing",
-                        "title": "Low attendance today",
-                        "description": (
-                            f"Only {present} of {total_active} active staff marked present. "
-                            "Customer-facing roles may be uncovered."
-                        ),
-                        "action": "Check store rosters & call backups",
-                        "impact": "Protects service quality",
-                        "link": "/hr/attendance",
-                    })
+                    recs.append(
+                        {
+                            "priority": "high",
+                            "category": "staffing",
+                            "title": "Low attendance today",
+                            "description": (
+                                f"Only {present} of {total_active} active staff marked present. "
+                                "Customer-facing roles may be uncovered."
+                            ),
+                            "action": "Check store rosters & call backups",
+                            "impact": "Protects service quality",
+                            "link": "/hr/attendance",
+                        }
+                    )
         except Exception:
             pass
 
@@ -1516,18 +1783,20 @@ class JarvisAnalyticsEngine:
                 total_customers = cust_col.count_documents({})
                 lapsed = max(0, total_customers - len(recent_buyer_ids))
                 if total_customers >= 20 and lapsed >= max(5, total_customers // 5):
-                    recs.append({
-                        "priority": "medium",
-                        "category": "marketing",
-                        "title": f"{lapsed} lapsed customers (6+ months)",
-                        "description": (
-                            f"{lapsed} of {total_customers} customers haven't purchased in 6+ months. "
-                            "A targeted WhatsApp campaign typically wins back 5-10%."
-                        ),
-                        "action": "Launch reactivation campaign via MEGAPHONE",
-                        "impact": "Recovers latent revenue",
-                        "link": "/customers/campaigns",
-                    })
+                    recs.append(
+                        {
+                            "priority": "medium",
+                            "category": "marketing",
+                            "title": f"{lapsed} lapsed customers (6+ months)",
+                            "description": (
+                                f"{lapsed} of {total_customers} customers haven't purchased in 6+ months. "
+                                "A targeted WhatsApp campaign typically wins back 5-10%."
+                            ),
+                            "action": "Launch reactivation campaign via MEGAPHONE",
+                            "impact": "Recovers latent revenue",
+                            "link": "/customers/campaigns",
+                        }
+                    )
         except Exception:
             pass
 
@@ -1535,19 +1804,23 @@ class JarvisAnalyticsEngine:
         try:
             vr_col = get_db_collection("vendor_returns")
             if vr_col is not None:
-                open_returns = vr_col.count_documents({"status": {"$in": ["OPEN", "PENDING"]}})
+                open_returns = vr_col.count_documents(
+                    {"status": {"$in": ["OPEN", "PENDING"]}}
+                )
                 if open_returns >= 3:
-                    recs.append({
-                        "priority": "low",
-                        "category": "finance",
-                        "title": f"{open_returns} open vendor returns",
-                        "description": (
-                            f"{open_returns} vendor returns are open. Each one ties up cash + shelf space."
-                        ),
-                        "action": "Close vendor returns or escalate",
-                        "impact": "Frees working capital",
-                        "link": "/inventory/vendor-returns",
-                    })
+                    recs.append(
+                        {
+                            "priority": "low",
+                            "category": "finance",
+                            "title": f"{open_returns} open vendor returns",
+                            "description": (
+                                f"{open_returns} vendor returns are open. Each one ties up cash + shelf space."
+                            ),
+                            "action": "Close vendor returns or escalate",
+                            "impact": "Frees working capital",
+                            "link": "/inventory/vendor-returns",
+                        }
+                    )
         except Exception:
             pass
 
@@ -1766,9 +2039,7 @@ class JarvisResponseGenerator:
         for i, rec in enumerate(recommendations[:5], 1):
             priority = rec.get("priority", "low")
             priority_emoji = (
-                "🔴"
-                if priority == "high"
-                else "🟡" if priority == "medium" else "🟢"
+                "🔴" if priority == "high" else "🟡" if priority == "medium" else "🟢"
             )
             title = rec.get("title", "")
             description = rec.get("description") or rec.get("action") or ""
@@ -2626,43 +2897,87 @@ async def run_single_agent(
 # endpoint. This is an explicit allow-list rather than a deny-list — the
 # alternative is leaking sensitive collections (vendor_portal_tokens,
 # session secrets, etc.) the moment anyone adds one without thinking.
-_JARVIS_QUERYABLE_COLLECTIONS = frozenset({
-    # Operational
-    "orders", "products", "stock", "stock_units", "stock_counts",
-    "stock_transfers", "purchase_orders", "grns", "vendor_returns",
-    "prescriptions", "eye_tests", "eye_camps", "workshop_jobs",
-    "walkouts", "walk_in_counters",
-    # People (own-data, no customer PII fields shown)
-    "users", "stores", "vendors",
-    "attendance", "leaves",
-    # Finance
-    "expenses", "budgets", "advances", "salary_advances",
-    "salary_records", "salary_config", "payslips", "payroll",
-    "incentives", "incentive_inputs", "incentive_settings",
-    "points_log", "payout_snapshots",
-    "targets", "period_locks",
-    # Tasks + SOP
-    "tasks", "sop_templates", "handoffs",
-    # Loyalty (aggregate; customer name still PII-scrubbed)
-    "loyalty_accounts", "loyalty_transactions", "loyalty_settings",
-    # Agent infra
-    "agent_config", "agent_events", "agent_audit_log",
-    "anomalies", "alert_history", "health_checks", "ui_audits",
-    "audit_logs",
-    # Integrations
-    "integrations", "sync_runs", "webhook_inbox", "tally_exports",
-    "notification_logs", "notifications",
-    # Settings
-    "settings",
-})
+_JARVIS_QUERYABLE_COLLECTIONS = frozenset(
+    {
+        # Operational
+        "orders",
+        "products",
+        "stock",
+        "stock_units",
+        "stock_counts",
+        "stock_transfers",
+        "purchase_orders",
+        "grns",
+        "vendor_returns",
+        "prescriptions",
+        "eye_tests",
+        "eye_camps",
+        "workshop_jobs",
+        "walkouts",
+        "walk_in_counters",
+        # People (own-data, no customer PII fields shown)
+        "users",
+        "stores",
+        "vendors",
+        "attendance",
+        "leaves",
+        # Finance
+        "expenses",
+        "budgets",
+        "advances",
+        "salary_advances",
+        "salary_records",
+        "salary_config",
+        "payslips",
+        "payroll",
+        "incentives",
+        "incentive_inputs",
+        "incentive_settings",
+        "points_log",
+        "payout_snapshots",
+        "targets",
+        "period_locks",
+        # Tasks + SOP
+        "tasks",
+        "sop_templates",
+        "handoffs",
+        # Loyalty (aggregate; customer name still PII-scrubbed)
+        "loyalty_accounts",
+        "loyalty_transactions",
+        "loyalty_settings",
+        # Agent infra
+        "agent_config",
+        "agent_events",
+        "agent_audit_log",
+        "anomalies",
+        "alert_history",
+        "health_checks",
+        "ui_audits",
+        "audit_logs",
+        # Integrations
+        "integrations",
+        "sync_runs",
+        "webhook_inbox",
+        "tally_exports",
+        "notification_logs",
+        "notifications",
+        # Settings
+        "settings",
+    }
+)
 
 # Collections that MUST be customer-PII-scrubbed before going to the LLM
 # even though they're queryable. customer/patient names + phones are
 # scrubbed; aggregate counts + IDs remain.
-_CUSTOMER_PII_COLLECTIONS = frozenset({
-    "customers", "loyalty_accounts", "loyalty_transactions",
-    "prescriptions", "eye_tests",
-})
+_CUSTOMER_PII_COLLECTIONS = frozenset(
+    {
+        "customers",
+        "loyalty_accounts",
+        "loyalty_transactions",
+        "prescriptions",
+        "eye_tests",
+    }
+)
 
 
 def _coerce_mongo_value(s: str) -> Any:
@@ -2670,6 +2985,7 @@ def _coerce_mongo_value(s: str) -> Any:
     Lets ?filter={"status":"OPEN"} work without forcing the caller to
     URL-encode the JSON when they pass it via the structured params."""
     import json as _json
+
     if not s:
         return s
     try:
@@ -2759,6 +3075,7 @@ async def jarvis_read_collection(
     # Apply customer-PII scrub for sensitive collections
     if collection in _CUSTOMER_PII_COLLECTIONS:
         from agents.llm_provider import scrub_pii
+
         rows = [scrub_pii(r, level="customer") for r in rows]
 
     return {
@@ -2775,6 +3092,7 @@ async def jarvis_read_collection(
 # ============================================================================
 # PIXEL audit history
 # ============================================================================
+
 
 @router.get(
     "/agents/pixel/audits",
@@ -2794,6 +3112,7 @@ async def pixel_audit_history(
 ):
     """Return PIXEL audit history + readiness signal."""
     import os as _os
+
     limit = max(1, min(int(limit), 50))
     col = get_db_collection("ui_audits")
     pagespeed_ready = bool(_os.getenv("PAGESPEED_API_KEY"))
@@ -2814,7 +3133,9 @@ async def pixel_audit_history(
             col.find(
                 {"agent_id": "pixel", "kind": "scheduled_audit"},
                 {"_id": 0},
-            ).sort("ran_at", -1).limit(limit)
+            )
+            .sort("ran_at", -1)
+            .limit(limit)
         )
     except Exception as e:
         logger.warning("[JARVIS] pixel audits read failed: %s", e)
@@ -2851,6 +3172,7 @@ async def pixel_audit_history(
 # ============================================================================
 # SENTINEL health history
 # ============================================================================
+
 
 @router.get(
     "/agents/sentinel/health",

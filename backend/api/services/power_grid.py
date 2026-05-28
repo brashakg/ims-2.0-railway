@@ -58,7 +58,9 @@ def build_lens_grid(
     """
     sphs = sphs or sph_range()
     cyls = cyls or cyl_range()
-    grid = {s: {c: {"count": 0, "skus": 0, "in_stock": False} for c in cyls} for s in sphs}
+    grid = {
+        s: {c: {"count": 0, "skus": 0, "in_stock": False} for c in cyls} for s in sphs
+    }
     total_units = 0
     out_of_range = 0
 

@@ -24,6 +24,7 @@ sale or a delivery wave. The validator stays pure of that policy.
 Mirrors the convention in services/org_validation.py: enum tuples + pure
 functions, no FastAPI imports.
 """
+
 from __future__ import annotations
 
 from typing import Any, Dict, Iterable, List, Optional, Sequence
@@ -235,9 +236,7 @@ def validate_fixture_payload(
                 out[sfield] = None
             else:
                 if not isinstance(raw, str):
-                    raise ValueError(
-                        "{f} must be a string".format(f=sfield)
-                    )
+                    raise ValueError("{f} must be a string".format(f=sfield))
                 out[sfield] = raw.strip()
         elif existing is not None and sfield in existing:
             out[sfield] = existing[sfield]
@@ -270,8 +269,14 @@ CATALOG_TYPE_TO_CATEGORIES: Dict[str, tuple] = {
     "Frame": ("FRAME", "SUNGLASS", "READING_GLASSES"),
     "Lens": ("OPTICAL_LENS",),
     "CL": ("CONTACT_LENS", "COLORED_CONTACT_LENS"),
-    "Access.": ("ACCESSORIES", "WATCH", "SMARTWATCH", "SMARTGLASSES",
-                "WALL_CLOCK", "SERVICES"),
+    "Access.": (
+        "ACCESSORIES",
+        "WATCH",
+        "SMARTWATCH",
+        "SMARTGLASSES",
+        "WALL_CLOCK",
+        "SERVICES",
+    ),
 }
 
 

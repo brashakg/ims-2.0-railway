@@ -39,7 +39,9 @@ class JobCreate(BaseModel):
 
 
 class Decision(BaseModel):
-    decision: str = Field(..., description="APPROVE | REJECT | SPECS_ONLY | NEEDS_REVIEW")
+    decision: str = Field(
+        ..., description="APPROVE | REJECT | SPECS_ONLY | NEEDS_REVIEW"
+    )
     rights_confirmed: bool = False  # required to use an UNVERIFIED-source image
     note: Optional[str] = None
 
@@ -61,8 +63,10 @@ async def create_job(
         raise HTTPException(status_code=400, detail="brand and model are required")
 
     result = ap.run_search(
-        body.brand.strip(), body.model.strip(),
-        (body.color or "").strip(), (body.size or "").strip(),
+        body.brand.strip(),
+        body.model.strip(),
+        (body.color or "").strip(),
+        (body.size or "").strip(),
     )
 
     job_id = str(uuid.uuid4())
@@ -138,11 +142,15 @@ async def get_job(
     db = _db()
     if db is None:
         raise HTTPException(status_code=503, detail="DB unavailable")
-    job = db.get_collection("catalog_ingest_jobs").find_one({"job_id": job_id}, {"_id": 0})
+    job = db.get_collection("catalog_ingest_jobs").find_one(
+        {"job_id": job_id}, {"_id": 0}
+    )
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found")
     cands = list(
-        db.get_collection("catalog_ingest_candidates").find({"job_id": job_id}, {"_id": 0})
+        db.get_collection("catalog_ingest_candidates").find(
+            {"job_id": job_id}, {"_id": 0}
+        )
     )
     cands.sort(key=lambda c: c.get("score", 0), reverse=True)
     return {"job": job, "candidates": cands}
@@ -158,7 +166,9 @@ async def decide_candidate(
     rights_confirmed (copyright guard)."""
     decision = (body.decision or "").upper()
     if decision not in _DECISIONS:
-        raise HTTPException(status_code=400, detail=f"decision must be one of {sorted(_DECISIONS)}")
+        raise HTTPException(
+            status_code=400, detail=f"decision must be one of {sorted(_DECISIONS)}"
+        )
 
     db = _db()
     if db is None:

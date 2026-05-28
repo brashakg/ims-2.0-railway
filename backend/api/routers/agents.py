@@ -415,6 +415,7 @@ async def agents_reseed(user: dict = Depends(require_superadmin)):
     seed_errors: List[Dict[str, str]] = []
     from copy import deepcopy as _deepcopy
     from datetime import datetime as _dt, timezone as _tz
+
     for default in DEFAULT_AGENT_CONFIGS:
         try:
             existing = col.find_one({"agent_id": default["agent_id"]})
@@ -432,10 +433,12 @@ async def agents_reseed(user: dict = Depends(require_superadmin)):
             doc["toggled_at"] = _dt.now(_tz.utc)
             col.insert_one(doc)
         except Exception as e:
-            seed_errors.append({
-                "agent_id": default.get("agent_id", "?"),
-                "error": f"{type(e).__name__}: {str(e)[:200]}",
-            })
+            seed_errors.append(
+                {
+                    "agent_id": default.get("agent_id", "?"),
+                    "error": f"{type(e).__name__}: {str(e)[:200]}",
+                }
+            )
             logger.warning(
                 "[AGENTS-RESEED] failed to seed %s: %s",
                 default.get("agent_id"),
@@ -478,7 +481,9 @@ async def agents_reseed(user: dict = Depends(require_superadmin)):
             try:
                 start = getattr(scheduler, "start", None)
                 if callable(start):
-                    maybe_coro = start(AGENT_REGISTRY or {})  # pylint: disable=not-callable
+                    maybe_coro = start(
+                        AGENT_REGISTRY or {}
+                    )  # pylint: disable=not-callable
                     if hasattr(maybe_coro, "__await__"):
                         await maybe_coro
                 scheduler_rehydrated = True
@@ -495,7 +500,9 @@ async def agents_reseed(user: dict = Depends(require_superadmin)):
         "rehydrate_error": rehydrate_error,
         "configured_after": after_ids,
         "default_count": len(DEFAULT_AGENT_CONFIGS),
-        "worker_id": _os.getenv("HOSTNAME") or _os.getenv("RAILWAY_REPLICA_ID") or "unknown",
+        "worker_id": _os.getenv("HOSTNAME")
+        or _os.getenv("RAILWAY_REPLICA_ID")
+        or "unknown",
         "as_of": datetime.now(timezone.utc).isoformat(),
     }
 

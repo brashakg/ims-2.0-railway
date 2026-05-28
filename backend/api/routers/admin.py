@@ -353,9 +353,7 @@ async def track_shiprocket_shipment(
             status_code=400, detail="Shiprocket integration not enabled"
         )
 
-    return _simulated_integration_response(
-        "Shiprocket", "track shipment", {"awb": awb}
-    )
+    return _simulated_integration_response("Shiprocket", "track shipment", {"awb": awb})
 
 
 @router.get("/integrations/shiprocket/rates")

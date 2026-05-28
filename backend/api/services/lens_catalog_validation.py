@@ -31,6 +31,7 @@ Q2: stock cell key is (sph, cyl, add). SV (has_add=False) requires add=None.
 Q5: enum config drives ALL string fields except brand/series (which are
     free-text inside their enum lists since brands change frequently).
 """
+
 from __future__ import annotations
 
 import re
@@ -156,13 +157,9 @@ def _ensure_int_ge_zero(name: str, value: Any) -> int:
         try:
             value = int(value)
         except (TypeError, ValueError):
-            raise ValueError(
-                "{name} must be a non-negative integer".format(name=name)
-            )
+            raise ValueError("{name} must be a non-negative integer".format(name=name))
     if value < 0:
-        raise ValueError(
-            "{name} must be a non-negative integer".format(name=name)
-        )
+        raise ValueError("{name} must be a non-negative integer".format(name=name))
     return value
 
 
@@ -210,9 +207,7 @@ def slugify_lens_line(
 # ---------------------------------------------------------------------------
 
 
-def _enum_items(
-    enum_config: Optional[Dict[str, Any]], key: str
-) -> List[Any]:
+def _enum_items(enum_config: Optional[Dict[str, Any]], key: str) -> List[Any]:
     """Pull the items list for an enum_type out of the loaded enum_config
     dict. Returns [] when enum_config is None or the key is missing -- the
     router calls _empty_enum_warning() and refuses the write."""
@@ -225,8 +220,7 @@ def _enum_items(
 
 
 def _check_in_enum(
-    field: str, value: Any, enum_config: Optional[Dict[str, Any]],
-    enum_key: str
+    field: str, value: Any, enum_config: Optional[Dict[str, Any]], enum_key: str
 ) -> Any:
     """Raise ValueError if `value` is not in the live enum_config[enum_key]
     list. Empty enum lists (e.g. the seeded-empty brands list) raise a
@@ -249,9 +243,7 @@ def _check_in_enum(
     return value
 
 
-def _check_index_in_enum(
-    value: float, enum_config: Optional[Dict[str, Any]]
-) -> float:
+def _check_index_in_enum(value: float, enum_config: Optional[Dict[str, Any]]) -> float:
     """Index needs a tolerance compare -- 1.6 and 1.60 must both match
     the seeded 1.60. Compare to 4 decimal places (more than enough for
     optical refractive indexes)."""
@@ -428,9 +420,7 @@ def validate_lens_catalog_payload(
             if isinstance(add_raw, dict) and not add_raw:
                 out["add_range"] = None
             else:
-                raise ValueError(
-                    "add_range must be null when has_add=False"
-                )
+                raise ValueError("add_range must be null when has_add=False")
         else:
             out["add_range"] = None
 
@@ -440,9 +430,7 @@ def validate_lens_catalog_payload(
         raise ValueError("mrp must be non-negative")
     out["mrp"] = mrp
 
-    if "cost_price" in src or (
-        existing is not None and "cost_price" in existing
-    ):
+    if "cost_price" in src or (existing is not None and "cost_price" in existing):
         cost = _pick("cost_price")
         if cost is not None:
             cost_f = _ensure_float("cost_price", cost)
@@ -494,9 +482,7 @@ def validate_lens_catalog_payload(
     return out
 
 
-def _series_for_brand(
-    enum_config: Optional[Dict[str, Any]], brand: str
-) -> List[str]:
+def _series_for_brand(enum_config: Optional[Dict[str, Any]], brand: str) -> List[str]:
     """The series enum is stored as a list of {brand: [series...]} dicts.
     Return the list of series codes configured for `brand`. Empty list
     means "any series accepted" -- the validator falls open in that case
@@ -567,8 +553,7 @@ def validate_lens_stock_line_payload(
     if has_add:
         if add_raw is None:
             raise ValueError(
-                "add is required for multifocal lens line "
-                "(has_add=True)"
+                "add is required for multifocal lens line " "(has_add=True)"
             )
         add = _ensure_float("add", add_raw)
         out["add"] = add
@@ -576,8 +561,7 @@ def validate_lens_stock_line_payload(
         if add_raw not in (None,):
             # Reject any non-null add on an SV line.
             raise ValueError(
-                "add must be null for single-vision lens line "
-                "(has_add=False)"
+                "add must be null for single-vision lens line " "(has_add=False)"
             )
         out["add"] = None
 
@@ -605,8 +589,10 @@ def validate_lens_stock_line_payload(
             )
         if has_add:
             add_rng = lens_line.get("add_range") or {}
-            if add_rng and out["add"] is not None and not _in_range(
-                out["add"], add_rng
+            if (
+                add_rng
+                and out["add"] is not None
+                and not _in_range(out["add"], add_rng)
             ):
                 raise ValueError(
                     "add {add} outside line add_range "
@@ -656,16 +642,12 @@ def validate_bulk_import_payload(
     elif isinstance(matrix, list):
         rows = matrix
     else:
-        raise ValueError(
-            "matrix must be a list of cell dicts or a CSV string"
-        )
+        raise ValueError("matrix must be a list of cell dicts or a CSV string")
 
     out: List[Dict[str, Any]] = []
     for idx, row in enumerate(rows):
         if not isinstance(row, dict):
-            raise ValueError(
-                "matrix row {idx}: must be a dict".format(idx=idx)
-            )
+            raise ValueError("matrix row {idx}: must be a dict".format(idx=idx))
         # Wrap each cell-level error with the row index so partial-import
         # debugging is tractable.
         try:
@@ -681,9 +663,7 @@ def validate_bulk_import_payload(
                 lens_line=lens_line,
             )
         except ValueError as exc:
-            raise ValueError(
-                "matrix row {idx}: {msg}".format(idx=idx, msg=exc)
-            )
+            raise ValueError("matrix row {idx}: {msg}".format(idx=idx, msg=exc))
         out.append(cell)
     return out
 
@@ -707,9 +687,7 @@ def _parse_csv_matrix(text: str) -> List[Dict[str, Any]]:
     header = [h.strip() for h in lines[0].split(",")]
     if not header or "qty" not in header:
         raise ValueError(
-            "CSV matrix header must include 'qty'; got {header}".format(
-                header=header
-            )
+            "CSV matrix header must include 'qty'; got {header}".format(header=header)
         )
     out: List[Dict[str, Any]] = []
     for i, line in enumerate(lines[1:], start=1):
@@ -731,18 +709,14 @@ def _parse_csv_matrix(text: str) -> List[Dict[str, Any]]:
                     row[k] = int(v)
                 except ValueError:
                     raise ValueError(
-                        "CSV row {i}: qty {v!r} is not an integer".format(
-                            i=i, v=v
-                        )
+                        "CSV row {i}: qty {v!r} is not an integer".format(i=i, v=v)
                     )
             elif k in ("sph", "cyl", "add"):
                 try:
                     row[k] = float(v)
                 except ValueError:
                     raise ValueError(
-                        "CSV row {i}: {k} {v!r} is not a number".format(
-                            i=i, k=k, v=v
-                        )
+                        "CSV row {i}: {k} {v!r} is not a number".format(i=i, k=k, v=v)
                     )
             else:
                 row[k] = v
@@ -782,9 +756,7 @@ def validate_enum_config_payload(
         for entry in items:
             if not isinstance(entry, str):
                 raise ValueError(
-                    "{enum_type} entries must be strings".format(
-                        enum_type=enum_type
-                    )
+                    "{enum_type} entries must be strings".format(enum_type=enum_type)
                 )
             v = entry.strip()
             if not v:
@@ -807,9 +779,7 @@ def validate_enum_config_payload(
                 raise ValueError("indexes entries must be numbers")
             if v_f <= 1.0:
                 raise ValueError(
-                    "index {v} must be > 1.0 (refractive indexes are > 1)".format(
-                        v=v_f
-                    )
+                    "index {v} must be > 1.0 (refractive indexes are > 1)".format(v=v_f)
                 )
             rounded = round(v_f, 4)
             if rounded in seen_idx:
@@ -824,15 +794,12 @@ def validate_enum_config_payload(
     for entry in items:
         if not isinstance(entry, dict) or len(entry) != 1:
             raise ValueError(
-                "series entries must be single-key dicts "
-                "{{brand: [series...]}}"
+                "series entries must be single-key dicts " "{{brand: [series...]}}"
             )
         for k, v in entry.items():
             if not isinstance(k, str) or not k.strip():
                 raise ValueError("series brand key must be a non-empty string")
-            if not isinstance(v, list) or not all(
-                isinstance(s, str) for s in v
-            ):
+            if not isinstance(v, list) or not all(isinstance(s, str) for s in v):
                 raise ValueError(
                     "series value for brand {k!r} must be a list of "
                     "strings".format(k=k)

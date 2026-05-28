@@ -139,7 +139,10 @@ def _network_disabled() -> bool:
     operator) keep brand-site/marketplace scraping from EVER hitting the wire,
     regardless of other config. Truthy values: 1/true/yes/on."""
     return os.getenv("AUTOPILOT_DISABLE_NETWORK", "").strip().lower() in (
-        "1", "true", "yes", "on",
+        "1",
+        "true",
+        "yes",
+        "on",
     )
 
 
@@ -170,7 +173,11 @@ class _ProductHTMLParser(HTMLParser):
         if not url or url.startswith("data:"):
             return
         low = url.lower()
-        if not (low.startswith("http://") or low.startswith("https://") or low.startswith("//")):
+        if not (
+            low.startswith("http://")
+            or low.startswith("https://")
+            or low.startswith("//")
+        ):
             return
         if url not in self.image_urls and len(self.image_urls) < 12:
             self.image_urls.append(url)
@@ -193,7 +200,9 @@ class _ProductHTMLParser(HTMLParser):
             elif name in ("og:image", "twitter:image") and content:
                 self._add_image(content)
         elif tag == "img":
-            self._add_image(a.get("src") or a.get("data-src") or a.get("data-original") or "")
+            self._add_image(
+                a.get("src") or a.get("data-src") or a.get("data-original") or ""
+            )
         elif tag in ("th", "td", "dt", "dd"):
             self._cell_tag = tag
             self._cell_text = []
@@ -224,7 +233,13 @@ class _ProductHTMLParser(HTMLParser):
 def scrape_product_page(raw_html: str) -> Dict[str, Any]:
     """Best-effort {title, description, specs{}, usp, image_urls} from raw HTML.
     Stdlib only, fully fail-soft (any parse error -> empty-ish dict)."""
-    out: Dict[str, Any] = {"title": "", "description": "", "specs": {}, "usp": "", "image_urls": []}
+    out: Dict[str, Any] = {
+        "title": "",
+        "description": "",
+        "specs": {},
+        "usp": "",
+        "image_urls": [],
+    }
     if not raw_html:
         return out
     try:
@@ -262,8 +277,9 @@ def scrape_product_page(raw_html: str) -> Dict[str, Any]:
     return out
 
 
-def _http_get(url: str, *, params: Optional[Dict[str, Any]] = None,
-              client: Optional[Any] = None) -> Optional[str]:
+def _http_get(
+    url: str, *, params: Optional[Dict[str, Any]] = None, client: Optional[Any] = None
+) -> Optional[str]:
     """GET a URL and return the response text, or None on ANY failure
     (missing httpx, network error, non-200). Fully fail-soft."""
     if httpx is None or not url or _network_disabled():
@@ -293,7 +309,9 @@ def _ecommerce_configured() -> bool:
     return bool(os.getenv("ECOMMERCE_DATABASE_URL"))
 
 
-def search_internal_catalog(brand: str, model: str, limit: int = 25) -> List[Dict[str, Any]]:
+def search_internal_catalog(
+    brand: str, model: str, limit: int = 25
+) -> List[Dict[str, Any]]:
     """WORKING source: our own BVI e-commerce catalog. Answers 'do we already
     list this model online?' (dedup + enrichment). Read-only, fail-soft."""
     if not _ecommerce_configured():
@@ -371,6 +389,7 @@ DEFAULT_BRAND_SITES: Dict[str, str] = {
 def _url_q(value: str) -> str:
     """URL-encode a query value (stdlib)."""
     from urllib.parse import quote_plus
+
     return quote_plus(value or "")
 
 
@@ -419,19 +438,24 @@ class SourceAdapter:
         """Human-readable explanation surfaced in GET /sources."""
         return ""
 
-    def _search(self, brand: str, model: str, color: str, size: str, limit: int) -> List[Dict[str, Any]]:
+    def _search(
+        self, brand: str, model: str, color: str, size: str, limit: int
+    ) -> List[Dict[str, Any]]:
         """Real work; may hit the network. Subclasses implement this."""
         raise NotImplementedError
 
-    def search(self, brand: str, model: str, color: str = "", size: str = "",
-               limit: int = 25) -> List[Dict[str, Any]]:
+    def search(
+        self, brand: str, model: str, color: str = "", size: str = "", limit: int = 25
+    ) -> List[Dict[str, Any]]:
         """Fail-soft wrapper around _search(). ANY exception -> [] + a warning.
         Guarantees every returned candidate carries this adapter's source +
         source_class so downstream dedupe/scoring/copyright logic is correct."""
         try:
             out = self._search(brand, model, color, size, limit) or []
         except Exception as e:  # noqa: BLE001
-            logger.warning("[AUTOPILOT] adapter %s raised (suppressed): %s", self.name, e)
+            logger.warning(
+                "[AUTOPILOT] adapter %s raised (suppressed): %s", self.name, e
+            )
             return []
         normalized: List[Dict[str, Any]] = []
         for cand in out:
@@ -495,7 +519,9 @@ class BrandSiteAdapter(SourceAdapter):
         # Enabled when we know a site for this... but is_enabled() is called
         # without a brand. Treat "enabled" as "we have httpx + at least one
         # configured brand site"; per-brand resolution happens in _search.
-        return httpx is not None and bool(DEFAULT_BRAND_SITES) and not _network_disabled()
+        return (
+            httpx is not None and bool(DEFAULT_BRAND_SITES) and not _network_disabled()
+        )
 
     def reason(self) -> str:
         if httpx is None:
@@ -507,7 +533,9 @@ class BrandSiteAdapter(SourceAdapter):
     def _search(self, brand, model, color, size, limit):
         base = self._site_for(brand)
         if not base:
-            logger.warning("[AUTOPILOT] brand_site: no configured site for brand %r", brand)
+            logger.warning(
+                "[AUTOPILOT] brand_site: no configured site for brand %r", brand
+            )
             return []
         key = _norm(brand).replace(" ", "")
         path = BRAND_SITE_SEARCH_PATHS.get(key, BRAND_SITE_DEFAULT_SEARCH_PATH)
@@ -517,7 +545,9 @@ class BrandSiteAdapter(SourceAdapter):
         if not body:
             return []
         scraped = scrape_product_page(body)
-        if not (scraped.get("title") or scraped.get("specs") or scraped.get("image_urls")):
+        if not (
+            scraped.get("title") or scraped.get("specs") or scraped.get("image_urls")
+        ):
             return []
         cand = _candidate_skeleton(self.name, self.source_class)
         cand.update(
@@ -544,7 +574,9 @@ class BrandSiteAdapter(SourceAdapter):
 # Railway. All are best-effort; any mismatch just yields [] (fail-soft).
 MYLUXOTTICA_BASE_URL = os.getenv("MYLUXOTTICA_BASE_URL", "https://my.luxottica.com")
 MYLUXOTTICA_LOGIN_PATH = os.getenv("MYLUXOTTICA_LOGIN_PATH", "/auth/login")
-MYLUXOTTICA_SEARCH_PATH = os.getenv("MYLUXOTTICA_SEARCH_PATH", "/catalog/search?query={q}")
+MYLUXOTTICA_SEARCH_PATH = os.getenv(
+    "MYLUXOTTICA_SEARCH_PATH", "/catalog/search?query={q}"
+)
 MYLUXOTTICA_LOGIN_USER_FIELD = "username"
 MYLUXOTTICA_LOGIN_PASS_FIELD = "password"
 
@@ -610,7 +642,9 @@ class MyLuxotticaAdapter(SourceAdapter):
         if not body:
             return []
         scraped = scrape_product_page(body)
-        if not (scraped.get("title") or scraped.get("specs") or scraped.get("image_urls")):
+        if not (
+            scraped.get("title") or scraped.get("specs") or scraped.get("image_urls")
+        ):
             return []
         cand = _candidate_skeleton(self.name, self.source_class)
         cand.update(
@@ -700,7 +734,11 @@ class MarketplaceAdapter(SourceAdapter):
             if self._has_serp():
                 body = _http_get(
                     MARKETPLACE_SEARCH_URL,
-                    params={"q": q, "api_key": os.getenv("SERP_API_KEY"), "num": min(int(limit), 10)},
+                    params={
+                        "q": q,
+                        "api_key": os.getenv("SERP_API_KEY"),
+                        "num": min(int(limit), 10),
+                    },
                 )
                 items = self._parse_serp(body)
             elif self._has_cse():
@@ -744,6 +782,7 @@ class MarketplaceAdapter(SourceAdapter):
             return {}
         try:
             import json
+
             data = json.loads(body)
             return data if isinstance(data, dict) else {}
         except Exception:  # noqa: BLE001
@@ -752,7 +791,7 @@ class MarketplaceAdapter(SourceAdapter):
     def _parse_serp(self, body: Optional[str]) -> List[Dict[str, Any]]:
         data = self._parse_json(body)
         out: List[Dict[str, Any]] = []
-        for r in (data.get("organic_results") or []):
+        for r in data.get("organic_results") or []:
             if not isinstance(r, dict):
                 continue
             img = r.get("thumbnail")
@@ -769,12 +808,14 @@ class MarketplaceAdapter(SourceAdapter):
     def _parse_cse(self, body: Optional[str]) -> List[Dict[str, Any]]:
         data = self._parse_json(body)
         out: List[Dict[str, Any]] = []
-        for r in (data.get("items") or []):
+        for r in data.get("items") or []:
             if not isinstance(r, dict):
                 continue
             images: List[str] = []
             pagemap = r.get("pagemap") or {}
-            cse_img = (pagemap.get("cse_image") or []) if isinstance(pagemap, dict) else []
+            cse_img = (
+                (pagemap.get("cse_image") or []) if isinstance(pagemap, dict) else []
+            )
             if cse_img and isinstance(cse_img[0], dict) and cse_img[0].get("src"):
                 images = [cse_img[0]["src"]]
             out.append(
@@ -850,7 +891,9 @@ def run_search(
             if not adapter.is_enabled():
                 continue
         except Exception as e:  # noqa: BLE001
-            logger.warning("[AUTOPILOT] adapter %s is_enabled raised: %s", adapter.name, e)
+            logger.warning(
+                "[AUTOPILOT] adapter %s is_enabled raised: %s", adapter.name, e
+            )
             continue
         for cand in adapter.search(brand, model, color, size, limit=limit):
             cand_brand = cand.get("brand") or brand

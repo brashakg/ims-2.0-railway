@@ -177,9 +177,7 @@ class CreateWalkoutRequest(BaseModel):
     """
 
     customer_name: str = Field(..., min_length=1, max_length=120)
-    mobile: Optional[str] = Field(
-        None, description="10-digit Indian mobile; optional"
-    )
+    mobile: Optional[str] = Field(None, description="10-digit Indian mobile; optional")
     age_group: AgeGroup
     gender: Gender
     product_interested: ProductCategory
@@ -281,9 +279,7 @@ class CreateFollowUpRequest(BaseModel):
     can verify each round actually happened (anti-fake-closure).
     """
 
-    round: Literal[1, 2, 3] = Field(
-        ..., description="Follow-up round 1, 2, or 3"
-    )
+    round: Literal[1, 2, 3] = Field(..., description="Follow-up round 1, 2, or 3")
     scheduled_date: date_type
     scheduled_time: Optional[str] = Field(
         None, max_length=5, description="HH:MM 24-hour"
@@ -1468,11 +1464,7 @@ async def dashboard_fu_status(
             key = (
                 "fu1"
                 if round_num == 1
-                else (
-                    "fu2"
-                    if round_num == 2
-                    else ("fu3" if round_num == 3 else None)
-                )
+                else ("fu2" if round_num == 2 else ("fu3" if round_num == 3 else None))
             )
             if not key:
                 continue
@@ -1625,23 +1617,19 @@ async def update_followup(
         if _user_role_set(current_user) & _SELF_APPROVE_ROLES:
             patch["approval_status"] = ApprovalStatus.APPROVED.value
             patch["approved_by_user_id"] = current_user.get("user_id")
-            patch["approved_by_name"] = (
-                _resolve_sales_person_name(current_user.get("user_id"))
-                or current_user.get("username")
-            )
+            patch["approved_by_name"] = _resolve_sales_person_name(
+                current_user.get("user_id")
+            ) or current_user.get("username")
             patch["approved_at"] = now
         else:
             patch["approval_status"] = ApprovalStatus.PENDING_APPROVAL.value
             patch["approved_by_user_id"] = None
             patch["approved_by_name"] = None
             patch["approved_at"] = None
-    elif (
-        "status" in patch
-        and patch["status"] in (
-            FollowUpStatus.NOT_REACHABLE.value,
-            FollowUpStatus.NOT_REQUIRED.value,
-            FollowUpStatus.ESCALATED.value,
-        )
+    elif "status" in patch and patch["status"] in (
+        FollowUpStatus.NOT_REACHABLE.value,
+        FollowUpStatus.NOT_REQUIRED.value,
+        FollowUpStatus.ESCALATED.value,
     ):
         # Non-DONE terminal statuses don't require approval. Clear any
         # stale approval state from a prior DONE flip.
@@ -1699,8 +1687,7 @@ async def approve_followup(
         raise HTTPException(
             status_code=403,
             detail=(
-                "Only store managers / area managers / admins can approve "
-                "follow-ups"
+                "Only store managers / area managers / admins can approve " "follow-ups"
             ),
         )
 
@@ -1721,11 +1708,7 @@ async def approve_followup(
             )
 
     fu = next(
-        (
-            f
-            for f in (existing.get("followups") or [])
-            if f.get("round") == round_num
-        ),
+        (f for f in (existing.get("followups") or []) if f.get("round") == round_num),
         None,
     )
     if not fu:

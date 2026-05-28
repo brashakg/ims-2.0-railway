@@ -244,9 +244,7 @@ def build_shipment_payload(
                 "sku": (it.get("sku") or it.get("product_id") or "SKU")[:50],
                 "units": int(it.get("quantity") or 1),
                 "selling_price": float(
-                    it.get("item_total")
-                    or it.get("unit_price")
-                    or 0.0
+                    it.get("item_total") or it.get("unit_price") or 0.0
                 ),
             }
         )
@@ -278,9 +276,7 @@ def build_shipment_payload(
         "billing_state": address.get("state") or "",
         "billing_country": address.get("country") or "India",
         "billing_email": address.get("email") or order.get("customer_email") or "",
-        "billing_phone": str(
-            address.get("phone") or order.get("customer_phone") or ""
-        ),
+        "billing_phone": str(address.get("phone") or order.get("customer_phone") or ""),
         "shipping_is_billing": True,
         "order_items": line_items,
         "payment_method": address.get("payment_method") or "Prepaid",
@@ -340,13 +336,9 @@ async def create_shipment(
     auth = await authenticate(db)
     token = (auth.raw or {}).get("token")
     if not auth.ok or not token:
-        return ShipResult(
-            ok=False, status="FAILED", error=auth.error or "auth failed"
-        )
+        return ShipResult(ok=False, status="FAILED", error=auth.error or "auth failed")
 
-    payload = build_shipment_payload(
-        order, address, pickup_location=pickup_location
-    )
+    payload = build_shipment_payload(order, address, pickup_location=pickup_location)
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
@@ -365,9 +357,7 @@ async def create_shipment(
             auth = await authenticate(db, force=True)
             token = (auth.raw or {}).get("token")
             if not auth.ok or not token:
-                return ShipResult(
-                    ok=False, status="FAILED", error="re-auth failed"
-                )
+                return ShipResult(ok=False, status="FAILED", error="re-auth failed")
             async with httpx.AsyncClient(timeout=PROVIDER_TIMEOUT) as client:
                 resp = await client.post(
                     f"{SHIPROCKET_BASE_URL}/orders/create/adhoc",
@@ -418,7 +408,9 @@ async def track(
     back to the last-known status persisted on the shipment doc.
     """
     if not awb and not shipment_id:
-        return ShipResult(ok=False, status="FAILED", error="awb or shipment_id required")
+        return ShipResult(
+            ok=False, status="FAILED", error="awb or shipment_id required"
+        )
 
     if not credentials_present(db):
         return ShipResult(
@@ -444,9 +436,7 @@ async def track(
 
     try:
         async with httpx.AsyncClient(timeout=PROVIDER_TIMEOUT) as client:
-            resp = await client.get(
-                url, headers={"Authorization": f"Bearer {token}"}
-            )
+            resp = await client.get(url, headers={"Authorization": f"Bearer {token}"})
         if resp.status_code != 200:
             return ShipResult(
                 ok=False,

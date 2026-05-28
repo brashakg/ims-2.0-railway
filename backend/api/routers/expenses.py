@@ -240,9 +240,7 @@ def _check_caps_for_roles(
         if role in seen:
             continue
         seen.add(role)
-        ok, reason = check_cap(
-            category, role, amount, spent_today, spent_month, caps
-        )
+        ok, reason = check_cap(category, role, amount, spent_today, spent_month, caps)
         if not ok:
             return False, reason
     return True, ""
@@ -260,9 +258,7 @@ def has_blocking_advance(outstanding_advances: list, linked_advance_id) -> bool:
         return False
     if linked_advance_id:
         outstanding_ids = {
-            a.get("advance_id")
-            for a in outstanding_advances
-            if isinstance(a, dict)
+            a.get("advance_id") for a in outstanding_advances if isinstance(a, dict)
         }
         if linked_advance_id in outstanding_ids:
             return False
@@ -599,9 +595,12 @@ def _period_locked(year: int, month: int) -> bool:
         db = get_db().db
         if db is None:
             return False
-        return db.get_collection("period_locks").find_one(
-            {"month": int(month), "year": int(year)}
-        ) is not None
+        return (
+            db.get_collection("period_locks").find_one(
+                {"month": int(month), "year": int(year)}
+            )
+            is not None
+        )
     except Exception:
         return False
 
@@ -649,9 +648,7 @@ async def create_expense(
     # MOST RESTRICTIVE cap across the roles they hold.
     if not _is_admin(current_user):
         caps = _load_caps()
-        spent_today, spent_month = _spent_for_category(
-            employee_id, expense.category, d
-        )
+        spent_today, spent_month = _spent_for_category(employee_id, expense.category, d)
         ok, reason = _check_caps_for_roles(
             current_user.get("roles", []),
             expense.category,
@@ -1041,18 +1038,14 @@ async def update_expense_caps(
     doc = {
         "_id": _CAPS_DOC_ID,
         "caps": [entry.model_dump() for entry in payload.caps],
-        "global": (
-            payload.global_cap.model_dump() if payload.global_cap else {}
-        ),
+        "global": (payload.global_cap.model_dump() if payload.global_cap else {}),
         "updated_by": current_user.get("user_id"),
         "updated_at": datetime.now().isoformat(),
     }
     try:
         coll.update_one({"_id": _CAPS_DOC_ID}, {"$set": doc}, upsert=True)
     except Exception as exc:
-        raise HTTPException(
-            status_code=500, detail="Failed to save caps"
-        ) from exc
+        raise HTTPException(status_code=500, detail="Failed to save caps") from exc
 
     return {
         "message": "Expense caps updated",

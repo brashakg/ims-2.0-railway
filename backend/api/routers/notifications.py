@@ -105,7 +105,9 @@ async def unread_count(current_user: dict = Depends(get_current_user)):
 
 
 @router.patch("/{notification_id}/read")
-async def mark_read(notification_id: str, current_user: dict = Depends(get_current_user)):
+async def mark_read(
+    notification_id: str, current_user: dict = Depends(get_current_user)
+):
     """Mark one of the current user's notifications as read."""
     col = _coll()
     uid = current_user.get("user_id")

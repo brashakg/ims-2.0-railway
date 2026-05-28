@@ -533,9 +533,9 @@ async def program_stats(current_user: Dict[str, Any] = Depends(get_current_user)
         "points_issued": issued,
         "points_redeemed": redeemed,
         "redemption_rate": round(redeemed / issued * 100, 1) if issued else 0.0,
-        "avg_points_per_member": round(active_balance / total_members)
-        if total_members
-        else 0,
+        "avg_points_per_member": (
+            round(active_balance / total_members) if total_members else 0
+        ),
     }
 
 

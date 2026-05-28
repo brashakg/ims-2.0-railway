@@ -51,7 +51,11 @@ _REGISTRY: List[Dict[str, Any]] = [
         "powers": "ORACLE narratives, JARVIS & CORTEX chat, agent copy",
         "source": "env",
         "env_required": ["ANTHROPIC_API_KEY"],
-        "env_optional": ["AGENT_CLAUDE_MODEL", "ANTHROPIC_API_URL", "LLM_DEFAULT_MODEL"],
+        "env_optional": [
+            "AGENT_CLAUDE_MODEL",
+            "ANTHROPIC_API_URL",
+            "LLM_DEFAULT_MODEL",
+        ],
         "dispatch_gated": False,
     },
     {
@@ -151,7 +155,9 @@ def _load_collection_doc(db, integration_type: str) -> Optional[Dict[str, Any]]:
         return None
 
 
-def _present_config_keys(config: Dict[str, Any], candidate_keys: List[str]) -> List[str]:
+def _present_config_keys(
+    config: Dict[str, Any], candidate_keys: List[str]
+) -> List[str]:
     """Subset of candidate_keys that are populated (truthy) in config.
     Returns FIELD NAMES only - never the values."""
     if not isinstance(config, dict):
@@ -190,7 +196,9 @@ def _build_one(entry: Dict[str, Any], db) -> Dict[str, Any]:
     env_optional = entry.get("env_optional", [])
     if env_required or env_optional:
         out["env_keys"] = _env_key_report(env_required + env_optional)
-    env_configured = bool(env_required) and all(bool(os.getenv(k)) for k in env_required)
+    env_configured = bool(env_required) and all(
+        bool(os.getenv(k)) for k in env_required
+    )
 
     # --- collection side ----------------------------------------------------
     coll_configured = False
@@ -249,7 +257,9 @@ def _build_one(entry: Dict[str, Any], db) -> Dict[str, Any]:
             # non-live still means simulated. We surface "test_only" only for
             # the MSG91 channels and "simulated" for the rest so the label is
             # accurate.
-            out["state"] = "test_only" if entry["id"].startswith("msg91") else "simulated"
+            out["state"] = (
+                "test_only" if entry["id"].startswith("msg91") else "simulated"
+            )
         else:
             out["state"] = "simulated"
 

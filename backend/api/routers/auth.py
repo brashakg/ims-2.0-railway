@@ -509,6 +509,7 @@ async def login(request: LoginRequest, req: Request = None):
     # know the role→cap matrix. SUPERADMIN/ADMIN → 100% (unlimited), managers
     # get role baseline + any per-user override. See services/role_caps.py.
     from api.services.role_caps import effective_discount_cap
+
     eff_cap = effective_discount_cap(
         user.get("roles", []),
         user.get("discount_cap"),
