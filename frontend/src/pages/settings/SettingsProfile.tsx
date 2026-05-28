@@ -25,6 +25,12 @@ export function ProfileSection() {
     email: string;
     phone: string;
   } | null>(null);
+  // Notification preferences seeded from getPreferences(); persisted via
+  // settingsApi.updatePreferences. Previously the getPreferences() result was
+  // ignored and the toggles had no onChange (dead controls).
+  const [emailNotifications, setEmailNotifications] = useState(true);
+  const [smsNotifications, setSmsNotifications] = useState(true);
+  const [savingPrefs, setSavingPrefs] = useState(false);
   const [showChangePassword, setShowChangePassword] = useState(false);
   const [pwCurrent, setPwCurrent] = useState('');
   const [pwNew, setPwNew] = useState('');
@@ -70,9 +76,9 @@ export function ProfileSection() {
 
   const loadProfile = async () => {
     try {
-      const [profileRes] = await Promise.all([
+      const [profileRes, prefsRes] = await Promise.all([
         settingsApi.getProfile().catch(() => null),
-        settingsApi.getPreferences().catch(() => ({})),
+        settingsApi.getPreferences().catch(() => null),
       ]);
       if (profileRes) {
         setProfileData({
@@ -81,9 +87,37 @@ export function ProfileSection() {
           phone: profileRes.phone || '',
         });
       }
+      if (prefsRes) {
+        setEmailNotifications(prefsRes.email_notifications ?? true);
+        setSmsNotifications(prefsRes.sms_notifications ?? true);
+      }
     } catch {
       // Use defaults
     }
+  };
+
+  const persistPreferences = async (next: { email_notifications: boolean; sms_notifications: boolean }) => {
+    setSavingPrefs(true);
+    try {
+      await settingsApi.updatePreferences(next);
+      toast.success('Preferences saved');
+    } catch {
+      toast.error('Failed to save preferences');
+    } finally {
+      setSavingPrefs(false);
+    }
+  };
+
+  const toggleEmailNotifications = () => {
+    const value = !emailNotifications;
+    setEmailNotifications(value);
+    persistPreferences({ email_notifications: value, sms_notifications: smsNotifications });
+  };
+
+  const toggleSmsNotifications = () => {
+    const value = !smsNotifications;
+    setSmsNotifications(value);
+    persistPreferences({ email_notifications: emailNotifications, sms_notifications: value });
   };
 
   return (
@@ -215,14 +249,34 @@ export function ProfileSection() {
               <p className="font-medium text-gray-900">Email Notifications</p>
               <p className="text-sm text-gray-500">Receive email alerts for important updates</p>
             </div>
-            <ToggleRight className="w-8 h-8 text-green-600 cursor-pointer" />
+            {emailNotifications ? (
+              <ToggleRight
+                className={`w-8 h-8 text-green-600 ${savingPrefs ? 'opacity-50 pointer-events-none' : 'cursor-pointer'}`}
+                onClick={toggleEmailNotifications}
+              />
+            ) : (
+              <ToggleLeft
+                className={`w-8 h-8 text-gray-500 ${savingPrefs ? 'opacity-50 pointer-events-none' : 'cursor-pointer'}`}
+                onClick={toggleEmailNotifications}
+              />
+            )}
           </div>
           <div className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
             <div>
               <p className="font-medium text-gray-900">SMS Notifications</p>
               <p className="text-sm text-gray-500">Receive SMS for urgent alerts</p>
             </div>
-            <ToggleLeft className="w-8 h-8 text-gray-500 cursor-pointer" />
+            {smsNotifications ? (
+              <ToggleRight
+                className={`w-8 h-8 text-green-600 ${savingPrefs ? 'opacity-50 pointer-events-none' : 'cursor-pointer'}`}
+                onClick={toggleSmsNotifications}
+              />
+            ) : (
+              <ToggleLeft
+                className={`w-8 h-8 text-gray-500 ${savingPrefs ? 'opacity-50 pointer-events-none' : 'cursor-pointer'}`}
+                onClick={toggleSmsNotifications}
+              />
+            )}
           </div>
         </div>
       </div>
@@ -271,12 +325,21 @@ export function BusinessSection() {
         <h2 className="text-lg font-semibold text-gray-900 mb-4">Company Profile</h2>
         <div className="space-y-4">
           <div className="flex items-center gap-4 p-4 bg-gray-50 rounded-lg">
-            <div className="w-20 h-20 rounded-lg bg-white border-2 border-dashed border-gray-300 flex items-center justify-center cursor-pointer hover:border-bv-red-600">
+            <div className="w-20 h-20 rounded-lg bg-white border-2 border-dashed border-gray-300 flex items-center justify-center">
               <Building2 className="w-8 h-8 text-gray-500" />
             </div>
             <div>
               <p className="text-sm text-gray-500">Company Logo</p>
-              <button className="text-sm text-bv-red-600 hover:underline">Upload new logo</button>
+              {/* Logo file upload is not wired yet (no upload API endpoint).
+                  Disabled rather than left as a dead button. */}
+              <button
+                type="button"
+                disabled
+                title="Logo file upload is coming soon."
+                className="text-sm text-gray-400 cursor-not-allowed"
+              >
+                Upload new logo (coming soon)
+              </button>
             </div>
           </div>
 
