@@ -64,9 +64,22 @@ export const clinicalApi = {
   },
 
   completeTest: async (testId: string, data: {
-    rightEye: { sphere: number | null; cylinder: number | null; axis: number | null; add?: number | null };
-    leftEye: { sphere: number | null; cylinder: number | null; axis: number | null; add?: number | null };
+    rightEye: {
+      sphere: number | null; cylinder: number | null; axis: number | null;
+      add?: number | null; pd?: number | null;
+      prism?: string | null; base?: string | null; va?: string | null;
+    };
+    leftEye: {
+      sphere: number | null; cylinder: number | null; axis: number | null;
+      add?: number | null; pd?: number | null;
+      prism?: string | null; base?: string | null; va?: string | null;
+    };
     pd?: number;
+    // Parity fields mirrored into the prescriptions collection (see
+    // clinical.complete_test): single IPD, lens type, next-checkup date.
+    ipd?: string;
+    lensRecommendation?: string;
+    nextCheckup?: string;
     notes?: string;
   }) => {
     const response = await api.post(`/clinical/tests/${testId}/complete`, data);

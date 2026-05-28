@@ -796,8 +796,11 @@ export function POSLayout() {
                       source,
                       optometrist_id: isOptometrist ? user?.id : (user?.id || 'admin-override'),
                       validity_months: 12,
-                      right_eye: { sph: String(rxData.sph_od || 0), cyl: String(rxData.cyl_od || 0), axis: rxData.axis_od || 180, add: String(rxData.add_od || 0), pd: String(rxData.pd_od || '') },
-                      left_eye: { sph: String(rxData.sph_os || 0), cyl: String(rxData.cyl_os || 0), axis: rxData.axis_os || 180, add: String(rxData.add_os || 0), pd: String(rxData.pd_os || '') },
+                      right_eye: { sph: String(rxData.sph_od || 0), cyl: String(rxData.cyl_od || 0), axis: rxData.axis_od || 180, add: String(rxData.add_od || 0), pd: String(rxData.pd_od || ''), prism: rxData.prism_od || undefined, base: rxData.base_od || undefined, acuity: rxData.va_od || undefined },
+                      left_eye: { sph: String(rxData.sph_os || 0), cyl: String(rxData.cyl_os || 0), axis: rxData.axis_os || 180, add: String(rxData.add_os || 0), pd: String(rxData.pd_os || ''), prism: rxData.prism_os || undefined, base: rxData.base_os || undefined, acuity: rxData.va_os || undefined },
+                      ipd: rxData.ipd || undefined,
+                      lens_recommendation: rxData.lens_type || undefined,
+                      next_checkup: rxData.next_checkup || undefined,
                       remarks: rxData.doctor_name ? `Dr. ${rxData.doctor_name}` : undefined,
                     } as any);
 

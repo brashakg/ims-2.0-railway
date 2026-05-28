@@ -125,6 +125,10 @@ function _buildEye(d: any, suffix: 'od' | 'os') {
     axis: _rxAxis(d[`axis_${suffix}`]),
     add: _rxStr(d[`add_${suffix}`]),
     pd: _rxStr(d[`pd_${suffix}`]),
+    // Parity with the clinical Final-Rx: visual acuity, prism, base.
+    prism: _rxStr(d[`prism_${suffix}`]),
+    base: _rxStr(d[`base_${suffix}`]),
+    acuity: _rxStr(d[`va_${suffix}`]),
   };
 }
 function toPrescriptionCreatePayload(data: any): any {
@@ -138,13 +142,24 @@ function toPrescriptionCreatePayload(data: any): any {
   const {
     sph_od: _sph_od, cyl_od: _cyl_od, axis_od: _axis_od, add_od: _add_od, pd_od: _pd_od,
     sph_os: _sph_os, cyl_os: _cyl_os, axis_os: _axis_os, add_os: _add_os, pd_os: _pd_os,
+    // New spectacle parity flat keys (folded into right_eye/left_eye below).
+    prism_od: _prism_od, base_od: _base_od, va_od: _va_od,
+    prism_os: _prism_os, base_os: _base_os, va_os: _va_os,
     issue_date: _issue_date, expiry_date: _expiry_date, doctor_name: _doctor_name,
+    lens_type: _lens_type,
     ...rest
   } = data;
   return {
-    ...rest, // patient_id, customer_id, store_id, source, optometrist_id, validity_months, etc.
+    // rest carries patient_id, customer_id, store_id, source, optometrist_id,
+    // validity_months, ipd, next_checkup, etc.
+    ...rest,
     right_eye: _buildEye(data, 'od'),
     left_eye: _buildEye(data, 'os'),
+    // The form's lens_type IS the backend's lens_recommendation; don't clobber
+    // an explicit lens_recommendation the caller may already have set.
+    ...(_lens_type && !('lens_recommendation' in rest)
+      ? { lens_recommendation: _lens_type }
+      : {}),
   };
 }
 

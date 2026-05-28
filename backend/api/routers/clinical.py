@@ -60,6 +60,11 @@ class EyeTestData(BaseModel):
     right_eye: dict = Field(..., alias="rightEye")
     left_eye: dict = Field(..., alias="leftEye")
     pd: Optional[float] = None
+    # IPD + next-checkup so the clinical Final-Rx mirror writes the SAME parity
+    # fields a POS-created prescription does. Kept as str -> no float-coercion
+    # 422 on an empty value.
+    ipd: Optional[str] = None
+    next_checkup: Optional[str] = Field(None, alias="nextCheckup")
     notes: Optional[str] = None
     lens_recommendation: Optional[str] = Field(None, alias="lensRecommendation")
     coating_recommendation: Optional[str] = Field(None, alias="coatingRecommendation")
@@ -457,6 +462,13 @@ async def complete_test(
                         "axis": data.right_eye.get("axis", 180),
                         "add": str(data.right_eye.get("add", "0")),
                         "pd": str(data.right_eye.get("pd", "")),
+                        "prism": (data.right_eye.get("prism") or None),
+                        "base": (data.right_eye.get("base") or None),
+                        "acuity": (
+                            data.right_eye.get("acuity")
+                            or data.right_eye.get("va")
+                            or None
+                        ),
                     },
                     "left_eye": {
                         "sph": str(
@@ -468,9 +480,18 @@ async def complete_test(
                         "axis": data.left_eye.get("axis", 180),
                         "add": str(data.left_eye.get("add", "0")),
                         "pd": str(data.left_eye.get("pd", "")),
+                        "prism": (data.left_eye.get("prism") or None),
+                        "base": (data.left_eye.get("base") or None),
+                        "acuity": (
+                            data.left_eye.get("acuity")
+                            or data.left_eye.get("va")
+                            or None
+                        ),
                     },
                     "lens_recommendation": data.lens_recommendation,
                     "coating_recommendation": data.coating_recommendation,
+                    "ipd": data.ipd,
+                    "next_checkup": data.next_checkup,
                     "remarks": data.notes,
                     "validity_months": 12,
                     "test_date": now.isoformat(),
