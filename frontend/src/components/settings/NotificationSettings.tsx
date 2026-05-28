@@ -60,18 +60,24 @@ export function NotificationSettings() {
   }, []);
 
   const loadSettings = async () => {
-    // Load provider config from API
+    // Load provider config from API.
+    // GET /settings/notifications/providers returns a NESTED shape:
+    //   { whatsapp: { provider, enabled, sender }, sms: {...}, email: {...}, dispatch_mode }
+    // (NOT the flat api_key/sender_id/is_active the old code read). Secret
+    // values (API keys) are never returned by this endpoint — they live in the
+    // integrations collection — so we seed provider/sender/enabled only and
+    // leave apiKey blank for the user to (re)enter.
     try {
       const data = await settingsApi.getNotificationProviders();
       if (data) {
-        setProviderConfig({
-          provider: data.provider ?? 'MSG91',
-          apiKey: data.api_key ?? '',
-          apiSecret: data.api_secret ?? '',
-          senderId: data.sender_id ?? '',
-          webhookUrl: data.webhook_url ?? '',
-          isActive: data.is_active ?? false,
-        });
+        const wa = (data.whatsapp ?? {}) as { provider?: string; enabled?: boolean; sender?: string };
+        const sms = (data.sms ?? {}) as { provider?: string; enabled?: boolean; sender?: string };
+        setProviderConfig((prev) => ({
+          ...prev,
+          provider: (wa.provider ?? sms.provider ?? prev.provider) as NotificationProvider,
+          senderId: wa.sender ?? sms.sender ?? '',
+          isActive: Boolean(wa.enabled ?? sms.enabled ?? false),
+        }));
       }
     } catch {
       // API unavailable — leave default state; no toast needed on initial load

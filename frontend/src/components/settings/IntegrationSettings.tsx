@@ -223,10 +223,16 @@ export function IntegrationSettings() {
     setTestingId(id);
     try {
       const result = await settingsApi.testIntegration(id);
-      if (result?.success === false) {
-        toast.error(result?.message ?? `Connection test failed for ${id}`);
-      } else {
+      // POST /settings/integrations/{type}/test returns
+      //   { status: "configured" | "not_configured", live: boolean, message, ... }
+      // There is NO `success` key — the old `result?.success === false` check
+      // never matched, so an unconfigured integration always reported success.
+      // Treat only a configured/live result as a pass.
+      const isConfigured = result?.status === 'configured' || result?.live === true;
+      if (isConfigured) {
         toast.success(result?.message ?? `Connection to ${id} is working`);
+      } else {
+        toast.error(result?.message ?? `${id} is not configured`);
       }
     } catch (err: unknown) {
       const message =

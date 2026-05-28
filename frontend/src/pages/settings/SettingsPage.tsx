@@ -486,14 +486,22 @@ function TaxInvoiceSection({
               <p className="font-medium text-gray-900">E-Invoice Enabled</p>
               <p className="text-sm text-gray-500">Generate IRN for B2B transactions</p>
             </div>
-            <ToggleLeft className="w-8 h-8 text-gray-500 cursor-pointer" />
+            {taxSettings?.e_invoice_enabled ? (
+              <ToggleRight className="w-8 h-8 text-green-600 cursor-pointer" onClick={() => setTaxSettings((prev: any) => prev ? { ...prev, e_invoice_enabled: false } : null)} />
+            ) : (
+              <ToggleLeft className="w-8 h-8 text-gray-500 cursor-pointer" onClick={() => setTaxSettings((prev: any) => prev ? { ...prev, e_invoice_enabled: true } : null)} />
+            )}
           </div>
           <div className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
             <div>
               <p className="font-medium text-gray-900">E-Way Bill Auto-Generate</p>
               <p className="text-sm text-gray-500">For invoices above threshold</p>
             </div>
-            <ToggleLeft className="w-8 h-8 text-gray-500 cursor-pointer" />
+            {taxSettings?.e_way_bill_enabled ? (
+              <ToggleRight className="w-8 h-8 text-green-600 cursor-pointer" onClick={() => setTaxSettings((prev: any) => prev ? { ...prev, e_way_bill_enabled: false } : null)} />
+            ) : (
+              <ToggleLeft className="w-8 h-8 text-gray-500 cursor-pointer" onClick={() => setTaxSettings((prev: any) => prev ? { ...prev, e_way_bill_enabled: true } : null)} />
+            )}
           </div>
         </div>
       </div>
@@ -552,11 +560,21 @@ function TaxInvoiceSection({
           </div>
           <div className="flex gap-4">
             <label className="flex items-center gap-2 cursor-pointer">
-              <input type="checkbox" checked={invoiceSettings?.show_logo_on_invoice} className="rounded border-gray-300" />
+              <input
+                type="checkbox"
+                checked={invoiceSettings?.show_logo_on_invoice ?? false}
+                onChange={e => setInvoiceSettings((prev: any) => prev ? { ...prev, show_logo_on_invoice: e.target.checked } : null)}
+                className="rounded border-gray-300"
+              />
               <span className="text-sm">Show logo on invoice</span>
             </label>
             <label className="flex items-center gap-2 cursor-pointer">
-              <input type="checkbox" checked={invoiceSettings?.show_qr_code} className="rounded border-gray-300" />
+              <input
+                type="checkbox"
+                checked={invoiceSettings?.show_qr_code ?? false}
+                onChange={e => setInvoiceSettings((prev: any) => prev ? { ...prev, show_qr_code: e.target.checked } : null)}
+                className="rounded border-gray-300"
+              />
               <span className="text-sm">Show QR code</span>
             </label>
           </div>
