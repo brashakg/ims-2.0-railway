@@ -123,7 +123,31 @@ export const productApi = {
     const response = await api.post('/products', data);
     return response.data;
   },
+
+  // Rapid Grid (Phase B): create many products in one call. Each row is the
+  // SAME CreateProductPayload shape as createProduct; the backend validates +
+  // creates valid rows and reports per-row results. Import this DIRECTLY from
+  // this module (not the api barrel) — the barrel re-export fails to resolve
+  // (TS2614).
+  bulkCreateProducts: async (products: CreateProductPayload[]): Promise<BulkCreateResponse> => {
+    const response = await api.post('/products/bulk-create', { products });
+    return response.data as BulkCreateResponse;
+  },
 };
+
+// Per-row + summary result from POST /products/bulk-create.
+export interface BulkCreateRowResult {
+  index: number;
+  ok: boolean;
+  errors: string[];
+  sku: string;
+  product_id?: string;
+}
+
+export interface BulkCreateResponse {
+  summary: { total: number; created: number; failed: number };
+  results: BulkCreateRowResult[];
+}
 
 // ============================================================================
 // Bulk pricing / offers API  (v2 Pricing & Offers screen)
