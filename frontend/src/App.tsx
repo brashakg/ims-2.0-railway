@@ -71,7 +71,9 @@ const VendorReturns = lazy(() => import('./pages/purchase/VendorReturns').then(m
 const StockReplenishment = lazy(() => import('./pages/inventory/StockReplenishment').then(m => ({ default: m.StockReplenishment })));
 const StockAudit = lazy(() => import('./pages/inventory/StockAudit').then(m => ({ default: m.StockAudit })));
 const JarvisPage = lazy(() => import('./pages/jarvis/JarvisPage').then(m => ({ default: m.JarvisPage })));
-const AddProductPage = lazy(() => import('./pages/catalog/AddProductPage'));
+// /catalog/add — mode-switching shell: defaults to fast Quick Add (Single);
+// ?mode=guided renders the step-by-step wizard (Guided Add).
+const ProductAddShell = lazy(() => import('./pages/catalog/ProductAddShell'));
 const CatalogAutopilotPage = lazy(() => import('./pages/catalog/CatalogAutopilotPage'));
 const PricingOffersPage = lazy(() => import('./pages/pricing/PricingOffersPage'));
 const ExpenseTracker = lazy(() => import('./pages/finance/ExpenseTracker'));
@@ -783,12 +785,12 @@ function App() {
                     }
                   />
 
-                  {/* Catalog / Add Product */}
+                  {/* Catalog / Add Product — Quick Add (default) + Guided wizard */}
                   <Route
                     path="catalog/add"
                     element={
                       <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER']}>
-                        <AddProductPage />
+                        <ProductAddShell />
                       </ProtectedRoute>
                     }
                   />
