@@ -336,16 +336,60 @@ export function AuthProvider({ children }: AuthProviderProps) {
 
   // Set active store
   const setActiveStore = (storeId: string) => {
-    if (state.user?.storeIds.includes(storeId) || hasRole(['SUPERADMIN', 'ADMIN', 'AREA_MANAGER'])) {
-      dispatch({ type: 'SET_ACTIVE_STORE', payload: storeId });
-      // Persist to localStorage
-      const userJson = localStorage.getItem('ims_user');
-      if (userJson) {
+    if (
+      !(
+        state.user?.storeIds.includes(storeId) ||
+        hasRole(['SUPERADMIN', 'ADMIN', 'AREA_MANAGER'])
+      )
+    ) {
+      return;
+    }
+
+    // Optimistic local update for a snappy switch.
+    dispatch({ type: 'SET_ACTIVE_STORE', payload: storeId });
+    const userJson = localStorage.getItem('ims_user');
+    if (userJson) {
+      try {
         const user = JSON.parse(userJson);
         user.activeStoreId = storeId;
         localStorage.setItem('ims_user', JSON.stringify(user));
+      } catch {
+        /* ignore malformed cache */
       }
     }
+
+    // QA F9: re-issue the JWT so the token's active_store_id matches the UI.
+    // The backend bakes active_store_id INTO the token and most store-scoped
+    // endpoints resolve the store from the token; flipping only client state
+    // left the token on the OLD store -> reads/writes could hit the wrong
+    // store in a multi-store chain. The request interceptor reads `ims_token`
+    // per request, so persisting the new token takes effect on the next call.
+    // Fire-and-forget (keeps the void signature); failures leave the optimistic
+    // state and re-sync on the next refresh/login.
+    authApi
+      .switchStore(storeId)
+      .then(({ access_token, active_store_id }) => {
+        if (access_token) {
+          localStorage.setItem('ims_token', access_token);
+        }
+        if (active_store_id && active_store_id !== storeId) {
+          // Server normalized the store — reconcile UI + cache to match.
+          dispatch({ type: 'SET_ACTIVE_STORE', payload: active_store_id });
+          const uj = localStorage.getItem('ims_user');
+          if (uj) {
+            try {
+              const u = JSON.parse(uj);
+              u.activeStoreId = active_store_id;
+              localStorage.setItem('ims_user', JSON.stringify(u));
+            } catch {
+              /* ignore */
+            }
+          }
+        }
+      })
+      .catch(() => {
+        /* non-fatal: optimistic state stands; backend 403s if no store access */
+      });
   };
 
   // Permission check based on role hierarchy
