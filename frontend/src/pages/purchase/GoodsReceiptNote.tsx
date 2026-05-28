@@ -1,18 +1,26 @@
 // ============================================================================
-// IMS 2.0 - Goods Receipt Note (GRN)
+// IMS 2.0 - Goods Receipt Note (GRN)  ·  v2 reskin (slice 2c)
 // ============================================================================
-// GRN creation, partial receipt, quality inspection, barcode scanning, discrepancies
+// GRN creation, partial receipt, quality inspection, discrepancies.
+// Reskinned to the v2 statutory-calm aesthetic (docs/design/inventory.html
+// Receive GRN modal): inv-body shell, stat-strip, inv-tabs, 4-step receive
+// stepper, card/tbl primitives, BV brand tokens. Same backend wiring + data
+// flow (vendorsApi.getGRNs / createGRN). PO dropdown is wired to the real
+// getPurchaseOrders API (empty state when none) -- no mock data.
 
-import { useState, useEffect, startTransition } from 'react';
-import { Check, AlertCircle, Package, FileText } from 'lucide-react';
+import { useState, useEffect, useMemo, startTransition } from 'react';
+import { Check, AlertCircle, Package, FileText, Printer, Loader2 } from 'lucide-react';
 import clsx from 'clsx';
 import { vendorsApi } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 
 interface GRNLineItem {
+  po_item_id: string;
   product_id: string;
   product_name: string;
+  sku?: string;
+  hsn_code?: string;
   po_qty: number;
   received_qty: number;
   inspection_status: 'pending' | 'passed' | 'failed';
@@ -40,6 +48,25 @@ interface GRN {
   items: GRNDiscrepancyItem[];
   quality_status: 'passed' | 'failed' | 'conditional';
   created_by: string;
+}
+
+interface POOption {
+  po_id: string;
+  po_number: string;
+  vendor_name?: string;
+  status?: string;
+  items?: Array<{
+    po_item_id?: string;
+    id?: string;
+    product_id: string;
+    product_name?: string;
+    name?: string;
+    sku?: string;
+    hsn_code?: string;
+    quantity?: number;
+    qty?: number;
+    ordered_qty?: number;
+  }>;
 }
 
 // Normalise a raw GRN doc from the API into the shape the UI needs. The
@@ -71,7 +98,6 @@ function transformGRN(grn: any): GRN {
   };
 }
 
-
 const INSPECTION_CHECKLIST = [
   'Product packaging intact',
   'Expiry date valid (min 6 months)',
@@ -82,16 +108,17 @@ const INSPECTION_CHECKLIST = [
   'Quality certifications present',
 ];
 
-const getQualityStatusColor = (status: string) => {
+// Maps quality status to a v2 chip class.
+const qualityChip = (status: string): string => {
   switch (status) {
     case 'passed':
-      return 'bg-green-50 text-green-700';
+      return 'ok';
     case 'failed':
-      return 'bg-red-50 text-red-700';
+      return 'err';
     case 'conditional':
-      return 'bg-yellow-50 text-yellow-700';
+      return 'warn';
     default:
-      return 'bg-gray-100 text-gray-700';
+      return '';
   }
 };
 
@@ -103,402 +130,592 @@ export function GoodsReceiptNote() {
   const [receivedItems, setReceivedItems] = useState<GRNLineItem[]>([]);
   const [inspectionChecks, setInspectionChecks] = useState<Record<string, boolean>>({});
   const [qualityNotes, setQualityNotes] = useState('');
+  const [vendorInvoiceNo, setVendorInvoiceNo] = useState('');
   const [discrepancies, setDiscrepancies] = useState('');
   const [grns, setGrns] = useState<GRN[]>([]);
+  const [pos, setPos] = useState<POOption[]>([]);
   const [, setIsLoading] = useState(true);
+  const [submitting, setSubmitting] = useState(false);
 
-  // Load GRNs on mount
+  const storeId = user?.activeStoreId || '';
+
+  // Load GRNs + open purchase orders on mount / store change.
   useEffect(() => {
-    const loadGRNs = async () => {
+    const load = async () => {
       try {
         setIsLoading(true);
-        const storeId = user?.activeStoreId || '';
-        const response = await vendorsApi.getGRNs({ store_id: storeId });
-        const grnList = Array.isArray(response)
-          ? response
-          : response.grns || response.data || [];
+        const [grnResp, poResp] = await Promise.all([
+          vendorsApi.getGRNs({ store_id: storeId }),
+          vendorsApi.getPurchaseOrders({ store_id: storeId }).catch(() => null),
+        ]);
+        const grnList = Array.isArray(grnResp) ? grnResp : grnResp.grns || grnResp.data || [];
         setGrns(grnList.map(transformGRN));
+
+        const poList: any[] = Array.isArray(poResp)
+          ? poResp
+          : poResp?.purchase_orders || poResp?.pos || poResp?.data || [];
+        setPos(
+          poList.map((p: any) => ({
+            po_id: p.po_id || p.id || p._id || '',
+            po_number: p.po_number || p.po_id || 'PO',
+            vendor_name: p.vendor_name || p.vendor?.trade_name || p.vendor?.legal_name,
+            status: p.status,
+            items: p.items || p.line_items || [],
+          })),
+        );
       } catch (error) {
         toast.error('Failed to load GRNs');
       } finally {
         setIsLoading(false);
       }
     };
+    load();
+  }, [storeId]);
 
-    loadGRNs();
-  }, [user?.activeStoreId]);
+  const reloadGrns = async () => {
+    const response = await vendorsApi.getGRNs({ store_id: storeId });
+    const grnList = Array.isArray(response) ? response : response.grns || response.data || [];
+    setGrns(grnList.map(transformGRN));
+  };
+
+  // When a PO is picked, hydrate the receive lines from its order items.
+  const onSelectPO = (poId: string) => {
+    setPoNumber(poId);
+    const po = pos.find((p) => p.po_id === poId || p.po_number === poId);
+    const lines = (po?.items || []).map((it) => {
+      const qty = it.quantity ?? it.qty ?? it.ordered_qty ?? 0;
+      return {
+        po_item_id: it.po_item_id || it.id || it.product_id,
+        product_id: it.product_id,
+        product_name: it.product_name || it.name || it.product_id,
+        sku: it.sku,
+        hsn_code: it.hsn_code,
+        po_qty: qty,
+        received_qty: qty,
+        inspection_status: 'pending' as const,
+      };
+    });
+    setReceivedItems(lines);
+  };
 
   const toggleInspectionCheck = (item: string) => {
     startTransition(() => {
-      setInspectionChecks(prev => ({
-        ...prev,
-        [item]: !prev[item],
-      }));
+      setInspectionChecks((prev) => ({ ...prev, [item]: !prev[item] }));
     });
   };
 
-  const allChecksComplete = Object.values(inspectionChecks).every(v => v);
+  const checksComplete = INSPECTION_CHECKLIST.filter((c) => inspectionChecks[c]).length;
+  const allChecksComplete =
+    checksComplete === INSPECTION_CHECKLIST.length && INSPECTION_CHECKLIST.length > 0;
   const qualityStatus = allChecksComplete && !discrepancies ? 'passed' : discrepancies ? 'failed' : 'conditional';
 
+  // Receive totals (drives the stepper + totals strip).
+  const totals = useMemo(() => {
+    const ord = receivedItems.reduce((s, i) => s + i.po_qty, 0);
+    const rec = receivedItems.reduce((s, i) => s + i.received_qty, 0);
+    const short = receivedItems.reduce((s, i) => s + Math.max(0, i.po_qty - i.received_qty), 0);
+    const over = receivedItems.reduce((s, i) => s + Math.max(0, i.received_qty - i.po_qty), 0);
+    return { ord, rec, short, over };
+  }, [receivedItems]);
+
+  // 4-step receive flow state: PO -> lines -> inspection -> post.
+  const steps = useMemo(() => {
+    const hasPO = !!poNumber;
+    const hasLines = receivedItems.length > 0;
+    const inspected = allChecksComplete || !!discrepancies;
+    return [
+      { done: hasPO, active: !hasPO, t: 'Match PO & vendor invoice', s: poNumber ? poNumber : 'Pick the order being received' },
+      { done: hasPO && hasLines, active: hasPO && !hasLines, t: 'Verify boxes & lines', s: hasLines ? `${receivedItems.length} lines` : 'No lines on this PO' },
+      { done: inspected, active: hasLines && !inspected, t: 'Quality inspection', s: `${checksComplete}/${INSPECTION_CHECKLIST.length} checks` },
+      { done: false, active: inspected && hasLines, t: 'Post & close', s: 'Stock ledger updated' },
+    ];
+  }, [poNumber, receivedItems.length, allChecksComplete, discrepancies, checksComplete]);
+
+  const handleSubmit = async () => {
+    if (!poNumber) {
+      toast.error('Please select a Purchase Order');
+      return;
+    }
+    if (receivedItems.length === 0) {
+      toast.error('No line items to receive on this PO');
+      return;
+    }
+    setSubmitting(true);
+    try {
+      await vendorsApi.createGRN({
+        po_id: poNumber,
+        vendor_invoice_no: vendorInvoiceNo,
+        vendor_invoice_date: new Date().toISOString().split('T')[0],
+        items: receivedItems.map((item) => ({
+          po_item_id: item.po_item_id,
+          product_id: item.product_id,
+          received_qty: item.received_qty,
+          accepted_qty: item.inspection_status === 'failed' ? 0 : item.received_qty,
+          rejected_qty: item.inspection_status === 'failed' ? item.received_qty : 0,
+          rejection_reason: item.inspection_status === 'failed' ? 'Quality inspection failed' : undefined,
+        })),
+        notes: qualityNotes || undefined,
+      });
+      toast.success('GRN created successfully');
+      setActiveTab('history');
+      setPoNumber('');
+      setReceivedItems([]);
+      setInspectionChecks({});
+      setQualityNotes('');
+      setVendorInvoiceNo('');
+      setDiscrepancies('');
+      await reloadGrns();
+    } catch (err) {
+      toast.error('Failed to create GRN');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const tabs: Array<[typeof activeTab, string, number]> = [
+    ['create', 'Create GRN', 0],
+    ['history', 'History', grns.length],
+    [
+      'discrepancies',
+      'Discrepancies',
+      grns.filter((g) => g.total_rejected > 0 || g.total_received !== g.total_accepted).length,
+    ],
+  ];
+
   return (
-    <div className="space-y-6">
+    <div className="inv-body">
       {/* Header */}
-      <div className="flex items-center justify-between">
+      <div className="inv-head">
         <div>
-          <h1 className="text-3xl font-bold">Goods Receipt Notes</h1>
-          <p className="text-gray-500">Record item receipt with quality inspection</p>
+          <div className="eyebrow" style={{ marginBottom: 6 }}>Purchase · inward</div>
+          <h1>Goods received.</h1>
+          <p className="text-sm text-ink-4 mt-1" style={{ color: 'var(--ink-4)' }}>
+            Record item receipt against a PO with quality inspection and placement.
+          </p>
         </div>
       </div>
 
-      {/* Summary Stats */}
-      <div className="grid grid-cols-4 gap-4">
-        <div className="bg-white border border-gray-200 rounded-lg p-4">
-          <p className="text-gray-500 text-sm mb-1">Total GRNs</p>
-          <p className="text-2xl font-bold text-gray-900">{grns.length}</p>
+      {/* Summary stat strip */}
+      <div className="stat-strip">
+        <div>
+          <div className="l">Total GRNs</div>
+          <div className="v">{grns.length}</div>
+          <div className="d">all stores in scope</div>
         </div>
-        <div className="bg-white border border-gray-200 rounded-lg p-4">
-          <p className="text-gray-500 text-sm mb-1">Quality Passed</p>
-          <p className="text-2xl font-bold text-green-600">
-            {grns.filter(g => g.quality_status === 'passed').length}
-          </p>
+        <div>
+          <div className="l">Quality passed</div>
+          <div className="v" style={{ color: 'var(--ok)' }}>
+            {grns.filter((g) => g.quality_status === 'passed').length}
+          </div>
+          <div className="d good">clean receipts</div>
         </div>
-        <div className="bg-white border border-gray-200 rounded-lg p-4">
-          <p className="text-gray-500 text-sm mb-1">Conditional Receipts</p>
-          <p className="text-2xl font-bold text-yellow-600">
-            {grns.filter(g => g.quality_status === 'conditional').length}
-          </p>
+        <div>
+          <div className="l">Conditional</div>
+          <div className="v" style={{ color: 'var(--warn)' }}>
+            {grns.filter((g) => g.quality_status === 'conditional').length}
+          </div>
+          <div className="d warn">partial accept</div>
         </div>
-        <div className="bg-white border border-gray-200 rounded-lg p-4">
-          <p className="text-gray-500 text-sm mb-1">Failed Quality</p>
-          <p className="text-2xl font-bold text-red-600">
-            {grns.filter(g => g.quality_status === 'failed').length}
-          </p>
+        <div>
+          <div className="l">Failed quality</div>
+          <div className="v" style={{ color: 'var(--err)' }}>
+            {grns.filter((g) => g.quality_status === 'failed').length}
+          </div>
+          <div className="d bad">debit note raised</div>
         </div>
       </div>
 
       {/* Tabs */}
-      <div className="flex gap-2 border-b border-gray-300">
-        {(['create', 'history', 'discrepancies'] as const).map((tab) => (
+      <div className="inv-tabs">
+        {tabs.map(([tab, label, count]) => (
           <button
             key={tab}
+            className={activeTab === tab ? 'on' : ''}
             onClick={() => startTransition(() => setActiveTab(tab))}
-            className={clsx(
-              'px-4 py-3 font-medium border-b-2 transition-colors',
-              activeTab === tab
-                ? 'border-blue-500 text-blue-600'
-                : 'border-transparent text-gray-500 hover:text-gray-700'
-            )}
           >
-            {tab === 'create' ? 'Create GRN' : tab === 'history' ? 'History' : 'Discrepancies'}
+            {label}
+            {count > 0 && <span className="count">· {count}</span>}
           </button>
         ))}
       </div>
 
-      {/* Tab Content */}
+      {/* ─────────────────────────── CREATE ─────────────────────────── */}
       {activeTab === 'create' && (
-        <div className="space-y-6">
-          {/* PO Selection */}
-          <div className="bg-white border border-gray-200 rounded-lg p-6">
-            <h3 className="text-lg font-semibold text-gray-900 mb-4">Select Purchase Order</h3>
-            <select
-              value={poNumber}
-              onChange={(e) => setPoNumber(e.target.value)}
-              className="w-full px-4 py-2 bg-white border border-gray-300 rounded-lg text-gray-900"
-            >
-              <option value="PO-2024-001">PO-2024-001 - Optical Frames Ltd</option>
-              <option value="PO-2024-002">PO-2024-002 - Lens Manufacturers Inc</option>
-            </select>
-          </div>
-
-          {/* Items Reception */}
-          <div className="bg-white border border-gray-200 rounded-lg p-6">
-            <h3 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
-              <Package className="w-5 h-5" />
-              Items Received
-            </h3>
-
-            <div className="space-y-4">
-              {receivedItems.map((item, idx) => (
-                <div key={idx} className="bg-gray-50 border border-gray-200 rounded-lg p-4">
-                  <div className="flex items-start justify-between mb-3">
-                    <div>
-                      <p className="text-gray-900 font-semibold">{item.product_name}</p>
-                      <p className="text-gray-500 text-sm">Product ID: {item.product_id}</p>
-                    </div>
-                    <span className={clsx(
-                      'px-2 py-1 rounded text-xs font-semibold',
-                      item.inspection_status === 'passed' ? 'bg-green-50 text-green-700' :
-                      item.inspection_status === 'failed' ? 'bg-red-50 text-red-700' :
-                      'bg-yellow-50 text-yellow-700'
-                    )}>
-                      {item.inspection_status === 'passed' ? 'Passed' : item.inspection_status === 'failed' ? 'Failed' : 'Pending'}
-                    </span>
-                  </div>
-
-                  <div className="grid grid-cols-3 gap-4">
-                    <div>
-                      <p className="text-gray-500 text-xs mb-2">PO Quantity</p>
-                      <p className="text-gray-900 font-semibold">{item.po_qty}</p>
-                    </div>
-                    <div>
-                      <p className="text-gray-500 text-xs mb-2">Received Quantity</p>
-                      <input
-                        type="number"
-                        value={item.received_qty}
-                        onChange={(e) => {
-                          startTransition(() => {
-                            const newItems = [...receivedItems];
-                            newItems[idx].received_qty = parseInt(e.target.value) || 0;
-                            setReceivedItems(newItems);
-                          });
-                        }}
-                        className="w-full px-2 py-1 bg-white border border-gray-300 rounded text-gray-900 text-sm"
-                      />
-                    </div>
-                    <div>
-                      <p className="text-gray-500 text-xs mb-2">Variance</p>
-                      <p className={clsx(
-                        'text-sm font-semibold',
-                        item.received_qty === item.po_qty ? 'text-green-600' : 'text-orange-600'
-                      )}>
-                        {item.received_qty - item.po_qty > 0 ? '+' : ''}{item.received_qty - item.po_qty}
-                      </p>
-                    </div>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          {/* Quality Inspection */}
-          <div className="bg-white border border-gray-200 rounded-lg p-6">
-            <h3 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
-              <Check className="w-5 h-5" />
-              Quality Inspection Checklist
-            </h3>
-
-            <div className="space-y-3 mb-4">
-              {INSPECTION_CHECKLIST.map((item) => (
-                <label key={item} className="flex items-center gap-3 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={inspectionChecks[item] || false}
-                    onChange={() => toggleInspectionCheck(item)}
-                    className="w-4 h-4 rounded border-gray-500"
-                  />
-                  <span className="text-gray-600 text-sm">{item}</span>
-                </label>
-              ))}
-            </div>
-
-            <div className="mb-4">
-              <label className="block text-gray-500 text-sm mb-2">Quality Notes</label>
-              <textarea
-                value={qualityNotes}
-                onChange={(e) => startTransition(() => setQualityNotes(e.target.value))}
-                placeholder="Add any observations during inspection..."
-                className="w-full px-4 py-2 bg-white border border-gray-300 rounded text-gray-900 placeholder-gray-500 resize-none"
-                rows={3}
-              />
-            </div>
-
-            <div className="mb-4">
-              <label className="block text-gray-500 text-sm mb-2">Discrepancies Found</label>
-              <textarea
-                value={discrepancies}
-                onChange={(e) => startTransition(() => setDiscrepancies(e.target.value))}
-                placeholder="List any damaged items, missing items, or other discrepancies..."
-                className="w-full px-4 py-2 bg-white border border-gray-300 rounded text-gray-900 placeholder-gray-500 resize-none"
-                rows={3}
-              />
-            </div>
-
-            <div className={clsx(
-              'p-4 rounded-lg',
-              qualityStatus === 'passed' ? 'bg-green-50 border border-green-700' :
-              qualityStatus === 'failed' ? 'bg-red-50 border border-red-700' :
-              'bg-yellow-50/30 border border-yellow-700'
-            )}>
-              <p className={clsx(
-                'text-sm font-semibold flex items-center gap-2',
-                qualityStatus === 'passed' ? 'text-green-700' :
-                qualityStatus === 'failed' ? 'text-red-700' :
-                'text-yellow-700'
-              )}>
-                <Check className="w-4 h-4" />
-                Quality Status: {qualityStatus.charAt(0).toUpperCase() + qualityStatus.slice(1)}
-              </p>
-            </div>
-          </div>
-
-          {/* Submit Button */}
-          <button
-            onClick={async () => {
-              if (!poNumber) { toast.error('Please select a Purchase Order'); return; }
-              try {
-                await vendorsApi.createGRN({
-                  po_id: poNumber,
-                  vendor_invoice_no: '',
-                  vendor_invoice_date: new Date().toISOString().split('T')[0],
-                  items: receivedItems.map(item => ({
-                    po_item_id: item.product_id,
-                    product_id: item.product_id,
-                    received_qty: item.received_qty,
-                    accepted_qty: item.inspection_status === 'passed' ? item.received_qty : 0,
-                    rejected_qty: item.inspection_status === 'failed' ? item.received_qty : 0,
-                    rejection_reason: item.inspection_status === 'failed' ? 'Quality inspection failed' : undefined,
-                  })),
-                  notes: qualityNotes || undefined,
-                });
-                toast.success('GRN created successfully');
-                setActiveTab('history');
-                // Reload GRNs
-                const storeId = user?.activeStoreId || '';
-                const response = await vendorsApi.getGRNs({ store_id: storeId });
-                const grnList = Array.isArray(response)
-                  ? response
-                  : response.grns || response.data || [];
-                setGrns(grnList.map(transformGRN));
-              } catch (err) {
-                toast.error('Failed to create GRN');
-              }
-            }}
-            className="w-full px-4 py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-semibold flex items-center justify-center gap-2"
-          >
-            <FileText className="w-5 h-5" />
-            Create GRN
-          </button>
-        </div>
-      )}
-
-      {activeTab === 'history' && (
         <div className="space-y-4">
-          {grns.map((grn) => (
-            <div key={grn.id} className="bg-white border border-gray-200 rounded-lg p-4 hover:border-gray-300 transition-colors">
-              <div className="flex items-start justify-between mb-3">
+          {/* Receive stepper */}
+          <div className="grn-stepper">
+            {steps.map((st, i) => (
+              <div key={i} className={st.done ? 'done' : st.active ? 'active' : ''}>
+                <div className="n">{st.done ? '✓' : i + 1}</div>
                 <div>
-                  <p className="text-gray-900 font-semibold">{grn.grn_number}</p>
-                  <p className="text-gray-500 text-sm">Against {grn.po_number}</p>
+                  <div className="t">{st.t}</div>
+                  <div className="s">{st.s}</div>
                 </div>
-                <span className={clsx('px-3 py-1 rounded-full text-xs font-semibold', getQualityStatusColor(grn.quality_status))}>
-                  {grn.quality_status === 'passed' ? 'Passed' : grn.quality_status === 'failed' ? 'Failed' : 'Conditional'}
+              </div>
+            ))}
+          </div>
+
+          {/* PO selection */}
+          <div className="card">
+            <div className="card-head">
+              <h3>Select purchase order</h3>
+              <span className="meta">PO precedes GRN · GRN is the GST document</span>
+            </div>
+            <div className="card-body">
+              {pos.length === 0 ? (
+                <div className="text-center py-6" style={{ color: 'var(--ink-4)', fontSize: 13 }}>
+                  <Package className="w-8 h-8 mx-auto mb-2" style={{ color: 'var(--ink-5)' }} />
+                  No open purchase orders to receive against.
+                  <div className="text-xs mt-1" style={{ color: 'var(--ink-5)' }}>
+                    Create or send a PO from Purchase Management first.
+                  </div>
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 tablet:grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-xs font-medium mb-1" style={{ color: 'var(--ink-4)' }}>
+                      Purchase order
+                    </label>
+                    <select value={poNumber} onChange={(e) => onSelectPO(e.target.value)} className="input w-full">
+                      <option value="">Select a PO…</option>
+                      {pos.map((p) => (
+                        <option key={p.po_id} value={p.po_id}>
+                          {p.po_number}
+                          {p.vendor_name ? ` · ${p.vendor_name}` : ''}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium mb-1" style={{ color: 'var(--ink-4)' }}>
+                      Vendor invoice no.
+                    </label>
+                    <input
+                      type="text"
+                      value={vendorInvoiceNo}
+                      onChange={(e) => startTransition(() => setVendorInvoiceNo(e.target.value))}
+                      placeholder="e.g. JJ/24/04/2240"
+                      className="input w-full"
+                    />
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Items reception */}
+          {receivedItems.length > 0 && (
+            <div className="card">
+              <div className="card-head">
+                <h3 className="flex items-center gap-2">
+                  <Package className="w-4 h-4" /> Line items · received quantity
+                </h3>
+                <span className="meta">
+                  {totals.rec} / {totals.ord} units · auto-detects shortages
                 </span>
               </div>
-
-              <div className="grid grid-cols-4 gap-4 mb-3 pb-3 border-b border-gray-300">
+              <table className="tbl">
+                <thead>
+                  <tr>
+                    <th>#</th>
+                    <th>Item</th>
+                    <th className="right">Ordered</th>
+                    <th className="right">Received</th>
+                    <th className="right">Δ</th>
+                    <th>QA</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {receivedItems.map((item, idx) => {
+                    const variance = item.received_qty - item.po_qty;
+                    return (
+                      <tr key={item.po_item_id || idx}>
+                        <td className="mono" style={{ color: 'var(--ink-4)' }}>{idx + 1}</td>
+                        <td>
+                          <div className="font-medium" style={{ color: 'var(--ink)' }}>{item.product_name}</div>
+                          <div className="mono text-xs" style={{ color: 'var(--ink-4)' }}>
+                            {item.sku || item.product_id}
+                            {item.hsn_code ? ` · HSN ${item.hsn_code}` : ''}
+                          </div>
+                        </td>
+                        <td className="right mono">{item.po_qty}</td>
+                        <td className="right">
+                          <input
+                            type="number"
+                            min={0}
+                            value={item.received_qty}
+                            onChange={(e) =>
+                              startTransition(() => {
+                                const v = Math.max(0, parseInt(e.target.value) || 0);
+                                setReceivedItems((arr) =>
+                                  arr.map((r, j) => (j === idx ? { ...r, received_qty: v } : r)),
+                                );
+                              })
+                            }
+                            className="input"
+                            style={{ width: 64, textAlign: 'right', height: 30, padding: '0 6px' }}
+                          />
+                        </td>
+                        <td className="right">
+                          {variance === 0 ? (
+                            <span style={{ color: 'var(--ink-4)' }}>—</span>
+                          ) : (
+                            <span className={clsx('chip', variance < 0 ? 'warn' : 'err')}>
+                              {variance > 0 ? `+${variance}` : variance}
+                            </span>
+                          )}
+                        </td>
+                        <td>
+                          <select
+                            value={item.inspection_status}
+                            onChange={(e) =>
+                              startTransition(() => {
+                                const v = e.target.value as GRNLineItem['inspection_status'];
+                                setReceivedItems((arr) =>
+                                  arr.map((r, j) => (j === idx ? { ...r, inspection_status: v } : r)),
+                                );
+                              })
+                            }
+                            className="input"
+                            style={{ height: 30, padding: '0 6px', maxWidth: 130 }}
+                          >
+                            <option value="pending">Pending</option>
+                            <option value="passed">Passed</option>
+                            <option value="failed">Failed</option>
+                          </select>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+              {/* Totals strip */}
+              <div className="grn-totals" style={{ borderTop: '1px solid var(--line)' }}>
                 <div>
-                  <p className="text-gray-500 text-xs mb-1">Items Received</p>
-                  <p className="text-gray-900 font-semibold">{grn.items_received}</p>
+                  <div className="l">Lines</div>
+                  <div className="v">{receivedItems.length}</div>
+                  <div className="d">matched against PO</div>
                 </div>
                 <div>
-                  <p className="text-gray-500 text-xs mb-1">Received Date</p>
-                  <p className="text-gray-900 font-semibold">{new Date(grn.received_at).toLocaleDateString()}</p>
+                  <div className="l">Ordered → received</div>
+                  <div className="v">
+                    {totals.rec} <span style={{ fontSize: 13, color: 'var(--ink-4)' }}>/ {totals.ord}</span>
+                  </div>
+                  <div className="d" style={{ color: totals.short ? 'var(--err)' : 'var(--ok)' }}>
+                    {totals.short ? `${totals.short} short · raise debit note` : 'No shortage'}
+                  </div>
                 </div>
                 <div>
-                  <p className="text-gray-500 text-xs mb-1">Received Time</p>
-                  <p className="text-gray-900 font-semibold">{new Date(grn.received_at).toLocaleTimeString()}</p>
+                  <div className="l">Over-receipt</div>
+                  <div className="v" style={{ color: totals.over ? 'var(--warn)' : 'var(--ink)' }}>{totals.over}</div>
+                  <div className="d">{totals.over ? 'excess vs PO' : 'within PO'}</div>
                 </div>
                 <div>
-                  <p className="text-gray-500 text-xs mb-1">Created By</p>
-                  <p className="text-gray-900 font-semibold">{grn.created_by}</p>
+                  <div className="l">QA status</div>
+                  <div className="v" style={{ fontSize: 18 }}>
+                    <span
+                      className={clsx('chip', qualityChip(qualityStatus))}
+                      style={{ fontSize: 12, verticalAlign: 'middle' }}
+                    >
+                      {qualityStatus.charAt(0).toUpperCase() + qualityStatus.slice(1)}
+                    </span>
+                  </div>
+                  <div className="d">{checksComplete}/{INSPECTION_CHECKLIST.length} checks done</div>
                 </div>
               </div>
-
-              <button className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded text-sm font-semibold">
-                View Details
-              </button>
             </div>
-          ))}
+          )}
+
+          {/* Quality inspection */}
+          {receivedItems.length > 0 && (
+            <div className="card">
+              <div className="card-head">
+                <h3 className="flex items-center gap-2">
+                  <Check className="w-4 h-4" /> Quality inspection checklist
+                </h3>
+                <span className="meta">{checksComplete}/{INSPECTION_CHECKLIST.length} complete</span>
+              </div>
+              <div className="card-body">
+                <div className="grid grid-cols-1 tablet:grid-cols-2 gap-x-6 gap-y-2 mb-4">
+                  {INSPECTION_CHECKLIST.map((item) => (
+                    <label key={item} className="flex items-center gap-3 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={inspectionChecks[item] || false}
+                        onChange={() => toggleInspectionCheck(item)}
+                        className="w-4 h-4 rounded"
+                        style={{ accentColor: 'var(--bv)' }}
+                      />
+                      <span className="text-sm" style={{ color: 'var(--ink-2)' }}>{item}</span>
+                    </label>
+                  ))}
+                </div>
+
+                <div className="mb-4">
+                  <label className="block text-xs font-medium mb-1" style={{ color: 'var(--ink-4)' }}>
+                    Quality notes
+                  </label>
+                  <textarea
+                    value={qualityNotes}
+                    onChange={(e) => startTransition(() => setQualityNotes(e.target.value))}
+                    placeholder="Add any observations during inspection…"
+                    className="input w-full resize-none"
+                    rows={2}
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium mb-1" style={{ color: 'var(--ink-4)' }}>
+                    Discrepancies found
+                  </label>
+                  <textarea
+                    value={discrepancies}
+                    onChange={(e) => startTransition(() => setDiscrepancies(e.target.value))}
+                    placeholder="List any damaged items, missing items, or other discrepancies…"
+                    className="input w-full resize-none"
+                    rows={2}
+                  />
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Footer actions */}
+          <div className="flex items-center gap-3 flex-wrap">
+            <span className="text-xs" style={{ color: 'var(--ink-4)' }}>
+              GRN will be created against {poNumber || 'the selected PO'} · stock ledger updated · variance raises a debit note.
+            </span>
+            <span className="flex-1" />
+            <button
+              type="button"
+              className="btn"
+              onClick={() => window.print()}
+              disabled={receivedItems.length === 0}
+            >
+              <Printer className="w-4 h-4" /> Print preview
+            </button>
+            <button
+              type="button"
+              onClick={handleSubmit}
+              disabled={submitting || !poNumber || receivedItems.length === 0}
+              className="btn accent"
+            >
+              {submitting ? <Loader2 className="w-4 h-4 animate-spin" /> : <FileText className="w-4 h-4" />}
+              Post GRN
+            </button>
+          </div>
         </div>
       )}
 
+      {/* ─────────────────────────── HISTORY ─────────────────────────── */}
+      {activeTab === 'history' && (
+        <div className="space-y-3">
+          {grns.length === 0 ? (
+            <div className="card text-center py-12" style={{ color: 'var(--ink-4)' }}>
+              <FileText className="w-10 h-10 mx-auto mb-3" style={{ color: 'var(--ink-5)' }} />
+              <p className="font-medium">No goods receipt notes yet</p>
+              <p className="text-sm mt-1" style={{ color: 'var(--ink-5)' }}>
+                Receive a purchase order to create the first GRN.
+              </p>
+            </div>
+          ) : (
+            grns.map((grn) => (
+              <div key={grn.id} className="card">
+                <div className="flex items-start justify-between mb-3">
+                  <div>
+                    <p className="font-semibold mono" style={{ color: 'var(--ink)' }}>{grn.grn_number}</p>
+                    <p className="text-sm" style={{ color: 'var(--ink-4)' }}>Against {grn.po_number}</p>
+                  </div>
+                  <span className={clsx('chip', qualityChip(grn.quality_status))}>
+                    {grn.quality_status.charAt(0).toUpperCase() + grn.quality_status.slice(1)}
+                  </span>
+                </div>
+
+                <div className="grn-totals" style={{ border: '1px solid var(--line)', borderRadius: 'var(--r-md)' }}>
+                  <div>
+                    <div className="l">Items received</div>
+                    <div className="v" style={{ fontSize: 18 }}>{grn.items_received}</div>
+                  </div>
+                  <div>
+                    <div className="l">Received date</div>
+                    <div className="v" style={{ fontSize: 14 }}>
+                      {grn.received_at ? new Date(grn.received_at).toLocaleDateString('en-IN') : '—'}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="l">Accept / reject</div>
+                    <div className="v" style={{ fontSize: 14 }}>
+                      {grn.total_accepted} / {grn.total_rejected}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="l">Received by</div>
+                    <div className="v" style={{ fontSize: 14 }}>{grn.created_by}</div>
+                  </div>
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+      )}
+
+      {/* ─────────────────────────── DISCREPANCIES ─────────────────────────── */}
       {activeTab === 'discrepancies' && (
-        <div className="space-y-4">
-          <div className="bg-blue-50 border border-blue-700 rounded-lg p-4 flex items-start gap-3">
-            <AlertCircle className="w-5 h-5 text-blue-600 flex-shrink-0 mt-0.5" />
+        <div className="space-y-3">
+          <div
+            className="flex items-start gap-3 rounded-lg p-4"
+            style={{ background: 'var(--bv-soft)', border: '1px solid var(--bv-50)' }}
+          >
+            <AlertCircle className="w-5 h-5 flex-shrink-0 mt-0.5" style={{ color: 'var(--bv)' }} />
             <div>
-              <p className="text-blue-700 font-semibold">Discrepancy Report</p>
-              <p className="text-blue-700 text-sm mt-1">
+              <p className="font-semibold" style={{ color: 'var(--ink)' }}>Discrepancy report</p>
+              <p className="text-sm mt-1" style={{ color: 'var(--ink-3)' }}>
                 Items with variance between PO quantity and received quantity, or quality inspection failures.
               </p>
             </div>
           </div>
 
           {(() => {
-            // Real discrepancies: GRNs that rejected units, or where not every
-            // received unit was accepted (a quantity/quality shortfall).
             const discrepant = grns.filter(
-              (g) => g.total_rejected > 0 || g.total_received !== g.total_accepted
+              (g) => g.total_rejected > 0 || g.total_received !== g.total_accepted,
             );
             if (discrepant.length === 0) {
               return (
-                <div className="bg-white border border-gray-200 rounded-lg p-8 text-center text-gray-500">
+                <div className="card text-center py-8" style={{ color: 'var(--ink-4)' }}>
                   No discrepancies — all received goods matched their POs and passed inspection.
                 </div>
               );
             }
-            return (
-              <div className="space-y-3">
-                {discrepant.map((g) => {
-                  const isQualityFail = g.total_rejected > 0;
-                  const rejectedItems = g.items.filter((i) => (i.rejected_qty || 0) > 0);
-                  return (
-                    <div
-                      key={g.id}
-                      className={clsx(
-                        'border rounded-lg p-4',
-                        isQualityFail
-                          ? 'bg-red-50 border-red-700'
-                          : 'bg-orange-50/30 border-orange-700'
-                      )}
-                    >
-                      <div className="flex items-start justify-between mb-2">
-                        <div>
-                          <p
-                            className={clsx(
-                              'font-semibold',
-                              isQualityFail ? 'text-red-700' : 'text-orange-700'
-                            )}
-                          >
-                            {g.grn_number}
-                          </p>
-                          <p className="text-gray-500 text-sm">Against {g.po_number}</p>
-                        </div>
-                        <span
-                          className={clsx(
-                            'px-2 py-1 rounded text-xs font-semibold',
-                            isQualityFail
-                              ? 'bg-red-50 text-red-700'
-                              : 'bg-orange-50 text-orange-700'
-                          )}
-                        >
-                          {isQualityFail ? 'Quality Rejection' : 'Quantity Variance'}
-                        </span>
-                      </div>
-                      <p
-                        className={clsx(
-                          'text-sm',
-                          isQualityFail ? 'text-red-700' : 'text-orange-700'
-                        )}
-                      >
-                        Received: {g.total_received} | Accepted: {g.total_accepted} | Rejected:{' '}
-                        {g.total_rejected}
-                      </p>
-                      {rejectedItems.length > 0 && (
-                        <ul className="mt-2 space-y-1">
-                          {rejectedItems.map((i, idx) => (
-                            <li key={idx} className="text-xs text-red-600">
-                              {i.product_name || i.product_id}: {i.rejected_qty} rejected
-                              {i.rejection_reason ? ` — ${i.rejection_reason}` : ''}
-                            </li>
-                          ))}
-                        </ul>
-                      )}
+            return discrepant.map((g) => {
+              const isQualityFail = g.total_rejected > 0;
+              const rejectedItems = g.items.filter((i) => (i.rejected_qty || 0) > 0);
+              return (
+                <div key={g.id} className="card">
+                  <div className="flex items-start justify-between mb-2">
+                    <div>
+                      <p className="font-semibold mono" style={{ color: 'var(--ink)' }}>{g.grn_number}</p>
+                      <p className="text-sm" style={{ color: 'var(--ink-4)' }}>Against {g.po_number}</p>
                     </div>
-                  );
-                })}
-              </div>
-            );
+                    <span className={clsx('chip', isQualityFail ? 'err' : 'warn')}>
+                      {isQualityFail ? 'Quality rejection' : 'Quantity variance'}
+                    </span>
+                  </div>
+                  <p className="text-sm" style={{ color: 'var(--ink-3)' }}>
+                    Received: {g.total_received} · Accepted: {g.total_accepted} · Rejected: {g.total_rejected}
+                  </p>
+                  {rejectedItems.length > 0 && (
+                    <ul className="mt-2 space-y-1">
+                      {rejectedItems.map((i, idx) => (
+                        <li key={idx} className="text-xs" style={{ color: 'var(--err)' }}>
+                          {i.product_name || i.product_id}: {i.rejected_qty} rejected
+                          {i.rejection_reason ? ` — ${i.rejection_reason}` : ''}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              );
+            });
           })()}
         </div>
       )}
