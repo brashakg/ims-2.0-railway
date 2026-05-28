@@ -6,7 +6,7 @@ Sales order management endpoints
 
 from fastapi import APIRouter, HTTPException, Depends, Query
 from pydantic import BaseModel, Field
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 from datetime import datetime, date, timedelta
 from enum import Enum
 import uuid
@@ -320,6 +320,14 @@ class OrderItemCreate(BaseModel):
     # the unit to SOLD with the order_id so a future return can re-activate
     # exactly the unit that left. Absent -> FIFO allocation by product+store.
     stock_id: Optional[str] = None
+    # Lens catalog cell coordinates (Branch B', sub-PR 4). Set by the FE
+    # when a LENS item is configured via the Power Grid. The lens_stock_hook
+    # uses these to atomically reserve the cell at POS Step 6; missing values
+    # mean the line is a legacy / free-text lens entry and the hook no-ops.
+    lens_line_id: Optional[str] = None
+    sph: Optional[float] = None
+    cyl: Optional[float] = None
+    add: Optional[float] = None
 
 
 class PaymentCreate(BaseModel):
@@ -1011,6 +1019,12 @@ async def create_order(
                     # re-activate exactly the unit that left. Optional; FIFO
                     # allocation by product+store fills the gap when missing.
                     "stock_id": getattr(item, "stock_id", None),
+                    # Lens catalog cell coordinates (B'4) -- consumed by
+                    # the lens_stock_hook on reserve/commit/release.
+                    "lens_line_id": getattr(item, "lens_line_id", None),
+                    "sph": getattr(item, "sph", None),
+                    "cyl": getattr(item, "cyl", None),
+                    "add": getattr(item, "add", None),
                 }
             )
             subtotal += item_subtotal
@@ -1040,7 +1054,77 @@ async def create_order(
                 days=order.expected_delivery_days
             )
 
+        # Branch B' sub-PR 4 -- atomic lens-stock reserve BEFORE the
+        # order is persisted. Owner-decreed flow (2026-05-28): the POS
+        # "Pay now" action validates the cart, calls reserve for each
+        # lens line, and only then persists the order. If any reserve
+        # 409s, the order is NEVER created and the POS surfaces a clean
+        # "out of stock for SPH X CYL Y; available: N" message.
+        #
+        # We pre-generate the order_id so the reserve audit rows have a
+        # stable source_id (`{order_id}#{line_index}`). This is the same
+        # value the workshop commit + order cancel paths will use to
+        # find/idempotency-check the reservation later.
+        precomputed_order_id = str(uuid.uuid4())
+
+        lens_reserve_failed = False
+        lens_reservations: List[Dict[str, Any]] = []
+        # Import the hook BEFORE the try so `release_for_cancel` is
+        # unconditionally bound for the compensating-rollback path in the
+        # except block (pylint E0601 otherwise: the import lived inside try).
+        from ..services.lens_stock_hook import (
+            reserve_for_order_item,
+            release_for_cancel,
+        )
+        try:
+            for idx, oi in enumerate(items_data):
+                rec = await reserve_for_order_item(
+                    order_item=oi,
+                    order_id=precomputed_order_id,
+                    line_index=idx,
+                    store_id=store_id or "",
+                    user=current_user,
+                )
+                if rec is not None:
+                    lens_reservations.append({"line_index": idx, **rec})
+                    if rec.get("status") == "failed":
+                        lens_reserve_failed = True
+        except HTTPException as exc:
+            # Insufficient stock (409) -- compensating release for any
+            # lines that already succeeded, then re-raise so POS sees
+            # the original "available=N" message and the user can fix.
+            if exc.status_code == 409:
+                try:
+                    for prev_idx, prev_oi in enumerate(items_data):
+                        try:
+                            await release_for_cancel(
+                                order_item=prev_oi,
+                                order_id=precomputed_order_id,
+                                line_index=prev_idx,
+                                store_id=store_id or "",
+                                user=current_user,
+                            )
+                        except Exception as inner_rb:  # noqa: BLE001
+                            logger.warning(
+                                "[LENS_HOOK] compensating release "
+                                "failed (line %s): %s", prev_idx, inner_rb,
+                            )
+                except Exception as rb_exc:  # noqa: BLE001
+                    logger.warning(
+                        "[LENS_HOOK] rollback outer error: %s", rb_exc,
+                    )
+            raise
+        except Exception as exc:  # noqa: BLE001
+            # Non-blocking soft failure (mongo blip, etc.). Tag the
+            # order and continue -- never crash POS create on a hook
+            # error. Revenue protection takes priority.
+            logger.warning(
+                "[LENS_HOOK] reserve fail-soft pre-create: %s", exc,
+            )
+            lens_reserve_failed = True
+
         order_data = {
+            "order_id": precomputed_order_id,
             "order_number": generate_order_number(store_id),
             "store_id": store_id,
             "customer_id": order.customer_id,
@@ -1069,9 +1153,40 @@ async def create_order(
             "delivery_priority": (order.delivery_priority or "NORMAL").upper(),
             "notes": order.notes,
             "payments": [],
+            "lens_reservations": lens_reservations,
+            "lens_reserve_failed": bool(lens_reserve_failed),
         }
 
-        created = order_repo.create(order_data)
+        try:
+            created = order_repo.create(order_data)
+        except Exception as create_exc:  # noqa: BLE001
+            # Order persist failed AFTER reservations succeeded -- run
+            # the compensating release so the cells don't leak.
+            logger.error(
+                "[ORDERS] order_repo.create failed; releasing %d lens "
+                "reservations for order %s",
+                len(lens_reservations), precomputed_order_id,
+            )
+            try:
+                from ..services.lens_stock_hook import release_for_cancel
+                for idx, oi in enumerate(items_data):
+                    try:
+                        await release_for_cancel(
+                            order_item=oi,
+                            order_id=precomputed_order_id,
+                            line_index=idx,
+                            store_id=store_id or "",
+                            user=current_user,
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass  # fail-soft compensating action
+            except Exception:  # noqa: BLE001
+                pass
+            raise HTTPException(
+                status_code=500,
+                detail="Failed to create order: {0}".format(create_exc),
+            )
+
         if created:
             created_order_id = created.get("order_id") or ""
             # Flip serialized stock units to SOLD with this order_id stamped on
@@ -1612,6 +1727,36 @@ async def cancel_order(
                 "cancelled_at": datetime.now().isoformat(),
             },
         )
+
+        # Branch B' sub-PR 4 -- release any lens-stock reservations on
+        # the cancelled order so the cells return to AVAILABLE. Fully
+        # fail-soft: a release that can't go through (commit already
+        # happened, lens already cut) is logged but never blocks the
+        # cancel response.
+        try:
+            from ..services.lens_stock_hook import release_for_cancel
+
+            items_for_release = order.get("items") or []
+            for idx, oi in enumerate(items_for_release):
+                try:
+                    await release_for_cancel(
+                        order_item=oi,
+                        order_id=order_id,
+                        line_index=idx,
+                        store_id=order.get("store_id") or "",
+                        user=current_user,
+                    )
+                except Exception as rel_exc:  # noqa: BLE001
+                    logger.warning(
+                        "[LENS_HOOK] release on cancel failed "
+                        "(order %s line %s): %s",
+                        order_id, idx, rel_exc,
+                    )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[LENS_HOOK] cancel release outer error %s: %s",
+                order_id, exc,
+            )
 
         # Audit alert (May 2026) — every cancellation is CRITICAL severity
         try:
