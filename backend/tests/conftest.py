@@ -99,14 +99,26 @@ def app():
     return _app
 
 
-@pytest.fixture
+@pytest.fixture(scope="session")
 def client(app):
-    """TestClient that talks to the app. Entering the context runs the app
-    lifespan (which connects the DB on CI); we then clear transactional
-    collections so this test can't inherit rows left behind by an earlier one."""
+    """Session-scoped TestClient: the app lifespan runs ONCE (startup connects
+    the DB; shutdown closes it only at session end). Per-test isolation is the
+    job of the autouse `_isolate_db` fixture below. Session scope deliberately
+    avoids the per-test lifespan churn -- a function-scoped client closed the
+    shared Mongo client on every test teardown, so a later test hit
+    'pymongo.errors.InvalidOperation: Cannot use MongoClient after close'."""
     with TestClient(app) as c:
-        _reset_churn_collections()
         yield c
+
+
+@pytest.fixture(autouse=True)
+def _isolate_db(client):
+    """Before EVERY test, clear the transactional collections from the app DB so
+    no test inherits rows left behind by an earlier one on CI's shared mongo.
+    Requests the session-scoped `client` so the DB is connected first. Fail-soft
+    no-op when no DB is connected (local runs)."""
+    _reset_churn_collections()
+    yield
 
 
 @pytest.fixture
