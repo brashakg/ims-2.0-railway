@@ -763,6 +763,41 @@ class JarvisAnalyticsEngine:
         except Exception:
             pass
 
+        # Recent audit activity — who did what, when. Lets JARVIS answer
+        # "what did <user> do this week?" off the SAME audit trail the
+        # SUPERADMIN Activity Log screen reads. Compact + newest-first.
+        try:
+            col = get_db_collection("audit_logs")
+            if col is not None:
+                ctx["recent_activity"] = [
+                    {
+                        "timestamp": str(a.get("timestamp") or "")[:19],
+                        "user_id": a.get("user_id") or "",
+                        "username": a.get("username") or a.get("user_name") or "",
+                        "action": a.get("action") or "",
+                        "entity_type": a.get("entity_type") or "",
+                        "entity_id": str(a.get("entity_id") or ""),
+                        "store_id": a.get("store_id") or "",
+                    }
+                    for a in col.find(
+                        {},
+                        {
+                            "timestamp": 1,
+                            "user_id": 1,
+                            "username": 1,
+                            "user_name": 1,
+                            "action": 1,
+                            "entity_type": 1,
+                            "entity_id": 1,
+                            "store_id": 1,
+                        },
+                    )
+                    .sort("timestamp", -1)
+                    .limit(40)
+                ]
+        except Exception as e:
+            logger.warning("[JARVIS] recent_activity ctx failed: %s", e)
+
         # Tasks (open + overdue + by type)
         try:
             col = get_db_collection("tasks")

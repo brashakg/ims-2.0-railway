@@ -71,6 +71,7 @@ const VendorReturns = lazy(() => import('./pages/purchase/VendorReturns').then(m
 const StockReplenishment = lazy(() => import('./pages/inventory/StockReplenishment').then(m => ({ default: m.StockReplenishment })));
 const StockAudit = lazy(() => import('./pages/inventory/StockAudit').then(m => ({ default: m.StockAudit })));
 const JarvisPage = lazy(() => import('./pages/jarvis/JarvisPage').then(m => ({ default: m.JarvisPage })));
+const ActivityLogPage = lazy(() => import('./pages/admin/ActivityLogPage'));
 // /catalog/add — mode-switching shell: defaults to fast Quick Add (Single);
 // ?mode=guided renders the step-by-step wizard (Guided Add).
 const ProductAddShell = lazy(() => import('./pages/catalog/ProductAddShell'));
@@ -781,6 +782,16 @@ function App() {
                     element={
                       <ProtectedRoute allowedRoles={['SUPERADMIN']}>
                         <JarvisPage />
+                      </ProtectedRoute>
+                    }
+                  />
+
+                  {/* User Activity Log (audit trail) — Superadmin only */}
+                  <Route
+                    path="admin/activity-log"
+                    element={
+                      <ProtectedRoute allowedRoles={['SUPERADMIN']}>
+                        <ActivityLogPage />
                       </ProtectedRoute>
                     }
                   />

@@ -286,6 +286,9 @@ export const settingsApi = {
     entity_id?: string;
     user_id?: string;
     action?: string;
+    store_id?: string;
+    start_date?: string; // inclusive YYYY-MM-DD
+    end_date?: string; // inclusive YYYY-MM-DD
     limit?: number;
     offset?: number;
   }) => {

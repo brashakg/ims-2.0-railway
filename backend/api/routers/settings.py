@@ -1164,24 +1164,58 @@ async def update_system_settings(
 # ============================================================================
 
 
+def _audit_time_filter(start_date: Optional[str], end_date: Optional[str]) -> dict:
+    """Build a Mongo `timestamp` range clause from inclusive YYYY-MM-DD bounds.
+
+    Returns {} when neither bound parses, so a malformed date silently widens
+    the query rather than 500ing it. `end_date` is taken to the END of that day
+    (23:59:59.999999) so a single-day from==to range returns that whole day.
+    """
+    clause: dict = {}
+    if start_date:
+        try:
+            clause["$gte"] = datetime.strptime(start_date, "%Y-%m-%d")
+        except (ValueError, TypeError):
+            pass
+    if end_date:
+        try:
+            clause["$lte"] = datetime.strptime(end_date, "%Y-%m-%d").replace(
+                hour=23, minute=59, second=59, microsecond=999999
+            )
+        except (ValueError, TypeError):
+            pass
+    return {"timestamp": clause} if clause else {}
+
+
 @router.get("/audit-logs")
 async def get_audit_logs(
     entity_type: Optional[str] = None,
     entity_id: Optional[str] = None,
     user_id: Optional[str] = None,
     action: Optional[str] = None,
+    store_id: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
     limit: int = 50,
     offset: int = 0,
     current_user: dict = Depends(get_current_user),
 ):
-    """Get audit logs (SUPERADMIN/ADMIN only)"""
+    """Query the audit trail (SUPERADMIN/ADMIN only).
+
+    Powers the SUPERADMIN Activity Log screen: filter by user, action, entity,
+    store, and an inclusive YYYY-MM-DD date range — newest first. Every filter
+    is optional and ANDs together; an unparseable date is ignored, never fatal.
+    """
     if not any(role in current_user["roles"] for role in ["SUPERADMIN", "ADMIN"]):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
+    limit = max(1, min(int(limit), 500))
+    offset = max(0, int(offset))
+
     audit_repo = get_audit_repository()
     if audit_repo is not None:
-        # Build filter
-        filter_dict = {}
+        # Build filter — all clauses AND together.
+        filter_dict: dict = {}
         if entity_type:
             filter_dict["entity_type"] = entity_type
         if entity_id:
@@ -1190,8 +1224,13 @@ async def get_audit_logs(
             filter_dict["user_id"] = user_id
         if action:
             filter_dict["action"] = action
+        if store_id:
+            filter_dict["store_id"] = store_id
+        filter_dict.update(_audit_time_filter(start_date, end_date))
 
-        logs = audit_repo.find_many(filter_dict, skip=offset, limit=limit)
+        logs = audit_repo.find_many(
+            filter_dict, sort=[("timestamp", -1)], skip=offset, limit=limit
+        )
         total = audit_repo.count(filter_dict)
 
         # Clean up MongoDB _id fields
