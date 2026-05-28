@@ -107,6 +107,20 @@ export const authApi = {
     return response.data;
   },
 
+  // Re-issue the JWT with a new active store. The backend bakes
+  // active_store_id INTO the token, and store-scoped endpoints resolve the
+  // store from the token; if we only flip client state the token keeps the
+  // OLD store and writes can land on the wrong store (QA F9). Callers must
+  // persist the returned access_token so the next request carries it.
+  switchStore: async (
+    storeId: string
+  ): Promise<{ access_token: string; active_store_id: string }> => {
+    const response = await api.post<{ access_token: string; active_store_id: string }>(
+      `/auth/switch-store/${encodeURIComponent(storeId)}`
+    );
+    return response.data;
+  },
+
   getProfile: async (): Promise<User> => {
     // Backend /auth/me returns the JWT payload verbatim (snake_case:
     // user_id, store_ids, active_store_id, roles, exp). Frontend User type
