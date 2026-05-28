@@ -76,6 +76,16 @@ export interface LensStockAuditResponse {
 // API
 // ----------------------------------------------------------------------------
 
+/** Body for PATCH /lens-stock/{line_stock_id}. on_hand / reorder_point /
+ *  safety_stock are absolute (not deltas). `reserved` is NEVER editable here
+ *  -- only reserve/commit/release move it (B'4). Omit a field to leave it. */
+export interface LensStockCellUpdate {
+  on_hand?: number;
+  reorder_point?: number;
+  safety_stock?: number;
+  notes?: string;
+}
+
 export const lensStockApi = {
   /** Full per-cell matrix for a lens line at a store. Backend returns
    *  cells the FE turns into the (sph x cyl[, add]) grid. */
@@ -89,6 +99,17 @@ export const lensStockApi = {
   /** Single cell by line_stock_id (id of the row in lens_stock_lines). */
   cell: async (lineStockId: string): Promise<LensStockCellResponse> => {
     const res = await api.get(`/lens-stock/cell/${encodeURIComponent(lineStockId)}`);
+    return res.data as LensStockCellResponse;
+  },
+
+  /** Absolute update of on_hand / reorder_point / safety_stock for one cell.
+   *  Does NOT touch reserved (the backend refuses that). Returns the updated
+   *  cell so the caller can re-render without a separate re-fetch. */
+  update: async (
+    lineStockId: string,
+    body: LensStockCellUpdate,
+  ): Promise<LensStockCellResponse> => {
+    const res = await api.patch(`/lens-stock/${encodeURIComponent(lineStockId)}`, body);
     return res.data as LensStockCellResponse;
   },
 

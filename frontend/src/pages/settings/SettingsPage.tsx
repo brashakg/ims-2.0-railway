@@ -15,7 +15,7 @@ import {
   Store, Users, Tag, Percent, Database,
   ChevronRight, Plus, AlertCircle,
   RefreshCw, ToggleLeft, ToggleRight,
-  Link, Boxes, CircleDot,
+  Link, Boxes, CircleDot, Layers,
   User, Building2, Receipt, Bell, History, Printer, Save,
   Search, Calendar, Filter, X, Shield, LogOut, Bot, Award,
 } from 'lucide-react';
@@ -43,6 +43,7 @@ import { ProfileSection, BusinessSection } from './SettingsProfile';
 import { UserManagementSection } from './SettingsAuth';
 import { StoreManagementSection, CategorySection, BrandSection, DiscountSection } from './SettingsStore';
 import { LensMasterSection } from './SettingsLens';
+import { LensCatalogEnumsSection } from './SettingsLensEnums';
 import type { SettingsTab } from './settingsTypes';
 
 // ============================================================================
@@ -94,6 +95,7 @@ const SETTINGS_SECTIONS = [
   { id: 'categories' as SettingsTab, label: 'Category Master', icon: Tag, description: 'Product categories and attributes', role: ['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER'] },
   { id: 'brands' as SettingsTab, label: 'Brand Master', icon: Boxes, description: 'Brands and subbrands', role: ['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER'] },
   { id: 'lens-master' as SettingsTab, label: 'Lens Master', icon: CircleDot, description: 'Lens brands, indices, coatings', role: ['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER'] },
+  { id: 'lens-enums' as SettingsTab, label: 'Lens Catalog Enums', icon: Layers, description: 'Editable brand/coating/index/material/type lists for the typed catalog', role: ['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER'] },
   { id: 'lens-pricing' as SettingsTab, label: 'Lens Pricing', icon: Receipt, description: 'Range-based tier pricing brackets', role: ['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER'] },
   { id: 'discounts' as SettingsTab, label: 'Discount Rules', icon: Percent, description: 'Role-based discount limits', role: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER'] },
   { id: 'loyalty' as SettingsTab, label: 'Loyalty Programme', icon: Award, description: 'Earn rate, tiers, expiry, redemption rules', role: ['SUPERADMIN', 'ADMIN'] },
@@ -123,7 +125,7 @@ export function SettingsPage() {
   useEffect(() => {
     const tabParam = searchParams.get('tab');
     if (tabParam && tabParam !== activeTab) {
-      const validTabs: SettingsTab[] = ['profile', 'business', 'stores', 'users', 'categories', 'brands', 'lens-master', 'lens-pricing', 'discounts', 'loyalty', 'tax-invoice', 'hsn-rates', 'notifications', 'integrations', 'printers', 'approvals', 'agents', 'feature-toggles', 'audit-logs', 'system'];
+      const validTabs: SettingsTab[] = ['profile', 'business', 'stores', 'users', 'categories', 'brands', 'lens-master', 'lens-enums', 'lens-pricing', 'discounts', 'loyalty', 'tax-invoice', 'hsn-rates', 'notifications', 'integrations', 'printers', 'approvals', 'agents', 'feature-toggles', 'audit-logs', 'system'];
       if (validTabs.includes(tabParam as SettingsTab)) {
         setActiveTab(tabParam as SettingsTab);
       }
@@ -202,7 +204,7 @@ export function SettingsPage() {
   const SETTINGS_GROUPS: Array<{ id: GroupId; label: string; members: SettingsTab[] }> = [
     { id: 'account', label: 'Account',      members: ['profile'] },
     { id: 'org',     label: 'Organisation', members: ['business', 'stores', 'users'] },
-    { id: 'catalog', label: 'Catalog',      members: ['categories', 'brands', 'lens-master', 'discounts'] },
+    { id: 'catalog', label: 'Catalog',      members: ['categories', 'brands', 'lens-master', 'lens-enums', 'discounts'] },
     { id: 'ops',     label: 'Operations',   members: ['tax-invoice', 'hsn-rates', 'printers', 'notifications', 'integrations'] },
     { id: 'system',  label: 'System',       members: ['approvals', 'agents', 'feature-toggles', 'audit-logs', 'system'] },
   ];
@@ -368,6 +370,7 @@ export function SettingsPage() {
           {activeTab === 'categories' && <CategorySection />}
           {activeTab === 'brands' && <BrandSection />}
           {activeTab === 'lens-master' && <LensMasterSection />}
+          {activeTab === 'lens-enums' && <LensCatalogEnumsSection />}
           {activeTab === 'discounts' && <DiscountSection />}
 
           {/* ---- Existing component delegates ---- */}

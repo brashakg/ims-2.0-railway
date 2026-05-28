@@ -10,16 +10,29 @@ Endpoints (prefix /api/v1/lens-enums):
   GET    /{enum_type}                            single
   PATCH  /{enum_type}                            replace the items list
   POST   /{enum_type}/items                      append one item
+  POST   /{enum_type}/rename                     rename + CASCADE (B'3)
   DELETE /{enum_type}/items/{item}               remove one item (refused if in use)
 
 Role gates:
-  SUPERADMIN / ADMIN only -- enum edits affect every lens line, so the
-  blast radius is high. CATALOG_MANAGER reads but cannot mutate (the user
-  can still propose values to the owner; the owner pushes them live).
+  SUPERADMIN / ADMIN / CATALOG_MANAGER may mutate -- the catalog manager
+  owns the lens catalog (mirrors lens_catalog.py's own write gate). Enum
+  edits affect every lens line, so the blast radius is high; reads stay
+  open to any authenticated user.
+
+Cascade rename (B'3): renaming an enum value (e.g. "Essilor" -> "Essilor
+India") rewrites the enum master, every lens_catalog row that uses the old
+value (brand/coating/index/material/lens_type), and stamps every dependent
+lens_stock_lines row -- atomically from the caller's view, audit-logged with
+kind="lens_enum_rename". The lens_line_id SLUG is intentionally NOT re-built:
+the slug is a stable identifier referenced by stock rows + historical orders
+(see LensLineUpdate in lens_catalog.py, which forbids identity edits for the
+same reason). Stock lines reference a line by its stable lens_line_id, so a
+rename keeps every FK link intact while the displayed brand/coating updates.
 
 Audit logging: every write writes to audit_logs via get_audit_repository().
 Fail-soft.
 """
+
 from __future__ import annotations
 
 import logging
@@ -40,9 +53,11 @@ from ..services.lens_catalog_validation import (
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-# Only SUPERADMIN/ADMIN can edit enums. SUPERADMIN auto-passes inside
-# require_roles, so we only need to name ADMIN here.
-_WRITE_ROLES = ("ADMIN",)
+# SUPERADMIN / ADMIN / CATALOG_MANAGER can edit enums. SUPERADMIN auto-passes
+# inside require_roles, so we only need to name ADMIN + CATALOG_MANAGER here.
+# This mirrors lens_catalog.py's _WRITE_ROLES so the catalog manager who edits
+# lens lines can also edit the enum lists those lines draw from.
+_WRITE_ROLES = ("ADMIN", "CATALOG_MANAGER")
 
 
 # ============================================================================
@@ -84,6 +99,29 @@ def _catalog_coll():
         return None
 
 
+def _stock_coll():
+    """Loaded on RENAME so the cascade can stamp dependent stock rows."""
+    db = _get_db()
+    if db is None:
+        return None
+    try:
+        return db.get_collection("lens_stock_lines")
+    except Exception:  # noqa: BLE001
+        return None
+
+
+# Map an enum_type to the lens_catalog field it populates. `series` is
+# intentionally absent -- it is a per-brand list, not a 1:1 column, so it is
+# renamed via PATCH /series with the new full list (same rule as delete).
+_ENUM_FIELD_MAP: Dict[str, str] = {
+    "coatings": "coating",
+    "brands": "brand",
+    "indexes": "index",
+    "materials": "material",
+    "lens_types": "lens_type",
+}
+
+
 def _now() -> datetime:
     return datetime.utcnow()
 
@@ -112,9 +150,7 @@ def _load_items(enum_type: str) -> List[Any]:
             if doc and isinstance(doc.get("items"), list):
                 return list(doc["items"])
         except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "[LENS_ENUMS] load %s failed: %s", enum_type, exc
-            )
+            logger.warning("[LENS_ENUMS] load %s failed: %s", enum_type, exc)
     return list(DEFAULT_ENUM_ITEMS.get(enum_type) or [])
 
 
@@ -140,9 +176,7 @@ def _persist_items(
         )
         return coll.find_one({"enum_id": enum_type})
     except Exception as exc:  # noqa: BLE001
-        logger.error(
-            "[LENS_ENUMS] persist %s failed: %s", enum_type, exc
-        )
+        logger.error("[LENS_ENUMS] persist %s failed: %s", enum_type, exc)
         raise HTTPException(
             status_code=500,
             detail="Failed to persist enum_type {enum_type}".format(
@@ -339,6 +373,286 @@ async def append_item(
     return {"status": "success", "enum": _clean(persisted)}
 
 
+def _audit_rename(
+    enum_type: str,
+    user: Dict[str, Any],
+    old_value: Any,
+    new_value: Any,
+    catalog_modified: int,
+    stock_modified: int,
+) -> None:
+    """Audit-log a cascade rename to audit_logs (kind=lens_enum_rename).
+
+    Distinct from the generic enum mutations (which go through _audit) so
+    the auditor can grep one query for every cascade rename + see how far
+    the blast radius reached (catalog rows + stock rows touched)."""
+    try:
+        repo = get_audit_repository()
+        if repo is None:
+            return
+        repo.create(
+            {
+                "action": "lens_enum.rename",
+                "kind": "lens_enum_rename",
+                "module": "inventory",
+                "entity_type": "lens_enum_config",
+                "entity_id": enum_type,
+                "user_id": user.get("user_id"),
+                "user_name": user.get("username"),
+                "severity": "INFO",
+                "before": {"value": old_value},
+                "after": {"value": new_value},
+                "metadata": {
+                    "enum_type": enum_type,
+                    "old_value": old_value,
+                    "new_value": new_value,
+                    "catalog_rows_updated": catalog_modified,
+                    "stock_rows_stamped": stock_modified,
+                },
+                "timestamp": _now(),
+            }
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[LENS_ENUMS] rename audit insert failed for %s: %s",
+            enum_type,
+            exc,
+        )
+
+
+# The identity tuple that lens_catalog enforces UNIQUE. Renaming one of
+# these fields can collide two lines onto the same tuple.
+_IDENTITY_FIELDS: tuple = (
+    "brand",
+    "series",
+    "index",
+    "material",
+    "lens_type",
+    "coating",
+)
+
+
+def _identity_key(doc: Dict[str, Any], field: str, new_value: Any) -> tuple:
+    """The post-rename identity tuple for `doc` (substituting new_value for
+    `field`). Used to detect collisions before the cascade write."""
+    return tuple(new_value if f == field else doc.get(f) for f in _IDENTITY_FIELDS)
+
+
+def _cascade_rename_catalog(field: str, old_value: Any, new_value: Any) -> List[str]:
+    """Rewrite `field` from old_value -> new_value on every lens_catalog row.
+    Returns the affected lens_line_id list (used to stamp stock rows + report
+    the blast radius). Fail-soft: returns [] when the collection is absent.
+
+    Pre-flight collision check: if the rename would push any affected line
+    onto an identity tuple already held by a DIFFERENT line, we 409 BEFORE
+    writing anything (update_many is not atomic across docs, so a partial
+    rename would otherwise be possible)."""
+    coll = _catalog_coll()
+    if coll is None:
+        return []
+    try:
+        affected_docs = list(coll.find({field: old_value}))
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[LENS_ENUMS] rename catalog scan failed: %s", exc)
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to read lens_catalog for rename cascade",
+        )
+    affected = [
+        str(d.get("lens_line_id")) for d in affected_docs if d.get("lens_line_id")
+    ]
+    if not affected:
+        return []
+
+    # Pre-flight: would the rename collide onto an existing different line?
+    try:
+        all_docs = list(coll.find({}))
+    except Exception:  # noqa: BLE001
+        all_docs = affected_docs
+    affected_ids = set(affected)
+    existing_keys = {
+        tuple(d.get(f) for f in _IDENTITY_FIELDS): str(d.get("lens_line_id"))
+        for d in all_docs
+        if str(d.get("lens_line_id")) not in affected_ids
+    }
+    post_keys: set = set()
+    for d in affected_docs:
+        key = _identity_key(d, field, new_value)
+        if key in existing_keys or key in post_keys:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Rename to {new!r} would collide two lens lines onto the "
+                    "same identity (brand/series/index/material/lens_type/"
+                    "coating). Merge or retire the conflicting line first; "
+                    "the enum list was left unchanged.".format(new=new_value)
+                ),
+            )
+        post_keys.add(key)
+    try:
+        coll.update_many(
+            {field: old_value},
+            {"$set": {field: new_value, "updated_at": _now()}},
+        )
+    except Exception as exc:  # noqa: BLE001
+        msg = str(exc)
+        if "duplicate key" in msg.lower() or "E11000" in msg:
+            # Renaming would collide two lens lines onto the same identity
+            # tuple (brand, series, index, material, lens_type, coating).
+            # The owner must merge/retire one of them first. The enum master
+            # is still untouched (catalog write came first), so this is a
+            # clean refusal.
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Rename to {new!r} would collide two lens lines onto the "
+                    "same identity (brand/series/index/material/lens_type/"
+                    "coating). Merge or retire the conflicting line first; "
+                    "the enum list was left unchanged.".format(new=new_value)
+                ),
+            )
+        logger.error("[LENS_ENUMS] rename catalog update failed: %s", exc)
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Failed to cascade rename onto lens_catalog "
+                "({field}); enum master left unchanged.".format(field=field)
+            ),
+        )
+    return affected
+
+
+def _cascade_stamp_stock(lens_line_ids: List[str]) -> int:
+    """Stamp every lens_stock_lines row whose parent line was renamed with
+    enum_rename_at=now. The stock row references the line by its stable
+    lens_line_id (unchanged by the rename), so its effective brand/coating
+    already resolves to the new value -- the stamp makes the cascade an
+    observable, audit-able write across all three layers. Returns the row
+    count. Fail-soft: returns 0 when stock collection absent."""
+    if not lens_line_ids:
+        return 0
+    coll = _stock_coll()
+    if coll is None:
+        return 0
+    try:
+        result = coll.update_many(
+            {"lens_line_id": {"$in": lens_line_ids}},
+            {"$set": {"enum_rename_at": _now()}},
+        )
+        return int(getattr(result, "modified_count", 0) or 0)
+    except Exception as exc:  # noqa: BLE001
+        # Stock stamping is best-effort -- the catalog rename already
+        # succeeded and the FK links are intact. Log + report 0.
+        logger.warning("[LENS_ENUMS] rename stock stamp failed: %s", exc)
+        return 0
+
+
+@router.post("/{enum_type}/rename")
+async def rename_item(
+    enum_type: str = Path(...),
+    body: Dict[str, Any] = Body(...),
+    current_user: dict = Depends(require_roles(*_WRITE_ROLES)),
+):
+    """Rename an enum value and CASCADE the change (B'3).
+
+    Body shape: {old_value, new_value}. Renames the value in the enum master
+    AND on every lens_catalog row + stamps every dependent lens_stock_lines
+    row, then audit-logs the cascade (kind=lens_enum_rename).
+
+    The order is deliberate so a mid-cascade failure leaves the system
+    consistent: (1) cascade onto lens_catalog FIRST (the wide write), (2)
+    flip the enum master only after the catalog write succeeds, (3) stamp
+    stock rows (best-effort, FK links stay intact regardless). If the
+    catalog write fails the enum master is untouched -> a clean retry.
+
+    `series` cannot be renamed here (it is a per-brand list); PATCH
+    /lens-enums/series with the new full list instead. `indexes` rename
+    takes numeric old/new values.
+    """
+    enum_type = _check_enum_type(enum_type)
+    if "old_value" not in body or "new_value" not in body:
+        raise HTTPException(
+            status_code=400,
+            detail="`old_value` and `new_value` are required",
+        )
+
+    if enum_type == "series":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Series cannot be renamed via this endpoint; "
+                "PATCH /lens-enums/series with the new full list."
+            ),
+        )
+
+    old_value = _coerce_item(enum_type, body["old_value"])
+    new_value = _coerce_item(enum_type, body["new_value"])
+
+    # Build the new enum list: swap old -> new, then validate (de-dupes,
+    # type-checks, rejects index<=1.0, etc.). The validator collapses a
+    # rename-onto-an-existing-value into a single entry, which is the
+    # correct "merge two values into one" behaviour.
+    before = _load_items(enum_type)
+    if enum_type == "indexes":
+        present = any(_index_equal(x, old_value) for x in before)
+        candidate = [(new_value if _index_equal(x, old_value) else x) for x in before]
+    else:
+        present = old_value in before
+        candidate = [(new_value if x == old_value else x) for x in before]
+    if not present:
+        raise HTTPException(
+            status_code=404,
+            detail="{old!r} not found in {enum_type}".format(
+                old=old_value, enum_type=enum_type
+            ),
+        )
+    if old_value == new_value:
+        raise HTTPException(
+            status_code=400,
+            detail="old_value and new_value are identical; nothing to rename",
+        )
+
+    # Validate the resulting list BEFORE touching any catalog rows, so a
+    # bad new_value (e.g. empty string, index<=1.0) 400s without a partial
+    # cascade.
+    new_items = _validate(enum_type, candidate)
+
+    field = _ENUM_FIELD_MAP.get(enum_type)
+    if not field:
+        # Should be unreachable (series handled above), defensive only.
+        raise HTTPException(
+            status_code=400,
+            detail="enum_type {0!r} cannot be cascade-renamed".format(enum_type),
+        )
+
+    # 1. Cascade onto lens_catalog (the wide write) FIRST.
+    affected_lines = _cascade_rename_catalog(field, old_value, new_value)
+    # 2. Flip the enum master only after the catalog write succeeded.
+    persisted = _persist_items(enum_type, new_items, current_user)
+    # 3. Stamp dependent stock rows (best-effort).
+    stock_modified = _cascade_stamp_stock(affected_lines)
+
+    _audit_rename(
+        enum_type,
+        current_user,
+        old_value,
+        new_value,
+        catalog_modified=len(affected_lines),
+        stock_modified=stock_modified,
+    )
+    return {
+        "status": "success",
+        "enum": _clean(persisted),
+        "cascade": {
+            "old_value": old_value,
+            "new_value": new_value,
+            "catalog_rows_updated": len(affected_lines),
+            "stock_rows_stamped": stock_modified,
+            "affected_lens_line_ids": affected_lines,
+        },
+    }
+
+
 @router.delete("/{enum_type}/items/{item}")
 async def remove_item(
     enum_type: str = Path(...),
@@ -382,10 +696,7 @@ async def remove_item(
 
     # Filter the item out. For indexes use a tolerant compare.
     if enum_type == "indexes":
-        candidate = [
-            x for x in before
-            if not _index_equal(x, coerced)
-        ]
+        candidate = [x for x in before if not _index_equal(x, coerced)]
     else:
         candidate = [x for x in before if x != coerced]
     if len(candidate) == len(before):
