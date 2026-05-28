@@ -139,30 +139,43 @@ export function GoodsReceiptNote() {
 
   const storeId = user?.activeStoreId || '';
 
+  // Only POs that still have goods to receive belong in the receive picker.
+  // A DRAFT PO hasn't been sent; a RECEIVED/CANCELLED one is closed. Keep the
+  // legacy "PARTIAL" alias alongside the canonical "PARTIALLY_RECEIVED".
+  const isReceivablePO = (status?: string) =>
+    !status ||
+    ['SENT', 'ACKNOWLEDGED', 'PARTIAL', 'PARTIALLY_RECEIVED'].includes(status);
+
+  const fetchPurchaseOrders = async (): Promise<POOption[]> => {
+    const poResp = await vendorsApi
+      .getPurchaseOrders({ store_id: storeId })
+      .catch(() => null);
+    const poList: any[] = Array.isArray(poResp)
+      ? poResp
+      : poResp?.purchase_orders || poResp?.pos || poResp?.data || [];
+    return poList
+      .map((p: any) => ({
+        po_id: p.po_id || p.id || p._id || '',
+        po_number: p.po_number || p.po_id || 'PO',
+        vendor_name: p.vendor_name || p.vendor?.trade_name || p.vendor?.legal_name,
+        status: p.status,
+        items: p.items || p.line_items || [],
+      }))
+      .filter((p: POOption) => isReceivablePO(p.status));
+  };
+
   // Load GRNs + open purchase orders on mount / store change.
   useEffect(() => {
     const load = async () => {
       try {
         setIsLoading(true);
-        const [grnResp, poResp] = await Promise.all([
+        const [grnResp, poList] = await Promise.all([
           vendorsApi.getGRNs({ store_id: storeId }),
-          vendorsApi.getPurchaseOrders({ store_id: storeId }).catch(() => null),
+          fetchPurchaseOrders(),
         ]);
         const grnList = Array.isArray(grnResp) ? grnResp : grnResp.grns || grnResp.data || [];
         setGrns(grnList.map(transformGRN));
-
-        const poList: any[] = Array.isArray(poResp)
-          ? poResp
-          : poResp?.purchase_orders || poResp?.pos || poResp?.data || [];
-        setPos(
-          poList.map((p: any) => ({
-            po_id: p.po_id || p.id || p._id || '',
-            po_number: p.po_number || p.po_id || 'PO',
-            vendor_name: p.vendor_name || p.vendor?.trade_name || p.vendor?.legal_name,
-            status: p.status,
-            items: p.items || p.line_items || [],
-          })),
-        );
+        setPos(poList);
       } catch (error) {
         toast.error('Failed to load GRNs');
       } finally {
@@ -176,6 +189,10 @@ export function GoodsReceiptNote() {
     const response = await vendorsApi.getGRNs({ store_id: storeId });
     const grnList = Array.isArray(response) ? response : response.grns || response.data || [];
     setGrns(grnList.map(transformGRN));
+  };
+
+  const reloadPurchaseOrders = async () => {
+    setPos(await fetchPurchaseOrders());
   };
 
   // When a PO is picked, hydrate the receive lines from its order items.
@@ -242,7 +259,9 @@ export function GoodsReceiptNote() {
     }
     setSubmitting(true);
     try {
-      await vendorsApi.createGRN({
+      // Step 1 — create the GRN doc (status PENDING). This records the receipt
+      // + per-line accept/reject and stamps each line's short/exact/over flag.
+      const created = await vendorsApi.createGRN({
         po_id: poNumber,
         vendor_invoice_no: vendorInvoiceNo,
         vendor_invoice_date: new Date().toISOString().split('T')[0],
@@ -256,7 +275,39 @@ export function GoodsReceiptNote() {
         })),
         notes: qualityNotes || undefined,
       });
-      toast.success('GRN created successfully');
+
+      // Step 2 — POST it: mint serialized stock into stock_units at this store
+      // and advance the PO to partially/fully received. Posting is what makes
+      // the goods sellable; a created-but-unposted GRN holds no stock.
+      const grnId: string | undefined = created?.grn_id || created?.id;
+      let posted: any = null;
+      if (grnId) {
+        try {
+          posted = await vendorsApi.acceptGRN(grnId);
+        } catch (postErr) {
+          // The GRN doc was saved; only the stock-posting step failed. Tell the
+          // user so they can retry the post from the History tab rather than
+          // believing nothing happened.
+          toast.warning(
+            'GRN saved but stock posting failed. Retry from History — no stock was added.',
+          );
+          setActiveTab('history');
+          await reloadGrns();
+          return;
+        }
+      }
+
+      const units = posted?.units_added ?? 0;
+      const poState =
+        posted?.po_status === 'RECEIVED'
+          ? 'PO fully received'
+          : posted?.po_status === 'PARTIALLY_RECEIVED'
+            ? 'PO partially received'
+            : '';
+      toast.success(
+        `GRN posted${units ? ` · ${units} unit${units === 1 ? '' : 's'} added to stock` : ''}${poState ? ` · ${poState}` : ''}`,
+      );
+
       setActiveTab('history');
       setPoNumber('');
       setReceivedItems([]);
@@ -264,7 +315,8 @@ export function GoodsReceiptNote() {
       setQualityNotes('');
       setVendorInvoiceNo('');
       setDiscrepancies('');
-      await reloadGrns();
+      // Posting changes which POs are still receivable — refresh both lists.
+      await Promise.all([reloadGrns(), reloadPurchaseOrders()]);
     } catch (err) {
       toast.error('Failed to create GRN');
     } finally {
@@ -382,6 +434,9 @@ export function GoodsReceiptNote() {
                         <option key={p.po_id} value={p.po_id}>
                           {p.po_number}
                           {p.vendor_name ? ` · ${p.vendor_name}` : ''}
+                          {p.status === 'PARTIALLY_RECEIVED' || p.status === 'PARTIAL'
+                            ? ' · partially received'
+                            : ''}
                         </option>
                       ))}
                     </select>
@@ -583,7 +638,7 @@ export function GoodsReceiptNote() {
           {/* Footer actions */}
           <div className="flex items-center gap-3 flex-wrap">
             <span className="text-xs" style={{ color: 'var(--ink-4)' }}>
-              GRN will be created against {poNumber || 'the selected PO'} · stock ledger updated · variance raises a debit note.
+              Posting against {poNumber || 'the selected PO'} adds {totals.rec} unit{totals.rec === 1 ? '' : 's'} to this store&rsquo;s stock · the PO is marked partially / fully received · variance raises a debit note.
             </span>
             <span className="flex-1" />
             <button
