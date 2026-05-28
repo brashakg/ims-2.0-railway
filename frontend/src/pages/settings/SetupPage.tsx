@@ -4,7 +4,7 @@
 import { useState, useEffect } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
-import { adminStoreApi } from '../../services/api';
+import { adminStoreApi, adminUserApi } from '../../services/api';
 import {
   Building, Users, Plus, Edit, MapPin, Phone, Clock,
   Shield, Save, X, ChevronRight, CheckCircle, AlertTriangle,
@@ -238,7 +238,30 @@ export default function SetupPage() {
 
           {showEmployeeForm && <EmployeeFormModal
             stores={stores}
-            onSave={() => setShowEmployeeForm(false)}
+            onSave={async (emp) => {
+              // Onboard the employee through the ONE canonical user path
+              // (adminUserApi -> POST /users). The wizard collects roles[],
+              // assigned stores, discount cap + a temp password that must be
+              // changed on first login (mustChangePassword: true).
+              try {
+                await adminUserApi.createUser({
+                  name: emp.name,
+                  email: emp.email,
+                  phone: emp.phone || undefined,
+                  roles: emp.roles,
+                  storeIds: emp.assignedStores,
+                  primaryStoreId: emp.primaryStore || undefined,
+                  discountCap: emp.discountCap,
+                  username: emp.username || undefined,
+                  password: emp.tempPassword || undefined,
+                  mustChangePassword: true,
+                });
+                toast.success(`${emp.name || 'Employee'} onboarded`);
+                setShowEmployeeForm(false);
+              } catch (e: any) {
+                toast.error(e?.response?.data?.detail || 'Failed to onboard employee');
+              }
+            }}
             onClose={() => setShowEmployeeForm(false)}
           />}
         </div>
@@ -350,7 +373,7 @@ function StoreFormModal({ store, onSave, onClose }: { store: StoreConfig | null;
 // ---------------------------------------------------------------------------
 // EMPLOYEE FORM MODAL
 // ---------------------------------------------------------------------------
-function EmployeeFormModal({ stores, onSave, onClose }: { stores: StoreConfig[]; onSave: () => void; onClose: () => void }) {
+function EmployeeFormModal({ stores, onSave, onClose }: { stores: StoreConfig[]; onSave: (emp: NewEmployee) => void | Promise<void>; onClose: () => void }) {
   const [form, setForm] = useState<NewEmployee>(DEFAULT_EMPLOYEE);
   const [step, setStep] = useState(1);
 
@@ -500,7 +523,7 @@ function EmployeeFormModal({ stores, onSave, onClose }: { stores: StoreConfig[];
 
         <div className="p-5 border-t border-gray-200 flex justify-between">
           <button onClick={() => step > 1 ? setStep(step - 1) : onClose()} className="px-4 py-2 border border-gray-300 rounded-lg text-sm">{step === 1 ? 'Cancel' : 'Back'}</button>
-          <button onClick={() => step < 4 ? setStep(step + 1) : onSave()}
+          <button onClick={() => step < 4 ? setStep(step + 1) : onSave(form)}
             className="px-6 py-2 bg-bv-red-600 text-white rounded-lg text-sm font-semibold hover:bg-bv-red-700">
             {step === 4 ? 'Create Employee' : 'Continue'} <ChevronRight className="w-4 h-4 inline ml-1" />
           </button>

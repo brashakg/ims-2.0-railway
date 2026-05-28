@@ -108,8 +108,14 @@ export function UserManagementSection() {
         name: userData.fullName || '',
         email: userData.email || '',
         phone: userData.phone || '',
-        role: userData.roles?.[0] || 'SALES_STAFF',
-        storeId: userData.accessibleStores?.[0] || '',
+        // Pass the FULL multi-selects (all roles + all accessible stores) +
+        // discount cap the modal collects -- not just the first of each -- so
+        // nothing is dropped on save.
+        roles: userData.roles && userData.roles.length ? userData.roles : ['SALES_STAFF'],
+        storeIds: userData.accessibleStores || [],
+        primaryStoreId: userData.accessibleStores?.[0],
+        discountCap: userData.discountCap,
+        username: (userData as { username?: string }).username,
         password: password,
         status: userData.isActive ? 'ACTIVE' : 'INACTIVE',
       };
