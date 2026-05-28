@@ -35,7 +35,12 @@ class TestAuthAndEnvelope:
         resp = client.get("/api/v1/reports/inventory/non-moving-stock")
         assert resp.status_code == 401
 
-    def test_returns_empty_envelope_when_db_absent(self, client, auth_headers):
+    def test_returns_empty_envelope_when_db_absent(self, client, auth_headers, monkeypatch):
+        # Force the endpoint to see db=None regardless of mock DB state.
+        # The seeded mock DB may contain products from earlier tests in the
+        # session (state leaks because the mock DB is a module-level singleton).
+        import api.routers.reports as reports_module
+        monkeypatch.setattr(reports_module, "get_db", lambda: None)
         resp = client.get(
             "/api/v1/reports/inventory/non-moving-stock",
             headers=auth_headers,
