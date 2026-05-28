@@ -111,7 +111,11 @@ export const catalogApi = {
   getOnlineStatus: async (skus: string[]): Promise<Record<string, OnlineStatus>> => {
     const clean = Array.from(new Set((skus || []).map(s => String(s || '').trim()).filter(Boolean)));
     if (clean.length === 0) return {};
-    const response = await api.get('/catalog/online-status', { params: { skus: clean.join(',') } });
+    // POST (SKU list in the body), not GET with a comma-joined ?skus= query.
+    // The inventory page can pass thousands of SKUs; a query string that long
+    // tripped server/proxy URL limits -> net::ERR_CONNECTION_CLOSED and a blank
+    // "Online" column (QA F12). The body has no practical length limit.
+    const response = await api.post('/catalog/online-status', { skus: clean });
     return (response.data?.statuses || {}) as Record<string, OnlineStatus>;
   },
 
