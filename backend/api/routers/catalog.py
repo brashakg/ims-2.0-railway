@@ -46,6 +46,24 @@ async def get_online_status(
     return {"statuses": online_status_for_skus(sku_list)}
 
 
+class OnlineStatusRequest(BaseModel):
+    skus: List[str] = Field(default_factory=list)
+
+
+@router.post("/online-status")
+async def post_online_status(
+    body: OnlineStatusRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """POST variant of the SKU online-status lookup: the SKU list rides in the
+    BODY, not the query string. The inventory page can carry thousands of SKUs,
+    and a comma-joined `?skus=...` built a multi-KB URL that tripped server /
+    proxy length limits -> net::ERR_CONNECTION_CLOSED, blanking the "Online"
+    column (QA F12). Same response shape as the GET."""
+    sku_list = [s.strip() for s in (body.skus or []) if s and s.strip()]
+    return {"statuses": online_status_for_skus(sku_list)}
+
+
 @router.get("/online-summary")
 async def get_online_summary(current_user: dict = Depends(get_current_user)):
     """Diagnostic: is the e-commerce catalog DB configured/reachable + counts."""
