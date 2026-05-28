@@ -98,7 +98,9 @@ def _get_db():
     return None
 
 
-def _on_hand_by_product(db, product_ids: List[str], store_id: Optional[str] = None) -> Dict[str, int]:
+def _on_hand_by_product(
+    db, product_ids: List[str], store_id: Optional[str] = None
+) -> Dict[str, int]:
     """Count on-hand units per product from the serialized `stock` collection
     (one row per unit). A unit is on-hand when its status is an available one
     (or absent) and quantity > 0. Optionally scoped to a store. Fail-soft -> {}.
@@ -108,7 +110,11 @@ def _on_hand_by_product(db, product_ids: List[str], store_id: Optional[str] = No
     avail = ["AVAILABLE", "available", "IN_STOCK", "in_stock"]
     match: dict = {
         "product_id": {"$in": list(product_ids)},
-        "$or": [{"status": {"$in": avail}}, {"status": {"$exists": False}}, {"status": None}],
+        "$or": [
+            {"status": {"$in": avail}},
+            {"status": {"$exists": False}},
+            {"status": None},
+        ],
     }
     if store_id:
         match["store_id"] = store_id
@@ -117,7 +123,12 @@ def _on_hand_by_product(db, product_ids: List[str], store_id: Optional[str] = No
         for row in db.get_collection("stock_units").aggregate(
             [
                 {"$match": match},
-                {"$group": {"_id": "$product_id", "n": {"$sum": {"$ifNull": ["$quantity", 1]}}}},
+                {
+                    "$group": {
+                        "_id": "$product_id",
+                        "n": {"$sum": {"$ifNull": ["$quantity", 1]}},
+                    }
+                },
             ]
         ):
             out[row["_id"]] = int(row.get("n", 0) or 0)
@@ -249,24 +260,236 @@ async def get_stock(
     low_stock: bool = Query(False),
     current_user: dict = Depends(get_current_user),
 ):
-    """Get stock with filtering"""
-    repo = get_stock_repository()
+    """Get the Stock Ledger view for a store.
+
+    Returns ONE row per product the store can hold (every active product
+    in the catalog), enriched with on-hand counts aggregated from the
+    serialized `stock_units` collection. This is the canonical "Inventory"
+    page view and MUST agree with the POS product search at the same
+    store (a product the POS can sell -> a row in this list, with
+    on_hand >= 0).
+
+    Background: the older shape of this endpoint returned raw stock_units
+    documents (one row per serialized unit, with no product fields like
+    sku/name/brand/mrp). The frontend Stock Ledger then could not display
+    or filter rows, surfacing as "No products found matching your filters"
+    in the QA repro at BV-BOK-01 even though POS could sell the SKU at
+    the same store. See `tests/test_inventory_pos_consistency.py` for the
+    cross-surface guard.
+
+    Modes:
+    - `product_id` set: returns raw stock_units rows for that product+store
+      (per-unit detail; consumers wanted unit-level data here, e.g. transfer
+      builders that pick specific stock_ids).
+    - `low_stock=true`: returns the per-product low-stock aggregation
+      (unchanged, used by the Low-Stock tab).
+    - default: per-product ledger view scoped to `store_id`, optionally
+      filtered by `category`. Includes products with zero on-hand so the
+      page reflects the full catalog the store stocks.
+    """
+    stock_repo = get_stock_repository()
+    product_repo = get_product_repository()
     active_store = validate_store_access(store_id, current_user)
 
-    if repo is not None:
-        if low_stock:
-            stock = repo.find_low_stock(active_store)
-        elif product_id:
-            stock = repo.find_by_product_store(product_id, active_store)
-        else:
-            filter_dict = {"store_id": active_store} if active_store else {}
-            if category:
-                filter_dict["category"] = category
-            stock = repo.find_many(filter_dict, limit=100)
+    if stock_repo is None or product_repo is None:
+        return {"items": [], "total": 0}
 
+    # Mode 1: per-product low-stock aggregation. Untouched.
+    if low_stock:
+        stock = stock_repo.find_low_stock(active_store)
         return {"items": stock, "total": len(stock)}
 
-    return {"items": [], "total": 0}
+    # Mode 2: per-unit detail for one product. Consumers (e.g. transfer
+    # picker that selects specific stock_ids) want the raw stock_units rows.
+    if product_id:
+        stock = stock_repo.find_by_product_store(product_id, active_store)
+        return {"items": stock, "total": len(stock)}
+
+    # Mode 3 (default): per-product ledger view. Aggregate stock_units by
+    # product_id, join with the catalog so every row carries the fields the
+    # frontend renders (sku, name, brand, category, mrp, offer_price). Then
+    # union in catalog-only products so the page shows the full set the POS
+    # can sell at this store - even ones with zero on-hand right now.
+    items = _build_store_ledger(
+        stock_repo,
+        product_repo,
+        active_store,
+        category=category,
+    )
+    return {"items": items, "total": len(items)}
+
+
+def _build_store_ledger(
+    stock_repo,
+    product_repo,
+    store_id: Optional[str],
+    category: Optional[str] = None,
+) -> List[Dict]:
+    """Per-product Stock Ledger rows for a store.
+
+    Aggregates `stock_units` by (product_id, status) so a single product
+    with multiple serialized units rolls into ONE row carrying:
+      - on-hand count (AVAILABLE + IN_STOCK + status-absent, sums `quantity`
+        but defaults to 1 when missing because units are typically qty=1)
+      - reserved count (RESERVED)
+      - product master fields (sku, name, brand, category, mrp, offer_price)
+      - a representative barcode + location_code from any AVAILABLE unit
+        (so the row's Barcode + Location columns are populated)
+
+    Joins to `products` so every row carries the catalog fields the
+    frontend filters/renders. Products in the catalog with no stock_units
+    at this store still appear (with stock=0, reserved=0) so the ledger
+    shows what the store CAN sell, not just what it currently holds.
+
+    Fail-soft: aggregation errors fall back to a product-only listing.
+    """
+    on_hand_by_product: Dict[str, int] = {}
+    reserved_by_product: Dict[str, int] = {}
+    sample_unit_by_product: Dict[str, Dict] = {}
+
+    # ---- 1. Roll up stock_units per product at this store -------------
+    if store_id:
+        avail_statuses = ["AVAILABLE", "available", "IN_STOCK", "in_stock"]
+        try:
+            pipeline = [
+                {"$match": {"store_id": store_id}},
+                {
+                    "$group": {
+                        "_id": {
+                            "product_id": "$product_id",
+                            "status": "$status",
+                        },
+                        "qty": {"$sum": {"$ifNull": ["$quantity", 1]}},
+                        "barcode": {"$first": "$barcode"},
+                        "location_code": {"$first": "$location_code"},
+                    }
+                },
+            ]
+            for row in stock_repo.collection.aggregate(pipeline):
+                key = row["_id"] or {}
+                pid = key.get("product_id") or ""
+                status = key.get("status")
+                qty = int(row.get("qty") or 0)
+                if not pid:
+                    continue
+                if status in avail_statuses or status is None:
+                    on_hand_by_product[pid] = on_hand_by_product.get(pid, 0) + qty
+                    # Capture a sample barcode/location from any available unit
+                    # for the Barcode + Location columns on the ledger row.
+                    if pid not in sample_unit_by_product:
+                        sample_unit_by_product[pid] = {
+                            "barcode": row.get("barcode") or "",
+                            "location_code": row.get("location_code") or "",
+                        }
+                elif status == "RESERVED":
+                    reserved_by_product[pid] = reserved_by_product.get(pid, 0) + qty
+        except (AttributeError, TypeError, ValueError) as exc:
+            logger.warning("[INVENTORY] stock aggregation failed: %s", exc)
+
+    # ---- 2. Catalog union: list every active product (optionally filtered
+    # by category) so the ledger shows what the store CAN sell, not just
+    # what is currently on the floor. This is what aligns with POS - a
+    # product the POS can search for at this store is now ALWAYS in the
+    # Stock Ledger for the same store. -------------------------------
+    catalog_filter: Dict = {"is_active": True}
+    if category:
+        catalog_filter["category"] = category
+    try:
+        products = product_repo.find_many(catalog_filter, limit=5000)
+    except (AttributeError, TypeError, ValueError) as exc:
+        logger.warning("[INVENTORY] product list failed: %s", exc)
+        products = []
+
+    items: List[Dict] = []
+    seen_pids = set()
+    for product in products:
+        pid = str(product.get("product_id") or product.get("_id") or "")
+        if not pid:
+            continue
+        seen_pids.add(pid)
+        on_hand = on_hand_by_product.get(pid, 0)
+        reserved = reserved_by_product.get(pid, 0)
+        sample = sample_unit_by_product.get(pid, {})
+        items.append(_ledger_row(product, on_hand, reserved, sample, store_id))
+
+    # ---- 3. Edge case - units exist for a product that's NOT in the
+    # active catalog (deactivated SKU still on the shelf). Surface those
+    # rows too so the manager can see + clear them. ------------------
+    for pid, on_hand in on_hand_by_product.items():
+        if pid in seen_pids:
+            continue
+        product = product_repo.find_by_id(pid) or {"product_id": pid}
+        items.append(
+            _ledger_row(
+                product,
+                on_hand,
+                reserved_by_product.get(pid, 0),
+                sample_unit_by_product.get(pid, {}),
+                store_id,
+            )
+        )
+
+    return items
+
+
+def _ledger_row(
+    product: Dict,
+    on_hand: int,
+    reserved: int,
+    sample_unit: Dict,
+    store_id: Optional[str],
+) -> Dict:
+    """Build a single Stock Ledger row from a product master doc.
+
+    Field naming MIRRORS the legacy raw-stock_units shape AND the
+    product-master shape both because consumers landed on a mix:
+      - `id` + `sku` + `name` + `brand` + `category` + `mrp` (used by
+        the InventoryPage card grid, transfer modal, returns picker)
+      - `product_id` + `quantity` + `reserved_quantity` (compatibility
+        with code that grew up on stock_units rows)
+      - `stock` (front-end alias for on-hand) + `offerPrice` (FE alias
+        for offer_price) so existing renderers don't have to change.
+    """
+    pid = str(product.get("product_id") or product.get("_id") or "")
+    brand = product.get("brand", "")
+    model = product.get("model", "")
+    # `name` is constructed from brand+model when the master doc doesn't
+    # carry one explicitly; matches the convention in aging + reports.
+    name = product.get("name") or f"{brand} {model}".strip() or product.get("sku", "")
+    mrp = float(product.get("mrp", 0) or 0)
+    offer_price = float(product.get("offer_price", mrp) or mrp)
+    return {
+        "id": pid,
+        "product_id": pid,
+        "stock_id": pid,  # legacy alias
+        "sku": product.get("sku", ""),
+        "name": name,
+        "productName": name,
+        "brand": brand,
+        "model": model,
+        "category": product.get("category", ""),
+        "mrp": mrp,
+        "offerPrice": offer_price,
+        "offer_price": offer_price,
+        "stock": on_hand,
+        "quantity": on_hand,
+        "reserved": reserved,
+        "reservedQuantity": reserved,
+        "reserved_quantity": reserved,
+        "barcode": sample_unit.get("barcode", "") or product.get("barcode", ""),
+        "location": sample_unit.get("location_code", "")
+        or product.get("location_code", ""),
+        "location_code": sample_unit.get("location_code", "")
+        or product.get("location_code", ""),
+        "store_id": store_id or "",
+        "is_active": bool(product.get("is_active", True)),
+        # Pass through CL identity fields so the contact-lens widgets
+        # can read them without a second fetch.
+        "modality": product.get("modality"),
+        "cl_series": product.get("cl_series"),
+        "base_curve": product.get("base_curve"),
+        "diameter": product.get("diameter"),
+    }
 
 
 # NOTE: Specific routes MUST come before /{parameter} routes
@@ -840,7 +1063,8 @@ async def complete_stock_count(
                     ),
                     priority=pri,
                     category="Inventory",
-                    store_id=count_doc.get("store_id") or current_user.get("active_store_id"),
+                    store_id=count_doc.get("store_id")
+                    or current_user.get("active_store_id"),
                     dedupe_ref=f"stockcount:{count_id}",
                 )
         except Exception as _e:  # noqa: BLE001
@@ -924,31 +1148,54 @@ async def transfer_recommendations(
             return {"recommendations": [], "store_id": active_store}
 
         # Cross-store available levels for just the deficit products.
-        rows = stock_repo.aggregate(
-            [
-                {"$match": {"product_id": {"$in": low_ids}, "status": "AVAILABLE"}},
-                {"$group": {"_id": {"p": "$product_id", "s": "$store_id"}, "qty": {"$sum": "$quantity"}}},
-            ]
-        ) or []
+        rows = (
+            stock_repo.aggregate(
+                [
+                    {"$match": {"product_id": {"$in": low_ids}, "status": "AVAILABLE"}},
+                    {
+                        "$group": {
+                            "_id": {"p": "$product_id", "s": "$store_id"},
+                            "qty": {"$sum": "$quantity"},
+                        }
+                    },
+                ]
+            )
+            or []
+        )
         store_levels: Dict[str, Dict[str, int]] = {}
         for r in rows:
             key = r.get("_id", {})
-            store_levels.setdefault(key.get("p"), {})[key.get("s")] = int(r.get("qty", 0) or 0)
+            store_levels.setdefault(key.get("p"), {})[key.get("s")] = int(
+                r.get("qty", 0) or 0
+            )
 
         # Enrich with product names.
         names: Dict[str, str] = {}
         product_repo = get_product_repository()
         if product_repo is not None:
             for p in product_repo.find_many({"product_id": {"$in": low_ids}}) or []:
-                names[p.get("product_id")] = p.get("name") or p.get("product_name") or ""
+                names[p.get("product_id")] = (
+                    p.get("name") or p.get("product_name") or ""
+                )
 
         low_products = [
-            {"product_id": r["_id"], "quantity": int(r.get("quantity", 0) or 0),
-             "product_name": names.get(r["_id"], "")}
-            for r in low if r.get("_id")
+            {
+                "product_id": r["_id"],
+                "quantity": int(r.get("quantity", 0) or 0),
+                "product_name": names.get(r["_id"], ""),
+            }
+            for r in low
+            if r.get("_id")
         ]
-        recs = recommend_transfers(active_store, low_products, store_levels, threshold=threshold)
-        return {"store_id": active_store, "threshold": threshold, "recommendations": recs, "count": len(recs)}
+        recs = recommend_transfers(
+            active_store, low_products, store_levels, threshold=threshold
+        )
+        return {
+            "store_id": active_store,
+            "threshold": threshold,
+            "recommendations": recs,
+            "count": len(recs),
+        }
     except Exception as e:  # noqa: BLE001
         logger.warning(f"transfer_recommendations error: {e}")
         return {"recommendations": [], "store_id": active_store}
@@ -968,13 +1215,15 @@ async def assign_accountability(
     key = {"store_id": body.store_id, "category": body.category or "ALL"}
     coll.update_one(
         key,
-        {"$set": {
-            **key,
-            "staff_id": body.staff_id,
-            "staff_name": body.staff_name,
-            "assigned_by": current_user.get("user_id"),
-            "assigned_at": datetime.now().isoformat(),
-        }},
+        {
+            "$set": {
+                **key,
+                "staff_id": body.staff_id,
+                "staff_name": body.staff_name,
+                "assigned_by": current_user.get("user_id"),
+                "assigned_at": datetime.now().isoformat(),
+            }
+        },
         upsert=True,
     )
     return {"message": "Custodian assigned", **key, "staff_id": body.staff_id}
@@ -1019,7 +1268,14 @@ async def accountability_shrinkage(
     try:
         counts = list(
             db.get_collection("stock_counts").find(
-                q, {"_id": 0, "store_id": 1, "audit_number": 1, "shrinkage_percentage": 1, "completed_at": 1}
+                q,
+                {
+                    "_id": 0,
+                    "store_id": 1,
+                    "audit_number": 1,
+                    "shrinkage_percentage": 1,
+                    "completed_at": 1,
+                },
             )
         )
         custodians = {
@@ -1029,7 +1285,10 @@ async def accountability_shrinkage(
             )
             if c.get("store_id")
         }
-        return {"rows": shrinkage_by_custodian(counts, custodians), "count": len(counts)}
+        return {
+            "rows": shrinkage_by_custodian(counts, custodians),
+            "count": len(counts),
+        }
     except Exception as e:  # noqa: BLE001
         logger.warning(f"accountability_shrinkage error: {e}")
         return {"rows": []}
@@ -1265,9 +1524,7 @@ def _load_cl_stock_rows(db, store_id: Optional[str]) -> List[dict]:
         products_coll = db.get_collection("products")
 
         # 1. Resolve the CL product ids first (category lives on the PRODUCT).
-        cl_products = list(
-            products_coll.find({"category": {"$in": CL_CATEGORY_CODES}})
-        )
+        cl_products = list(products_coll.find({"category": {"$in": CL_CATEGORY_CODES}}))
         if not cl_products:
             return []
 
@@ -1332,12 +1589,29 @@ def _group_cl_rows(rows: List[dict], now: Optional[datetime] = None) -> List[dic
         key = (r.get("product_id"), r.get("batch_code"), r.get("expiry_date"))
         g = groups.get(key)
         if g is None:
-            g = {k: r.get(k) for k in (
-                "product_id", "sku", "brand", "model", "category",
-                "cl_series", "modality", "base_curve", "diameter",
-                "cl_power", "cl_cyl", "cl_axis", "cl_add", "color",
-                "pack_size", "batch_code", "expiry_date", "location_code",
-            )}
+            g = {
+                k: r.get(k)
+                for k in (
+                    "product_id",
+                    "sku",
+                    "brand",
+                    "model",
+                    "category",
+                    "cl_series",
+                    "modality",
+                    "base_curve",
+                    "diameter",
+                    "cl_power",
+                    "cl_cyl",
+                    "cl_axis",
+                    "cl_add",
+                    "color",
+                    "pack_size",
+                    "batch_code",
+                    "expiry_date",
+                    "location_code",
+                )
+            }
             g["on_hand"] = 0
             g["days_until_expiry"] = compute_days_until_expiry(
                 r.get("expiry_date"), now
@@ -1350,9 +1624,11 @@ def _group_cl_rows(rows: List[dict], now: Optional[datetime] = None) -> List[dic
     grouped.sort(
         key=lambda g: (
             g.get("days_until_expiry") is None,
-            g.get("days_until_expiry")
-            if g.get("days_until_expiry") is not None
-            else 10**9,
+            (
+                g.get("days_until_expiry")
+                if g.get("days_until_expiry") is not None
+                else 10**9
+            ),
         )
     )
     return grouped
@@ -1366,7 +1642,10 @@ async def list_contact_lens_inventory(
     base_curve: Optional[float] = Query(None),
     cl_power: Optional[float] = Query(None),
     near_expiry_days: Optional[int] = Query(
-        None, ge=1, le=365, description="If set, only return lines expiring within N days"
+        None,
+        ge=1,
+        le=365,
+        description="If set, only return lines expiring within N days",
     ),
     current_user: dict = Depends(get_current_user),
 ):
@@ -1385,7 +1664,9 @@ async def list_contact_lens_inventory(
     if brand:
         rows = [r for r in rows if (r.get("brand") or "").lower() == brand.lower()]
     if modality:
-        rows = [r for r in rows if (r.get("modality") or "").upper() == modality.upper()]
+        rows = [
+            r for r in rows if (r.get("modality") or "").upper() == modality.upper()
+        ]
     if base_curve is not None:
         rows = [r for r in rows if r.get("base_curve") == base_curve]
     if cl_power is not None:
@@ -1437,7 +1718,11 @@ async def get_contact_lens_expiry_status(
 
     # FEFO pick suggestion: dated batches with on-hand stock, earliest first.
     fefo = fefo_sort(
-        [line for line in lines if line.get("expiry_date") and line.get("on_hand", 0) > 0]
+        [
+            line
+            for line in lines
+            if line.get("expiry_date") and line.get("on_hand", 0) > 0
+        ]
     )
 
     # Backward-compatible shape (expired / expiring_soon / safe / summary) plus
@@ -1484,8 +1769,15 @@ async def get_lens_power_grid(
     try:
         # Lens category codes across the schema (short + full enums).
         lens_cats = [
-            "LS", "OPTICAL_LENS", "OPTICAL_LENSES", "RX_LENSES", "LENS",
-            "LENSES", "EYEGLASS_LENS", "SPECTACLE_LENS", "SPECTACLE_LENSES",
+            "LS",
+            "OPTICAL_LENS",
+            "OPTICAL_LENSES",
+            "RX_LENSES",
+            "LENS",
+            "LENSES",
+            "EYEGLASS_LENS",
+            "SPECTACLE_LENS",
+            "SPECTACLE_LENSES",
         ]
         lenses = list(
             db.get_collection("products").find(
@@ -1525,8 +1817,12 @@ async def get_cl_power_grid(
             db.get_collection("products").find(
                 {"category": {"$in": CL_CATEGORY_CODES}},
                 {
-                    "_id": 0, "product_id": 1, "cl_power": 1, "base_curve": 1,
-                    "brand": 1, "cl_series": 1,
+                    "_id": 0,
+                    "product_id": 1,
+                    "cl_power": 1,
+                    "base_curve": 1,
+                    "brand": 1,
+                    "cl_series": 1,
                 },
             )
         )
@@ -1538,7 +1834,10 @@ async def get_cl_power_grid(
         near: Dict[str, bool] = {}
         if pids:
             avail = ["AVAILABLE", "available", "IN_STOCK", "in_stock"]
-            match: dict = {"product_id": {"$in": pids}, "expiry_date": {"$exists": True}}
+            match: dict = {
+                "product_id": {"$in": pids},
+                "expiry_date": {"$exists": True},
+            }
             if store_id:
                 match["store_id"] = store_id
             try:
@@ -1762,10 +2061,18 @@ async def get_overstock_analysis(
 
 # Broad "this order represents a real sale" status set (both cases seen in DB)
 _SOLD_STATUSES = [
-    "DELIVERED", "delivered", "Delivered",
-    "COMPLETED", "completed", "Completed",
-    "PAID", "paid", "Paid",
-    "FULFILLED", "fulfilled", "Fulfilled",
+    "DELIVERED",
+    "delivered",
+    "Delivered",
+    "COMPLETED",
+    "completed",
+    "Completed",
+    "PAID",
+    "paid",
+    "Paid",
+    "FULFILLED",
+    "fulfilled",
+    "Fulfilled",
 ]
 
 
@@ -2155,7 +2462,14 @@ def _lookup_product(products_coll, product_id: str) -> Optional[dict]:
     we try the cheap string matches first. Defensive — never raises."""
     if not product_id:
         return None
-    projection = {"_id": 0, "name": 1, "sku": 1, "barcode": 1, "brand": 1, "category": 1}
+    projection = {
+        "_id": 0,
+        "name": 1,
+        "sku": 1,
+        "barcode": 1,
+        "brand": 1,
+        "category": 1,
+    }
     try:
         p = products_coll.find_one(
             {

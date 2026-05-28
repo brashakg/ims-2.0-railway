@@ -142,7 +142,12 @@ async def list_products(
     limit: int = Query(50, ge=1, le=100),
     current_user: dict = Depends(get_current_user),
 ):
-    """List products with filtering. If store_id provided, only return products with stock at that store."""
+    """List active catalog products with optional search / brand / category
+    filters. `store_id` is accepted (kept for backwards-compat) but does NOT
+    filter the result set - the canonical Stock Ledger at /inventory/stock
+    is the per-store on-hand view. POS search uses this endpoint so a SKU
+    that's in the catalog can always be looked up at any store the user has
+    access to."""
     from ..services.cache import cache
 
     # Build cache key from query params
@@ -164,30 +169,17 @@ async def list_products(
         else:
             products = repo.find_many({}, skip=skip, limit=limit)
 
-        # If store_id provided, filter to products with stock at this store
-        if store_id and products:
-            try:
-                stock_repo = (
-                    repo.db.get_collection("stock_units")
-                    if hasattr(repo, "db")
-                    else None
-                )
-                if stock_repo:
-                    stock_product_ids = set()
-                    async for su in stock_repo.find(
-                        {"store_id": store_id, "quantity": {"$gt": 0}},
-                        {"product_id": 1},
-                    ):
-                        stock_product_ids.add(su.get("product_id", ""))
-                    if stock_product_ids:
-                        products = [
-                            p
-                            for p in products
-                            if str(p.get("product_id", p.get("_id", "")))
-                            in stock_product_ids
-                        ]
-            except Exception:
-                pass  # Fallback: return all products if stock lookup fails
+        # NOTE: `store_id` is INTENTIONALLY a no-op here for the product
+        # search. The earlier in-place filter attempted `async for` on a
+        # SYNC pymongo cursor (TypeError: 'Cursor' object is not async
+        # iterable) -> the wrapping `except Exception: pass` swallowed it
+        # silently, leaving the list unfiltered in prod. We now skip that
+        # filter on purpose so POS search returns every catalog product
+        # the store CAN sell (matching /inventory/stock semantics: every
+        # active product appears, on_hand may be zero). This keeps the
+        # QA-reported invariant - if POS shows a SKU at a store, the
+        # Stock Ledger MUST show the same SKU at the same store. Per-SKU
+        # on-hand quantities are surfaced via /inventory/stock, not here.
 
         total = len(products)
         result = {"products": products, "total": total}
@@ -254,9 +246,19 @@ async def create_product(
 
         # Persist CL identity fields top-level only when provided (additive).
         for _f in (
-            "cl_series", "modality", "base_curve", "diameter",
-            "cl_power", "cl_cyl", "cl_axis", "cl_add", "pack_size",
-            "sph", "cyl", "axis", "add",
+            "cl_series",
+            "modality",
+            "base_curve",
+            "diameter",
+            "cl_power",
+            "cl_cyl",
+            "cl_axis",
+            "cl_add",
+            "pack_size",
+            "sph",
+            "cyl",
+            "axis",
+            "add",
         ):
             _v = getattr(product, _f, None)
             if _v is not None:
