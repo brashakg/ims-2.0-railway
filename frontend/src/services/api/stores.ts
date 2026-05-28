@@ -145,17 +145,21 @@ export const adminUserApi = {
     email: string;
     phone?: string;
     role?: string;
+    roles?: string[];
     storeId?: string;
+    storeIds?: string[];
+    primaryStoreId?: string;
+    discountCap?: number;
     password?: string;
     username?: string;
+    mustChangePassword?: boolean;
     status?: string;
   }) => {
-    // Map the UI's shape (name/role/storeId) onto the backend UserCreate
-    // contract (full_name/roles[]/store_ids[]). Sending the raw UI shape was
-    // a 422: `username` + `full_name` are required and were never sent, and
-    // `role`/`storeId` (wrong names) were silently dropped so the new user got
-    // no role/store. Derive a username from the email local-part when the form
-    // doesn't supply one.
+    // Map the UI shape onto the backend UserCreate contract
+    // (full_name/roles[]/store_ids[]/discount_cap). Accepts the multi-select
+    // arrays the forms collect (roles/storeIds) and falls back to the single
+    // role/storeId for older callers. Derive a username from the email
+    // local-part when the form doesn't supply one.
     const fullName = (data.name || '').trim();
     const emailLocal = (data.email || '').split('@')[0] || '';
     const derived = (data.username || emailLocal || fullName)
@@ -170,15 +174,26 @@ export const adminUserApi = {
       full_name: fullName.length >= 2 ? fullName : username,
       password: hasRealPwd ? data.password : 'Welcome@123',
       // A temp/auto password must be changed on first login (not become the
-      // permanent password).
-      must_change_password: !hasRealPwd,
+      // permanent password). Onboarding passes mustChangePassword:true so the
+      // shown temp password never silently becomes permanent.
+      must_change_password:
+        data.mustChangePassword != null ? data.mustChangePassword : !hasRealPwd,
     };
     if (data.phone) payload.phone = data.phone;
-    if (data.role) payload.roles = [data.role];
-    if (data.storeId) {
-      payload.store_ids = [data.storeId];
-      payload.primary_store_id = data.storeId;
+    const roles =
+      data.roles && data.roles.length ? data.roles : data.role ? [data.role] : [];
+    const storeIds =
+      data.storeIds && data.storeIds.length
+        ? data.storeIds
+        : data.storeId
+          ? [data.storeId]
+          : [];
+    if (roles.length) payload.roles = roles;
+    if (storeIds.length) {
+      payload.store_ids = storeIds;
+      payload.primary_store_id = data.primaryStoreId || storeIds[0];
     }
+    if (data.discountCap != null) payload.discount_cap = data.discountCap;
     const response = await api.post('/users', payload);
     return response.data;
   },
@@ -188,19 +203,32 @@ export const adminUserApi = {
     email: string;
     phone: string;
     role: string;
+    roles: string[];
     storeId: string;
+    storeIds: string[];
+    primaryStoreId: string;
+    discountCap: number;
     status: string;
   }>) => {
-    // Same name->full_name / role->roles[] / storeId->store_ids[] mapping the
-    // backend UserUpdate expects (raw UI shape silently dropped role + store).
+    // name->full_name / roles[] / store_ids[] / discount_cap mapping the backend
+    // UserUpdate expects. Prefers the multi-select arrays the forms collect.
     const payload: Record<string, unknown> = {};
     if (data.name !== undefined) payload.full_name = data.name;
     if (data.phone !== undefined) payload.phone = data.phone;
-    if (data.role) payload.roles = [data.role];
-    if (data.storeId) {
-      payload.store_ids = [data.storeId];
-      payload.primary_store_id = data.storeId;
+    const roles =
+      data.roles && data.roles.length ? data.roles : data.role ? [data.role] : undefined;
+    const storeIds =
+      data.storeIds && data.storeIds.length
+        ? data.storeIds
+        : data.storeId
+          ? [data.storeId]
+          : undefined;
+    if (roles) payload.roles = roles;
+    if (storeIds) {
+      payload.store_ids = storeIds;
+      payload.primary_store_id = data.primaryStoreId || storeIds[0];
     }
+    if (data.discountCap != null) payload.discount_cap = data.discountCap;
     if (data.status !== undefined) payload.is_active = data.status === 'ACTIVE';
     const response = await api.put(`/users/${userId}`, payload);
     return response.data;
