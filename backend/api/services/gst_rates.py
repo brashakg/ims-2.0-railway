@@ -100,15 +100,31 @@ GST_CATEGORY_TABLE: dict = {
     "SMTWT": ("910221", 18.0),  # Smart Watch
 }
 
-# Default GST rate for any category not in the table above (conservative
-# standard rate, matching the prior IMS fallback and the frontend default).
-DEFAULT_GST_RATE = 18.0
+# Default GST rate for any category not in the table above.
+#
+# OPTICAL-DOMINANT FALLBACK (changed 18.0 -> 5.0 on 2026-05-28): a QA finding
+# showed an UNCATEGORIZED product ("Fastrack P357BK1", blank category) billed at
+# 18% GST at POS via this fallback. For an optical chain the overwhelming
+# majority of stock is frames / spectacle lenses / corrective specs / contact
+# lenses, all of which are 5% under GST 2.0 -- so 5% is the far safer default
+# than 18% when a category is somehow missing. Over-charging GST is both a
+# customer-trust and a compliance problem, so we bias the *unknown* case toward
+# the dominant optical rate.
+#
+# NOTE: this is only a safety net. The REAL fix is the server-side block-save
+# guard in routers/products.py (create/update reject a blank category with 422)
+# plus the one-time backfill of existing uncategorized rows to FRAME/5%
+# (scripts/backfill_uncategorized_to_frame.py). A correctly-categorized product
+# never reaches this fallback at all.
+DEFAULT_GST_RATE = 5.0
 
 
 def gst_rate_for_category(category: str) -> float:
     """Return the GST rate (percent, as a float) for a product/order category.
 
-    Falls back to DEFAULT_GST_RATE (18.0) for unknown categories.
+    Falls back to DEFAULT_GST_RATE (5.0 -- optical-dominant) for unknown
+    categories. See the DEFAULT_GST_RATE comment above for why the fallback is
+    5% and not the 18% standard rate.
     """
     return GST_CATEGORY_TABLE.get((category or "").strip().upper(), (None, DEFAULT_GST_RATE))[1]
 

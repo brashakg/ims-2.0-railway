@@ -45,11 +45,14 @@ def test_fallback_non_corrective_18pct(monkeypatch):
         assert resolve_gst_rate(category=cat) == 18.0
 
 
-def test_fallback_unknown_category_18pct(monkeypatch):
+def test_fallback_unknown_category_defaults_to_5(monkeypatch):
+    # Optical-dominant fallback: the static GST_CATEGORY_TABLE default moved
+    # 18% -> 5% on 2026-05-28 (QA: uncategorized product billed at 18%), so an
+    # unknown category now resolves to 5% via the static table fall-through.
     _empty_lookup(monkeypatch)
-    assert resolve_gst_rate(category="WIDGET") == 18.0
-    assert resolve_gst_rate(category=None) == 18.0
-    assert resolve_gst_rate() == 18.0
+    assert resolve_gst_rate(category="WIDGET") == 5.0
+    assert resolve_gst_rate(category=None) == 5.0
+    assert resolve_gst_rate() == 5.0
 
 
 def test_category_spelling_variants_normalize(monkeypatch):
