@@ -9,9 +9,8 @@ import { adminStoreApi, adminUserApi } from '../../services/api';
 import {
   Building, Users, Plus, Edit, MapPin, Phone, Clock,
   Shield, Save, X, ChevronRight, CheckCircle, AlertTriangle,
-  Tag, Wand2,
+  Tag,
 } from 'lucide-react';
-import { StoreSetupWizard } from '../../components/settings/StoreSetupWizard';
 import clsx from 'clsx';
 
 // ---------------------------------------------------------------------------
@@ -84,7 +83,7 @@ const DEFAULT_EMPLOYEE: NewEmployee = {
 export default function SetupPage() {
   const { user } = useAuth();
   const toast = useToast();
-  const [activeTab, setActiveTab] = useState<'stores' | 'employees' | 'wizard'>('stores');
+  const [activeTab, setActiveTab] = useState<'stores' | 'employees'>('stores');
   const [stores, setStores] = useState<StoreConfig[]>([]);
 
   useEffect(() => {
@@ -137,9 +136,6 @@ export default function SetupPage() {
           </button>
           <button onClick={() => setActiveTab('employees')} className={clsx('px-4 py-2 rounded-md text-sm font-medium transition-colors', activeTab === 'employees' ? 'bg-white shadow text-gray-900' : 'text-gray-500')}>
             <Users className="w-4 h-4 inline mr-1.5" />Employees
-          </button>
-          <button onClick={() => setActiveTab('wizard')} className={clsx('px-4 py-2 rounded-md text-sm font-medium transition-colors', activeTab === 'wizard' ? 'bg-white shadow text-gray-900' : 'text-gray-500')}>
-            <Wand2 className="w-4 h-4 inline mr-1.5" />Setup Wizard
           </button>
         </div>
       </div>
@@ -266,20 +262,10 @@ export default function SetupPage() {
       {/* ================================================================ */}
       {/* SETUP WIZARD TAB                                                 */}
       {/* ================================================================ */}
-      {activeTab === 'wizard' && (
-        <div className="space-y-4">
-          <div className="bg-white border border-gray-200 rounded-xl p-6">
-            <div className="flex items-center gap-3 mb-4">
-              <Wand2 className="w-6 h-6 text-bv-gold-500" />
-              <div>
-                <h2 className="text-lg font-semibold text-gray-900">New Store Setup Wizard</h2>
-                <p className="text-sm text-gray-500">Step-by-step guided setup for opening a new store location</p>
-              </div>
-            </div>
-            <StoreSetupWizard />
-          </div>
-        </div>
-      )}
+      {/* "Setup Wizard" tab retired: it was a 3rd, broken store-create path
+          (posted the wrong shape -> 422, with blank staff/inventory steps).
+          Stores are created in Organization, staff in Settings > Users -- one
+          canonical path each. */}
     </div>
   );
 }
