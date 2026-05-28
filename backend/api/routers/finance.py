@@ -8,7 +8,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from .auth import get_current_user
-from ..services import ap_engine, cashflow, itc_reconcile
+from ..dependencies import validate_store_access
+from ..services import ap_engine, cashflow, itc_reconcile, cash_register
 
 # Mounted at /api/v1/finance in main.py. NO internal prefix: the earlier
 # prefix="/finance" double-prefixed every path to /api/v1/finance/finance/*,
@@ -1657,3 +1658,353 @@ async def get_period_status(
     """Whether an accounting period is locked (for the UI to disable edits)."""
     db = _get_db()
     return {"month": month, "year": year, "locked": is_period_locked(db, month, year)}
+
+
+# ============================================================================
+# CASH REGISTER / EOD RECONCILIATION
+# ============================================================================
+# A till session: opened with a denomination float, closed with a counted
+# denomination breakdown. Expected cash = opening + POS CASH sales for the
+# window - cash refunds - cash payouts/expenses - bank deposit. Variance =
+# counted - expected. Store-scoped; persisted to `cash_register_sessions`.
+#
+# Pure money math lives in services/cash_register.py; this router owns
+# persistence, store scoping, and pulling the POS CASH figure for the window.
+
+_CASH_SESSIONS = "cash_register_sessions"
+
+
+class DenominationLine(BaseModel):
+    face: int = Field(..., description="Face value in rupees, e.g. 500")
+    pieces: int = Field(0, ge=0, description="Number of notes/coins of this face")
+    kind: str = Field("note", description="'note' or 'coin'")
+
+
+class CashRegisterOpen(BaseModel):
+    store_id: Optional[str] = None
+    shift: Optional[str] = None  # AM / PM / FULL (free text)
+    denominations: List[DenominationLine] = Field(default_factory=list)
+    opening_float: Optional[float] = None  # optional override of denom sum
+    note: Optional[str] = None
+
+
+class CashRegisterClose(BaseModel):
+    session_id: str
+    denominations: List[DenominationLine] = Field(default_factory=list)
+    bank_deposit: float = 0.0
+    counted_override: Optional[float] = None  # optional override of denom sum
+    tolerance: float = 0.0
+    note: Optional[str] = None
+
+
+def _iso_now() -> str:
+    return datetime.utcnow().isoformat()
+
+
+def _cash_sales_for_window(db, store_id: str, start_iso: str, end_iso: Optional[str]):
+    """Net POS CASH collected for a store between start and end (ISO strings).
+
+    Sums order.payments[] where method == 'CASH' (the canonical tender field;
+    `mode` tolerated as a legacy alias). Negative CASH tenders (refunds) are
+    returned separately so the reconciliation can show sales vs refunds.
+    Returns (cash_sales, cash_refunds) as positive magnitudes."""
+    if db is None:
+        return 0.0, 0.0
+    match: Dict = {"store_id": store_id}
+    created = {"$gte": start_iso}
+    if end_iso:
+        created["$lte"] = end_iso
+    match["created_at"] = created
+
+    cash_sales = 0.0
+    cash_refunds = 0.0
+    try:
+        cursor = db.get_collection("orders").find(match, {"_id": 0, "payments": 1})
+        for o in cursor:
+            for p in o.get("payments") or []:
+                method = str(p.get("method") or p.get("mode") or "").upper()
+                if method != "CASH":
+                    continue
+                try:
+                    amt = float(p.get("amount", 0) or 0)
+                except (TypeError, ValueError):
+                    amt = 0.0
+                if amt >= 0:
+                    cash_sales += amt
+                else:
+                    cash_refunds += -amt
+    except Exception:
+        return 0.0, 0.0
+    return round(cash_sales, 2), round(cash_refunds, 2)
+
+
+def _cash_expenses_for_window(
+    db, store_id: str, start_iso: str, end_iso: Optional[str]
+):
+    """Cash payouts from the drawer for a store in the window.
+
+    Expenses use `expense_date` (ISO date) and `payment_mode`. Only CASH-mode
+    expenses come out of the physical drawer; UPI/CARD/BANK don't. Counts
+    APPROVED / PAID / SENT_TO_ACCOUNTANT spends (anything that represents money
+    actually disbursed). Fail-soft to 0."""
+    if db is None:
+        return 0.0
+    start_day = start_iso[:10]
+    end_day = (end_iso or _iso_now())[:10]
+    total = 0.0
+    try:
+        cursor = db.get_collection("expenses").find(
+            {
+                "store_id": store_id,
+                "expense_date": {"$gte": start_day, "$lte": end_day},
+            },
+            {"_id": 0, "amount": 1, "payment_mode": 1, "status": 1, "expense_date": 1},
+        )
+        for e in cursor:
+            mode = str(e.get("payment_mode") or "").upper()
+            if mode and mode != "CASH":
+                continue  # unknown mode counts as cash (conservative)
+            status = str(e.get("status") or "").upper()
+            if status not in ("APPROVED", "PAID", "SENT_TO_ACCOUNTANT", "REIMBURSED"):
+                continue
+            try:
+                total += float(e.get("amount", 0) or 0)
+            except (TypeError, ValueError):
+                pass
+    except Exception:
+        return 0.0
+    return round(total, 2)
+
+
+@router.post("/cash-register/open")
+async def open_cash_register(
+    body: CashRegisterOpen,
+    current_user: dict = Depends(get_current_user),
+):
+    """Open a till session with an opening float counted by denomination.
+
+    Store-scoped (validate_store_access). Blocks a second OPEN session for the
+    same store so the drawer can't be opened twice without closing."""
+    db = _get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    store_id = validate_store_access(body.store_id or "", current_user)
+    if not store_id:
+        raise HTTPException(status_code=400, detail="No store context for this user")
+
+    coll = db.get_collection(_CASH_SESSIONS)
+
+    # Guard: one OPEN session per store at a time.
+    existing = None
+    try:
+        existing = coll.find_one({"store_id": store_id, "status": "OPEN"})
+    except Exception:
+        existing = None
+    if existing is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "A cash register session is already open for this store. "
+                "Close it before opening a new one."
+            ),
+        )
+
+    denoms = cash_register.normalize_denominations(
+        [d.model_dump() for d in body.denominations]
+    )
+    denom_total = cash_register.total_from_denominations(denoms)
+    opening_float = (
+        round(float(body.opening_float), 2)
+        if body.opening_float is not None
+        else denom_total
+    )
+
+    now = _iso_now()
+    session_id = f"CR-{store_id}-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+    doc = {
+        "session_id": session_id,
+        "store_id": store_id,
+        "status": "OPEN",
+        "shift": (body.shift or "").upper() or None,
+        "opening_float": opening_float,
+        "opening_denominations": denoms,
+        "opened_at": now,
+        "opened_by": current_user.get("user_id"),
+        "opened_by_name": current_user.get("name"),
+        "opening_note": body.note,
+        # close-time fields, filled on /close
+        "closed_at": None,
+        "closed_by": None,
+        "closed_by_name": None,
+        "closing_denominations": [],
+        "counted": None,
+        "expected": None,
+        "variance": None,
+        "variance_status": None,
+    }
+    try:
+        coll.insert_one(dict(doc))
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"Could not open session: {exc}")
+    doc.pop("_id", None)
+    return doc
+
+
+@router.post("/cash-register/close")
+async def close_cash_register(
+    body: CashRegisterClose,
+    current_user: dict = Depends(get_current_user),
+):
+    """Close a till session: count the drawer by denomination, compute expected
+    vs counted variance, and lock the session.
+
+    Expected = opening float + POS CASH sales for the session window
+    - cash refunds - cash expenses - bank deposit."""
+    db = _get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    coll = db.get_collection(_CASH_SESSIONS)
+    session = None
+    try:
+        session = coll.find_one({"session_id": body.session_id})
+    except Exception:
+        session = None
+    if session is None:
+        raise HTTPException(status_code=404, detail="Cash register session not found")
+
+    store_id = validate_store_access(session.get("store_id") or "", current_user)
+    if session.get("status") == "CLOSED":
+        raise HTTPException(status_code=409, detail="Session already closed")
+
+    start_iso = session.get("opened_at") or _iso_now()
+    end_iso = _iso_now()
+
+    cash_sales, cash_refunds = _cash_sales_for_window(db, store_id, start_iso, end_iso)
+    cash_expenses = _cash_expenses_for_window(db, store_id, start_iso, end_iso)
+    opening_float = float(session.get("opening_float", 0) or 0)
+
+    denoms = cash_register.normalize_denominations(
+        [d.model_dump() for d in body.denominations]
+    )
+    counted = (
+        round(float(body.counted_override), 2)
+        if body.counted_override is not None
+        else cash_register.total_from_denominations(denoms)
+    )
+
+    summary = cash_register.build_close_summary(
+        opening_float=opening_float,
+        cash_sales=cash_sales,
+        cash_refunds=cash_refunds,
+        cash_expenses=cash_expenses,
+        bank_deposit=body.bank_deposit,
+        denominations=denoms,
+        tolerance=body.tolerance,
+    )
+    # build_close_summary uses the denoms total for counted; honour an override.
+    summary["counted"] = counted
+    summary["variance"] = cash_register.compute_variance(counted, summary["expected"])
+    summary["variance_status"] = cash_register.variance_status(
+        summary["variance"], body.tolerance
+    )
+
+    update = {
+        "status": "CLOSED",
+        "closed_at": end_iso,
+        "closed_by": current_user.get("user_id"),
+        "closed_by_name": current_user.get("name"),
+        "closing_denominations": denoms,
+        "cash_sales": cash_sales,
+        "cash_refunds": cash_refunds,
+        "cash_expenses": cash_expenses,
+        "bank_deposit": summary["bank_deposit"],
+        "counted": counted,
+        "expected": summary["expected"],
+        "variance": summary["variance"],
+        "variance_status": summary["variance_status"],
+        "tolerance": summary["tolerance"],
+        "closing_note": body.note,
+    }
+    try:
+        coll.update_one({"session_id": body.session_id}, {"$set": update})
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"Could not close session: {exc}")
+
+    merged = dict(session)
+    merged.update(update)
+    merged.pop("_id", None)
+    return merged
+
+
+@router.get("/cash-register/sessions")
+async def list_cash_register_sessions(
+    store_id: Optional[str] = Query(None),
+    status: Optional[str] = Query(None, description="OPEN / CLOSED"),
+    limit: int = Query(50, ge=1, le=200),
+    current_user: dict = Depends(get_current_user),
+):
+    """Cash register session history, store-scoped, newest first.
+
+    Also returns the live `open_session` (if any) and an `expected_preview` for
+    it so the close screen can show the running expected figure before a count
+    is entered."""
+    db = _get_db()
+    if db is None:
+        return {"sessions": [], "open_session": None, "expected_preview": None}
+
+    scoped_store = validate_store_access(store_id or "", current_user)
+    coll = db.get_collection(_CASH_SESSIONS)
+
+    match: Dict = {}
+    if scoped_store:
+        match["store_id"] = scoped_store
+    elif store_id:
+        match["store_id"] = store_id
+    if status:
+        match["status"] = status.upper()
+
+    sessions: List[dict] = []
+    try:
+        cursor = coll.find(match, {"_id": 0}).sort("opened_at", -1).limit(limit)
+        sessions = list(cursor)
+    except Exception:
+        sessions = []
+
+    # Surface the currently-open session + a running expected preview.
+    open_session = None
+    expected_preview = None
+    try:
+        open_match = {"status": "OPEN"}
+        if scoped_store:
+            open_match["store_id"] = scoped_store
+        elif store_id:
+            open_match["store_id"] = store_id
+        open_session = coll.find_one(open_match, {"_id": 0})
+    except Exception:
+        open_session = None
+
+    if open_session is not None:
+        os_store = open_session.get("store_id")
+        start_iso = open_session.get("opened_at") or _iso_now()
+        cash_sales, cash_refunds = _cash_sales_for_window(db, os_store, start_iso, None)
+        cash_expenses = _cash_expenses_for_window(db, os_store, start_iso, None)
+        opening_float = float(open_session.get("opening_float", 0) or 0)
+        expected = cash_register.compute_expected_cash(
+            opening_float, cash_sales, cash_refunds, cash_expenses, 0.0
+        )
+        expected_preview = {
+            "opening_float": round(opening_float, 2),
+            "cash_sales": cash_sales,
+            "cash_refunds": cash_refunds,
+            "cash_expenses": cash_expenses,
+            "bank_deposit": 0.0,
+            "expected": expected,
+        }
+
+    return {
+        "sessions": sessions,
+        "open_session": open_session,
+        "expected_preview": expected_preview,
+    }
