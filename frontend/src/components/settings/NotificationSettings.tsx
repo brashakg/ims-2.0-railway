@@ -23,7 +23,6 @@ import {
   type NotificationProviderConfig,
   type NotificationTemplate,
   NOTIFICATION_TEMPLATES,
-  getTemplatesByCategory,
 } from '../../constants/notifications';
 import clsx from 'clsx';
 import { settingsApi } from '../../services/api/settings';
@@ -47,7 +46,7 @@ export function NotificationSettings() {
   });
 
   // Template states
-  const [_templates, setTemplates] = useState<NotificationTemplate[]>(
+  const [templates, setTemplates] = useState<NotificationTemplate[]>(
     Object.values(NOTIFICATION_TEMPLATES)
   );
   const [selectedTemplate, setSelectedTemplate] = useState<NotificationTemplate | null>(null);
@@ -83,22 +82,36 @@ export function NotificationSettings() {
       // API unavailable — leave default state; no toast needed on initial load
     }
 
-    // Load notification templates from API, fall back to hardcoded constants
+    // Load notification templates. The canonical set lives in the FE constants
+    // (already the initial state); the DB stores per-template OVERRIDES
+    // (is_enabled / edited content / subject) keyed by template_id. Overlay any
+    // overrides onto the constant base so a partial save never shrinks the list.
+    // GET returns { templates: [...] } (NOT a bare array — the old
+    // Array.isArray(resp) guard always missed and silently fell back).
     try {
-      const templateData = await settingsApi.getNotificationTemplates();
-      if (Array.isArray(templateData) && templateData.length > 0) {
-        const mapped: NotificationTemplate[] = templateData.map((t: any) => ({
-          id: t.template_id ?? t.id,
-          name: t.name ?? t.trigger_event ?? t.template_id,
-          category: t.category ?? 'TRANSACTIONAL',
-          channel: t.channel ?? 'SMS',
-          subject: t.subject,
-          template: t.content ?? t.template ?? '',
-          variables: t.variables ?? [],
-          dltTemplateId: t.dlt_template_id,
-          isActive: t.is_enabled ?? t.isActive ?? true,
-        }));
-        setTemplates(mapped);
+      const resp: any = await settingsApi.getNotificationTemplates();
+      const rows: any[] = Array.isArray(resp?.templates)
+        ? resp.templates
+        : Array.isArray(resp)
+          ? resp
+          : [];
+      if (rows.length > 0) {
+        const overrides = new Map<string, any>(
+          rows.map((t: any) => [t.template_id ?? t.id, t])
+        );
+        setTemplates((base) =>
+          base.map((t) => {
+            const o = overrides.get(t.id);
+            if (!o) return t;
+            return {
+              ...t,
+              subject: o.subject ?? t.subject,
+              template: o.content ?? o.template ?? t.template,
+              variables: o.variables ?? t.variables,
+              isActive: Boolean(o.is_enabled ?? o.isActive ?? t.isActive),
+            };
+          })
+        );
       }
     } catch {
       // Fall back to hardcoded NOTIFICATION_TEMPLATES already set as initial state
@@ -124,12 +137,41 @@ export function NotificationSettings() {
     }
   };
 
-  const handleToggleTemplate = (templateId: string) => {
-    setTemplates(prev =>
-      prev.map(t =>
-        t.id === templateId ? { ...t, isActive: !t.isActive } : t
-      )
+  const handleToggleTemplate = async (templateId: string) => {
+    const current = templates.find((t) => t.id === templateId);
+    if (!current) return;
+    const nextActive = !current.isActive;
+
+    // Optimistic: flip locally + keep the preview pane in sync.
+    setTemplates((prev) =>
+      prev.map((t) => (t.id === templateId ? { ...t, isActive: nextActive } : t))
     );
+    setSelectedTemplate((s) =>
+      s && s.id === templateId ? { ...s, isActive: nextActive } : s
+    );
+
+    try {
+      // Backend NotificationTemplate model requires the full shape; send it.
+      await settingsApi.updateNotificationTemplate(templateId, {
+        template_id: templateId,
+        template_type: current.channel,
+        trigger_event: current.id,
+        is_enabled: nextActive,
+        subject: current.subject,
+        content: current.template,
+        variables: current.variables,
+      });
+      toast.success(`Template ${nextActive ? 'enabled' : 'disabled'}`);
+    } catch (error: any) {
+      // Revert so the UI never lies about persisted state.
+      setTemplates((prev) =>
+        prev.map((t) => (t.id === templateId ? { ...t, isActive: current.isActive } : t))
+      );
+      setSelectedTemplate((s) =>
+        s && s.id === templateId ? { ...s, isActive: current.isActive } : s
+      );
+      toast.error(error?.message || 'Failed to update template');
+    }
   };
 
   const handleTestNotification = async () => {
@@ -384,7 +426,7 @@ export function NotificationSettings() {
           {/* Templates List */}
           <div className="laptop:col-span-2 space-y-4">
             {['TRANSACTIONAL', 'SERVICE', 'REMINDER', 'GREETING', 'PROMOTIONAL'].map((category) => {
-              const categoryTemplates = getTemplatesByCategory(category as any);
+              const categoryTemplates = templates.filter((t) => t.category === category);
               if (categoryTemplates.length === 0) return null;
 
               return (

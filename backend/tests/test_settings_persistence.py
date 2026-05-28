@@ -74,3 +74,33 @@ def test_printer_settings_persist(client, auth_headers):
     got = client.get("/api/v1/settings/printers", headers=auth_headers).json()
     assert got.get("receipt_printer_width") == 58
     assert got.get("copies_per_print") == 2
+
+
+def test_notification_template_persist(client, auth_headers):
+    """Toggling/editing a notification template on the Settings -> Notification
+    Templates tab must persist. The PUT handler used to return success WITHOUT
+    writing, so every reload reverted. Round-trip PUT (is_enabled=False) -> GET."""
+    tpl_id = "test_tpl_persist"
+    put = client.put(
+        f"/api/v1/settings/notifications/templates/{tpl_id}",
+        json={
+            "template_id": tpl_id,
+            "template_type": "SMS",
+            "trigger_event": "ORDER_READY",
+            "is_enabled": False,
+            "content": "Hi {customer_name}, order {order_id} is ready.",
+            "variables": ["customer_name", "order_id"],
+        },
+        headers=auth_headers,
+    )
+    assert put.status_code == 200, put.text
+    if _no_db(put):
+        pytest.skip("notification_templates collection unavailable (no DB)")
+    resp = client.get(
+        "/api/v1/settings/notifications/templates", headers=auth_headers
+    ).json()
+    rows = resp.get("templates", []) if isinstance(resp, dict) else resp
+    match = next((t for t in rows if t.get("template_id") == tpl_id), None)
+    assert match is not None, resp
+    assert match.get("is_enabled") is False
+    assert match.get("content", "").startswith("Hi {customer_name}")

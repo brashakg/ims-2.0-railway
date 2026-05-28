@@ -48,6 +48,7 @@ _CHURN_COLLECTIONS = (
     "tasks",
     "notifications",
     "notification_logs",
+    "notification_templates",
     "expenses",
     "advances",
     "audit_logs",

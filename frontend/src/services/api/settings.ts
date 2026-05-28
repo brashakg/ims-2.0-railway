@@ -108,6 +108,7 @@ export const settingsApi = {
   },
 
   updateNotificationTemplate: async (templateId: string, template: {
+    template_id?: string;
     template_type?: string;
     trigger_event?: string;
     is_enabled?: boolean;

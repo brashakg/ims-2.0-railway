@@ -704,30 +704,56 @@ async def update_notification_template(
     template: NotificationTemplate,
     current_user: dict = Depends(get_current_user),
 ):
-    """Update notification template (SUPERADMIN/ADMIN only)"""
+    """Update (or upsert) a notification template (SUPERADMIN/ADMIN only).
+
+    Persists one document per template_id in the `notification_templates`
+    collection. Previously this returned success WITHOUT writing -- so every
+    toggle/edit on the Settings -> Notification Templates tab silently reverted
+    on reload (same data-loss class fixed for the other settings panels).
+    """
     if not any(role in current_user["roles"] for role in ["SUPERADMIN", "ADMIN"]):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
-    return {"message": "Template updated", "template": template.model_dump()}
+    payload = template.model_dump()
+    payload["template_id"] = template_id  # path is canonical
+    collection = _get_settings_collection("notification_templates")
+    if collection is not None:
+        collection.update_one(
+            {"template_id": template_id}, {"$set": payload}, upsert=True
+        )
+        return {"message": "Template updated", "template": payload}
+    return {"message": "Template updated (no DB)", "template": payload}
 
 
 @router.post("/notifications/templates")
 async def create_notification_template(
     template: NotificationTemplate, current_user: dict = Depends(get_current_user)
 ):
-    """Create new notification template (SUPERADMIN/ADMIN only)"""
+    """Create a notification template (SUPERADMIN/ADMIN only). Upsert by
+    template_id so a repeat create is idempotent rather than duplicating."""
     if not any(role in current_user["roles"] for role in ["SUPERADMIN", "ADMIN"]):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
-    return {"message": "Template created", "template": template.model_dump()}
+    payload = template.model_dump()
+    collection = _get_settings_collection("notification_templates")
+    if collection is not None:
+        collection.update_one(
+            {"template_id": payload["template_id"]}, {"$set": payload}, upsert=True
+        )
+        return {"message": "Template created", "template": payload}
+    return {"message": "Template created (no DB)", "template": payload}
 
 
 @router.delete("/notifications/templates/{template_id}")
 async def delete_notification_template(
     template_id: str, current_user: dict = Depends(get_current_user)
 ):
-    """Delete notification template (SUPERADMIN/ADMIN only)"""
+    """Delete a notification template (SUPERADMIN/ADMIN only)."""
     if not any(role in current_user["roles"] for role in ["SUPERADMIN", "ADMIN"]):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
-    return {"message": "Template deleted"}
+    collection = _get_settings_collection("notification_templates")
+    if collection is not None:
+        result = collection.delete_one({"template_id": template_id})
+        return {"message": "Template deleted", "deleted_count": result.deleted_count}
+    return {"message": "Template deleted (no DB)"}
 
 
 @router.post("/notifications/test")
