@@ -227,9 +227,19 @@ def patch_db(mongo_db, monkeypatch):
     """Point both get_db() entrypoints (dependencies + database.connection) at
     the test mongo db, and force DATABASE_AVAILABLE on so get_db() returns it.
 
-    Also clears the product list cache between tests so cache invalidation in
-    the endpoint doesn't leak stale rows across assertions.
+    The mongo_db fixture is module-scoped (one connection reused across the
+    module), so this function-scoped fixture WIPES the collections this suite
+    touches before each test -- otherwise products seeded by one test leak into
+    the next and break the cap-count assertions. Also clears the product list
+    cache so endpoint cache invalidation doesn't surface stale rows.
     """
+    # Fresh data per test: drop the collections this suite writes to.
+    for coll in ("products", "stock_units", "audit_logs"):
+        try:
+            mongo_db[coll].delete_many({})
+        except Exception:  # noqa: BLE001
+            pass
+
     proxy = _DBProxy(mongo_db)
     import api.dependencies as deps
     from database import connection as conn
