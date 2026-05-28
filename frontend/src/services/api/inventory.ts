@@ -424,8 +424,13 @@ export const reorderApi = {
       lead_time_days: number;
     }
   ) => {
-    // Updates reorder settings on the product record via the admin products endpoint
-    const response = await api.put(`/admin/products/${productId}`, settings);
+    // Persist reorder settings via the SINGLE validated product-update path
+    // (`PUT /products/{id}` in routers/products.py). Previously this hit the
+    // now-retired, unvalidated `PUT /admin/products/{id}` -- consolidated so
+    // there is exactly one validated writer to the `products` collection.
+    // reorder_point / reorder_quantity / max_stock / lead_time_days are
+    // explicit optional fields on the backend ProductUpdate schema.
+    const response = await api.put(`/products/${productId}`, settings);
     return response.data;
   },
 };

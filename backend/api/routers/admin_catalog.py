@@ -1038,50 +1038,21 @@ async def get_product(product_id: str):
     return _scrub(doc) or {}
 
 
-@router.post("/products", status_code=201)
-async def create_product(payload: Dict[str, Any]):
-    coll = _coll("products")
-    if coll is None:
-        raise HTTPException(status_code=503, detail="Database not available")
-    pid = _new_id()
-    body = {
-        **payload,
-        "product_id": pid,
-        "_id": pid,
-        "created_at": _now(),
-        "updated_at": _now(),
-    }
-    body.setdefault("is_active", True)
-    coll.insert_one(body)
-    return _scrub(body) or {}
-
-
-@router.put("/products/{product_id}")
-async def update_product(product_id: str, updates: Dict[str, Any]):
-    coll = _coll("products")
-    if coll is None:
-        raise HTTPException(status_code=503, detail="Database not available")
-    if not coll.find_one({"$or": [{"product_id": product_id}, {"_id": product_id}]}):
-        raise HTTPException(status_code=404, detail="Product not found")
-    updates = {k: v for k, v in updates.items() if k not in ("_id", "product_id")}
-    updates["updated_at"] = _now()
-    coll.update_one(
-        {"$or": [{"product_id": product_id}, {"_id": product_id}]}, {"$set": updates}
-    )
-    doc = coll.find_one({"$or": [{"product_id": product_id}, {"_id": product_id}]})
-    return _scrub(doc) or {}
-
-
-@router.delete("/products/{product_id}")
-async def delete_product(product_id: str):
-    """Soft-delete via is_active=False. Hard delete is intentionally not exposed."""
-    coll = _coll("products")
-    if coll is None:
-        raise HTTPException(status_code=503, detail="Database not available")
-    if not coll.find_one({"$or": [{"product_id": product_id}, {"_id": product_id}]}):
-        raise HTTPException(status_code=404, detail="Product not found")
-    coll.update_one(
-        {"$or": [{"product_id": product_id}, {"_id": product_id}]},
-        {"$set": {"is_active": False, "updated_at": _now()}},
-    )
-    return {"deactivated": True, "product_id": product_id}
+# ----------------------------------------------------------------------------
+# RETIRED: product WRITE endpoints (create / update / delete).
+# ----------------------------------------------------------------------------
+# These used to take a raw Dict and write the SAME `products` collection with
+# NO validation -- no category 422 guard, no MRP >= offer_price rule, no
+# canonical GST/HSN derivation, and they stored the frontend's camelCase keys
+# (offerPrice / costPrice / hsnCode) verbatim. That created a split-brain with
+# the canonical writer in routers/products.py (offerPrice vs offer_price, etc.)
+# and let an uncategorized / mis-priced product reach POS.
+#
+# There must be exactly ONE validated product-write path. All product
+# create/update/delete now go through routers/products.py:
+#   POST   /api/v1/products              (single create, validated)
+#   POST   /api/v1/products/bulk-create  (batch create, same validators)
+#   PUT    /api/v1/products/{id}         (update -- incl. barcode + reorder fields)
+# The frontend callers (adminProductApi writes, reorderApi) were repointed to
+# productApi accordingly. The GET reads above + generate-sku + bulk-import
+# (file-stash only; not a product writer) remain for backwards-compat.

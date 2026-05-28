@@ -266,6 +266,17 @@ class ProductUpdate(BaseModel):
     hsn_code: Optional[str] = None
     gst_rate: Optional[float] = None
     is_active: Optional[bool] = None
+    # Scan-to-sell barcode persisted on the product master. Moved here from the
+    # retired (unvalidated) /admin/products PUT so the Inventory "Save barcode"
+    # action writes through the SAME validated update path as every other field.
+    barcode: Optional[str] = None
+    # ---- Per-product reorder configuration. Moved here from the retired
+    # /admin/products PUT (the Reorder dashboard's only writer) so reorder
+    # settings persist through the validated path. All optional + additive. ----
+    reorder_point: Optional[int] = Field(None, ge=0)
+    reorder_quantity: Optional[int] = Field(None, ge=0)
+    max_stock: Optional[int] = Field(None, ge=0)
+    lead_time_days: Optional[int] = Field(None, ge=0)
     # ---- Contact-lens (CL) identity fields. All optional + additive. ----
     cl_series: Optional[str] = None
     modality: Optional[str] = None
