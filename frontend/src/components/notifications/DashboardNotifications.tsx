@@ -41,12 +41,12 @@ export function DashboardNotifications() {
   return (
     <div className="card p-4">
       <div className="flex items-center justify-between mb-3">
-        <h3 className="text-sm font-semibold text-gray-900 flex items-center gap-2">
+        <h2 className="text-sm font-semibold text-gray-900 flex items-center gap-2">
           <Bell className="w-4 h-4" /> Notifications
           {unread > 0 && (
             <span className="text-xs font-medium bg-bv-red-100 text-bv-red-700 rounded-full px-2 py-0.5">{unread}</span>
           )}
-        </h3>
+        </h2>
         <Link to="/notifications" className="text-xs text-bv-red-600 hover:underline inline-flex items-center gap-0.5">
           View all <ChevronRight className="w-3 h-3" />
         </Link>

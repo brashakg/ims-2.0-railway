@@ -1161,6 +1161,7 @@ function SalespersonPicker() {
         Salesperson <span className="text-red-500">*</span>
       </label>
       <select
+        aria-label="Select salesperson"
         value={store.salesperson_id}
         onChange={(e) => {
           const p = people.find((x) => x.id === e.target.value);

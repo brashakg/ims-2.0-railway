@@ -22,7 +22,7 @@
   --ink:           #141413;
   --ink-2:         #2a2a28;
   --ink-3:         #55554f;
-  --ink-4:         #8a8a82;
+  --ink-4:         #6b6b64;  /* WCAG AA: 4.5:1 on white/#fafaf9 (was #8a8a82 = 3.3:1) */
   --ink-5:         #b6b6ae;
 
   /* Better Vision brand */
@@ -89,7 +89,7 @@
   --color-ink:           #141413;
   --color-ink-2:         #2a2a28;
   --color-ink-3:         #55554f;
-  --color-ink-4:         #8a8a82;
+  --color-ink-4:         #6b6b64;  /* WCAG AA (kept in sync with --ink-4) */
   --color-ink-5:         #b6b6ae;
   --color-surface:       #ffffff;
   --color-surface-2:     #fbfbfa;
@@ -810,7 +810,7 @@
   font-weight: 600;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  color: #6f6f68;
+  color: #a1a19a;  /* WCAG AA: 7.3:1 on the #141413 rail (was #6f6f68 = 3.6:1) */
   background: transparent;
   border: 0;
   border-radius: 8px;
@@ -823,7 +823,7 @@
   outline: 2px solid var(--bv, #d4422a);
   outline-offset: -2px;
 }
-.rail .rail-group-title.collapsed { color: #5a5a55; }
+.rail .rail-group-title.collapsed { color: #a1a19a; }  /* WCAG AA on the dark rail (was #5a5a55 = 2.65:1) */
 .rail .rail-group { display: contents; }
 .rail .rail-item {
   position: relative;
