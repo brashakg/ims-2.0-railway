@@ -88,15 +88,35 @@ def _reset_churn_collections():
         pass
 
 
+def _noop_close(*_args, **_kwargs):
+    """No-op replacement for close_db (see app fixture)."""
+    return None
+
+
 @pytest.fixture(scope="session")
 def app():
     """Create the FastAPI app for testing."""
     # Set test env vars before importing the app
     os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-for-unit-tests")
     os.environ.setdefault("MONGODB_URI", "")  # empty = no DB
-    from api.main import app as _app
+    import api.main as _main
 
-    return _app
+    # Neuter close_db for the whole test session. A TestClient lifespan teardown
+    # -- from the session `client` fixture OR from any test that opens its own
+    # `with TestClient(app)` -- otherwise calls close_db(), which closes the
+    # shared singleton Mongo client and makes every later test fail with
+    # 'pymongo.errors.InvalidOperation: Cannot use MongoClient after close'.
+    # init_db is idempotent, so the live client is simply reused across tests;
+    # the OS reclaims it at process exit. Other shutdown steps still run.
+    _main.close_db = _noop_close
+    try:
+        import database.connection as _conn
+
+        _conn.close_db = _noop_close
+    except Exception:  # noqa: BLE001
+        pass
+
+    return _main.app
 
 
 @pytest.fixture(scope="session")
