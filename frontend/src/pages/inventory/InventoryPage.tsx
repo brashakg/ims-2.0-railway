@@ -40,7 +40,11 @@ import {
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import type { ProductCategory } from '../../types';
-import { inventoryApi, adminProductApi, catalogApi, storeApi, type OnlineStatus } from '../../services/api';
+import { inventoryApi, catalogApi, storeApi, type OnlineStatus } from '../../services/api';
+// Product writes go through the SINGLE validated path (productApi -> /products).
+// Imported DIRECTLY from the module (not the api barrel) to dodge the TS2614
+// re-export resolution issue documented in CLAUDE.md.
+import { productApi, type CreateProductPayload } from '../../services/api/products';
 // v2-2b: import the new display API modules DIRECTLY (not via the api barrel)
 // to dodge the TS2614 re-export resolution issue documented in CLAUDE.md.
 import { displayPlacementsApi, type DisplayPlacement } from '../../services/api/displayPlacements';
@@ -182,6 +186,9 @@ export function InventoryPage() {
   // CSV Import state
   const [showCSVImport, setShowCSVImport] = useState(false);
   const [csvFile, setCsvFile] = useState<File | null>(null);
+  // csvRows = ALL parsed rows (sent to the validated bulk-create endpoint).
+  // csvPreview = first 10 rows, for the on-screen preview table only.
+  const [csvRows, setCsvRows] = useState<Array<Record<string, string>>>([]);
   const [csvPreview, setCsvPreview] = useState<Array<Record<string, string>>>([]);
   const [isImporting, setIsImporting] = useState(false);
 
@@ -406,23 +413,74 @@ export function InventoryPage() {
     }).format(amount);
   };
 
-  // Handle CSV import
+  // Handle CSV import.
+  // Parses the (already-parsed) CSV rows into the canonical CreateProductPayload
+  // shape and creates them through the SINGLE validated path
+  // (`POST /products/bulk-create`). The backend runs the SAME validators as the
+  // single-create endpoint (category 422 guard, MRP >= offer_price, canonical
+  // GST/HSN derivation) and returns a per-row result -- valid rows are created,
+  // invalid rows are skipped and reported with reasons. Previously this posted
+  // the raw file to the unvalidated `/admin/products/bulk-import`, which only
+  // stashed the file and never actually created any product (a silent no-op),
+  // so the "imported N" toast was misleading.
   const handleImportProducts = async () => {
-    if (!csvFile) {
+    if (!csvFile || csvRows.length === 0) {
       toast.error('Please select a CSV file first');
       return;
     }
-    // Detect category from parsed preview rows if possible
-    const detectedCategory = csvPreview.length > 0 ? (csvPreview[0].category || 'FR') : 'FR';
+
+    // Map CSV rows -> CreateProductPayload. Required canonical fields:
+    // category, sku, brand, model, mrp (+ offer_price, which the backend
+    // requires > 0). `name` maps to `model`; opening_stock is intentionally
+    // ignored (stock is created via GRN, not at product-create time).
+    const num = (v: string | undefined): number | undefined => {
+      if (v === undefined || String(v).trim() === '') return undefined;
+      const n = Number(String(v).replace(/[^0-9.\-]/g, ''));
+      return Number.isFinite(n) ? n : undefined;
+    };
+    const products: CreateProductPayload[] = csvRows.map((row) => {
+      const mrp = num(row.mrp) ?? 0;
+      const offer = num(row.offer_price);
+      return {
+        category: (row.category || '').trim(),
+        sku: (row.sku || '').trim(),
+        brand: (row.brand || '').trim(),
+        model: (row.model || row.name || '').trim(),
+        attributes: {},
+        mrp,
+        // Backend ProductCreate requires offer_price > 0; default to MRP when
+        // the CSV omits it (i.e. sell at MRP, no discount).
+        offer_price: offer && offer > 0 ? offer : mrp,
+        ...(row.hsn_code && row.hsn_code.trim() ? { hsn_code: row.hsn_code.trim() } : {}),
+        ...(row.description && row.description.trim() ? { description: row.description.trim() } : {}),
+      };
+    });
+
     setIsImporting(true);
     try {
-      const result = await adminProductApi.bulkImportProducts(csvFile, detectedCategory);
-      const count = result?.imported ?? result?.count ?? csvPreview.length;
-      toast.success(`Successfully imported ${count} product${count === 1 ? '' : 's'}`);
-      setShowCSVImport(false);
-      setCsvFile(null);
-      setCsvPreview([]);
-      await loadInventory();
+      const result = await productApi.bulkCreateProducts(products);
+      const created = result?.summary?.created ?? 0;
+      const failed = result?.summary?.failed ?? 0;
+      if (created > 0) {
+        toast.success(`Imported ${created} product${created === 1 ? '' : 's'}${failed ? ` (${failed} skipped)` : ''}`);
+      }
+      if (failed > 0) {
+        // Surface the first few row errors so a bad category / price / dup SKU
+        // is actionable rather than silently dropped.
+        const firstErr = result.results.find(r => !r.ok);
+        const reason = firstErr?.errors?.[0] ? `: ${firstErr.errors[0]}` : '';
+        toast.error(`${failed} row${failed === 1 ? '' : 's'} skipped${reason}`);
+      }
+      if (created === 0 && failed === 0) {
+        toast.error('No products were imported. Check the CSV format and try again.');
+      }
+      if (created > 0) {
+        setShowCSVImport(false);
+        setCsvFile(null);
+        setCsvPreview([]);
+        setCsvRows([]);
+        await loadInventory();
+      }
     } catch (err: unknown) {
       const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail || 'Import failed. Check CSV format and try again.';
       toast.error(msg);
@@ -436,7 +494,11 @@ export function InventoryPage() {
     if (!selectedProduct) return;
 
     try {
-      await adminProductApi.updateProduct(selectedProduct.id, { barcode });
+      // Write the barcode through the SINGLE validated product-update path
+      // (`PUT /products/{id}`). selectedProduct.id is the canonical product_id
+      // (the /inventory/stock aggregate returns id == product_id). Previously
+      // this hit the now-retired, unvalidated `PUT /admin/products/{id}`.
+      await productApi.updateProduct(selectedProduct.id, { barcode });
       toast.success(`Barcode saved for ${selectedProduct.name}`);
       await loadInventory();
     } catch {
@@ -1209,7 +1271,7 @@ export function InventoryPage() {
                   <p className="text-sm text-gray-500">Upload a CSV file with product data</p>
                 </div>
               </div>
-              <button onClick={() => { setShowCSVImport(false); setCsvFile(null); setCsvPreview([]); }} className="text-gray-500 hover:text-gray-900">
+              <button onClick={() => { setShowCSVImport(false); setCsvFile(null); setCsvPreview([]); setCsvRows([]); }} className="text-gray-500 hover:text-gray-900">
                 <X className="w-5 h-5" />
               </button>
             </div>
@@ -1263,6 +1325,7 @@ export function InventoryPage() {
                         headers.forEach((h, i) => { row[h] = values[i]?.trim() || ''; });
                         return row;
                       });
+                      setCsvRows(rows);                 // ALL rows -> bulk-create
                       setCsvPreview(rows.slice(0, 10)); // Preview first 10
                       toast.success(`Parsed ${rows.length} product${rows.length === 1 ? '' : 's'} from CSV`);
                     };
@@ -1306,10 +1369,10 @@ export function InventoryPage() {
 
             <div className="p-5 border-t border-gray-200 flex justify-between items-center">
               <p className="text-xs text-gray-500">
-                {csvFile ? `${csvPreview.length}+ products ready to import` : 'Select a CSV file to begin'}
+                {csvFile ? `${csvRows.length} product${csvRows.length === 1 ? '' : 's'} ready to import` : 'Select a CSV file to begin'}
               </p>
               <div className="flex gap-2">
-                <button onClick={() => { setShowCSVImport(false); setCsvFile(null); setCsvPreview([]); }} className="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg text-sm hover:bg-gray-200">
+                <button onClick={() => { setShowCSVImport(false); setCsvFile(null); setCsvPreview([]); setCsvRows([]); }} className="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg text-sm hover:bg-gray-200">
                   Cancel
                 </button>
                 <button

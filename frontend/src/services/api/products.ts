@@ -53,6 +53,43 @@ export interface CreateProductPayload {
   };
 }
 
+// Partial update payload for `PUT /products/{id}`. Mirrors the backend
+// `ProductUpdate` schema (snake_case). Every field is optional; the backend
+// merges only what is sent and re-runs the category + MRP>=offer validators.
+export interface UpdateProductPayload {
+  category?: string;
+  brand?: string;
+  model?: string;
+  color?: string;
+  mrp?: number;
+  offer_price?: number;
+  hsn_code?: string;
+  gst_rate?: number;
+  is_active?: boolean;
+  // Scan-to-sell barcode persisted on the product master.
+  barcode?: string;
+  // Per-product reorder configuration (Reorder dashboard).
+  reorder_point?: number;
+  reorder_quantity?: number;
+  max_stock?: number;
+  lead_time_days?: number;
+  // CL identity
+  cl_series?: string;
+  modality?: string;
+  base_curve?: number;
+  diameter?: number;
+  cl_power?: number;
+  cl_cyl?: number;
+  cl_axis?: number;
+  cl_add?: number;
+  pack_size?: number;
+  // Spectacle-lens power identity
+  sph?: number;
+  cyl?: number;
+  axis?: number;
+  add?: number;
+}
+
 // ============================================================================
 // Catalog API - Online (Shopify/e-commerce) status bridge
 // ----------------------------------------------------------------------------
@@ -121,6 +158,16 @@ export const productApi = {
 
   createProduct: async (data: CreateProductPayload) => {
     const response = await api.post('/products', data);
+    return response.data;
+  },
+
+  // Update a product through the SINGLE validated path (`PUT /products/{id}`).
+  // The backend ProductUpdate schema enforces category (422) + MRP >= offer
+  // and persists only modelled fields (snake_case). Use this instead of the
+  // retired, unvalidated `adminProductApi.updateProduct`. `productId` is the
+  // canonical product_id. All fields optional; send only what changes.
+  updateProduct: async (productId: string, data: UpdateProductPayload) => {
+    const response = await api.put(`/products/${productId}`, data);
     return response.data;
   },
 
@@ -233,6 +280,14 @@ export const pricingApi = {
 
 // ============================================================================
 // Admin API - Product Master
+// ----------------------------------------------------------------------------
+// WRITE methods (create / update / delete) were REMOVED. They posted raw
+// camelCase to the unvalidated `/admin/products` endpoints, which wrote the
+// `products` collection with no category / MRP / GST validation and stored
+// camelCase keys (offerPrice vs offer_price) -> split-brain. All product
+// writes now go through the single validated `productApi` (`/products`,
+// `/products/bulk-create`, `PUT /products/{id}`). The reads below + the
+// CSV file-stash + generate-sku helper are kept (they are not product writers).
 // ============================================================================
 
 export const adminProductApi = {
@@ -243,44 +298,6 @@ export const adminProductApi = {
 
   getProduct: async (productId: string) => {
     const response = await api.get(`/admin/products/${productId}`);
-    return response.data;
-  },
-
-  createProduct: async (data: {
-    category: string;
-    brand: string;
-    subbrand?: string;
-    modelNo: string;
-    name: string;
-    sku: string;
-    mrp: number;
-    offerPrice?: number;
-    costPrice?: number;
-    hsnCode?: string;
-    attributes: Record<string, string | number>;
-    images?: string[];
-    status?: string;
-  }) => {
-    const response = await api.post('/admin/products', data);
-    return response.data;
-  },
-
-  updateProduct: async (productId: string, data: Partial<{
-    name: string;
-    mrp: number;
-    offerPrice: number;
-    costPrice: number;
-    barcode: string;
-    attributes: Record<string, string | number>;
-    images: string[];
-    status: string;
-  }>) => {
-    const response = await api.put(`/admin/products/${productId}`, data);
-    return response.data;
-  },
-
-  deleteProduct: async (productId: string) => {
-    const response = await api.delete(`/admin/products/${productId}`);
     return response.data;
   },
 
