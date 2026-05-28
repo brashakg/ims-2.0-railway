@@ -5,7 +5,7 @@
 import { useState, useEffect } from 'react';
 import {
   Store, Tag, Plus, Edit2, Trash2, X, Check,
-  ToggleLeft, ToggleRight, Boxes,
+  Boxes,
 } from 'lucide-react';
 import clsx from 'clsx';
 import { useToast } from '../../context/ToastContext';
@@ -271,7 +271,10 @@ export function CategorySection() {
       <div className="flex items-center justify-between mb-6">
         <div>
           <h2 className="text-lg font-semibold text-gray-900">Category Master</h2>
-          <p className="text-sm text-gray-500">Product categories with HSN codes and attributes</p>
+          <p className="text-sm text-gray-500">
+            Fixed product categories (HSN + attributes). GST rates are edited in the
+            HSN / GST master — this is a read-only reference.
+          </p>
         </div>
       </div>
 
@@ -300,14 +303,12 @@ export function CategorySection() {
                 </div>
               </div>
               <div className="flex items-center gap-3">
-                {cat.isActive ? (
-                  <ToggleRight className="w-6 h-6 text-green-600 cursor-pointer" />
-                ) : (
-                  <ToggleLeft className="w-6 h-6 text-gray-500 cursor-pointer" />
-                )}
-                <button className="text-gray-500 hover:text-bv-red-600">
-                  <Edit2 className="w-4 h-4" />
-                </button>
+                <span className={clsx(
+                  'text-xs px-2 py-0.5 rounded-full',
+                  cat.isActive ? 'bg-green-50 text-green-600' : 'bg-gray-100 text-gray-500'
+                )}>
+                  {cat.isActive ? 'Active' : 'Inactive'}
+                </span>
               </div>
             </div>
 
