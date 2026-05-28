@@ -137,7 +137,7 @@ const INTEGRATION_SCHEMAS: Record<string, IntegrationSchema> = {
     readOnly: true,
     banner: {
       kind: 'info',
-      text: 'GST filing requires a licensed GST Suvidha Provider (GSP). Not configurable from this UI yet - contact us when you onboard a GSP.',
+      text: 'GST filing already works end-to-end via the offline-tool workflow: download GSTR-1 / GSTR-3B JSON from Reports -> GST, import on gst.gov.in -> Returns -> Offline Tool. A GSP integration (one-click portal push from inside IMS) only becomes necessary once any single legal entity crosses the Rs 5 Cr aggregate-turnover e-invoicing mandate. Until then, the manual JSON workflow is the standard practice for small + mid Indian businesses and is the supported path here.',
     },
   },
 };
