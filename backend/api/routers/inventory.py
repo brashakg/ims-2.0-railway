@@ -98,7 +98,9 @@ def _get_db():
     return None
 
 
-def _on_hand_by_product(db, product_ids: List[str], store_id: Optional[str] = None) -> Dict[str, int]:
+def _on_hand_by_product(
+    db, product_ids: List[str], store_id: Optional[str] = None
+) -> Dict[str, int]:
     """Count on-hand units per product from the serialized `stock` collection
     (one row per unit). A unit is on-hand when its status is an available one
     (or absent) and quantity > 0. Optionally scoped to a store. Fail-soft -> {}.
@@ -108,7 +110,11 @@ def _on_hand_by_product(db, product_ids: List[str], store_id: Optional[str] = No
     avail = ["AVAILABLE", "available", "IN_STOCK", "in_stock"]
     match: dict = {
         "product_id": {"$in": list(product_ids)},
-        "$or": [{"status": {"$in": avail}}, {"status": {"$exists": False}}, {"status": None}],
+        "$or": [
+            {"status": {"$in": avail}},
+            {"status": {"$exists": False}},
+            {"status": None},
+        ],
     }
     if store_id:
         match["store_id"] = store_id
@@ -117,7 +123,12 @@ def _on_hand_by_product(db, product_ids: List[str], store_id: Optional[str] = No
         for row in db.get_collection("stock_units").aggregate(
             [
                 {"$match": match},
-                {"$group": {"_id": "$product_id", "n": {"$sum": {"$ifNull": ["$quantity", 1]}}}},
+                {
+                    "$group": {
+                        "_id": "$product_id",
+                        "n": {"$sum": {"$ifNull": ["$quantity", 1]}},
+                    }
+                },
             ]
         ):
             out[row["_id"]] = int(row.get("n", 0) or 0)
@@ -362,9 +373,7 @@ def _build_store_ledger(
                 if not pid:
                     continue
                 if status in avail_statuses or status is None:
-                    on_hand_by_product[pid] = (
-                        on_hand_by_product.get(pid, 0) + qty
-                    )
+                    on_hand_by_product[pid] = on_hand_by_product.get(pid, 0) + qty
                     # Capture a sample barcode/location from any available unit
                     # for the Barcode + Location columns on the ledger row.
                     if pid not in sample_unit_by_product:
@@ -373,9 +382,7 @@ def _build_store_ledger(
                             "location_code": row.get("location_code") or "",
                         }
                 elif status == "RESERVED":
-                    reserved_by_product[pid] = (
-                        reserved_by_product.get(pid, 0) + qty
-                    )
+                    reserved_by_product[pid] = reserved_by_product.get(pid, 0) + qty
         except (AttributeError, TypeError, ValueError) as exc:
             logger.warning("[INVENTORY] stock aggregation failed: %s", exc)
 
@@ -1056,7 +1063,8 @@ async def complete_stock_count(
                     ),
                     priority=pri,
                     category="Inventory",
-                    store_id=count_doc.get("store_id") or current_user.get("active_store_id"),
+                    store_id=count_doc.get("store_id")
+                    or current_user.get("active_store_id"),
                     dedupe_ref=f"stockcount:{count_id}",
                 )
         except Exception as _e:  # noqa: BLE001
@@ -1140,31 +1148,54 @@ async def transfer_recommendations(
             return {"recommendations": [], "store_id": active_store}
 
         # Cross-store available levels for just the deficit products.
-        rows = stock_repo.aggregate(
-            [
-                {"$match": {"product_id": {"$in": low_ids}, "status": "AVAILABLE"}},
-                {"$group": {"_id": {"p": "$product_id", "s": "$store_id"}, "qty": {"$sum": "$quantity"}}},
-            ]
-        ) or []
+        rows = (
+            stock_repo.aggregate(
+                [
+                    {"$match": {"product_id": {"$in": low_ids}, "status": "AVAILABLE"}},
+                    {
+                        "$group": {
+                            "_id": {"p": "$product_id", "s": "$store_id"},
+                            "qty": {"$sum": "$quantity"},
+                        }
+                    },
+                ]
+            )
+            or []
+        )
         store_levels: Dict[str, Dict[str, int]] = {}
         for r in rows:
             key = r.get("_id", {})
-            store_levels.setdefault(key.get("p"), {})[key.get("s")] = int(r.get("qty", 0) or 0)
+            store_levels.setdefault(key.get("p"), {})[key.get("s")] = int(
+                r.get("qty", 0) or 0
+            )
 
         # Enrich with product names.
         names: Dict[str, str] = {}
         product_repo = get_product_repository()
         if product_repo is not None:
             for p in product_repo.find_many({"product_id": {"$in": low_ids}}) or []:
-                names[p.get("product_id")] = p.get("name") or p.get("product_name") or ""
+                names[p.get("product_id")] = (
+                    p.get("name") or p.get("product_name") or ""
+                )
 
         low_products = [
-            {"product_id": r["_id"], "quantity": int(r.get("quantity", 0) or 0),
-             "product_name": names.get(r["_id"], "")}
-            for r in low if r.get("_id")
+            {
+                "product_id": r["_id"],
+                "quantity": int(r.get("quantity", 0) or 0),
+                "product_name": names.get(r["_id"], ""),
+            }
+            for r in low
+            if r.get("_id")
         ]
-        recs = recommend_transfers(active_store, low_products, store_levels, threshold=threshold)
-        return {"store_id": active_store, "threshold": threshold, "recommendations": recs, "count": len(recs)}
+        recs = recommend_transfers(
+            active_store, low_products, store_levels, threshold=threshold
+        )
+        return {
+            "store_id": active_store,
+            "threshold": threshold,
+            "recommendations": recs,
+            "count": len(recs),
+        }
     except Exception as e:  # noqa: BLE001
         logger.warning(f"transfer_recommendations error: {e}")
         return {"recommendations": [], "store_id": active_store}
@@ -1184,13 +1215,15 @@ async def assign_accountability(
     key = {"store_id": body.store_id, "category": body.category or "ALL"}
     coll.update_one(
         key,
-        {"$set": {
-            **key,
-            "staff_id": body.staff_id,
-            "staff_name": body.staff_name,
-            "assigned_by": current_user.get("user_id"),
-            "assigned_at": datetime.now().isoformat(),
-        }},
+        {
+            "$set": {
+                **key,
+                "staff_id": body.staff_id,
+                "staff_name": body.staff_name,
+                "assigned_by": current_user.get("user_id"),
+                "assigned_at": datetime.now().isoformat(),
+            }
+        },
         upsert=True,
     )
     return {"message": "Custodian assigned", **key, "staff_id": body.staff_id}
@@ -1235,7 +1268,14 @@ async def accountability_shrinkage(
     try:
         counts = list(
             db.get_collection("stock_counts").find(
-                q, {"_id": 0, "store_id": 1, "audit_number": 1, "shrinkage_percentage": 1, "completed_at": 1}
+                q,
+                {
+                    "_id": 0,
+                    "store_id": 1,
+                    "audit_number": 1,
+                    "shrinkage_percentage": 1,
+                    "completed_at": 1,
+                },
             )
         )
         custodians = {
@@ -1245,7 +1285,10 @@ async def accountability_shrinkage(
             )
             if c.get("store_id")
         }
-        return {"rows": shrinkage_by_custodian(counts, custodians), "count": len(counts)}
+        return {
+            "rows": shrinkage_by_custodian(counts, custodians),
+            "count": len(counts),
+        }
     except Exception as e:  # noqa: BLE001
         logger.warning(f"accountability_shrinkage error: {e}")
         return {"rows": []}
@@ -1481,9 +1524,7 @@ def _load_cl_stock_rows(db, store_id: Optional[str]) -> List[dict]:
         products_coll = db.get_collection("products")
 
         # 1. Resolve the CL product ids first (category lives on the PRODUCT).
-        cl_products = list(
-            products_coll.find({"category": {"$in": CL_CATEGORY_CODES}})
-        )
+        cl_products = list(products_coll.find({"category": {"$in": CL_CATEGORY_CODES}}))
         if not cl_products:
             return []
 
@@ -1548,12 +1589,29 @@ def _group_cl_rows(rows: List[dict], now: Optional[datetime] = None) -> List[dic
         key = (r.get("product_id"), r.get("batch_code"), r.get("expiry_date"))
         g = groups.get(key)
         if g is None:
-            g = {k: r.get(k) for k in (
-                "product_id", "sku", "brand", "model", "category",
-                "cl_series", "modality", "base_curve", "diameter",
-                "cl_power", "cl_cyl", "cl_axis", "cl_add", "color",
-                "pack_size", "batch_code", "expiry_date", "location_code",
-            )}
+            g = {
+                k: r.get(k)
+                for k in (
+                    "product_id",
+                    "sku",
+                    "brand",
+                    "model",
+                    "category",
+                    "cl_series",
+                    "modality",
+                    "base_curve",
+                    "diameter",
+                    "cl_power",
+                    "cl_cyl",
+                    "cl_axis",
+                    "cl_add",
+                    "color",
+                    "pack_size",
+                    "batch_code",
+                    "expiry_date",
+                    "location_code",
+                )
+            }
             g["on_hand"] = 0
             g["days_until_expiry"] = compute_days_until_expiry(
                 r.get("expiry_date"), now
@@ -1566,9 +1624,11 @@ def _group_cl_rows(rows: List[dict], now: Optional[datetime] = None) -> List[dic
     grouped.sort(
         key=lambda g: (
             g.get("days_until_expiry") is None,
-            g.get("days_until_expiry")
-            if g.get("days_until_expiry") is not None
-            else 10**9,
+            (
+                g.get("days_until_expiry")
+                if g.get("days_until_expiry") is not None
+                else 10**9
+            ),
         )
     )
     return grouped
@@ -1582,7 +1642,10 @@ async def list_contact_lens_inventory(
     base_curve: Optional[float] = Query(None),
     cl_power: Optional[float] = Query(None),
     near_expiry_days: Optional[int] = Query(
-        None, ge=1, le=365, description="If set, only return lines expiring within N days"
+        None,
+        ge=1,
+        le=365,
+        description="If set, only return lines expiring within N days",
     ),
     current_user: dict = Depends(get_current_user),
 ):
@@ -1601,7 +1664,9 @@ async def list_contact_lens_inventory(
     if brand:
         rows = [r for r in rows if (r.get("brand") or "").lower() == brand.lower()]
     if modality:
-        rows = [r for r in rows if (r.get("modality") or "").upper() == modality.upper()]
+        rows = [
+            r for r in rows if (r.get("modality") or "").upper() == modality.upper()
+        ]
     if base_curve is not None:
         rows = [r for r in rows if r.get("base_curve") == base_curve]
     if cl_power is not None:
@@ -1653,7 +1718,11 @@ async def get_contact_lens_expiry_status(
 
     # FEFO pick suggestion: dated batches with on-hand stock, earliest first.
     fefo = fefo_sort(
-        [line for line in lines if line.get("expiry_date") and line.get("on_hand", 0) > 0]
+        [
+            line
+            for line in lines
+            if line.get("expiry_date") and line.get("on_hand", 0) > 0
+        ]
     )
 
     # Backward-compatible shape (expired / expiring_soon / safe / summary) plus
@@ -1700,8 +1769,15 @@ async def get_lens_power_grid(
     try:
         # Lens category codes across the schema (short + full enums).
         lens_cats = [
-            "LS", "OPTICAL_LENS", "OPTICAL_LENSES", "RX_LENSES", "LENS",
-            "LENSES", "EYEGLASS_LENS", "SPECTACLE_LENS", "SPECTACLE_LENSES",
+            "LS",
+            "OPTICAL_LENS",
+            "OPTICAL_LENSES",
+            "RX_LENSES",
+            "LENS",
+            "LENSES",
+            "EYEGLASS_LENS",
+            "SPECTACLE_LENS",
+            "SPECTACLE_LENSES",
         ]
         lenses = list(
             db.get_collection("products").find(
@@ -1741,8 +1817,12 @@ async def get_cl_power_grid(
             db.get_collection("products").find(
                 {"category": {"$in": CL_CATEGORY_CODES}},
                 {
-                    "_id": 0, "product_id": 1, "cl_power": 1, "base_curve": 1,
-                    "brand": 1, "cl_series": 1,
+                    "_id": 0,
+                    "product_id": 1,
+                    "cl_power": 1,
+                    "base_curve": 1,
+                    "brand": 1,
+                    "cl_series": 1,
                 },
             )
         )
@@ -1754,7 +1834,10 @@ async def get_cl_power_grid(
         near: Dict[str, bool] = {}
         if pids:
             avail = ["AVAILABLE", "available", "IN_STOCK", "in_stock"]
-            match: dict = {"product_id": {"$in": pids}, "expiry_date": {"$exists": True}}
+            match: dict = {
+                "product_id": {"$in": pids},
+                "expiry_date": {"$exists": True},
+            }
             if store_id:
                 match["store_id"] = store_id
             try:
@@ -1978,10 +2061,18 @@ async def get_overstock_analysis(
 
 # Broad "this order represents a real sale" status set (both cases seen in DB)
 _SOLD_STATUSES = [
-    "DELIVERED", "delivered", "Delivered",
-    "COMPLETED", "completed", "Completed",
-    "PAID", "paid", "Paid",
-    "FULFILLED", "fulfilled", "Fulfilled",
+    "DELIVERED",
+    "delivered",
+    "Delivered",
+    "COMPLETED",
+    "completed",
+    "Completed",
+    "PAID",
+    "paid",
+    "Paid",
+    "FULFILLED",
+    "fulfilled",
+    "Fulfilled",
 ]
 
 
@@ -2371,7 +2462,14 @@ def _lookup_product(products_coll, product_id: str) -> Optional[dict]:
     we try the cheap string matches first. Defensive — never raises."""
     if not product_id:
         return None
-    projection = {"_id": 0, "name": 1, "sku": 1, "barcode": 1, "brand": 1, "category": 1}
+    projection = {
+        "_id": 0,
+        "name": 1,
+        "sku": 1,
+        "barcode": 1,
+        "brand": 1,
+        "category": 1,
+    }
     try:
         p = products_coll.find_one(
             {

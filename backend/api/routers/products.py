@@ -246,9 +246,19 @@ async def create_product(
 
         # Persist CL identity fields top-level only when provided (additive).
         for _f in (
-            "cl_series", "modality", "base_curve", "diameter",
-            "cl_power", "cl_cyl", "cl_axis", "cl_add", "pack_size",
-            "sph", "cyl", "axis", "add",
+            "cl_series",
+            "modality",
+            "base_curve",
+            "diameter",
+            "cl_power",
+            "cl_cyl",
+            "cl_axis",
+            "cl_add",
+            "pack_size",
+            "sph",
+            "cyl",
+            "axis",
+            "add",
         ):
             _v = getattr(product, _f, None)
             if _v is not None:
