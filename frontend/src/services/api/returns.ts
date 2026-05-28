@@ -15,7 +15,12 @@ export interface ReturnLinePayload {
   product_name: string;
   sku: string;
   return_qty: number;
+  // NET (pre-GST) unit price from the original order line. The server grosses
+  // it up by gst_rate to refund the GST-inclusive amount the customer paid.
   unit_price: number;
+  // GST rate (%) the line was billed at. Hint only; the server prefers the
+  // rate stamped on the original order line.
+  gst_rate?: number;
   reason?: string;
   condition: ItemCondition;
   notes?: string;
@@ -27,6 +32,7 @@ export interface ReplacementLinePayload {
   sku: string;
   quantity: number;
   unit_price: number;
+  gst_rate?: number;
 }
 
 export interface CreateReturnPayload {
@@ -39,6 +45,9 @@ export interface CreateReturnPayload {
   replacement_items?: ReplacementLinePayload[];
   approval_note?: string;
   refund_method?: string;
+  // Optional absolute Rs deduction for damaged / opened goods. 0 = full
+  // refund. Net refund = gross - restocking_fee.
+  restocking_fee?: number;
 }
 
 export const returnsApi = {

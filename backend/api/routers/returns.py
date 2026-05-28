@@ -37,9 +37,11 @@ from pydantic import BaseModel, Field
 try:
     from pymongo import ReturnDocument
 except ImportError:  # pragma: no cover - test stubs may not have pymongo
+
     class ReturnDocument:  # type: ignore[no-redef]
         AFTER = "after"
         BEFORE = "before"
+
 
 from .auth import get_current_user, require_roles
 from ..dependencies import (
@@ -79,7 +81,15 @@ class ReturnLine(BaseModel):
     product_name: str = ""
     sku: str = ""
     return_qty: float = Field(..., ge=0)
+    # NET (pre-GST) unit price as billed on the original order line. The refund
+    # is the GST-INCLUSIVE gross, so this is grossed up by `gst_rate` (resolved
+    # authoritatively from the original order when available - see
+    # _priced_return_lines). Do NOT pass an already-gross price here.
     unit_price: float = Field(..., ge=0)
+    # GST rate (%) the line was billed at. Optional hint from the till; the
+    # server prefers the rate stamped on the original order line. 0 / None ->
+    # treat unit_price as already gross (no gross-up).
+    gst_rate: Optional[float] = Field(default=None, ge=0)
     reason: Optional[str] = None
     condition: ItemCondition = "GOOD"
     # Whether this returned unit should go back into sellable stock. Defaults
@@ -95,6 +105,9 @@ class ReplacementLine(BaseModel):
     sku: str = ""
     quantity: float = Field(..., ge=0)
     unit_price: float = Field(..., ge=0)
+    # GST rate (%) for the replacement line so its gross matches what the
+    # customer will be billed. 0 / None -> unit_price treated as already gross.
+    gst_rate: Optional[float] = Field(default=None, ge=0)
 
 
 class ReturnCreate(BaseModel):
@@ -107,6 +120,10 @@ class ReturnCreate(BaseModel):
     replacement_items: List[ReplacementLine] = Field(default_factory=list)
     approval_note: Optional[str] = None
     refund_method: Optional[str] = None
+    # Optional absolute Rs deduction for damaged / opened goods. 0 = full
+    # refund. Must be >= 0 and <= the GST-inclusive gross refund (enforced in
+    # the handler -> 422). Net refund = gross - restocking_fee.
+    restocking_fee: float = Field(default=0.0, ge=0)
 
 
 # ============================================================================
@@ -171,6 +188,70 @@ def _resolve_order(create: ReturnCreate) -> Optional[Dict[str, Any]]:
     return None
 
 
+def _order_line_index(order: Optional[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    """Index the original order's items by item_id and by product_id.
+
+    Returns {"by_item": {item_id: line}, "by_product": {product_id: line}} so a
+    return line can recover the rate it was billed at. by_product keeps the
+    FIRST line per product (good enough to recover a GST rate, which is the
+    same for every unit of a product). Fail-soft -> empty maps.
+    """
+    by_item: Dict[str, Dict[str, Any]] = {}
+    by_product: Dict[str, Dict[str, Any]] = {}
+    if not order:
+        return {"by_item": by_item, "by_product": by_product}
+    for line in order.get("items") or []:
+        if not isinstance(line, dict):
+            continue
+        iid = line.get("item_id") or line.get("id")
+        if iid and iid not in by_item:
+            by_item[str(iid)] = line
+        pid = line.get("product_id")
+        if pid and pid not in by_product:
+            by_product[str(pid)] = line
+    return {"by_item": by_item, "by_product": by_product}
+
+
+def _priced_return_lines(
+    lines: List[ReturnLine], order: Optional[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    """Build engine-ready dicts whose `gst_rate` is the rate the line was
+    billed at, so `returns_engine.returned_value` can gross the NET unit_price
+    up to the GST-INCLUSIVE amount the customer paid.
+
+    Rate-resolution order (most authoritative first):
+      1. the matching ORIGINAL order line's `gst_rate` (by order_item_id, then
+         by product_id) - this is what POS actually billed;
+      2. the `gst_rate` the till sent on the return line;
+      3. 0 -> treat unit_price as already gross (fail-soft: never over-refund a
+         rate we cannot prove; matches pre-fix behaviour when no order/rate).
+
+    Returns one dict per line carrying unit_price, gst_rate, return_qty, plus
+    the identity/restock fields the rest of the flow needs.
+    """
+    idx = _order_line_index(order)
+    by_item = idx["by_item"]
+    by_product = idx["by_product"]
+    out: List[Dict[str, Any]] = []
+    for ln in lines:
+        d = ln.model_dump()
+        rate: Optional[float] = None
+        orig = None
+        if ln.order_item_id and str(ln.order_item_id) in by_item:
+            orig = by_item[str(ln.order_item_id)]
+        elif ln.product_id and str(ln.product_id) in by_product:
+            orig = by_product[str(ln.product_id)]
+        if orig is not None:
+            orig_rate = orig.get("gst_rate")
+            if orig_rate is not None:
+                rate = float(orig_rate)
+        if rate is None and ln.gst_rate is not None:
+            rate = float(ln.gst_rate)
+        d["gst_rate"] = rate if rate is not None else 0.0
+        out.append(d)
+    return out
+
+
 def _order_payment_method(order: Optional[Dict[str, Any]]) -> str:
     """Best-effort original payment method for defaulting a refund method."""
     if not order:
@@ -208,13 +289,18 @@ def _issue_store_credit(
     reason: str,
     ref: str,
     current_user: dict,
+    gross: Optional[float] = None,
+    restocking_fee: Optional[float] = None,
 ) -> Optional[Dict[str, Any]]:
     """Append an ISSUED ledger entry + bump the customer's running balance.
 
     Reuses services.store_credit_ledger.make_entry and the same persistence
-    shape as customers.py. Fully fail-soft: returns None (and never raises)
-    when the DB is absent or anything goes wrong, so a return is still
-    recorded even if the credit ledger write fails.
+    shape as customers.py. `amount` is the NET credit issued; when a credit
+    note carries a restocking fee, `gross` + `restocking_fee` are stamped on
+    the persisted ledger row so the GST-inclusive gross, the fee, and the net
+    are all auditable from the ledger alone. Fully fail-soft: returns None (and
+    never raises) when the DB is absent or anything goes wrong, so a return is
+    still recorded even if the credit ledger write fails.
     """
     if not customer_id or amount <= 0:
         return None
@@ -242,6 +328,13 @@ def _issue_store_credit(
     except ValueError as exc:
         logger.warning("[RETURNS] credit entry rejected: %s", exc)
         return None
+
+    # Stamp the gross / fee / net trail onto the ledger row for the credit note.
+    if gross is not None:
+        entry["gross_refund"] = round(float(gross), 2)
+    if restocking_fee is not None:
+        entry["restocking_fee"] = round(float(restocking_fee), 2)
+    entry["net_refund"] = round(float(amount), 2)
 
     coll = _ledger_coll()
     if coll is not None:
@@ -467,9 +560,7 @@ def _restock_good_items(
                 "applied": True,
             },
         )
-        sid = _reactivate_original_unit(
-            stock_repo, pid, store_id, order_id, used_ids
-        )
+        sid = _reactivate_original_unit(stock_repo, pid, store_id, order_id, used_ids)
         if sid:
             row["reactivated"] += 1
             row["quantity"] += 1
@@ -556,19 +647,47 @@ async def create_return(
 
     store_id = body.store_id or current_user.get("active_store_id")
 
-    # 1. Money math (pure engine; validates negatives).
+    order = _resolve_order(body)
+
+    # 1. Money math (pure engine; validates negatives). returned_value is the
+    #    GST-INCLUSIVE gross the customer paid: the original order line's
+    #    `gst_rate` is recovered (see _priced_return_lines) and the NET
+    #    unit_price grossed up by it. This fixes the under-refund bug where the
+    #    bare net subtotal was returned, dropping the GST the customer paid.
+    priced_lines = _priced_return_lines(active_lines, order)
     try:
-        ret_value = engine.returned_value(
-            [it.model_dump() for it in active_lines]
-        )
+        gross_refund = engine.returned_value(priced_lines)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
-    order = _resolve_order(body)
+    # Restocking fee: optional Rs deduction for damaged / opened goods. Only
+    # meaningful on a refund (RETURN / CREDIT_NOTE); an EXCHANGE is a like-for-
+    # like swap settled on the difference, so a fee there is ambiguous -> 422.
+    restocking_fee = round(float(body.restocking_fee or 0.0), 2)
+    if restocking_fee > 0 and body.return_type == "EXCHANGE":
+        raise HTTPException(
+            status_code=422,
+            detail="restocking_fee does not apply to an EXCHANGE",
+        )
+    try:
+        # net = gross - fee; raises if the fee exceeds the gross refund.
+        net_amount = engine.net_refund(gross_refund, restocking_fee)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+    # Back the GST out of the gross for the credit note / GSTR-1 reversal. The
+    # tax is INSIDE the gross (not added on top). Use the dominant rate across
+    # the returned lines when they span rates.
+    gst_view = engine.gst_breakup(gross_refund, engine.dominant_gst_rate(priced_lines))
+
+    # `ret_value` carries the GST-inclusive gross for the response + doc
+    # (preserves the existing field name; now correctly gross, not net).
+    ret_value = gross_refund
+
     customer_id = body.customer_id or (order or {}).get("customer_id")
-    customer_name = (order or {}).get("customer_name") or (
-        order or {}
-    ).get("customerName") or ""
+    customer_name = (
+        (order or {}).get("customer_name") or (order or {}).get("customerName") or ""
+    )
 
     return_id = generate_return_id()
 
@@ -581,18 +700,21 @@ async def create_return(
     replacement_dump = [r.model_dump() for r in body.replacement_items]
 
     if body.return_type == "RETURN":
-        refund_amount = ret_value
+        # Net of any restocking fee = the cash actually given back.
+        refund_amount = net_amount
         refund_method = body.refund_method or _order_payment_method(order)
 
     elif body.return_type == "CREDIT_NOTE":
-        credit_amount = ret_value
+        credit_amount = net_amount
         refund_method = "STORE_CREDIT"
         credit_entry = _issue_store_credit(
             customer_id,
-            ret_value,
+            net_amount,
             reason=f"Credit note for return {return_id}",
             ref=return_id,
             current_user=current_user,
+            gross=gross_refund,
+            restocking_fee=restocking_fee,
         )
 
     else:  # EXCHANGE
@@ -648,9 +770,18 @@ async def create_return(
         "customer_name": customer_name,
         "store_id": store_id,
         "return_type": body.return_type,
-        "items": [it.model_dump() for it in active_lines],
+        # Persist the GST-resolved lines (each carries the rate it was billed
+        # at) so the doc is self-describing for the credit note / audit.
+        "items": priced_lines,
         "replacement_items": replacement_dump,
         "returned_value": ret_value,
+        # GST-inclusive gross the customer paid for the returned qty, the
+        # optional restocking fee, and the resulting net refund. Persisted so
+        # the credit note / GSTR-1 reversal is auditable.
+        "gross_refund": gross_refund,
+        "restocking_fee": restocking_fee,
+        "net_refund": net_amount,
+        "gst_breakup": gst_view,
         "refund_amount": refund_amount,
         "refund_method": refund_method,
         "credit_amount": credit_amount,
@@ -693,6 +824,9 @@ async def create_return(
                     "details": {
                         "return_type": body.return_type,
                         "returned_value": ret_value,
+                        "gross_refund": gross_refund,
+                        "restocking_fee": restocking_fee,
+                        "net_refund": net_amount,
                         "refund_amount": refund_amount,
                         "credit_amount": credit_amount,
                         "collect_amount": collect_amount,
@@ -704,9 +838,14 @@ async def create_return(
         logger.warning("[RETURNS] audit log skipped: %s", exc)
 
     # 5. Response.
+    fee_note = (
+        f" (gross Rs {gross_refund} - restocking fee Rs {restocking_fee})"
+        if restocking_fee > 0
+        else ""
+    )
     message = {
-        "RETURN": f"Refund of Rs {ret_value} recorded",
-        "CREDIT_NOTE": f"Store credit of Rs {ret_value} issued",
+        "RETURN": f"Refund of Rs {net_amount} recorded{fee_note}",
+        "CREDIT_NOTE": f"Store credit of Rs {net_amount} issued{fee_note}",
         "EXCHANGE": "Exchange recorded",
     }[body.return_type]
 
@@ -714,6 +853,10 @@ async def create_return(
         "return_id": return_id,
         "return_type": body.return_type,
         "returned_value": ret_value,
+        "gross_refund": gross_refund,
+        "restocking_fee": restocking_fee,
+        "net_refund": net_amount,
+        "gst_breakup": gst_view,
         "refund_amount": refund_amount,
         "refund_method": refund_method,
         "credit_amount": credit_amount,
@@ -757,10 +900,7 @@ async def list_returns(
     try:
         total = coll.count_documents(query)
         cursor = (
-            coll.find(query, {"_id": 0})
-            .sort("created_at", -1)
-            .skip(skip)
-            .limit(limit)
+            coll.find(query, {"_id": 0}).sort("created_at", -1).skip(skip).limit(limit)
         )
         returns = list(cursor)
     except Exception as exc:  # noqa: BLE001
