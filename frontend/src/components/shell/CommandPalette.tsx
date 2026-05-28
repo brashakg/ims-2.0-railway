@@ -112,6 +112,7 @@ const ALL_PAGES: JumpPage[] = [
   { label: 'Incentive', route: '/incentive', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT', 'SALES_STAFF', 'SALES_CASHIER', 'CASHIER'] },
   { label: 'Reports', route: '/reports', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'] },
   { label: 'Finance', route: '/finance/dashboard', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'] },
+  { label: 'Cash Register', route: '/finance/cash-register', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'] },
   { label: 'Cash Flow', route: '/finance/cash-flow', requireRoles: ['SUPERADMIN', 'ADMIN', 'ACCOUNTANT'] },
   { label: 'GST Credit (ITC)', route: '/finance/itc', requireRoles: ['SUPERADMIN', 'ADMIN', 'ACCOUNTANT'] },
   { label: 'Marketing', route: '/customers/campaigns', requireRoles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER'] },
