@@ -9,6 +9,7 @@ from typing import Any, Dict, Optional
 from datetime import date, datetime, timedelta
 from calendar import monthrange
 from .auth import get_current_user, require_roles
+from ..utils.dates import to_date_str
 from ..dependencies import (
     get_order_repository,
     get_stock_repository,
@@ -229,7 +230,7 @@ async def dashboard_stats(
         # Calculate totals
         for order in all_orders:
             status = order.get("status", "")
-            order_date = order.get("created_at", "")[:10]
+            order_date = to_date_str(order.get("created_at"))
 
             # Today's orders
             if order_date == today_str:
@@ -262,7 +263,7 @@ async def dashboard_stats(
         # Count customers created today
         all_customers = customer_repo.find_many({"store_id": active_store})
         for customer in all_customers:
-            created_date = customer.get("created_at", "")[:10]
+            created_date = to_date_str(customer.get("created_at"))
             if created_date == today_str:
                 today_new_customers += 1
 
@@ -758,7 +759,7 @@ async def gst_report(
         "data": [
             {
                 "order_number": o.get("order_number"),
-                "date": o.get("created_at", "")[:10],
+                "date": to_date_str(o.get("created_at")),
                 "taxable_amount": o.get("taxable_amount", 0),
                 "cgst": o.get("cgst_amount", 0),
                 "sgst": o.get("sgst_amount", 0),

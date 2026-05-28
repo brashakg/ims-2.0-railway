@@ -189,7 +189,7 @@ async def get_notification_logs(
     """Get notification logs with filters"""
     active_store = store_id or current_user.get("active_store_id", "")
     db = _get_db()
-    if not db:
+    if db is None:
         return {"logs": [], "total": 0}
 
     query = {"store_id": active_store}
@@ -218,7 +218,7 @@ async def send_review_request(
 ):
     """Send a Google Review request after order delivery"""
     db = _get_db()
-    if not db:
+    if db is None:
         raise HTTPException(status_code=503, detail="Database unavailable")
 
     # Look up order and customer
@@ -265,7 +265,7 @@ async def get_rx_expiry_alerts(
     """Get prescriptions expiring in 30/60/90 days"""
     active_store = store_id or current_user.get("active_store_id", "")
     db = _get_db()
-    if not db:
+    if db is None:
         return {"urgent": [], "soon": [], "upcoming": [], "total_count": 0}
 
     now = datetime.now()
@@ -329,7 +329,7 @@ async def send_rx_reminder(
 ):
     """Send prescription expiry reminder to customer"""
     db = _get_db()
-    if not db:
+    if db is None:
         raise HTTPException(status_code=503, detail="Database unavailable")
 
     customer = (
@@ -369,7 +369,7 @@ async def snooze_rx_alert(
 ):
     """Snooze an Rx expiry alert for N days"""
     db = _get_db()
-    if not db:
+    if db is None:
         return {"message": "Snoozed"}
 
     snooze_until = (datetime.now() + timedelta(days=req.days)).isoformat()
@@ -395,7 +395,7 @@ async def send_referral_invite(
 ):
     """Generate referral code and send invite"""
     db = _get_db()
-    if not db:
+    if db is None:
         raise HTTPException(status_code=503, detail="Database unavailable")
 
     customer = (
@@ -470,7 +470,7 @@ async def get_referrals(
     """List referrals for a store"""
     active_store = store_id or current_user.get("active_store_id", "")
     db = _get_db()
-    if not db:
+    if db is None:
         return {"referrals": [], "total": 0}
 
     query = {"store_id": active_store}
@@ -492,7 +492,7 @@ async def redeem_referral(
 ):
     """Credit rewards for a completed referral"""
     db = _get_db()
-    if not db:
+    if db is None:
         raise HTTPException(status_code=503, detail="Database unavailable")
 
     coll = db.get_collection("referrals")
@@ -532,7 +532,7 @@ async def send_nps_survey(
 ):
     """Send NPS survey for a delivered order"""
     db = _get_db()
-    if not db:
+    if db is None:
         raise HTTPException(status_code=503, detail="Database unavailable")
 
     order = db.get_collection("orders").find_one(
@@ -596,7 +596,7 @@ async def submit_nps_response(
 ):
     """Record NPS survey response"""
     db = _get_db()
-    if not db:
+    if db is None:
         raise HTTPException(status_code=503, detail="Database unavailable")
 
     coll = db.get_collection("nps_responses")
@@ -640,7 +640,7 @@ async def get_nps_dashboard(
     """Get NPS dashboard data"""
     active_store = store_id or current_user.get("active_store_id", "")
     db = _get_db()
-    if not db:
+    if db is None:
         return {
             "avg_score": 0,
             "promoters": 0,
@@ -701,7 +701,7 @@ async def create_walkin(
     """Register a walk-in visitor"""
     active_store = store_id or current_user.get("active_store_id", "")
     db = _get_db()
-    if not db:
+    if db is None:
         raise HTTPException(status_code=503, detail="Database unavailable")
 
     walkin_id = (
@@ -762,7 +762,7 @@ async def get_walkins(
     """List walk-in registrations"""
     active_store = store_id or current_user.get("active_store_id", "")
     db = _get_db()
-    if not db:
+    if db is None:
         return {"walkins": [], "total": 0}
 
     query = {"store_id": active_store}
@@ -798,7 +798,7 @@ async def record_walkout(
     """Record a customer walkout for recovery follow-up"""
     active_store = store_id or current_user.get("active_store_id", "")
     db = _get_db()
-    if not db:
+    if db is None:
         raise HTTPException(status_code=503, detail="Database unavailable")
 
     customer = (
@@ -866,7 +866,7 @@ async def get_walkout_recoveries(
     """List walkout recovery attempts"""
     active_store = store_id or current_user.get("active_store_id", "")
     db = _get_db()
-    if not db:
+    if db is None:
         return {"walkouts": [], "total": 0, "recovered": 0, "recovery_rate": 0}
 
     coll = db.get_collection("walkouts")

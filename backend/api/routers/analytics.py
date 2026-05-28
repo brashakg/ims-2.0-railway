@@ -11,6 +11,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 from .auth import get_current_user
+from ..utils.dates import to_date_str
 from ..dependencies import (
     get_order_repository,
     get_stock_repository,
@@ -280,7 +281,7 @@ async def get_dashboard_summary(
             [
                 c
                 for c in customers
-                if c.get("created_at", "")[:10] >= start_date.date().isoformat()
+                if to_date_str(c.get("created_at")) >= start_date.date().isoformat()
             ]
         )
 
@@ -707,12 +708,12 @@ async def get_customer_insights(
         new_customers = [
             c
             for c in all_customers
-            if c.get("created_at", "")[:10] >= start_date.date().isoformat()
+            if to_date_str(c.get("created_at")) >= start_date.date().isoformat()
         ]
         returning_customers = [
             c
             for c in all_customers
-            if c.get("created_at", "")[:10] < start_date.date().isoformat()
+            if to_date_str(c.get("created_at")) < start_date.date().isoformat()
         ]
 
         # Top customers by spend
@@ -920,7 +921,7 @@ async def get_enterprise_kpis(
                     "revenue": 0.0,
                     "orders": 0,
                 }
-            order_date_str = order.get("created_at", "")[:10]
+            order_date_str = to_date_str(order.get("created_at"))
             current_date_str = end_date.date().isoformat()
             if order_date_str == current_date_str:  # Same day for today
                 stores_by_id[order_store_id]["revenue"] += _safe_float(

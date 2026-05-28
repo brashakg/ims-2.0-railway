@@ -1234,7 +1234,7 @@ def _clean(doc: dict) -> dict:
 def _recompute_bill_status(db, bill_id: Optional[str]) -> None:
     """Re-derive a bill's status (OUTSTANDING / PARTIAL / PAID) from its
     allocated payments + debit notes. Fail-soft."""
-    if not db or not bill_id:
+    if db is None or not bill_id:
         return
     try:
         bill = db.get_collection("vendor_bills").find_one(
