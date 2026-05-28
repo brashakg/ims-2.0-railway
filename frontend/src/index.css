@@ -1795,6 +1795,131 @@
 .zone-chip.warn { color: var(--warn); border-color: var(--warn); }
 
 /* ============================================================================
+   GRN receive flow + cycle-count banner (v2-2c).
+   Ported from docs/design/inventory.html (Receive GRN modal + Cycle count
+   tab). Used by the Goods Receipt Note page + Stock Audit count sheet to
+   carry the statutory-but-calm v2 aesthetic. BV tokens only.
+   ============================================================================ */
+
+/* Stepper — "Match PO -> Verify boxes -> Assign placement -> Post" */
+.grn-stepper {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  background: var(--surface-2);
+  overflow: hidden;
+  margin-bottom: 18px;
+}
+.grn-stepper > div {
+  padding: 12px 16px;
+  border-right: 1px solid var(--line);
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+}
+.grn-stepper > div:last-child { border-right: 0; }
+.grn-stepper .n {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 1.5px solid var(--ink-4);
+  display: grid;
+  place-items: center;
+  font: 600 11px/1 var(--font-mono);
+  color: var(--ink-4);
+  flex-shrink: 0;
+}
+.grn-stepper .active .n { border-color: var(--ink); color: var(--ink); background: var(--surface); }
+.grn-stepper .done .n { border-color: var(--ok); background: var(--ok); color: #fff; }
+.grn-stepper .t { font: 600 12px/1.2 var(--font-sans); color: var(--ink-3); }
+.grn-stepper .active .t { color: var(--ink); }
+.grn-stepper .done .t { color: var(--ink); }
+.grn-stepper .s { font-size: 11px; color: var(--ink-4); margin-top: 2px; }
+
+/* Consignment / vendor read-only grid */
+.grn-vendor-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 14px;
+  padding: 14px 16px;
+}
+.grn-vendor-grid .l {
+  font: 500 9.5px/1 var(--font-mono);
+  color: var(--ink-4);
+  text-transform: uppercase;
+  letter-spacing: .08em;
+  margin-bottom: 4px;
+}
+.grn-vendor-grid .v { font-size: 12px; color: var(--ink); font-weight: 500; }
+.grn-vendor-grid .v.mono { font-family: var(--font-mono); font-size: 11px; }
+
+/* Totals strip inside the GRN card */
+.grn-totals {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 0;
+}
+.grn-totals > div { padding: 12px 16px; border-right: 1px solid var(--line); }
+.grn-totals > div:last-child { border-right: 0; }
+.grn-totals .l {
+  font: 500 10px/1 var(--font-mono);
+  color: var(--ink-4);
+  text-transform: uppercase;
+  letter-spacing: .08em;
+  margin-bottom: 5px;
+}
+.grn-totals .v {
+  font-family: var(--font-sans);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  font-size: 22px;
+  line-height: 1;
+  letter-spacing: -.02em;
+  color: var(--ink);
+}
+.grn-totals .d { font-size: 11px; color: var(--ink-4); margin-top: 3px; }
+
+/* Cycle-count banner (Stock Audit in-progress sessions) */
+.count-banner {
+  background: var(--bv-soft);
+  border: 1px solid var(--bv-50);
+  border-radius: var(--r-lg);
+  padding: 14px 18px;
+  display: flex;
+  gap: 14px;
+  align-items: center;
+  box-shadow: var(--sh-xs);
+}
+.count-banner .icn {
+  width: 40px;
+  height: 40px;
+  background: var(--bv);
+  color: #fff;
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  font-family: var(--font-display);
+  font-size: 22px;
+  flex-shrink: 0;
+}
+.count-banner .t { font: 600 13px/1.2 var(--font-sans); margin-bottom: 2px; color: var(--ink); }
+.count-banner .s { font-size: 11.5px; color: var(--ink-3); }
+
+@media (max-width: 1024px) {
+  .grn-stepper { grid-template-columns: 1fr 1fr; }
+  .grn-vendor-grid { grid-template-columns: repeat(2, 1fr); }
+  .grn-totals { grid-template-columns: 1fr 1fr; }
+}
+@media (max-width: 640px) {
+  .grn-stepper { grid-template-columns: 1fr; }
+  .grn-vendor-grid { grid-template-columns: 1fr; }
+  .grn-totals { grid-template-columns: 1fr; }
+  .grn-stepper > div, .grn-vendor-grid > div, .grn-totals > div { border-right: 0; border-bottom: 1px solid var(--line); }
+}
+
+/* ============================================================================
    Reports — KPI grid + chart cards.
    Ported from docs/design/reports.html. Shares .inv-tabs with Inventory.
    ============================================================================ */

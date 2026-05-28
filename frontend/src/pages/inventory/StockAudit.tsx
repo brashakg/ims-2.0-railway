@@ -1,11 +1,15 @@
 // ============================================================================
-// IMS 2.0 - Stock Audit Management
+// IMS 2.0 - Stock Audit / Count Sheet  ·  v2 reskin (slice 2c)
 // ============================================================================
-// Physical stock count, variance analysis, shrinkage tracking
-// Wired to /inventory/stock-count API endpoints
+// Physical stock count, variance analysis, shrinkage tracking. Reskinned to
+// the v2 aesthetic (docs/design/inventory.html Cycle count tab): inv-body
+// shell, stat-strip, count-banner for in-progress sessions, card/tbl
+// primitives, sessions grouped by display zone/fixture (the fixture system
+// from v2-2a/2b). Same backend wiring (inventoryApi.getStockCounts /
+// startStockCount / completeStockCount). BV brand tokens only.
 
-import { useState, useEffect } from 'react';
-import { Plus, BarChart3, CheckCircle, Clock, Loader2, RefreshCw } from 'lucide-react';
+import { useState, useEffect, useMemo } from 'react';
+import { Plus, BarChart3, CheckCircle, Clock, Loader2, RefreshCw, Printer } from 'lucide-react';
 import clsx from 'clsx';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
@@ -35,27 +39,30 @@ interface AuditVariance {
   variance_percentage: number;
 }
 
-const getStatusColor = (status: string) => {
+const statusChip = (status: string): string => {
   switch (status) {
     case 'in_progress':
-      return 'bg-blue-100 text-blue-800';
+      return 'info';
     case 'completed':
-      return 'bg-green-100 text-green-800';
+      return 'ok';
     default:
-      return 'bg-gray-100 text-gray-800';
+      return '';
   }
 };
 
 const getStatusIcon = (status: string) => {
   switch (status) {
     case 'in_progress':
-      return <BarChart3 className="w-4 h-4" />;
+      return <BarChart3 className="w-3.5 h-3.5" />;
     case 'completed':
-      return <CheckCircle className="w-4 h-4" />;
+      return <CheckCircle className="w-3.5 h-3.5" />;
     default:
-      return <Clock className="w-4 h-4" />;
+      return <Clock className="w-3.5 h-3.5" />;
   }
 };
+
+// Label for the zone/fixture grouping header. Falls back to "Unzoned".
+const zoneLabel = (zone?: string) => (zone && zone.trim() ? zone.trim() : 'Unzoned · whole store');
 
 export function StockAudit() {
   const { user } = useAuth();
@@ -129,194 +136,271 @@ export function StockAudit() {
     }
   };
 
-  const completedAudits = audits.filter(a => a.status === 'completed');
-  const inProgressAudits = audits.filter(a => a.status === 'in_progress');
+  const completedAudits = audits.filter((a) => a.status === 'completed');
+  const inProgressAudits = audits.filter((a) => a.status === 'in_progress');
 
-  const avgShrinkage = completedAudits.length > 0
-    ? (completedAudits.reduce((sum, a) => sum + (a.shrinkage_percentage || 0), 0) / completedAudits.length).toFixed(2)
-    : '0.00';
+  const avgShrinkage =
+    completedAudits.length > 0
+      ? (
+          completedAudits.reduce((sum, a) => sum + (a.shrinkage_percentage || 0), 0) /
+          completedAudits.length
+        ).toFixed(2)
+      : '0.00';
+
+  // Group completed/idle sessions by zone (display-fixture system). The
+  // count sheet "groups by fixture instead of by shelf range" per the v2
+  // design — zone is the closest field the count API carries.
+  const zoneGroups = useMemo(() => {
+    const groups = new Map<string, StockAudit[]>();
+    for (const a of audits) {
+      if (a.status === 'in_progress') continue; // surfaced as banners above
+      const key = zoneLabel(a.zone);
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key)!.push(a);
+    }
+    return Array.from(groups.entries());
+  }, [audits]);
 
   return (
-    <div className="space-y-6">
+    <div className="inv-body">
       {/* Header */}
-      <div className="flex items-center justify-between">
+      <div className="inv-head">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">Stock Audit</h1>
-          <p className="text-sm text-gray-500">Physical stock count and variance analysis</p>
+          <div className="eyebrow" style={{ marginBottom: 6 }}>Inventory · audit</div>
+          <h1>Count the floor.</h1>
+          <p className="text-sm mt-1" style={{ color: 'var(--ink-4)' }}>
+            Physical stock count and variance analysis, grouped by display zone.
+          </p>
         </div>
         <div className="flex gap-2">
-          <button onClick={loadAudits} disabled={isLoading} className="btn-outline text-sm flex items-center gap-2">
+          <button onClick={loadAudits} disabled={isLoading} className="btn">
             {isLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
             Refresh
           </button>
-          <button
-            onClick={() => setShowNewAuditModal(true)}
-            className="px-4 py-2 bg-bv-red-600 hover:bg-bv-red-700 text-white rounded-lg font-semibold flex items-center gap-2"
-          >
-            <Plus className="w-5 h-5" />
-            New Stock Count
+          <button onClick={() => setShowNewAuditModal(true)} className="btn accent">
+            <Plus className="w-4 h-4" />
+            New stock count
           </button>
         </div>
       </div>
 
-      {/* Summary Stats */}
-      <div className="grid grid-cols-2 tablet:grid-cols-4 gap-4">
-        <div className="card">
-          <p className="text-sm text-gray-500 mb-1">Total Counts</p>
-          <p className="text-2xl font-bold text-gray-900">{audits.length}</p>
+      {/* Summary stat strip */}
+      <div className="stat-strip">
+        <div>
+          <div className="l">Total counts</div>
+          <div className="v">{audits.length}</div>
+          <div className="d">this store</div>
         </div>
-        <div className="card">
-          <p className="text-sm text-gray-500 mb-1">In Progress</p>
-          <p className="text-2xl font-bold text-blue-600">{inProgressAudits.length}</p>
+        <div>
+          <div className="l">In progress</div>
+          <div className="v" style={{ color: 'var(--info)' }}>{inProgressAudits.length}</div>
+          <div className="d">open sessions</div>
         </div>
-        <div className="card">
-          <p className="text-sm text-gray-500 mb-1">Completed</p>
-          <p className="text-2xl font-bold text-green-600">{completedAudits.length}</p>
+        <div>
+          <div className="l">Completed</div>
+          <div className="v" style={{ color: 'var(--ok)' }}>{completedAudits.length}</div>
+          <div className="d good">signed off</div>
         </div>
-        <div className="card">
-          <p className="text-sm text-gray-500 mb-1">Avg Shrinkage</p>
-          <p className="text-2xl font-bold text-orange-600">{avgShrinkage}%</p>
+        <div>
+          <div className="l">Avg shrinkage</div>
+          <div className="v" style={{ color: Number(avgShrinkage) > 1 ? 'var(--warn)' : 'var(--ink)' }}>
+            {avgShrinkage}%
+          </div>
+          <div className="d">{Number(avgShrinkage) > 1 ? 'above tolerance' : 'within tolerance'}</div>
         </div>
       </div>
 
       {/* Loading */}
       {isLoading && (
         <div className="card flex items-center justify-center py-12">
-          <Loader2 className="w-8 h-8 animate-spin text-bv-gold-500" />
+          <Loader2 className="w-7 h-7 animate-spin" style={{ color: 'var(--bv)' }} />
+        </div>
+      )}
+
+      {/* In-progress count banners */}
+      {!isLoading && inProgressAudits.length > 0 && (
+        <div className="space-y-3 mb-5">
+          {inProgressAudits.map((audit) => (
+            <div key={audit.count_id} className="count-banner">
+              <div className="icn">C</div>
+              <div>
+                <div className="t">
+                  Cycle count in progress
+                  {audit.zone ? ` · ${audit.zone}` : ''}
+                  {audit.category && audit.category !== 'All' ? ` · ${audit.category}` : ''}
+                </div>
+                <div className="s">
+                  {audit.audit_number} · started {audit.created_at ? new Date(audit.created_at).toLocaleString('en-IN') : '—'}
+                  {audit.created_by_name ? ` by ${audit.created_by_name}` : ''} · {audit.items_counted} SKUs counted
+                </div>
+              </div>
+              <span className="flex-1" />
+              <button className="btn" onClick={() => window.print()}>
+                <Printer className="w-4 h-4" /> Count sheet
+              </button>
+              <button className="btn accent" onClick={() => handleCompleteAudit(audit.count_id)}>
+                <CheckCircle className="w-4 h-4" /> Complete count
+              </button>
+            </div>
+          ))}
         </div>
       )}
 
       {/* Empty state */}
       {!isLoading && audits.length === 0 && (
         <div className="card text-center py-12">
-          <BarChart3 className="w-12 h-12 mx-auto mb-3 text-gray-700" />
-          <p className="text-gray-500 font-medium">No stock counts yet</p>
-          <p className="text-sm text-gray-500 mt-1">Start a new physical stock count to track inventory accuracy</p>
+          <BarChart3 className="w-10 h-10 mx-auto mb-3" style={{ color: 'var(--ink-5)' }} />
+          <p className="font-medium" style={{ color: 'var(--ink-3)' }}>No stock counts yet</p>
+          <p className="text-sm mt-1" style={{ color: 'var(--ink-5)' }}>
+            Start a new physical stock count to track inventory accuracy.
+          </p>
         </div>
       )}
 
-      {/* Audit List */}
-      {!isLoading && audits.length > 0 && (
-        <div className="space-y-3">
-          <h3 className="font-semibold text-gray-900">Stock Count Sessions</h3>
-          {audits.map((audit) => (
-            <div
-              key={audit.count_id}
-              onClick={() => setSelectedAudit(selectedAudit === audit.count_id ? null : audit.count_id)}
-              className={clsx(
-                'card cursor-pointer transition-all',
-                selectedAudit === audit.count_id ? 'ring-2 ring-bv-gold-400' : 'hover:shadow-md'
-              )}
-            >
-              <div className="flex items-start justify-between mb-3">
-                <div>
-                  <p className="font-semibold text-gray-900">{audit.audit_number}</p>
-                  <p className="text-sm text-gray-500">
-                    {audit.category || 'All Categories'} {audit.zone && `· ${audit.zone}`}
-                  </p>
-                </div>
-                <span className={clsx('px-3 py-1 rounded-full text-xs font-semibold flex items-center gap-1', getStatusColor(audit.status))}>
-                  {getStatusIcon(audit.status)}
-                  {audit.status === 'in_progress' ? 'In Progress' : 'Completed'}
+      {/* Session list grouped by display zone / fixture */}
+      {!isLoading && zoneGroups.length > 0 && (
+        <div className="space-y-5">
+          {zoneGroups.map(([zone, list]) => (
+            <div key={zone}>
+              {/* Zone section header strip (count sheet groups by fixture/zone) */}
+              <div className="fl-floor-head" style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 10 }}>
+                <span className="ttl" style={{ font: '600 13px/1 var(--font-sans)', color: 'var(--ink)' }}>{zone}</span>
+                <span className="meta" style={{ font: '500 10.5px/1 var(--font-mono)', color: 'var(--ink-4)', textTransform: 'uppercase', letterSpacing: '.08em' }}>
+                  {list.length} session{list.length > 1 ? 's' : ''}
                 </span>
+                <span style={{ flex: 1, height: 1, background: 'var(--line)' }} />
               </div>
 
-              <div className="grid grid-cols-2 tablet:grid-cols-4 gap-4 text-sm">
-                <div>
-                  <p className="text-gray-500 text-xs">Created</p>
-                  <p className="font-medium text-gray-900">{audit.created_at ? new Date(audit.created_at).toLocaleDateString('en-IN') : '-'}</p>
-                </div>
-                <div>
-                  <p className="text-gray-500 text-xs">Items Counted</p>
-                  <p className="font-medium text-gray-900">{audit.items_counted}</p>
-                </div>
-                <div>
-                  <p className="text-gray-500 text-xs">By</p>
-                  <p className="font-medium text-gray-900">{audit.created_by_name || '-'}</p>
-                </div>
-                {audit.status === 'completed' && (
-                  <div>
-                    <p className="text-gray-500 text-xs">Variance</p>
-                    <p className={clsx('font-medium', Math.abs(audit.variance_percentage || 0) > 5 ? 'text-red-600' : 'text-green-600')}>
-                      {audit.variance_percentage?.toFixed(2)}%
-                    </p>
-                  </div>
-                )}
-              </div>
+              <div className="space-y-3">
+                {list.map((audit) => (
+                  <div
+                    key={audit.count_id}
+                    onClick={() => setSelectedAudit(selectedAudit === audit.count_id ? null : audit.count_id)}
+                    className={clsx('card cursor-pointer transition-all', selectedAudit === audit.count_id ? 'ring-2' : 'hover:shadow-md')}
+                    style={selectedAudit === audit.count_id ? { boxShadow: '0 0 0 2px var(--bv)' } : undefined}
+                  >
+                    <div className="flex items-start justify-between mb-3">
+                      <div>
+                        <p className="font-semibold mono" style={{ color: 'var(--ink)' }}>{audit.audit_number}</p>
+                        <p className="text-sm" style={{ color: 'var(--ink-4)' }}>
+                          {audit.category || 'All categories'}
+                          {audit.zone && ` · ${audit.zone}`}
+                        </p>
+                      </div>
+                      <span className={clsx('chip', statusChip(audit.status))}>
+                        {getStatusIcon(audit.status)}
+                        {audit.status === 'in_progress' ? 'In progress' : 'Completed'}
+                      </span>
+                    </div>
 
-              {/* Expanded details */}
-              {selectedAudit === audit.count_id && (
-                <div className="mt-4 pt-4 border-t border-gray-200 space-y-3">
-                  {audit.status === 'completed' && (
-                    <>
-                      <div className="grid grid-cols-2 gap-3">
-                        <div className="bg-gray-50 rounded-lg p-3">
-                          <p className="text-xs text-gray-500">Overall Variance</p>
-                          <p className={clsx('font-bold text-lg', Math.abs(audit.variance_percentage || 0) > 5 ? 'text-red-600' : 'text-green-600')}>
+                    <div className="grid grid-cols-2 tablet:grid-cols-4 gap-4 text-sm">
+                      <div>
+                        <p className="text-xs" style={{ color: 'var(--ink-4)' }}>Created</p>
+                        <p className="font-medium" style={{ color: 'var(--ink)' }}>
+                          {audit.created_at ? new Date(audit.created_at).toLocaleDateString('en-IN') : '—'}
+                        </p>
+                      </div>
+                      <div>
+                        <p className="text-xs" style={{ color: 'var(--ink-4)' }}>Items counted</p>
+                        <p className="font-medium" style={{ color: 'var(--ink)' }}>{audit.items_counted}</p>
+                      </div>
+                      <div>
+                        <p className="text-xs" style={{ color: 'var(--ink-4)' }}>By</p>
+                        <p className="font-medium" style={{ color: 'var(--ink)' }}>{audit.created_by_name || '—'}</p>
+                      </div>
+                      {audit.status === 'completed' && (
+                        <div>
+                          <p className="text-xs" style={{ color: 'var(--ink-4)' }}>Variance</p>
+                          <p
+                            className="font-medium"
+                            style={{ color: Math.abs(audit.variance_percentage || 0) > 5 ? 'var(--err)' : 'var(--ok)' }}
+                          >
                             {audit.variance_percentage?.toFixed(2)}%
                           </p>
                         </div>
-                        <div className="bg-gray-50 rounded-lg p-3">
-                          <p className="text-xs text-gray-500">Shrinkage</p>
-                          <p className={clsx('font-bold text-lg', (audit.shrinkage_percentage || 0) > 1 ? 'text-orange-600' : 'text-green-600')}>
-                            {audit.shrinkage_percentage?.toFixed(2)}%
-                          </p>
-                        </div>
-                      </div>
+                      )}
+                    </div>
 
-                      {/* Variance details */}
-                      {audit.variances && audit.variances.length > 0 && (
-                        <div>
-                          <p className="text-xs font-medium text-gray-500 uppercase tracking-wide mb-2">Item Variances</p>
-                          <div className="space-y-1">
-                            {audit.variances.filter((v: any) => v.variance !== 0).map((v: any, i: number) => (
-                              <div key={v.product_id || i} className="flex items-center justify-between text-sm bg-gray-50 rounded px-3 py-2">
-                                <div>
-                                  <span className="font-medium text-gray-900">{v.product_name || v.sku}</span>
-                                  <span className="text-gray-500 ml-2 text-xs">Sys: {v.system_quantity} | Count: {v.physical_quantity}</span>
-                                </div>
-                                <span className={clsx('font-semibold', v.variance < 0 ? 'text-red-600' : 'text-green-600')}>
-                                  {v.variance > 0 ? '+' : ''}{v.variance}
-                                </span>
-                              </div>
-                            ))}
-                            {audit.variances.filter((v: any) => v.variance !== 0).length === 0 && (
-                              <p className="text-sm text-gray-500 italic">No variances found — perfect match!</p>
-                            )}
+                    {/* Expanded detail */}
+                    {selectedAudit === audit.count_id && audit.status === 'completed' && (
+                      <div className="mt-4 pt-4 space-y-3" style={{ borderTop: '1px solid var(--line)' }}>
+                        <div className="grid grid-cols-2 gap-3">
+                          <div className="rounded-lg p-3" style={{ background: 'var(--bg-sunk)' }}>
+                            <p className="text-xs" style={{ color: 'var(--ink-4)' }}>Overall variance</p>
+                            <p
+                              className="font-bold text-lg"
+                              style={{ color: Math.abs(audit.variance_percentage || 0) > 5 ? 'var(--err)' : 'var(--ok)' }}
+                            >
+                              {audit.variance_percentage?.toFixed(2)}%
+                            </p>
+                          </div>
+                          <div className="rounded-lg p-3" style={{ background: 'var(--bg-sunk)' }}>
+                            <p className="text-xs" style={{ color: 'var(--ink-4)' }}>Shrinkage</p>
+                            <p
+                              className="font-bold text-lg"
+                              style={{ color: (audit.shrinkage_percentage || 0) > 1 ? 'var(--warn)' : 'var(--ok)' }}
+                            >
+                              {audit.shrinkage_percentage?.toFixed(2)}%
+                            </p>
                           </div>
                         </div>
-                      )}
-                    </>
-                  )}
 
-                  {audit.status === 'in_progress' && (
-                    <button
-                      onClick={(e) => { e.stopPropagation(); handleCompleteAudit(audit.count_id); }}
-                      className="w-full px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg text-sm font-semibold flex items-center justify-center gap-2"
-                    >
-                      <CheckCircle className="w-4 h-4" />
-                      Complete Count & Calculate Variances
-                    </button>
-                  )}
-                </div>
-              )}
+                        {audit.variances && audit.variances.filter((v) => v.variance !== 0).length > 0 ? (
+                          <table className="tbl">
+                            <thead>
+                              <tr>
+                                <th>Product</th>
+                                <th className="right">System</th>
+                                <th className="right">Counted</th>
+                                <th className="right">Δ</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {audit.variances
+                                .filter((v) => v.variance !== 0)
+                                .map((v, i) => (
+                                  <tr key={v.product_id || i}>
+                                    <td>
+                                      <span className="font-medium" style={{ color: 'var(--ink)' }}>{v.product_name || v.sku}</span>
+                                    </td>
+                                    <td className="right mono">{v.system_quantity}</td>
+                                    <td className="right mono">{v.physical_quantity}</td>
+                                    <td className="right">
+                                      <span className={clsx('chip', v.variance < 0 ? 'err' : 'ok')}>
+                                        {v.variance > 0 ? `+${v.variance}` : v.variance}
+                                      </span>
+                                    </td>
+                                  </tr>
+                                ))}
+                            </tbody>
+                          </table>
+                        ) : (
+                          <p className="text-sm italic" style={{ color: 'var(--ink-4)' }}>
+                            No variances found — perfect match!
+                          </p>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
             </div>
           ))}
         </div>
       )}
 
-      {/* New Audit Modal */}
+      {/* New count modal */}
       {showNewAuditModal && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+        <div className="fixed inset-0 flex items-center justify-center z-50 p-4" style={{ background: 'rgba(20,20,19,0.45)' }}>
           <div className="bg-white rounded-xl shadow-2xl w-full max-w-md">
             <div className="p-6">
-              <h3 className="text-lg font-bold text-gray-900 mb-4">Start New Stock Count</h3>
+              <h3 className="text-lg font-bold mb-4" style={{ color: 'var(--ink)' }}>Start new stock count</h3>
 
               <div className="space-y-4">
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Category (optional)</label>
-                  <select value={newCategory} onChange={(e) => setNewCategory(e.target.value)} className="input-field w-full">
-                    <option value="">All Categories</option>
+                  <label className="block text-sm font-medium mb-1" style={{ color: 'var(--ink-2)' }}>Category (optional)</label>
+                  <select value={newCategory} onChange={(e) => setNewCategory(e.target.value)} className="input w-full">
+                    <option value="">All categories</option>
                     <option value="FRAMES">Frames</option>
                     <option value="SUNGLASSES">Sunglasses</option>
                     <option value="RX_LENSES">Rx Lenses</option>
@@ -326,31 +410,27 @@ export function StockAudit() {
                   </select>
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Zone (optional)</label>
+                  <label className="block text-sm font-medium mb-1" style={{ color: 'var(--ink-2)' }}>Zone / fixture (optional)</label>
                   <input
                     type="text"
                     value={newZone}
                     onChange={(e) => setNewZone(e.target.value)}
-                    placeholder="e.g., Zone A, Display Wall, Shelf 1"
-                    className="input-field w-full"
+                    placeholder="e.g. W-01 Wall, Counter C-01, CL fridge"
+                    className="input w-full"
                   />
+                  <p className="text-xs mt-1" style={{ color: 'var(--ink-4)' }}>
+                    Scope the count to one display fixture for a focused count sheet.
+                  </p>
                 </div>
               </div>
 
               <div className="mt-6 flex gap-3">
-                <button
-                  onClick={() => setShowNewAuditModal(false)}
-                  className="flex-1 px-4 py-2 border border-gray-200 text-gray-700 rounded-lg hover:bg-gray-50"
-                >
+                <button onClick={() => setShowNewAuditModal(false)} className="btn flex-1">
                   Cancel
                 </button>
-                <button
-                  onClick={handleStartAudit}
-                  disabled={starting}
-                  className="flex-1 px-4 py-2 bg-bv-red-600 hover:bg-bv-red-700 text-white rounded-lg font-semibold flex items-center justify-center gap-2"
-                >
+                <button onClick={handleStartAudit} disabled={starting} className="btn accent flex-1">
                   {starting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
-                  Start Count
+                  Start count
                 </button>
               </div>
             </div>
