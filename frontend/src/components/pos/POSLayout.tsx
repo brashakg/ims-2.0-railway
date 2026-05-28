@@ -1273,12 +1273,15 @@ function StepCustomer() {
               <div className={`w-10 h-10 rounded-full ${isWalkin ? 'bg-gray-500 text-white' : 'bg-bv-red-700 text-white'} flex items-center justify-center font-semibold`}>{store.customer.name?.charAt(0)?.toUpperCase() || 'W'}</div>
               <div>
                 <p className="font-semibold text-gray-900">{store.customer.name}</p>
-                <p className="text-sm text-gray-500">{store.customer.phone || 'No phone'}</p>
+                {/* gray-600 (not -500): on the bv-red-50 selected-customer card
+                    gray-500 fell below WCAG AA (~4.0:1). gray-600 is ~6.2:1 on
+                    that pink bg and still fine on the white walk-in card. */}
+                <p className="text-sm text-gray-600">{store.customer.phone || 'No phone'}</p>
                 {isWalkin && <p className="text-xs text-amber-600 mt-0.5">Walk-in -- Quick Sale only</p>}
                 {store.patient && <p className="text-xs text-bv-red-600 mt-0.5">Patient: {store.patient.name}</p>}
               </div>
             </div>
-            <button onClick={() => startTransition(() => store.setCustomer(null))} className="text-sm text-gray-500 hover:text-gray-700 px-3 py-1 border border-gray-200 rounded-lg">Change</button>
+            <button onClick={() => startTransition(() => store.setCustomer(null))} className="text-sm text-gray-600 hover:text-gray-800 px-3 py-1 border border-gray-200 rounded-lg">Change</button>
           </div>
           {!isWalkin && <CustomerCardWithLoyalty />}
           {!isWalkin && <RxAvailableBadge customerId={store.customer.id} customerName={store.customer.name} />}
