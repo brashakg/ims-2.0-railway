@@ -14,7 +14,7 @@ export { authApi } from './auth';
 export { storeApi, adminStoreApi, adminUserApi, adminSystemApi } from './stores';
 
 // Products & Catalog (products, categories, brands, lens)
-export { productApi, catalogApi, adminProductApi, adminCategoryApi, adminBrandApi, adminLensApi } from './products';
+export { productApi, catalogApi, adminProductApi, adminBrandApi, adminLensApi } from './products';
 export type { OnlineStatus } from './products';
 
 // Inventory & Vendors

@@ -318,50 +318,11 @@ export const adminProductApi = {
 };
 
 // ============================================================================
-// Admin API - Category Master
+// Categories are a FIXED reference (CATEGORY_DEFINITIONS) that drives GST via
+// the HSN/GST master -- there is no category CRUD. The old adminCategoryApi
+// (/admin/categories writer) was removed: it had zero consumers and was a
+// confusing duplicate source for category + GST data.
 // ============================================================================
-
-export const adminCategoryApi = {
-  getCategories: async () => {
-    const response = await api.get('/admin/categories');
-    return response.data;
-  },
-
-  getCategory: async (categoryId: string) => {
-    const response = await api.get(`/admin/categories/${categoryId}`);
-    return response.data;
-  },
-
-  createCategory: async (data: {
-    code: string;
-    name: string;
-    hsnCode: string;
-    gstRate: number;
-    description?: string;
-    attributes?: string[];
-    status?: string;
-  }) => {
-    const response = await api.post('/admin/categories', data);
-    return response.data;
-  },
-
-  updateCategory: async (categoryId: string, data: Partial<{
-    name: string;
-    hsnCode: string;
-    gstRate: number;
-    description: string;
-    attributes: string[];
-    status: string;
-  }>) => {
-    const response = await api.put(`/admin/categories/${categoryId}`, data);
-    return response.data;
-  },
-
-  deleteCategory: async (categoryId: string) => {
-    const response = await api.delete(`/admin/categories/${categoryId}`);
-    return response.data;
-  },
-};
 
 // ============================================================================
 // Admin API - Brand Master

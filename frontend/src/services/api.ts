@@ -15,7 +15,6 @@ export {
   productApi,
   catalogApi,
   adminProductApi,
-  adminCategoryApi,
   adminBrandApi,
   adminLensApi,
   inventoryApi,
