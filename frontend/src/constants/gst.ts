@@ -333,37 +333,47 @@ export function getHSNByCategory(category: string, use6Digit: boolean = false): 
   }
 }
 
-// Calculate GST components
+// Calculate GST components.
+//
+// `amount` is the taxable base; GST is added ON TOP (GST-EXCLUSIVE). This
+// matches the cart, payment, order record, and the HSN-wise summary
+// (legalPrimitives.hsnTaxSummary computes taxable*rate/100). It previously
+// EXTRACTED GST as if `amount` were tax-inclusive — amount*rate/(100+rate) —
+// so on a ₹999 frame @5% the invoice line section read ₹999 + ₹47.57 =
+// ₹1046.57 while the HSN summary and the actual tender were ₹999 + ₹49.95 =
+// ₹1048.95: the printed Grand Total didn't reconcile with what the customer
+// paid and the two tax tables on one invoice disagreed (QA F3, a compliance
+// problem). Only the GST tax invoice uses this helper.
 export function calculateGST(amount: number, gstRate: number) {
-  const gstAmount = (amount * gstRate) / (100 + gstRate);
-  // Round CGST down, assign remainder to SGST to avoid 1-paisa loss on odd amounts
+  const gstAmount = (amount * gstRate) / 100;
+  // Round CGST down, assign remainder to SGST so CGST+SGST == total GST exactly.
   const roundedGst = parseFloat(gstAmount.toFixed(2));
-  const cgst = Math.floor(roundedGst * 100 / 2) / 100;
+  const cgst = Math.floor((roundedGst * 100) / 2) / 100;
   const sgst = parseFloat((roundedGst - cgst).toFixed(2));
-  const baseAmount = amount - gstAmount;
 
   return {
-    baseAmount: parseFloat(baseAmount.toFixed(2)),
+    baseAmount: parseFloat(amount.toFixed(2)),
     cgst,
     sgst,
     igst: 0, // For intra-state transactions
-    totalGst: parseFloat(gstAmount.toFixed(2)),
-    totalAmount: parseFloat(amount.toFixed(2)),
+    totalGst: roundedGst,
+    totalAmount: parseFloat((amount + roundedGst).toFixed(2)),
   };
 }
 
-// Calculate GST for inter-state transactions
+// Calculate GST for inter-state transactions (IGST, added on top — see
+// calculateGST for why this is exclusive, not extracted).
 export function calculateIGST(amount: number, gstRate: number) {
-  const gstAmount = (amount * gstRate) / (100 + gstRate);
-  const baseAmount = amount - gstAmount;
+  const gstAmount = (amount * gstRate) / 100;
+  const roundedGst = parseFloat(gstAmount.toFixed(2));
 
   return {
-    baseAmount: parseFloat(baseAmount.toFixed(2)),
+    baseAmount: parseFloat(amount.toFixed(2)),
     cgst: 0,
     sgst: 0,
-    igst: parseFloat(gstAmount.toFixed(2)),
-    totalGst: parseFloat(gstAmount.toFixed(2)),
-    totalAmount: parseFloat(amount.toFixed(2)),
+    igst: roundedGst,
+    totalGst: roundedGst,
+    totalAmount: parseFloat((amount + roundedGst).toFixed(2)),
   };
 }
 
