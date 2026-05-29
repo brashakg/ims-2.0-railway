@@ -180,6 +180,10 @@ export interface Customer {
   pincode?: string;
   patients: Patient[];
   createdAt: string;
+  // Marketing-consent flag (backend snake_case). Read by Customer 360
+  // PreferencesTab and written by the consent toggle via
+  // updateCustomer(id, { marketing_consent }).
+  marketing_consent?: boolean;
 }
 
 export interface Patient {
