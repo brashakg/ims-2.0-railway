@@ -2613,3 +2613,140 @@ main input[type="date"] { background-color: #fff; border-color: #d1d5db; color: 
   border: 1px solid var(--line, #e5e7eb);
   border-radius: 4px;
 }
+
+/* ============================================================================
+   Mobile shell — hamburger drawer (< 768px)
+   ============================================================================
+   On small screens:
+   1. The left rail column collapses to 0 (hidden).
+   2. A hamburger button in the Topbar opens a full-height left drawer overlay
+      re-using the existing Rail markup (rendered with mobileOpen=true).
+   3. A semi-transparent backdrop closes the drawer on tap.
+   4. Safe-area padding keeps content + POS action bars above notch/home bar.
+   ============================================================================ */
+
+/* ---- Hamburger button — visible on mobile only ---- */
+.topbar-hamburger {
+  display: none;               /* hidden on desktop */
+  align-items: center;
+  justify-content: center;
+  width: 40px; height: 40px;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  border-radius: 8px;
+  cursor: pointer;
+  flex-shrink: 0;
+  color: var(--ink-2, #555550);
+}
+.topbar-hamburger:hover { background: var(--bg-sunk, #f1f1ec); }
+.topbar-hamburger:focus-visible {
+  outline: 2px solid var(--bv, #b42318);
+  outline-offset: 2px;
+}
+.topbar-hamburger-icon {
+  display: flex; flex-direction: column; gap: 4px;
+}
+.topbar-hamburger-icon span {
+  display: block; width: 18px; height: 2px;
+  background: currentColor; border-radius: 2px;
+}
+
+/* ---- Topbar row: min-width clamp so children don't wrap ---- */
+.topbar {
+  min-width: 0;
+  overflow: hidden;       /* prevent horizontal bleed on tiny screens */
+}
+
+/* ---- Store pill: responsive truncation ---- */
+.store-pill {
+  max-width: 200px;       /* desktop cap */
+  min-width: 0;
+}
+.store-pill .store-pill-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+/* Mobile: hide the long name, show the code (e.g. BV-BOK-01) */
+.store-pill .store-pill-code { display: none; }
+
+/* ---- Backdrop ---- */
+.mobile-nav-backdrop {
+  display: none;           /* hidden on desktop */
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  z-index: 29;             /* just below the rail (z-index:20 + portal) */
+}
+
+/* ---- Safe-area bottom padding for main content + POS bars ---- */
+.page-body {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+/* POS sticky action bars (Continue / Pay / Complete) */
+.pos-action-bar {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+/* ====== MOBILE BREAKPOINT (< 768px) ====== */
+@media (max-width: 767px) {
+  /* 1. Collapse the left rail column from the grid */
+  .app-shell {
+    --rail-width: 0px;
+    grid-template-columns: 0 1fr;
+  }
+  .app-shell.rail-expanded { --rail-width: 0px; }
+
+  /* 2. Show hamburger, hide the desktop ⌘K label + KBD */
+  .topbar-hamburger { display: flex; }
+  .topbar .cmdk span:not([class]) { display: none; }  /* hide "Search or jump to…" text */
+  .topbar .cmdk .kbd { display: none; }               /* hide ⌘K badge */
+
+  /* 3. Show store code, hide full name on small screens */
+  .store-pill .store-pill-name { display: none; }
+  .store-pill .store-pill-code { display: inline; }
+
+  /* 4. Show backdrop when drawer is open */
+  .mobile-nav-backdrop { display: block; }
+
+  /* 5. Rail becomes a fixed left drawer overlay */
+  .rail {
+    position: fixed;
+    top: 0; left: 0;
+    width: 264px;
+    height: 100dvh;           /* 100dvh respects mobile browser chrome */
+    z-index: 30;
+    transform: translateX(-100%);
+    transition: transform .22s cubic-bezier(.4, 0, .2, 1);
+    overflow-y: auto;
+    box-shadow: none;
+  }
+
+  /* The rail-mobile-open class is set by Shell when navOpen=true */
+  .rail.rail-mobile-open {
+    transform: translateX(0);
+    box-shadow: 4px 0 24px rgba(0, 0, 0, 0.25);
+  }
+
+  /* 6. Topbar: ensure one-line layout */
+  .topbar {
+    gap: 6px;
+    padding: 0 8px;
+  }
+  .topbar .crumbs {
+    flex: 1;
+    overflow: hidden;
+  }
+
+  /* 7. Focus trap: make the rail drawer fully scrollable on small phones */
+  .rail.rail-mobile-open { overscroll-behavior: contain; }
+}
+
+/* ====== Very small phones (< 390px, e.g. 360×640) ====== */
+@media (max-width: 389px) {
+  .store-pill { max-width: 80px; }
+  .role-pill .k { display: none; }   /* hide "Role" label */
+}
+

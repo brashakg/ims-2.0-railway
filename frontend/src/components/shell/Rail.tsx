@@ -151,9 +151,12 @@ function hasAnyRole(userRoles: readonly UserRole[] | undefined, required: UserRo
   return required.some((r) => userRoles.includes(r));
 }
 
-export function Rail({ brand = 'bv' }: { brand?: 'bv' | 'wizopt' }) {
+export function Rail({ brand = 'bv', mobileOpen = false }: { brand?: 'bv' | 'wizopt'; mobileOpen?: boolean }) {
   const { user } = useAuth();
   const { railExpanded, toggleRailExpanded } = useAppearance();
+  // In the mobile drawer, always render the expanded layout (group headers +
+  // labels) regardless of the desktop icon-only collapse state.
+  const expanded = railExpanded || mobileOpen;
   const { pathname } = useLocation();
   const userRoles = user?.roles;
   const activeRole = user?.activeRole;
@@ -263,14 +266,19 @@ export function Rail({ brand = 'bv' }: { brand?: 'bv' | 'wizopt' }) {
     .toUpperCase() || '?';
 
   return (
-    <aside className={'rail' + (railExpanded ? ' expanded' : '')}>
+    <aside
+      className={'rail' + (expanded ? ' expanded' : '') + (mobileOpen ? ' rail-mobile-open' : '')}
+      role={mobileOpen ? 'dialog' : undefined}
+      aria-modal={mobileOpen ? true : undefined}
+      aria-label={mobileOpen ? 'Navigation menu' : undefined}
+    >
       {/* Header row — brand glyph + wordmark (expanded only) + toggle.
           Toggle moved up here so it's discoverable above the fold; the
           old position at the bottom was easy to miss. */}
       <div className="rail-header">
         <div className="rail-brand-row">
           <div className="brand" title={wordmark}>{glyph}</div>
-          {railExpanded && (
+          {expanded && (
             <span className="rail-wordmark" aria-hidden="true">{wordmark}</span>
           )}
         </div>
@@ -286,7 +294,7 @@ export function Rail({ brand = 'bv' }: { brand?: 'bv' | 'wizopt' }) {
       </div>
 
       {visibleGroups.map((group, gi) => {
-        const isCollapsible = railExpanded && !!group.title;
+        const isCollapsible = expanded && !!group.title;
         const isCollapsed = isCollapsible && collapsedGroups.has(group.title!);
         const itemsHidden = isCollapsed;
         return (
@@ -359,14 +367,14 @@ export function Rail({ brand = 'bv' }: { brand?: 'bv' | 'wizopt' }) {
                 );
               })}
             </div>
-            {gi < visibleGroups.length - 1 && !railExpanded && <div className="rail-sep" />}
+            {gi < visibleGroups.length - 1 && !expanded && <div className="rail-sep" />}
           </div>
         );
       })}
       <div className="rail-spacer" />
       <div className="rail-avatar" title={user?.name ? `${user.name} • ${activeRole}` : 'User'}>
         <span className="rail-avatar-initials">{userInitials}</span>
-        {railExpanded && (
+        {expanded && (
           <span className="rail-avatar-name" aria-hidden="true">
             {user?.name?.split(' ')[0] || 'User'}
           </span>
