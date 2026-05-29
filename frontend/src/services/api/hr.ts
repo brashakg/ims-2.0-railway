@@ -10,13 +10,20 @@ export const hrApi = {
     return response.data;
   },
 
+  // Geo-fenced, late-mark-aware check-in. The backend reads store_id /
+  // latitude / longitude as QUERY params (not a JSON body) and enforces the
+  // store radius for roles 4-7 server-side, returning is_late + late_minutes.
   checkIn: async (storeId: string, latitude: number, longitude: number) => {
-    const response = await api.post('/hr/attendance/check-in', {
-      store_id: storeId,
-      latitude,
-      longitude,
+    const response = await api.post('/hr/attendance/check-in', null, {
+      params: { store_id: storeId, latitude, longitude },
     });
-    return response.data;
+    return response.data as {
+      message: string;
+      checkInTime: string;
+      is_late: boolean;
+      late_minutes: number;
+      geo: { verified: boolean; reason: string };
+    };
   },
 
   checkOut: async (attendanceId: string) => {
@@ -61,6 +68,80 @@ export const hrApi = {
     const response = await api.get('/hr/attendance/grid', { params });
     return response.data as AttendanceGrid;
   },
+
+  // --- Shift config (attendance engine) ----------------------------
+  getShifts: async (opts?: { storeId?: string; activeOnly?: boolean }) => {
+    const params: Record<string, string | boolean> = {};
+    if (opts?.storeId) params.store_id = opts.storeId;
+    if (opts?.activeOnly !== undefined) params.active_only = opts.activeOnly;
+    const response = await api.get('/hr/shifts', { params });
+    return response.data as { shifts: Shift[]; total: number };
+  },
+
+  createShift: async (payload: {
+    name: string;
+    start_time: string;
+    end_time: string;
+    grace_minutes?: number;
+    weekly_off?: number[];
+    store_id?: string;
+  }) => {
+    const response = await api.post('/hr/shifts', payload);
+    return response.data as { message: string; shift: Shift };
+  },
+
+  assignShift: async (employeeId: string, shiftId: string) => {
+    const response = await api.post('/hr/shifts/assign', {
+      employee_id: employeeId,
+      shift_id: shiftId,
+    });
+    return response.data;
+  },
+
+  // --- Late-mark report --------------------------------------------
+  getLateMarks: async (opts: { month: string; storeId?: string; employeeId?: string }) => {
+    const params: Record<string, string> = { month: opts.month };
+    if (opts.storeId) params.store_id = opts.storeId;
+    if (opts.employeeId) params.employee_id = opts.employeeId;
+    const response = await api.get('/hr/attendance/late-marks', { params });
+    return response.data as LateMarksReport;
+  },
+
+  // --- LWP report (accountant reads; NOT auto-applied to payroll) ---
+  getLwpReport: async (opts: { year: number; month: number; storeId?: string; employeeId?: string }) => {
+    const params: Record<string, string | number> = { year: opts.year, month: opts.month };
+    if (opts.storeId) params.store_id = opts.storeId;
+    if (opts.employeeId) params.employee_id = opts.employeeId;
+    const response = await api.get('/hr/reports/lwp', { params });
+    return response.data as LwpReport;
+  },
+
+  // --- Week-off swap (request -> manager approval) ------------------
+  getWeekOffSwaps: async (opts?: { status?: string; storeId?: string; employeeId?: string }) => {
+    const params: Record<string, string> = {};
+    if (opts?.status) params.status = opts.status;
+    if (opts?.storeId) params.store_id = opts.storeId;
+    if (opts?.employeeId) params.employee_id = opts.employeeId;
+    const response = await api.get('/hr/weekoff-swaps', { params });
+    return response.data as { swaps: WeekOffSwap[]; total: number };
+  },
+
+  requestWeekOffSwap: async (payload: { from_date: string; to_date: string; reason?: string }) => {
+    const response = await api.post('/hr/weekoff-swaps', payload);
+    return response.data as { message: string; swap: WeekOffSwap };
+  },
+
+  approveWeekOffSwap: async (swapId: string) => {
+    const response = await api.post(`/hr/weekoff-swaps/${swapId}/approve`);
+    return response.data;
+  },
+
+  rejectWeekOffSwap: async (swapId: string, reason: string) => {
+    const response = await api.post(`/hr/weekoff-swaps/${swapId}/reject`, null, {
+      params: { reason },
+    });
+    return response.data;
+  },
 };
 
 export type AttendanceCode = 'P' | 'A' | 'L' | 'HD' | 'LWP' | 'WO' | '-';
@@ -88,6 +169,70 @@ export interface AttendanceGrid {
   days: number[];
   employees: AttendanceGridEmployee[];
   totals: AttendanceGridSummary;
+}
+
+// weekly_off uses Python weekday() convention: Mon=0 .. Sun=6.
+export interface Shift {
+  shift_id: string;
+  store_id?: string | null;
+  name: string;
+  start_time: string;   // 'HH:MM'
+  end_time: string;     // 'HH:MM'
+  grace_minutes: number;
+  weekly_off: number[];
+  is_active: boolean;
+  created_by?: string;
+  created_at?: string;
+}
+
+export interface LateMarkRow {
+  employee_id: string;
+  name: string;
+  late_count: number;
+  total_late_minutes: number;
+  avg_late_minutes: number;
+  dates: string[];
+}
+
+export interface LateMarksReport {
+  month: string;
+  employees: LateMarkRow[];
+  total_late_marks: number;
+}
+
+export interface LwpRow {
+  employee_id: string;
+  name: string;
+  lwp_days: number;
+  absent_days: number;
+  marked_lwp_days: number;
+  half_days: number;
+  unpaid_leave_days: number;
+}
+
+export interface LwpReport {
+  year: number;
+  month: number;
+  employees: LwpRow[];
+  total_lwp_days: number;
+  note?: string;
+}
+
+export type WeekOffSwapStatus = 'PENDING' | 'APPROVED' | 'REJECTED' | 'CANCELLED';
+
+export interface WeekOffSwap {
+  swap_id: string;
+  employee_id: string;
+  store_id?: string | null;
+  from_date: string;
+  to_date: string;
+  reason?: string;
+  status: WeekOffSwapStatus;
+  requested_by?: string;
+  approved_by?: string;
+  approved_at?: string;
+  rejection_reason?: string;
+  created_at?: string;
 }
 
 // ============================================================================

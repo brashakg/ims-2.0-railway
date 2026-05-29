@@ -254,13 +254,13 @@ Status: ✅ Built | 🔧 Partially Built | ❌ Not Yet Built
 - ✅ Check-in / Check-out buttons with geolocation
 - ✅ Leave request and approval system
 - 🔧 Attendance data from API (structure built, real data depends on usage)
-- ❌ Geo-fenced check-in (only near assigned store)
-- ❌ Shift configuration per employee
-- ❌ Week-off swap with manager approval
-- ❌ Late mark auto-calculation based on shift time
-- ❌ LWP auto-deduction
-- ❌ Overtime tracking
-- ❌ Monthly attendance grid view (like Excel ATTENDANCE sheet)
+- ✅ Geo-fenced check-in (enforced near assigned store; roles 1-3 exempt)
+- ✅ Shift configuration per employee (name/start/end/grace/weekly-off)
+- ✅ Week-off swap with manager approval (no self-approval)
+- ✅ Late mark auto-calculation based on shift time + grace
+- ✅ LWP report for the month (read-only; entered manually into payroll, never auto-applied)
+- ⛔ Overtime tracking — intentionally NOT built (product-owner decision: no overtime)
+- ✅ Monthly attendance grid view (like Excel ATTENDANCE sheet) with late + LWP columns
 - ❌ Employee can view own attendance/salary/incentives on mobile
 
 ---

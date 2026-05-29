@@ -144,9 +144,11 @@ oversight dashboard** — genuinely missing.
 ### HR / Payroll — old: 7 + 9 missing → reality: mixed
 Payroll: ✅ **complete** (engine + run flow + payslip/Tally JV/PF ECR exports +
 4 test files). HR: ✅ attendance (`check-in/out`, `grid`, compliance), leaves +
-balances. ❌ Genuinely missing HR automation: **shift config per employee**,
-**overtime tracking**, **late-mark auto-calc**, **week-off swap approval**, and
-geo-fenced *enforcement* on check-in (geo exists for login, not attendance).
+balances. ✅ **Attendance engine** now shipped: **shift config per employee**,
+**late-mark auto-calc**, **week-off swap approval** (no self-approval),
+**geo-fenced enforcement on check-in** (roles 4-7), and a **monthly LWP report**
+(read-only — surfaced for the accountant, never auto-applied to payroll).
+**Overtime is intentionally NOT built** (product-owner decision: no overtime).
 
 ### POS / Orders / Returns — old: 5 + 2 + 3 missing → reality: ✅ mostly built
 *(POS is revenue-critical — audit only, no changes without explicit go-ahead.)*
@@ -182,9 +184,11 @@ This is the real to-do list. Everything else above is "verify in browser", not "
 1. **Customer self-service surfaces** — order-tracking QR + a read-only customer
    Rx/prescription portal (+ OTP verify). High customer-facing value; net-new
    surface, low blast radius on existing flows.
-2. **HR attendance engine** — shift config per employee, late-mark auto-calc,
-   overtime, week-off swap approval, geo-fenced check-in enforcement. Feeds payroll
-   LWP, which already exists — closes the loop.
+2. ~~**HR attendance engine**~~ — ✅ DONE. Shift config per employee, late-mark
+   auto-calc, week-off swap approval (no self-approval), geo-fenced check-in
+   enforcement, and a monthly LWP report. The LWP number is surfaced for the
+   accountant (read-only); it is NOT auto-pushed into payroll — manual entry
+   stays the source of truth. Overtime intentionally excluded (product decision).
 3. **🔌 Cheap UI wins** — wire the already-built backend-only endpoints:
    `finance/pnl/by-store`, `crm/customers/churn-risk/list`, workshop **QC checklist
    UI**. Hours, not days.

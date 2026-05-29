@@ -816,10 +816,10 @@ ATTENDANCE_SCHEMA = {
         "date": {"bsonType": "date"},
         "check_in": {"bsonType": "date"},
         "check_out": {"bsonType": "date"},
-        "status": {"enum": ["PRESENT", "ABSENT", "HALF_DAY", "LEAVE", "HOLIDAY"]},
+        "status": {"enum": ["PRESENT", "ABSENT", "HALF_DAY", "LEAVE", "HOLIDAY", "WEEK_OFF", "LWP"]},
         "is_late": {"bsonType": "bool"},
         "late_minutes": {"bsonType": "int"},
-        "overtime_minutes": {"bsonType": "int"},
+        "shift_id": {"bsonType": "string"},
         "notes": {"bsonType": "string"}
     }
 }
@@ -837,6 +837,48 @@ LEAVE_SCHEMA = {
         "days": {"bsonType": "int"},
         "reason": {"bsonType": "string"},
         "status": {"enum": ["PENDING", "APPROVED", "REJECTED", "CANCELLED"]},
+        "approved_by": {"bsonType": "string"},
+        "approved_at": {"bsonType": "date"},
+        "rejection_reason": {"bsonType": "string"},
+        "created_at": {"bsonType": "date"}
+    }
+}
+
+# A named work shift (e.g. "Morning 10-7") with a grace window and weekly-off
+# day(s). One shift can be assigned to many employees. weekly_off uses Python's
+# weekday() convention: Monday=0 .. Sunday=6.
+SHIFT_SCHEMA = {
+    "bsonType": "object",
+    "required": ["shift_id", "name", "start_time", "end_time"],
+    "properties": {
+        "shift_id": {"bsonType": "string"},
+        "store_id": {"bsonType": "string"},
+        "name": {"bsonType": "string"},
+        "start_time": {"bsonType": "string"},        # "HH:MM" 24h
+        "end_time": {"bsonType": "string"},          # "HH:MM" 24h
+        "grace_minutes": {"bsonType": "int"},        # minutes past start before "late"
+        "weekly_off": {"bsonType": "array"},         # list of int weekdays (Mon=0..Sun=6)
+        "is_active": {"bsonType": "bool"},
+        "created_by": {"bsonType": "string"},
+        "created_at": {"bsonType": "date"}
+    }
+}
+
+# A request by an employee to move their weekly-off from one date to another.
+# Manager-approved (requester cannot approve their own). Record-only: it does
+# not mutate payroll.
+WEEKOFF_SWAP_SCHEMA = {
+    "bsonType": "object",
+    "required": ["swap_id", "employee_id", "from_date", "to_date", "status"],
+    "properties": {
+        "swap_id": {"bsonType": "string"},
+        "employee_id": {"bsonType": "string"},
+        "store_id": {"bsonType": "string"},
+        "from_date": {"bsonType": "string"},         # the scheduled week-off being given up
+        "to_date": {"bsonType": "string"},           # the new week-off date requested
+        "reason": {"bsonType": "string"},
+        "status": {"enum": ["PENDING", "APPROVED", "REJECTED", "CANCELLED"]},
+        "requested_by": {"bsonType": "string"},
         "approved_by": {"bsonType": "string"},
         "approved_at": {"bsonType": "date"},
         "rejection_reason": {"bsonType": "string"},
@@ -938,6 +980,15 @@ COLLECTIONS.update({
         {"keys": [("employee_id", 1), ("from_date", -1)]},
         {"keys": [("store_id", 1), ("status", 1)]},
         {"keys": [("status", 1)]}
+    ]},
+    "shifts": {"schema": SHIFT_SCHEMA, "indexes": [
+        {"keys": [("shift_id", 1)], "unique": True},
+        {"keys": [("store_id", 1), ("is_active", 1)]}
+    ]},
+    "weekoff_swaps": {"schema": WEEKOFF_SWAP_SCHEMA, "indexes": [
+        {"keys": [("swap_id", 1)], "unique": True},
+        {"keys": [("employee_id", 1), ("status", 1)]},
+        {"keys": [("store_id", 1), ("status", 1)]}
     ]},
     "payroll": {"schema": PAYROLL_SCHEMA, "indexes": [
         {"keys": [("employee_id", 1), ("year", 1), ("month", 1)], "unique": True},

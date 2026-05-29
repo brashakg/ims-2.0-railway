@@ -5,8 +5,8 @@ Real database queries for attendance, leaves, and payroll
 """
 
 from fastapi import APIRouter, Depends, Query, HTTPException
-from pydantic import BaseModel
-from typing import Optional
+from pydantic import BaseModel, Field
+from typing import Optional, List
 from datetime import date, datetime
 from calendar import monthrange
 import uuid
@@ -18,11 +18,26 @@ from ..dependencies import (
     get_user_repository,
     validate_store_access,
 )
+from ..services import attendance_engine
 
 # Roles allowed to view HR reporting screens. Mirrors the router-level gate in
 # main.py (_FINANCE_ROLES) and how payroll.py gates its read endpoints.
 # SUPERADMIN auto-passes inside require_roles, so it is intentionally omitted.
 _HR_READ_ROLES = ("ADMIN", "AREA_MANAGER", "STORE_MANAGER", "ACCOUNTANT")
+
+# Roles allowed to APPROVE a week-off swap / CONFIGURE shifts (manager tier).
+# SUPERADMIN auto-passes inside require_roles so it is intentionally omitted.
+_SWAP_APPROVER_ROLES = ("ADMIN", "AREA_MANAGER", "STORE_MANAGER")
+_SHIFT_ADMIN_ROLES = ("ADMIN", "AREA_MANAGER", "STORE_MANAGER")
+
+
+def _get_db():
+    """Shared DB-handle helper (CLAUDE.md convention). Fail-soft: callers must
+    treat a None return as 'DB not connected'."""
+    from database.connection import get_db
+
+    return get_db().db
+
 
 router = APIRouter()
 
@@ -346,13 +361,165 @@ async def get_attendance_grid(
     return _build_grid(year, mon, employees, records)
 
 
+def _store_coords(store_id: Optional[str]) -> dict:
+    """Load a store's geo-fence coordinates + radius. Fail-soft: returns
+    {lat: None, lng: None, radius_m: None} when the DB or store is absent."""
+    out = {"lat": None, "lng": None, "radius_m": None}
+    if not store_id:
+        return out
+    try:
+        db = _get_db()
+    except Exception:
+        db = None
+    if db is None:
+        return out
+    try:
+        s = db.get_collection("stores").find_one(
+            {"store_id": store_id},
+            {"_id": 0, "latitude": 1, "longitude": 1, "geofence_radius_m": 1},
+        )
+    except Exception:
+        s = None
+    if s:
+        out["lat"] = s.get("latitude")
+        out["lng"] = s.get("longitude")
+        out["radius_m"] = s.get("geofence_radius_m")
+    return out
+
+
+def _resolve_employee_shift(employee_id: str, store_id: Optional[str]) -> Optional[dict]:
+    """Resolve the shift assigned to an employee.
+
+    Lookup order: explicit per-user assignment (users.shift_id) -> the store's
+    single active shift (only if exactly one, to avoid guessing) -> None.
+    Fail-soft: any DB error -> None (so late-mark just isn't computed)."""
+    try:
+        db = _get_db()
+    except Exception:
+        db = None
+    if db is None:
+        return None
+    shift_id = None
+    try:
+        u = db.get_collection("users").find_one(
+            {"user_id": employee_id}, {"_id": 0, "shift_id": 1}
+        )
+        if u:
+            shift_id = u.get("shift_id")
+    except Exception:
+        shift_id = None
+    try:
+        if shift_id:
+            return db.get_collection("shifts").find_one({"shift_id": shift_id}, {"_id": 0})
+        # Fall back to the store's lone active shift, if unambiguous.
+        if store_id:
+            active = list(
+                db.get_collection("shifts").find(
+                    {"store_id": store_id, "is_active": True}, {"_id": 0}
+                ).limit(2)
+            )
+            if len(active) == 1:
+                return active[0]
+    except Exception:
+        return None
+    return None
+
+
 @router.post("/attendance/check-in")
 async def check_in(
     latitude: Optional[float] = None,
     longitude: Optional[float] = None,
+    store_id: Optional[str] = None,
     current_user: dict = Depends(get_current_user),
 ):
-    return {"message": "Check-in recorded", "checkInTime": datetime.now().isoformat()}
+    """Record a geo-fenced, late-mark-aware check-in for the current user.
+
+    Behaviour:
+      - Geo-fence: store staff (roles 4-7) must be within the store radius
+        (default 500m). Roles 1-3 are exempt. Reuses the same haversine logic as
+        the geo-fenced LOGIN. Out-of-radius -> 403 with the measured distance.
+      - Late-mark: if the employee has an assigned shift, the check-in time is
+        compared to shift start + grace; a late check-in is RECORDED on the
+        attendance doc (is_late / late_minutes). Record-only -- no payroll effect.
+
+    Fail-soft: with no DB connected the endpoint still returns a stub response so
+    the operator UI works in demo mode.
+    """
+    roles = current_user.get("roles", []) or []
+    active_store = store_id or current_user.get("active_store_id")
+    now = datetime.now()
+
+    # --- Geo-fence enforcement (roles 4-7) ---
+    coords = _store_coords(active_store)
+    geo = attendance_engine.evaluate_geofence(
+        roles=roles,
+        user_lat=latitude,
+        user_lng=longitude,
+        store_lat=coords["lat"],
+        store_lng=coords["lng"],
+        radius_m=coords["radius_m"],
+    )
+    if not geo["allowed"]:
+        if geo["reason"] == "LOCATION_REQUIRED":
+            raise HTTPException(
+                status_code=403,
+                detail="Location access required for check-in. Please enable GPS and try again.",
+            )
+        # OUTSIDE_RADIUS
+        dist = geo.get("distance_m")
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"Check-in blocked: you are {int(dist)}m from the store "
+                f"(must be within {geo['radius_m']}m)."
+                if dist is not None
+                else "Check-in not permitted from this location."
+            ),
+        )
+
+    # --- Late-mark auto-calc ---
+    shift = _resolve_employee_shift(current_user.get("user_id"), active_store)
+    late = attendance_engine.compute_late_mark(
+        now,
+        (shift or {}).get("start_time"),
+        (shift or {}).get("grace_minutes", 0),
+    )
+
+    # --- Record (fail-soft) ---
+    employee_id = current_user.get("user_id")
+    attendance_repo = get_attendance_repository()
+    if attendance_repo is not None and employee_id:
+        today_iso = now.date().isoformat()
+        existing = attendance_repo.find_one(
+            {"employee_id": employee_id, "date": today_iso}
+        )
+        data = {
+            "employee_id": employee_id,
+            "employee_name": current_user.get("full_name") or current_user.get("username"),
+            "store_id": active_store,
+            "date": today_iso,
+            "status": "PRESENT",
+            "check_in": now.isoformat(),
+            "is_late": late["is_late"],
+            "late_minutes": late["late_minutes"],
+            "shift_id": (shift or {}).get("shift_id"),
+            "geo_verified": geo["reason"] in ("WITHIN_RADIUS", "EXEMPT_ROLE"),
+            "marked_by": employee_id,
+            "marked_at": now.isoformat(),
+        }
+        if existing is not None:
+            attendance_repo.update(existing.get("attendance_id"), data)
+        else:
+            data["attendance_id"] = str(uuid.uuid4())
+            attendance_repo.create(data)
+
+    return {
+        "message": "Check-in recorded",
+        "checkInTime": now.isoformat(),
+        "is_late": late["is_late"],
+        "late_minutes": late["late_minutes"],
+        "geo": {"verified": geo["reason"] in ("WITHIN_RADIUS", "EXEMPT_ROLE"), "reason": geo["reason"]},
+    }
 
 
 @router.post("/attendance/check-out")
@@ -671,3 +838,507 @@ async def get_salary_slip(
     current_user: dict = Depends(get_current_user),
 ):
     return {"employeeId": employee_id, "year": year, "month": month, "salarySlip": {}}
+
+
+# ============================================================================
+# SHIFT CONFIG  (attendance engine)
+# ============================================================================
+# A shift defines a start/end time, a grace window for late-marking, and the
+# weekly-off day(s). Shifts are stored in the `shifts` collection and assigned
+# to an employee via users.shift_id. Manager-tier only for writes; HR roles can
+# read. weekly_off uses Python weekday() convention (Mon=0 .. Sun=6).
+
+
+class ShiftCreate(BaseModel):
+    name: str
+    start_time: str = Field(..., description="Shift start, 'HH:MM' 24h")
+    end_time: str = Field(..., description="Shift end, 'HH:MM' 24h")
+    grace_minutes: int = Field(default=0, ge=0, le=240)
+    weekly_off: List[int] = Field(
+        default_factory=list, description="Weekday ints, Mon=0..Sun=6"
+    )
+    store_id: Optional[str] = None
+
+
+class ShiftAssignRequest(BaseModel):
+    employee_id: str
+    shift_id: str
+
+
+def _clean_weekly_off(days: List[int]) -> List[int]:
+    """Keep only valid weekday ints (0-6), de-duplicated + sorted."""
+    return sorted({int(d) for d in (days or []) if isinstance(d, int) and 0 <= int(d) <= 6})
+
+
+@router.post("/shifts", status_code=201)
+async def create_shift(
+    shift: ShiftCreate,
+    current_user: dict = Depends(require_roles(*_SHIFT_ADMIN_ROLES)),
+):
+    """Create a work shift. Validates HH:MM times via the engine's parser so a
+    malformed time is rejected up front (422)."""
+    if attendance_engine._parse_hhmm(shift.start_time) is None:
+        raise HTTPException(status_code=422, detail="start_time must be 'HH:MM' 24h")
+    if attendance_engine._parse_hhmm(shift.end_time) is None:
+        raise HTTPException(status_code=422, detail="end_time must be 'HH:MM' 24h")
+
+    store_id = validate_store_access(shift.store_id, current_user)
+    doc = {
+        "shift_id": str(uuid.uuid4()),
+        "store_id": store_id,
+        "name": shift.name.strip(),
+        "start_time": shift.start_time.strip(),
+        "end_time": shift.end_time.strip(),
+        "grace_minutes": int(shift.grace_minutes),
+        "weekly_off": _clean_weekly_off(shift.weekly_off),
+        "is_active": True,
+        "created_by": current_user.get("user_id"),
+        "created_at": datetime.now().isoformat(),
+    }
+    try:
+        db = _get_db()
+    except Exception:
+        db = None
+    if db is None:
+        # Fail-soft: echo the would-be doc so demo mode works.
+        return {"message": "Shift created", "shift": doc}
+    db.get_collection("shifts").insert_one({**doc, "_id": doc["shift_id"]})
+    return {"message": "Shift created", "shift": doc}
+
+
+@router.get("/shifts")
+async def list_shifts(
+    store_id: Optional[str] = Query(None),
+    active_only: bool = Query(True),
+    current_user: dict = Depends(require_roles(*_HR_READ_ROLES)),
+):
+    """List shifts for a store. Fail-soft -> empty list."""
+    active_store = validate_store_access(store_id, current_user)
+    try:
+        db = _get_db()
+    except Exception:
+        db = None
+    if db is None:
+        return {"shifts": [], "total": 0}
+    flt: dict = {}
+    if active_store:
+        flt["store_id"] = active_store
+    if active_only:
+        flt["is_active"] = True
+    try:
+        shifts = list(db.get_collection("shifts").find(flt, {"_id": 0}).limit(200))
+    except Exception:
+        shifts = []
+    return {"shifts": shifts, "total": len(shifts)}
+
+
+@router.post("/shifts/assign")
+async def assign_shift(
+    req: ShiftAssignRequest,
+    current_user: dict = Depends(require_roles(*_SHIFT_ADMIN_ROLES)),
+):
+    """Assign a shift to an employee (sets users.shift_id)."""
+    try:
+        db = _get_db()
+    except Exception:
+        db = None
+    if db is None:
+        return {"message": "Shift assigned", "employee_id": req.employee_id, "shift_id": req.shift_id}
+
+    shift = db.get_collection("shifts").find_one({"shift_id": req.shift_id}, {"_id": 0})
+    if shift is None:
+        raise HTTPException(status_code=404, detail="Shift not found")
+    # Store-scope guard: a non-HQ manager can only assign within their store.
+    if shift.get("store_id"):
+        validate_store_access(shift.get("store_id"), current_user)
+
+    res = db.get_collection("users").update_one(
+        {"user_id": req.employee_id}, {"$set": {"shift_id": req.shift_id}}
+    )
+    if res.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Employee not found")
+    return {"message": "Shift assigned", "employee_id": req.employee_id, "shift_id": req.shift_id}
+
+
+# ============================================================================
+# LATE-MARK REPORT
+# ============================================================================
+
+
+@router.get("/attendance/late-marks")
+async def late_marks_report(
+    month: Optional[str] = Query(None, description="Target month as YYYY-MM"),
+    store_id: Optional[str] = Query(None),
+    employee_id: Optional[str] = Query(None),
+    current_user: dict = Depends(require_roles(*_HR_READ_ROLES)),
+):
+    """Per-employee late-mark report for a month.
+
+    Reads attendance docs flagged is_late=True and aggregates count +
+    total/avg late minutes per employee. Record-only reporting view; never
+    touches payroll. Fail-soft -> empty report."""
+    year, mon = _parse_month(month)
+    active_store = validate_store_access(store_id, current_user)
+    attendance_repo = get_attendance_repository()
+    if attendance_repo is None:
+        return {"month": f"{year:04d}-{mon:02d}", "employees": [], "total_late_marks": 0}
+
+    n_days = _days_in_month(year, mon)
+    start = f"{year:04d}-{mon:02d}-01"
+    end = f"{year:04d}-{mon:02d}-{n_days:02d}"
+    flt: dict = {"date": {"$gte": start, "$lte": end}, "is_late": True}
+    if active_store:
+        flt["store_id"] = active_store
+    if employee_id:
+        flt["employee_id"] = employee_id
+    try:
+        records = attendance_repo.find_many(flt, limit=5000)
+    except Exception:
+        records = []
+
+    by_emp: dict = {}
+    total = 0
+    for r in records or []:
+        emp = r.get("employee_id")
+        if not emp:
+            continue
+        total += 1
+        slot = by_emp.setdefault(
+            emp,
+            {
+                "employee_id": emp,
+                "name": r.get("employee_name") or emp,
+                "late_count": 0,
+                "total_late_minutes": 0,
+                "dates": [],
+            },
+        )
+        slot["late_count"] += 1
+        slot["total_late_minutes"] += int(r.get("late_minutes") or 0)
+        d = r.get("date")
+        if d:
+            slot["dates"].append(str(d)[:10])
+
+    employees = []
+    for slot in by_emp.values():
+        cnt = slot["late_count"] or 1
+        slot["avg_late_minutes"] = round(slot["total_late_minutes"] / cnt, 1)
+        slot["dates"].sort()
+        employees.append(slot)
+    employees.sort(key=lambda e: (-e["late_count"], e["name"].lower()))
+
+    return {
+        "month": f"{year:04d}-{mon:02d}",
+        "employees": employees,
+        "total_late_marks": total,
+    }
+
+
+# ============================================================================
+# WEEK-OFF SWAP  (request -> manager approval)
+# ============================================================================
+# An employee requests to move their weekly-off from one date to another. The
+# request is PENDING until a manager-tier user approves/rejects. The requester
+# can NEVER approve their own request (SYSTEM_INTENT 7), enforced both by the
+# role gate AND an explicit self-approval check in the engine.
+
+
+class WeekOffSwapCreate(BaseModel):
+    from_date: date = Field(..., description="The scheduled week-off being given up")
+    to_date: date = Field(..., description="The new week-off date requested")
+    reason: Optional[str] = None
+
+
+@router.post("/weekoff-swaps", status_code=201)
+async def create_weekoff_swap(
+    req: WeekOffSwapCreate,
+    current_user: dict = Depends(get_current_user),
+):
+    """File a week-off swap request for the current user (status PENDING)."""
+    if req.from_date == req.to_date:
+        raise HTTPException(status_code=422, detail="from_date and to_date must differ")
+
+    employee_id = current_user.get("user_id")
+    doc = {
+        "swap_id": str(uuid.uuid4()),
+        "employee_id": employee_id,
+        "store_id": current_user.get("active_store_id"),
+        "from_date": req.from_date.isoformat(),
+        "to_date": req.to_date.isoformat(),
+        "reason": (req.reason or "").strip(),
+        "status": "PENDING",
+        "requested_by": employee_id,
+        "created_at": datetime.now().isoformat(),
+    }
+    try:
+        db = _get_db()
+    except Exception:
+        db = None
+    if db is None:
+        return {"message": "Week-off swap requested", "swap": doc}
+    db.get_collection("weekoff_swaps").insert_one({**doc, "_id": doc["swap_id"]})
+    return {"message": "Week-off swap requested", "swap": doc}
+
+
+@router.get("/weekoff-swaps")
+async def list_weekoff_swaps(
+    status: Optional[str] = Query(None),
+    store_id: Optional[str] = Query(None),
+    employee_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """List week-off swap requests.
+
+    HQ/manager roles see store-scoped requests; a non-manager only sees their
+    own (so staff can track their pending requests). Fail-soft -> empty list."""
+    try:
+        db = _get_db()
+    except Exception:
+        db = None
+    if db is None:
+        return {"swaps": [], "total": 0}
+
+    roles = set(current_user.get("roles", []) or [])
+    is_manager = bool(roles & set(_SWAP_APPROVER_ROLES)) or "SUPERADMIN" in roles
+
+    flt: dict = {}
+    if status:
+        flt["status"] = status.upper()
+    if is_manager:
+        active_store = store_id or current_user.get("active_store_id")
+        if active_store and "SUPERADMIN" not in roles and "ADMIN" not in roles:
+            flt["store_id"] = active_store
+        elif store_id:
+            flt["store_id"] = store_id
+        if employee_id:
+            flt["employee_id"] = employee_id
+    else:
+        # Non-managers: pinned to their own requests.
+        flt["employee_id"] = current_user.get("user_id")
+
+    try:
+        swaps = list(
+            db.get_collection("weekoff_swaps")
+            .find(flt, {"_id": 0})
+            .sort("created_at", 1)
+            .limit(500)
+        )
+    except Exception:
+        swaps = []
+    return {"swaps": swaps, "total": len(swaps)}
+
+
+@router.post("/weekoff-swaps/{swap_id}/approve")
+async def approve_weekoff_swap(
+    swap_id: str,
+    current_user: dict = Depends(require_roles(*_SWAP_APPROVER_ROLES)),
+):
+    """Approve a week-off swap. The requester cannot approve their own request
+    (enforced by the engine's can_approve_swap on top of the role gate)."""
+    try:
+        db = _get_db()
+    except Exception:
+        db = None
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    swap = db.get_collection("weekoff_swaps").find_one({"swap_id": swap_id}, {"_id": 0})
+    if swap is None:
+        raise HTTPException(status_code=404, detail="Swap request not found")
+    if swap.get("store_id"):
+        validate_store_access(swap.get("store_id"), current_user)
+
+    decision = attendance_engine.can_approve_swap(
+        approver_id=current_user.get("user_id"),
+        approver_roles=current_user.get("roles", []),
+        requested_by=swap.get("requested_by") or swap.get("employee_id"),
+        swap_status=swap.get("status"),
+    )
+    if not decision["allowed"]:
+        if decision["reason"] == "SELF_APPROVAL":
+            raise HTTPException(
+                status_code=403, detail="You cannot approve your own week-off swap request"
+            )
+        if decision["reason"] == "NOT_PENDING":
+            raise HTTPException(status_code=400, detail="Swap request is not pending")
+        raise HTTPException(status_code=403, detail="Not permitted to approve this request")
+
+    db.get_collection("weekoff_swaps").update_one(
+        {"swap_id": swap_id},
+        {
+            "$set": {
+                "status": "APPROVED",
+                "approved_by": current_user.get("user_id"),
+                "approved_at": datetime.now().isoformat(),
+            }
+        },
+    )
+    return {"message": "Week-off swap approved", "swap_id": swap_id}
+
+
+@router.post("/weekoff-swaps/{swap_id}/reject")
+async def reject_weekoff_swap(
+    swap_id: str,
+    reason: str = Query(...),
+    current_user: dict = Depends(require_roles(*_SWAP_APPROVER_ROLES)),
+):
+    """Reject a week-off swap. Self-rejection is also forbidden via the engine
+    (requester cannot act on their own request)."""
+    try:
+        db = _get_db()
+    except Exception:
+        db = None
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    swap = db.get_collection("weekoff_swaps").find_one({"swap_id": swap_id}, {"_id": 0})
+    if swap is None:
+        raise HTTPException(status_code=404, detail="Swap request not found")
+    if swap.get("store_id"):
+        validate_store_access(swap.get("store_id"), current_user)
+
+    decision = attendance_engine.can_approve_swap(
+        approver_id=current_user.get("user_id"),
+        approver_roles=current_user.get("roles", []),
+        requested_by=swap.get("requested_by") or swap.get("employee_id"),
+        swap_status=swap.get("status"),
+    )
+    if not decision["allowed"]:
+        if decision["reason"] == "SELF_APPROVAL":
+            raise HTTPException(
+                status_code=403, detail="You cannot act on your own week-off swap request"
+            )
+        if decision["reason"] == "NOT_PENDING":
+            raise HTTPException(status_code=400, detail="Swap request is not pending")
+        raise HTTPException(status_code=403, detail="Not permitted to reject this request")
+
+    db.get_collection("weekoff_swaps").update_one(
+        {"swap_id": swap_id},
+        {
+            "$set": {
+                "status": "REJECTED",
+                "rejected_by": current_user.get("user_id"),
+                "rejected_at": datetime.now().isoformat(),
+                "rejection_reason": reason,
+            }
+        },
+    )
+    return {"message": "Week-off swap rejected", "swap_id": swap_id}
+
+
+# ============================================================================
+# LWP REPORT  (for the accountant -- read-only, NOT auto-applied to payroll)
+# ============================================================================
+
+
+@router.get("/reports/lwp")
+async def lwp_report(
+    year: int = Query(..., ge=2000, le=2100),
+    month: int = Query(..., ge=1, le=12),
+    store_id: Optional[str] = Query(None),
+    employee_id: Optional[str] = Query(None),
+    current_user: dict = Depends(require_roles(*_HR_READ_ROLES)),
+):
+    """Leave-Without-Pay days per employee for a month.
+
+    Computed (via the pure engine) from attendance records + approved unpaid
+    leaves. This is what the accountant READS before manually entering LWP days
+    into a payroll run. It is deliberately NOT pushed into payroll -- the payroll
+    engine still does LWP proration off the manually-entered number.
+
+    Fail-soft -> empty report."""
+    active_store = validate_store_access(store_id, current_user)
+    attendance_repo = get_attendance_repository()
+    leave_repo = get_leave_repository()
+    user_repo = get_user_repository()
+    if attendance_repo is None:
+        return {"year": year, "month": month, "employees": [], "total_lwp_days": 0.0}
+
+    n_days = _days_in_month(year, month)
+    start = f"{year:04d}-{month:02d}-01"
+    end = f"{year:04d}-{month:02d}-{n_days:02d}"
+
+    # Build the roster so an employee with ZERO records still appears (0 LWP).
+    roster: dict = {}
+    if user_repo is not None:
+        try:
+            rfilter = {"is_active": True}
+            if active_store:
+                rfilter["store_ids"] = active_store
+            for u in user_repo.find_many(rfilter, limit=1000) or []:
+                uid = u.get("user_id") or u.get("_id")
+                if uid:
+                    roster[uid] = u.get("full_name") or u.get("username") or uid
+        except Exception:
+            roster = {}
+
+    att_flt: dict = {"date": {"$gte": start, "$lte": end}}
+    if active_store:
+        att_flt["store_id"] = active_store
+    if employee_id:
+        att_flt["employee_id"] = employee_id
+    try:
+        att_records = attendance_repo.find_many(att_flt, limit=10000)
+    except Exception:
+        att_records = []
+
+    leaves = []
+    if leave_repo is not None:
+        lv_flt: dict = {"status": "APPROVED"}
+        if active_store:
+            lv_flt["store_id"] = active_store
+        if employee_id:
+            lv_flt["employee_id"] = employee_id
+        try:
+            leaves = leave_repo.find_many(lv_flt, limit=5000)
+        except Exception:
+            leaves = []
+
+    # Bucket per employee.
+    att_by_emp: dict = {}
+    for r in att_records or []:
+        att_by_emp.setdefault(r.get("employee_id"), []).append(r)
+    lv_by_emp: dict = {}
+    for lv in leaves or []:
+        # Keep only leaves that overlap the target month window.
+        fd = attendance_engine._to_date(lv.get("from_date"))
+        if fd is None:
+            continue
+        td = attendance_engine._to_date(lv.get("to_date")) or fd
+        if td.year < year or fd.year > year:
+            continue
+        if not (fd <= date(year, month, n_days) and td >= date(year, month, 1)):
+            continue
+        lv_by_emp.setdefault(lv.get("employee_id"), []).append(lv)
+
+    # Union of employees seen in roster + records + leaves.
+    emp_ids = set(roster) | set(att_by_emp) | set(lv_by_emp)
+    if employee_id:
+        emp_ids = {employee_id}
+
+    employees = []
+    total = 0.0
+    for emp in emp_ids:
+        if not emp:
+            continue
+        result = attendance_engine.compute_lwp_days(
+            records=att_by_emp.get(emp, []),
+            approved_unpaid_leaves=lv_by_emp.get(emp, []),
+        )
+        total += result["lwp_days"]
+        employees.append(
+            {
+                "employee_id": emp,
+                "name": roster.get(emp, emp),
+                **result,
+            }
+        )
+    employees.sort(key=lambda e: (-e["lwp_days"], (e["name"] or "").lower()))
+
+    return {
+        "year": year,
+        "month": month,
+        "employees": employees,
+        "total_lwp_days": round(total, 1),
+        "note": "Report only. Enter LWP days manually into the payroll run; not auto-applied.",
+    }
