@@ -46,7 +46,12 @@ export class PosPage {
     await this.page
       .getByRole('button', { name: 'Walk-in (Quick Sale only)' })
       .click();
-    await expect(this.page.getByText('Walk-in Customer')).toBeVisible();
+    // Confirm the selected-customer CARD rendered. "Walk-in Customer" also
+    // appears in the step-indicator subtitle (a <div>), so scope to the card's
+    // <p> (paragraph role) to avoid a strict-mode 2-element match.
+    await expect(
+      this.page.getByRole('paragraph').filter({ hasText: /^Walk-in Customer$/ })
+    ).toBeVisible();
 
     await this.continueButton.click();
   }
