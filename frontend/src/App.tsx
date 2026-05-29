@@ -21,6 +21,8 @@ import { Analytics } from '@vercel/analytics/react';
 // Lazy load pages for code splitting
 const LoginPage = lazy(() => import('./pages/auth/LoginPage').then(m => ({ default: m.LoginPage })));
 const VendorPortalPage = lazy(() => import('./pages/vendor-portal/VendorPortalPage'));
+const OrderTrackingPage = lazy(() => import('./pages/portal/OrderTrackingPage'));
+const RxPortalPage = lazy(() => import('./pages/portal/RxPortalPage'));
 const DashboardPage = lazy(() => import('./pages/dashboard/HubPage'));
 const NotificationsPage = lazy(() => import('./pages/notifications/NotificationsPage'));
 const ExecutiveDashboard = lazy(() => import('./pages/dashboard/ExecutiveDashboard').then(m => ({ default: m.ExecutiveDashboard })));
@@ -156,6 +158,11 @@ function App() {
                       labs hit this without an IMS user account. The
                       tokenId in the URL IS the auth (server-side check). */}
                   <Route path="/vendor-portal/:tokenId" element={<VendorPortalPage />} />
+                  {/* Customer self-service — public, no AppLayout/auth.
+                      Order tracking is a tokenized link; Rx viewing is
+                      OTP-gated (medical data). See pages/portal/. */}
+                  <Route path="/track/:token" element={<OrderTrackingPage />} />
+                  <Route path="/rx-portal" element={<RxPortalPage />} />
 
                 {/* Protected routes with layout */}
                 <Route

@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional
 from datetime import datetime, date, timedelta
 from enum import Enum
 import uuid
+import secrets
 
 import logging
 
@@ -1147,6 +1148,12 @@ async def create_order(
         order_data = {
             "order_id": precomputed_order_id,
             "order_number": generate_order_number(store_id),
+            # Public order-tracking token — long, unguessable, customer-facing.
+            # Powers the no-login /portal/track/{token} link + QR. Additive;
+            # does not touch any POS pricing/tax logic. Backfill-safe: orders
+            # created before this field get a token lazily minted on lookup
+            # (see portal.ensure_tracking_token).
+            "tracking_token": secrets.token_urlsafe(24),
             "store_id": store_id,
             "customer_id": order.customer_id,
             "customer_name": customer_name,
@@ -1287,6 +1294,16 @@ async def get_order(order_id: str, current_user: dict = Depends(get_current_user
     if repo is not None:
         order = repo.find_by_id(order_id)
         if order is not None:
+            # Backfill-safe: ensure a public tracking token exists so the
+            # staff-facing order view can render the customer-tracking QR
+            # even for orders created before that field existed. Fail-soft.
+            if not order.get("tracking_token"):
+                try:
+                    from .portal import ensure_tracking_token
+
+                    order["tracking_token"] = ensure_tracking_token(repo, order)
+                except Exception:  # noqa: BLE001
+                    pass
             return order_to_frontend(order)
         raise HTTPException(status_code=404, detail="Order not found")
 

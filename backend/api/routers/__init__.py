@@ -45,6 +45,7 @@ from .payout import router as payout_router
 from .webhooks import router as webhooks_router
 from .loyalty import router as loyalty_router
 from .vendor_portal import router as vendor_portal_router
+from .portal import router as portal_router
 from .techcherry_import import router as techcherry_import_router
 from .vouchers import router as vouchers_router
 from .entities import router as entities_router
@@ -102,6 +103,7 @@ __all__ = [
     "webhooks_router",
     "loyalty_router",
     "vendor_portal_router",
+    "portal_router",
     "techcherry_import_router",
     "vouchers_router",
     "entities_router",

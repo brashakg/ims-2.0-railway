@@ -78,6 +78,7 @@ from .routers import (
     webhooks_router,
     loyalty_router,
     vendor_portal_router,
+    portal_router,
     techcherry_import_router,
     vouchers_router,
     entities_router,
@@ -892,6 +893,10 @@ app.include_router(vouchers_router, prefix="/api/v1/vouchers", tags=["Vouchers"]
 app.include_router(
     vendor_portal_router, prefix="/api/v1/vendor-portal", tags=["Vendor Portal"]
 )
+# Customer self-service portal — PUBLIC. Order tracking is a tokenized link
+# (no login); Rx viewing is OTP-gated (medical data). Mounted OUTSIDE the
+# JWT-protected family because real customers hit this without an IMS account.
+app.include_router(portal_router, prefix="/api/v1/portal", tags=["Customer Portal"])
 # TechCherry one-time migration — SUPERADMIN-only batch upsert endpoint.
 # Mounted under /admin/techcherry so it sits in the operator namespace
 # without inheriting the broader admin router (which is ADMIN+SUPERADMIN;

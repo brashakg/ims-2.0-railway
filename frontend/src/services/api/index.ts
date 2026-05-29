@@ -128,3 +128,14 @@ export type {
   ApproveResponse,
   RejectResponse,
 } from './proposals';
+// Customer self-service portal (public: order tracking + OTP-gated Rx view)
+export { portalApi } from './portal';
+export type {
+  OrderTracking,
+  TrackingStatusEntry,
+  TrackingItem,
+  OtpRequestResponse,
+  OtpVerifyResponse,
+  PortalPrescription,
+  PortalRxResponse,
+} from './portal';
