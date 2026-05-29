@@ -58,7 +58,7 @@ import { BarcodeScanner } from './BarcodeScanner';
 import { AutoSearch } from '../common/AutoSearch';
 import { AddCustomerModal, type CustomerFormData } from '../customers/AddCustomerModal';
 import { CustomerCardWithLoyalty } from './CustomerCardWithLoyalty';
-import { getGSTRateByCategory } from '../../constants/gst';
+import { resolveGstRate } from '../../constants/gstRuntime';
 import type { PrescriptionInput } from '../../utils/lensAutoSuggest';
 
 import { useToast } from '../../context/ToastContext';
@@ -1740,17 +1740,24 @@ function StepReview({ onOpenDiscount }: { onOpenDiscount: (item: CartLineItem) =
   const subtotal = store.getSubtotal(); const discount = store.getTotalDiscount();
 
   const taxBreakdown = useMemo(() => {
+    // GST-INCLUSIVE: line_total is the all-in price; EXTRACT the GST from within
+    // (matches posStore.getTax / getGrandTotal) rather than adding it on top, and
+    // use the DB-aware resolver so editable HSN/GST overrides are reflected.
+    // `rates` maps a rate -> its EXTRACTED taxable base so the HSN breakdown below
+    // reconciles to the inclusive total (taxable + tax === grand total).
+    const cartFactor = 1 - (store.cart_discount_percent || 0) / 100;
     let totalTax = 0;
     const rates: Record<number, number> = {};
     for (const item of (store.cart || [])) {
-      const rate = getGSTRateByCategory(item.category);
-      const itemTaxable = item.line_total;
-      const itemTax = Math.round(itemTaxable * (rate / 100) * 100) / 100;
-      totalTax += itemTax;
+      const rate = resolveGstRate(item.category, (item as any).hsn_code || (item as any).hsnCode);
+      const itemGross = Math.round((item.line_total || 0) * cartFactor * 100) / 100;
+      const itemTaxable = itemGross / (1 + rate / 100);
+      totalTax += itemGross - itemTaxable;
       rates[rate] = (rates[rate] || 0) + itemTaxable;
     }
+    Object.keys(rates).forEach((k) => { rates[+k] = Math.round(rates[+k] * 100) / 100; });
     return { totalTax: Math.round(totalTax * 100) / 100, rates };
-  }, [store.cart]);
+  }, [store.cart, store.cart_discount_percent]);
 
   const total = store.getGrandTotal();
 
@@ -1771,7 +1778,7 @@ function StepReview({ onOpenDiscount }: { onOpenDiscount: (item: CartLineItem) =
           </thead>
           <tbody>
             {(store.cart || []).map(item => {
-              const gstRate = getGSTRateByCategory(item.category);
+              const gstRate = resolveGstRate(item.category, (item as any).hsn_code || (item as any).hsnCode);
               return (
               <tr key={item.id} className="border-t border-gray-200">
                 <td className="px-4 py-3">
