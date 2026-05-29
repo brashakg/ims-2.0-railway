@@ -180,9 +180,14 @@ MEGAPHONE consent ×2, Jarvis gate, agents truthiness ×3) · `afe9080` StatusBa
 `55809f3` STORE_MANAGER cap-bypass. All verified against the full suite + the
 live running backend.
 
-## 11. Finance / GST reporting correctness (wave-2 finance agent) 📋
+## 11. Finance / GST reporting correctness (wave-2 finance agent) — 🔧 FIXED `860ab04`
 
-A coherent cluster of **field-name / type mismatches** that make finance reports
+> **Shipped:** all 6 below are fixed + 15 regression tests (`test_finance_reporting_
+> correctness.py`), full suite 2154 green. Taxable is derived as `grand_total -
+> tax_amount` (NOT `subtotal`, which is pre-discount gross — that correction was
+> made during review of the agent's diff).
+
+A coherent cluster of **field-name / type mismatches** that made finance reports
 silently wrong (the routers read keys the orders/expenses APIs never write). 58
 expenses + full advance/lifecycle/cap/period-lock exercised; **what's *enforced*
 works** (spend caps, duplicate-bill SHA-256, period-lock 423, outstanding-advance
