@@ -1,0 +1,151 @@
+/* ============================================================
+   Hub operational additions (priority tasks + SOP work row).
+   Uses the index.css design tokens (--surface / --line / --ink* /
+   --bv / --bg-sunk) with light-theme fallbacks so it renders
+   correctly even if a token is momentarily absent.
+   ============================================================ */
+
+/* Compact greeting in place of the old marketing hero. */
+.hub-h1.hub-h1-compact {
+  font-size: 30px;
+  line-height: 1.15;
+  margin: 10px 0 6px;
+}
+
+.hub-work-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin-bottom: 18px;
+}
+
+.hub-work-card {
+  background: var(--surface, #ffffff);
+  border: 1px solid var(--line, #ececea);
+  border-radius: 14px;
+  padding: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.hub-work-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.hub-work-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ink, #141413);
+}
+
+.hub-work-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--bv, #CD201A);
+}
+
+.hub-work-empty {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13.5px;
+  color: var(--ink-3, #55554f);
+  margin: 4px 0;
+}
+
+.hub-task-list,
+.hub-sop-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.hub-task-row,
+.hub-sop-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  background: none;
+  border: none;
+  border-radius: 9px;
+  padding: 8px 10px;
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.12s;
+}
+
+.hub-task-row:hover,
+.hub-sop-row:hover {
+  background: var(--bg-sunk, #f4f4f2);
+}
+
+.hub-prio {
+  flex-shrink: 0;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: 6px;
+  color: #fff;
+}
+
+.hub-prio-p0 { background: #dc2626; }
+.hub-prio-p1 { background: #ea580c; }
+.hub-prio-p2 { background: #d97706; }
+.hub-prio-p3 { background: #64748b; }
+.hub-prio-p4 { background: #94a3b8; }
+
+.hub-task-name {
+  flex: 1;
+  font-size: 13.5px;
+  color: var(--ink, #141413);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.hub-task-due {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 12px;
+  color: var(--ink-3, #55554f);
+}
+
+.hub-task-due.is-overdue {
+  color: #dc2626;
+  font-weight: 600;
+}
+
+.hub-sop-name {
+  flex: 1;
+  font-size: 13.5px;
+  color: var(--ink, #141413);
+}
+
+.hub-sop-meta {
+  flex-shrink: 0;
+  font-size: 12px;
+  color: var(--ink-3, #55554f);
+  text-transform: capitalize;
+}
+
+@media (max-width: 768px) {
+  .hub-work-row { grid-template-columns: 1fr; }
+}
