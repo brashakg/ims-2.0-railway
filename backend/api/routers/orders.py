@@ -76,6 +76,7 @@ def _compute_per_category_gst(items: list, cart_discount_pct: float) -> dict:
     cart_discount_pct = max(0.0, min(100.0, cart_discount_pct or 0.0))
     cart_factor = 1.0 - (cart_discount_pct / 100.0)
     subtotal = 0.0
+    gross_total = 0.0
     item_discount_sum = 0.0
     per_rate_taxable: dict = {}
     per_rate_tax: dict = {}
@@ -86,8 +87,16 @@ def _compute_per_category_gst(items: list, cart_discount_pct: float) -> dict:
         cat = it.get("category") or it.get("item_type") or ""
         hsn = it.get("hsn_code") or it.get("hsn") or None
         rate = resolve_gst_rate(hsn_code=hsn, category=cat)
-        line_taxable = round(line_subtotal * cart_factor, 2)
-        line_tax = round(line_taxable * (rate / 100.0), 2)
+        # GST-INCLUSIVE: item_total IS the all-in price the customer pays;
+        # the GST is the component WITHIN it, not added on top. Extract:
+        #   taxable = gross / (1 + rate/100); tax = gross - taxable.
+        # (Was: taxable = gross, tax = gross*rate -> charged price + GST on top,
+        # which OVERCHARGED the customer the tax fraction. QA F3 / owner: the
+        # counter price is inclusive.)
+        line_gross = round(line_subtotal * cart_factor, 2)
+        gross_total += line_gross
+        line_taxable = round(line_gross / (1.0 + rate / 100.0), 2)
+        line_tax = round(line_gross - line_taxable, 2)
         per_rate_taxable[rate] = round(
             per_rate_taxable.get(rate, 0.0) + line_taxable, 2
         )
@@ -97,8 +106,9 @@ def _compute_per_category_gst(items: list, cart_discount_pct: float) -> dict:
         it["tax_amount"] = line_tax
     taxable = round(sum(per_rate_taxable.values()), 2)
     tax = round(sum(per_rate_tax.values()), 2)
+    # grand_total (caller: taxable + tax) now equals the gross the customer pays.
     cart_discount_amount = (
-        round(subtotal - taxable, 2) if cart_discount_pct > 0 else 0.0
+        round(subtotal - round(gross_total, 2), 2) if cart_discount_pct > 0 else 0.0
     )
     dominant_rate = (
         max(per_rate_taxable, key=per_rate_taxable.get) if per_rate_taxable else 18.0

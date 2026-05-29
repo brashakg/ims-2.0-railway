@@ -14,7 +14,9 @@ export function CartSidebar() {
   const subtotal = store.getSubtotal();
   const grand = store.getGrandTotal();
   const totalDiscount = store.getTotalDiscount();
-  const gst = grand - subtotal + totalDiscount;
+  // GST-inclusive: GST is the tax extracted from WITHIN the (inclusive)
+  // grand total, not added on top. See posStore.getTax.
+  const gst = store.getTax();
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>

@@ -16,8 +16,10 @@ export function POSReceipt({ onClose }: POSReceiptProps) {
 
   const sub = store.getSubtotal();
   const disc = store.getTotalDiscount();
-  const taxable = sub - disc;
-  const gst = store.getGrandTotal() - taxable;
+  // GST-inclusive: the taxable base + GST are extracted from WITHIN the
+  // inclusive total (taxable + gst === grand), not added on top.
+  const taxable = store.getTaxableValue();
+  const gst = store.getTax();
 
   // Detect inter-state: compare customer billing state with store state
   const custState = ((store.customer as any)?.billing_address?.state || (store.customer as any)?.state || '').toLowerCase().trim();

@@ -99,21 +99,29 @@ export function GSTInvoice({
     : 1;
 
   // Line items -> invoice rows with GST calculation.
+  // GST-INCLUSIVE (owner decision 2026-05-29 / QA F3): the line price the
+  // customer is billed IS the all-in amount. We EXTRACT the taxable base +
+  // GST from within it (calculateGST/calculateIGST already extract), so the
+  // row total equals the price paid — NOT price + GST on top (which made the
+  // invoice total Rs 1,046.57 on a Rs 999 sale).
   const lineItems: InvoiceLineItem[] = order.items.map(item => {
-    const taxableValue = Math.round(item.finalPrice * discountRatio * 100) / 100;
+    const grossLine = Math.round(item.finalPrice * discountRatio * 100) / 100;
     const category = (item as any).category || (item as any).itemType || '';
     const hsnInfo = getHSNByCategory(category, true);
     const gstRate = (item as any).gstRate || resolveGstRate(category, (item as any).hsnCode || hsnInfo?.code);
     const hsnCode = (item as any).hsnCode || hsnInfo?.code || '9004';
 
     let cgst = 0, sgst = 0, igst = 0;
+    let taxableValue: number;
     if (isInterState) {
-      const gstCalc = calculateIGST(taxableValue, gstRate);
+      const gstCalc = calculateIGST(grossLine, gstRate);
       igst = gstCalc.igst;
+      taxableValue = gstCalc.baseAmount;
     } else {
-      const gstCalc = calculateGST(taxableValue, gstRate);
+      const gstCalc = calculateGST(grossLine, gstRate);
       cgst = gstCalc.cgst;
       sgst = gstCalc.sgst;
+      taxableValue = gstCalc.baseAmount;
     }
 
     return {
@@ -126,13 +134,13 @@ export function GSTInvoice({
       hsnCode,
       quantity: item.quantity,
       unitPrice: item.unitPrice,
-      discount: item.discountAmount + (item.finalPrice - taxableValue),
+      discount: item.discountAmount + (item.finalPrice - grossLine),
       taxableValue,
       gstRate,
       cgst,
       sgst,
       igst,
-      totalAmount: taxableValue + cgst + sgst + igst,
+      totalAmount: grossLine,
     };
   });
 

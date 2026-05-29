@@ -1,26 +1,31 @@
 """
 IMS 2.0 - Returns GST-inclusive refund + restocking-fee tests
 =============================================================
-Regression cover for the P1 money bug (QA-confirmed 2026-05-28): a full-item
-return on an order the customer PAID Rs 1,404 (Rs 1,190 net + Rs 214 GST,
-GST-inclusive Indian MRP) refunded only Rs 1,190 - the GST was dropped, so the
-customer was UNDER-refunded by ~15%.
+The refund a customer is owed is the GST-INCLUSIVE GROSS rupees they actually
+PAID for the returned units.
 
-The fix: refund = the GST-INCLUSIVE gross the customer paid, computed by
-grossing the ORIGINAL order line's NET unit_price up by the rate it was billed
-at. An optional restocking_fee (absolute Rs, for damaged / opened goods) is
-deducted to get the net refund. gross_refund + restocking_fee + net_refund are
-persisted on the return doc + the credit-note ledger row for an auditable
-GSTR-1 reversal.
+Under GST-INCLUSIVE pricing (owner decision 2026-05-29) the counter price IS
+the all-in amount, so each order line stores taxable_value + tax_amount whose
+SUM is the gross billed. The returns router resolves the per-unit refund from
+that stored gross ((taxable_value + tax_amount) / qty), which is correct for
+BOTH inclusive orders AND legacy exclusive orders. `returns_engine` therefore
+does NOT gross unit_price up again -- it sums it as billed and only backs the
+tax OUT (gst_breakup) for the credit note / GSTR-1 reversal.
+
+Legacy fallback: an order line with no stored taxable/tax (pre-2026-05 billing)
+carries a NET unit_price + gst_rate; the router grosses it up by the rate so we
+still refund the full amount (preserves the earlier under-refund fix). The
+endpoint tests below exercise THIS legacy path (the QA order stores only
+item_total + gst_rate); `test_inclusive_order_refunds_billed_gross` covers a
+modern inclusive order line.
 
 Two layers:
-  1. Pure engine (returns_engine): gross-up, net_refund, gst_breakup math.
+  1. Pure engine (returns_engine): inclusive sum, net_refund, gst_breakup math.
   2. Endpoint tests via FastAPI TestClient with monkeypatched fake repos - no
-     live DB. The order carries gst_rate on its items so the handler recovers
-     the authoritative rate.
+     live DB.
 
-NOTE: 1190 * 1.18 = 1404.20 exactly (GST 214.20). The QA ticket rounded this to
-"1404 / 214"; the precise GST-inclusive figure the engine refunds is 1404.20.
+NOTE: 1190 * 1.18 = 1404.20 exactly (GST 214.20). The legacy QA order's net
+1190 @ 18% grosses up to the 1404.20 the customer paid.
 """
 
 from __future__ import annotations
@@ -52,26 +57,33 @@ pytestmark = pytest.mark.asyncio
 # ============================================================================
 
 
-def test_engine_grosses_up_net_unit_price():
-    # The QA case at the engine level: net 1190 @ 18% -> gross 1404.20.
-    assert engine.gross_unit_price(1190, 18) == 1404.20
+def test_engine_unit_price_is_inclusive_gross():
+    # Inclusive: unit_price IS the gross paid; it is NOT grossed up again.
+    # The caller resolves it from the order's billed gross (1404.20 here).
+    assert engine.gross_unit_price(1404.20, 18) == 1404.20
     val = engine.returned_value(
-        [{"return_qty": 1, "unit_price": 1190, "gst_rate": 18}]
+        [{"return_qty": 1, "unit_price": 1404.20, "gst_rate": 18}]
     )
     assert val == 1404.20
 
 
-def test_engine_no_rate_is_unchanged():
-    # gst_rate absent / 0 -> unit_price treated as already gross (legacy).
+def test_engine_rate_is_not_applied_to_price():
+    # gst_rate present or absent does NOT change the summed gross (it is the
+    # tax already inside unit_price; used only by gst_breakup).
     assert engine.returned_value([{"return_qty": 1, "unit_price": 1500}]) == 1500.0
+    assert (
+        engine.returned_value([{"return_qty": 1, "unit_price": 1500, "gst_rate": 18}])
+        == 1500.0
+    )
     assert engine.gross_unit_price(1500, 0) == 1500.0
+    assert engine.gross_unit_price(1500, 18) == 1500.0
 
 
 def test_engine_partial_qty_proportional_gross():
-    # 2 of a net-1190 @ 18% line -> 2 * 1404.20 = 2808.40.
+    # 2 units of an inclusive-1404.20 line -> 2 * 1404.20 = 2808.40.
     assert (
         engine.returned_value(
-            [{"return_qty": 2, "unit_price": 1190, "gst_rate": 18}]
+            [{"return_qty": 2, "unit_price": 1404.20, "gst_rate": 18}]
         )
         == 2808.40
     )
@@ -432,3 +444,43 @@ async def test_restocking_fee_rejected_on_exchange(ctx):
         headers={"Authorization": f"Bearer {tok}"},
     )
     assert r.status_code == 422
+
+
+async def test_inclusive_order_refunds_billed_gross(ctx):
+    """A MODERN inclusive order line stores taxable_value + tax_amount whose SUM
+    is the gross the customer paid. A full return must refund that billed gross
+    (e.g. a Rs 999 all-in frame @ 5% = 951.43 taxable + 47.57 GST), NOT gross it
+    up again to 999*1.05."""
+    tok = _staff_token(["CASHIER"])
+    # Swap the wired order for an inclusive one: customer paid Rs 999 all-in.
+    order = ctx["order_repo"]._order
+    order["items"][0] = {
+        "item_id": "li1",
+        "product_id": "PRD-1",
+        "product_name": "Inclusive Frame",
+        "sku": "FR-1",
+        "quantity": 1,
+        "unit_price": 999.0,  # gross / all-in price under inclusive billing
+        "gst_rate": 5.0,
+        "taxable_value": 951.43,  # extracted base stored on the order line
+        "tax_amount": 47.57,  # GST inside the 999
+        "item_total": 999.0,
+    }
+    payload = _qa_payload()
+    payload["items"][0]["unit_price"] = 999.0  # till sends the gross
+    r = ctx["client"].post(
+        "/api/v1/returns",
+        json=payload,
+        headers={"Authorization": f"Bearer {tok}"},
+    )
+    assert r.status_code == 201
+    data = r.json()
+    # Refund the billed gross 999.00 -- the stored taxable+tax sum -- exactly.
+    assert data["gross_refund"] == 999.0
+    assert data["returned_value"] == 999.0
+    assert data["refund_amount"] == 999.0
+    # GST backed out of the 999 for the credit note / GSTR-1 reversal.
+    assert data["gst_breakup"]["taxable"] == 951.43
+    assert data["gst_breakup"]["tax"] == 47.57
+    # NOT the over-refund 999 * 1.05 = 1048.95.
+    assert data["refund_amount"] != 1048.95

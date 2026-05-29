@@ -4,31 +4,30 @@ IMS 2.0 - Customer Returns / Exchange money-math engine
 Pure functions, no DB, so the money math is deterministic + unit-tested. The
 router persists; this module only computes.
 
-IMPORTANT - GST convention (corrected 2026-05-28)
--------------------------------------------------
+IMPORTANT - GST convention (GST-INCLUSIVE pricing, 2026-05-29)
+-------------------------------------------------------------
 The refund a customer is owed is the GST-INCLUSIVE GROSS rupees they actually
-PAID for the returned units (Indian MRP convention). IMS orders store a NET
-(pre-GST) `unit_price` on each line and add GST ON TOP (orders.py:
-grand_total = taxable + tax). So the gross a customer paid for a line is:
-
-    gross_unit = unit_price * (1 + gst_rate / 100)
-
-Earlier this module summed `return_qty * unit_price` with no gross-up, which
-dropped the GST and UNDER-refunded the customer by the tax fraction (the
-QA-confirmed bug: order paid Rs 1,404 = Rs 1,190 net + Rs 214 GST, refunded
-only Rs 1,190). `returned_value` now grosses each line up by its `gst_rate`
-so the figure is the gross rupees billed. A line that is ALREADY gross simply
-carries `gst_rate = 0` and is summed unchanged (backward compatible).
+PAID for the returned units. Under inclusive pricing the counter price IS the
+all-in amount (orders.py: grand_total = taxable + tax where taxable = gross /
+(1 + rate)). So the `unit_price` this module receives is ALREADY the gross the
+customer paid for one unit -- the caller (returns router `_priced_return_lines`)
+resolves it from the original order line's billed amount ((taxable_value +
+tax_amount) / qty), which is correct for BOTH inclusive orders AND legacy
+exclusive orders (where the stored taxable+tax summed to the grossed-up amount).
+This module therefore does NOT gross `unit_price` up again -- it is summed as
+billed. `gst_rate` is retained ONLY so the tax can be backed OUT of the gross
+for the credit note / GSTR-1 reversal.
 
 The concepts:
-  - returned_value      = sum(return_qty * gross_unit) over the returned items
-                          (GST-INCLUSIVE gross = what the customer paid).
+  - returned_value      = sum(return_qty * unit_price) over the returned items,
+                          where unit_price is the GST-INCLUSIVE gross billed.
   - restocking_fee      = optional absolute Rs deduction for damaged / opened
                           goods. 0 <= fee <= gross. Net refund = gross - fee.
   - exchange settlement = replacement_total - returned_value:
                             > 0 -> COLLECT (customer pays the difference)
                             < 0 -> REFUND  (shop owes the customer)
                             ~ 0 -> EVEN    (within a small epsilon)
+                          (replacement unit_price is the inclusive offer price.)
   - credit-note amount  = the returned_value (issued to the customer as credit).
   - gst_breakup         = backs the tax OUT of a gross figure for the credit
                           note / GSTR-1 reversal (tax is NOT added on top).
@@ -85,35 +84,37 @@ def _coerce_rate(value: Any, label: str = "gst_rate") -> float:
     return rate
 
 
-def gross_unit_price(unit_price: Any, gst_rate: Any) -> float:
-    """GST-INCLUSIVE gross unit price = net unit_price grossed up by gst_rate.
+def gross_unit_price(unit_price: Any, gst_rate: Any = None) -> float:
+    """GST-INCLUSIVE gross unit price.
 
-    gross = unit_price * (1 + gst_rate / 100), rounded to 2dp. When gst_rate is
-    0 / None the price is returned unchanged (it is already gross). Raises
-    ValueError on negative / non-numeric input.
+    Under inclusive pricing `unit_price` is ALREADY the gross the customer paid
+    for one unit, so it is returned unchanged (rounded 2dp). `gst_rate` is
+    accepted for signature/back-compat and VALIDATED (negatives rejected) but
+    NOT applied -- the tax is inside the price; use `gst_breakup` to back it
+    out. Raises ValueError on negative / non-numeric input.
     """
     price = _coerce_price(unit_price, "unit_price")
-    rate = _coerce_rate(gst_rate)
-    return round(price * (1.0 + rate / 100.0), 2)
+    _coerce_rate(gst_rate)  # validate only; do NOT gross up an inclusive price
+    return round(price, 2)
 
 
 def returned_value(items: List[Dict[str, Any]]) -> float:
     """GST-INCLUSIVE gross value of the returned items.
 
-    For each line: return_qty * unit_price * (1 + gst_rate/100), accumulated
-    and rounded ONCE at the end (2dp) - the same single-round convention the
-    original net math used, so a line with no rate (gst_rate absent / 0)
-    returns an identical figure to before this fix. `items` is a list of dicts
-    each carrying `return_qty` (or `quantity`), `unit_price`, and optional
-    `gst_rate` (absent / 0 -> price already gross). Raises ValueError if any
-    qty/price/rate is negative or non-numeric.
+    For each line: return_qty * unit_price, where `unit_price` is the GST-
+    INCLUSIVE gross billed for one unit (the caller resolves it from the
+    original order line's billed amount). Accumulated and rounded ONCE at the
+    end (2dp). `items` is a list of dicts each carrying `return_qty` (or
+    `quantity`), `unit_price`, and optional `gst_rate` (validated but NOT
+    applied -- it is the tax already inside unit_price). Raises ValueError if
+    any qty/price/rate is negative or non-numeric.
     """
     total = 0.0
     for it in items or []:
         qty = _coerce_qty(it.get("return_qty", it.get("quantity")), "return_qty")
         price = _coerce_price(it.get("unit_price"), "unit_price")
-        rate = _coerce_rate(it.get("gst_rate"))
-        total += qty * price * (1.0 + rate / 100.0)
+        _coerce_rate(it.get("gst_rate"))  # validate only; price is inclusive
+        total += qty * price
     return round(total, 2)
 
 
@@ -160,9 +161,9 @@ def exchange_settlement(
 ) -> Dict[str, Any]:
     """Compute the money settlement for an EXCHANGE.
 
-    replacement_total = sum(quantity * gross_unit) over replacement_items,
-    where gross_unit grosses each replacement's NET `unit_price` up by its
-    `gst_rate` (absent / 0 -> already gross), mirroring returned_value.
+    replacement_total = sum(quantity * unit_price) over replacement_items,
+    where unit_price is the GST-INCLUSIVE offer price of each replacement
+    (the tax is inside it), mirroring returned_value.
     difference        = round(replacement_total - returned_total, 2)
       difference > 0  -> COLLECT (customer pays |difference|)
       difference < 0  -> REFUND  (shop owes |difference|)
@@ -178,8 +179,8 @@ def exchange_settlement(
     for it in replacement_items or []:
         qty = _coerce_qty(it.get("quantity", it.get("return_qty")), "quantity")
         price = _coerce_price(it.get("unit_price"), "unit_price")
-        rate = _coerce_rate(it.get("gst_rate"))
-        replacement_total += qty * price * (1.0 + rate / 100.0)
+        _coerce_rate(it.get("gst_rate"))  # validate only; offer price is inclusive
+        replacement_total += qty * price
     replacement_total = round(replacement_total, 2)
 
     difference = round(replacement_total - returned_total, 2)

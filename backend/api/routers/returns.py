@@ -212,19 +212,48 @@ def _order_line_index(order: Optional[Dict[str, Any]]) -> Dict[str, Dict[str, An
     return {"by_item": by_item, "by_product": by_product}
 
 
+def _billed_unit_gross(line: Dict[str, Any]) -> Optional[float]:
+    """Per-unit GST-INCLUSIVE gross a customer was actually billed for a line.
+
+    Uses the stored (taxable_value + tax_amount) / quantity -- the real billed
+    gross. This is correct for BOTH inclusive orders (taxable = gross/(1+rate),
+    tax = gross - taxable -> sum = gross) AND legacy exclusive orders (taxable =
+    net, tax = net*rate -> sum = grossed-up amount the customer paid). Returns
+    None when those fields / a positive qty are absent so the caller can fall
+    back. Defensive: never raises.
+    """
+    tv = line.get("taxable_value")
+    tx = line.get("tax_amount")
+    if tv is None or tx is None:
+        return None
+    try:
+        qty = float(line.get("quantity") or 0)
+        gross_line = float(tv) + float(tx)
+    except (TypeError, ValueError):
+        return None
+    if qty <= 0:
+        return None
+    return round(gross_line / qty, 2)
+
+
 def _priced_return_lines(
     lines: List[ReturnLine], order: Optional[Dict[str, Any]]
 ) -> List[Dict[str, Any]]:
-    """Build engine-ready dicts whose `gst_rate` is the rate the line was
-    billed at, so `returns_engine.returned_value` can gross the NET unit_price
-    up to the GST-INCLUSIVE amount the customer paid.
+    """Build engine-ready dicts carrying the GST-INCLUSIVE gross `unit_price`
+    the customer was billed for each line plus the `gst_rate` it was billed at.
 
-    Rate-resolution order (most authoritative first):
-      1. the matching ORIGINAL order line's `gst_rate` (by order_item_id, then
-         by product_id) - this is what POS actually billed;
-      2. the `gst_rate` the till sent on the return line;
-      3. 0 -> treat unit_price as already gross (fail-soft: never over-refund a
-         rate we cannot prove; matches pre-fix behaviour when no order/rate).
+    `unit_price` resolution (most authoritative first):
+      1. the matching ORIGINAL order line's stored billed gross,
+         (taxable_value + tax_amount) / quantity -- correct for inclusive AND
+         legacy exclusive orders, so the refund always matches what was paid;
+      2. legacy fallback (older orders with no stored taxable/tax): the till's
+         NET unit_price grossed up by the resolved rate (preserves the #140
+         under-refund fix);
+      3. the till's unit_price unchanged (no order line / no rate).
+
+    `gst_rate` resolution: original order line's rate, else the till's rate,
+    else 0. It is used ONLY to back the tax OUT of the gross for the credit
+    note -- `returns_engine` no longer grosses unit_price up (it is inclusive).
 
     Returns one dict per line carrying unit_price, gst_rate, return_qty, plus
     the identity/restock fields the rest of the flow needs.
@@ -241,12 +270,26 @@ def _priced_return_lines(
             orig = by_item[str(ln.order_item_id)]
         elif ln.product_id and str(ln.product_id) in by_product:
             orig = by_product[str(ln.product_id)]
+        billed_unit: Optional[float] = None
         if orig is not None:
             orig_rate = orig.get("gst_rate")
             if orig_rate is not None:
                 rate = float(orig_rate)
+            billed_unit = _billed_unit_gross(orig)
         if rate is None and ln.gst_rate is not None:
             rate = float(ln.gst_rate)
+        if billed_unit is not None:
+            # Authoritative: the gross actually billed for this unit.
+            d["unit_price"] = billed_unit
+        elif rate:
+            # Legacy order with no stored taxable/tax -> gross the till's NET
+            # unit_price up by the rate so we still refund the full amount.
+            try:
+                d["unit_price"] = round(
+                    float(d.get("unit_price") or 0.0) * (1.0 + rate / 100.0), 2
+                )
+            except (TypeError, ValueError):
+                pass
         d["gst_rate"] = rate if rate is not None else 0.0
         out.append(d)
     return out
