@@ -71,6 +71,7 @@ from .routers import (
     marketing_router,
     analytics_v2_router,
     agents_router,
+    proposals_router,
     walkouts_router,
     points_router,
     payout_router,
@@ -873,6 +874,10 @@ app.include_router(
     analytics_v2_router, prefix="/api/v1/analytics-v2", tags=["Analytics V2"]
 )
 app.include_router(agents_router, prefix="/api/v1/jarvis", tags=["Agents"])
+# AI change-proposal workflow (SYSTEM_INTENT section 8) - SUPERADMIN-only.
+# Mounted at the same /api/v1/jarvis prefix; its paths (/proposals*) don't
+# collide with agents_router's (/agents*).
+app.include_router(proposals_router, prefix="/api/v1/jarvis", tags=["AI Proposals"])
 app.include_router(walkouts_router, prefix="/api/v1/walkouts", tags=["Walkouts"])
 app.include_router(
     points_router, prefix="/api/v1/incentive/points", tags=["Daily Points"]

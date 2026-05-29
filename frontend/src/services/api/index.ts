@@ -118,3 +118,13 @@ export type { Entity, GstinEntry, PtRegistration } from './entities';
 // Payroll config (Structured-CTC salary master + Professional Tax slabs)
 export { payrollApi, grossOf } from './payroll';
 export type { SalaryConfig, PtSlab, OtherAllowance } from './payroll';
+
+// Jarvis AI change-proposals (SUPERADMIN only — SYSTEM_INTENT section 8)
+export { proposalsApi } from './proposals';
+export type {
+  ProposalStatus,
+  AIProposal,
+  ProposalListResponse,
+  ApproveResponse,
+  RejectResponse,
+} from './proposals';
