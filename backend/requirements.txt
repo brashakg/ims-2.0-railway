@@ -2,15 +2,15 @@
 # ===============================
 
 # Web Framework
-fastapi==0.136.1
-uvicorn[standard]==0.46.0
+fastapi==0.136.3
+uvicorn[standard]==0.48.0
 
 # Data Validation
 pydantic==2.13.4
 pydantic-settings==2.14.1
 
 # Authentication & Security
-pyjwt==2.12.1
+pyjwt==2.13.0
 bcrypt==4.2.0
 python-multipart==0.0.29
 # RSA-SHA256 signing for QZ Tray silent label printing (labels.py). The
@@ -20,7 +20,7 @@ cryptography==44.0.0
 # Database
 pymongo==4.17.0
 # Read-only bridge to the e-commerce (BVI) Postgres for online catalog/stock
-psycopg2-binary==2.9.10
+psycopg2-binary==2.9.12
 
 # HTTP Client (for JARVIS AI)
 httpx==0.28.1

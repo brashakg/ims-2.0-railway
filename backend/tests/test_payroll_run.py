@@ -9,7 +9,7 @@ Integration-level: requires Mongo (CI provides a mongo:7.0 service).
 import uuid
 
 
-def test_payroll_run_compute_approve_lock(client, auth_headers):
+def test_payroll_run_compute_approve_lock(client, auth_headers, db_live):
     entity = f"ent_run_{uuid.uuid4().hex[:8]}"
     e1 = f"RUN1-{uuid.uuid4().hex[:6]}"
     e2 = f"RUN2-{uuid.uuid4().hex[:6]}"
@@ -90,7 +90,7 @@ def test_payroll_run_requires_finance_role(client, staff_headers):
     assert r.status_code == 403
 
 
-def test_payroll_run_dry_run_does_not_persist(client, auth_headers):
+def test_payroll_run_dry_run_does_not_persist(client, auth_headers, db_live):
     entity = f"ent_dry_{uuid.uuid4().hex[:8]}"
     e1 = f"DRY-{uuid.uuid4().hex[:6]}"
     client.post(

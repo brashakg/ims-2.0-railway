@@ -35,7 +35,10 @@ class TestAuthAndEnvelope:
         resp = client.get("/api/v1/reports/inventory/non-moving-stock")
         assert resp.status_code == 401
 
-    def test_returns_empty_envelope_when_db_absent(self, client, auth_headers):
+    def test_returns_empty_envelope_when_db_absent(self, client, auth_headers, monkeypatch):
+        # Simulate DB absent by patching get_db to return None in the reports router.
+        from api.routers import reports as reports_module
+        monkeypatch.setattr(reports_module, "get_db", lambda: None)
         resp = client.get(
             "/api/v1/reports/inventory/non-moving-stock",
             headers=auth_headers,

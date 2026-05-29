@@ -70,7 +70,7 @@ def _entity_payload(name="Test Entity"):
     }
 
 
-def test_entity_create_get_and_list(client, auth_headers):
+def test_entity_create_get_and_list(client, auth_headers, db_live):
     r = client.post(
         "/api/v1/entities",
         json=_entity_payload("Better Vision Chas-Bokaro"),
@@ -92,7 +92,7 @@ def test_entity_create_get_and_list(client, auth_headers):
     assert eid in [e["entity_id"] for e in r3.json()["entities"]]
 
 
-def test_entity_update(client, auth_headers):
+def test_entity_update(client, auth_headers, db_live):
     r = client.post(
         "/api/v1/entities", json=_entity_payload("Entity To Update"), headers=auth_headers
     )
@@ -109,7 +109,7 @@ def test_entity_create_requires_admin(client, staff_headers):
     assert r.status_code == 403
 
 
-def test_assign_missing_store_returns_404(client, auth_headers):
+def test_assign_missing_store_returns_404(client, auth_headers, db_live):
     r = client.post("/api/v1/entities", json=_entity_payload(), headers=auth_headers)
     eid = r.json()["entity"]["entity_id"]
     r2 = client.post(
@@ -123,7 +123,7 @@ def test_assign_missing_store_returns_404(client, auth_headers):
 # ---------------------------------------------------------------------------
 
 
-def test_salary_config_create_get_update(client, auth_headers):
+def test_salary_config_create_get_update(client, auth_headers, db_live):
     emp = f"EMP-{uuid.uuid4().hex[:8]}"
     payload = {
         "employee_id": emp,
@@ -155,7 +155,7 @@ def test_salary_config_create_get_update(client, auth_headers):
     assert r3.json()["config"]["basic"] == 22000
 
 
-def test_salary_config_duplicate_returns_409(client, auth_headers):
+def test_salary_config_duplicate_returns_409(client, auth_headers, db_live):
     emp = f"EMP-{uuid.uuid4().hex[:8]}"
     payload = {"employee_id": emp, "basic": 15000}
     assert (
@@ -176,7 +176,7 @@ def test_salary_config_basic_must_be_positive(client, auth_headers):
     assert r.status_code == 422  # pydantic gt=0
 
 
-def test_salary_config_bulk_upsert(client, auth_headers):
+def test_salary_config_bulk_upsert(client, auth_headers, db_live):
     e1 = f"EMP-{uuid.uuid4().hex[:8]}"
     e2 = f"EMP-{uuid.uuid4().hex[:8]}"
     payload = {
@@ -206,14 +206,14 @@ def test_salary_config_write_requires_finance_role(client, staff_headers):
 # ---------------------------------------------------------------------------
 
 
-def test_pt_slabs_list_includes_jh_and_mh(client, auth_headers):
+def test_pt_slabs_list_includes_jh_and_mh(client, auth_headers, db_live):
     r = client.get("/api/v1/payroll/pt-slabs", headers=auth_headers)
     assert r.status_code == 200
     codes = {s["state_code"] for s in r.json()["pt_slabs"]}
     assert {"JH", "MH"}.issubset(codes)
 
 
-def test_pt_slabs_seed_then_get(client, auth_headers):
+def test_pt_slabs_seed_then_get(client, auth_headers, db_live):
     r = client.post("/api/v1/payroll/pt-slabs/seed", headers=auth_headers)
     assert r.status_code == 201, r.text
     assert set(r.json()["states"]) == {"MH", "JH"}

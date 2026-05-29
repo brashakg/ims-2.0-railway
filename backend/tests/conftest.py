@@ -170,6 +170,17 @@ def _isolate_db(client):
 
 
 @pytest.fixture
+def db_live(client):
+    """Skip the test when no live MongoDB is reachable.
+    Prevents integration tests from producing confusing 500s on local runs
+    that have no DB. On CI (mongo:7.0 service present) this is a no-op."""
+    from database.connection import get_db
+    db = get_db()
+    if not (db and getattr(db, "is_connected", False)):
+        pytest.skip("No live MongoDB — integration test skipped")
+
+
+@pytest.fixture
 def auth_headers(client):
     """Get a valid JWT for an admin user by calling login.
     Falls back to creating a token directly if login requires a DB.

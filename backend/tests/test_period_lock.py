@@ -12,7 +12,7 @@ os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-for-unit-tests")
 os.environ.setdefault("MONGODB_URI", "")
 
 
-def test_locked_period_blocks_expense_create(client, auth_headers):
+def test_locked_period_blocks_expense_create(client, auth_headers, db_live):
     yr = 2098
     # Lock a unique far-future period (idempotent: 400 if a prior run locked it).
     lk = client.post(
