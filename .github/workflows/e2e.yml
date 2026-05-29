@@ -1,0 +1,140 @@
+name: E2E (Playwright)
+
+on:
+  push:
+    branches: [main, develop, 'claude/**']
+  pull_request:
+    branches: [main, develop]
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+
+    # Mirror backend-ci.yml's Mongo service exactly.
+    services:
+      mongodb:
+        image: mongo:7.0
+        env:
+          MONGO_INITDB_DATABASE: ims_test
+        options: >-
+          --health-cmd "mongosh --eval 'db.runCommand(\"ping\")'"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 27017:27017
+
+    env:
+      # The app reads MONGODB_URL and connects to database "ims_2_0" (the URI
+      # path is ignored — see api/main.py). Seed + app therefore share one DB.
+      MONGODB_URL: mongodb://localhost:27017/ims_test
+      JWT_SECRET_KEY: ci-test-secret-key
+      ENVIRONMENT: test
+      # Allow the same-origin preview origin through CORS (belt-and-braces;
+      # the /api proxy makes calls same-origin so this is rarely exercised).
+      CORS_ORIGINS: http://localhost:4173
+      # Backend the e2e API helper + gstMode() talk to directly.
+      E2E_API_URL: http://localhost:8000
+      E2E_BASE_URL: http://localhost:4173
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # ---- Backend ----
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: 'backend/requirements*.txt'
+
+      - name: Install backend dependencies
+        working-directory: backend
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Boot backend (uvicorn)
+        working-directory: backend
+        run: |
+          nohup python -m uvicorn api.main:app --host 0.0.0.0 --port 8000 \
+            > "$GITHUB_WORKSPACE/backend.log" 2>&1 &
+          echo "Backend starting (pid $!)..."
+
+      - name: Wait for backend health
+        run: npx --yes wait-on -t 120000 http://localhost:8000/health
+
+      - name: Seed E2E data
+        working-directory: backend
+        run: python scripts/seed_e2e.py
+
+      # ---- Frontend (build + serve same-origin with /api proxy) ----
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20.x'
+          cache: 'npm'
+          cache-dependency-path: 'frontend/package-lock.json'
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Build frontend (relative API base -> same-origin /api proxy)
+        working-directory: frontend
+        env:
+          # Force a relative API base so the built SPA hits the local backend
+          # via the preview /api proxy — NEVER the Railway prod URL.
+          VITE_API_URL: /api/v1
+        run: npm run build
+
+      - name: Serve frontend (vite preview + /api proxy)
+        working-directory: frontend
+        env:
+          E2E_BACKEND_URL: http://localhost:8000
+        run: |
+          nohup npx vite preview --config vite.preview.config.ts --port 4173 \
+            > "$GITHUB_WORKSPACE/frontend.log" 2>&1 &
+          echo "Frontend preview starting (pid $!)..."
+
+      - name: Wait for frontend + backend
+        run: npx --yes wait-on -t 120000 http://localhost:8000/health http://localhost:4173
+
+      # ---- Playwright ----
+      - name: Install e2e dependencies
+        working-directory: e2e
+        run: npm ci || npm install
+
+      - name: Install Playwright browsers (chromium)
+        working-directory: e2e
+        run: npx playwright install --with-deps chromium
+
+      - name: Run Playwright tests
+        working-directory: e2e
+        run: npx playwright test
+
+      - name: Dump server logs on failure
+        if: failure()
+        run: |
+          echo "===== backend.log ====="
+          cat "$GITHUB_WORKSPACE/backend.log" || true
+          echo "===== frontend.log ====="
+          cat "$GITHUB_WORKSPACE/frontend.log" || true
+
+      - name: Upload Playwright report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: e2e/playwright-report/
+          retention-days: 14
+
+      - name: Upload traces
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-traces
+          path: e2e/test-results/
+          retention-days: 14
