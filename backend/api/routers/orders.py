@@ -44,7 +44,7 @@ from ..services.gst_rates import gst_rate_for_category as _gst_rate_for_category
 # static canonical table, so a govt rate change is an in-app edit (Settings ->
 # HSN & GST Rates) with no code change. Fail-soft: falls back to the static
 # table when the master/DB is unavailable.
-from ..services.gst_rates import resolve_gst_rate
+from ..services.gst_rates import resolve_gst_rate, gst_pricing_mode
 
 # LOW_GST_CATEGORIES retained for any external reference / readability; it is
 # the set of categories the canonical table bills at 5%.
@@ -75,6 +75,7 @@ def _compute_per_category_gst(items: list, cart_discount_pct: float) -> dict:
     """
     cart_discount_pct = max(0.0, min(100.0, cart_discount_pct or 0.0))
     cart_factor = 1.0 - (cart_discount_pct / 100.0)
+    mode = gst_pricing_mode()  # "inclusive" (default) | "exclusive" — flag-flippable
     subtotal = 0.0
     gross_total = 0.0
     item_discount_sum = 0.0
@@ -87,16 +88,21 @@ def _compute_per_category_gst(items: list, cart_discount_pct: float) -> dict:
         cat = it.get("category") or it.get("item_type") or ""
         hsn = it.get("hsn_code") or it.get("hsn") or None
         rate = resolve_gst_rate(hsn_code=hsn, category=cat)
-        # GST-INCLUSIVE: item_total IS the all-in price the customer pays;
-        # the GST is the component WITHIN it, not added on top. Extract:
-        #   taxable = gross / (1 + rate/100); tax = gross - taxable.
-        # (Was: taxable = gross, tax = gross*rate -> charged price + GST on top,
-        # which OVERCHARGED the customer the tax fraction. QA F3 / owner: the
-        # counter price is inclusive.)
+        # GST mode (GST_PRICING_MODE, per-request):
+        #   inclusive (default) — item_total IS the all-in price; the GST is the
+        #     component WITHIN it: taxable = gross/(1+rate); tax = gross-taxable.
+        #     (QA F3 / owner: the counter price is inclusive.)
+        #   exclusive (legacy)  — item_total is the pre-tax taxable; GST on top.
+        # The flag lets the mode be flipped on Railway without a redeploy (instant
+        # atomic rollback). taxable + tax == grand_total in BOTH modes.
         line_gross = round(line_subtotal * cart_factor, 2)
         gross_total += line_gross
-        line_taxable = round(line_gross / (1.0 + rate / 100.0), 2)
-        line_tax = round(line_gross - line_taxable, 2)
+        if mode == "exclusive":
+            line_taxable = line_gross
+            line_tax = round(line_gross * (rate / 100.0), 2)
+        else:
+            line_taxable = round(line_gross / (1.0 + rate / 100.0), 2)
+            line_tax = round(line_gross - line_taxable, 2)
         per_rate_taxable[rate] = round(
             per_rate_taxable.get(rate, 0.0) + line_taxable, 2
         )
@@ -121,6 +127,7 @@ def _compute_per_category_gst(items: list, cart_discount_pct: float) -> dict:
         "dominant_rate": dominant_rate,
         "cart_discount_amount": cart_discount_amount,
         "total_discount": total_discount,
+        "pricing_model": mode,
     }
 
 
@@ -1158,6 +1165,10 @@ async def create_order(
             "tax_amount": tax_amount,
             "total_discount": total_discount,
             "grand_total": grand_total,
+            # Self-label the GST model this order was billed under, so any
+            # deploy-skew / flag-flip order is identifiable + reports can trust
+            # the stored per-line taxable/tax without guessing the era.
+            "pricing_model": gst.get("pricing_model", "inclusive"),
             "amount_paid": 0.0,
             "balance_due": grand_total,
             "payment_status": "UNPAID",

@@ -10,7 +10,7 @@ import { Eye } from 'lucide-react';
 import { Shell, type Crumb } from '../shell';
 import { useAppearance } from '../../context/AppearanceContext';
 import { useAuth } from '../../context/AuthContext';
-import { loadHsnRates } from '../../constants/gstRuntime';
+import { loadHsnRates, loadPricingMode } from '../../constants/gstRuntime';
 import { ForcePasswordChange } from '../../pages/auth/ForcePasswordChange';
 
 // Keep labels consistent with the Rail labels so the crumb matches the active item.
@@ -87,7 +87,9 @@ export function AppLayout() {
   // Load the editable HSN->GST master once per session so the POS preview +
   // invoice reflect the same (SUPERADMIN-edited) rates the backend bills from.
   // Fail-soft: resolveGstRate() falls back to static GST 2.0 constants.
-  useEffect(() => { loadHsnRates(); }, []);
+  // Also load the GST pricing mode (inclusive/exclusive) at runtime from
+  // /health so a backend flag flip reaches the FE without a redeploy.
+  useEffect(() => { loadHsnRates(); loadPricingMode(); }, []);
 
   // Force-change-on-first-login gate: an admin-created / password-reset user
   // signs in with a temporary password and MUST change it before reaching any

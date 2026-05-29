@@ -12,7 +12,7 @@
 import { useRef } from 'react';
 import { Printer, Download } from 'lucide-react';
 import { calculateGST, calculateIGST, getHSNByCategory } from '../../constants/gst';
-import { resolveGstRate } from '../../constants/gstRuntime';
+import { resolveGstRate, isInclusivePricing } from '../../constants/gstRuntime';
 import { describeForReceipt } from '../../utils/receiptFormat';
 import {
   buildLegalHeader,
@@ -111,17 +111,36 @@ export function GSTInvoice({
     const gstRate = (item as any).gstRate || resolveGstRate(category, (item as any).hsnCode || hsnInfo?.code);
     const hsnCode = (item as any).hsnCode || hsnInfo?.code || '9004';
 
+    // GST_PRICING_MODE (runtime, /health): inclusive (default) extracts GST
+    // from WITHIN the line price (row total = price paid); exclusive (legacy)
+    // adds GST ON TOP (row total = price + GST). The flag lets prod roll back
+    // without a redeploy; the row stays self-consistent either way.
+    const inclusive = isInclusivePricing();
     let cgst = 0, sgst = 0, igst = 0;
     let taxableValue: number;
-    if (isInterState) {
-      const gstCalc = calculateIGST(grossLine, gstRate);
-      igst = gstCalc.igst;
-      taxableValue = gstCalc.baseAmount;
+    let totalAmount: number;
+    if (inclusive) {
+      if (isInterState) {
+        const gstCalc = calculateIGST(grossLine, gstRate);
+        igst = gstCalc.igst;
+        taxableValue = gstCalc.baseAmount;
+      } else {
+        const gstCalc = calculateGST(grossLine, gstRate);
+        cgst = gstCalc.cgst;
+        sgst = gstCalc.sgst;
+        taxableValue = gstCalc.baseAmount;
+      }
+      totalAmount = grossLine;
     } else {
-      const gstCalc = calculateGST(grossLine, gstRate);
-      cgst = gstCalc.cgst;
-      sgst = gstCalc.sgst;
-      taxableValue = gstCalc.baseAmount;
+      taxableValue = grossLine;
+      const tax = Math.round(grossLine * (gstRate / 100) * 100) / 100;
+      if (isInterState) {
+        igst = tax;
+      } else {
+        cgst = Math.floor((tax * 100) / 2) / 100;
+        sgst = Math.round((tax - cgst) * 100) / 100;
+      }
+      totalAmount = Math.round((grossLine + tax) * 100) / 100;
     }
 
     return {
@@ -140,7 +159,7 @@ export function GSTInvoice({
       cgst,
       sgst,
       igst,
-      totalAmount: grossLine,
+      totalAmount,
     };
   });
 

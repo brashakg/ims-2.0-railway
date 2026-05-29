@@ -657,14 +657,32 @@ async def global_exception_handler(request: Request, exc: Exception):
 @app.get("/health", tags=["Health"])
 @app.get("/api/v1/health", tags=["Health"])
 async def health_check():
+    import os
+
     db_status = (
         "connected" if DATABASE_AVAILABLE and get_db().is_connected else "disconnected"
     )
+    # Expose the active GST pricing mode + build SHA so the frontend can read
+    # the mode at RUNTIME (Vite bakes build-time env, so a flag flip wouldn't
+    # reach the FE otherwise) and so a FE/BE version skew is detectable.
+    try:
+        from .services.gst_rates import gst_pricing_mode
+
+        pricing_mode = gst_pricing_mode()
+    except Exception:  # noqa: BLE001
+        pricing_mode = "inclusive"
+    build_sha = (
+        os.environ.get("RAILWAY_GIT_COMMIT_SHA")
+        or os.environ.get("RAILWAY_DEPLOYMENT_ID")
+        or "dev"
+    )[:12]
     return {
         "status": "healthy",
         "service": "IMS 2.0 API",
         "version": "2.0.0",
         "database": db_status,
+        "pricing_mode": pricing_mode,
+        "build_sha": build_sha,
     }
 
 

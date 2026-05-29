@@ -396,3 +396,22 @@ def seed_hsn_gst_master() -> int:
     if inserted:
         invalidate_cache()
     return inserted
+
+
+def gst_pricing_mode() -> str:
+    """Active GST pricing mode: "inclusive" (default) or "exclusive".
+
+    Read PER REQUEST from the GST_PRICING_MODE env var so the mode can be
+    flipped on Railway WITHOUT a redeploy -- the flip is instant + atomic, and
+    is also the instant rollback (no slow redeploy). Both the FE+BE deploys can
+    ship the dual-mode code while the flag stays at the current value, so there
+    is no behaviour change during the independent builds (no skew window).
+
+      - "inclusive" (default): the counter price IS the all-in price the
+        customer pays; GST is extracted from within (taxable = gross/(1+rate)).
+      - "exclusive": legacy behaviour -- GST is added ON TOP of the line price.
+    """
+    import os
+
+    mode = (os.environ.get("GST_PRICING_MODE") or "inclusive").strip().lower()
+    return "exclusive" if mode == "exclusive" else "inclusive"
