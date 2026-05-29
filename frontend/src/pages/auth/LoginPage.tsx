@@ -102,15 +102,17 @@ export function LoginPage() {
   return (
     <div className="min-h-screen bg-gradient-to-br from-gray-50 to-gray-100 flex items-center justify-center p-4">
       <div className="w-full max-w-md">
-        {/* Real brand lockup — Better Vision (house brand) */}
+        {/* Real brand lockup — Better Vision (house brand). Hi-res source so it
+            stays crisp at a prominent size; ~h-24 fills the card better than the
+            old h-14 which left the page looking empty. */}
         <div className="text-center mb-8">
           <img
-            src={getBrandAssets('bv').lockup}
+            src={getBrandAssets('bv').lockupHiRes}
             alt="Better Vision"
-            className="h-14 mx-auto mb-4"
+            className="h-20 sm:h-24 w-auto max-w-[280px] mx-auto mb-4"
             style={{ objectFit: 'contain' }}
           />
-          <p className="text-gray-500 text-sm">Retail Operating System</p>
+          <p className="text-gray-500 text-sm tracking-wide">Retail Operating System</p>
         </div>
 
         {/* Login Card */}
