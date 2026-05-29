@@ -157,8 +157,22 @@ async def send_bulk_notifications(
     if rate_err:
         raise HTTPException(status_code=429, detail=rate_err)
     active_store = store_id or current_user.get("active_store_id", "")
+    # Respect marketing consent (consent / DLT compliance): a customer who has
+    # turned OFF "Receive marketing messages" (marketing_consent == False) must
+    # not get promotional fan-outs. Only an explicit False opts out — missing /
+    # None defaults to consented (matches the create-path default). Ad-hoc
+    # recipients with no customer_id can't be consent-checked and are sent.
+    db = _get_db()
+    cust_coll = db.get_collection("customers") if db is not None else None
     results = []
+    skipped = 0
     for r in req.recipients:
+        if r.customer_id and cust_coll is not None:
+            cust = cust_coll.find_one({"customer_id": r.customer_id}) or {}
+            if cust.get("marketing_consent") is False:
+                skipped += 1
+                results.append({"phone": r.phone, "status": "skipped", "reason": "opted_out"})
+                continue
         try:
             res = await send_notification(
                 store_id=active_store,
@@ -175,7 +189,10 @@ async def send_bulk_notifications(
         except Exception as e:
             results.append({"phone": r.phone, "status": "failed", "error": str(e)})
     queued = sum(1 for r in results if r["status"] == "queued")
-    return {"message": f"{queued}/{len(results)} queued", "results": results}
+    msg = f"{queued}/{len(results)} queued"
+    if skipped:
+        msg += f" ({skipped} skipped — opted out)"
+    return {"message": msg, "results": results, "skipped": skipped}
 
 
 @router.get("/notifications/logs")

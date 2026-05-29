@@ -1279,6 +1279,44 @@
 .section-head .line { flex: 1; height: 1px; background: var(--line); }
 .section-head .sub { font-size: 12px; color: var(--ink-4); }
 
+/* Hub — tablet + phone. The desktop layout is a 1.2fr/1fr hero with a 3-col
+   meta panel and a 12-col module grid (span-4 cards) at 48px padding — all of
+   which overflow / cram on a phone. Collapse progressively. */
+@media (max-width: 1024px) {
+  .hub-hero {
+    grid-template-columns: 1fr;
+    gap: 24px;
+    padding: 32px 24px 20px;
+  }
+  .hub-meta-grid {
+    border-left: 0;
+    padding-left: 0;
+    border-top: 1px solid var(--line);
+    padding-top: 24px;
+  }
+  .hub-h1 { font-size: 40px; }
+  .modules { padding: 24px; gap: 14px; }
+  .mod-card { grid-column: span 6; }       /* 2-up */
+  .mod-card.feature { grid-column: span 12; }
+}
+@media (max-width: 640px) {
+  .hub-bg { min-height: calc(100dvh - 52px); }
+  .hub-hero { padding: 24px 16px 16px; gap: 16px; }
+  .hub-h1 { font-size: clamp(28px, 8vw, 40px); }
+  .hub-sub { font-size: 13px; }
+  .hub-meta-grid { grid-template-columns: repeat(2, 1fr); gap: 16px; padding-top: 16px; }
+  .hub-meta-grid .v { font-size: 26px; }
+  .modules {
+    grid-template-columns: 1fr;            /* single column = no overflow */
+    padding: 16px;
+    gap: 12px;
+  }
+  .mod-card,
+  .mod-card.feature { grid-column: auto; min-height: 0; padding: 18px; }
+  .mod-title { font-size: 22px; }
+  .section-head { margin: 12px 0 0; }
+}
+
 /* ============================================================================
    Store Setup — 240px nav + content.
    Ported from docs/design/setup.html

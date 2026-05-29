@@ -841,8 +841,33 @@ function PreferencesTab({ customer }: { customer: Customer | null }) {
   // Only marketing consent is actually captured on the customer record today.
   // The previous version rendered fabricated toggles (Newsletter/SMS/etc.) and
   // a fake product-interest list — removed so this reflects real data only.
-  const consent = (customer as any)?.marketing_consent;
-  const hasConsent = typeof consent === 'boolean';
+  // Marketing consent is now an editable toggle (was read-only). Missing/None
+  // defaults to opted-in (matches the create-path default); only an explicit
+  // false means opted out. Toggling PATCHes the customer record, and the
+  // backend send path skips opted-out customers (consent/DLT compliance).
+  const toast = useToast();
+  const custId = (customer as any)?.customer_id || (customer as any)?.id || '';
+  const [consent, setConsent] = useState<boolean>(((customer as any)?.marketing_consent) !== false);
+  const [savingConsent, setSavingConsent] = useState(false);
+  useEffect(() => {
+    setConsent(((customer as any)?.marketing_consent) !== false);
+  }, [customer]);
+
+  const toggleConsent = async () => {
+    if (!custId || savingConsent) return;
+    const next = !consent;
+    setConsent(next); // optimistic
+    setSavingConsent(true);
+    try {
+      await customerApi.updateCustomer(custId, { marketing_consent: next });
+      toast.success(next ? 'Marketing messages enabled' : 'Customer opted out of marketing messages');
+    } catch {
+      setConsent(!next); // revert on failure
+      toast.error('Could not update marketing consent');
+    } finally {
+      setSavingConsent(false);
+    }
+  };
 
   return (
     <div className="space-y-4">
@@ -851,11 +876,15 @@ function PreferencesTab({ customer }: { customer: Customer | null }) {
           <Settings className="w-5 h-5" />
           Communication Preferences
         </h3>
-        {hasConsent ? (
-          <PreferenceRow label="Marketing consent" status={!!consent} />
-        ) : (
-          <p className="text-gray-500 text-sm">No marketing-consent preference recorded for this customer.</p>
-        )}
+        <PreferenceRow
+          label="Receive marketing messages"
+          status={consent}
+          onToggle={custId ? toggleConsent : undefined}
+          saving={savingConsent}
+        />
+        <p className="text-xs text-gray-500 mt-2">
+          Birthday wishes, Rx-renewal reminders, and offers via SMS / WhatsApp. Turning this off stops all promotional messages to this customer.
+        </p>
       </div>
 
       <div className="bg-gray-50 rounded-lg p-4">
@@ -872,15 +901,30 @@ function PreferencesTab({ customer }: { customer: Customer | null }) {
 interface PreferenceRowProps {
   label: string;
   status: boolean;
+  onToggle?: () => void;
+  saving?: boolean;
 }
 
-function PreferenceRow({ label, status }: PreferenceRowProps) {
+function PreferenceRow({ label, status, onToggle, saving }: PreferenceRowProps) {
   return (
     <div className="flex items-center justify-between">
       <span className="text-gray-600">{label}</span>
-      <div className={clsx('w-10 h-6 rounded-full flex items-center px-1 cursor-pointer', status ? 'bg-green-600' : 'bg-gray-300')}>
+      <button
+        type="button"
+        role="switch"
+        aria-checked={status}
+        aria-label={label}
+        disabled={!onToggle || saving}
+        onClick={onToggle}
+        className={clsx(
+          'w-10 h-6 rounded-full flex items-center px-1 transition-colors',
+          onToggle ? 'cursor-pointer' : 'cursor-default',
+          saving ? 'opacity-50' : '',
+          status ? 'bg-green-600' : 'bg-gray-300',
+        )}
+      >
         <div className={clsx('w-4 h-4 rounded-full bg-white transition-transform', status ? 'translate-x-4' : '')} />
-      </div>
+      </button>
     </div>
   );
 }
