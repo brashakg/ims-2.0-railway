@@ -103,7 +103,15 @@ export function EnterpriseKpiCard({
   };
 
   const colors = statusColors[status];
-  const performancePercent = target ? Math.min(100, (Number(value) / target) * 100) : null;
+  // QA F2: `value` may be a pre-formatted string ("₹15,000", "15,000") whose
+  // Number() is NaN -> "NaN%" + a full bar. Strip non-numeric chars first and
+  // guard against a 0/NaN target so the progress card never shows NaN%.
+  const numericValue =
+    typeof value === 'number' ? value : Number(String(value).replace(/[^0-9.-]/g, ''));
+  const performancePercent =
+    target && target > 0 && Number.isFinite(numericValue)
+      ? Math.min(100, Math.max(0, (numericValue / target) * 100))
+      : null;
 
   // Determine sparkline color based on trend
   const sparklineColor = useMemo(() => {
