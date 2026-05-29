@@ -61,14 +61,33 @@ jobs:
         run: |
           nohup python -m uvicorn api.main:app --host 0.0.0.0 --port 8000 \
             > "$GITHUB_WORKSPACE/backend.log" 2>&1 &
+          echo "$!" > "$GITHUB_WORKSPACE/backend.pid"
           echo "Backend starting (pid $!)..."
 
       - name: Wait for backend health
-        run: npx --yes wait-on -t 120000 http://localhost:8000/health
+        # NB: wait-on issues HEAD by default; /health is GET-only (returns 405
+        # to HEAD) so the plain http:// scheme never reports ready. The
+        # http-get:// scheme forces a GET and treats any 2xx as up.
+        run: npx --yes wait-on -t 120000 http-get://localhost:8000/health
+
+      - name: Confirm backend /health (and surface log on failure)
+        run: |
+          echo "Backend process: $(cat "$GITHUB_WORKSPACE/backend.pid" 2>/dev/null || echo '?')"
+          curl -fsS http://localhost:8000/health | tee /tmp/health.json
+          echo ""
+          echo "pricing_mode -> $(grep -o '"pricing_mode":"[^"]*"' /tmp/health.json || true)"
+
+      - name: Dump backend log if boot failed
+        if: failure()
+        run: |
+          echo "===== backend.log (boot phase) ====="
+          cat "$GITHUB_WORKSPACE/backend.log" || echo "(no backend.log)"
 
       - name: Seed E2E data
         working-directory: backend
-        run: python scripts/seed_e2e.py
+        run: |
+          set -o pipefail
+          python scripts/seed_e2e.py 2>&1 | tee "$GITHUB_WORKSPACE/seed.log"
 
       # ---- Frontend (build + serve same-origin with /api proxy) ----
       - name: Setup Node.js 20
@@ -100,7 +119,9 @@ jobs:
           echo "Frontend preview starting (pid $!)..."
 
       - name: Wait for frontend + backend
-        run: npx --yes wait-on -t 120000 http://localhost:8000/health http://localhost:4173
+        # http-get:// forces GET (see backend health note above); the FE root is
+        # plain http:// (static index responds to HEAD).
+        run: npx --yes wait-on -t 120000 http-get://localhost:8000/health http://localhost:4173
 
       # ---- Playwright ----
       - name: Install e2e dependencies
@@ -120,6 +141,8 @@ jobs:
         run: |
           echo "===== backend.log ====="
           cat "$GITHUB_WORKSPACE/backend.log" || true
+          echo "===== seed.log ====="
+          cat "$GITHUB_WORKSPACE/seed.log" || true
           echo "===== frontend.log ====="
           cat "$GITHUB_WORKSPACE/frontend.log" || true
 

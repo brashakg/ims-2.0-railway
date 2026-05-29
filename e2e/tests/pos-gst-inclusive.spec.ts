@@ -127,27 +127,43 @@ test.describe('POS — GST-inclusive sale', () => {
   });
 
   /**
-   * The wizard Review panel (StepReview) renders its CGST/SGST split from a
-   * LOCAL exclusive calc that PR #331 did NOT migrate: it shows tax ON TOP
-   * (Rs 24.97 / Rs 24.98 ~ Rs 49.95) even though the same panel's Grand Total
-   * is the inclusive Rs 999. The cart sidebar (POSCart) and the persisted
-   * order ARE inclusive (asserted above). This is a real, isolated UI
-   * inconsistency — marked fixme so it never reports a fake pass.
+   * The wizard Review panel (StepReview) GST split. PR #333 + #335 migrated its
+   * taxBreakdown to be flag-aware (gstRuntime.isInclusivePricing): in the
+   * default INCLUSIVE mode the CGST/SGST are now EXTRACTED from WITHIN the
+   * Rs 999 (taxable = gross/(1+rate)) rather than added on top, and the panel's
+   * Grand Total stays the inclusive Rs 999. This guards that fix.
    *
-   * When StepReview is fixed to extract GST within (CGST 23.78 / SGST 23.79),
-   * remove the fixme and this becomes a live guard.
+   * Mode-aware: in exclusive mode the same rule yields cgst/sgst on-top while
+   * Grand Total = price + GST, so the assertion stays honest either way.
    */
-  test.fixme(
-    'wizard Review shows CGST/SGST extracted WITHIN the Rs 999 (currently on-top — #331 missed StepReview)',
-    async ({ page }) => {
-      const pos = new PosPage(page);
-      await pos.goto();
-      await pos.selectFirstSalespersonAndWalkin();
-      await pos.addProductByName(SEED.frame.name);
-      await pos.continueFromProducts();
-      // Intended (post-fix) behavior: CGST 23.78 + SGST 23.79 = 47.57 within 999.
-      await expect(page.getByText(/CGST.*23\.78/)).toBeVisible();
-      await expect(page.getByText(/SGST.*23\.79/)).toBeVisible();
-    }
-  );
+  test('wizard Review shows CGST/SGST split per mode, reconciling to the Grand Total (#333/#335)', async ({
+    page,
+    mode,
+  }) => {
+    const expected = lineGst(SEED.frame.price, SEED.frame.gstRate, mode);
+
+    const pos = new PosPage(page);
+    await pos.goto();
+    await pos.selectFirstSalespersonAndWalkin();
+    await pos.addProductByName(SEED.frame.name);
+    await pos.continueFromProducts();
+
+    // CGST/SGST are shown WITHIN the inclusive price (23.78 / 23.79), not the
+    // on-top 24.97 / 24.98 that the pre-#333 local calc produced.
+    const cgst = pos.reviewTaxRowValue('CGST');
+    const sgst = pos.reviewTaxRowValue('SGST');
+    await expect(cgst).toHaveText(new RegExp(expected.cgst.toFixed(2).replace('.', '\\.')));
+    await expect(sgst).toHaveText(new RegExp(expected.sgst.toFixed(2).replace('.', '\\.')));
+
+    // The Grand Total still equals the inclusive counter price (Rs 999) — the
+    // split is WITHIN it, not added on top.
+    const grandTotalCell = pos.reviewRowValue('Grand Total');
+    await expect(grandTotalCell).toHaveText(
+      new RegExp(`${Math.round(expected.grandTotal).toLocaleString('en-IN')}`)
+    );
+  });
+
+  // NB: the GST invoice paisa-split equality (line-item CGST === HSN-summary
+  // CGST to the paise) is still unfixed and remains a `test.fixme` in
+  // gst-invoice.spec.ts; no duplicate guard is added here.
 });

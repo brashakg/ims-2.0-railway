@@ -73,6 +73,20 @@ export class PosPage {
       .last();
   }
 
+  /**
+   * Locate the value cell of a Review-step GST row by its label PREFIX.
+   * The label span renders the rate too ("CGST (2.5%)"), so match on prefix:
+   *   <div class="flex justify-between"><span>CGST (2.5%)</span><span>₹23.78</span></div>
+   */
+  reviewTaxRowValue(prefix: 'CGST' | 'SGST'): Locator {
+    const labelSpan = this.page.getByText(new RegExp(`^${prefix}\\s*\\(`));
+    return this.page
+      .locator('div.flex.justify-between', { has: labelSpan })
+      .last()
+      .locator('span')
+      .last();
+  }
+
   async continueFromReview() {
     await this.continueButton.click();
   }
