@@ -58,7 +58,7 @@ import { BarcodeScanner } from './BarcodeScanner';
 import { AutoSearch } from '../common/AutoSearch';
 import { AddCustomerModal, type CustomerFormData } from '../customers/AddCustomerModal';
 import { CustomerCardWithLoyalty } from './CustomerCardWithLoyalty';
-import { resolveGstRate } from '../../constants/gstRuntime';
+import { resolveGstRate, isInclusivePricing } from '../../constants/gstRuntime';
 import type { PrescriptionInput } from '../../utils/lensAutoSuggest';
 
 import { useToast } from '../../context/ToastContext';
@@ -1740,19 +1740,23 @@ function StepReview({ onOpenDiscount }: { onOpenDiscount: (item: CartLineItem) =
   const subtotal = store.getSubtotal(); const discount = store.getTotalDiscount();
 
   const taxBreakdown = useMemo(() => {
-    // GST-INCLUSIVE: line_total is the all-in price; EXTRACT the GST from within
-    // (matches posStore.getTax / getGrandTotal) rather than adding it on top, and
-    // use the DB-aware resolver so editable HSN/GST overrides are reflected.
-    // `rates` maps a rate -> its EXTRACTED taxable base so the HSN breakdown below
-    // reconciles to the inclusive total (taxable + tax === grand total).
+    // GST_PRICING_MODE (runtime, /health): mirrors posStore.getTax / getGrandTotal.
+    //   INCLUSIVE (default): line_total is all-in; EXTRACT GST from within
+    //     (taxable = gross/(1+rate); tax = gross-taxable).
+    //   EXCLUSIVE (legacy): line_total is the pre-tax base; GST added on top
+    //     (taxable = gross; tax = gross*rate).
+    // Uses the DB-aware resolver (editable HSN/GST overrides). `rates` maps a
+    // rate -> its taxable base so the HSN breakdown reconciles to the grand
+    // total (which getGrandTotal also computes per-mode).
+    const inclusive = isInclusivePricing();
     const cartFactor = 1 - (store.cart_discount_percent || 0) / 100;
     let totalTax = 0;
     const rates: Record<number, number> = {};
     for (const item of (store.cart || [])) {
       const rate = resolveGstRate(item.category, (item as any).hsn_code || (item as any).hsnCode);
       const itemGross = Math.round((item.line_total || 0) * cartFactor * 100) / 100;
-      const itemTaxable = itemGross / (1 + rate / 100);
-      totalTax += itemGross - itemTaxable;
+      const itemTaxable = inclusive ? itemGross / (1 + rate / 100) : itemGross;
+      totalTax += inclusive ? itemGross - itemTaxable : itemGross * (rate / 100);
       rates[rate] = (rates[rate] || 0) + itemTaxable;
     }
     Object.keys(rates).forEach((k) => { rates[+k] = Math.round(rates[+k] * 100) / 100; });
