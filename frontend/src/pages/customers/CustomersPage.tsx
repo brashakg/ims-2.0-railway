@@ -245,6 +245,13 @@ export function CustomersPage() {
 
   // Handle creating new customer
   const handleCreateCustomer = async (formData: CustomerFormData) => {
+    // Email validation (optional — only check format when given) so bad
+    // addresses don't reach the customer record (type="email" alone doesn't
+    // validate on a JS-submitted form).
+    if (formData.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(formData.email.trim())) {
+      toast.error('Please enter a valid email address');
+      return;
+    }
     try {
       // Map to backend CustomerCreate schema (same as POS, same as ClinicalPage)
       const customerData = {
@@ -1022,6 +1029,10 @@ export function CustomersPage() {
                   onClick={async () => {
                     if (!editForm.name || !editForm.phone) {
                       toast.error('Name and phone are required');
+                      return;
+                    }
+                    if (editForm.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(editForm.email.trim())) {
+                      toast.error('Please enter a valid email address');
                       return;
                     }
                     try {
