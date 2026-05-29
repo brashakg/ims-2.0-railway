@@ -26,6 +26,10 @@ export { orderApi, prescriptionApi, workshopApi, adminDiscountApi } from './sale
 // Customers
 export { customerApi } from './customers';
 
+// CRM analytics (RFM segments, churn-risk, lifecycle)
+export { crmApi } from './crm';
+export type { ChurnRiskCustomer, ChurnRiskLevel } from './crm';
+
 // Customer Returns / Exchanges / Credit Notes
 export { returnsApi } from './returns';
 export type {
