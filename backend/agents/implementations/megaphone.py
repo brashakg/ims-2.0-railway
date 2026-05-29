@@ -225,6 +225,20 @@ class MegaphoneAgent(JarvisAgent):
                 {"expiry_date": {"$lte": cutoff, "$gt": now.isoformat()}},
                 {"_id": 0, "customer_id": 1, "patient_name": 1, "expiry_date": 1},
             ).limit(50))
+            # Consent gate (TCCCPR): prescriptions carry no consent flag, so
+            # drop rows whose customer has opted out of marketing. A missing
+            # flag defaults to consented (matches the customer-create default).
+            cust_coll = self.get_collection("customers")
+            if cust_coll is not None and expiring:
+                ids = [e.get("customer_id") for e in expiring if e.get("customer_id")]
+                opted_out = {
+                    c.get("customer_id")
+                    for c in cust_coll.find(
+                        {"customer_id": {"$in": ids}, "marketing_consent": False},
+                        {"_id": 0, "customer_id": 1},
+                    )
+                }
+                expiring = [e for e in expiring if e.get("customer_id") not in opted_out]
             return expiring
         except Exception as e:
             logger.debug(f"[MEGAPHONE] Rx scan error (non-fatal): {e}")
@@ -240,7 +254,12 @@ class MegaphoneAgent(JarvisAgent):
             # Customers store birthday as "YYYY-MM-DD" or "DD-MM-YYYY"; we
             # match on the suffix that ends with -MM-DD.
             matches = list(coll.find(
-                {"date_of_birth": {"$regex": today + "$"}},
+                # Consent gate (TCCCPR): never queue a promotional birthday
+                # message to a customer who has opted out of marketing.
+                {
+                    "date_of_birth": {"$regex": today + "$"},
+                    "marketing_consent": {"$ne": False},
+                },
                 {"_id": 0, "customer_id": 1, "name": 1},
             ).limit(50))
             return matches

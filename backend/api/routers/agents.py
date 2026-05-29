@@ -655,7 +655,7 @@ async def get_agent_logs(
 
         db = get_seeded_db()
         col = db.get_collection("agent_audit_log") if db else None
-        if not col:
+        if col is None:
             return {"logs": [], "total": 0}
 
         logs = list(
@@ -692,7 +692,7 @@ async def get_agent_timeline(
 
         db = get_seeded_db()
         col = db.get_collection("agent_audit_log") if db else None
-        if not col:
+        if col is None:
             return {"timeline": [], "total": 0}
 
         entries = list(col.find({}, {"_id": 0}).sort("timestamp", -1).limit(limit))
@@ -725,7 +725,7 @@ async def get_health_history(
 
         db = get_seeded_db()
         col = db.get_collection("health_checks") if db else None
-        if not col:
+        if col is None:
             return {"history": [], "total": 0}
 
         since = datetime.now(timezone.utc) - timedelta(hours=hours)

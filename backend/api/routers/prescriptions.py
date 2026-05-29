@@ -81,6 +81,16 @@ def _validate_rx_value(value: Optional[str], field_name: str) -> Optional[str]:
             f"{field_name} value {num} is outside the valid range ({lo} to {hi}). "
             f"Please double-check the prescription."
         )
+    # SYSTEM_INTENT section 4: dioptric powers move in 0.25 steps. Reject
+    # off-step values (e.g. +1.30, +0.10) that no lens is ground to. AXIS is
+    # integer-checked elsewhere; linear measures (PD/base_curve/diameter) are
+    # exempt from the 0.25 grid.
+    if field_name in ("sph", "cyl", "add", "cl_power", "cl_cyl", "cl_add"):
+        if round(num * 100) % 25 != 0:
+            raise ValueError(
+                f"{field_name} value {num} must be in 0.25-diopter steps "
+                f"(e.g. -1.25, 0.00, +2.50)."
+            )
     return value
 
 
@@ -375,10 +385,14 @@ async def create_prescription(
         if eye.cyl:
             try:
                 cyl_val = float(eye.cyl)
-                if cyl_val < -10.0 or cyl_val > 10.0:
+                # SYSTEM_INTENT section 4 + the canonical RANGES table both bound
+                # spectacle CYL to -6.00..+6.00. This path previously allowed
+                # +/-10.00, so a high-cyl Rx could be saved here yet fail the
+                # /validate check. Reconciled to +/-6.00.
+                if cyl_val < -6.0 or cyl_val > 6.0:
                     raise HTTPException(
                         status_code=422,
-                        detail=f"{eye_label} CYL must be between -10.00 and +10.00",
+                        detail=f"{eye_label} CYL must be between -6.00 and +6.00",
                     )
             except ValueError:
                 raise HTTPException(
@@ -526,7 +540,9 @@ async def validate_prescription(
                 issues.append(f"{eye_label} CYL {cyl} out of range (-6..+6)")
             if axis is not None and axis != "" and not (1 <= int(float(axis)) <= 180):
                 issues.append(f"{eye_label} AXIS {axis} out of range (1-180)")
-            if add not in (None, "", 0) and not (0.75 <= float(add) <= 3.50):
+            if add not in (None, "", 0) and float(add) != 0 and not (
+                0.75 <= float(add) <= 3.50
+            ):
                 issues.append(f"{eye_label} ADD {add} out of range (+0.75..+3.50)")
         except (ValueError, TypeError):
             issues.append(f"{eye_label} has a non-numeric Rx value")
