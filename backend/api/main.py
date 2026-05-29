@@ -706,11 +706,20 @@ async def seed_database(secret: str = "", force: str = ""):
     Requires secret key. Only inserts into empty collections.
     Use force=users to drop and re-seed users (fixes password hashes).
     """
-    # Seed secret reads from env (rotatable on Railway) with a hardcoded
-    # fallback so existing scripts that pass `bv-seed-2026` keep working.
-    # Set SEED_SECRET on the backend service to override.
-    expected = os.getenv("SEED_SECRET", "bv-seed-2026")
-    if secret != expected:
+    # SECURITY: the seed secret MUST come from the environment. There is NO
+    # hardcoded fallback — this is a public repo, and a known secret on an
+    # endpoint that can `force`-drop the users collection (re-seeding accounts
+    # with known passwords) is a full unauthenticated account-takeover path.
+    # If SEED_SECRET is unset the endpoint is disabled. Constant-time compare.
+    import hmac as _hmac
+
+    expected = os.getenv("SEED_SECRET")
+    if not expected:
+        raise HTTPException(
+            status_code=403,
+            detail="DB seeding is disabled (SEED_SECRET not configured on the server).",
+        )
+    if not secret or not _hmac.compare_digest(secret, expected):
         raise HTTPException(status_code=403, detail="Invalid seed secret")
 
     if not DATABASE_AVAILABLE:
