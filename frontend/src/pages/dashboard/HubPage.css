@@ -1,35 +1,29 @@
-
 /* ============================================================
-   Operational dashboard additions (replaces marketing hero):
-   slim header + priority-tasks/SOP work row.
+   Hub operational additions (priority tasks + SOP work row).
+   Uses the index.css design tokens (--surface / --line / --ink* /
+   --bv / --bg-sunk) with light-theme fallbacks so it renders
+   correctly even if a token is momentarily absent.
    ============================================================ */
-.hub-header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 16px;
-  padding: 8px 0 0;
-}
 
-.hub-header-date {
-  font-size: 22px;
-  font-weight: 700;
-  letter-spacing: -0.01em;
-  color: var(--text-primary, #0f172a);
-  margin: 2px 0 0;
+/* Compact greeting in place of the old marketing hero. */
+.hub-h1.hub-h1-compact {
+  font-size: 30px;
+  line-height: 1.15;
+  margin: 10px 0 6px;
 }
 
 .hub-work-row {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 16px;
+  margin-bottom: 18px;
 }
 
 .hub-work-card {
-  background: var(--surface, #fff);
-  border: 1px solid var(--border, #e2e8f0);
-  border-radius: 16px;
-  padding: 20px;
+  background: var(--surface, #ffffff);
+  border: 1px solid var(--line, #ececea);
+  border-radius: 14px;
+  padding: 18px;
   display: flex;
   flex-direction: column;
   gap: 12px;
@@ -45,9 +39,9 @@
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  font-size: 15px;
+  font-size: 14px;
   font-weight: 600;
-  color: var(--text-primary, #0f172a);
+  color: var(--ink, #141413);
 }
 
 .hub-work-link {
@@ -59,15 +53,15 @@
   cursor: pointer;
   font-size: 13px;
   font-weight: 500;
-  color: var(--accent-blue, #2563eb);
+  color: var(--bv, #CD201A);
 }
 
 .hub-work-empty {
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 14px;
-  color: var(--text-secondary, #64748b);
+  font-size: 13.5px;
+  color: var(--ink-3, #55554f);
   margin: 4px 0;
 }
 
@@ -78,7 +72,7 @@
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 4px;
 }
 
 .hub-task-row,
@@ -89,7 +83,7 @@
   width: 100%;
   background: none;
   border: none;
-  border-radius: 10px;
+  border-radius: 9px;
   padding: 8px 10px;
   cursor: pointer;
   text-align: left;
@@ -98,7 +92,7 @@
 
 .hub-task-row:hover,
 .hub-sop-row:hover {
-  background: var(--surface-hover, #f1f5f9);
+  background: var(--bg-sunk, #f4f4f2);
 }
 
 .hub-prio {
@@ -118,8 +112,8 @@
 
 .hub-task-name {
   flex: 1;
-  font-size: 14px;
-  color: var(--text-primary, #0f172a);
+  font-size: 13.5px;
+  color: var(--ink, #141413);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -131,7 +125,7 @@
   align-items: center;
   gap: 3px;
   font-size: 12px;
-  color: var(--text-secondary, #64748b);
+  color: var(--ink-3, #55554f);
 }
 
 .hub-task-due.is-overdue {
@@ -141,18 +135,17 @@
 
 .hub-sop-name {
   flex: 1;
-  font-size: 14px;
-  color: var(--text-primary, #0f172a);
+  font-size: 13.5px;
+  color: var(--ink, #141413);
 }
 
 .hub-sop-meta {
   flex-shrink: 0;
   font-size: 12px;
-  color: var(--text-secondary, #64748b);
+  color: var(--ink-3, #55554f);
   text-transform: capitalize;
 }
 
 @media (max-width: 768px) {
   .hub-work-row { grid-template-columns: 1fr; }
-  .hub-header { flex-direction: column; align-items: stretch; }
 }
