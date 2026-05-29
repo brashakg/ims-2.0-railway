@@ -9,6 +9,7 @@ import { useAppearance } from '../../context/AppearanceContext';
 import { Icon, type IconName } from './Icon';
 import type { UserRole } from '../../types';
 import { ecommerceSsoApi } from '../../services/api/ecommerceSso';
+import { getBrandAssets } from '../../utils/brandAssets';
 
 const COLLAPSED_GROUPS_KEY = 'ims_rail_collapsed_groups';
 
@@ -255,8 +256,8 @@ export function Rail({ brand = 'bv', mobileOpen = false }: { brand?: 'bv' | 'wiz
     });
   }, []);
 
-  const glyph = brand === 'wizopt' ? 'W' : 'B';
-  const wordmark = brand === 'wizopt' ? 'WizOpt' : 'Better Vision';
+  const brandAssets = getBrandAssets(brand);
+  const wordmark = brandAssets.name;
   const userInitials = (user?.name ?? '')
     .split(/\s+/)
     .map((s) => s[0])
@@ -277,7 +278,16 @@ export function Rail({ brand = 'bv', mobileOpen = false }: { brand?: 'bv' | 'wiz
           old position at the bottom was easy to miss. */}
       <div className="rail-header">
         <div className="rail-brand-row">
-          <div className="brand" title={wordmark}>{glyph}</div>
+          {/* Real brand mark — white knockout so it reads on the dark rail */}
+          <div className="brand" title={wordmark}>
+            <img
+              src={brandAssets.markWhite}
+              alt={wordmark}
+              width={28}
+              height={28}
+              style={{ objectFit: 'contain', display: 'block' }}
+            />
+          </div>
           {expanded && (
             <span className="rail-wordmark" aria-hidden="true">{wordmark}</span>
           )}
