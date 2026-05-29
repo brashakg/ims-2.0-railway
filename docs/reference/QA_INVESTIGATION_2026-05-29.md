@@ -177,5 +177,39 @@ rushed edit. Exact file:line locations are above.
 ## 10. Fixes shipped this session (12)
 `143327a` seed-secret · `b60b234` marketing test · `6f3c302` (Rx step, CYL, validate-ADD,
 MEGAPHONE consent ×2, Jarvis gate, agents truthiness ×3) · `afe9080` StatusBadge ·
-+ STORE_MANAGER cap-bypass (this commit). All verified against the full suite + the
+`55809f3` STORE_MANAGER cap-bypass. All verified against the full suite + the
 live running backend.
+
+## 11. Finance / GST reporting correctness (wave-2 finance agent) 📋
+
+A coherent cluster of **field-name / type mismatches** that make finance reports
+silently wrong (the routers read keys the orders/expenses APIs never write). 58
+expenses + full advance/lifecycle/cap/period-lock exercised; **what's *enforced*
+works** (spend caps, duplicate-bill SHA-256, period-lock 423, outstanding-advance
+block on new expenses, AR aging by due-date, P&L identity) — the bugs are in
+*reporting* and *persistence signalling*:
+
+1. 🔴 **GSTR-1/3B taxable value = 0** — read `order["taxable"]`/`taxable_amount` but
+   orders persist taxable as **`subtotal`** (`reports.py:1821-1823, 2116-2118` vs
+   `orders.py:1167`). Tax-with-zero-taxable is rejected by the GST portal → invalid filings.
+2. 🔴 **`/reports/finance/gst` always zero** — reads `cgst_amount/sgst_amount/igst_amount/
+   taxable_amount/final_amount`, none of which orders produce (they stamp
+   `tax_amount/subtotal/grand_total`) — `reports.py:754-767`.
+3. 🟠 **`/finance/gst/summary` = 0** — filters `created_at` with ISO **strings** but orders
+   store `created_at` as **datetime** (`finance.py:504`). (Same string-vs-datetime class.)
+4. 🔴 **Date-ranged P&L / cash-flow drop ALL expenses** — filter on `date` but expenses
+   store **`expense_date`** (`finance.py:438-441,1679-1681,812` vs `expenses.py:674`) →
+   any P&L with a date range shows `total_expenses=0`, **overstating net profit**.
+5. 🟠 **Second advance not blocked** while one is outstanding (`request_advance`,
+   `expenses.py:1153`) — the guard exists only on new *expenses*. §-doc violation.
+6. 🔴 **201-on-failure / silent data loss (latent, root cause of intermittent persistence)** —
+   `create_expense`/`request_advance` discard `repo.create()`'s return and always 201 with a
+   client-minted id; `BaseRepository.create` swallows exceptions → `None` (`expenses.py:665-685`,
+   `base_repository.py:99-104`). A failed write reports success. Observed live (58 creates → 0
+   persisted during a mock-fallback window).
+
+> **Fix direction:** align the report readers to the actual order/expense field names
+> (`subtotal`, `tax_amount`, `expense_date`), query date fields with datetime objects, add
+> the outstanding-advance guard to `request_advance`, and make create endpoints check
+> `repo.create()`'s return (500 on `None`). A focused, tested finance PR — same shape as the
+> RBAC cluster. (Total fleet: **16 agents**.)
