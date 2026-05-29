@@ -223,6 +223,8 @@ export interface POSState {
   getSubtotal: () => number;
   getTotalDiscount: () => number;
   getGrandTotal: () => number;
+  getTax: () => number;
+  getTaxableValue: () => number;
   getTotalPaid: () => number;
   getBalance: () => number;
 }
@@ -534,33 +536,48 @@ export const usePOSStore = create<POSState>()(
       },
 
       getGrandTotal: () => {
-        // Flow: raw_line_total → per-item discount → per-item taxable
-        //   → apply cart-level discount proportionally → GST per category
-        //   → sum.
-        // GST is calculated on the POST-cart-discount taxable value so
-        // the invoice math stays legally consistent (GST on the actual
-        // amount charged).
+        // GST-INCLUSIVE pricing (owner decision 2026-05-29 / QA F3): the
+        // counter price the customer sees IS the all-in price they pay.
+        // GST is the component WITHIN it (see getTax), NOT added on top.
+        // So the grand total = sum of the inclusive line totals after the
+        // cart-level discount. (Was: line total + GST on top, which
+        // OVERCHARGED every customer the tax fraction — e.g. a Rs 999
+        // frame rang up at Rs 1,048.95.)
         const state = get();
         const cart = state.cart || [];
-        const cartDiscountPct = state.cart_discount_percent || 0;
-        const cartDiscountFactor = 1 - cartDiscountPct / 100;  // 1.0 when 0
+        const cartDiscountFactor = 1 - (state.cart_discount_percent || 0) / 100;  // 1.0 when 0
 
-        let taxable = 0;
-        let totalTax = 0;
+        let gross = 0;
         for (const item of cart) {
           const lineTotal = item.line_total || 0;
-          const itemTaxable = Math.round(lineTotal * cartDiscountFactor * 100) / 100;
-          taxable += itemTaxable;
-          const gstRate = resolveGstRate(item.category, (item as any).hsn_code || (item as any).hsnCode);
-          totalTax += itemTaxable * (gstRate / 100);
+          gross += Math.round(lineTotal * cartDiscountFactor * 100) / 100;
         }
-        // NOTE: never `set()` inside a getter. React 18+ / zustand 5
-        // make calling set() during render illegal (it surfaces as
-        // "Cannot update a component while rendering a different
-        // component" or as a re-entrant render loop). The cart
-        // discount amount is recomputed by `setCartDiscount` whenever
-        // the percent or cart changes — see that action below.
-        return Math.round((taxable + totalTax) * 100) / 100;
+        // NOTE: never `set()` inside a getter (illegal during React render).
+        return Math.round(gross * 100) / 100;
+      },
+
+      getTax: () => {
+        // GST extracted from WITHIN the inclusive line totals, per category
+        // rate: tax = gross - gross/(1 + rate/100), summed per line then
+        // rounded once. This is the GST component of getGrandTotal, NOT an
+        // amount added on top.
+        const state = get();
+        const cart = state.cart || [];
+        const cartDiscountFactor = 1 - (state.cart_discount_percent || 0) / 100;
+
+        let tax = 0;
+        for (const item of cart) {
+          const lineGross = Math.round((item.line_total || 0) * cartDiscountFactor * 100) / 100;
+          const gstRate = resolveGstRate(item.category, (item as any).hsn_code || (item as any).hsnCode);
+          const lineTaxable = lineGross / (1 + gstRate / 100);
+          tax += lineGross - lineTaxable;
+        }
+        return Math.round(tax * 100) / 100;
+      },
+
+      getTaxableValue: () => {
+        // The pre-tax taxable base inside the inclusive total = grand - tax.
+        return Math.round((get().getGrandTotal() - get().getTax()) * 100) / 100;
       },
 
       getTotalPaid: () => {

@@ -82,7 +82,8 @@ export function StepComplete({ onPrint, onReset }: StepCompleteProps) {
     })),
     subtotal: store.getSubtotal(),
     totalDiscount: store.getTotalDiscount(),
-    taxAmount: store.getGrandTotal() - store.getSubtotal(),
+    // GST-inclusive: tax is extracted from WITHIN the inclusive total.
+    taxAmount: store.getTax(),
     grandTotal: store.getGrandTotal(),
     amountPaid: store.getTotalPaid(),
     balanceDue: store.getBalance(),
