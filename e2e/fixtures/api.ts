@@ -66,8 +66,30 @@ export class ApiClient {
     return this.ctx.get(path, { headers: this.authHeaders() });
   }
 
-  async getOrder(orderId: string): Promise<any> {
-    return this.getJson(`/api/v1/orders/${orderId}`);
+  /**
+   * Fetch the persisted order. The POS success screen surfaces the
+   * order_NUMBER (ORD-...), but GET /orders/{id} resolves by order_id (a UUID),
+   * so a number 404s there. Resolve a number via /orders/search (matches
+   * order_number) and fall back to the direct id lookup otherwise.
+   */
+  async getOrder(orderIdOrNumber: string): Promise<any> {
+    if (/^ORD-/i.test(orderIdOrNumber)) {
+      const { orders } = await this.getJson(
+        `/api/v1/orders/search?q=${encodeURIComponent(orderIdOrNumber)}`
+      );
+      const match = (orders ?? []).find(
+        (o: any) => o.orderNumber === orderIdOrNumber || o.order_number === orderIdOrNumber
+      );
+      if (!match) {
+        throw new Error(
+          `Order ${orderIdOrNumber} not found via /orders/search (got ${
+            (orders ?? []).length
+          } result(s))`
+        );
+      }
+      return match;
+    }
+    return this.getJson(`/api/v1/orders/${orderIdOrNumber}`);
   }
 
   async switchStore(storeId: string): Promise<{ token: string; activeStoreId: string }> {
