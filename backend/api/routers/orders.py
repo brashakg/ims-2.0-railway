@@ -861,9 +861,10 @@ async def create_order(
         user_discount_cap = effective_discount_cap(
             user_roles, current_user.get("discount_cap")
         )
-        is_admin = any(
-            r in user_roles for r in ["SUPERADMIN", "ADMIN", "STORE_MANAGER"]
-        )
+        # Only HQ roles bypass discount caps. STORE_MANAGER has a real 20%
+        # cap (SYSTEM_INTENT discount matrix) and MUST flow through the
+        # effective_cap + category-cap path -- it was incorrectly bypassing.
+        is_admin = any(r in user_roles for r in ["SUPERADMIN", "ADMIN"])
 
         for item in order.items:
             item_total = item.unit_price * item.quantity
