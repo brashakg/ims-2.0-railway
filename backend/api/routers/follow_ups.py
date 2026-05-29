@@ -22,11 +22,18 @@ router = APIRouter()
 
 
 def _get_db():
-    """Get raw database connection"""
+    """Get the bool-safe DB wrapper.
+
+    Returns the connection WRAPPER (has `.is_connected` + `.get_collection`),
+    NOT the raw pymongo `Database`. The raw Database overrides `__bool__` to
+    raise NotImplementedError, so the `if not db ...` guards in the handlers
+    below would 500 on every call (this was the live `/follow-ups/` +
+    `/follow-ups/summary` 500). The wrapper is a plain object -> bool-safe.
+    """
     try:
         from database.connection import get_db
 
-        return get_db().db
+        return get_db()
     except Exception:
         return _dep_get_db()
 
@@ -111,6 +118,43 @@ class FollowUpSummary(BaseModel):
     pending_total: int
 
 
+def _iso(value):
+    """Coerce a stored value to an ISO string (or None). datetime/date ->
+    isoformat; everything else -> str(); None stays None."""
+    if value is None:
+        return None
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    return str(value)
+
+
+def _to_response(fu: dict) -> FollowUpResponse:
+    """Build a FollowUpResponse from a stored doc, tolerating legacy / partial
+    records so one malformed row can't 500 the whole list.
+
+    `FollowUpResponse(**fu)` raised for stored docs that (a) carried a datetime
+    in a str field (pydantic v2 won't coerce datetime->str), or (b) were
+    missing a required field. This coerces datetimes to ISO strings, defaults
+    missing required strings, and ignores Mongo `_id`.
+    """
+    fu = fu or {}
+    return FollowUpResponse(
+        follow_up_id=str(fu.get("follow_up_id") or fu.get("_id") or ""),
+        customer_id=str(fu.get("customer_id") or ""),
+        customer_name=str(fu.get("customer_name") or ""),
+        customer_phone=str(fu.get("customer_phone") or ""),
+        store_id=str(fu.get("store_id") or ""),
+        type=str(fu.get("type") or "general"),
+        scheduled_date=(_iso(fu.get("scheduled_date")) or ""),
+        status=str(fu.get("status") or "pending"),
+        outcome=_iso(fu.get("outcome")),
+        notes=str(fu.get("notes") or ""),
+        created_at=(_iso(fu.get("created_at")) or ""),
+        completed_at=_iso(fu.get("completed_at")),
+        completed_by=(str(fu["completed_by"]) if fu.get("completed_by") else None),
+    )
+
+
 # ============================================================================
 # ENDPOINTS
 # ============================================================================
@@ -159,7 +203,7 @@ async def list_follow_ups(
     # Fetch follow-ups, sorted by scheduled_date (due soonest first)
     follow_ups = list(collection.find(query).sort("scheduled_date", 1))
 
-    return [FollowUpResponse(**fu) for fu in follow_ups]
+    return [_to_response(fu) for fu in follow_ups]
 
 
 @router.post("", response_model=FollowUpResponse)
@@ -200,7 +244,7 @@ async def create_follow_up(
     result = collection.insert_one(follow_up)
     follow_up["_id"] = result.inserted_id
 
-    return FollowUpResponse(**follow_up)
+    return _to_response(follow_up)
 
 
 @router.patch("/{follow_up_id}/complete", response_model=FollowUpResponse)
@@ -235,7 +279,7 @@ async def complete_follow_up(
     if not result:
         raise HTTPException(status_code=404, detail="Follow-up not found")
 
-    return FollowUpResponse(**result)
+    return _to_response(result)
 
 
 @router.get("/due-today", response_model=List[FollowUpResponse])
@@ -263,7 +307,7 @@ async def get_due_today(
         ).sort("scheduled_date", 1)
     )
 
-    return [FollowUpResponse(**fu) for fu in follow_ups]
+    return [_to_response(fu) for fu in follow_ups]
 
 
 @router.post("/auto-generate")
