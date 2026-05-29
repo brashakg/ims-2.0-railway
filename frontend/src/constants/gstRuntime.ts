@@ -84,3 +84,31 @@ export function resolveGstRate(category?: string | null, hsnCode?: string | null
   if (norm && _byCat[norm] != null) return _byCat[norm];
   return getGSTRateByCategory(category || '');
 }
+
+// ============================================================================
+// GST pricing mode (inclusive vs exclusive) — read at RUNTIME from /health.
+// ============================================================================
+// CRITICAL: Vite bakes import.meta.env at BUILD time, so a backend GST_PRICING_MODE
+// flip would NOT reach a pre-built frontend via a build var. We therefore read
+// the mode from the backend `/health` at startup so a flag flip lands without a
+// FE redeploy. Default inclusive (matches the backend default) until /health answers.
+
+let _pricingInclusive = true;
+
+/** Fetch the active GST pricing mode from the backend `/health`. Safe to call
+ *  repeatedly; never throws; keeps the prior value (default inclusive) on error. */
+export async function loadPricingMode(): Promise<void> {
+  try {
+    const res = await api.get('/health');
+    const mode = String(res.data?.pricing_mode || 'inclusive').toLowerCase();
+    _pricingInclusive = mode !== 'exclusive';
+  } catch {
+    /* keep current value (default inclusive) */
+  }
+}
+
+/** True when GST is INCLUSIVE (counter price is all-in; tax extracted from
+ *  within). False = EXCLUSIVE (GST added on top). Synchronous; default true. */
+export function isInclusivePricing(): boolean {
+  return _pricingInclusive;
+}

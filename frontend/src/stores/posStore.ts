@@ -8,7 +8,7 @@
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
 import type { Customer, Patient, Prescription } from '../types';
-import { resolveGstRate } from '../constants/gstRuntime';
+import { resolveGstRate, isInclusivePricing } from '../constants/gstRuntime';
 
 // ============================================================================
 // Debounced storage — prevents localStorage writes from blocking UI (fixes INP)
@@ -536,47 +536,55 @@ export const usePOSStore = create<POSState>()(
       },
 
       getGrandTotal: () => {
-        // GST-INCLUSIVE pricing (owner decision 2026-05-29 / QA F3): the
-        // counter price the customer sees IS the all-in price they pay.
-        // GST is the component WITHIN it (see getTax), NOT added on top.
-        // So the grand total = sum of the inclusive line totals after the
-        // cart-level discount. (Was: line total + GST on top, which
-        // OVERCHARGED every customer the tax fraction — e.g. a Rs 999
-        // frame rang up at Rs 1,048.95.)
+        // GST_PRICING_MODE (read at runtime from /health, see gstRuntime):
+        //   INCLUSIVE (default, owner decision / QA F3): the counter price IS
+        //     the all-in price; total = sum of inclusive line totals (GST is
+        //     WITHIN, see getTax). A Rs 999 frame rings up Rs 999.
+        //   EXCLUSIVE (legacy): GST is added on top -> total = line + GST.
+        // The backend recomputes authoritatively on order-create; this mirrors
+        // the same mode for the live preview so FE+BE agree during a flag flip.
         const state = get();
         const cart = state.cart || [];
         const cartDiscountFactor = 1 - (state.cart_discount_percent || 0) / 100;  // 1.0 when 0
+        const inclusive = isInclusivePricing();
 
-        let gross = 0;
+        let total = 0;
         for (const item of cart) {
-          const lineTotal = item.line_total || 0;
-          gross += Math.round(lineTotal * cartDiscountFactor * 100) / 100;
+          const lineGross = Math.round((item.line_total || 0) * cartDiscountFactor * 100) / 100;
+          if (inclusive) {
+            total += lineGross;
+          } else {
+            const rate = resolveGstRate(item.category, (item as any).hsn_code || (item as any).hsnCode);
+            total += lineGross + lineGross * (rate / 100);
+          }
         }
         // NOTE: never `set()` inside a getter (illegal during React render).
-        return Math.round(gross * 100) / 100;
+        return Math.round(total * 100) / 100;
       },
 
       getTax: () => {
-        // GST extracted from WITHIN the inclusive line totals, per category
-        // rate: tax = gross - gross/(1 + rate/100), summed per line then
-        // rounded once. This is the GST component of getGrandTotal, NOT an
-        // amount added on top.
+        // GST component, mode-aware (summed per line, rounded once):
+        //   INCLUSIVE -> extracted from WITHIN: gross - gross/(1 + rate/100).
+        //   EXCLUSIVE -> added on top: gross * rate.
         const state = get();
         const cart = state.cart || [];
         const cartDiscountFactor = 1 - (state.cart_discount_percent || 0) / 100;
+        const inclusive = isInclusivePricing();
 
         let tax = 0;
         for (const item of cart) {
           const lineGross = Math.round((item.line_total || 0) * cartDiscountFactor * 100) / 100;
           const gstRate = resolveGstRate(item.category, (item as any).hsn_code || (item as any).hsnCode);
-          const lineTaxable = lineGross / (1 + gstRate / 100);
-          tax += lineGross - lineTaxable;
+          tax += inclusive
+            ? lineGross - lineGross / (1 + gstRate / 100)
+            : lineGross * (gstRate / 100);
         }
         return Math.round(tax * 100) / 100;
       },
 
       getTaxableValue: () => {
-        // The pre-tax taxable base inside the inclusive total = grand - tax.
+        // Pre-tax taxable base = grand - tax. Correct in BOTH modes:
+        // inclusive -> gross/(1+rate); exclusive -> the line total (gross).
         return Math.round((get().getGrandTotal() - get().getTax()) * 100) / 100;
       },
 
