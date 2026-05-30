@@ -549,77 +549,116 @@ class TestFinancePayrollHrRoutes:
         r = matrix_client.request(method, path, headers=ALL_ROLE_HEADERS[role])
         assert_route_allowed(r, role, method, path)
 
-    # --- Divergence tests (xfail = documents the policy/route gap) ---
+    # --- Reconciled rows (formerly xfail divergences) ---------------------
+    #
+    # These were previously xfail "policy too permissive" markers. The policy
+    # rows have now been TIGHTENED to mirror the route gates exactly, so the
+    # CORRECT behavior is a middleware 'Forbidden:' 403 for the roles the route
+    # does not allow, and an authorized pass for the roles it does. The live app
+    # is ground truth here: if a "denied" assert ever fails, the row was
+    # over-tightened and must be reverted.
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="DIVERGENCE: policy lists AREA_MANAGER in allowed for POST /payroll/run, "
-               "but route gate (_RUN_ROLES=(ADMIN,ACCOUNTANT)) 403s them. "
-               "Policy is too permissive — fix: remove AREA_MANAGER from policy row.",
-    )
-    def test_DIVERGENCE_payroll_run_area_manager_policy_vs_route(self, client):
-        """This MUST fail: policy says allowed, live says 403."""
+    # GET /expenses/aging  — route gate _ACCOUNTANT_ROLES=(ADMIN,ACCOUNTANT);
+    # policy row is ['ACCOUNTANT','ADMIN'] (always was). AREA_MANAGER and
+    # STORE_MANAGER are correctly DENIED by the middleware (no bug — the old
+    # xfail was a stale-copy misread).
+    @pytest.mark.parametrize("role", ["AREA_MANAGER", "STORE_MANAGER"])
+    def test_expenses_aging_denied_for_manager_roles(self, client, role):
+        r = client.get("/api/v1/expenses/aging", headers=ALL_ROLE_HEADERS[role])
+        assert_middleware_403(r, "GET", "/api/v1/expenses/aging")
+
+    @pytest.mark.parametrize("role", ["ACCOUNTANT", "ADMIN"])
+    def test_expenses_aging_allowed_for_accountant_admin(self, matrix_client, role):
+        r = matrix_client.get("/api/v1/expenses/aging", headers=ALL_ROLE_HEADERS[role])
+        assert_route_allowed(r, role, "GET", "/api/v1/expenses/aging")
+
+    # POST /payroll/run  — route gate _RUN_ROLES=(ADMIN,ACCOUNTANT); policy row
+    # now TIGHTENED to ['ACCOUNTANT','ADMIN']. AREA_MANAGER + STORE_MANAGER are
+    # correctly DENIED by the middleware (the real divergence is now fixed).
+    @pytest.mark.parametrize("role", ["AREA_MANAGER", "STORE_MANAGER"])
+    def test_payroll_run_denied_for_manager_roles(self, client, role):
         r = client.post(
             "/api/v1/payroll/run",
-            headers=ALL_ROLE_HEADERS["AREA_MANAGER"],
+            headers=ALL_ROLE_HEADERS[role],
             json={"month": 5, "year": 2026},
         )
-        assert r.status_code not in (401, 403), (
-            f"AREA_MANAGER on POST /payroll/run got {r.status_code}. "
-            f"Policy row says AREA_MANAGER is allowed but route gate (_RUN_ROLES) says no."
-        )
+        assert_middleware_403(r, "POST", "/api/v1/payroll/run")
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="DIVERGENCE: policy lists STORE_MANAGER in allowed for POST /payroll/run, "
-               "but route gate (_RUN_ROLES=(ADMIN,ACCOUNTANT)) 403s them. "
-               "Policy is too permissive — fix: remove STORE_MANAGER from policy row.",
-    )
-    def test_DIVERGENCE_payroll_run_store_manager_policy_vs_route(self, client):
-        """This MUST fail: policy says allowed, live says 403."""
-        r = client.post(
+    @pytest.mark.parametrize("role", ["ACCOUNTANT", "ADMIN"])
+    def test_payroll_run_allowed_for_accountant_admin(self, matrix_client, role):
+        r = matrix_client.post(
             "/api/v1/payroll/run",
-            headers=ALL_ROLE_HEADERS["STORE_MANAGER"],
+            headers=ALL_ROLE_HEADERS[role],
             json={"month": 5, "year": 2026},
         )
-        assert r.status_code not in (401, 403), (
-            f"STORE_MANAGER on POST /payroll/run got {r.status_code}. "
-            f"Policy row says STORE_MANAGER is allowed but route gate (_RUN_ROLES) says no."
-        )
+        assert_route_allowed(r, role, "POST", "/api/v1/payroll/run")
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="DIVERGENCE: policy lists AREA_MANAGER in allowed for GET /expenses/aging, "
-               "but route gate (_ACCOUNTANT_ROLES=(ADMIN,ACCOUNTANT)) 403s them. "
-               "Policy is too permissive — fix: remove AREA_MANAGER from policy row.",
-    )
-    def test_DIVERGENCE_expenses_aging_area_manager_policy_vs_route(self, client):
-        """This MUST fail: policy says allowed, live says 403."""
-        r = client.get(
-            "/api/v1/expenses/aging",
-            headers=ALL_ROLE_HEADERS["AREA_MANAGER"],
-        )
-        assert r.status_code not in (401, 403), (
-            f"AREA_MANAGER on GET /expenses/aging got {r.status_code}. "
-            f"Policy row says AREA_MANAGER is allowed but route gate (_ACCOUNTANT_ROLES) says no."
-        )
+    # --- Tightened-payroll-row self-check (live app is ground truth) -------
+    #
+    # Every payroll policy row that was tightened from the 4-role _FINANCE set
+    # down to the route's stricter gate. Each REMOVED role must be denied by the
+    # live app (middleware 'Forbidden:' 403, since the route-level require_roles
+    # is shadowed one layer up by the policy), and each KEPT role must be
+    # authorized through. If a REMOVED role is actually allowed by the live
+    # route, the denied-assert fails and the row must be reverted.
+    #
+    # (method, path, kept_roles, removed_roles, body) — confirmed against the
+    # require_roles(...) gate in backend/api/routers/payroll.py:
+    #   require_roles("ADMIN")             -> kept {ADMIN}
+    #   require_roles(*_RUN_ROLES)         -> kept {ADMIN, ACCOUNTANT}
+    _TIGHTENED_PAYROLL_ROWS = [
+        # require_roles("ADMIN") rows -> only ADMIN (+SUPERADMIN) kept
+        ("POST", "/api/v1/payroll/config", ["ADMIN"],
+         ["ACCOUNTANT", "AREA_MANAGER", "STORE_MANAGER"], {"employee_id": "EMP-DUMMY-1"}),
+        ("POST", "/api/v1/payroll/config/bulk", ["ADMIN"],
+         ["ACCOUNTANT", "AREA_MANAGER", "STORE_MANAGER"], {"configs": []}),
+        ("PUT", "/api/v1/payroll/config/EMP-DUMMY-1", ["ADMIN"],
+         ["ACCOUNTANT", "AREA_MANAGER", "STORE_MANAGER"], {"employee_id": "EMP-DUMMY-1"}),
+        ("POST", "/api/v1/payroll/lock", ["ADMIN"],
+         ["ACCOUNTANT", "AREA_MANAGER", "STORE_MANAGER"], {"month": 5, "year": 2026}),
+        ("POST", "/api/v1/payroll/pt-slabs/seed", ["ADMIN"],
+         ["ACCOUNTANT", "AREA_MANAGER", "STORE_MANAGER"], None),
+        ("PUT", "/api/v1/payroll/pt-slabs/JH", ["ADMIN"],
+         ["ACCOUNTANT", "AREA_MANAGER", "STORE_MANAGER"], {"slabs": []}),
+        # require_roles(*_RUN_ROLES=(ADMIN,ACCOUNTANT)) rows -> ADMIN+ACCOUNTANT kept
+        ("POST", "/api/v1/payroll/approve", ["ACCOUNTANT", "ADMIN"],
+         ["AREA_MANAGER", "STORE_MANAGER"], {"month": 5, "year": 2026}),
+        ("POST", "/api/v1/payroll/run", ["ACCOUNTANT", "ADMIN"],
+         ["AREA_MANAGER", "STORE_MANAGER"], {"month": 5, "year": 2026}),
+        ("GET", "/api/v1/payroll/tally/salary-jv", ["ACCOUNTANT", "ADMIN"],
+         ["AREA_MANAGER", "STORE_MANAGER"], None),
+        ("GET", "/api/v1/payroll/registers/pf-ecr", ["ACCOUNTANT", "ADMIN"],
+         ["AREA_MANAGER", "STORE_MANAGER"], None),
+    ]
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="DIVERGENCE: policy lists STORE_MANAGER in allowed for GET /expenses/aging, "
-               "but route gate (_ACCOUNTANT_ROLES=(ADMIN,ACCOUNTANT)) 403s them. "
-               "Policy is too permissive — fix: remove STORE_MANAGER from policy row.",
+    @pytest.mark.parametrize(
+        "method,path,kept,removed,body",
+        _TIGHTENED_PAYROLL_ROWS,
+        ids=[f"{m}:{p}" for (m, p, _k, _r, _b) in _TIGHTENED_PAYROLL_ROWS],
     )
-    def test_DIVERGENCE_expenses_aging_store_manager_policy_vs_route(self, client):
-        """This MUST fail: policy says allowed, live says 403."""
-        r = client.get(
-            "/api/v1/expenses/aging",
-            headers=ALL_ROLE_HEADERS["STORE_MANAGER"],
-        )
-        assert r.status_code not in (401, 403), (
-            f"STORE_MANAGER on GET /expenses/aging got {r.status_code}. "
-            f"Policy row says STORE_MANAGER is allowed but route gate (_ACCOUNTANT_ROLES) says no."
-        )
+    def test_tightened_payroll_row_removed_roles_denied(
+        self, client, method, path, kept, removed, body
+    ):
+        """Each role REMOVED from a tightened payroll row is denied by the live
+        app (middleware 'Forbidden:' 403). A failure here means the row was
+        over-tightened relative to the real route gate -> revert that row."""
+        for role in removed:
+            r = client.request(method, path, headers=ALL_ROLE_HEADERS[role], json=body)
+            assert_middleware_403(r, method, path)
+
+    @pytest.mark.parametrize(
+        "method,path,kept,removed,body",
+        _TIGHTENED_PAYROLL_ROWS,
+        ids=[f"{m}:{p}" for (m, p, _k, _r, _b) in _TIGHTENED_PAYROLL_ROWS],
+    )
+    def test_tightened_payroll_row_kept_roles_allowed(
+        self, matrix_client, method, path, kept, removed, body
+    ):
+        """Each role KEPT on a tightened payroll row is still authorized through
+        (passes BOTH the middleware policy and the route's own require_roles)."""
+        for role in kept:
+            r = matrix_client.request(method, path, headers=ALL_ROLE_HEADERS[role], json=body)
+            assert_route_allowed(r, role, method, path)
 
     @pytest.mark.parametrize("method,path", _FINANCE_PATHS)
     @pytest.mark.parametrize("role", [
@@ -845,7 +884,10 @@ class TestOrderCreation:
 class TestPrescriptionRoutes:
     """POST /prescriptions is self_enforced: the middleware DEFERS to the route
     which returns 403 with body 'Your role does not have clinical access.'
-    PUT /prescriptions/{id} is NOT self-enforced -> middleware 403."""
+    PUT /prescriptions/{id} is ALSO self_enforced (since #366): on a denied role
+    the middleware DEFERS to the route, which returns the body-specific clinical
+    403 ('Only optometrists and managers can edit prescriptions...'), NOT the
+    generic middleware 'Forbidden:' 403 — same pattern as POST /prescriptions."""
 
     _CLINICAL_ROLES = {"ADMIN", "OPTOMETRIST", "STORE_MANAGER", "SUPERADMIN"}
     _NON_CLINICAL = set(ALL_ROLES) - _CLINICAL_ROLES
@@ -880,24 +922,33 @@ class TestPrescriptionRoutes:
         )
         assert_route_allowed(r, role, "POST", "/api/v1/prescriptions")
 
-    def test_prescription_put_cashier_403_via_middleware(self, client):
-        """PUT /prescriptions/{id} is NOT self-enforced; middleware 403 applies."""
+    def test_prescription_put_cashier_clinical_403_deferred(self, client):
+        """PUT /prescriptions/{id} is self_enforced (since #366): middleware DEFERS,
+        route returns the body-specific clinical 403 (NOT 'Forbidden:')."""
         dummy_id = "RX-DUMMY-001"
         r = client.put(
             f"/api/v1/prescriptions/{dummy_id}",
             headers=ALL_ROLE_HEADERS["CASHIER"],
             json=self._RX_BODY,
         )
-        assert_middleware_403(r, "PUT", f"/api/v1/prescriptions/{dummy_id}")
+        assert_clinical_403(r, "CASHIER", f"/api/v1/prescriptions/{dummy_id}")
+        assert not r.json().get("detail", "").startswith(_MW_FORBIDDEN_PREFIX), (
+            "PUT /prescriptions/{id} must defer to the route's clinical 403, "
+            "not return the generic middleware 'Forbidden:' 403."
+        )
 
-    def test_prescription_put_workshop_staff_403_via_middleware(self, client):
+    def test_prescription_put_workshop_staff_clinical_403_deferred(self, client):
         dummy_id = "RX-DUMMY-001"
         r = client.put(
             f"/api/v1/prescriptions/{dummy_id}",
             headers=ALL_ROLE_HEADERS["WORKSHOP_STAFF"],
             json={"sph_od": -1.0},
         )
-        assert_middleware_403(r, "PUT", f"/api/v1/prescriptions/{dummy_id}")
+        assert_clinical_403(r, "WORKSHOP_STAFF", f"/api/v1/prescriptions/{dummy_id}")
+        assert not r.json().get("detail", "").startswith(_MW_FORBIDDEN_PREFIX), (
+            "PUT /prescriptions/{id} must defer to the route's clinical 403, "
+            "not return the generic middleware 'Forbidden:' 403."
+        )
 
     def test_prescription_put_optometrist_allowed(self, matrix_client):
         dummy_id = "RX-DUMMY-001"
