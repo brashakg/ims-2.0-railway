@@ -87,8 +87,11 @@ class POItemCreate(BaseModel):
     product_id: str
     product_name: str
     sku: str
-    quantity: int
-    unit_price: float
+    # A PO line must order at least one unit at a non-negative price. Without
+    # these bounds a negative quantity / price would persist a corrupt PO and
+    # poison the subtotal/GST math (subtotal = sum(quantity * unit_price)).
+    quantity: int = Field(..., ge=1)
+    unit_price: float = Field(..., ge=0)
 
 
 class POCreate(BaseModel):
@@ -102,9 +105,12 @@ class POCreate(BaseModel):
 class GRNItemCreate(BaseModel):
     po_item_id: str
     product_id: str
-    received_qty: int
-    accepted_qty: int
-    rejected_qty: int = 0
+    # Receipt quantities are counts of physical units -- never negative. A
+    # negative received/accepted/rejected qty would mint a negative stock
+    # movement and corrupt the PO receipt-state + accepted-qty rollups.
+    received_qty: int = Field(..., ge=0)
+    accepted_qty: int = Field(..., ge=0)
+    rejected_qty: int = Field(0, ge=0)
     rejection_reason: Optional[str] = None
     # Receiving location for the minted serialized units (optional; falls back
     # to "DEFAULT" on the stock unit). Lets the receiver bin goods at post time.

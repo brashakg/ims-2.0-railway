@@ -8,7 +8,7 @@ import hashlib
 import io
 from fastapi import APIRouter, Depends, Query, UploadFile, File, HTTPException
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional
 from datetime import date, datetime
 import uuid
@@ -363,7 +363,11 @@ def compute_aging(expenses: list, now: datetime) -> dict:
 
 class ExpenseCreate(BaseModel):
     category: str
-    amount: float
+    # An expense claim must be for a positive rupee amount. A zero / negative
+    # amount is meaningless money and would silently slip past the cap check
+    # (check_cap explicitly skips non-positive amounts), so bound it at the
+    # schema so the claim never reaches the DB.
+    amount: float = Field(..., gt=0)
     description: str
     expense_date: date
     advance_id: Optional[str] = None
@@ -373,7 +377,8 @@ class ExpenseCreate(BaseModel):
 
 class AdvanceCreate(BaseModel):
     advance_type: str
-    amount: float
+    # An advance is money handed out -- it must be a positive amount.
+    amount: float = Field(..., gt=0)
     purpose: str
     expected_settlement_date: Optional[date] = None
 
