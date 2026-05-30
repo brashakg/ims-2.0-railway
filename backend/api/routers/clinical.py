@@ -38,6 +38,11 @@ _REDO_ROLES = ("OPTOMETRIST", "STORE_MANAGER", "AREA_MANAGER", "ADMIN")
 # scorecard. SUPERADMIN auto-passes via require_roles.
 _ABUSE_VIEW_ROLES = ("STORE_MANAGER", "AREA_MANAGER", "ADMIN")
 
+# Canonical queue lifecycle states. Mirrors EyeTestQueueRepository.update_status'
+# allow-list so the router can reject an invalid status with a clean 400 BEFORE
+# the repo silently no-ops (which used to surface as a misleading 200 "updated").
+_VALID_QUEUE_STATUSES = ("WAITING", "IN_PROGRESS", "COMPLETED", "CANCELLED", "NO_SHOW")
+
 
 # ============================================================================
 # SCHEMAS
@@ -314,17 +319,33 @@ async def update_queue_status(
     body: StatusUpdate,
     current_user: dict = Depends(require_roles(*_CLINICAL_ROLES)),
 ):
-    """Update queue item status"""
+    """Update queue item status.
+
+    Validates the requested status against the canonical lifecycle states up
+    front. The repository silently no-ops on an unknown status, so the previous
+    handler returned a misleading 200 "Status updated" for garbage like
+    ``{"status": "BANANA"}`` -- a caller could believe a state change happened
+    that never did. We now reject an unknown status with 400.
+    """
+    status = (body.status or "").strip().upper()
+    if status not in _VALID_QUEUE_STATUSES:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Invalid queue status '{body.status}'. "
+                f"Allowed: {', '.join(_VALID_QUEUE_STATUSES)}"
+            ),
+        )
+
     queue_repo = get_eye_test_queue_repository()
 
     if queue_repo is not None:
-        success = queue_repo.update_status(queue_id, body.status)
-        if success:
-            return {"message": "Status updated", "status": body.status}
-        # Item may not exist, but still return success for compatibility
-        return {"message": "Status updated", "status": body.status}
+        # The item may legitimately be absent (sample/demo data); the repo
+        # no-ops in that case. We don't 404 -- the frontend treats this as a
+        # best-effort state sync -- but we DO echo the normalised status.
+        queue_repo.update_status(queue_id, status)
 
-    return {"message": "Status updated", "status": body.status}
+    return {"message": "Status updated", "status": status}
 
 
 @router.delete("/queue/{queue_id}")
@@ -468,6 +489,31 @@ async def complete_test(
     queue_repo = get_eye_test_queue_repository()
 
     if test_repo is not None:
+        # Look the test up FIRST so completion is idempotent + ordered:
+        #   * unknown test_id  -> 404 (don't silently mint an orphan Rx)
+        #   * already COMPLETED -> return the EXISTING prescription, do NOT
+        #     write a second one. The previous code blind-updated and re-created
+        #     a prescription on every call, so a double-click / retry / page
+        #     reload produced duplicate Rx rows for one exam.
+        existing_test = test_repo.find_by_id(test_id)
+        if existing_test is None:
+            raise HTTPException(status_code=404, detail="Test not found")
+
+        rx_repo = get_prescription_repository()
+
+        if existing_test.get("status") == "COMPLETED":
+            existing_rx = (
+                rx_repo.find_by_eye_test(test_id) if rx_repo is not None else None
+            )
+            return {
+                "message": "Test already completed",
+                "testId": test_id,
+                "prescriptionId": (
+                    existing_rx.get("prescription_id") if existing_rx else None
+                ),
+                "alreadyCompleted": True,
+            }
+
         # Update test record
         success = test_repo.complete_test(
             test_id=test_id,
@@ -489,7 +535,20 @@ async def complete_test(
 
             # ── Auto-create prescription so POS can find it ──
             prescription_id = None
-            rx_repo = get_prescription_repository()
+            # Idempotency belt-and-braces: even if the test row's status didn't
+            # flip COMPLETED for some reason (or a concurrent request raced us),
+            # never create a duplicate Rx for an exam that already has one.
+            already_rx = (
+                rx_repo.find_by_eye_test(test_id)
+                if (rx_repo is not None and test)
+                else None
+            )
+            if already_rx:
+                return {
+                    "message": "Test completed",
+                    "testId": test_id,
+                    "prescriptionId": already_rx.get("prescription_id"),
+                }
             if rx_repo is not None and test:
                 from datetime import timedelta
 

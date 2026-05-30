@@ -21,7 +21,19 @@ class PrescriptionRepository(BaseRepository):
     
     def find_by_number(self, prescription_number: str) -> Optional[Dict]:
         return self.find_one({"prescription_number": prescription_number})
-    
+
+    def find_by_eye_test(self, eye_test_id: str) -> Optional[Dict]:
+        """Return the prescription auto-created for a given eye test, if any.
+
+        The clinical completion flow stamps ``eye_test_id`` onto the Rx it
+        auto-creates. Looking it up lets ``complete_test`` stay idempotent: a
+        retried / double-clicked completion must not mint a SECOND prescription
+        for the same test.
+        """
+        if not eye_test_id:
+            return None
+        return self.find_one({"eye_test_id": eye_test_id})
+
     def find_by_patient(self, patient_id: str, limit: int = 10) -> List[Dict]:
         return self.find_many(
             {"patient_id": patient_id},
