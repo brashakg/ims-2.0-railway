@@ -98,7 +98,7 @@ class UserRepository(BaseRepository):
                 {"$addToSet": {"roles": role}}
             )
             return True
-        except:
+        except Exception:
             return False
     
     def remove_role(self, user_id: str, role: str) -> bool:
@@ -109,7 +109,7 @@ class UserRepository(BaseRepository):
                 {"$pull": {"roles": role}}
             )
             return True
-        except:
+        except Exception:
             return False
     
     def add_store(self, user_id: str, store_id: str) -> bool:
@@ -120,7 +120,7 @@ class UserRepository(BaseRepository):
                 {"$addToSet": {"store_ids": store_id}}
             )
             return True
-        except:
+        except Exception:
             return False
     
     def remove_store(self, user_id: str, store_id: str) -> bool:
@@ -131,7 +131,7 @@ class UserRepository(BaseRepository):
                 {"$pull": {"store_ids": store_id}}
             )
             return True
-        except:
+        except Exception:
             return False
     
     # =========================================================================

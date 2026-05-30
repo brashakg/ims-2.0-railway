@@ -47,10 +47,15 @@ export function PrescriptionQRCode({ prescription, customerName }: PrescriptionQ
   };
 
   const downloadQR = () => {
+    const svgEl = qrContainerRef.current?.querySelector('svg');
+    if (!svgEl) return;
+    const blob = new Blob([svgEl.outerHTML], { type: 'image/svg+xml' });
+    const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
-    link.href = qrContainerRef.current?.querySelector('svg')?.outerHTML || '';
+    link.href = url;
     link.download = `rx-${prescription.id}.svg`;
-    // In production, convert SVG to PNG
+    link.click();
+    URL.revokeObjectURL(url);
   };
 
   return (

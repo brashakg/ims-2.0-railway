@@ -65,7 +65,7 @@ class CustomerRepository(BaseRepository):
                 {"$push": {"patients": patient}}
             )
             return True
-        except:
+        except Exception:
             return False
     
     def find_patient(self, customer_id: str, patient_id: str) -> Optional[Dict]:
@@ -84,7 +84,7 @@ class CustomerRepository(BaseRepository):
                 {"$inc": {"loyalty_points": points}}
             )
             return True
-        except:
+        except Exception:
             return False
     
     def add_store_credit(self, customer_id: str, amount: float) -> bool:
@@ -94,7 +94,7 @@ class CustomerRepository(BaseRepository):
                 {"$inc": {"store_credit": amount}}
             )
             return True
-        except:
+        except Exception:
             return False
     
     def update_total_purchases(self, customer_id: str, amount: float) -> bool:
@@ -104,5 +104,5 @@ class CustomerRepository(BaseRepository):
                 {"$inc": {"total_purchases": amount}}
             )
             return True
-        except:
+        except Exception:
             return False
