@@ -346,7 +346,8 @@ export interface Order {
 
 export type JobStatus =
   | 'PENDING'
-  | 'PROCESSING'
+  | 'IN_PROGRESS'   // canonical backend status (was PROCESSING)
+  | 'PROCESSING'    // legacy frontend alias — kept for STATUS_CONFIG/backward compat
   | 'COMPLETED'
   | 'QC_FAILED'
   | 'READY'

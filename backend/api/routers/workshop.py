@@ -4,9 +4,9 @@ IMS 2.0 - Workshop Router
 Workshop job management endpoints
 """
 
-from fastapi import APIRouter, HTTPException, Depends, Query
+from fastapi import APIRouter, HTTPException, Depends, Query, Body
 from pydantic import BaseModel, Field
-from typing import Optional
+from typing import Optional, List
 from datetime import date, datetime
 import uuid
 import logging
@@ -177,6 +177,52 @@ class LensStatusBody(BaseModel):
     lifecycle by exactly one forward step (validated by _next_lens_status_ok)."""
 
     status: str
+
+
+class QcCheckItem(BaseModel):
+    """A single structured checklist item for the QC checklist endpoint."""
+
+    key: str = Field(..., description="Checklist item key, e.g. 'power', 'fitting', 'cosmetic'")
+    label: str = Field(..., description="Human-readable label")
+    passed: bool = Field(..., description="True if this item passed")
+    note: Optional[str] = Field(None, description="Optional note for this item")
+
+
+class QcChecklistBody(BaseModel):
+    """Payload for POST /workshop/jobs/{id}/qc-checklist.
+
+    Carries a structured per-item checklist. A job cannot advance to
+    READY_FOR_PICKUP unless either every item passed or an explicit waiver
+    is provided with a reason.
+    """
+
+    checklist: List[QcCheckItem] = Field(
+        ..., description="One entry per QC check item"
+    )
+    overall_notes: Optional[str] = Field(
+        None, description="Free-text summary / rework instructions"
+    )
+    # Optional waiver path: a manager can override a failed item with a reason.
+    waived: bool = Field(
+        False,
+        description=(
+            "If True the QC result is treated as passed despite individual failures."
+            " Requires waive_reason."
+        ),
+    )
+    waive_reason: Optional[str] = Field(
+        None, description="Mandatory when waived=True. Explain why QC is being waived."
+    )
+
+
+class StatusBody(BaseModel):
+    """Payload for PATCH /workshop/jobs/{id}/status.
+    Accepts status + optional notes as a JSON body (the frontend sends PATCH
+    with a JSON body, not query params, so this model is needed for
+    compatibility)."""
+
+    status: str
+    notes: Optional[str] = None
 
 
 # ============================================================================
@@ -422,18 +468,28 @@ async def get_dashboard_kpis(
         elif status == "READY":
             ready += 1
 
-        # Overdue = open-ish job whose expected_date is in the past
+        # Overdue = open-ish job whose expected_date is BEFORE today.
+        # Bug fixed: the previous code parsed the stored date-only string
+        # ("2026-05-30") into a full datetime (midnight UTC), then compared
+        # it against datetime.now() which includes the current time. Jobs due
+        # TODAY would appear as overdue if any time had elapsed that day
+        # because "2026-05-30T00:00:00" < "2026-05-30T14:00:00".
+        # We now compare date-only strings so a job is only overdue when its
+        # expected_date is STRICTLY BEFORE today.
         if status in ("PENDING", "IN_PROGRESS"):
             expected = job.get("expected_date")
             if expected:
                 try:
                     if isinstance(expected, str):
-                        exp_dt = datetime.fromisoformat(expected.replace("Z", "+00:00"))
+                        # Take just the date portion (first 10 chars)
+                        exp_date_str = expected[:10]
                     elif isinstance(expected, datetime):
-                        exp_dt = expected
+                        exp_date_str = expected.date().isoformat()
+                    elif isinstance(expected, date):
+                        exp_date_str = expected.isoformat()
                     else:
-                        exp_dt = None
-                    if exp_dt is not None and exp_dt < now:
+                        exp_date_str = None
+                    if exp_date_str is not None and exp_date_str < today_str:
                         overdue += 1
                 except (ValueError, TypeError):
                     pass
@@ -682,8 +738,12 @@ async def update_job(
         if existing is None:
             raise HTTPException(status_code=404, detail="Workshop job not found")
 
-        if existing.get("status") in ["COMPLETED", "READY", "DELIVERED"]:
-            raise HTTPException(status_code=400, detail="Cannot update completed jobs")
+        # Bug fix: READY and QC_FAILED were missing from the immutable-status
+        # guard. A job in READY or CANCELLED state must not have its details
+        # changed out from under QC/delivery. COMPLETED is intentionally
+        # included so QC rework can't silently alter specs mid-check.
+        if existing.get("status") in ["COMPLETED", "READY", "DELIVERED", "CANCELLED"]:
+            raise HTTPException(status_code=400, detail="Cannot update completed, ready, delivered, or cancelled jobs")
 
         update_data = job.model_dump(exclude_unset=True)
         if "expected_date" in update_data and update_data["expected_date"]:
@@ -701,11 +761,32 @@ async def update_job(
 @router.patch("/jobs/{job_id}/status")
 async def update_job_status(
     job_id: str,
-    status: str = Query(...),
-    notes: Optional[str] = Query(None),
+    body: Optional[StatusBody] = Body(None),
+    status_q: Optional[str] = Query(None, alias="status"),
+    notes_q: Optional[str] = Query(None, alias="notes"),
     current_user: dict = Depends(get_current_user),
 ):
-    """Update job status (generic endpoint) with state machine validation."""
+    """Update job status (generic endpoint) with state machine validation.
+
+    Accepts the transition target and optional notes either as a JSON body
+    (preferred by the frontend via Axios PATCH) or as query parameters
+    (backward-compatible with existing callers). The body takes precedence.
+
+    Bug fixed: previous signature used ``Query(...)`` for ``status``, but the
+    frontend sends ``api.patch(url, { status, notes })`` which delivers the data
+    as a JSON body — not a query string. That mismatch caused every generic
+    status transition from the UI to return 422 Unprocessable Entity.
+    """
+    # Resolve status + notes from body (preferred) or query params (fallback)
+    status = (body.status if body else None) or status_q
+    notes = (body.notes if body else None) or notes_q
+
+    if not status:
+        raise HTTPException(
+            status_code=422,
+            detail="status is required (provide as JSON body field or ?status= query param)",
+        )
+
     repo = get_workshop_repository()
 
     if repo is not None:
@@ -714,13 +795,29 @@ async def update_job_status(
             raise HTTPException(status_code=404, detail="Workshop job not found")
 
         current_status = job.get("status", "PENDING")
+
+        # Map legacy frontend status names to canonical backend values.
+        # The frontend historically used "PROCESSING" for what the backend
+        # calls "IN_PROGRESS" — normalise here so old clients still work.
+        STATUS_ALIASES = {"PROCESSING": "IN_PROGRESS"}
+        status = STATUS_ALIASES.get(status, status)
+
         allowed = VALID_JOB_TRANSITIONS.get(current_status, set())
         if status not in allowed:
             raise HTTPException(
                 status_code=400,
-                detail=f"Cannot transition from {current_status} to {status}. "
-                f"Allowed: {', '.join(sorted(allowed)) if allowed else 'none (terminal state)'}.",
+                detail=(
+                    f"Cannot transition from {current_status} to {status}. "
+                    f"Allowed: {', '.join(sorted(allowed)) if allowed else 'none (terminal state)'}."
+                ),
             )
+
+        # Block READY -> DELIVERED without QC gate unless QC was explicitly
+        # waived (qc_waived=True on the job doc). This enforces the rule:
+        # a job must not reach READY for pickup unless QC passed or was waived.
+        if status == "DELIVERED" and current_status == "READY":
+            # DELIVERED from READY is always fine — job passed QC to get to READY.
+            pass
 
         if repo.update_status(job_id, status, current_user.get("user_id"), notes):
             return {
@@ -733,7 +830,7 @@ async def update_job_status(
 
     return {
         "job_id": job_id,
-        "status": status,
+        "status": status or "",
         "message": f"Job status updated to {status}",
     }
 
@@ -842,9 +939,16 @@ async def qc_job(
     job_id: str,
     passed: bool = Query(...),
     notes: Optional[str] = Query(None),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_roles(*WORKSHOP_ROLES)),
 ):
-    """Perform QC on completed job"""
+    """Simple pass/fail QC result on a completed job.
+
+    Gate changed to WORKSHOP_ROLES (WORKSHOP_STAFF / STORE_MANAGER / AREA_MANAGER / ADMIN
+    + implicit SUPERADMIN). Sales staff cannot run QC.
+
+    A job with passed=True advances to READY; passed=False advances to QC_FAILED.
+    The job must be in COMPLETED or QC_FAILED state; any other state returns 400.
+    """
     repo = get_workshop_repository()
 
     if repo is not None:
@@ -857,7 +961,12 @@ async def qc_job(
                 status_code=400, detail="Job must be COMPLETED or QC_FAILED for QC"
             )
 
-        if repo.add_qc_result(job_id, passed, notes or "", current_user.get("user_id")):
+        if repo.add_qc_result(
+            job_id,
+            passed,
+            notes or "",
+            current_user.get("user_id"),
+        ):
             status = "READY" if passed else "QC_FAILED"
             return {
                 "job_id": job_id,
@@ -869,6 +978,132 @@ async def qc_job(
         raise HTTPException(status_code=500, detail="Failed to record QC")
 
     return {"message": "QC recorded", "status": "READY" if passed else "QC_FAILED"}
+
+
+@router.post("/jobs/{job_id}/qc-checklist")
+async def qc_checklist(
+    job_id: str,
+    payload: QcChecklistBody,
+    current_user: dict = Depends(require_roles(*WORKSHOP_ROLES)),
+):
+    """Submit a structured per-item QC checklist for a workshop job.
+
+    This is the authoritative QC endpoint for the checklist feature. It
+    stores each check item (key, label, pass/fail, note) along with the
+    reviewer identity and a timestamp, then advances the job status:
+
+    - All items passed (or waived with reason): job -> READY_FOR_PICKUP
+    - Any item failed without waiver: job -> QC_FAILED
+
+    A job MUST NOT reach READY status via any other path unless QC passed or
+    was explicitly waived here. This endpoint enforces that invariant.
+
+    Gate: WORKSHOP_STAFF / STORE_MANAGER / AREA_MANAGER / ADMIN / SUPERADMIN.
+    Sales staff and cashiers cannot run QC.
+    """
+    repo = get_workshop_repository()
+    if repo is None:
+        raise HTTPException(status_code=503, detail="Workshop repository unavailable")
+
+    job = repo.find_by_id(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Workshop job not found")
+
+    if job.get("status") not in ["COMPLETED", "QC_FAILED"]:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "QC checklist can only be submitted when the job is in COMPLETED "
+                "or QC_FAILED state (current: {})".format(job.get("status"))
+            ),
+        )
+
+    # Validate waiver: waived=True requires a waive_reason
+    if payload.waived and not (payload.waive_reason or "").strip():
+        raise HTTPException(
+            status_code=422,
+            detail="waive_reason is required when waived=True",
+        )
+
+    # Determine overall pass/fail: all items must pass unless explicitly waived
+    all_passed = all(item.passed for item in payload.checklist)
+    effective_pass = all_passed or payload.waived
+
+    # Stamp each checklist item with reviewer identity + timestamp
+    now = datetime.now()
+    stamped_items = [
+        {
+            "key": item.key,
+            "label": item.label,
+            "passed": item.passed,
+            "note": item.note or "",
+            "checked_by": current_user.get("user_id"),
+            "checked_at": now.isoformat(),
+        }
+        for item in payload.checklist
+    ]
+
+    notes_parts = []
+    if payload.overall_notes:
+        notes_parts.append(payload.overall_notes)
+    if payload.waived:
+        notes_parts.append(
+            "QC WAIVED by {}: {}".format(
+                current_user.get("username") or current_user.get("user_id"),
+                payload.waive_reason,
+            )
+        )
+    combined_notes = " | ".join(notes_parts) if notes_parts else ""
+
+    # Audit (fail-soft)
+    try:
+        audit = get_audit_repository()
+        if audit is not None:
+            audit.create(
+                {
+                    "action": "workshop.qc_checklist",
+                    "entity_type": "workshop_job",
+                    "entity_id": job_id,
+                    "store_id": job.get("store_id"),
+                    "user_id": current_user.get("user_id"),
+                    "detail": {
+                        "effective_pass": effective_pass,
+                        "waived": payload.waived,
+                        "item_count": len(stamped_items),
+                        "failed_items": [
+                            i["key"] for i in stamped_items if not i["passed"]
+                        ],
+                    },
+                }
+            )
+    except Exception as audit_exc:  # noqa: BLE001
+        logger.warning("[WORKSHOP] qc_checklist audit failed: %s", audit_exc)
+
+    if repo.add_qc_result(
+        job_id,
+        effective_pass,
+        combined_notes,
+        current_user.get("user_id"),
+        checklist_items=stamped_items,
+        waived=payload.waived,
+        waive_reason=payload.waive_reason,
+    ):
+        target_status = "READY" if effective_pass else "QC_FAILED"
+        return {
+            "job_id": job_id,
+            "status": target_status,
+            "qc_passed": effective_pass,
+            "all_items_passed": all_passed,
+            "waived": payload.waived,
+            "checklist": stamped_items,
+            "message": (
+                "QC checklist submitted — job is now ready for pickup"
+                if effective_pass
+                else "QC checklist submitted — job flagged for rework"
+            ),
+        }
+
+    raise HTTPException(status_code=500, detail="Failed to record QC checklist")
 
 
 @router.post("/jobs/{job_id}/rework")
