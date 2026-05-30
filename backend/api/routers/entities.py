@@ -239,6 +239,25 @@ def _validate_entity_payload(data: dict) -> None:
     for b in data.get("bank_accounts") or []:
         if isinstance(b, dict) and b.get("ifsc") and not ov.validate_ifsc(b["ifsc"]):
             raise HTTPException(status_code=400, detail=f"Invalid IFSC: {b['ifsc']}")
+    # Legacy single-bank IFSC field
+    legacy_ifsc = data.get("bank_ifsc")
+    if legacy_ifsc and not ov.validate_ifsc(legacy_ifsc):
+        raise HTTPException(status_code=400, detail=f"Invalid IFSC: {legacy_ifsc}")
+    # Phone and email format checks (only when provided)
+    phone = data.get("registered_phone")
+    if phone and not ov.validate_phone(phone):
+        raise HTTPException(
+            status_code=400,
+            detail="registered_phone must be a 10-digit Indian mobile number",
+        )
+    email = data.get("registered_email")
+    if email:
+        import re as _re
+        _EMAIL_RE = _re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+        if not _EMAIL_RE.match(email.strip()):
+            raise HTTPException(
+                status_code=400, detail="registered_email is not a valid email address"
+            )
 
 
 def _entity_active_dependents(db, entity_id: str) -> Optional[str]:

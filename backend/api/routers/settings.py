@@ -11,12 +11,13 @@ Comprehensive settings management for all user roles.
 """
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 import hashlib
 import os
 import base64
+import re
 import logging
 from .auth import get_current_user, hash_password, verify_password, require_roles
 from ..dependencies import get_audit_repository
@@ -269,7 +270,7 @@ def _get_user_from_db(user_id: str) -> Optional[dict]:
 class DiscountSettings(BaseModel):
     role: str
     category: str
-    max_discount: float
+    max_discount: float = Field(..., ge=0.0, le=100.0)
 
 
 class IntegrationConfig(BaseModel):
@@ -304,7 +305,8 @@ class ProfileUpdate(BaseModel):
 
 class PasswordChange(BaseModel):
     current_password: str
-    new_password: str = Field(..., min_length=8)
+    # max_length=72 avoids silent bcrypt truncation (bcrypt only uses first 72 bytes)
+    new_password: str = Field(..., min_length=8, max_length=72)
 
 
 class BusinessSettings(BaseModel):
@@ -323,30 +325,66 @@ class BusinessSettings(BaseModel):
     privacy_url: Optional[str] = None
 
 
+_GSTIN_RE = re.compile(r"^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][0-9A-Z]Z[0-9A-Z]$")
+
+
 class TaxSettings(BaseModel):
     gst_enabled: bool = True
     company_gstin: str = ""
-    default_gst_rate: float = 18.0
+    default_gst_rate: float = Field(default=18.0, ge=0.0, le=100.0)
     hsn_validation: bool = True
     e_invoice_enabled: bool = False
     e_invoice_username: Optional[str] = None
     e_way_bill_enabled: bool = False
-    e_way_bill_threshold: float = 50000.0
+    e_way_bill_threshold: float = Field(default=50000.0, ge=0.0)
     tds_enabled: bool = False
-    tds_rate: float = 0.0
+    tds_rate: float = Field(default=0.0, ge=0.0, le=100.0)
+
+    @field_validator("company_gstin")
+    @classmethod
+    def _validate_company_gstin(cls, v: str) -> str:
+        if not v:
+            return v
+        normalised = v.strip().upper()
+        if not _GSTIN_RE.match(normalised):
+            raise ValueError(
+                "company_gstin must be 15 characters in GSTIN format "
+                "(e.g. 29ABCDE1234F1Z5)"
+            )
+        return normalised
+
+
+_FINANCIAL_YEAR_RE = re.compile(r"^[0-9]{4}-[0-9]{2}$")
 
 
 class InvoiceSettings(BaseModel):
     invoice_prefix: str = "INV"
-    invoice_start_number: int = 1
-    current_invoice_number: int = 1
+    invoice_start_number: int = Field(default=1, ge=1)
+    current_invoice_number: int = Field(default=1, ge=1)
     financial_year: str = "2024-25"
     show_logo_on_invoice: bool = True
     show_terms_on_invoice: bool = True
     default_terms: str = "Goods once sold will not be returned or exchanged."
-    default_warranty_days: int = 365
+    default_warranty_days: int = Field(default=365, ge=0, le=3650)
     show_qr_code: bool = True
     digital_signature_enabled: bool = False
+
+    @field_validator("invoice_prefix")
+    @classmethod
+    def _validate_prefix(cls, v: str) -> str:
+        stripped = v.strip()
+        if not stripped:
+            raise ValueError("invoice_prefix must not be empty")
+        if len(stripped) > 10:
+            raise ValueError("invoice_prefix must be 10 characters or fewer")
+        return stripped.upper()
+
+    @field_validator("financial_year")
+    @classmethod
+    def _validate_fy(cls, v: str) -> str:
+        if v and not _FINANCIAL_YEAR_RE.match(v.strip()):
+            raise ValueError("financial_year must be in YYYY-YY format (e.g. 2024-25)")
+        return v.strip()
 
 
 class NotificationTemplate(BaseModel):
@@ -359,6 +397,10 @@ class NotificationTemplate(BaseModel):
     variables: List[str] = []  # Available variables like {customer_name}, {order_id}
 
 
+_VALID_RECEIPT_WIDTHS = {58, 80}
+_VALID_LABEL_SIZES = {"50x25", "50x30", "100x50"}
+
+
 class PrinterSettings(BaseModel):
     receipt_printer_name: Optional[str] = None
     receipt_printer_width: int = 80  # mm
@@ -366,12 +408,30 @@ class PrinterSettings(BaseModel):
     label_size: str = "50x25"  # mm
     auto_print_receipt: bool = True
     auto_print_job_card: bool = True
-    copies_per_print: int = 1
+    copies_per_print: int = Field(default=1, ge=1, le=10)
     # QZ Tray silent raw label printing. When False (or no cert/key on the
     # server), the frontend falls back to HTML print windows.
     qz_enabled: bool = True
     # Auto-print a stage sticker each time a workshop job advances a stage.
     auto_print_stage_sticker: bool = True
+
+    @field_validator("receipt_printer_width")
+    @classmethod
+    def _validate_width(cls, v: int) -> int:
+        if v not in _VALID_RECEIPT_WIDTHS:
+            raise ValueError(
+                f"receipt_printer_width must be one of {sorted(_VALID_RECEIPT_WIDTHS)} mm"
+            )
+        return v
+
+    @field_validator("label_size")
+    @classmethod
+    def _validate_label_size(cls, v: str) -> str:
+        if v not in _VALID_LABEL_SIZES:
+            raise ValueError(
+                f"label_size must be one of {sorted(_VALID_LABEL_SIZES)}"
+            )
+        return v
 
 
 class AuditLogEntry(BaseModel):
@@ -832,26 +892,58 @@ async def get_discount_rules(current_user: dict = Depends(get_current_user)):
 async def update_discount_rules(
     rules: Dict[str, Dict[str, int]], current_user: dict = Depends(get_current_user)
 ):
-    """Update discount rules (SUPERADMIN/ADMIN/AREA_MANAGER)"""
+    """Update discount rules (SUPERADMIN/ADMIN/AREA_MANAGER).
+
+    Persists the full rules dict under the 'discount_rules' singleton.
+    Previously returned success without writing (silent data loss on reload).
+    """
     if not any(
         role in current_user["roles"]
         for role in ["SUPERADMIN", "ADMIN", "AREA_MANAGER"]
     ):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
-    return {"message": "Discount rules updated", "rules": rules}
+    collection = _get_settings_collection("discount_rules")
+    if collection is not None:
+        collection.update_one(
+            {"_id": "default"},
+            {"$set": {"rules": rules, "updated_at": datetime.utcnow().isoformat()}},
+            upsert=True,
+        )
+        return {"message": "Discount rules updated", "rules": rules}
+    return {"message": "Discount rules updated (no DB)", "rules": rules}
 
 
 @router.post("/discount-rules")
 async def set_discount_rule(
     rule: DiscountSettings, current_user: dict = Depends(get_current_user)
 ):
-    """Set individual discount rule"""
+    """Set individual discount rule (SUPERADMIN/ADMIN/AREA_MANAGER).
+
+    Merges one role+category entry into the 'discount_rules' singleton.
+    Previously returned success without writing (silent data loss on reload).
+    """
     if not any(
         role in current_user["roles"]
         for role in ["SUPERADMIN", "ADMIN", "AREA_MANAGER"]
     ):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
-    return {"message": "Discount rule updated"}
+    payload = rule.model_dump()
+    collection = _get_settings_collection("discount_rules")
+    if collection is not None:
+        # Merge: update the specific role->category key inside the rules map
+        key = f"rules.{payload['role']}.{payload['category']}"
+        collection.update_one(
+            {"_id": "default"},
+            {
+                "$set": {
+                    key: payload["max_discount"],
+                    "updated_at": datetime.utcnow().isoformat(),
+                }
+            },
+            upsert=True,
+        )
+        return {"message": "Discount rule updated", "rule": payload}
+    return {"message": "Discount rule updated (no DB)", "rule": payload}
 
 
 # ============================================================================
@@ -1163,10 +1255,29 @@ async def get_system_settings(current_user: dict = Depends(get_current_user)):
 async def update_system_settings(
     settings: Dict, current_user: dict = Depends(get_current_user)
 ):
-    """Update system settings (SUPERADMIN only)"""
+    """Update system settings (SUPERADMIN only).
+
+    Persists to the 'system_settings' singleton.
+    Previously returned success without writing (silent data loss on reload).
+    """
     if "SUPERADMIN" not in current_user["roles"]:
         raise HTTPException(status_code=403, detail="Superadmin access required")
-    return {"message": "System settings updated", "settings": settings}
+    # Strip any attempt to pass internal Mongo _id
+    settings_clean = {k: v for k, v in settings.items() if k != "_id"}
+    collection = _get_settings_collection("system_settings")
+    if collection is not None:
+        collection.update_one(
+            {"_id": "default"},
+            {
+                "$set": {
+                    **settings_clean,
+                    "updated_at": datetime.utcnow().isoformat(),
+                }
+            },
+            upsert=True,
+        )
+        return {"message": "System settings updated", "settings": settings_clean}
+    return {"message": "System settings updated (no DB)", "settings": settings_clean}
 
 
 # ============================================================================
@@ -1477,13 +1588,52 @@ async def get_feature_toggles(
     return result
 
 
+def _save_feature_toggles(store_id: str, features: Dict[str, bool]) -> dict:
+    """Persist feature toggles to Mongo and invalidate the cache entry.
+
+    Extracted so PUT and PATCH share identical write + cache-invalidation logic.
+    Previously the PUT/PATCH endpoints wrote to Mongo but never cleared the
+    TTL_LONG (15 min) cache, so callers that hit GET within 15 minutes of a
+    save would see stale values.
+    """
+    from ..services.cache import cache
+
+    collection = _get_settings_collection("feature_toggles")
+    if collection is not None:
+        collection.update_one(
+            {"_id": store_id},
+            {
+                "$set": {
+                    "features": features,
+                    "updated_at": datetime.utcnow().isoformat(),
+                }
+            },
+            upsert=True,
+        )
+        # Invalidate cached GET so the next read reflects the change immediately.
+        cache.delete(f"feature_toggles:{store_id}")
+        return {
+            "message": "Feature toggles updated successfully",
+            "store_id": store_id,
+            "features": features,
+        }
+    return {
+        "message": "Feature toggles saved (no DB)",
+        "store_id": store_id,
+        "features": features,
+    }
+
+
 @router.put("/feature-toggles/{store_id}")
 async def update_feature_toggles_put(
     store_id: str,
     payload: FeatureTogglesUpdate,
     current_user: dict = Depends(get_current_user),
 ):
-    """Update feature toggle states for a store (SUPERADMIN or STORE_MANAGER of that store)"""
+    """Update feature toggle states for a store (SUPERADMIN or STORE_MANAGER of that store).
+
+    Invalidates the cache so GET immediately returns the new values.
+    """
     roles = current_user.get("roles", [])
     user_stores = current_user.get("store_ids", [])
     is_super = "SUPERADMIN" in roles
@@ -1492,28 +1642,7 @@ async def update_feature_toggles_put(
         raise HTTPException(
             status_code=403, detail="Superadmin or store manager access required"
         )
-    collection = _get_settings_collection("feature_toggles")
-    if collection is not None:
-        collection.update_one(
-            {"_id": store_id},
-            {
-                "$set": {
-                    "features": payload.features,
-                    "updated_at": datetime.utcnow().isoformat(),
-                }
-            },
-            upsert=True,
-        )
-        return {
-            "message": "Feature toggles updated successfully",
-            "store_id": store_id,
-            "features": payload.features,
-        }
-    return {
-        "message": "Feature toggles saved (no DB)",
-        "store_id": store_id,
-        "features": payload.features,
-    }
+    return _save_feature_toggles(store_id, payload.features)
 
 
 @router.patch("/feature-toggles/{store_id}")
@@ -1522,7 +1651,10 @@ async def update_feature_toggles_patch(
     payload: FeatureTogglesUpdate,
     current_user: dict = Depends(get_current_user),
 ):
-    """Update feature toggle states for a store (SUPERADMIN or STORE_MANAGER of that store)"""
+    """Update feature toggle states for a store (SUPERADMIN or STORE_MANAGER of that store).
+
+    Invalidates the cache so GET immediately returns the new values.
+    """
     roles = current_user.get("roles", [])
     user_stores = current_user.get("store_ids", [])
     is_super = "SUPERADMIN" in roles
@@ -1531,28 +1663,7 @@ async def update_feature_toggles_patch(
         raise HTTPException(
             status_code=403, detail="Superadmin or store manager access required"
         )
-    collection = _get_settings_collection("feature_toggles")
-    if collection is not None:
-        collection.update_one(
-            {"_id": store_id},
-            {
-                "$set": {
-                    "features": payload.features,
-                    "updated_at": datetime.utcnow().isoformat(),
-                }
-            },
-            upsert=True,
-        )
-        return {
-            "message": "Feature toggles updated successfully",
-            "store_id": store_id,
-            "features": payload.features,
-        }
-    return {
-        "message": "Feature toggles saved (no DB)",
-        "store_id": store_id,
-        "features": payload.features,
-    }
+    return _save_feature_toggles(store_id, payload.features)
 
 
 @router.get("/audit-logs/summary")
