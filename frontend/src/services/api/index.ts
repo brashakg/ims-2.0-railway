@@ -22,6 +22,7 @@ export { inventoryApi, vendorsApi, reorderApi } from './inventory';
 
 // Sales / Billing / Orders (orders, prescriptions, workshop, discounts)
 export { orderApi, prescriptionApi, workshopApi, adminDiscountApi } from './sales';
+export type { FamilyRxResponse, FamilyRxMember, FamilyRxPrescription } from './sales';
 
 // Customers
 export { customerApi } from './customers';

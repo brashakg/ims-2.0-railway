@@ -185,6 +185,7 @@ export const MODULE_CONFIGS: ModuleConfig[] = [
       { id: 'clinic-queue', label: 'Patient Queue', path: '/clinical' },
       { id: 'clinic-history', label: 'Test History', path: '/clinical/history' },
       { id: 'clinic-prescriptions', label: 'Prescriptions', path: '/prescriptions' },
+      { id: 'clinic-family-rx', label: 'Family Rx', path: '/clinical/family-rx' },
     ],
   },
   {
