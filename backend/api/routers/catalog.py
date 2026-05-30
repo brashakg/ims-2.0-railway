@@ -1003,8 +1003,12 @@ def _get_db():
         from ..dependencies import get_db
 
         conn = get_db()
-        if conn is not None and conn.is_connected:
-            return conn.db
+        if conn is not None:
+            # SeededDatabaseConnection wraps a real DatabaseConnection; check
+            # the real one to avoid treating the mock as a live database.
+            real = getattr(conn, "_real_db", conn)
+            if getattr(real, "is_connected", False):
+                return real.db
     except Exception:
         pass
     return None

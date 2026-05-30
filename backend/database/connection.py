@@ -564,7 +564,8 @@ class MockCollection:
         ]
         return MockCursor(results)
 
-    def update_one(self, filter: Dict, update: Dict) -> Any:
+    def update_one(self, filter: Dict, update: Dict, **kwargs) -> Any:
+        upsert = kwargs.get("upsert", False)
         doc = self.find_one(filter)
         if doc:
             if "$set" in update:
@@ -577,10 +578,16 @@ class MockCollection:
                     if field not in doc:
                         doc[field] = []
                     doc[field].append(value)
-            return type("obj", (object,), {"modified_count": 1})()
-        return type("obj", (object,), {"modified_count": 0})()
+            return type("obj", (object,), {"modified_count": 1, "upserted_id": None})()
+        if upsert:
+            new_doc = {}
+            if "$set" in update:
+                new_doc.update(update["$set"])
+            result = self.insert_one(new_doc)
+            return type("obj", (object,), {"modified_count": 0, "upserted_id": result.inserted_id})()
+        return type("obj", (object,), {"modified_count": 0, "upserted_id": None})()
 
-    def update_many(self, filter: Dict, update: Dict) -> Any:
+    def update_many(self, filter: Dict, update: Dict, **kwargs) -> Any:
         count = 0
         for doc in self._data.values():
             if self._matches_filter(doc, filter):
@@ -637,6 +644,9 @@ class MockDatabase:
         if name not in self._collections:
             self._collections[name] = MockCollection(name)
         return self._collections[name]
+
+    def get_collection(self, name: str) -> MockCollection:
+        return self[name]
 
     def list_collection_names(self) -> list:
         return list(self._collections.keys())
