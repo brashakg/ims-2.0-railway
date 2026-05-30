@@ -152,9 +152,16 @@ async def rbac_enforcement_middleware(request: Request, call_next):
 
     # AUTHENTICATED or a role list: inspect the token's roles.
     roles = _roles_from_bearer(request)
-    if roles is None:
-        # No usable token: defer to the route's own get_current_user -> 401
-        # (canonical shape). Never 403 here.
+    if not roles:
+        # Either no usable token (missing / malformed / invalid / expired ->
+        # None) OR a valid token whose ``roles`` claim is empty/absent (-> []).
+        # In BOTH cases defer to the route: its ``get_current_user`` returns the
+        # canonical 401 for a bad token, while a valid zero-role token still
+        # reaches an AUTHENTICATED route (which would 200) and is 403'd by a
+        # role-gated route's own ``require_roles``. We must never substitute a
+        # hard 403 here for an empty role set -- that would be stricter than the
+        # route on AUTHENTICATED endpoints, breaking the behavior-preserving
+        # contract. The route decides.
         return await call_next(request)
 
     if rbac_policy.check_access(method, path, roles):

@@ -677,7 +677,7 @@ POLICY: List[Dict[str, object]] = [
     {"method": 'GET', "path": '/api/v1/prescriptions/patient/{patient_id}/valid', "allowed": 'AUTHENTICATED'},
     {"method": 'GET', "path": '/api/v1/prescriptions/family/{customer_id}', "allowed": 'AUTHENTICATED'},
     {"method": 'GET', "path": '/api/v1/prescriptions/{prescription_id}', "allowed": 'AUTHENTICATED'},
-    {"method": 'PUT', "path": '/api/v1/prescriptions/{prescription_id}', "allowed": ['ADMIN', 'OPTOMETRIST', 'STORE_MANAGER', 'SUPERADMIN']},
+    {"method": 'PUT', "path": '/api/v1/prescriptions/{prescription_id}', "allowed": ['ADMIN', 'OPTOMETRIST', 'STORE_MANAGER', 'SUPERADMIN'], "self_enforced": True},
     {"method": 'POST', "path": '/api/v1/prescriptions/{prescription_id}/finalize', "allowed": ['ADMIN', 'OPTOMETRIST', 'SUPERADMIN']},
     {"method": 'GET', "path": '/api/v1/prescriptions/{prescription_id}/print', "allowed": 'AUTHENTICATED'},
     {"method": 'GET', "path": '/api/v1/prescriptions/{prescription_id}/validate', "allowed": 'AUTHENTICATED'},
