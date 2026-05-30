@@ -73,6 +73,13 @@ export interface User {
    *  password-reset; cleared once they change it. The frontend gates the whole
    *  app on this flag (see AppLayout). */
   mustChangePassword?: boolean;
+  /** Per-user module access -- a DENY-ONLY override layered on top of the role.
+   *  Map of canonical module key -> boolean. A key set to `false` HIDES the
+   *  module from the nav AND blocks its routes for this user, even when their
+   *  role would otherwise allow it. Missing / `true` => role defaults apply.
+   *  The role is always the ceiling: this can only restrict, never grant.
+   *  See AuthContext.hasModuleAccess + ModuleContext. */
+  moduleAccess?: Record<string, boolean>;
 }
 
 export interface AuthState {

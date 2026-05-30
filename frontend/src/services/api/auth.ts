@@ -45,6 +45,10 @@ export const authApi = {
         // True when the user must change an admin-set temporary password
         // before using the app. Optional for pre-fix backends.
         must_change_password?: boolean;
+        // Deny-only per-user module override (canonical key -> bool). Optional
+        // for pre-fix backends. snake_case from the server; camelCase tolerated.
+        module_access?: Record<string, boolean>;
+        moduleAccess?: Record<string, boolean>;
       };
     }
 
@@ -72,6 +76,9 @@ export const authApi = {
           geoRestricted: false,
           createdAt: new Date().toISOString(),
           mustChangePassword: data.user.must_change_password ?? false,
+          // Deny-only module override. Tolerate snake/camel; default to {} so a
+          // missing field never reads as "deny everything".
+          moduleAccess: data.user.module_access ?? data.user.moduleAccess ?? {},
         },
       };
     } catch (error) {
@@ -136,6 +143,8 @@ export const authApi = {
       active_store_id: string;
       discount_cap?: number;
       must_change_password?: boolean;
+      module_access?: Record<string, boolean>;
+      moduleAccess?: Record<string, boolean>;
       exp?: number;
     }>('/auth/me');
     const raw = response.data;
@@ -153,6 +162,8 @@ export const authApi = {
       geoRestricted: false,
       createdAt: new Date().toISOString(),
       mustChangePassword: raw.must_change_password ?? false,
+      // Deny-only module override; tolerate snake/camel, default to {}.
+      moduleAccess: raw.module_access ?? raw.moduleAccess ?? {},
     };
   },
 

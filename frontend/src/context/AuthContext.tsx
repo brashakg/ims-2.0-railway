@@ -32,6 +32,12 @@ interface AuthContextType extends AuthState {
   hasPermission: (permission: string) => boolean;
   hasRole: (role: UserRole | UserRole[]) => boolean;
   canAccessStore: (storeId: string) => boolean;
+  /** Per-user module gate. Returns `false` ONLY when the admin has explicitly
+   *  denied this module for the user (moduleAccess[moduleKey] === false); any
+   *  other value (missing, true) returns `true` so role defaults apply. This is
+   *  a DENY-ONLY override -- it never grants access a role lacks; callers must
+   *  still AND it with the role check (see ModuleContext / ProtectedRoute). */
+  hasModuleAccess: (moduleKey: string) => boolean;
   /** True iff the user holds INVESTOR and no other role with write
    *  power. Mirrors the server-side _is_investor_only check in
    *  backend/api/main.py — UI hides write actions when this is true.
@@ -478,6 +484,18 @@ export function AuthProvider({ children }: AuthProviderProps) {
     return userRoles.length === 1 && userRoles[0] === 'INVESTOR';
   };
 
+  /** Deny-only per-user module gate. `false` ONLY when the admin explicitly set
+   *  moduleAccess[moduleKey] === false; everything else (no map, missing key,
+   *  true) is allowed so the role default stands. This NEVER grants access a
+   *  role lacks -- the role filter still runs alongside it (see ModuleContext /
+   *  ProtectedRoute), so the role remains the ceiling and there is no path to
+   *  privilege escalation through this map. */
+  const hasModuleAccess = (moduleKey: string): boolean => {
+    const map = state.user?.moduleAccess;
+    if (!map) return true;
+    return map[moduleKey] !== false;
+  };
+
   const value: AuthContextType = {
     ...state,
     login,
@@ -489,6 +507,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
     hasRole,
     canAccessStore,
     isReadOnly,
+    hasModuleAccess,
   };
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

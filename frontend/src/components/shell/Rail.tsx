@@ -6,6 +6,7 @@ import { NavLink, useLocation } from 'react-router-dom';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { useAppearance } from '../../context/AppearanceContext';
+import { moduleForPath } from '../../context/ModuleContext';
 import { Icon, type IconName } from './Icon';
 import type { UserRole } from '../../types';
 import { ecommerceSsoApi } from '../../services/api/ecommerceSso';
@@ -153,7 +154,7 @@ function hasAnyRole(userRoles: readonly UserRole[] | undefined, required: UserRo
 }
 
 export function Rail({ brand = 'bv', mobileOpen = false }: { brand?: 'bv' | 'wizopt'; mobileOpen?: boolean }) {
-  const { user } = useAuth();
+  const { user, hasModuleAccess } = useAuth();
   const { railExpanded, toggleRailExpanded } = useAppearance();
   // In the mobile drawer, always render the expanded layout (group headers +
   // labels) regardless of the desktop icon-only collapse state.
@@ -162,17 +163,27 @@ export function Rail({ brand = 'bv', mobileOpen = false }: { brand?: 'bv' | 'wiz
   const userRoles = user?.roles;
   const activeRole = user?.activeRole;
 
-  // Filter hidden items based on role
+  // Filter hidden items based on role AND the per-user deny-only module
+  // override. The role check is the ceiling; hasModuleAccess can only further
+  // hide an item whose route belongs to a denied module (moduleForPath maps the
+  // item's `to` to its canonical module key; external/SSO URLs and ungated
+  // paths -> null -> never hidden by the module gate). ProtectedRoute enforces
+  // the same gate at the route level so a direct URL is blocked too.
   const visibleGroups = useMemo(() => {
     return RAIL_GROUPS.map((group) => ({
       ...group,
       items: group.items.filter((item) => {
-        if (!item.requireRoles) return true;
-        // Check both stored roles[] and active role (covers role-switching)
-        return hasAnyRole(userRoles, item.requireRoles) || (activeRole && item.requireRoles.includes(activeRole));
+        const roleOk =
+          !item.requireRoles ||
+          // Check both stored roles[] and active role (covers role-switching)
+          hasAnyRole(userRoles, item.requireRoles) ||
+          (activeRole && item.requireRoles.includes(activeRole));
+        if (!roleOk) return false;
+        const mod = item.external ? null : moduleForPath(item.to);
+        return !mod || hasModuleAccess(mod);
       }),
     })).filter((group) => group.items.length > 0);
-  }, [userRoles, activeRole]);
+  }, [userRoles, activeRole, hasModuleAccess]);
 
   // Which group titles are collapsed. Untitled (Hub) groups can't collapse.
   // Persisted to localStorage so a user's collapse choices survive refresh
