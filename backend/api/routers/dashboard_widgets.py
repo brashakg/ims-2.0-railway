@@ -14,7 +14,14 @@ from fastapi import APIRouter, Depends, Query
 from typing import Optional, Dict, Any
 from datetime import datetime
 
-from .auth import get_current_user
+from .auth import get_current_user, require_roles
+
+# /admin/* widgets surface cross-store escalations + system status and were
+# AUTHENTICATED-only (any user) -- they bypass the admin router's gate because
+# they live in THIS router, mounted at bare /api/v1. Restrict to Admin
+# (SUPERADMIN auto-passes). The Hub fetches widgets fail-soft, so other roles
+# simply get an empty card.
+_WIDGET_ADMIN_ROLES = ("ADMIN",)
 
 router = APIRouter()
 
@@ -324,7 +331,8 @@ async def analytics_store_target_today(
 
 @router.get("/admin/escalations")
 async def admin_escalations(
-    level: Optional[str] = Query(None), current_user: dict = Depends(get_current_user)
+    level: Optional[str] = Query(None),
+    current_user: dict = Depends(require_roles(*_WIDGET_ADMIN_ROLES)),
 ):
     coll = _coll("tasks")
     if coll is None:
@@ -337,7 +345,7 @@ async def admin_escalations(
 
 
 @router.get("/admin/system-health")
-async def admin_system_health(current_user: dict = Depends(get_current_user)):
+async def admin_system_health(current_user: dict = Depends(require_roles(*_WIDGET_ADMIN_ROLES))):
     from database.connection import get_db
 
     status = {"api": "healthy", "checked_at": datetime.now().isoformat()}
