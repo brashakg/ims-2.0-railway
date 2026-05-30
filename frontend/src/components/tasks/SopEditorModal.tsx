@@ -232,7 +232,7 @@ export function SopEditorModal({ isOpen, onClose, initial, onSaved }: SopEditorM
           </div>
 
           {/* Meta row */}
-          <div className="grid grid-cols-3 gap-3">
+          <div className="grid grid-cols-1 tablet:grid-cols-3 gap-3">
             <div>
               <label className="text-xs font-medium text-gray-700 block mb-1">Category</label>
               <select

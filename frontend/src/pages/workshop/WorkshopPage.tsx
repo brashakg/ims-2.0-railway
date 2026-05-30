@@ -1483,7 +1483,7 @@ function VendorCaptureBlock({ job, onSaved }: { job: Job; onSaved: () => void })
         )}
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-2 mb-2">
+      <div className="grid grid-cols-1 tablet:grid-cols-3 gap-2 mb-2">
         <div>
           <label className="block text-xs font-medium text-gray-500 mb-0.5">Lens lab</label>
           <select
