@@ -870,6 +870,13 @@ async def approve_expense(
         if existing is None:
             raise HTTPException(status_code=404, detail="Expense not found")
 
+        # Separation of duties (SYSTEM_INTENT s7): a requester cannot approve
+        # their own claim, even with an approver role.
+        if existing.get("employee_id") == current_user.get("user_id"):
+            raise HTTPException(
+                status_code=403, detail="You cannot approve your own expense."
+            )
+
         if existing.get("status") != "PENDING":
             raise HTTPException(
                 status_code=400, detail="Expense is not pending approval"
@@ -911,6 +918,12 @@ async def reject_expense(
         existing = expense_repo.find_by_id(expense_id)
         if existing is None:
             raise HTTPException(status_code=404, detail="Expense not found")
+
+        # Separation of duties (SYSTEM_INTENT s7): cannot act on your own claim.
+        if existing.get("employee_id") == current_user.get("user_id"):
+            raise HTTPException(
+                status_code=403, detail="You cannot reject your own expense."
+            )
 
         if existing.get("status") != "PENDING":
             raise HTTPException(
@@ -1229,6 +1242,12 @@ async def approve_advance(
         existing = advance_repo.find_by_id(advance_id)
         if existing is None:
             raise HTTPException(status_code=404, detail="Advance not found")
+
+        # Separation of duties (SYSTEM_INTENT s7): cannot approve your own advance.
+        if existing.get("employee_id") == current_user.get("user_id"):
+            raise HTTPException(
+                status_code=403, detail="You cannot approve your own advance."
+            )
 
         if existing.get("status") != "PENDING":
             raise HTTPException(
