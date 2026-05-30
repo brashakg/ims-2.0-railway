@@ -670,6 +670,7 @@ POLICY: List[Dict[str, object]] = [
     {"method": 'GET', "path": '/api/v1/prescriptions/patient/{patient_id}', "allowed": 'AUTHENTICATED'},
     {"method": 'GET', "path": '/api/v1/prescriptions/patient/{patient_id}/latest', "allowed": 'AUTHENTICATED'},
     {"method": 'GET', "path": '/api/v1/prescriptions/patient/{patient_id}/valid', "allowed": 'AUTHENTICATED'},
+    {"method": 'GET', "path": '/api/v1/prescriptions/family/{customer_id}', "allowed": 'AUTHENTICATED'},
     {"method": 'GET', "path": '/api/v1/prescriptions/{prescription_id}', "allowed": 'AUTHENTICATED'},
     {"method": 'POST', "path": '/api/v1/prescriptions/{prescription_id}/finalize', "allowed": ['ADMIN', 'OPTOMETRIST', 'SUPERADMIN']},
     {"method": 'GET', "path": '/api/v1/prescriptions/{prescription_id}/print', "allowed": 'AUTHENTICATED'},
@@ -988,6 +989,13 @@ POLICY: List[Dict[str, object]] = [
     {"method": 'GET', "path": '/api/v1/workshop/product-label', "allowed": 'AUTHENTICATED'},
     {"method": 'GET', "path": '/api/v1/workshop/ready', "allowed": 'AUTHENTICATED'},
     {"method": 'GET', "path": '/api/v1/workshop/technician-workload', "allowed": 'AUTHENTICATED'},
+    # Budgeting (dual-mode planned vs actual) -- manager+/accountant + store-scoped.
+    {"method": 'POST', "path": '/api/v1/budgets', "allowed": ['ACCOUNTANT', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER'], "store_scoped": True},
+    {"method": 'POST', "path": '/api/v1/budgets/', "allowed": ['ACCOUNTANT', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER'], "store_scoped": True},
+    {"method": 'GET', "path": '/api/v1/budgets', "allowed": ['ACCOUNTANT', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER'], "store_scoped": True},
+    {"method": 'GET', "path": '/api/v1/budgets/', "allowed": ['ACCOUNTANT', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER'], "store_scoped": True},
+    {"method": 'GET', "path": '/api/v1/budgets/variance', "allowed": ['ACCOUNTANT', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER'], "store_scoped": True},
+    {"method": 'DELETE', "path": '/api/v1/budgets/{budget_id}', "allowed": ['ACCOUNTANT', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER'], "store_scoped": True},
 ]
 
 
