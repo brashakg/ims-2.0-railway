@@ -339,6 +339,131 @@ async def list_prescriptions(
     return {"prescriptions": [], "total": 0}
 
 
+# ---- Family Rx view helpers --------------------------------------------
+
+def _parse_dt(value):
+    """Best-effort parse of an ISO date/datetime (or passthrough) -> datetime, else None."""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, date):
+        return datetime(value.year, value.month, value.day)
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "").split(".")[0])
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _add_months(dt: datetime, months: int) -> datetime:
+    """Add whole months to a datetime, clamping the day to the target month."""
+    m = dt.month - 1 + months
+    year = dt.year + m // 12
+    month = m % 12 + 1
+    leap = year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)
+    dim = [31, 29 if leap else 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1]
+    return dt.replace(year=year, month=month, day=min(dt.day, dim))
+
+
+def _rx_validity(rx: dict):
+    """(expiry_datetime | None, is_valid | None) for a prescription using
+    test_date + validity_months (defaults 12), tolerant of snake/camel fields."""
+    td = _parse_dt(
+        rx.get("test_date") or rx.get("testDate") or rx.get("created_at") or rx.get("createdAt")
+    )
+    months = rx.get("validity_months") or rx.get("validityMonths") or 12
+    try:
+        months = int(months)
+    except (TypeError, ValueError):
+        months = 12
+    if td is None:
+        return None, None
+    expiry = _add_months(td, months)
+    return expiry, datetime.now() < expiry
+
+
+@router.get("/family/{customer_id}")
+async def family_prescriptions(
+    customer_id: str, current_user: dict = Depends(get_current_user)
+):
+    """Family Rx view: a customer account's prescriptions grouped by family
+    member (patient), each annotated with expiry + validity. Lets POS / clinical
+    see the whole household's prescriptions in one place. Patients with no Rx are
+    still listed; any prescription whose patient_id isn't on the account surfaces
+    under an 'Unlinked patient' group (legacy/imported data)."""
+    repo = get_prescription_repository()
+    customer_repo = get_customer_repository()
+    if repo is None:
+        return {"customer_id": customer_id, "members": [], "member_count": 0, "total_prescriptions": 0}
+
+    customer = customer_repo.find_by_id(customer_id) if customer_repo is not None else None
+    if customer is None:
+        raise HTTPException(status_code=404, detail="Customer not found")
+    patients = customer.get("patients", []) or []
+
+    all_rx = repo.find_by_customer(customer_id) or []
+    by_patient: dict = {}
+    for rx in all_rx:
+        by_patient.setdefault(rx.get("patient_id"), []).append(rx)
+
+    def _enrich(rx_list):
+        rows, valid_count, latest = [], 0, None
+        ordered = sorted(
+            rx_list,
+            key=lambda r: str(r.get("test_date") or r.get("testDate") or r.get("created_at") or ""),
+            reverse=True,
+        )
+        for rx in ordered:
+            expiry, is_valid = _rx_validity(rx)
+            row = dict(rx)
+            row["expiry_date"] = expiry.isoformat() if expiry else None
+            row["is_valid"] = bool(is_valid) if is_valid is not None else None
+            rows.append(row)
+            if is_valid:
+                valid_count += 1
+            if latest is None:
+                latest = row
+        return rows, valid_count, latest
+
+    members, seen = [], set()
+    for p in patients:
+        pid = p.get("patient_id")
+        seen.add(pid)
+        rows, valid_count, latest = _enrich(by_patient.get(pid, []))
+        members.append({
+            "patient_id": pid,
+            "name": p.get("name"),
+            "relation": p.get("relation"),
+            "dob": p.get("dob"),
+            "prescription_count": len(rows),
+            "valid_count": valid_count,
+            "latest": latest,
+            "prescriptions": rows,
+        })
+    for pid, rx_list in by_patient.items():
+        if pid in seen:
+            continue
+        rows, valid_count, latest = _enrich(rx_list)
+        members.append({
+            "patient_id": pid,
+            "name": (latest or {}).get("patient_name") or "Unlinked patient",
+            "relation": None,
+            "dob": None,
+            "prescription_count": len(rows),
+            "valid_count": valid_count,
+            "latest": latest,
+            "prescriptions": rows,
+        })
+
+    return {
+        "customer_id": customer_id,
+        "customer_name": customer.get("name"),
+        "members": members,
+        "member_count": len(members),
+        "total_prescriptions": len(all_rx),
+    }
+
+
 @router.post("", status_code=201)
 @router.post("/", status_code=201, include_in_schema=False)
 async def create_prescription(
