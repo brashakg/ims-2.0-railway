@@ -180,8 +180,9 @@ export interface Customer {
   pincode?: string;
   patients: Patient[];
   createdAt: string;
-  // Marketing opt-in (PR #340). Snake_case to match the backend payload used
-  // by customerApi.updateCustomer and the clinical/customer create flows.
+  // Marketing-consent flag (backend snake_case). Read by Customer 360
+  // PreferencesTab and written by the consent toggle via
+  // updateCustomer(id, { marketing_consent }).
   marketing_consent?: boolean;
 }
 
