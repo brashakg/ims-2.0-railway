@@ -204,8 +204,19 @@ def build_aging(
             b.get("bill_date"), b.get("credit_days", 0)
         )
         due = parse_date(due_iso)
-        days_past = (as_of - due).days if due else 0
-        bucket = aging_bucket(days_past)
+        # Bug fix: when both due_date and bill_date are absent/unparseable
+        # the original code silently set days_past=0 and bucketed the bill as
+        # "current". A bill with no usable date could be years overdue, so
+        # putting it in "current" produces a falsely clean AP report. Instead
+        # bucket it under "90_plus" (most conservative, prompts investigation)
+        # and expose a sentinel days_past_due=-1 so callers can distinguish
+        # "genuinely current" from "undatable".
+        if due is None:
+            days_past = -1
+            bucket = "90_plus"
+        else:
+            days_past = (as_of - due).days
+            bucket = aging_bucket(days_past)
         buckets[bucket] = round(buckets[bucket] + out, 2)
         total_out = round(total_out + out, 2)
         items.append(
@@ -218,8 +229,10 @@ def build_aging(
                 "due_date": due_iso,
                 "total_amount": _f(b.get("total_amount")),
                 "outstanding": out,
-                "days_past_due": max(days_past, 0),
+                # -1 signals "undatable" to the caller; 0 means current
+                "days_past_due": max(days_past, 0) if days_past >= 0 else -1,
                 "bucket": bucket,
+                "undatable": due is None,
             }
         )
 
@@ -240,7 +253,12 @@ def build_aging(
         "total_outstanding": total_out,
         "unallocated_credits": unallocated,
         "net_payable": round(max(total_out - unallocated, 0.0), 2),
-        "items": sorted(items, key=lambda x: -x["days_past_due"]),
+        # Sort: undatable bills (-1) sort first (they are the most uncertain and
+        # need attention), then by days_past_due descending (most overdue first).
+        "items": sorted(
+            items,
+            key=lambda x: (x["days_past_due"] >= 0, -x["days_past_due"]),
+        ),
     }
 
 
