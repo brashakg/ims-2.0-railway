@@ -107,10 +107,20 @@ class StockRepository(BaseRepository):
         return self.aggregate(pipeline)
     
     def find_expiring(self, store_id: str, days: int = 30) -> List[Dict]:
-        cutoff = datetime.now() + timedelta(days=days)
+        # expiry_date is persisted as an ISO date string (date.isoformat(),
+        # e.g. "2026-05-30") by add_stock, NOT a BSON datetime. Datetime $gte/
+        # $lte bounds never match a string field in Mongo (BSON type-bracketing),
+        # which is why this returned 0. Compare string-vs-string with date-only
+        # ISO bounds, mirroring how /contact-lenses/expiry-status parses these
+        # values. ISO date strings sort lexicographically the same as
+        # chronologically, so the window is correct: today (not yet expired)
+        # through today + N days inclusive.
+        now = datetime.now()
+        lower = now.date().isoformat()
+        upper = (now + timedelta(days=days)).date().isoformat()
         return self.find_many({
             "store_id": store_id,
-            "expiry_date": {"$lte": cutoff, "$gte": datetime.now()},
+            "expiry_date": {"$lte": upper, "$gte": lower},
             "status": "AVAILABLE"
         })
     

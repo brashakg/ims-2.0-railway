@@ -44,9 +44,20 @@ class WorkshopJobRepository(BaseRepository):
         return self.find_many(filter, sort=[("completed_at", -1)])
     
     def find_overdue(self, store_id: str = None) -> List[Dict]:
+        # expected_date is persisted as an ISO date string (date.isoformat(),
+        # e.g. "2026-05-30") by create_job/update_job, NOT a BSON datetime.
+        # A datetime $lt bound never matches a string field in Mongo because
+        # of BSON type-bracketing, so this must compare string-vs-string.
+        # datetime.now().isoformat() used as a string bound reproduces the same
+        # "due today or earlier == overdue" semantics that dashboard-kpis and
+        # reports.workshop.pending-jobs compute in Python (parse date-only ->
+        # midnight, then `< now`). ISO date strings sort lexicographically the
+        # same as chronologically, so this is correct for both date-only and
+        # full-datetime stored values.
+        now_iso = datetime.now().isoformat()
         filter = {
             "status": {"$in": ["PENDING", "IN_PROGRESS"]},
-            "expected_date": {"$lt": datetime.now()}
+            "expected_date": {"$lt": now_iso}
         }
         if store_id:
             filter["store_id"] = store_id
