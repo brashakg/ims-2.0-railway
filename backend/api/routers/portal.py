@@ -86,8 +86,19 @@ _VIEW_TOKEN_AUDIENCE = "ims-portal-rx"
 def _jwt_secret() -> str:
     """Reuse the app's JWT secret so we don't introduce a second key to
     manage. auth.py already fails fast at import if it's unset, so by the
-    time this module runs it is guaranteed present -- but stay defensive."""
-    return os.getenv("JWT_SECRET_KEY") or "dev-portal-secret"
+    time this module runs it is guaranteed present -- but stay defensive.
+
+    Portal view tokens gate access to MEDICAL data (a customer's Rx), so we
+    must never sign them with a hardcoded fallback constant: a leaked default
+    would let anyone forge a valid view token. Fail loudly instead (the app's
+    core philosophy), matching api.routers.auth's import-time guard."""
+    secret = os.getenv("JWT_SECRET_KEY")
+    if not secret:
+        raise RuntimeError(
+            "JWT_SECRET_KEY environment variable is required to sign portal "
+            "view tokens. Generate one with: openssl rand -hex 32"
+        )
+    return secret
 
 
 # ============================================================================

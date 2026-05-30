@@ -31,10 +31,20 @@ router = APIRouter()
 # Encrypts API keys at rest using AES-like XOR with HMAC-derived key.
 # For production, replace with Fernet (cryptography lib) or cloud KMS.
 
-_CRED_SECRET = os.getenv(
-    "CREDENTIAL_ENCRYPTION_KEY",
-    os.getenv("JWT_SECRET_KEY", "ims2-default-key-change-me"),
-)
+# Source the at-rest credential key from env. Prefer a dedicated
+# CREDENTIAL_ENCRYPTION_KEY, fall back to the app's JWT_SECRET_KEY. We do NOT
+# ship a hardcoded default: a known constant would mean integration secrets
+# (Razorpay/Shopify/Tally keys) are effectively stored in plaintext. Fail
+# loudly if neither is set -- api.routers.auth already guarantees
+# JWT_SECRET_KEY is present whenever the app boots, so this only trips if this
+# module is imported in isolation without a configured environment.
+_CRED_SECRET = os.getenv("CREDENTIAL_ENCRYPTION_KEY") or os.getenv("JWT_SECRET_KEY")
+if not _CRED_SECRET:
+    raise RuntimeError(
+        "CREDENTIAL_ENCRYPTION_KEY or JWT_SECRET_KEY environment variable is "
+        "required to encrypt integration credentials at rest. "
+        "Generate one with: openssl rand -hex 32"
+    )
 
 # Sensitive config field names that must be encrypted at rest & masked on read
 _SENSITIVE_FIELDS = {
