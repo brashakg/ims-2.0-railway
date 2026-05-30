@@ -93,6 +93,7 @@ from .routers import (
     lens_enums_router,
     product_templates_router,
     audit_router,
+    budgets_router,
 )
 from .routers.auth import require_roles
 
@@ -817,6 +818,7 @@ app.include_router(
 )
 app.include_router(workshop_router, prefix="/api/v1/workshop", tags=["Workshop"])
 app.include_router(reports_router, prefix="/api/v1/reports", tags=["Reports"])
+app.include_router(budgets_router, prefix="/api/v1/budgets", tags=["Budgets"])
 app.include_router(settings_router, prefix="/api/v1/settings", tags=["Settings"])
 app.include_router(clinical_router, prefix="/api/v1/clinical", tags=["Clinical"])
 app.include_router(admin_router, prefix="/api/v1/admin", tags=["Admin"])

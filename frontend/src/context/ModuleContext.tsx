@@ -219,6 +219,7 @@ export const MODULE_CONFIGS: ModuleConfig[] = [
     allowedRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'],
     sidebarItems: [
       { id: 'fin-dashboard', label: 'Finance Dashboard', path: '/finance/dashboard' },
+      { id: 'fin-budgeting', label: 'Budgeting (Planned vs Actual)', path: '/finance/budgeting', roles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'] },
       { id: 'fin-expenses', label: 'Expense Tracker', path: '/finance/expenses' },
       { id: 'fin-pending', label: 'Pending Approval', path: '/finance/expenses?tab=pending-approval' },
       { id: 'fin-summary', label: 'Category Summary', path: '/finance/expenses?tab=summary' },
