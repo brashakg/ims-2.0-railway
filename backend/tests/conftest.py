@@ -57,9 +57,25 @@ _PRESERVE_COLLECTIONS = frozenset(
 )
 
 
+# Post-startup snapshot of the preserve-set, captured once on the first reset
+# (after the app lifespan has seeded users/stores/hsn_gst_master/agent_config/...
+# but before any test has mutated them). It is RESTORED before every test so a
+# test that edits a seeded/reference collection -- test_tally_export inserts into
+# `stores`, test_admin_hsn/test_gst_master edit `hsn_gst_master` rates, the
+# lens-config tests upsert `lens_enum_config` -- cannot leak that mutation into a
+# later test that asserts the seeded baseline. That is the second, subtler half
+# of the order-flake; the denylist clear below handles the leak-into-empty half.
+# Together they make the whole app DB deterministic before every test.
+_PRESERVE_BASELINE = None
+
+
 def _reset_churn_collections():
-    """Empty the transactional collections in the app DB so each HTTP test is
-    isolated on CI's shared mongo. No-op (fail-soft) when no DB is connected."""
+    """Make the app DB deterministic before each HTTP test: (1) clear every
+    transactional collection (denylist -- everything except _PRESERVE_COLLECTIONS)
+    and (2) restore the preserve-set to its post-startup baseline, undoing any
+    in-test mutation of seeded/reference data. The baseline is captured lazily on
+    the first call. No-op (fail-soft) when no DB is connected."""
+    global _PRESERVE_BASELINE
     try:
         from database.connection import get_db
 
@@ -69,11 +85,29 @@ def _reset_churn_collections():
         mongo = getattr(db, "db", None)
         if mongo is None:
             return
+        # Capture the seeded baseline once, before any test has mutated it.
+        if _PRESERVE_BASELINE is None:
+            snap = {}
+            for name in _PRESERVE_COLLECTIONS:
+                try:
+                    snap[name] = list(mongo[name].find({}))
+                except Exception:  # noqa: BLE001
+                    snap[name] = []
+            _PRESERVE_BASELINE = snap
+        # (1) Clear every transactional collection.
         for name in mongo.list_collection_names():
             if name in _PRESERVE_COLLECTIONS or name.startswith("system."):
                 continue
             try:
                 mongo[name].delete_many({})
+            except Exception:  # noqa: BLE001
+                pass
+        # (2) Restore the preserve-set to its captured baseline.
+        for name, docs in _PRESERVE_BASELINE.items():
+            try:
+                mongo[name].delete_many({})
+                if docs:
+                    mongo[name].insert_many([dict(d) for d in docs])
             except Exception:  # noqa: BLE001
                 pass
     except Exception:  # noqa: BLE001
