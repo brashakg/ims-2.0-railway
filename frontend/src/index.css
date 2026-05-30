@@ -2778,8 +2778,20 @@ main input[type="date"] { background-color: #fff; border-color: #d1d5db; color: 
     overflow: hidden;
   }
 
-  /* 7. Focus trap: make the rail drawer fully scrollable on small phones */
-  .rail.rail-mobile-open { overscroll-behavior: contain; }
+  /* 7. Drawer scroll fix: 25+ nav rows (19 items + group titles + header +
+     avatar) don't fit a phone's height. In a fixed-height flex column the rows
+     were shrinking/clipping and the flex:1 spacer ate the space, so the drawer
+     looked broken/empty. Keep every row at its natural height, drop the
+     push-to-bottom spacer, and let the drawer scroll. */
+  .rail.rail-mobile-open {
+    overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
+    height: 100vh;            /* fallback for browsers without dvh */
+    height: 100dvh;
+  }
+  .rail.rail-mobile-open > *,
+  .rail.rail-mobile-open .rail-group > * { flex-shrink: 0; }
+  .rail.rail-mobile-open .rail-spacer { display: none; }
 }
 
 /* ====== Very small phones (< 390px, e.g. 360×640) ====== */
