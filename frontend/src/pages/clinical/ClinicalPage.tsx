@@ -27,6 +27,7 @@ import { QueueExistingCustomerModal } from '../../components/customers/QueueExis
 import { EyeTestTokenPrint } from '../../components/print/EyeTestTokenPrint';
 import { AbuseDetection } from '../../components/clinical/AbuseDetection';
 import { PrescriptionCard } from '../../components/clinical/PrescriptionCard';
+import { ClinicPrescriptionHistory } from '../../components/clinical/ClinicPrescriptionHistory';
 import clsx from 'clsx';
 
 // Types
@@ -54,6 +55,7 @@ interface CompletedTest {
   id: string;
   patientName: string;
   customerPhone: string;
+  customerId?: string;
   completedAt: string;
   rightEye: { sphere: number | null; cylinder: number | null; axis: number | null };
   leftEye: { sphere: number | null; cylinder: number | null; axis: number | null };
@@ -86,6 +88,14 @@ export function ClinicalPage() {
     customerId: string;
   } | null>(null);
   const [currentTestId, setCurrentTestId] = useState<string | null>(null);
+
+  // Prescription history / edit modal (bugs #1-#3): per-customer Rx view with
+  // Edit + New + Print, grouped by family member. Opened from a queue row.
+  const [rxHistoryFor, setRxHistoryFor] = useState<{
+    customerId: string;
+    customerName?: string;
+    patientId?: string;
+  } | null>(null);
 
   // Add customer modal state (replaces simple patient modal)
   const [showAddCustomerModal, setShowAddCustomerModal] = useState(false);
@@ -654,6 +664,22 @@ export function ClinicalPage() {
 
                   {/* Actions */}
                   <div className="flex items-center gap-2">
+                    {/* Prescriptions / history — view past Rx for this customer,
+                        edit them, or add a fresh one (bugs #1-#3). */}
+                    <button
+                      onClick={() =>
+                        setRxHistoryFor({
+                          customerId: linkedCustomerId || item.id,
+                          customerName: item.patientName,
+                          patientId: linkedCustomerId || item.id,
+                        })
+                      }
+                      className="btn sm"
+                      title="View / edit prescriptions"
+                    >
+                      <FileText className="w-4 h-4" />
+                      Rx history
+                    </button>
                     {item.status === 'WAITING' && canStartTest && (
                       <button
                         onClick={async () => {
@@ -731,6 +757,19 @@ export function ClinicalPage() {
                         <p className="text-gray-500">L: {formatPower(test.leftEye.sphere)} / {formatPower(test.leftEye.cylinder)}</p>
                       </div>
                       <button
+                        onClick={() =>
+                          setRxHistoryFor({
+                            customerId: test.customerId || test.id,
+                            customerName: test.patientName,
+                            patientId: test.customerId || test.id,
+                          })
+                        }
+                        className="p-2 text-gray-500 hover:text-teal-600 transition-colors"
+                        title="View / edit prescriptions"
+                      >
+                        <Eye className="w-5 h-5" />
+                      </button>
+                      <button
                         onClick={() => setPrintRxCard({
                           id: test.id,
                           patientName: test.patientName,
@@ -801,6 +840,17 @@ export function ClinicalPage() {
         patient={selectedPatient}
         optometristName={user?.name}
       />
+
+      {/* Prescription history / edit / new — per customer, grouped by family */}
+      {rxHistoryFor && (
+        <ClinicPrescriptionHistory
+          isOpen={!!rxHistoryFor}
+          onClose={() => setRxHistoryFor(null)}
+          customerId={rxHistoryFor.customerId}
+          customerName={rxHistoryFor.customerName}
+          defaultPatientId={rxHistoryFor.patientId}
+        />
+      )}
 
       {/* Add Customer Modal (replaces simple patient modal) */}
       <AddCustomerModal
