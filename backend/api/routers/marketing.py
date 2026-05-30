@@ -108,7 +108,7 @@ class RxSnoozeRequest(BaseModel):
 async def send_marketing_notification(
     req: SendNotificationRequest,
     store_id: Optional[str] = Query(None),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_roles(*_BULK_SEND_ROLES)),
 ):
     """Send a notification to a customer via WhatsApp/SMS"""
     # Rate limit to prevent notification spam
