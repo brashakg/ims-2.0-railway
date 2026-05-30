@@ -59,7 +59,7 @@ class QueueItemCreate(BaseModel):
 class EyeTestData(BaseModel):
     right_eye: dict = Field(..., alias="rightEye")
     left_eye: dict = Field(..., alias="leftEye")
-    pd: Optional[float] = None
+    pd: Optional[float] = Field(None, ge=0, le=120)
     # IPD + next-checkup so the clinical Final-Rx mirror writes the SAME parity
     # fields a POS-created prescription does. Kept as str -> no float-coercion
     # 422 on an empty value.
@@ -137,6 +137,60 @@ def format_axis_value(v) -> str:
         return str(int(round(float(v))))
     except (TypeError, ValueError):
         return ""
+
+
+def _validate_eye_test_rx(eye_label: str, eye: dict) -> None:
+    """Validate the Rx powers captured on an eye-test eye dict against the
+    canonical clinical ranges (SPH -20..+20, CYL -6..+6, AXIS 1-180 whole,
+    ADD +0.75..+3.50, all dioptric powers on the 0.25-diopter grid).
+
+    Reuses the SINGLE source-of-truth validator in prescriptions.py so the
+    eye-test capture path -- which auto-creates a prescription on completion --
+    can never persist an Rx the prescriptions endpoint would reject. Raises
+    HTTPException(422) on a violation. None / empty / "0" values are tolerated
+    (a blank cell is valid) exactly as the prescription validator does.
+
+    `eye` carries the frontend's loose shape: sphere/sph, cylinder/cyl, axis,
+    add. We normalise the alias pairs before checking.
+    """
+    from .prescriptions import _validate_rx_value
+
+    if not isinstance(eye, dict):
+        return
+
+    def _as_str(v):
+        # The shared validator takes Optional[str]; numbers stringify cleanly,
+        # None passes straight through (treated as "no value").
+        if v is None:
+            return None
+        return str(v)
+
+    pairs = (
+        ("sph", eye.get("sphere", eye.get("sph"))),
+        ("cyl", eye.get("cylinder", eye.get("cyl"))),
+        ("add", eye.get("add", eye.get("addition"))),
+    )
+    for field_name, raw in pairs:
+        try:
+            _validate_rx_value(_as_str(raw), field_name)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=f"{eye_label} {exc}")
+
+    # AXIS is a whole number 1..180. Tolerate None / "" (no value).
+    axis = eye.get("axis")
+    if axis is not None and str(axis).strip() != "":
+        try:
+            axis_int = int(round(float(axis)))
+        except (TypeError, ValueError):
+            raise HTTPException(
+                status_code=422,
+                detail=f"{eye_label} AXIS must be a whole number between 1 and 180",
+            )
+        if axis_int < 1 or axis_int > 180:
+            raise HTTPException(
+                status_code=422,
+                detail=f"{eye_label} AXIS must be a whole number between 1 and 180",
+            )
 
 
 def _to_camel_case(snake_str: str) -> str:
@@ -402,6 +456,14 @@ async def complete_test(
     current_user: dict = Depends(require_roles(*_CLINICAL_ROLES)),
 ):
     """Complete an eye test with prescription data"""
+    # Validate the captured Rx powers against the canonical clinical ranges
+    # BEFORE anything is persisted. This path auto-creates a prescription on
+    # success, so an out-of-range SPH/CYL/AXIS/ADD here would otherwise be
+    # saved into an Rx the prescriptions endpoint would reject -- closing that
+    # write-path gap. Raises 422 on a violation.
+    _validate_eye_test_rx("Right eye", data.right_eye)
+    _validate_eye_test_rx("Left eye", data.left_eye)
+
     test_repo = get_eye_test_repository()
     queue_repo = get_eye_test_queue_repository()
 
