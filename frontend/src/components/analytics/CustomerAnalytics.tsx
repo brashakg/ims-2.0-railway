@@ -90,7 +90,7 @@ export function CustomerAnalytics({
   return (
     <div className="space-y-6">
       {/* KPI Cards */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 tablet:grid-cols-4 gap-4">
         <div className="bg-white rounded-lg border border-gray-200 p-4">
           <p className="text-sm font-medium text-gray-600 mb-2">Total Customers</p>
           <p className="text-3xl font-bold text-gray-900">{analytics.totalCustomers}</p>

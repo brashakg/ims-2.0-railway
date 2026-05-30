@@ -63,7 +63,7 @@ export function PriceBandCard({ storeId }: { storeId?: string }) {
       {data && !loading && (
         <>
           {/* Movement summary */}
-          <div className="grid grid-cols-3 gap-3 mb-4">
+          <div className="grid grid-cols-1 tablet:grid-cols-3 gap-3 mb-4">
             <div className="bg-emerald-50 rounded p-3 border border-emerald-100">
               <p className="text-xs text-emerald-700 inline-flex items-center gap-1">
                 <ArrowUpRight className="w-3 h-3" /> Premiumized

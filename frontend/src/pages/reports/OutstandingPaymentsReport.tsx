@@ -170,7 +170,7 @@ export default function OutstandingPaymentsReport() {
         </div>
 
         {/* Age buckets */}
-        <div className="grid grid-cols-5 gap-2">
+        <div className="grid grid-cols-3 tablet:grid-cols-5 gap-2">
           {(Object.entries(buckets) as [AgeBucket, { count: number; total: number }][]).map(([bucket, data]) => (
             <button key={bucket} onClick={() => setSelectedBucket(selectedBucket === bucket ? 'ALL' : bucket)}
               className={clsx('p-2.5 rounded-lg border text-center transition-all',
