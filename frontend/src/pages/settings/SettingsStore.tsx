@@ -537,10 +537,16 @@ export function DiscountSection() {
         adminDiscountApi.getRoleDiscountCaps().catch(() => null),
         adminDiscountApi.getTierDiscounts().catch(() => null),
       ]);
-      if (caps?.rules) {
+      // Backend returns { role_caps: { ROLE: max_discount_number } } — a single
+      // enforced cap per role (shown as the "Mass" column). The old code read
+      // caps.rules.{mass,premium,luxury}, which the endpoint never returns, so
+      // saved caps never reloaded. premium/luxury are not yet persisted/enforced
+      // server-side, so they keep their defaults until that's wired.
+      const capsMap = caps?.role_caps;
+      if (capsMap) {
         setDiscounts(prev => prev.map(d => {
-          const cap = caps.rules[d.roleKey];
-          return cap ? { ...d, mass: cap.mass ?? d.mass, premium: cap.premium ?? d.premium, luxury: cap.luxury ?? d.luxury } : d;
+          const m = capsMap[d.roleKey];
+          return typeof m === 'number' ? { ...d, mass: m } : d;
         }));
       }
     } catch {
