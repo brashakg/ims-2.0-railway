@@ -200,7 +200,7 @@ export function VendorReturns() {
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="text-3xl font-bold text-gray-900">Vendor Returns</h1>
           <p className="text-gray-500">Manage defective products and debit notes</p>
@@ -215,7 +215,7 @@ export function VendorReturns() {
       </div>
 
       {/* Summary Stats */}
-      <div className="grid grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 tablet:grid-cols-4 gap-4">
         <div className="bg-white border border-gray-200 rounded-lg p-4">
           <div className="flex items-center justify-between mb-2">
             <p className="text-gray-500 text-sm">Total Returns</p>

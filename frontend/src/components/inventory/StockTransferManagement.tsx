@@ -252,7 +252,7 @@ export function StockTransferManagement() {
                       {getStatusBadge(transfer.status)}
                     </div>
 
-                    <div className="flex items-center gap-4 text-sm text-gray-600">
+                    <div className="flex flex-wrap items-center gap-4 text-sm text-gray-600">
                       <div className="flex items-center gap-1.5">
                         <Building2 className="w-4 h-4" />
                         <span>
@@ -377,8 +377,8 @@ export function StockTransferManagement() {
               )}
 
               {/* Items Table */}
-              <div className="border border-gray-200 rounded-lg overflow-hidden">
-                <table className="w-full">
+              <div className="border border-gray-200 rounded-lg overflow-x-auto">
+                <table className="w-full min-w-[400px]">
                   <thead className="bg-gray-50 border-b border-gray-200">
                     <tr>
                       <th className="px-4 py-3 text-left text-sm font-medium text-gray-700">
