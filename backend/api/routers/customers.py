@@ -698,6 +698,73 @@ def _post_credit_entry(
     if existing is None:
         raise HTTPException(status_code=404, detail="Customer not found")
 
+    et = (entry_type or "").upper()
+
+    # ------------------------------------------------------------------
+    # REDEEM (debit) -> ATOMIC guarded decrement, no double-spend.
+    # ------------------------------------------------------------------
+    # The bug being fixed: the old code recomputed balance_after from a STALE
+    # pre-read snapshot, so two concurrent redeems both read the same balance,
+    # both passed make_entry's Python check, and both wrote an absolute
+    # store_credit value -- the second clobbering the first and effectively
+    # spending the same credit twice. Now the spend is a single conditional
+    # decrement filtered on store_credit >= amount (atomic in Mongo); the
+    # returned balance is read from the POST-update document, never a snapshot.
+    if et == scl.REDEEMED:
+        try:
+            amt = round(float(body.amount), 2)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="amount must be a number")
+        if amt <= 0:
+            raise HTTPException(status_code=400, detail="amount must be greater than 0")
+
+        debited = repo.try_debit_store_credit(customer_id, amt)
+        if debited is None:
+            # No document matched the store_credit >= amount guard -> insufficient
+            # (or a concurrent redeem won the race for the last rupees).
+            available = _current_credit_balance(customer_id, existing)
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"insufficient store credit: requested {amt:.2f}, "
+                    f"available {available:.2f}"
+                ),
+            )
+        if debited == getattr(repo, "DEBIT_NO_ATOMIC", "__no_atomic__"):
+            # Collection can't do a conditional update (minimal stand-in). Fall
+            # back to the validated read-modify-write path below.
+            new_balance = None
+        else:
+            # Authoritative post-update balance from the decremented document.
+            new_balance = float((debited or {}).get("store_credit", 0) or 0)
+
+        if new_balance is not None:
+            # Build the ledger row whose balance_after matches the atomic result.
+            entry = scl.make_entry(
+                customer_id=customer_id,
+                entry_type=scl.REDEEMED,
+                amount=amt,
+                current_balance=new_balance + amt,  # pre-debit balance
+                reason=body.reason or "",
+                ref=body.ref,
+                store_id=current_user.get("active_store_id"),
+                user_id=current_user.get("user_id"),
+            )
+            entry["balance_after"] = round(new_balance, 2)
+            coll = _ledger_coll()
+            if coll is not None:
+                try:
+                    coll.insert_one(dict(entry))
+                except Exception:  # noqa: BLE001
+                    pass
+            entry.pop("_id", None)
+            return {"entry": entry, "balance": entry["balance_after"]}
+        # else: fall through to the legacy snapshot path (no-atomic fallback).
+
+    # ------------------------------------------------------------------
+    # ISSUE / ADJUST (credit), or no-atomic REDEEM fallback.
+    # A credit cannot overspend, so the snapshot path is safe for it.
+    # ------------------------------------------------------------------
     balance = _current_credit_balance(customer_id, existing)
     try:
         entry = scl.make_entry(

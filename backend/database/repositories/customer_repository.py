@@ -101,7 +101,56 @@ class CustomerRepository(BaseRepository):
             return True
         except:
             return False
-    
+
+    # Sentinel: the collection had no atomic-guard support (minimal/mock coll),
+    # so the caller must fall back to the legacy snapshot path rather than treat
+    # the result as "insufficient".
+    DEBIT_NO_ATOMIC = "__no_atomic__"
+
+    def try_debit_store_credit(self, customer_id: str, amount: float):
+        """Atomically debit `amount` of store credit, guard-in-the-filter
+        (mirrors the voucher redeem). The decrement runs ONLY when the filter
+        still sees store_credit >= amount at modify time, so two concurrent
+        redeems can never both succeed and drive the balance negative.
+
+        Returns:
+          * the POST-update customer doc (dict) on success -> read the fresh
+            balance from doc["store_credit"], never a stale snapshot;
+          * None when the credit was insufficient (no document matched) -> the
+            caller surfaces a 400;
+          * DEBIT_NO_ATOMIC when the bound collection cannot do a conditional
+            update (a minimal stand-in) -> the caller falls back to the legacy
+            read-modify-write path instead of wrongly rejecting.
+
+        `amount` must be > 0. A conditional update_one (atomic in Mongo) is used
+        rather than find_one_and_update so the guard works on any collection
+        that honours a filtered update; the fresh doc is then re-read.
+        """
+        try:
+            amt = round(float(amount), 2)
+        except (TypeError, ValueError):
+            return None
+        if amt <= 0:
+            return None
+
+        updater = getattr(self.collection, "update_one", None)
+        if not callable(updater):
+            return self.DEBIT_NO_ATOMIC
+        try:
+            res = updater(
+                {"customer_id": customer_id, "store_credit": {"$gte": amt}},
+                {"$inc": {"store_credit": -amt}},
+            )
+        except Exception:
+            # Driver/mock can't evaluate the conditional -> let caller fall back.
+            return self.DEBIT_NO_ATOMIC
+        matched = getattr(res, "matched_count", None)
+        if matched is None:
+            matched = getattr(res, "modified_count", 0)
+        if not matched:
+            return None
+        return self.find_by_id(customer_id)
+
     def update_total_purchases(self, customer_id: str, amount: float) -> bool:
         try:
             self.collection.update_one(

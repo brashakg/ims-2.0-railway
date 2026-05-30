@@ -145,8 +145,73 @@ def test_exchange_rejects_negative():
 # ============================================================================
 
 
+# The returns router now requires every return line to resolve to a real
+# original order line (over-refund guard), so the fake order is auto-seeded with
+# a generous line (qty 100, returned_qty 0) for the identity these tests return
+# against (order_item_id=li1 / product_id=PRD-1).
+_DEFAULT_ORDER_ITEMS = [
+    {"item_id": "li1", "product_id": "PRD-1", "quantity": 100, "returned_qty": 0},
+]
+
+
+class _FakeOrdersColl:
+    """Fake `orders` collection modelling the array-update used by the returns
+    atomic returnable-qty claim (items.$elemMatch guard + positional
+    items.$.returned_qty $inc)."""
+
+    def __init__(self, orders):
+        self.docs = [dict(o) for o in orders]
+
+    @staticmethod
+    def _elem_matches(elem, cond):
+        for key, c in cond.items():
+            if key == "$or":
+                if not any(_FakeOrdersColl._elem_matches(elem, sub) for sub in c):
+                    return False
+                continue
+            val = elem.get(key)
+            if isinstance(c, dict):
+                for op, operand in c.items():
+                    if op == "$lte" and not (val is not None and val <= operand):
+                        return False
+                    if op == "$lt" and not (val is not None and val < operand):
+                        return False
+                    if op == "$gte" and not (val is not None and val >= operand):
+                        return False
+                    if op == "$exists" and (bool(operand) != (key in elem)):
+                        return False
+            elif val != c:
+                return False
+        return True
+
+    def find_one_and_update(self, query, update, return_document=None):
+        order_id = (query or {}).get("order_id")
+        elem_cond = ((query or {}).get("items") or {}).get("$elemMatch") or {}
+        inc = (update or {}).get("$inc", {}) or {}
+        for d in self.docs:
+            if d.get("order_id") != order_id:
+                continue
+            for line in d.get("items") or []:
+                if self._elem_matches(line, elem_cond):
+                    for field, delta in inc.items():
+                        leaf = field.split(".")[-1]
+                        line[leaf] = (line.get(leaf) or 0) + delta
+                    out = dict(d)
+                    out.pop("_id", None)
+                    return out
+            return None
+        return None
+
+
 class _FakeOrderRepo:
     def __init__(self, order=None):
+        if order is not None:
+            order = dict(order)
+            if "items" not in order:
+                order["items"] = [dict(li) for li in _DEFAULT_ORDER_ITEMS]
+            self.collection = _FakeOrdersColl([order])
+        else:
+            self.collection = _FakeOrdersColl([])
         self._order = order
 
     def find_by_id(self, oid):

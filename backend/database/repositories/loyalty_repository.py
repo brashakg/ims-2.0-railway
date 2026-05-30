@@ -98,6 +98,70 @@ class LoyaltyAccountRepository(BaseRepository):
         except Exception:
             return self.find_by_id(customer_id)
 
+    def try_debit(
+        self,
+        customer_id: str,
+        points: int,
+        delta_lifetime_redeemed: int = 0,
+        delta_lifetime_earned: int = 0,
+        new_tier: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Atomically debit `points` from a customer's balance, guard-in-the-
+        filter (mirrors the voucher redeem). The decrement happens ONLY when the
+        filter still sees balance_points >= points at modify time, so two
+        concurrent redemptions that together exceed the balance can never both
+        succeed -- the loser matches no document.
+
+        `points` MUST be a positive number of points to remove. Returns the
+        POST-update account doc on success, or None when the balance was
+        insufficient (the caller surfaces a 400/409) OR when the collection
+        lacks atomic find_one_and_update (caller falls back / fails closed).
+
+        Optional lifetime counters / tier are applied in the SAME write so the
+        debit and its bookkeeping are indivisible.
+        """
+        points = int(points)
+        if points <= 0:
+            # Nothing to debit -> treat as a no-op success so callers don't 400
+            # on a zero debit. (redeem already rejects points <= 0 upstream.)
+            return self.find_by_id(customer_id)
+
+        foau = getattr(self.collection, "find_one_and_update", None)
+        if not callable(foau):
+            # Minimal/mock collection without atomic ops -> signal no-atomic so
+            # the caller can fail closed rather than silently double-spend.
+            return None
+
+        inc: Dict[str, int] = {"balance_points": -points}
+        if delta_lifetime_redeemed:
+            inc["lifetime_redeemed"] = int(delta_lifetime_redeemed)
+        if delta_lifetime_earned:
+            inc["lifetime_earned"] = int(delta_lifetime_earned)
+
+        set_block: Dict[str, Any] = {
+            "last_activity_at": datetime.now(),
+            "updated_at": datetime.now(),
+        }
+        if new_tier:
+            set_block["tier"] = new_tier
+
+        try:
+            try:
+                from pymongo import ReturnDocument
+
+                after = ReturnDocument.AFTER
+            except Exception:  # noqa: BLE001
+                after = True
+            return foau(
+                {"customer_id": customer_id, "balance_points": {"$gte": points}},
+                {"$inc": inc, "$set": set_block},
+                return_document=after,
+            )
+        except Exception:
+            # An unexpected driver error must NOT silently fall through to an
+            # unconditional debit. Fail closed -> None (caller rejects).
+            return None
+
 
 # ============================================================================
 # Ledger repo
