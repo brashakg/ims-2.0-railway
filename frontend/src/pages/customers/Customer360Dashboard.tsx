@@ -460,7 +460,7 @@ function CustomerHeaderCard({ customer, stats, loyaltyData }: CustomerHeaderCard
 
       {/* Key Metrics */}
       {stats && (
-        <div className="grid grid-cols-5 gap-4 pt-4 border-t border-gray-200">
+        <div className="grid grid-cols-2 tablet:grid-cols-5 gap-4 pt-4 border-t border-gray-200">
           <div className="text-center">
             <p className="text-gray-500 text-sm">Customer Since</p>
             <p className="text-gray-900 font-semibold">{new Date(stats.customerSinceDate).toLocaleDateString()}</p>
