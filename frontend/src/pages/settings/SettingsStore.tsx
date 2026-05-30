@@ -9,6 +9,7 @@ import {
 } from 'lucide-react';
 import clsx from 'clsx';
 import { useToast } from '../../context/ToastContext';
+import { validatePincode, validatePhone, validateGeoRadius, firstError } from '../../utils/validators';
 import {
   adminStoreApi,
   adminBrandApi,
@@ -99,6 +100,12 @@ export function StoreManagementSection() {
   };
 
   const handleSaveStore = async (storeData: Partial<StoreData>) => {
+    const fieldErr = firstError(
+      validatePincode(storeData.pincode),
+      validatePhone(storeData.phone),
+      validateGeoRadius(storeData.geoFenceRadius),
+    );
+    if (fieldErr) { toast.error(fieldErr); return; }
     try {
       setIsLoading(true);
       // Canonical store path: orgStoreApi -> POST/PUT /stores with the backend

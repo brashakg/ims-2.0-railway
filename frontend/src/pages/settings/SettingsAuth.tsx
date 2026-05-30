@@ -9,6 +9,7 @@ import {
 import clsx from 'clsx';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
+import { validatePhone } from '../../utils/validators';
 import { adminUserApi, adminStoreApi } from '../../services/api';
 import type { StoreData, UserData } from './settingsTypes';
 import {
@@ -102,6 +103,8 @@ export function UserManagementSection() {
   };
 
   const handleSaveUser = async (userData: Partial<UserData>, password?: string) => {
+    const phoneErr = validatePhone(userData.phone);
+    if (phoneErr) { toast.error(phoneErr); return; }
     try {
       setIsLoading(true);
       const apiData = {
