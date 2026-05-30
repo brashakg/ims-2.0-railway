@@ -184,7 +184,7 @@ export function GuidedAddProduct() {
       );
 
       toast.success('Product created successfully!');
-      navigate('/catalog/inventory');
+      navigate('/inventory');
     } catch {
       toast.error('Failed to create product. Please try again.');
     } finally {
