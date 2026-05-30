@@ -50,3 +50,28 @@ Note (FE/DB hygiene, not a server break): XSS/script/10k-char/unicode/null-byte 
 - **After #363 merges:** B-2 (back-date Rx — conflicts with prescription PR).
 - **Safe orders validation (additive 422s, no valid-order behavior change):** C-3, C-7, C-8.
 - **Needs user decision (revenue/tax/control/compliance — "ask before touching POS"):** C-1, C-2, C-4, C-5, C-6, C-9; plus policy B-6.
+
+---
+## RBAC verification waves (code-level, no Mongo) — 2026-05-30
+
+**Security review of #364 middleware (read-only):** verdict SAFE; P1 none. Fixed in **#366**: (P2) empty/absent-roles token was hard-403'd on AUTHENTICATED routes -> now defers; (P2) PUT /prescriptions/{id} now self_enforced. P3 cosmetic (investor `code` body on role-gated writes; workshop 404-vs-403 order) — noted, not regressions.
+
+**RBAC access-matrix live test:** 375 passed / 4 xfail across ~55 (role,endpoint) pairs + 63 policy-consistency cases (test_rbac_access_matrix.py). Divergences:
+- FALSE POSITIVE: GET /expenses/aging — merged policy already ['ACCOUNTANT','ADMIN'] (agent read a stale copy). No fix.
+- REAL (benign direction — route enforces, policy too permissive): **payroll policy rows list AREA_MANAGER/STORE_MANAGER but routes gate to ADMIN/ACCOUNTANT (`_RUN_ROLES`) or ADMIN-only.** Confirmed stricter gates: POST /run, POST /approve, GET /tally/salary-jv, GET /registers/pf-ecr (=_RUN_ROLES); POST /config, PUT /config/{id}, POST /config/bulk, PUT /pt-slabs/{state}, POST /pt-slabs/seed, POST /lock (=ADMIN). The 4-role rows (lines ~635-661) overstate access -> middleware doesn't add defense for those roles (route still 403s, so no hole). **TODO: full payroll (and cross-module) policy-vs-gate reconciliation** — fix on the matrix-test branch after #366, convert the 4 xfails to positive denied-asserts, and re-point the matrix PUT-/prescriptions case to the now-self_enforced clinical-403.
+
+---
+## Business-rule + payroll engine audit (code-level, no Mongo) — 2026-05-30
+
+Canonical pure-function engines verified SOLID (payroll EPF/EPS/ESI/PT/proration incl. 15k cap + 21k ESI gate inclusive; pricing_caps "lower wins" + boundaries; role_caps; sales GST CGST+SGST residual split always reconciles; returns; Rx 0.25-grid; payout; lens). Findings:
+
+- **D-1 [P1] POS discount caps WRONG + violate SYSTEM_INTENT 3.** `orders.py:30-35` local `CATEGORY_DISCOUNT_CAPS` = MASS 10% (s/b 15%), PREMIUM 5% (s/b 20%), LUXURY 2% (s/b 5%), SERVICE missing, **no luxury brand caps**. Fallback `.get(cat,10.0)` + `discount_category or category` means a `category="FRAME"` product caps at 10% not 20%. Breaks legit discounts (StoreMgr 18% on PREMIUM frame -> 403 "limit 5%"). FIX: delete local table; use `pricing_caps.effective_discount_cap(discount_category, brand)` so brand caps apply. **In orders.py -> fold into orders cluster (orders-delta agent owns the file).**
+- **D-2 [P2] add-item-to-draft (`orders.py:1423-1438`) applies ONLY role cap** (no category/brand cap) -> SALES_STAFF can 10% a Cartier line (s/b 2%). Inconsistent with create_order. FIX: shared helper composing min(role,category,brand). **Fold into orders cluster.**
+- **D-3 [P3] ITC purchase register CGST/SGST drift +-1 paisa** (`itc_reconcile.py:145-148`, independent round). FIX: residual trick like sales side. (Independent file -> small fix.)
+- **D-4 [P3] payroll negative wage components flow through silently** (`payroll_engine.py` `_earnings`) -> negative gross/net, no raise. FIX: reject/clamp negative earnings. (Independent file -> small fix.)
+
+---
+## Session outcome (PRs)
+
+Shipped to main: **#362** customer search (family) · **#363** clinic+POS Rx flow · **#364** RBAC enforcement middleware · **#365** back-dated Rx · **#366** RBAC follow-up (empty-roles defer + PUT-Rx self_enforced) · **#367** customer data integrity (relation/upload-503/validation + B2B-GSTIN + Indian-mobile) · **#369** RBAC access-matrix test + payroll policy reconciliation.
+Open: **#368** orders/POS hardening (C-1..C-9 + D-1/D-2 discount caps) — held for user review (revenue) · **#370** audit P3 (ITC residual + payroll negative-wage raise).
