@@ -762,7 +762,7 @@ export function OrdersPage() {
                 <label className="block text-sm font-medium text-gray-700 mb-1">
                   Payment Method
                 </label>
-                <div className="grid grid-cols-4 gap-2">
+                <div className="grid grid-cols-2 tablet:grid-cols-4 gap-2">
                   {(['CASH', 'CARD', 'UPI', 'BANK_TRANSFER'] as const).map(method => (
                     <button
                       key={method}
