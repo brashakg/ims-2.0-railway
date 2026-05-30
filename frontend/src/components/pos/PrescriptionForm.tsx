@@ -68,6 +68,9 @@ interface PrescriptionFormProps {
   // capture). POS passes false: the POS create path maps spectacle fields
   // only, so the toggle is hidden there to avoid silently dropping CL data.
   allowContactLens?: boolean;
+  // Label for the primary action. Defaults to "Add to Order" (POS context).
+  // Clinic create/edit passes "Save prescription" / "Save changes".
+  submitLabel?: string;
 }
 
 export function PrescriptionForm({
@@ -75,6 +78,7 @@ export function PrescriptionForm({
   onCancel,
   initialData,
   allowContactLens = true,
+  submitLabel = 'Add to Order',
 }: PrescriptionFormProps) {
   const [prescription, setPrescription] = useState<PrescriptionData>(
     initialData || {}
@@ -791,7 +795,7 @@ export function PrescriptionForm({
               className="btn-primary flex-1 justify-center"
             >
               <Plus className="w-5 h-5" />
-              Add to Order
+              {submitLabel}
             </button>
           </div>
         </div>

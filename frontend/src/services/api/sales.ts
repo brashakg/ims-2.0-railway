@@ -86,7 +86,7 @@ function mapEye(eye: any): any {
   };
 }
 
-function mapRx(rx: any): any {
+export function mapRx(rx: any): any {
   if (!rx || typeof rx !== 'object') return rx;
   return {
     ...rx,
@@ -194,6 +194,19 @@ export const prescriptionApi = {
     // 422'd with "field required: right_eye, left_eye", which is why adding a
     // prescription failed wherever the PrescriptionForm was used.
     const response = await api.post('/prescriptions', toPrescriptionCreatePayload(data));
+    return response.data;
+  },
+
+  // Edit an existing prescription (clinic Edit flow). PUT updates only the
+  // mutable Rx fields; identity/provenance (patient_id/customer_id/store_id)
+  // is immutable server-side. Accepts the SAME flat PrescriptionForm keys as
+  // createPrescription and normalises them to nested right_eye/left_eye.
+  updatePrescription: async (prescriptionId: string, data: any) => {
+    const payload = toPrescriptionCreatePayload(data);
+    // PrescriptionUpdate doesn't take identity fields; strip them so an edit
+    // never tries (and silently no-ops) to reassign the Rx.
+    const { patient_id: _p, customer_id: _c, store_id: _s, source: _src, rx_kind: _k, ...editable } = payload || {};
+    const response = await api.put(`/prescriptions/${prescriptionId}`, editable);
     return response.data;
   },
 

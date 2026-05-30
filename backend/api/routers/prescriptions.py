@@ -177,6 +177,59 @@ class PrescriptionCreate(BaseModel):
     remarks: Optional[str] = None
 
 
+class EyeDataEdit(BaseModel):
+    """Same shape as EyeData but WITHOUT the field-level validators.
+
+    On an edit we want a clean 400 (a deliberate business-rule rejection) for an
+    out-of-range power, not Pydantic's 422 body-parse error. So the eye is
+    accepted as-is here, then the handler runs the SAME `_validate_rx_value`
+    ranges explicitly and raises HTTPException(400). axis stays Field-bounded
+    (1-180) because that's a structural constraint, identical to EyeData.
+    """
+
+    sph: Optional[str] = None
+    cyl: Optional[str] = None
+    axis: Optional[int] = Field(None, ge=1, le=180)
+    add: Optional[str] = None
+    pd: Optional[str] = None
+    prism: Optional[str] = None
+    base: Optional[str] = None
+    acuity: Optional[str] = None
+
+
+class PrescriptionUpdate(BaseModel):
+    """Editable fields of an existing prescription (clinic Edit flow).
+
+    Every field is optional: the handler patches ONLY the keys the caller sends
+    (exclude_unset), so a partial edit never blanks out fields it didn't touch.
+    The eye blocks are range-checked by the SAME `_validate_rx_value` ranges
+    (SPH -20..+20, CYL -6..+6, AXIS 1-180, ADD +0.75..+3.50, 0.25 steps) that
+    guard create -- an out-of-range Rx can't be saved here (rejected 400).
+
+    Identity / provenance fields (patient_id, customer_id, store_id, source,
+    rx_kind, prescription_number, created_by) are intentionally NOT editable:
+    editing a prescription must never silently re-assign it to another patient
+    or rewrite who/where it came from. Create a new Rx for that instead.
+    """
+
+    right_eye: Optional[EyeDataEdit] = None
+    left_eye: Optional[EyeDataEdit] = None
+    cl_right: Optional[CLEyeData] = None
+    cl_left: Optional[CLEyeData] = None
+    cl_brand: Optional[str] = None
+    cl_series: Optional[str] = None
+    modality: Optional[str] = None
+    color: Optional[str] = None
+    lens_recommendation: Optional[str] = None
+    coating_recommendation: Optional[str] = None
+    ipd: Optional[str] = None
+    next_checkup: Optional[str] = None
+    remarks: Optional[str] = None
+    optometrist_id: Optional[str] = None
+    # Re-dating an edit: when validity_months changes we recompute expiry_date.
+    validity_months: Optional[int] = Field(default=None, ge=6, le=24)
+
+
 # ============================================================================
 # HELPER FUNCTIONS
 # ============================================================================
@@ -610,6 +663,103 @@ async def create_prescription(
         "prescription_id": str(uuid.uuid4()),
         "prescription_number": generate_rx_number(),
         "message": "Prescription created",
+    }
+
+
+@router.put("/{prescription_id}")
+async def update_prescription(
+    prescription_id: str,
+    rx: PrescriptionUpdate,
+    current_user: dict = Depends(get_current_user),
+):
+    """Edit an existing prescription's mutable Rx fields (clinic Edit flow).
+
+    Gated identically to create_prescription (OPTOMETRIST / STORE_MANAGER /
+    ADMIN / SUPERADMIN). Re-runs the canonical Rx-range validation
+    (`_validate_rx_value`: SPH -20..+20, CYL -6..+6, ADD +0.75..+3.50 in 0.25
+    steps; AXIS 1-180) so an edit can never persist an invalid Rx. Only the keys
+    the caller sends are written (PATCH-style merge), so a partial edit never
+    blanks fields it didn't touch. Identity/provenance fields are immutable.
+    """
+    # --- Role gate (same set create_prescription uses) ---
+    user_roles = current_user.get("roles", [])
+    CLINICAL_ROLES = {"SUPERADMIN", "ADMIN", "STORE_MANAGER", "OPTOMETRIST"}
+    if not (set(user_roles) & CLINICAL_ROLES):
+        raise HTTPException(
+            status_code=403,
+            detail="Only optometrists and managers can edit prescriptions. "
+            "Your role does not have clinical access.",
+        )
+
+    repo = get_prescription_repository()
+    if repo is None:
+        raise HTTPException(status_code=503, detail="Database not available")
+
+    existing = repo.find_by_id(prescription_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="Prescription not found")
+
+    # Only the explicitly-supplied keys are touched (PATCH-style merge).
+    body = rx.model_dump(exclude_unset=True)
+    if not body:
+        raise HTTPException(status_code=400, detail="No fields to update")
+
+    # Re-validate spectacle powers against the canonical clinical ranges. We
+    # call the SAME `_validate_rx_value` the create path / EyeData validators
+    # use, but surface a 400 (deliberate business rejection) instead of 422.
+    def _validate_eye(eye_label: str, eye: dict):
+        if not isinstance(eye, dict):
+            return
+        try:
+            _validate_rx_value(eye.get("sph"), "sph")
+            _validate_rx_value(eye.get("cyl"), "cyl")
+            _validate_rx_value(eye.get("add"), "add")
+            _validate_rx_value(eye.get("pd"), "pd")
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=f"{eye_label}: {exc}")
+        axis = eye.get("axis")
+        if axis is not None and (not isinstance(axis, int) or axis < 1 or axis > 180):
+            raise HTTPException(
+                status_code=400,
+                detail=f"{eye_label} AXIS must be a whole number between 1 and 180",
+            )
+
+    if "right_eye" in body:
+        _validate_eye("Right eye", body["right_eye"])
+    if "left_eye" in body:
+        _validate_eye("Left eye", body["left_eye"])
+
+    # Contact-lens block (only when the edit touches CL fields).
+    if body.get("modality") and body["modality"] not in CL_MODALITIES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid modality. Allowed: {', '.join(CL_MODALITIES)}",
+        )
+    if "cl_right" in body:
+        _validate_cl_eye("Right eye", rx.cl_right)
+    if "cl_left" in body:
+        _validate_cl_eye("Left eye", rx.cl_left)
+
+    # If validity changed, recompute expiry off the original test/created date
+    # so the edit stays internally consistent (expiry = test_date + N months).
+    update_doc = dict(body)
+    if rx.validity_months is not None:
+        base_dt = _parse_dt(
+            existing.get("prescription_date")
+            or existing.get("test_date")
+            or existing.get("created_at")
+        ) or datetime.now()
+        update_doc["expiry_date"] = _add_months(base_dt, rx.validity_months).isoformat()
+
+    update_doc["updated_by"] = current_user.get("user_id")
+    update_doc["updated_at"] = datetime.now().isoformat()
+
+    repo.update(prescription_id, update_doc)
+    refreshed = repo.find_by_id(prescription_id) or {**existing, **update_doc}
+    return {
+        "prescription_id": prescription_id,
+        "message": "Prescription updated",
+        "prescription": refreshed,
     }
 
 
