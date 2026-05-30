@@ -44,6 +44,7 @@ const ClinicalPage = lazy(() => import('./pages/clinical/ClinicalPage').then(m =
 const NewEyeTestPage = lazy(() => import('./pages/clinical/NewEyeTestPage').then(m => ({ default: m.NewEyeTestPage })));
 const TestHistoryPage = lazy(() => import('./pages/clinical/TestHistoryPage').then(m => ({ default: m.TestHistoryPage })));
 const PrescriptionsPage = lazy(() => import('./pages/clinical/PrescriptionsPage').then(m => ({ default: m.PrescriptionsPage })));
+const FamilyRxPage = lazy(() => import('./pages/clinical/FamilyRxPage').then(m => ({ default: m.FamilyRxPage })));
 const ContactLensFittingPage = lazy(() => import('./pages/clinical/ContactLensFittingPage').then(m => ({ default: m.ContactLensFittingPage })));
 const WorkshopPage = lazy(() => import('./pages/workshop/WorkshopPage').then(m => ({ default: m.WorkshopPage })));
 const PurchaseManagementPage = lazy(() => import('./pages/purchase/PurchaseManagementPage').then(m => ({ default: m.PurchaseManagementPage })));
@@ -513,6 +514,16 @@ function App() {
                         allowedRoles={['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'OPTOMETRIST']}
                       >
                         <PrescriptionsPage />
+                      </ProtectedRoute>
+                    }
+                  />
+                  <Route
+                    path="clinical/family-rx"
+                    element={
+                      <ProtectedRoute
+                        allowedRoles={['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'OPTOMETRIST']}
+                      >
+                        <FamilyRxPage />
                       </ProtectedRoute>
                     }
                   />

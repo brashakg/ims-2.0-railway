@@ -252,7 +252,57 @@ export const prescriptionApi = {
       visits: number;
     };
   },
+
+  // Family Rx view: a customer account's prescriptions grouped by family member
+  // (patient), each row annotated with expiry_date + is_valid. Patients with no
+  // Rx are still listed; legacy/imported Rx whose patient_id isn't on the account
+  // surface under an "Unlinked patient" group. Backend ships raw snake_case
+  // prescription docs (right_eye.sph / left_eye.sph etc.) — the FamilyRxPage
+  // tolerates both snake/camel via its own reader, so we pass them through as-is.
+  getFamilyRx: async (customerId: string) => {
+    const response = await api.get(`/prescriptions/family/${customerId}`);
+    return response.data as FamilyRxResponse;
+  },
 };
+
+// ---- Family Rx response shape (GET /prescriptions/family/{customer_id}) ------
+export interface FamilyRxPrescription {
+  prescription_id?: string;
+  patient_id?: string | null;
+  patient_name?: string | null;
+  test_date?: string | null;
+  created_at?: string | null;
+  optometrist_name?: string | null;
+  doctor_name?: string | null;
+  validity_months?: number | null;
+  expiry_date: string | null;
+  is_valid: boolean | null;
+  // Eye blocks arrive snake_case from Mongo; keys vary (sph/sphere, cyl/cylinder,
+  // add/addition). Kept loose so the renderer can read whichever is present.
+  right_eye?: Record<string, unknown> | null;
+  left_eye?: Record<string, unknown> | null;
+  pd?: string | number | null;
+  [key: string]: unknown;
+}
+
+export interface FamilyRxMember {
+  patient_id: string | null;
+  name: string | null;
+  relation: string | null;
+  dob: string | null;
+  prescription_count: number;
+  valid_count: number;
+  latest: FamilyRxPrescription | null;
+  prescriptions: FamilyRxPrescription[];
+}
+
+export interface FamilyRxResponse {
+  customer_id: string;
+  customer_name?: string | null;
+  members: FamilyRxMember[];
+  member_count: number;
+  total_prescriptions: number;
+}
 
 export interface PrescriptionEyeData {
   sphere?: number | null;
