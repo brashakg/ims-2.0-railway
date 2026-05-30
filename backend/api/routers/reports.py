@@ -17,6 +17,7 @@ from ..dependencies import (
     get_task_repository,
     get_attendance_repository,
     get_db,
+    validate_store_access,
 )
 
 router = APIRouter()
@@ -410,10 +411,10 @@ async def sales_by_salesperson(
     store_id: Optional[str] = Query(None),
     from_date: date = Query(...),
     to_date: date = Query(...),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_roles(*_REPORT_FINANCE_ROLES)),
 ):
-    """Get sales grouped by salesperson"""
-    active_store = store_id or current_user.get("active_store_id")
+    """Get sales grouped by salesperson (management report; store-scoped)."""
+    active_store = validate_store_access(store_id, current_user)
     order_repo = get_order_repository()
 
     if order_repo is None:
@@ -522,10 +523,10 @@ async def inventory_summary(
 @router.get("/inventory/valuation")
 async def inventory_valuation(
     store_id: Optional[str] = Query(None),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_roles(*_REPORT_FINANCE_ROLES)),
 ):
-    """Get inventory valuation by category"""
-    active_store = store_id or current_user.get("active_store_id")
+    """Get inventory valuation by category (management report; store-scoped)."""
+    active_store = validate_store_access(store_id, current_user)
     stock_repo = get_stock_repository()
 
     if stock_repo is None:
@@ -1241,10 +1242,10 @@ async def staff_ranking(
     store_id: Optional[str] = Query(None),
     from_date: date = Query(...),
     to_date: date = Query(...),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_roles(*_REPORT_FINANCE_ROLES)),
 ):
-    """Staff performance ranking (sales, orders, avg bill)"""
-    active_store = store_id or current_user.get("active_store_id")
+    """Staff performance ranking (sales, orders, avg bill); store-scoped."""
+    active_store = validate_store_access(store_id, current_user)
     order_repo = get_order_repository()
 
     if order_repo is None:
