@@ -2717,8 +2717,15 @@ main input[type="date"] { background-color: #fff; border-color: #d1d5db; color: 
 /* ---- Topbar row: min-width clamp so children don't wrap ---- */
 .topbar {
   min-width: 0;
-  overflow: hidden;       /* prevent horizontal bleed on tiny screens */
+  /* Must stay overflow:visible: the store / role / notification dropdowns are
+     absolutely-positioned descendants that open BELOW the 52px bar, so any
+     overflow != visible here CLIPS them (the store switcher was invisible on
+     mobile). Horizontal bleed is prevented per-child instead (crumbs truncate,
+     store-pill is width-clamped). */
+  overflow: visible;
 }
+.crumbs { min-width: 0; }
+.crumbs .cur { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* ---- Store pill: responsive truncation ---- */
 .store-pill {
