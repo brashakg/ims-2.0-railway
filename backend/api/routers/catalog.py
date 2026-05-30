@@ -6,7 +6,7 @@ Handles product creation, SKU generation, and Shopify sync.
 """
 
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from typing import Optional, Dict, Any, List, Union
 from datetime import datetime
 from enum import Enum
@@ -20,11 +20,16 @@ from ..services.online_catalog import (
     ecommerce_db_configured,
 )
 from ..services import stock_allocation
-from ..services.pricing_caps import evaluate_offer_price
+from ..services.pricing_caps import evaluate_offer_price, CATEGORY_DISCOUNT_CAPS
 from ..services.gst_rates import gst_rate_for_category, hsn_for_category
 from .inventory import _on_hand_by_product
 
 router = APIRouter()
+
+# Canonical discount-cap tiers. Sourced from the SHARED pricing_caps cap table
+# (the single source of truth also used by the bulk-price / POS cap logic) so
+# the accepted set never drifts from what the resolver actually understands.
+_VALID_DISCOUNT_CATEGORIES = frozenset(CATEGORY_DISCOUNT_CAPS.keys())
 # NOTE: _get_db() is defined later in this module (reused here at call time).
 
 
@@ -116,7 +121,7 @@ async def online_stock_reconcile(
         }
     try:
         products = list(
-            db.get_collection("products")
+            _coll(db, "products")
             .find(
                 {"sku": {"$nin": [None, ""]}, "is_active": {"$ne": False}},
                 {"_id": 0, "product_id": 1, "sku": 1, "brand": 1, "model": 1},
@@ -884,9 +889,33 @@ CATEGORY_FIELDS = {
 
 class PricingInput(BaseModel):
     mrp: float = Field(..., gt=0)
-    offer_price: Optional[float] = None
-    cost_price: Optional[float] = None
-    discount_category: str = "MASS"  # MASS, PREMIUM, LUXURY
+    # offer_price / cost_price must be POSITIVE when supplied (mirrors the
+    # canonical products.ProductCreate `offer_price: Field(..., gt=0)`). They
+    # stay Optional here (an omitted offer_price defaults to MRP), but a
+    # non-positive value is rejected with 422 -- otherwise a negative offer
+    # price slipped through (the MRP-rule guard only catches offer > MRP, and a
+    # negative offer is `offer or mrp`-truthy so it was persisted verbatim).
+    offer_price: Optional[float] = Field(default=None, gt=0)
+    cost_price: Optional[float] = Field(default=None, gt=0)
+    discount_category: str = "MASS"  # MASS / PREMIUM / LUXURY / SERVICE / NON_DISCOUNTABLE
+
+    @field_validator("discount_category")
+    @classmethod
+    def _validate_discount_category(cls, v: str) -> str:
+        """Reject an unrecognized discount-cap tier. The tier drives the
+        discount cap in services/pricing_caps; an unknown / typo'd value
+        silently degrades to the most-permissive MASS (15%) tier there, so a
+        mistyped "NON_DISCOUNTABLE" would wrongly ALLOW a 15% discount. Pin it
+        to the canonical set (the single source of truth -- the cap table keys)
+        and normalize to upper-case so the persisted value matches what the cap
+        resolver expects."""
+        norm = (v or "").strip().upper()
+        if norm not in _VALID_DISCOUNT_CATEGORIES:
+            raise ValueError(
+                "Invalid discount_category. Allowed: "
+                f"{', '.join(sorted(_VALID_DISCOUNT_CATEGORIES))}."
+            )
+        return norm
 
 
 class InventoryInput(BaseModel):
@@ -1010,15 +1039,39 @@ def _get_db():
     return None
 
 
+def _coll(db, name: str):
+    """Return a collection by name using subscript access.
+
+    `_get_db()` returns the underlying database object: a real pymongo
+    `Database` when Mongo is live, or the in-memory `MockDatabase` (seeded
+    fallback) otherwise. A real `Database` supports BOTH `db[name]` and
+    `db.get_collection(name)`, but `MockDatabase` only implements
+    `__getitem__` -- so calling `.get_collection(...)` raised AttributeError
+    and 500'd the catalog CRUD path whenever the seeded mock DB was active
+    (a fresh deploy before Mongo connects, or local / test mock mode).
+    Subscript access works on both, so use it everywhere here.
+    """
+    return db[name] if db is not None else None
+
+
 def _catalog_coll():
-    db = _get_db()
-    return db.get_collection("catalog_products") if db is not None else None
+    return _coll(_get_db(), "catalog_products")
 
 
 def _save_catalog_product(product: Dict) -> None:
     coll = _catalog_coll()
     if coll is not None:
-        coll.update_one({"id": product["id"]}, {"$set": product}, upsert=True)
+        # Explicit update-or-insert. The previous `update_one(..., upsert=True)`
+        # works against real pymongo but BROKE on the seeded-mock fallback
+        # (MockCollection.update_one has no `upsert` kwarg AND never inserts a
+        # missing doc) -- so the catalog CRUD 500'd / silently lost writes
+        # whenever Mongo wasn't connected. Checking existence first keeps the
+        # 2-arg update_one / insert_one signatures that BOTH backends support,
+        # and is functionally identical to an upsert on real Mongo.
+        if coll.find_one({"id": product["id"]}) is not None:
+            coll.update_one({"id": product["id"]}, {"$set": product})
+        else:
+            coll.insert_one(dict(product))
     else:
         CATALOG_PRODUCTS[product["id"]] = product
 
@@ -1026,7 +1079,13 @@ def _save_catalog_product(product: Dict) -> None:
 def _get_catalog_product(product_id: str) -> Optional[Dict]:
     coll = _catalog_coll()
     if coll is not None:
-        return coll.find_one({"id": product_id}, {"_id": 0})
+        # No projection arg: MockCollection.find_one only accepts a filter, so
+        # the prior `find_one({...}, {"_id": 0})` blew up in mock mode. Strip the
+        # Mongo `_id` in Python instead (it isn't part of the catalog doc shape).
+        doc = coll.find_one({"id": product_id})
+        if doc is not None:
+            doc.pop("_id", None)
+        return doc
     return CATALOG_PRODUCTS.get(product_id)
 
 
@@ -1167,8 +1226,8 @@ async def list_catalog_products(
     brand: Optional[str] = None,
     search: Optional[str] = None,
     is_active: bool = True,
-    limit: int = Query(default=50, le=250),
-    page: int = 1,
+    limit: int = Query(default=50, ge=1, le=250),
+    page: int = Query(default=1, ge=1),
     current_user: dict = Depends(get_current_user),
 ):
     """List all products in catalog"""
@@ -1396,7 +1455,29 @@ async def update_catalog_product(
     if product.weight is not None:
         existing["weight"] = product.weight
     if product.pricing:
-        existing["pricing"].update(product.pricing.model_dump(exclude_none=True))
+        # Merge the incoming pricing onto the existing block, then enforce the
+        # non-negotiable MRP >= offer_price rule on the EFFECTIVE post-merge
+        # values via the SHARED pricing_caps validator (same source of truth as
+        # the create path + canonical /products). The create guard ran on a
+        # fresh PricingInput, but the update path previously merged pricing with
+        # NO re-validation -- so a partial pricing update (e.g. raising
+        # offer_price above the existing MRP, or lowering MRP below the existing
+        # offer_price) slipped a product into an MRP < offer state, exactly the
+        # back-door SYSTEM_INTENT section 3/10 forbids. Mirrors the equivalent
+        # fix in products.update_product.
+        merged_pricing = {
+            **(existing.get("pricing") or {}),
+            **product.pricing.model_dump(exclude_none=True),
+        }
+        eff_mrp = merged_pricing.get("mrp")
+        eff_offer = merged_pricing.get("offer_price")
+        if eff_mrp is not None and eff_offer is not None:
+            verdict = evaluate_offer_price(eff_mrp, eff_offer)
+            if verdict["reason"] == "MRP_BELOW_OFFER":
+                raise HTTPException(
+                    status_code=400, detail="Offer price cannot exceed MRP"
+                )
+        existing["pricing"] = merged_pricing
     if product.images is not None:
         existing["images"] = product.images
     if product.is_active is not None:

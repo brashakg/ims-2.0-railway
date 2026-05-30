@@ -23,16 +23,26 @@ from api.routers import catalog  # noqa: E402
 
 
 class _FakeColl:
+    """Minimal collection double that models BOTH real pymongo and the
+    in-memory MockDatabase contract used by _save_catalog_product:
+      - update_one(filter, {"$set": ...}) updates ONLY an existing doc
+        (no upsert) -- matches pymongo's 2-arg form and MockCollection.
+      - insert_one(doc) inserts a new doc.
+    _save_catalog_product checks existence first, then update_one OR insert_one,
+    so it never relies on the upsert kwarg (which MockCollection lacks)."""
+
     def __init__(self):
         self.docs = {}
 
-    def update_one(self, flt, update, upsert=False):
+    def update_one(self, flt, update):
         _id = flt["id"]
-        doc = self.docs.get(_id, {})
-        doc.update(update["$set"])
-        self.docs[_id] = doc
+        if _id in self.docs:
+            self.docs[_id].update(update["$set"])
 
-    def find_one(self, flt, projection=None):
+    def insert_one(self, doc):
+        self.docs[doc["id"]] = dict(doc)
+
+    def find_one(self, flt):
         d = self.docs.get(flt["id"])
         return dict(d) if d else None
 
