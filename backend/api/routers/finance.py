@@ -38,6 +38,68 @@ _REVENUE_EXPR = {"$ifNull": ["$grand_total", {"$ifNull": ["$total", 0]}]}
 _TAX_EXPR = {"$ifNull": ["$tax_amount", {"$ifNull": ["$tax_total", 0]}]}
 _DISCOUNT_EXPR = {"$ifNull": ["$discount_total", {"$ifNull": ["$discount_amount", 0]}]}
 
+# Order lifecycle: DRAFT -> CONFIRMED -> ... -> DELIVERED, plus terminal
+# CANCELLED (see orders.OrderStatus). A DRAFT was never booked and a CANCELLED
+# was reversed -- NEITHER is real revenue/tax/GST liability. Every financial
+# aggregation MUST exclude them, matching the convention used throughout
+# reports.py (`status: {"$nin": ["CANCELLED", "DRAFT"]}`). The original finance
+# queries had NO status filter, so cancelled + still-draft orders inflated
+# revenue, P&L, GST collected, and cash inflow. Lowercase variants tolerated.
+_EXCLUDED_ORDER_STATUSES = ["CANCELLED", "DRAFT", "cancelled", "draft"]
+_REAL_ORDER_STATUS_FILTER = {"$nin": _EXCLUDED_ORDER_STATUSES}
+
+
+def _parse_range_dt(s, *, end: bool = False) -> Optional[datetime]:
+    """Parse a 'YYYY-MM-DD' (or ISO) query string into a datetime suitable for
+    a Mongo range bound on `created_at`.
+
+    Orders persist `created_at` as a BSON *datetime* (BaseRepository
+    `_add_timestamps` -> datetime.now()), so a bare 'YYYY-MM-DD' STRING bound
+    never matches -- a string-vs-datetime comparison in Mongo silently returns
+    nothing. This was the bug behind every date-ranged finance figure reading
+    zero. We convert to a datetime so the comparison is apples-to-apples; an
+    `end` date-only bound expands to 23:59:59.999999 so the whole final day is
+    inclusive. Returns None when the input is empty / unparseable (caller then
+    omits that bound).
+    """
+    if s is None:
+        return None
+    if isinstance(s, datetime):
+        return s
+    txt = str(s).strip()
+    if not txt:
+        return None
+    try:
+        dt = datetime.fromisoformat(txt.replace("Z", "+00:00"))
+        # Drop tz so it compares with the naive datetimes orders are stored as.
+        if dt.tzinfo is not None:
+            dt = dt.replace(tzinfo=None)
+    except ValueError:
+        try:
+            dt = datetime.fromisoformat(txt[:10])
+        except ValueError:
+            return None
+    # A date-only end bound covers the entire day.
+    if len(txt) <= 10 and end:
+        return dt.replace(hour=23, minute=59, second=59, microsecond=999999)
+    return dt
+
+
+def _apply_created_at_range(match: dict, from_date, to_date) -> dict:
+    """Add a datetime `created_at` range to a Mongo match dict (in place).
+
+    Used by every date-ranged finance order query so they all compare
+    datetime-to-datetime against the BSON `created_at`. No-ops a bound when its
+    date is missing/unparseable.
+    """
+    lo = _parse_range_dt(from_date, end=False)
+    hi = _parse_range_dt(to_date, end=True)
+    if lo is not None:
+        match.setdefault("created_at", {})["$gte"] = lo
+    if hi is not None:
+        match.setdefault("created_at", {})["$lte"] = hi
+    return match
+
 
 def _order_total(o: dict) -> float:
     v = o.get("grand_total")
@@ -153,42 +215,70 @@ def _payroll_cost(db, store_id, from_date, to_date) -> float:
 
 
 def gst_reconciliation(
-    orders, purchases, store_to_entity: dict, entity_names: dict = None
+    orders,
+    purchases,
+    store_to_entity: dict,
+    entity_names: dict = None,
+    store_state_by_id: dict = None,
+    customer_state_by_id: dict = None,
 ) -> dict:
     """Group GST output (orders) vs input credit (purchases) by legal entity.
-    CGST/SGST split intra-state (tax/2 each); IGST not modelled (orders don't
-    capture inter-state). Pure."""
+
+    Output tax is classified per order: inter-state (seller state != buyer
+    state) -> IGST; intra-state (same / unknown) -> CGST + SGST (tax/2 each),
+    the same rule GSTR-1 / GSTR-3B use. When the state maps are empty (the DB
+    didn't carry state, or a caller doesn't supply them) every sale is treated
+    as intra-state -- the prior behaviour -- so cgst+sgst == gst_collected.
+    Pure."""
     entity_names = entity_names or {}
+    store_state_by_id = store_state_by_id or {}
+    customer_state_by_id = customer_state_by_id or {}
     acc: dict = {}
 
     def _ent(store_id):
         return store_to_entity.get(store_id) or "_unassigned"
 
+    def _blank():
+        return {"cgst": 0.0, "sgst": 0.0, "igst": 0.0, "input_credit": 0.0}
+
     for o in orders:
         eid = _ent(o.get("store_id"))
         tax = float(o.get("tax_amount") or o.get("tax_total") or 0)
-        acc.setdefault(eid, {"collected": 0.0, "input_credit": 0.0})["collected"] += tax
+        seller = str(store_state_by_id.get(o.get("store_id"), "") or "").strip().lower()
+        buyer = str(
+            customer_state_by_id.get(o.get("customer_id"), "") or ""
+        ).strip().lower()
+        is_inter_state = bool(seller and buyer and seller != buyer)
+        bucket = acc.setdefault(eid, _blank())
+        if is_inter_state:
+            bucket["igst"] += tax
+        else:
+            bucket["cgst"] += tax / 2
+            bucket["sgst"] += tax / 2
     for p in purchases:
         eid = _ent(p.get("delivery_store_id") or p.get("store_id"))
         tax = float(p.get("tax_amount") or 0)
-        acc.setdefault(eid, {"collected": 0.0, "input_credit": 0.0})[
-            "input_credit"
-        ] += tax
+        acc.setdefault(eid, _blank())["input_credit"] += tax
 
     entities, tot_c, tot_i = [], 0.0, 0.0
     for eid, d in acc.items():
-        c, i = round(d["collected"], 2), round(d["input_credit"], 2)
-        tot_c += c
+        cgst = round(d["cgst"], 2)
+        sgst = round(d["sgst"], 2)
+        igst = round(d["igst"], 2)
+        collected = round(cgst + sgst + igst, 2)
+        i = round(d["input_credit"], 2)
+        tot_c += collected
         tot_i += i
         entities.append(
             {
                 "entity_id": eid,
                 "entity_name": entity_names.get(eid, eid),
-                "gst_collected": c,
-                "cgst": round(c / 2, 2),
-                "sgst": round(c / 2, 2),
+                "gst_collected": collected,
+                "cgst": cgst,
+                "sgst": sgst,
+                "igst": igst,
                 "input_credit": i,
-                "net_payable": round(c - i, 2),
+                "net_payable": round(collected - i, 2),
             }
         )
     return {
@@ -215,6 +305,35 @@ def _store_maps(db):
     except Exception:
         pass
     return s2e, enames
+
+
+def _store_state_map(db) -> dict:
+    """store_id -> home state (for intra/inter-state GST classification)."""
+    out: dict = {}
+    try:
+        for s in db.get_collection("stores").find(
+            {}, {"_id": 0, "store_id": 1, "state": 1}
+        ):
+            if s.get("store_id"):
+                out[s["store_id"]] = str(s.get("state") or "")
+    except Exception:
+        pass
+    return out
+
+
+def _customer_state_map(db) -> dict:
+    """customer_id -> state (for intra/inter-state GST classification)."""
+    out: dict = {}
+    try:
+        for c in db.get_collection("customers").find(
+            {}, {"_id": 0, "customer_id": 1, "state": 1}
+        ):
+            cid = c.get("customer_id")
+            if cid:
+                out[cid] = str(c.get("state") or "")
+    except Exception:
+        pass
+    return out
 
 
 def pnl_by_category(orders, cost_by_product: dict) -> list:
@@ -318,7 +437,10 @@ async def get_revenue(
         if now.month < 4:
             start = start.replace(year=now.year - 1)
 
-    match = {"created_at": {"$gte": start.isoformat()}}
+    # created_at is a BSON datetime -> compare against a datetime, not an ISO
+    # string (a string bound never matches). Exclude DRAFT/CANCELLED so revenue
+    # reflects real booked sales only.
+    match = {"created_at": {"$gte": start}, "status": _REAL_ORDER_STATUS_FILTER}
     if store_id:
         match["store_id"] = store_id
 
@@ -350,7 +472,8 @@ async def get_revenue(
     if period == "month":
         prev_start = (start - timedelta(days=1)).replace(day=1)
         prev_match = {
-            "created_at": {"$gte": prev_start.isoformat(), "$lt": start.isoformat()}
+            "created_at": {"$gte": prev_start, "$lt": start},
+            "status": _REAL_ORDER_STATUS_FILTER,
         }
         if store_id:
             prev_match["store_id"] = store_id
@@ -407,13 +530,13 @@ async def get_pnl(
             "gross_margin_pct": 0,
             "net_margin_pct": 0,
         }
-    match = {}
+    # Exclude DRAFT/CANCELLED (never-booked / reversed) and compare the
+    # date range as datetimes (created_at is a BSON datetime, so a 'YYYY-MM-DD'
+    # string bound matched nothing -> the whole date-ranged P&L read zero).
+    match = {"status": _REAL_ORDER_STATUS_FILTER}
     if store_id:
         match["store_id"] = store_id
-    if from_date:
-        match.setdefault("created_at", {})["$gte"] = from_date
-    if to_date:
-        match.setdefault("created_at", {})["$lte"] = to_date
+    _apply_created_at_range(match, from_date, to_date)
 
     # Revenue
     rev_pipeline = [
@@ -506,7 +629,13 @@ async def get_gst_summary(
     # GST collected (from sales). Orders store `created_at` as a BSON
     # datetime, so the match MUST use datetime objects -- an .isoformat()
     # STRING comparison silently matched nothing and zeroed the GST summary.
-    sales_match = {"created_at": {"$gte": start, "$lt": end}}
+    # Exclude DRAFT/CANCELLED (a cancelled sale collected no GST). total_sales
+    # uses _REVENUE_EXPR (grand_total) -- `$total` is a legacy field modern
+    # orders don't carry, so summing it returned ~0.
+    sales_match = {
+        "created_at": {"$gte": start, "$lt": end},
+        "status": _REAL_ORDER_STATUS_FILTER,
+    }
     collected = list(
         db.get_collection("orders").aggregate(
             [
@@ -514,8 +643,8 @@ async def get_gst_summary(
                 {
                     "$group": {
                         "_id": None,
-                        "total_tax": {"$sum": "$tax_amount"},
-                        "total_sales": {"$sum": "$total"},
+                        "total_tax": {"$sum": _TAX_EXPR},
+                        "total_sales": {"$sum": _REVENUE_EXPR},
                     }
                 },
             ]
@@ -544,9 +673,14 @@ async def get_gst_summary(
     sgst = gst_collected / 2
     net_payable = gst_collected - gst_paid
 
-    # Filing status
-    gstr1_due = datetime(y, m + 1 if m < 12 else 1, 11)
-    gstr3b_due = datetime(y, m + 1 if m < 12 else 1, 20)
+    # Filing status. GSTR-1 is due the 11th and GSTR-3B the 20th of the month
+    # AFTER the tax period. For December (m==12) that is January of the NEXT
+    # year -- the old `datetime(y, 1, 11)` kept the SAME year, so Dec returns
+    # showed a due date in the past (e.g. Dec-2025 due 2025-01-11).
+    due_year = y + 1 if m == 12 else y
+    due_month = 1 if m == 12 else m + 1
+    gstr1_due = datetime(due_year, due_month, 11)
+    gstr3b_due = datetime(due_year, due_month, 20)
 
     return {
         "month": m,
@@ -650,7 +784,12 @@ async def get_outstanding(
     db = _get_db()
     if db is None:
         return []
-    match = {"payment_status": {"$in": UNPAID_STATUSES}}
+    # A CANCELLED order is not a receivable even if it was left PARTIAL/UNPAID
+    # before being voided -- exclude DRAFT/CANCELLED from AR.
+    match = {
+        "payment_status": {"$in": UNPAID_STATUSES},
+        "status": _REAL_ORDER_STATUS_FILTER,
+    }
     if store_id:
         match["store_id"] = store_id
 
@@ -794,10 +933,14 @@ async def get_cash_flow(
 
     active_store = store_id or current_user.get("active_store_id")
 
-    # Inflows (from orders) — scoped to the active store
+    # Inflows (from orders) -- scoped to the active store. created_at is a BSON
+    # datetime; an .isoformat() string bound never matched, so inflow always
+    # read zero. Also exclude DRAFT/CANCELLED -- a cancelled order is not cash
+    # in even if it was once marked PAID.
     inflow_match = {
-        "created_at": {"$gte": start.isoformat()},
+        "created_at": {"$gte": start},
         "payment_status": {"$in": PAID_STATUSES},
+        "status": _REAL_ORDER_STATUS_FILTER,
     }
     if active_store:
         inflow_match["store_id"] = active_store
@@ -938,7 +1081,11 @@ def _ar_aging(db, now: datetime) -> dict:
     try:
         orders = list(
             db.get_collection("orders").find(
-                {"payment_status": {"$in": UNPAID_STATUSES}},
+                {
+                    "payment_status": {"$in": UNPAID_STATUSES},
+                    # A cancelled order is not a receivable.
+                    "status": _REAL_ORDER_STATUS_FILTER,
+                },
                 {
                     "_id": 0,
                     "customer_id": 1,
@@ -1023,8 +1170,11 @@ async def owner_dashboard(current_user: dict = Depends(get_current_user)):
         db,
         "orders",
         {
-            "created_at": {"$gte": start.isoformat()},
+            # Datetime bound (created_at is BSON datetime) + exclude
+            # DRAFT/CANCELLED so the owner's month revenue is real.
+            "created_at": {"$gte": start},
             "payment_status": {"$in": PAID_STATUSES},
+            "status": _REAL_ORDER_STATUS_FILTER,
         },
         _REVENUE_EXPR,
     )
@@ -1032,7 +1182,11 @@ async def owner_dashboard(current_user: dict = Depends(get_current_user)):
         db,
         "expenses",
         {
-            "date": {"$gte": start.isoformat()},
+            # Expenses are dated on `expense_date` (date-only 'YYYY-MM-DD'
+            # string), NOT `date` -- the old field name matched nothing, so
+            # this-month expenses read 0 and net_cash_flow was overstated by
+            # the entire expense total. Use a date-only bound to match.
+            "expense_date": {"$gte": start.date().isoformat()},
             "status": {"$in": ["APPROVED", "PAID", "approved", "paid"]},
         },
         "$amount",
@@ -1123,7 +1277,11 @@ async def cash_flow_forecast(
     try:
         orders = list(
             db.get_collection("orders").find(
-                {"payment_status": {"$in": UNPAID_STATUSES}},
+                {
+                    "payment_status": {"$in": UNPAID_STATUSES},
+                    # Don't project a cancelled order as an expected collection.
+                    "status": _REAL_ORDER_STATUS_FILTER,
+                },
                 {
                     "_id": 0,
                     "grand_total": 1,
@@ -1150,16 +1308,19 @@ async def cash_flow_forecast(
         {"date": it.get("due_date"), "amount": it["outstanding"]} for it in ap["items"]
     ]
 
-    # Recurring monthly outflow estimate.
+    # Recurring monthly outflow estimate. Expenses are dated on `expense_date`
+    # (date-only 'YYYY-MM-DD' string), NOT `date` -- the old field name matched
+    # nothing, so the recurring estimate was always 0 and the forecast
+    # understated outflows. Use a date-only bound to match the stored values.
     monthly_expense_est = 0.0
     try:
-        three_mo_ago = (now - timedelta(days=90)).isoformat()
+        three_mo_ago = (now - timedelta(days=90)).date().isoformat()
         r = list(
             db.get_collection("expenses").aggregate(
                 [
                     {
                         "$match": {
-                            "date": {"$gte": three_mo_ago},
+                            "expense_date": {"$gte": three_mo_ago},
                             "status": {"$in": ["APPROVED", "PAID", "approved", "paid"]},
                         }
                     },
@@ -1560,12 +1721,25 @@ async def get_gst_reconciliation(
     if entity_id:
         store_ids = [sid for sid, eid in s2e.items() if eid == entity_id]
 
-    o_match = {"created_at": {"$gte": start.isoformat(), "$lt": end.isoformat()}}
+    # Orders persist created_at as a BSON datetime; the previous .isoformat()
+    # string bound matched nothing, so GST-collected per entity read zero.
+    # Exclude DRAFT/CANCELLED -- only real sales carry GST liability.
+    o_match = {
+        "created_at": {"$gte": start, "$lt": end},
+        "status": _REAL_ORDER_STATUS_FILTER,
+    }
     if store_ids is not None:
         o_match["store_id"] = {"$in": store_ids}
     orders = list(
         db.get_collection("orders").find(
-            o_match, {"_id": 0, "store_id": 1, "tax_amount": 1, "tax_total": 1}
+            o_match,
+            {
+                "_id": 0,
+                "store_id": 1,
+                "customer_id": 1,
+                "tax_amount": 1,
+                "tax_total": 1,
+            },
         )
     )
 
@@ -1578,9 +1752,23 @@ async def get_gst_reconciliation(
         )
     )
 
-    recon = gst_reconciliation(orders, purchases, s2e, enames)
+    recon = gst_reconciliation(
+        orders,
+        purchases,
+        s2e,
+        enames,
+        store_state_by_id=_store_state_map(db),
+        customer_state_by_id=_customer_state_map(db),
+    )
     recon.update(
-        {"month": m, "year": y, "note": "CGST/SGST split intra-state; file via Tally."}
+        {
+            "month": m,
+            "year": y,
+            "note": (
+                "Output tax split intra-state (CGST+SGST) vs inter-state (IGST) "
+                "by store vs customer state; file via Tally."
+            ),
+        }
     )
     return recon
 
@@ -1595,7 +1783,10 @@ async def get_tally_sales_jv(
 ):
     """Tally sales-voucher XML for a period + scope, ready to import into Tally."""
     db = _get_db()
-    match: dict = {}
+    # Never export DRAFT/CANCELLED orders to Tally -- they aren't real sales
+    # vouchers. created_at is a BSON datetime so the range is built as datetimes
+    # (a 'YYYY-MM-DD' string bound never matched -> empty export).
+    match: dict = {"status": _REAL_ORDER_STATUS_FILTER}
     store_ids = None
     if store_id:
         store_ids = [store_id]
@@ -1604,14 +1795,16 @@ async def get_tally_sales_jv(
         store_ids = [sid for sid, eid in s2e.items() if eid == entity_id]
     if store_ids is not None:
         match["store_id"] = {"$in": store_ids}
-    if from_date:
-        match.setdefault("created_at", {})["$gte"] = from_date
-    if to_date:
-        match.setdefault("created_at", {})["$lte"] = to_date
+    _apply_created_at_range(match, from_date, to_date)
 
     orders = list(db.get_collection("orders").find(match, {"_id": 0}))
     # Orders persist only total tax; split intra-state CGST/SGST = tax/2 and set
     # the taxable subtotal so each voucher balances (taxable + cgst + sgst = grand).
+    # NOTE: the shared Tally voucher builder (agents.nexus_providers) only emits
+    # CGST/SGST output ledgers -- it has no IGST ledger -- so inter-state sales
+    # cannot be represented as IGST here without imbalancing the voucher. For the
+    # single-state chains this assumption holds. Adding IGST is tracked as a
+    # follow-up against nexus_providers (a shared file outside this scope).
     for o in orders:
         tax = float(o.get("tax_amount") or o.get("tax_total") or 0)
         grand = float(o.get("grand_total") or o.get("total") or 0)
@@ -1657,13 +1850,13 @@ async def get_pnl_by_store(
         [sid for sid, eid in s2e.items() if eid == entity_id] if entity_id else None
     )
 
-    match: dict = {}
+    # Exclude DRAFT/CANCELLED and compare the date range as datetimes
+    # (created_at is a BSON datetime). This `match` is reused for both the
+    # revenue aggregation and the COGS find() below.
+    match: dict = {"status": _REAL_ORDER_STATUS_FILTER}
     if store_ids is not None:
         match["store_id"] = {"$in": store_ids}
-    if from_date:
-        match.setdefault("created_at", {})["$gte"] = from_date
-    if to_date:
-        match.setdefault("created_at", {})["$lte"] = to_date
+    _apply_created_at_range(match, from_date, to_date)
 
     rev = list(
         db.get_collection("orders").aggregate(
@@ -1740,7 +1933,9 @@ async def get_pnl_by_category(
 ):
     """Revenue + COGS + gross profit per product category."""
     db = _get_db()
-    match: dict = {}
+    # Exclude DRAFT/CANCELLED; compare the date range as datetimes
+    # (created_at is a BSON datetime, so a string bound matched nothing).
+    match: dict = {"status": _REAL_ORDER_STATUS_FILTER}
     store_ids = None
     if store_id:
         store_ids = [store_id]
@@ -1749,10 +1944,7 @@ async def get_pnl_by_category(
         store_ids = [sid for sid, eid in s2e.items() if eid == entity_id]
     if store_ids is not None:
         match["store_id"] = {"$in": store_ids}
-    if from_date:
-        match.setdefault("created_at", {})["$gte"] = from_date
-    if to_date:
-        match.setdefault("created_at", {})["$lte"] = to_date
+    _apply_created_at_range(match, from_date, to_date)
 
     orders = list(db.get_collection("orders").find(match, {"_id": 0, "items": 1}))
     cats = pnl_by_category(orders, _cost_by_product(db))
