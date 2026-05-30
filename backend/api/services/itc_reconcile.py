@@ -142,10 +142,15 @@ def build_itc_register(bills: List[dict], entity_state: Optional[str] = None) ->
             d["igst"] = round(d["igst"] + tax, 2)
             total_igst += tax
         else:
-            d["cgst"] = round(d["cgst"] + tax / 2, 2)
-            d["sgst"] = round(d["sgst"] + tax / 2, 2)
-            total_cgst += tax / 2
-            total_sgst += tax / 2
+            # Residual trick: compute half then assign the remainder to sgst so
+            # cgst + sgst == tax exactly (avoids +-1 paisa drift on odd-paise
+            # tax amounts, e.g. tax=5.01 -> half=2.50 + sgst=2.51 = 5.01).
+            half = round(tax / 2, 2)
+            sgst_part = round(tax - half, 2)
+            d["cgst"] = round(d["cgst"] + half, 2)
+            d["sgst"] = round(d["sgst"] + sgst_part, 2)
+            total_cgst += half
+            total_sgst += sgst_part
         d["bills"] += 1
         total_taxable += taxable
         total_tax += tax
