@@ -2030,6 +2030,9 @@
   display: grid;
   grid-template-columns: 220px 1fr;
   height: calc(100vh - 52px);
+  /* dvh keeps the footer + last product row reachable under mobile browser
+     chrome (the old 100vh got clipped by the phone URL bar). */
+  height: calc(100dvh - 52px);
   min-height: 0;
   background: var(--bg);
 }
@@ -2057,19 +2060,54 @@
 }
 .steps-rail .eyebrow { margin-bottom: 14px; display: block; }
 @media (max-width: 768px) {
-  /* On mobile, stepper collapses to a compact horizontal scroller at top */
+  /* On mobile, stepper + actions collapse to one compact horizontal scroller */
   .steps-rail {
     flex-direction: row;
+    align-items: stretch;
     overflow-x: auto;
     overflow-y: hidden;
-    padding: 10px 12px;
+    -webkit-overflow-scrolling: touch;
+    padding: 8px 12px;
     border-right: 0;
     border-bottom: 1px solid var(--line);
     gap: 8px;
     min-height: 0;
     height: auto;
+    flex-shrink: 0;
   }
-  .steps-rail .eyebrow, .steps-rail .rail-actions, .steps-rail .held-list { display: none; }
+  /* Eyebrow + held-bill preview don't fit the strip; Recall (kept in
+     rail-actions below) still reaches held bills. */
+  .steps-rail .eyebrow,
+  .steps-rail .held-list { display: none; }
+  /* Compact step chips — number/icon + short title only; drop the sub-text and
+     the vertical connector (positioned for the desktop vertical stack). */
+  .steps-rail .step {
+    width: auto;
+    flex-direction: row;
+    align-items: center;
+    padding: 8px 12px;
+    gap: 8px;
+    white-space: nowrap;
+  }
+  .steps-rail .step .step-sub { display: none; }
+  .steps-rail .step + .step::before { display: none; }
+  /* Keep Hold / Recall / New / +walk-in / Walkout reachable on phones as a
+     horizontal button group instead of hiding the whole actions strip (the
+     old rule made these impossible to use on mobile). */
+  .steps-rail .rail-actions {
+    flex-direction: row;
+    align-items: center;
+    margin-top: 0;
+    padding-top: 0;
+    border-top: 0;
+    gap: 6px;
+    flex-shrink: 0;
+  }
+  .steps-rail .rail-actions .btn { width: auto; white-space: nowrap; }
+  .steps-rail .rail-actions .kbd-row { display: none; }
+  /* Tighter work-surface + footer gutters on a phone. */
+  .pos-work { padding: 16px 14px 110px; }
+  .pos-footer { padding: 10px 14px calc(10px + env(safe-area-inset-bottom, 0)); }
 }
 
 .step {
