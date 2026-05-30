@@ -374,7 +374,7 @@ export function OrdersPage() {
                   const sc = ORDER_STATUS_CONFIG[order.orderStatus as OrderStatus];
                   return (
                     <button key={order.id} onClick={() => { setSelectedOrder(order); setSearchQuery(''); }}
-                      className="w-full text-left px-3 py-2.5 hover:bg-bv-gold-50 border-b border-gray-50 last:border-0 flex items-center gap-3">
+                      className="w-full text-left px-3 py-2.5 hover:bg-bv-red-50 border-b border-gray-50 last:border-0 flex items-center gap-3">
                       <div className="flex-1 min-w-0">
                         <p className="text-sm font-medium text-gray-900 truncate">{order.orderNumber}</p>
                         <p className="text-xs text-gray-500">{order.customerName} {order.customerPhone ? `· ${order.customerPhone}` : ''}</p>
@@ -771,7 +771,7 @@ export function OrdersPage() {
                       className={clsx(
                         'p-2 text-xs rounded-lg border transition-colors',
                         paymentMethod === method
-                          ? 'border-bv-red-600 bg-bv-gold-50 text-bv-gold-700'
+                          ? 'border-bv-red-600 bg-bv-red-50 text-bv-red-700'
                           : 'border-gray-200 hover:border-gray-300'
                       )}
                     >

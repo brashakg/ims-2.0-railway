@@ -77,22 +77,22 @@ const getStatusColor = (
   if (variant === 'solid') {
     switch (statusLower) {
       case 'vip':
-        return 'bg-purple-600 text-white dark:bg-purple-700 dark:text-gray-900';
+        return 'bg-purple-600 text-white';
       case 'active':
       case 'success':
-        return 'bg-green-600 text-white dark:bg-green-700 dark:text-gray-900';
+        return 'bg-green-600 text-white';
       case 'completed':
       case 'delivered':
       case 'approved':
-        return 'bg-blue-600 text-white dark:bg-blue-700 dark:text-gray-900';
+        return 'bg-blue-600 text-white';
       case 'pending':
       case 'processing':
-        return 'bg-amber-600 text-white dark:bg-amber-700 dark:text-gray-900';
+        return 'bg-amber-600 text-white';
       case 'cancelled':
       case 'rejected':
       case 'failed':
       case 'at-risk':
-        return 'bg-red-600 text-white dark:bg-red-700 dark:text-gray-900';
+        return 'bg-red-600 text-white';
       case 'in-stock':
         return 'bg-emerald-600 text-white';
       case 'out-of-stock':
@@ -109,11 +109,11 @@ const getStatusColor = (
       case 'refunded':
         return 'bg-teal-600 text-white';
       case 'inactive':
-        return 'bg-gray-600 text-white dark:bg-gray-100 dark:text-gray-900';
+        return 'bg-gray-600 text-white';
       case 'archived':
-        return 'bg-slate-600 text-white dark:bg-gray-100 dark:text-gray-900';
+        return 'bg-slate-600 text-white';
       default:
-        return 'bg-gray-600 text-white dark:bg-gray-100 dark:text-gray-900';
+        return 'bg-gray-600 text-white';
     }
   }
 
@@ -121,86 +121,86 @@ const getStatusColor = (
   if (variant === 'outline') {
     switch (statusLower) {
       case 'vip':
-        return 'border border-purple-300 text-purple-700 dark:border-purple-700 dark:text-purple-600 bg-purple-50 dark:bg-purple-50/20';
+        return 'border border-purple-300 text-purple-700 bg-purple-50';
       case 'active':
       case 'success':
-        return 'border border-green-300 text-green-700 dark:border-green-700 dark:text-green-600 bg-green-50 dark:bg-green-50/20';
+        return 'border border-green-300 text-green-700 bg-green-50';
       case 'completed':
       case 'delivered':
       case 'approved':
-        return 'border border-blue-300 text-blue-700 dark:border-blue-700 dark:text-blue-600 bg-blue-50 dark:bg-blue-50/20';
+        return 'border border-blue-300 text-blue-700 bg-blue-50';
       case 'pending':
       case 'processing':
-        return 'border border-amber-300 text-amber-700 dark:border-amber-300 dark:text-amber-600 bg-amber-50 dark:bg-amber-50/20';
+        return 'border border-amber-300 text-amber-700 bg-amber-50';
       case 'cancelled':
       case 'rejected':
       case 'failed':
       case 'at-risk':
-        return 'border border-red-300 text-red-700 dark:border-red-700 dark:text-red-600 bg-red-50 dark:bg-red-50/20';
+        return 'border border-red-300 text-red-700 bg-red-50';
       case 'in-stock':
-        return 'border border-emerald-300 text-emerald-700 dark:border-emerald-700 dark:text-emerald-600 bg-emerald-50 dark:bg-emerald-50/20';
+        return 'border border-emerald-300 text-emerald-700 bg-emerald-50';
       case 'out-of-stock':
       case 'damaged':
-        return 'border border-red-300 text-red-700 dark:border-red-700 dark:text-red-600 bg-red-50 dark:bg-red-50/20';
+        return 'border border-red-300 text-red-700 bg-red-50';
       case 'low-stock':
-        return 'border border-orange-300 text-orange-700 dark:border-orange-700 dark:text-orange-600 bg-orange-50 dark:bg-orange-50/20';
+        return 'border border-orange-300 text-orange-700 bg-orange-50';
       case 'draft':
-        return 'border border-gray-300 text-gray-700 dark:border-gray-200 dark:text-gray-500 bg-gray-50 dark:bg-white/20';
+        return 'border border-gray-300 text-gray-700 bg-gray-50';
       case 'shipped':
-        return 'border border-cyan-300 text-cyan-700 dark:border-cyan-700 dark:text-cyan-600 bg-cyan-50 dark:bg-cyan-50/20';
+        return 'border border-cyan-300 text-cyan-700 bg-cyan-50';
       case 'returned':
-        return 'border border-indigo-300 text-indigo-700 dark:border-indigo-700 dark:text-indigo-600 bg-indigo-50 dark:bg-indigo-50/20';
+        return 'border border-indigo-300 text-indigo-700 bg-indigo-50';
       case 'refunded':
-        return 'border border-teal-300 text-teal-700 dark:border-teal-700 dark:text-teal-600 bg-teal-50 dark:bg-teal-50/20';
+        return 'border border-teal-300 text-teal-700 bg-teal-50';
       case 'inactive':
-        return 'border border-gray-300 text-gray-700 dark:border-gray-200 dark:text-gray-500 bg-gray-50 dark:bg-white/20';
+        return 'border border-gray-300 text-gray-700 bg-gray-50';
       case 'archived':
-        return 'border border-slate-300 text-slate-700 dark:border-slate-700 dark:text-slate-600 bg-slate-50 dark:bg-slate-50/20';
+        return 'border border-slate-300 text-slate-700 bg-slate-50';
       default:
-        return 'border border-gray-300 text-gray-700 dark:border-gray-200 dark:text-gray-500 bg-gray-50 dark:bg-white/20';
+        return 'border border-gray-300 text-gray-700 bg-gray-50';
     }
   }
 
   // Subtle variants (default) - light background with colored text
   switch (statusLower) {
     case 'vip':
-      return 'bg-purple-100 text-purple-700 dark:bg-purple-50/30 dark:text-purple-700';
+      return 'bg-purple-100 text-purple-700';
     case 'active':
     case 'success':
-      return 'bg-green-100 text-green-700 dark:bg-green-50 dark:text-green-700';
+      return 'bg-green-100 text-green-700';
     case 'completed':
     case 'delivered':
     case 'approved':
-      return 'bg-blue-100 text-blue-700 dark:bg-blue-50 dark:text-blue-700';
+      return 'bg-blue-100 text-blue-700';
     case 'pending':
     case 'processing':
-      return 'bg-amber-100 text-amber-700 dark:bg-amber-50 dark:text-amber-700';
+      return 'bg-amber-100 text-amber-700';
     case 'cancelled':
     case 'rejected':
     case 'failed':
     case 'at-risk':
-      return 'bg-red-100 text-red-700 dark:bg-red-50 dark:text-red-700';
+      return 'bg-red-100 text-red-700';
     case 'in-stock':
-      return 'bg-emerald-100 text-emerald-700 dark:bg-emerald-50/30 dark:text-emerald-700';
+      return 'bg-emerald-100 text-emerald-700';
     case 'out-of-stock':
     case 'damaged':
-      return 'bg-red-100 text-red-700 dark:bg-red-50 dark:text-red-700';
+      return 'bg-red-100 text-red-700';
     case 'low-stock':
-      return 'bg-orange-100 text-orange-700 dark:bg-orange-50/30 dark:text-orange-700';
+      return 'bg-orange-100 text-orange-700';
     case 'draft':
-      return 'bg-gray-100 text-gray-700 dark:bg-white/30 dark:text-gray-700';
+      return 'bg-gray-100 text-gray-700';
     case 'shipped':
-      return 'bg-cyan-100 text-cyan-700 dark:bg-cyan-50/30 dark:text-cyan-700';
+      return 'bg-cyan-100 text-cyan-700';
     case 'returned':
-      return 'bg-indigo-100 text-indigo-700 dark:bg-indigo-50/30 dark:text-indigo-700';
+      return 'bg-indigo-100 text-indigo-700';
     case 'refunded':
-      return 'bg-teal-100 text-teal-700 dark:bg-teal-50/30 dark:text-teal-700';
+      return 'bg-teal-100 text-teal-700';
     case 'inactive':
-      return 'bg-gray-100 text-gray-700 dark:bg-white/30 dark:text-gray-700';
+      return 'bg-gray-100 text-gray-700';
     case 'archived':
-      return 'bg-slate-100 text-slate-700 dark:bg-slate-50/30 dark:text-slate-700';
+      return 'bg-slate-100 text-slate-700';
     default:
-      return 'bg-gray-100 text-gray-700 dark:bg-white/30 dark:text-gray-700';
+      return 'bg-gray-100 text-gray-700';
   }
 };
 

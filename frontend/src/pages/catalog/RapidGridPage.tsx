@@ -426,7 +426,7 @@ export function RapidGridPage() {
           )}
           <button
             type="button"
-            onClick={() => navigate('/catalog/inventory')}
+            onClick={() => navigate('/inventory')}
             className="ml-auto text-bv font-medium hover:underline"
           >
             View inventory →

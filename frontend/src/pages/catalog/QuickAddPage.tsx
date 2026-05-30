@@ -233,7 +233,7 @@ export function QuickAddPage() {
           // Keep focus flowing — jump back to the top of the form.
           window.scrollTo({ top: 0, behavior: 'smooth' });
         } else {
-          navigate('/catalog/inventory');
+          navigate('/inventory');
         }
       } catch {
         toast.error('Failed to create product. Please try again.');

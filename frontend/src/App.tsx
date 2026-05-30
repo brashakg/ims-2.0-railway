@@ -8,7 +8,6 @@ import { Suspense, lazy } from 'react';
 import { AuthProvider } from './context/AuthContext';
 import { ToastProvider } from './context/ToastContext';
 import { ModuleProvider } from './context/ModuleContext';
-import { ThemeProvider } from './context/ThemeContext';
 import { AppearanceProvider } from './context/AppearanceContext';
 import { AppLayout } from './components/layout/AppLayout';
 import { ProtectedRoute } from './components/layout/ProtectedRoute';
@@ -140,7 +139,6 @@ const NotFoundPage = () => (
 function App() {
   return (
     <ErrorBoundary>
-      <ThemeProvider>
       <AppearanceProvider>
       <QueryClientProvider client={queryClient}>
         <AuthProvider>
@@ -903,7 +901,6 @@ function App() {
       </AuthProvider>
     </QueryClientProvider>
     </AppearanceProvider>
-    </ThemeProvider>
     </ErrorBoundary>
   );
 }

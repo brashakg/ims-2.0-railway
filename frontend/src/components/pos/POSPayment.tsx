@@ -138,7 +138,7 @@ export function StepPayment() {
         </div>
       )}
 
-      <div className="grid grid-cols-5 gap-2">
+      <div className="grid grid-cols-3 tablet:grid-cols-5 gap-2">
         {methods.map(m => (
           <button key={m.id} onClick={() => {
             if (m.id === 'CASH') {

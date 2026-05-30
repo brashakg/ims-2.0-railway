@@ -401,7 +401,7 @@ function UserModal({
         </div>
 
         <div className="flex-1 overflow-y-auto p-4 space-y-4">
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 tablet:grid-cols-2 gap-4">
             <div>
               <label className="block text-sm font-medium text-gray-600 mb-1">Username *</label>
               <input
@@ -422,7 +422,7 @@ function UserModal({
             </div>
           </div>
 
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 tablet:grid-cols-2 gap-4">
             <div>
               <label className="block text-sm font-medium text-gray-600 mb-1">Email *</label>
               <input
@@ -460,7 +460,7 @@ function UserModal({
             {allowedRoles.length === 0 ? (
               <p className="text-sm text-gray-500">You don't have permission to assign roles.</p>
             ) : (
-              <div className="grid grid-cols-2 gap-2">
+              <div className="grid grid-cols-1 tablet:grid-cols-2 gap-2">
                 {allowedRoles.map(role => (
                   <label key={role} className="flex items-center gap-2 p-2 bg-gray-50 border border-gray-200 rounded cursor-pointer hover:bg-gray-100">
                     <input
@@ -491,7 +491,7 @@ function UserModal({
             {allowedStores.length === 0 ? (
               <p className="text-sm text-gray-500">No stores available.</p>
             ) : (
-              <div className="grid grid-cols-2 gap-2">
+              <div className="grid grid-cols-1 tablet:grid-cols-2 gap-2">
                 {allowedStores.map(store => (
                   <label key={store.id} className="flex items-center gap-2 p-2 bg-gray-50 border border-gray-200 rounded cursor-pointer hover:bg-gray-100">
                     <input
@@ -517,7 +517,7 @@ function UserModal({
             )}
           </div>
 
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 tablet:grid-cols-2 gap-4">
             <div>
               <label className="block text-sm font-medium text-gray-600 mb-1">Discount Cap (%)</label>
               <input
@@ -546,7 +546,7 @@ function UserModal({
           <div>
             <label className="block text-sm font-medium text-gray-600 mb-2">Module Access</label>
             <p className="text-xs text-gray-500 mb-2">Control which modules this user can access (overrides role defaults)</p>
-            <div className="grid grid-cols-3 gap-2">
+            <div className="grid grid-cols-2 tablet:grid-cols-3 gap-2">
               {['POS', 'Clinical', 'Workshop', 'Inventory', 'Reports', 'HR', 'Finance', 'CRM', 'Tasks'].map(mod => {
                 const moduleKey = mod.toLowerCase();
                 const userModules = (formData as any).moduleAccess || {};
@@ -572,7 +572,7 @@ function UserModal({
           {/* User-wise Permissions */}
           <div>
             <label className="block text-sm font-medium text-gray-600 mb-2">Individual Permissions</label>
-            <div className="grid grid-cols-2 gap-2">
+            <div className="grid grid-cols-1 tablet:grid-cols-2 gap-2">
               {[
                 { key: 'can_void_orders', label: 'Void/Cancel Orders' },
                 { key: 'can_process_returns', label: 'Process Returns' },

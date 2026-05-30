@@ -288,13 +288,13 @@ function StoreFormModal({ store, onSave, onClose }: { store: StoreConfig | null;
           <button onClick={onClose} className="p-1 hover:bg-gray-100 rounded"><X className="w-5 h-5" /></button>
         </div>
         <div className="p-5 space-y-4">
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 tablet:grid-cols-2 gap-4">
             <div><label className="text-xs text-gray-500 block mb-1">Store Name *</label>
               <input value={form.name} onChange={e => setForm(p => ({ ...p, name: e.target.value }))} className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" /></div>
             <div><label className="text-xs text-gray-500 block mb-1">Store Code *</label>
               <input value={form.code} onChange={e => setForm(p => ({ ...p, code: e.target.value.toUpperCase() }))} placeholder="BV-BOK-03" className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" /></div>
           </div>
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 tablet:grid-cols-2 gap-4">
             <div><label className="text-xs text-gray-500 block mb-1">Brand *</label>
               <select value={form.brand} onChange={e => setForm(p => ({ ...p, brand: e.target.value as any }))} className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
                 <option value="BETTER_VISION">Better Vision</option>
@@ -305,7 +305,7 @@ function StoreFormModal({ store, onSave, onClose }: { store: StoreConfig | null;
           </div>
           <div><label className="text-xs text-gray-500 block mb-1">Address *</label>
             <input value={form.address} onChange={e => setForm(p => ({ ...p, address: e.target.value }))} className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" /></div>
-          <div className="grid grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 tablet:grid-cols-2 lg:grid-cols-3 gap-4">
             <div><label className="text-xs text-gray-500 block mb-1">City *</label>
               <input value={form.city} onChange={e => setForm(p => ({ ...p, city: e.target.value }))} className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" /></div>
             <div><label className="text-xs text-gray-500 block mb-1">State *</label>
@@ -313,13 +313,13 @@ function StoreFormModal({ store, onSave, onClose }: { store: StoreConfig | null;
             <div><label className="text-xs text-gray-500 block mb-1">Pincode *</label>
               <input value={form.pincode} onChange={e => setForm(p => ({ ...p, pincode: e.target.value.replace(/\D/g, '').slice(0, 6) }))} className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" /></div>
           </div>
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 tablet:grid-cols-2 gap-4">
             <div><label className="text-xs text-gray-500 block mb-1">Phone *</label>
               <input value={form.phone} onChange={e => setForm(p => ({ ...p, phone: e.target.value.replace(/\D/g, '').slice(0, 10) }))} className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" /></div>
             <div><label className="text-xs text-gray-500 block mb-1">Email</label>
               <input type="email" value={form.email} onChange={e => setForm(p => ({ ...p, email: e.target.value }))} className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" /></div>
           </div>
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 tablet:grid-cols-2 gap-4">
             <div><label className="text-xs text-gray-500 block mb-1">Opening Time</label>
               <input type="time" value={form.openingTime} onChange={e => setForm(p => ({ ...p, openingTime: e.target.value }))} className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" /></div>
             <div><label className="text-xs text-gray-500 block mb-1">Closing Time</label>
@@ -334,7 +334,7 @@ function StoreFormModal({ store, onSave, onClose }: { store: StoreConfig | null;
                   ...p, categories: p.categories.includes(cat) ? p.categories.filter(c => c !== cat) : [...p.categories, cat]
                 }))}
                   className={clsx('text-xs px-3 py-1.5 rounded-lg border transition-colors',
-                    form.categories.includes(cat) ? 'bg-bv-gold-50 border-bv-red-300 text-bv-gold-700' : 'border-gray-200 text-gray-500 hover:border-gray-300')}>
+                    form.categories.includes(cat) ? 'bg-bv-red-50 border-bv-red-300 text-bv-red-700' : 'border-gray-200 text-gray-500 hover:border-gray-300')}>
                   {cat.replace(/_/g, ' ')}
                 </button>
               ))}
@@ -390,13 +390,13 @@ function EmployeeFormModal({ stores, onSave, onClose }: { stores: StoreConfig[];
           {step === 1 && (
             <>
               <h4 className="font-medium text-gray-900">Personal Information</h4>
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 tablet:grid-cols-2 gap-4">
                 <div><label className="text-xs text-gray-500 block mb-1">Full Name *</label>
                   <input value={form.name} onChange={e => setForm(p => ({ ...p, name: e.target.value }))} className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" /></div>
                 <div><label className="text-xs text-gray-500 block mb-1">Employee Code</label>
                   <input value={form.employeeCode} onChange={e => setForm(p => ({ ...p, employeeCode: e.target.value.toUpperCase() }))} placeholder="BV-EMP-001" className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" /></div>
               </div>
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 tablet:grid-cols-2 gap-4">
                 <div><label className="text-xs text-gray-500 block mb-1">Phone *</label>
                   <input value={form.phone} onChange={e => setForm(p => ({ ...p, phone: e.target.value.replace(/\D/g, '').slice(0, 10) }))} className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" /></div>
                 <div><label className="text-xs text-gray-500 block mb-1">Email</label>
@@ -412,11 +412,11 @@ function EmployeeFormModal({ stores, onSave, onClose }: { stores: StoreConfig[];
             <>
               <h4 className="font-medium text-gray-900">Assign Roles</h4>
               <p className="text-xs text-gray-500">One person can have multiple roles. Each role grants specific permissions.</p>
-              <div className="grid grid-cols-2 gap-2">
+              <div className="grid grid-cols-1 tablet:grid-cols-2 gap-2">
                 {ROLES.map(role => (
                   <button key={role.id} onClick={() => toggleRole(role.id)}
                     className={clsx('p-3 rounded-lg border-2 text-left transition-all',
-                      form.roles.includes(role.id) ? 'border-bv-red-600 bg-bv-gold-50' : 'border-gray-200 hover:border-gray-300')}>
+                      form.roles.includes(role.id) ? 'border-bv-red-600 bg-bv-red-50' : 'border-gray-200 hover:border-gray-300')}>
                     <div className="flex items-center gap-2">
                       <div className={clsx('w-5 h-5 rounded border-2 flex items-center justify-center',
                         form.roles.includes(role.id) ? 'border-bv-red-600 bg-bv-red-600' : 'border-gray-300')}>
@@ -441,7 +441,7 @@ function EmployeeFormModal({ stores, onSave, onClose }: { stores: StoreConfig[];
                   {stores.map(s => (
                     <button key={s.id} onClick={() => toggleStore(s.id || '')}
                       className={clsx('w-full p-3 rounded-lg border-2 text-left flex items-center justify-between',
-                        form.assignedStores.includes(s.id || '') ? 'border-bv-red-600 bg-bv-gold-50' : 'border-gray-200')}>
+                        form.assignedStores.includes(s.id || '') ? 'border-bv-red-600 bg-bv-red-50' : 'border-gray-200')}>
                       <div>
                         <p className="text-sm font-medium">{s.name}</p>
                         <p className="text-xs text-gray-500">{s.city}</p>
@@ -457,7 +457,7 @@ function EmployeeFormModal({ stores, onSave, onClose }: { stores: StoreConfig[];
                   ))}
                 </div>
               </div>
-              <div className="grid grid-cols-3 gap-4">
+              <div className="grid grid-cols-1 tablet:grid-cols-2 lg:grid-cols-3 gap-4">
                 <div><label className="text-xs text-gray-500 block mb-1">Shift Start</label>
                   <input type="time" value={form.shiftStart} onChange={e => setForm(p => ({ ...p, shiftStart: e.target.value }))} className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" /></div>
                 <div><label className="text-xs text-gray-500 block mb-1">Shift End</label>
@@ -480,7 +480,7 @@ function EmployeeFormModal({ stores, onSave, onClose }: { stores: StoreConfig[];
           {step === 4 && (
             <>
               <h4 className="font-medium text-gray-900">Login Credentials</h4>
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 tablet:grid-cols-2 gap-4">
                 <div><label className="text-xs text-gray-500 block mb-1">Username *</label>
                   <input value={form.username || autoUsername} onChange={e => setForm(p => ({ ...p, username: e.target.value }))} className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" /></div>
                 <div><label className="text-xs text-gray-500 block mb-1">Temporary Password</label>
@@ -490,7 +490,7 @@ function EmployeeFormModal({ stores, onSave, onClose }: { stores: StoreConfig[];
 
               <div className="bg-gray-50 rounded-lg p-4 mt-4">
                 <h5 className="text-sm font-medium text-gray-900 mb-2">Summary</h5>
-                <div className="grid grid-cols-2 gap-y-1 text-xs">
+                <div className="grid grid-cols-1 tablet:grid-cols-2 gap-y-1 text-xs">
                   <span className="text-gray-500">Name:</span><span className="font-medium">{form.name}</span>
                   <span className="text-gray-500">Roles:</span><span className="font-medium">{form.roles.join(', ') || 'None'}</span>
                   <span className="text-gray-500">Stores:</span><span className="font-medium">{form.assignedStores.length} store(s)</span>

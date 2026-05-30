@@ -138,7 +138,7 @@ export function ContactLensFittingPage() {
       {/* Quick Actions */}
       <div className="card bg-gradient-to-r from-purple-50 to-blue-50">
         <h3 className="font-medium text-gray-900 mb-3">Quick Actions</h3>
-        <div className="grid grid-cols-2 gap-3">
+        <div className="grid grid-cols-1 tablet:grid-cols-2 gap-3">
           <button onClick={showDevMessage} className="p-3 bg-white rounded-lg shadow-sm hover:shadow transition-shadow text-left">
             <User className="w-5 h-5 text-purple-600 mb-2" />
             <p className="text-sm font-medium text-gray-900">New Patient</p>

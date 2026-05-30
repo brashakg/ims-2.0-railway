@@ -1326,7 +1326,7 @@ function StepCustomer() {
               emptyMessage="No customers found"
             />
             <div className="mt-3 flex gap-4">
-              <button onClick={() => setShowAddCustomerModal(true)} className="flex items-center gap-2 text-sm text-bv-red-600 hover:text-bv-gold-700 font-medium"><Plus className="w-4 h-4" /> Create new customer</button>
+              <button onClick={() => setShowAddCustomerModal(true)} className="flex items-center gap-2 text-sm text-bv-red-600 hover:text-bv-red-700 font-medium"><Plus className="w-4 h-4" /> Create new customer</button>
               <button onClick={async () => {
                 try {
                   const r = await customerApi.createCustomer({ name: 'Walk-in Customer', mobile: '0000000000', customer_type: 'B2C' } as any);
@@ -1431,7 +1431,7 @@ function StepPrescription({ onShowModal, onShowNew }: { onShowModal: () => void;
       <div className="w-full max-w-5xl mx-auto space-y-4">
         <div className="flex items-center justify-between">
           <h3 className="font-semibold text-gray-900">Selected Prescription</h3>
-          <button onClick={onShowModal} className="text-sm text-bv-red-600 hover:text-bv-gold-700 font-medium">Change</button>
+          <button onClick={onShowModal} className="text-sm text-bv-red-600 hover:text-bv-red-700 font-medium">Change</button>
         </div>
         <PrescriptionPanel prescription={store.prescription} patientName={store.patient?.name || store.customer?.name} readOnly />
         <div className="bg-green-50 border border-green-200 rounded-lg p-3 flex items-center gap-2 text-sm text-green-700">
