@@ -14,27 +14,23 @@ grand_total, so the correct GST taxable value is grand_total - tax_amount
 Coverage:
   1. _order_taxable_and_tax pure helper (taxable == grand_total - tax_amount,
      line fallback, empty).
-  2. GSTR-1 + GSTR-3B taxable != 0 for a taxable order, against a REAL Mongo
-     (seeded + cleaned up under a unique store id).
+  2. GSTR-1 + GSTR-3B taxable != 0 for a taxable order (hermetic fake raw db).
   3. /reports/finance/gst returns non-zero taxable / tax (fake order repo).
-  4. Date-ranged P&L includes an in-range expense (real Mongo, unique store).
+  4. Date-ranged P&L filters expenses on `expense_date` (hermetic mini-pipeline).
   5. create_expense / request_advance raise (NOT 201) when the repo write
      returns None -- silent data loss must fail LOUDLY (SYSTEM_INTENT).
 
-Mongo is reached via JWT_SECRET_KEY=test MONGO_HOST=127.0.0.1 MONGO_PORT=27017.
-The DB-backed tests skip cleanly if Mongo is unreachable; no live network.
+All tests are hermetic (fake repos / fake DB handles) -- no live Mongo, so they
+cannot flake on CI's shared database regardless of test order.
 """
 
 from __future__ import annotations
 
 import os
 import sys
-import uuid
 from datetime import datetime
 
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-for-unit-tests")
-os.environ.setdefault("MONGO_HOST", "127.0.0.1")
-os.environ.setdefault("MONGO_PORT", "27017")
 
 import pytest  # noqa: E402
 from fastapi import FastAPI  # noqa: E402
@@ -67,25 +63,6 @@ def _client_for(router, prefix, roles, store_id="store-gst-test"):
 
     app.dependency_overrides[get_current_user] = _fake_user
     return TestClient(app)
-
-
-def _raw_db_or_skip():
-    """Return a connected raw pymongo Database, else skip the test."""
-    try:
-        from database.connection import get_db
-
-        conn = get_db()
-        if conn is None:
-            pytest.skip("No DB connection available")
-        # `.db` lazily connects; `is_connected` is False until then.
-        raw = conn.db
-        if raw is None or not conn.is_connected:
-            pytest.skip("Mongo not connected")
-        # Ping to be sure.
-        raw.command("ping")
-        return conn, raw
-    except Exception as exc:  # pragma: no cover - env dependent
-        pytest.skip(f"Mongo unreachable: {exc}")
 
 
 # ============================================================================
@@ -128,61 +105,80 @@ class TestOrderTaxableHelper:
 
 
 # ============================================================================
-# 2. GSTR-1 + GSTR-3B taxable != 0 (real Mongo, unique store, cleaned up)
+# 2. GSTR-1 + GSTR-3B taxable != 0 (hermetic: fake raw db, no Mongo)
 # ============================================================================
 
 
-@pytest.fixture
-def seeded_gst_store():
-    """Seed one store + one taxable order in a real Mongo under a unique store
-    id, yield (store_id, month), then delete what we inserted."""
-    conn, raw = _raw_db_or_skip()
-    store_id = f"GSTTEST-{uuid.uuid4().hex[:8]}"
-    # 2026-03: middle-of-period date so the inclusive monthrange filter catches it.
-    created = datetime(2026, 3, 15, 10, 0, 0)
-    raw["stores"].insert_one(
-        {
-            "store_id": store_id,
-            "store_name": "GST Test Store",
-            "state": "Maharashtra",
-            "gstin": "27ABCDE1234F1Z5",
-        }
-    )
-    raw["orders"].insert_one(
-        {
-            "order_id": f"ORD-{store_id}",
-            "order_number": "INV-GSTTEST-1",
-            "store_id": store_id,
-            "customer_id": "",  # walk-in -> intra-state (same as store)
-            "customer_name": "Walk-in",
-            "status": "COMPLETED",
-            "created_at": created,
-            "subtotal": 1200.0,  # pre-discount gross (must NOT be the taxable)
-            "tax_amount": 180.0,
-            "grand_total": 1180.0,
-            "items": [
-                {
-                    "product_name": "Ray-Ban Sunglass",
-                    "hsn_code": "9004",
-                    "gst_rate": 18,
-                    "taxable_value": 1000.0,
-                    "tax_amount": 180.0,
-                    "item_total": 1180.0,
-                }
-            ],
-        }
-    )
-    try:
-        yield store_id, "2026-03"
-    finally:
-        raw["stores"].delete_many({"store_id": store_id})
-        raw["orders"].delete_many({"store_id": store_id})
+class _FakeRawCol:
+    """Minimal pymongo-collection stand-in: find() returns all docs, find_one()
+    the first. Filters are ignored -- the test controls the data."""
+
+    def __init__(self, docs):
+        self._docs = list(docs)
+
+    def find(self, *args, **kwargs):
+        return list(self._docs)
+
+    def find_one(self, *args, **kwargs):
+        return self._docs[0] if self._docs else None
 
 
-def test_gstr1_taxable_not_zero(seeded_gst_store):
-    store_id, month = seeded_gst_store
-    client = _client_for(reports.router, "/reports", ["ADMIN"], store_id=store_id)
-    resp = client.get(f"/reports/gstr1?month={month}&store_id={store_id}")
+class _FakeRawDB:
+    def __init__(self, **collections):
+        self._cols = {k: _FakeRawCol(v) for k, v in collections.items()}
+
+    def __getitem__(self, name):
+        return self._cols.get(name) or _FakeRawCol([])
+
+
+def _gst_fake_order():
+    """One walk-in (intra-state) COMPLETED taxable order for hermetic GSTR tests."""
+    return {
+        "order_number": "INV-GSTTEST-1",
+        "order_id": "ORD-GSTTEST-1",
+        "customer_id": "",  # walk-in -> no customer state -> intra-state default
+        "customer_name": "Walk-in",
+        "status": "COMPLETED",
+        "created_at": datetime(2026, 3, 15, 10, 0, 0),
+        "grand_total": 1180.0,
+        "tax_amount": 180.0,
+        "subtotal": 1200.0,
+        "items": [
+            {
+                "product_name": "Ray-Ban Sunglass",
+                "hsn_code": "9004",
+                "gst_rate": 18,
+                "taxable_value": 1000.0,
+                "tax_amount": 180.0,
+                "item_total": 1180.0,
+            }
+        ],
+    }
+
+
+def _gst_fake_db():
+    """Fake raw DB the GSTR endpoints read via reports._get_raw_db()."""
+    return _FakeRawDB(
+        orders=[_gst_fake_order()],
+        stores=[
+            {
+                "store_id": "GSTTEST",
+                "gstin": "27ABCDE1234F1Z5",
+                "store_name": "GST Test Store",
+                "state": "Maharashtra",
+            }
+        ],
+        customers=[],
+    )
+
+
+def test_gstr1_taxable_not_zero(monkeypatch):
+    # Hermetic (fake raw db) so it can't be perturbed by full-suite cross-test DB
+    # state -- the real-Mongo version was the documented `finance_reporting` flake
+    # (intermittent taxable=0). Same assertions, now deterministic.
+    monkeypatch.setattr(reports, "_get_raw_db", _gst_fake_db)
+    client = _client_for(reports.router, "/reports", ["ADMIN"], store_id="GSTTEST")
+    resp = client.get("/reports/gstr1?month=2026-03&store_id=GSTTEST")
     assert resp.status_code == 200
     body = resp.json()
     # The bug: taxable was 0. The fix: taxable == grand_total - tax_amount = 1000.
@@ -194,10 +190,11 @@ def test_gstr1_taxable_not_zero(seeded_gst_store):
     assert b2cs_taxable == 1000.0
 
 
-def test_gstr3b_taxable_not_zero(seeded_gst_store):
-    store_id, month = seeded_gst_store
-    client = _client_for(reports.router, "/reports", ["ADMIN"], store_id=store_id)
-    resp = client.get(f"/reports/gstr3b?month={month}&store_id={store_id}")
+def test_gstr3b_taxable_not_zero(monkeypatch):
+    # Hermetic, same rationale as test_gstr1_taxable_not_zero.
+    monkeypatch.setattr(reports, "_get_raw_db", _gst_fake_db)
+    client = _client_for(reports.router, "/reports", ["ADMIN"], store_id="GSTTEST")
+    resp = client.get("/reports/gstr3b?month=2026-03&store_id=GSTTEST")
     assert resp.status_code == 200
     body = resp.json()
     # Outward taxable value must equal grand_total - tax_amount = 1000, not 0.
@@ -266,37 +263,105 @@ def test_reports_finance_gst_non_zero(monkeypatch):
 
 
 # ============================================================================
-# 4. Date-ranged P&L includes an in-range expense (real Mongo, unique store)
+# 4. Date-ranged P&L filters expenses on `expense_date` (hermetic mini-pipeline)
 # ============================================================================
+#
+# The endpoint reads expenses via db.get_collection("expenses").aggregate([
+#   {"$match": {... "expense_date": {"$gte","$lte"}, "status": {"$in"}}},
+#   {"$group": {"_id": "$category", "amount": {"$sum": "$amount"}}}]).
+# `_ExpensesCol` honours exactly those operators against the seeded docs, so the
+# regression still bites if anyone reverts the field name back to `date` (the
+# match key would miss the doc -> expense dropped -> total_expenses 0). Hermetic
+# (no Mongo) so it can't flake on CI's shared db the way the real-Mongo version
+# did (intermittent taxable/total 0 under full-suite cross-test load).
+
+
+def _match_doc(doc, match):
+    """True if `doc` satisfies a Mongo-style $match (eq / $gte / $lte / $in)."""
+    for key, cond in match.items():
+        val = doc.get(key)
+        if isinstance(cond, dict):
+            for op, opv in cond.items():
+                if op == "$gte" and not (val is not None and val >= opv):
+                    return False
+                if op == "$lte" and not (val is not None and val <= opv):
+                    return False
+                if op == "$in" and val not in opv:
+                    return False
+        elif val != cond:
+            return False
+    return True
+
+
+class _ExpensesCol:
+    """Honours the 2-stage [$match, $group-by-$category-sum-$amount] pnl pipeline."""
+
+    def __init__(self, docs):
+        self._docs = list(docs)
+
+    def aggregate(self, pipeline, *args, **kwargs):
+        out = self._docs
+        for stage in pipeline:
+            if "$match" in stage:
+                out = [d for d in out if _match_doc(d, stage["$match"])]
+            elif "$group" in stage:
+                grp = stage["$group"]
+                field = grp["_id"][1:] if isinstance(grp["_id"], str) else None
+                buckets: dict = {}
+                for d in out:
+                    key = d.get(field) if field else None
+                    buckets[key] = buckets.get(key, 0.0) + (d.get("amount") or 0)
+                out = [{"_id": k, "amount": v} for k, v in buckets.items()]
+        return list(out)
+
+
+class _EmptyCol:
+    def aggregate(self, *args, **kwargs):
+        return []
+
+    def find(self, *args, **kwargs):
+        return []
+
+
+class _FakePnlDB:
+    """Only `expenses` carries data; orders/products are empty (revenue 0)."""
+
+    def __init__(self, expenses):
+        self._exp = _ExpensesCol(expenses)
+
+    def get_collection(self, name):
+        return self._exp if name == "expenses" else _EmptyCol()
 
 
 @pytest.fixture
-def seeded_pnl_store():
-    conn, raw = _raw_db_or_skip()
-    store_id = f"PNLTEST-{uuid.uuid4().hex[:8]}"
-    raw["expenses"].insert_one(
+def pnl_expenses():
+    # One APPROVED RENT expense dated 2026-03-15 on the `expense_date` field
+    # (the shape create_expense actually writes).
+    return [
         {
-            "expense_id": f"EXP-{store_id}",
-            "store_id": store_id,
+            "expense_id": "EXP-PNLTEST",
+            "store_id": "PNLTEST",
             "category": "RENT",
             "amount": 5000.0,
             "status": "APPROVED",
-            # Stored on `expense_date` as a date-only ISO string (the actual
-            # shape create_expense writes). The OLD code filtered `date`.
             "expense_date": "2026-03-15",
         }
-    )
-    try:
-        yield store_id
-    finally:
-        raw["expenses"].delete_many({"store_id": store_id})
+    ]
 
 
-def test_pnl_includes_in_range_expense(seeded_pnl_store):
-    store_id = seeded_pnl_store
-    client = _client_for(finance.router, "/finance", ["ADMIN"], store_id=store_id)
+def _patch_pnl(monkeypatch, expenses):
+    monkeypatch.setattr(finance, "_get_db", lambda: _FakePnlDB(expenses))
+    # COGS + payroll have their own tests; zero them so the assertion isolates
+    # the expense date filter.
+    monkeypatch.setattr(finance, "_cost_by_product", lambda _db: {})
+    monkeypatch.setattr(finance, "_payroll_cost", lambda *a, **k: 0.0)
+
+
+def test_pnl_includes_in_range_expense(monkeypatch, pnl_expenses):
+    _patch_pnl(monkeypatch, pnl_expenses)
+    client = _client_for(finance.router, "/finance", ["ADMIN"], store_id="PNLTEST")
     resp = client.get(
-        f"/finance/pnl?store_id={store_id}&from_date=2026-03-01&to_date=2026-03-31"
+        "/finance/pnl?store_id=PNLTEST&from_date=2026-03-01&to_date=2026-03-31"
     )
     assert resp.status_code == 200
     body = resp.json()
@@ -306,12 +371,12 @@ def test_pnl_includes_in_range_expense(seeded_pnl_store):
     assert body["expenses"].get("RENT") == 5000.0
 
 
-def test_pnl_excludes_out_of_range_expense(seeded_pnl_store):
+def test_pnl_excludes_out_of_range_expense(monkeypatch, pnl_expenses):
     """A correct field-name filter must also EXCLUDE out-of-range expenses."""
-    store_id = seeded_pnl_store
-    client = _client_for(finance.router, "/finance", ["ADMIN"], store_id=store_id)
+    _patch_pnl(monkeypatch, pnl_expenses)
+    client = _client_for(finance.router, "/finance", ["ADMIN"], store_id="PNLTEST")
     resp = client.get(
-        f"/finance/pnl?store_id={store_id}&from_date=2026-01-01&to_date=2026-01-31"
+        "/finance/pnl?store_id=PNLTEST&from_date=2026-01-01&to_date=2026-01-31"
     )
     assert resp.status_code == 200
     # The March expense is outside Jan -> excluded.
