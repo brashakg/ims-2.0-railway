@@ -154,6 +154,7 @@ export const adminUserApi = {
     username?: string;
     mustChangePassword?: boolean;
     status?: string;
+    moduleAccess?: Record<string, boolean>;
   }) => {
     // Map the UI shape onto the backend UserCreate contract
     // (full_name/roles[]/store_ids[]/discount_cap). Accepts the multi-select
@@ -194,6 +195,9 @@ export const adminUserApi = {
       payload.primary_store_id = data.primaryStoreId || storeIds[0];
     }
     if (data.discountCap != null) payload.discount_cap = data.discountCap;
+    // Deny-only per-user module override (canonical key -> bool). Only sent when
+    // provided so create defaults to {} server-side (all role defaults apply).
+    if (data.moduleAccess != null) payload.module_access = data.moduleAccess;
     const response = await api.post('/users', payload);
     return response.data;
   },
@@ -209,6 +213,7 @@ export const adminUserApi = {
     primaryStoreId: string;
     discountCap: number;
     status: string;
+    moduleAccess: Record<string, boolean>;
   }>) => {
     // name->full_name / roles[] / store_ids[] / discount_cap mapping the backend
     // UserUpdate expects. Prefers the multi-select arrays the forms collect.
@@ -230,6 +235,9 @@ export const adminUserApi = {
     }
     if (data.discountCap != null) payload.discount_cap = data.discountCap;
     if (data.status !== undefined) payload.is_active = data.status === 'ACTIVE';
+    // Only include module_access when explicitly provided so an unrelated edit
+    // never wipes an existing grant (backend update uses exclude_unset too).
+    if (data.moduleAccess != null) payload.module_access = data.moduleAccess;
     const response = await api.put(`/users/${userId}`, payload);
     return response.data;
   },

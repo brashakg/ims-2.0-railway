@@ -6,7 +6,7 @@ User management endpoints
 
 from fastapi import APIRouter, HTTPException, Depends, Query
 from pydantic import BaseModel, Field, EmailStr
-from typing import List, Optional
+from typing import List, Optional, Dict
 from datetime import datetime
 import uuid
 import hashlib
@@ -41,6 +41,13 @@ class UserCreate(BaseModel):
     # When True (admin created the account with a temporary password), the user
     # must change it on first login instead of it becoming the permanent one.
     must_change_password: bool = Field(default=False)
+    # Per-user module access -- a DENY-ONLY override LAYERED ON TOP of the role.
+    # Shape: {moduleKey: bool}. A key set to False HIDES + route-blocks that
+    # module for this user even when their role would allow it. The role is the
+    # ceiling: this can only further RESTRICT, never grant a module the role
+    # forbids (enforced client-side by AND-ing with the role filter; there is no
+    # server path that reads this to GRANT). None/absent -> role defaults apply.
+    module_access: Optional[Dict[str, bool]] = None
 
 
 class UserUpdate(BaseModel):
@@ -51,6 +58,10 @@ class UserUpdate(BaseModel):
     primary_store_id: Optional[str] = None
     discount_cap: Optional[float] = Field(default=None, ge=0, le=100)
     is_active: Optional[bool] = None
+    # Deny-only per-user module override (see UserCreate.module_access). Only
+    # persisted when explicitly provided on update so an unrelated edit (e.g. a
+    # phone change) never wipes an existing grant -- handled via exclude_unset.
+    module_access: Optional[Dict[str, bool]] = None
 
 
 class UserResponse(BaseModel):
@@ -245,6 +256,9 @@ async def create_user(user: UserCreate, current_user: dict = Depends(require_adm
             # The admin sets a temporary password; force the user to change it on
             # first login. Cleared by /auth/change-password. See auth.py.
             "must_change_password": True,
+            # Deny-only module override. Default to {} (role defaults apply for
+            # every module) so the stored shape is always a dict, not null.
+            "module_access": user.module_access or {},
         }
 
         created = repo.create(user_data)
@@ -290,6 +304,9 @@ async def update_user(
         if existing is None:
             raise HTTPException(status_code=404, detail="User not found")
 
+        # exclude_unset => fields the client didn't send are NOT in the dict, so
+        # an unrelated edit can't wipe module_access (or any other field). When
+        # module_access IS sent it round-trips through verbatim and overwrites.
         update_data = user.model_dump(exclude_unset=True)
         update_data["updated_by"] = current_user.get("user_id")
 
