@@ -20,6 +20,8 @@ from ..services.online_catalog import (
     ecommerce_db_configured,
 )
 from ..services import stock_allocation
+from ..services.pricing_caps import evaluate_offer_price
+from ..services.gst_rates import gst_rate_for_category, hsn_for_category
 from .inventory import _on_hand_by_product
 
 router = APIRouter()
@@ -920,7 +922,10 @@ class ProductCreateInput(BaseModel):
     # Common fields
     description: Optional[str] = None
     hsn_code: Optional[str] = None
-    gst_rate: float = 18.0
+    # Optional so an omitted rate can be derived from HSN/category (mirrors
+    # products.py ProductCreate). A hard-coded 18.0 default was a pricing
+    # back-door: an optical frame (5% GST) would silently persist at 18%.
+    gst_rate: Optional[float] = None
     weight: Optional[float] = None  # in grams
 
     # Pricing
@@ -1215,6 +1220,42 @@ async def get_catalog_product(
     return {"product": product}
 
 
+def _guard_catalog_pricing(product: "ProductCreateInput") -> tuple:
+    """Apply the two non-negotiable catalog pricing rules that the canonical
+    POST /api/v1/products path already enforces, so /catalog/products is not an
+    unguarded back-door (SYSTEM_INTENT section 3/10: offer_price > mrp -> BLOCK):
+
+      1. Block offer_price > mrp (400), via the SHARED pricing_caps validator
+         (services/pricing_caps.evaluate_offer_price) -- the same source of
+         truth used by products.py and the bulk-price endpoints. Only the
+         MRP_BELOW_OFFER verdict is raised here; discount-cap (CAP_EXCEEDED)
+         stays a bulk/POS concern, matching products._assert_mrp_ge_offer.
+      2. Derive gst_rate / hsn_code from the product category via the canonical
+         services/gst_rates table when the client omits the rate (or omits the
+         HSN), so the master rate equals what POS bills (a frame -> 5%, not the
+         old hard-coded 18% default). An explicitly-supplied rate still wins.
+
+    Returns the (gst_rate, hsn_code) to persist. The ProductCategory enum values
+    are the short codes ("FR", "SG", ...) which are keys in GST_CATEGORY_TABLE.
+    """
+    mrp = product.pricing.mrp
+    offer_price = product.pricing.offer_price
+    if mrp is not None and offer_price is not None:
+        verdict = evaluate_offer_price(mrp, offer_price)
+        if verdict["reason"] == "MRP_BELOW_OFFER":
+            raise HTTPException(
+                status_code=400, detail="Offer price cannot exceed MRP"
+            )
+
+    category_code = product.category.value
+    if product.gst_rate is not None:
+        gst_rate = product.gst_rate
+    else:
+        gst_rate = gst_rate_for_category(category_code)
+    hsn_code = product.hsn_code or hsn_for_category(category_code)
+    return gst_rate, hsn_code
+
+
 @router.post("/products")
 async def create_catalog_product(
     product: ProductCreateInput, current_user: dict = Depends(get_current_user)
@@ -1240,6 +1281,10 @@ async def create_catalog_product(
                 status_code=400, detail=f"Missing required field: {required_field}"
             )
 
+    # Non-negotiable pricing guards (block offer > MRP; derive GST from
+    # HSN/category) -- same rules the canonical /products path enforces.
+    gst_rate, hsn_code = _guard_catalog_pricing(product)
+
     # Generate SKU and title
     product_id = f"prod_{uuid.uuid4().hex[:12]}"
     sku = generate_sku(product.category, product.attributes)
@@ -1254,8 +1299,8 @@ async def create_catalog_product(
         "category_name": CATEGORY_NAMES.get(product.category),
         "attributes": product.attributes,
         "description": product.description,
-        "hsn_code": product.hsn_code,
-        "gst_rate": product.gst_rate,
+        "hsn_code": hsn_code,
+        "gst_rate": gst_rate,
         "weight": product.weight,
         "pricing": {
             "mrp": product.pricing.mrp,
@@ -1569,6 +1614,16 @@ async def import_products(
                 errors.append({"index": i, "error": "Invalid category"})
                 continue
 
+            # Same pricing guards as the single-create path: block offer > MRP
+            # and derive GST from HSN/category. A bad row is recorded + skipped
+            # (the 400 raised by the guard is reported per-row, not as a batch
+            # abort) so one bad row never poisons the whole import.
+            try:
+                gst_rate, hsn_code = _guard_catalog_pricing(product)
+            except HTTPException as guard_exc:
+                errors.append({"index": i, "error": guard_exc.detail})
+                continue
+
             product_id = f"prod_{uuid.uuid4().hex[:12]}"
             sku = generate_sku(product.category, product.attributes)
             title = generate_product_title(product.category, product.attributes)
@@ -1581,8 +1636,8 @@ async def import_products(
                 "category_name": CATEGORY_NAMES.get(product.category),
                 "attributes": product.attributes,
                 "description": product.description,
-                "hsn_code": product.hsn_code,
-                "gst_rate": product.gst_rate,
+                "hsn_code": hsn_code,
+                "gst_rate": gst_rate,
                 "weight": product.weight,
                 "pricing": {
                     "mrp": product.pricing.mrp,
