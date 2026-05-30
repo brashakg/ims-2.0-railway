@@ -206,13 +206,16 @@ def generate_transfer_number() -> str:
 #   SHIP    -> reduce on-hand at the SOURCE store: take that many AVAILABLE
 #              source units and mark them TRANSFERRED (records transfer_id so
 #              they can be matched on receive + so re-ship is a no-op).
-#   RECEIVE -> raise on-hand at the DESTINATION store: create that many
-#              AVAILABLE units there (new store-local barcodes are a separate
-#              print step; the data layer just mints the units).
+#   RECEIVE -> raise on-hand at the DESTINATION store by RE-HOMING the same
+#              shipped units: flip them TRANSFERRED -> AVAILABLE and set their
+#              store to the destination, keeping each unit's ORIGINAL barcode
+#              for life. A transfer is not a purchase, so no new barcode is
+#              minted (standard serialized-stock POS behavior) and no phantom
+#              stock is ever created - the unit simply changes location.
 #
 # Idempotency: a doc-level `stock_shipped` flag guards SHIP; each line tracks
-# `received_qty_committed` (units already minted at destination) so a re-/
-# partial receive only ever mints the DELTA. Fail-soft: no stock repo (DB
+# `received_qty_committed` (units already re-homed to the destination) so a re-/
+# partial receive only ever moves the DELTA. Fail-soft: no stock repo (DB
 # down / tests without Mongo) -> the lifecycle still advances the transfer doc
 # exactly as before, just without moving units.
 
@@ -357,14 +360,49 @@ def _apply_ship_stock_move(transfer: Dict) -> Dict:
     return transfer
 
 
-def _apply_receive_stock_move(transfer: Dict) -> Dict:
-    """Raise destination on-hand when transfer units are received.
+def _transferred_pool(stock_repo, transfer, product_id, prefer):
+    """Ordered pool of unit ids shipped under this transfer for a product.
 
-    For each line, mint AVAILABLE units at the DESTINATION store up to the
-    line's `quantity_received`, minus whatever was already minted on a prior
-    (partial) receive. The delta is tracked per line in `received_qty_committed`
-    and the minted ids appended to `received_stock_ids`, so repeated or partial
-    receives only ever create the NEW units - never duplicates.
+    Starts from the ids SHIP recorded on the line (`prefer`); only when that is
+    empty does it fall back to querying the units still marked TRANSFERRED for
+    this transfer+product (covers legacy docs whose `shipped_stock_ids` wasn't
+    recorded). Fail-soft to `prefer` on any repo error. Pure read."""
+    pool = [str(s) for s in (prefer or []) if s]
+    if pool:
+        return pool
+    try:
+        rows = stock_repo.find_many(
+            {
+                "transfer_id": transfer.get("id"),
+                "product_id": product_id,
+                "status": STOCK_STATUS_TRANSFERRED,
+            }
+        )
+    except Exception as exc:  # noqa: BLE001 - fail-soft
+        logger.warning("[TRANSFER] receive pool lookup failed: %s", exc)
+        return pool
+    for unit in rows or []:
+        sid = unit.get("stock_id") or unit.get("stock_unit_id") or unit.get("_id")
+        if sid:
+            pool.append(str(sid))
+    return pool
+
+
+def _apply_receive_stock_move(transfer: Dict) -> Dict:
+    """Raise destination on-hand by RE-HOMING the shipped units.
+
+    A transfer never creates stock. For each line, the SAME physical units that
+    SHIP marked TRANSFERRED (recorded per line in `shipped_stock_ids`) are
+    flipped back to AVAILABLE and re-homed to the destination store, keeping
+    their ORIGINAL barcode for life (a transfer is not a purchase -> no new
+    barcode is minted). The destination's on-hand rises by exactly the number of
+    units that physically arrived.
+
+    Per line we re-home at most `quantity_received` units, bounded by the pool of
+    units actually shipped (so a receive can never exceed what left the source).
+    `received_qty_committed` tracks how many of the line's shipped units have
+    already been re-homed, so a repeated or partial receive only ever moves the
+    DELTA - never double-counts and never fabricates stock the source never sent.
 
     Fail-soft: no stock repo -> transfer returned unchanged (lifecycle still
     advances, as before).
@@ -377,7 +415,7 @@ def _apply_receive_stock_move(transfer: Dict) -> Dict:
     if not to_store:
         return transfer
 
-    minted_total = 0
+    moved_total = 0
     for line in transfer.get("items", []):
         product_id = line.get("product_id")
         try:
@@ -385,50 +423,50 @@ def _apply_receive_stock_move(transfer: Dict) -> Dict:
         except (TypeError, ValueError):
             received = 0
         already = int(line.get("received_qty_committed", 0) or 0)
-        delta = received - already
-        if not product_id or delta <= 0:
+        want = received - already
+        if not product_id or want <= 0:
             continue
 
-        minted_ids: List[str] = list(line.get("received_stock_ids", []))
-        for _ in range(delta):
-            barcode = f"{str(to_store)[:3]}-{uuid.uuid4().hex[:8].upper()}"
-            created = stock_repo.create(
+        # The units to re-home are exactly those SHIP marked TRANSFERRED for this
+        # transfer (stable, ordered pool); never mint new ones.
+        pool = _transferred_pool(stock_repo, transfer, product_id, line.get("shipped_stock_ids"))
+        movable = pool[already:already + want]
+
+        received_ids: List[str] = list(line.get("received_stock_ids", []))
+        moved_here = 0
+        for sid in movable:
+            ok = stock_repo.update(
+                sid,
                 {
-                    "product_id": product_id,
-                    "store_id": to_store,
-                    "barcode": barcode,
-                    "location_code": "DEFAULT",
                     "status": STOCK_STATUS_AVAILABLE,
-                    "is_reserved": False,
-                    "barcode_printed": False,
+                    "store_id": to_store,
+                    "received_at": datetime.now().isoformat(),
                     "source_type": "TRANSFER",
                     "source_id": transfer.get("id"),
                     "transfer_number": transfer.get("transfer_number"),
                     "from_store_id": transfer.get("from_location_id"),
-                }
+                    # No longer held against the (now-completed) transfer.
+                    "transfer_id": None,
+                    "transfer_to_store_id": None,
+                },
             )
-            if created:
-                sid = (
-                    created.get("stock_id")
-                    or created.get("stock_unit_id")
-                    or created.get("_id")
+            if ok:
+                received_ids.append(str(sid))
+                moved_here += 1
+                moved_total += 1
+                _audit_stock_move(
+                    STOCK_STATUS_TRANSFERRED,
+                    STOCK_STATUS_AVAILABLE,
+                    str(sid),
+                    transfer,
+                    {"product_id": product_id, "moved_to": to_store},
                 )
-                if sid:
-                    minted_ids.append(str(sid))
-                    minted_total += 1
-                    _audit_stock_move(
-                        None,
-                        STOCK_STATUS_AVAILABLE,
-                        str(sid),
-                        transfer,
-                        {"product_id": product_id, "minted": True},
-                    )
 
-        line["received_stock_ids"] = minted_ids
-        line["received_qty_committed"] = already + delta
+        line["received_stock_ids"] = received_ids
+        line["received_qty_committed"] = already + moved_here
 
     transfer["stock_units_moved_in"] = (
-        int(transfer.get("stock_units_moved_in", 0) or 0) + minted_total
+        int(transfer.get("stock_units_moved_in", 0) or 0) + moved_total
     )
     return transfer
 

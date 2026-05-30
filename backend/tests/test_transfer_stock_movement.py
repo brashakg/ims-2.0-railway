@@ -7,8 +7,10 @@ therefore left BOTH stores' on-hand wrong. SYSTEM_INTENT 5 requires:
 
   * SHIP    -> source-store on-hand drops by the shipped qty (units flipped
                to TRANSFERRED, no longer counted as on-hand at the source).
-  * RECEIVE -> destination-store on-hand rises by the received qty (fresh
-               AVAILABLE units minted at the destination).
+  * RECEIVE -> destination-store on-hand rises by the received qty by RE-HOMING
+               the same shipped units (TRANSFERRED -> AVAILABLE at the
+               destination store, keeping each unit's original barcode). A
+               transfer never mints new stock - the unit just changes location.
 
 This test drives the real endpoint functions against the REAL repositories
 (StockRepository / ProductRepository) on a throwaway Mongo database at
@@ -251,7 +253,7 @@ def test_reship_and_rereceive_do_not_double_move(lifecycle):
     assert _on_hand(db, product_id, "B") == K  # no duplicates
 
 
-def test_partial_receive_then_complete_mints_only_delta(lifecycle):
+def test_partial_receive_then_complete_moves_only_delta(lifecycle):
     db = lifecycle["db"]
     stock_repo = lifecycle["stock_repo"]
     product_id = "PRD-PARTIAL-1"
@@ -278,7 +280,7 @@ def test_partial_receive_then_complete_mints_only_delta(lifecycle):
     assert part["status"] == transfers.TransferStatus.PARTIALLY_RECEIVED
     assert _on_hand(db, product_id, "B") == 2
 
-    # Now receive the full 5 (cumulative) -> only 3 NEW units minted (delta).
+    # Now receive the full 5 (cumulative) -> only 3 more units re-homed (delta).
     full = asyncio.run(
         transfers.receive_transfer(
             tid,
@@ -292,6 +294,52 @@ def test_partial_receive_then_complete_mints_only_delta(lifecycle):
     )["transfer"]
     assert full["status"] == transfers.TransferStatus.RECEIVED
     assert _on_hand(db, product_id, "B") == 5  # 2 + 3, no double count
+
+
+def test_received_units_keep_original_barcode_and_no_mint(lifecycle):
+    """A transfer re-homes the SAME physical units: destination on-hand is made
+    of the very units shipped from the source (same ids + same barcodes), and
+    the total number of stock_unit docs for the product never grows (no minting).
+    This locks the 'barcode follows the unit, unique per unit per purchase' rule.
+    """
+    db = lifecycle["db"]
+    stock_repo = lifecycle["stock_repo"]
+    units = db.get_collection("stock_units")
+    product_id = "PRD-BARCODE-1"
+    N, K = 6, 4
+
+    _seed_units(stock_repo, product_id, "A", N)
+    total_before = units.count_documents({"product_id": product_id})
+    barcodes_before = {
+        d["barcode"] for d in units.find({"product_id": product_id}, {"barcode": 1})
+    }
+
+    transfer = _make_transfer(product_id, K)
+    tid = transfer["id"]
+    asyncio.run(transfers.ship_transfer(tid, current_user=_ADMIN))
+    line_id = transfer["items"][0]["id"]
+    asyncio.run(
+        transfers.receive_transfer(
+            tid,
+            items_received=[
+                transfers.TransferItemReceive(
+                    transfer_item_id=line_id, quantity_received=K
+                )
+            ],
+            current_user=_ADMIN,
+        )
+    )
+
+    # No new stock_unit docs were created - the units just changed location.
+    assert units.count_documents({"product_id": product_id}) == total_before == N
+    # The K units now AVAILABLE at B carry their ORIGINAL (source) barcodes.
+    dest = list(units.find({"product_id": product_id, "store_id": "B",
+                            "status": "AVAILABLE"}, {"barcode": 1}))
+    assert len(dest) == K
+    dest_barcodes = {d["barcode"] for d in dest}
+    assert dest_barcodes <= barcodes_before  # subset: same physical labels moved
+    # And none of them were re-minted with a destination-prefixed barcode.
+    assert all(not bc.startswith("B-") for bc in dest_barcodes)
 
 
 def test_ship_caps_at_available_source_units(lifecycle):
