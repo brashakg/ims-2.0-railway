@@ -23,6 +23,7 @@ from ..dependencies import (
     get_stock_repository,
     get_product_repository,
     get_walkin_counter_repository,
+    validate_store_access,
 )
 
 # Discount cap by product discount_category (mirrors billing.py caps)
@@ -421,7 +422,7 @@ async def list_orders(
 ):
     """List orders with filters"""
     repo = get_order_repository()
-    active_store = store_id or current_user.get("active_store_id")
+    active_store = validate_store_access(store_id, current_user)
 
     if repo is not None:
         if customer_id:
@@ -464,7 +465,7 @@ async def get_pending_deliveries(
 ):
     """Get orders pending delivery"""
     repo = get_order_repository()
-    active_store = store_id or current_user.get("active_store_id")
+    active_store = validate_store_access(store_id, current_user)
 
     if repo is not None:
         orders = repo.find_ready_for_delivery(active_store)
@@ -481,7 +482,7 @@ async def get_unpaid_orders(
 ):
     """Get unpaid/partially paid orders"""
     repo = get_order_repository()
-    active_store = store_id or current_user.get("active_store_id")
+    active_store = validate_store_access(store_id, current_user)
 
     if repo is not None:
         orders = repo.find_unpaid(active_store)
@@ -498,7 +499,7 @@ async def get_overdue_orders(
 ):
     """Get overdue orders (past expected delivery)"""
     repo = get_order_repository()
-    active_store = store_id or current_user.get("active_store_id")
+    active_store = validate_store_access(store_id, current_user)
 
     if repo is not None:
         orders = repo.find_overdue(active_store)
@@ -516,7 +517,7 @@ async def search_orders(
 ):
     """Search orders by number, customer name, or phone"""
     repo = get_order_repository()
-    active_store = store_id or current_user.get("active_store_id")
+    active_store = validate_store_access(store_id, current_user)
 
     if repo is not None:
         orders = repo.search_orders(q, active_store)
@@ -535,7 +536,7 @@ async def get_sales_summary(
 ):
     """Get sales summary for a date range"""
     repo = get_order_repository()
-    active_store = store_id or current_user.get("active_store_id")
+    active_store = validate_store_access(store_id, current_user)
 
     if repo and active_store:
         summary = repo.get_sales_summary(active_store, from_date, to_date)
@@ -557,7 +558,7 @@ async def get_status_counts(
 ):
     """Get order counts by status"""
     repo = get_order_repository()
-    active_store = store_id or current_user.get("active_store_id")
+    active_store = validate_store_access(store_id, current_user)
 
     if repo is not None:
         counts = repo.get_status_counts(active_store)
@@ -1295,6 +1296,9 @@ async def get_order(order_id: str, current_user: dict = Depends(get_current_user
     if repo is not None:
         order = repo.find_by_id(order_id)
         if order is not None:
+            # Store-scope: only view an order in a store the user can access
+            # (raises 403 otherwise; SUPERADMIN/ADMIN pass through).
+            validate_store_access(order.get("store_id"), current_user)
             # Backfill-safe: ensure a public tracking token exists so the
             # staff-facing order view can render the customer-tracking QR
             # even for orders created before that field existed. Fail-soft.
