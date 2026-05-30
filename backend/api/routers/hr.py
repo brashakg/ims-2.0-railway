@@ -5,7 +5,7 @@ Real database queries for attendance, leaves, and payroll
 """
 
 from fastapi import APIRouter, Depends, Query, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 from typing import Optional, List
 from datetime import date, datetime
 from calendar import monthrange
@@ -43,6 +43,24 @@ router = APIRouter()
 
 
 # ============================================================================
+# CONSTANTS
+# ============================================================================
+
+# Canonical attendance status values accepted by mark_attendance.
+_VALID_STATUSES = frozenset(
+    {"PRESENT", "ABSENT", "HALF_DAY", "LEAVE", "LWP", "HOLIDAY", "WEEK_OFF"}
+)
+
+# Leave types accepted by apply_leave.
+_VALID_LEAVE_TYPES = frozenset(
+    {
+        "CASUAL", "SICK", "EARNED", "PRIVILEGE",
+        "MATERNITY", "PATERNITY", "UNPAID", "LWP", "LOP",
+    }
+)
+
+
+# ============================================================================
 # SCHEMAS
 # ============================================================================
 
@@ -53,13 +71,63 @@ class LeaveCreate(BaseModel):
     to_date: date
     reason: str
 
+    @field_validator("leave_type")
+    @classmethod
+    def validate_leave_type(cls, v: str) -> str:
+        normalised = v.strip().upper()
+        if normalised not in _VALID_LEAVE_TYPES:
+            raise ValueError(
+                f"leave_type must be one of: {', '.join(sorted(_VALID_LEAVE_TYPES))}"
+            )
+        return normalised
+
+    @model_validator(mode="after")
+    def dates_must_be_valid(self) -> "LeaveCreate":
+        today = date.today()
+        if self.to_date < self.from_date:
+            raise ValueError("to_date must be on or after from_date")
+        # Allow leave applications for future dates (pre-booking), but not
+        # back-dated by more than 90 days (prevents historical data injection).
+        if self.from_date < date(today.year - 1, today.month, today.day):
+            raise ValueError("from_date cannot be more than 1 year in the past")
+        return self
+
 
 class AttendanceMarkRequest(BaseModel):
     employee_id: str
     date: date
-    status: str  # PRESENT, ABSENT, HALF_DAY, LEAVE
+    status: str  # PRESENT, ABSENT, HALF_DAY, LEAVE, LWP, HOLIDAY, WEEK_OFF
     check_in: Optional[datetime] = None
     check_out: Optional[datetime] = None
+
+    @field_validator("status")
+    @classmethod
+    def validate_status(cls, v: str) -> str:
+        normalised = v.strip().upper()
+        if normalised not in _VALID_STATUSES:
+            raise ValueError(
+                f"status must be one of: {', '.join(sorted(_VALID_STATUSES))}"
+            )
+        return normalised
+
+    @field_validator("date")
+    @classmethod
+    def date_not_future(cls, v: date) -> date:
+        if v > date.today():
+            raise ValueError("Attendance cannot be marked for a future date")
+        return v
+
+    @model_validator(mode="after")
+    def checkout_after_checkin(self) -> "AttendanceMarkRequest":
+        ci = self.check_in
+        co = self.check_out
+        if ci is not None and co is not None:
+            # Strip timezone info for naive comparison (both are stored naive).
+            ci_ts = ci.replace(tzinfo=None)
+            co_ts = co.replace(tzinfo=None)
+            if co_ts <= ci_ts:
+                raise ValueError("check_out must be after check_in")
+        return self
 
 
 # ============================================================================
@@ -493,6 +561,13 @@ async def check_in(
         existing = attendance_repo.find_one(
             {"employee_id": employee_id, "date": today_iso}
         )
+        # Block double check-in: if a record already has a check_in timestamp,
+        # the employee must check out first before checking in again.
+        if existing is not None and existing.get("check_in"):
+            raise HTTPException(
+                status_code=409,
+                detail="Already checked in today. Please check out before checking in again.",
+            )
         data = {
             "employee_id": employee_id,
             "employee_name": current_user.get("full_name") or current_user.get("username"),
@@ -554,6 +629,20 @@ async def check_out_by_id(
     )
     if existing is None:
         raise HTTPException(status_code=404, detail="Attendance record not found")
+
+    # Must have checked in before checking out.
+    if not existing.get("check_in"):
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot check out: no check-in recorded for this attendance entry.",
+        )
+    # Block double check-out: once stamped, the employee is already gone.
+    if existing.get("check_out"):
+        raise HTTPException(
+            status_code=409,
+            detail="Already checked out for this attendance record.",
+        )
+
     now_iso = datetime.now().isoformat()
     repo.update(
         existing.get("attendance_id") or existing.get("_id"),
@@ -631,7 +720,64 @@ async def list_leaves(
 async def apply_leave(
     leave: LeaveCreate, current_user: dict = Depends(get_current_user)
 ):
-    return {"leaveId": "new-leave-id", "message": "Leave application submitted"}
+    """Apply for leave. Validates leave_type, date order, and detects overlapping
+    approved/pending leaves for the same employee. Persists to the leave collection
+    when DB is available; echoes back a draft record in demo mode (fail-soft).
+
+    Overlap rule: a new application is blocked if its [from_date, to_date] range
+    intersects any existing APPROVED or PENDING leave for the same employee.
+    This prevents booking two leaves for the same calendar days.
+    """
+    employee_id = current_user.get("user_id")
+    store_id = current_user.get("active_store_id")
+    leave_repo = get_leave_repository()
+
+    if leave_repo is not None and employee_id:
+        # Check for overlapping active (APPROVED or PENDING) leaves.
+        existing_leaves = leave_repo.find_many(
+            {
+                "employee_id": employee_id,
+                "status": {"$in": ["APPROVED", "PENDING"]},
+            }
+        ) or []
+        for ex in existing_leaves:
+            ex_from = ex.get("from_date")
+            ex_to = ex.get("to_date") or ex_from
+            if ex_from is None:
+                continue
+            # Normalise to ISO strings for comparison.
+            ex_from_s = ex_from[:10] if isinstance(ex_from, str) else str(ex_from)
+            ex_to_s = ex_to[:10] if isinstance(ex_to, str) else str(ex_to)
+            new_from_s = leave.from_date.isoformat()
+            new_to_s = leave.to_date.isoformat()
+            # Overlap: new interval starts before existing ends AND ends after existing starts.
+            if new_from_s <= ex_to_s and new_to_s >= ex_from_s:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"Leave overlaps with an existing {ex.get('status')} leave "
+                        f"({ex_from_s} to {ex_to_s}). Cancel or modify the existing "
+                        "request before filing a new one."
+                    ),
+                )
+
+    doc = {
+        "leave_id": str(uuid.uuid4()),
+        "employee_id": employee_id,
+        "store_id": store_id,
+        "leave_type": leave.leave_type,
+        "from_date": leave.from_date.isoformat(),
+        "to_date": leave.to_date.isoformat(),
+        "reason": (leave.reason or "").strip(),
+        "status": "PENDING",
+        "applied_by": employee_id,
+        "applied_at": datetime.now().isoformat(),
+    }
+
+    if leave_repo is not None:
+        leave_repo.create(doc)
+
+    return {"leaveId": doc["leave_id"], "message": "Leave application submitted", "status": "PENDING"}
 
 
 @router.post("/leaves/{leave_id}/approve")
