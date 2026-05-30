@@ -72,7 +72,7 @@ export function CampaignManager() {
       {activeTab === 'campaigns' && (
         <div className="space-y-4">
           {/* Summary */}
-          <div className="grid grid-cols-4 gap-4">
+          <div className="grid grid-cols-2 tablet:grid-cols-4 gap-4">
             <div className="bg-white border border-gray-200 rounded-lg p-4">
               <p className="text-gray-500 text-sm mb-1">Active</p>
               <p className="text-2xl font-bold text-blue-600">0</p>
@@ -123,7 +123,7 @@ export function CampaignManager() {
                   </span>
                 </div>
 
-                <div className="grid grid-cols-4 gap-2 mb-3 pb-3 border-b border-gray-200">
+                <div className="grid grid-cols-2 tablet:grid-cols-4 gap-2 mb-3 pb-3 border-b border-gray-200">
                   <div className="text-center">
                     <p className="text-gray-500 text-xs mb-1">Audience</p>
                     <p className="text-gray-900 font-semibold">{campaign.audience}</p>

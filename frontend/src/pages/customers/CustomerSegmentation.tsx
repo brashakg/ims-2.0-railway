@@ -133,7 +133,7 @@ export function CustomerSegmentation() {
       ) : (
         <>
           {/* Summary Stats */}
-          <div className="grid grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 tablet:grid-cols-3 gap-4">
             <div className="bg-white border border-gray-200 rounded-lg p-4">
               <p className="text-gray-500 text-sm mb-1">Segmented Customers</p>
               <p className="text-2xl font-bold text-gray-900">{totalCustomers}</p>

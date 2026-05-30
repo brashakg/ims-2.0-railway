@@ -206,7 +206,7 @@ export function FollowUpDashboard() {
       </div>
 
       {/* Summary Cards */}
-      <div className="grid grid-cols-5 gap-4">
+      <div className="grid grid-cols-2 tablet:grid-cols-5 gap-4">
         <div className="bg-red-50 border border-red-200 rounded-lg p-4">
           <div className="flex items-center justify-between">
             <div>
