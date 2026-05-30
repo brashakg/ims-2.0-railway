@@ -92,11 +92,14 @@ class StockRepository(BaseRepository):
         })
     
     def find_low_stock(self, store_id: str, threshold: int = 5) -> List[Dict]:
+        # One stock_units row == one physical unit. Legacy rows have no
+        # `quantity` field, so summing `$quantity` raw yields 0 and every
+        # product looks out-of-stock. $ifNull treats a missing quantity as 1.
         pipeline = [
             {"$match": {"store_id": store_id, "status": "AVAILABLE"}},
             {"$group": {
                 "_id": "$product_id",
-                "quantity": {"$sum": "$quantity"}
+                "quantity": {"$sum": {"$ifNull": ["$quantity", 1]}}
             }},
             {"$match": {"quantity": {"$lte": threshold}}},
             {"$sort": {"quantity": 1}}
