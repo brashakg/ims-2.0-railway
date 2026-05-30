@@ -1,0 +1,536 @@
+"""
+IMS 2.0 - User-management privilege-escalation + validation guards
+==================================================================
+Locks the SECURITY-SENSITIVE contract of the users router that previously lived
+only in the React UI (and was therefore bypassable by hitting the API):
+
+  * role-assignment ceiling: an actor can never create/promote a user to a role
+    ABOVE their own highest level (no self- or other-escalation to SUPERADMIN).
+  * role/enum validation: junk roles are rejected with 422/400.
+  * email/phone format + case-insensitive duplicate email.
+  * password floor (8) + bcrypt 72-byte ceiling.
+  * deny-only module_access (a True/grant entry is stripped, junk keys dropped).
+  * last-admin / last-role guards on deactivate + role removal.
+  * a non-SUPERADMIN cannot modify/deactivate a higher-ranked account.
+
+Mirrors the TestClient + fake-repo harness in test_module_rbac.py.
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+
+os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-for-unit-tests")
+os.environ.setdefault("MONGODB_URI", "")
+
+from fastapi import FastAPI  # noqa: E402
+from fastapi.testclient import TestClient  # noqa: E402
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from api.routers import users  # noqa: E402
+from api.routers.auth import get_current_user  # noqa: E402
+from api.services import user_roles  # noqa: E402
+
+
+# ---------------------------------------------------------------------------
+# Fake repo (adds find_by_role / add_role / remove_role / add_store over the
+# slice test_module_rbac.py uses, so the admin-count + role mutations work).
+# ---------------------------------------------------------------------------
+
+
+class _FakeColl:
+    """Minimal collection shim so _find_by_email_ci's regex path (the real
+    Mongo behaviour) is exercised. Supports the case-insensitive email regex
+    lookup the router issues."""
+
+    def __init__(self, docs):
+        self._docs = docs
+
+    def find_one(self, query):
+        email_q = query.get("email")
+        if isinstance(email_q, dict) and "$regex" in email_q:
+            import re as _re
+
+            pat = _re.compile(email_q["$regex"], _re.IGNORECASE)
+            for d in self._docs.values():
+                if d.get("email") and pat.match(d["email"]):
+                    return dict(d)
+            return None
+        for d in self._docs.values():
+            if all(d.get(k) == v for k, v in query.items()):
+                return dict(d)
+        return None
+
+
+class _FakeUserRepo:
+    def __init__(self, seed=None):
+        self._docs = {}
+        if seed:
+            for doc in seed:
+                self._docs[doc["user_id"]] = dict(doc)
+        self.last_update = None
+        self.collection = _FakeColl(self._docs)
+
+    def find_by_username(self, username):
+        for d in self._docs.values():
+            if d.get("username") == username:
+                return dict(d)
+        return None
+
+    def find_by_email(self, email):
+        for d in self._docs.values():
+            if d.get("email") == email:
+                return dict(d)
+        return None
+
+    def find_by_id(self, user_id):
+        d = self._docs.get(user_id)
+        return dict(d) if d else None
+
+    def find_by_role(self, role, store_id=None):
+        return [
+            dict(d)
+            for d in self._docs.values()
+            if role in (d.get("roles") or []) and d.get("is_active", True)
+        ]
+
+    def create(self, user_data):
+        doc = dict(user_data)
+        doc.setdefault("user_id", "u-new")
+        self._docs[doc["user_id"]] = doc
+        return dict(doc)
+
+    def update(self, user_id, update_data):
+        d = self._docs.get(user_id)
+        if d is None:
+            return False
+        d.update(update_data)
+        self.last_update = dict(update_data)
+        return True
+
+    def add_role(self, user_id, role):
+        d = self._docs.get(user_id)
+        if d is None:
+            return False
+        d.setdefault("roles", [])
+        if role not in d["roles"]:
+            d["roles"].append(role)
+        return True
+
+    def remove_role(self, user_id, role):
+        d = self._docs.get(user_id)
+        if d is None:
+            return False
+        d["roles"] = [r for r in d.get("roles", []) if r != role]
+        return True
+
+    def add_store(self, user_id, store_id):
+        d = self._docs.get(user_id)
+        if d is None:
+            return False
+        d.setdefault("store_ids", [])
+        if store_id not in d["store_ids"]:
+            d["store_ids"].append(store_id)
+        return True
+
+
+def _client(repo, actor, monkeypatch):
+    monkeypatch.setattr(users, "get_user_repository", lambda: repo)
+    app = FastAPI()
+    app.include_router(users.router, prefix="/api/v1/users")
+
+    async def _u():
+        return dict(actor)
+
+    app.dependency_overrides[get_current_user] = _u
+    return TestClient(app)
+
+
+_ADMIN = {"user_id": "admin-1", "roles": ["ADMIN"], "store_ids": ["S1"]}
+_SUPER = {"user_id": "su-1", "roles": ["SUPERADMIN"], "store_ids": ["S1"]}
+_AREA = {"user_id": "am-1", "roles": ["AREA_MANAGER"], "store_ids": ["S1"]}
+
+_BASE = {
+    "username": "newbie",
+    "email": "newbie@example.com",
+    "password": "Welcome@123",
+    "full_name": "New Bie",
+    "store_ids": ["S1"],
+}
+
+
+# ===========================================================================
+# Pure helper unit tests (no HTTP)
+# ===========================================================================
+
+
+def test_role_set_matches_rbac_policy():
+    # user_roles.VALID_ROLES must stay in sync with the owned rbac_policy table
+    # (the 11 operational roles) plus the read-only INVESTOR role.
+    from api.services import rbac_policy
+
+    assert set(rbac_policy.ALL_ROLES) | {"INVESTOR"} == set(user_roles.VALID_ROLES)
+
+
+def test_can_assign_blocks_escalation():
+    ok, bad = user_roles.can_assign_roles(["ADMIN"], ["SUPERADMIN"])
+    assert ok is False and bad == "SUPERADMIN"
+
+
+def test_can_assign_allows_equal_or_lower():
+    assert user_roles.can_assign_roles(["ADMIN"], ["ADMIN", "STORE_MANAGER"])[0]
+    assert user_roles.can_assign_roles(["AREA_MANAGER"], ["STORE_MANAGER"])[0]
+
+
+def test_superadmin_can_assign_anything():
+    assert user_roles.can_assign_roles(["SUPERADMIN"], ["SUPERADMIN"])[0]
+
+
+def test_area_manager_cannot_mint_admin():
+    ok, bad = user_roles.can_assign_roles(["AREA_MANAGER"], ["ADMIN"])
+    assert ok is False and bad == "ADMIN"
+
+
+def test_sanitize_module_access_strips_grants_and_junk():
+    out = user_roles.sanitize_module_access(
+        {"reports": False, "pos": True, "bogus": False, "hr": False}
+    )
+    assert out == {"reports": False, "hr": False}
+
+
+def test_sanitize_module_access_none_passthrough():
+    assert user_roles.sanitize_module_access(None) is None
+
+
+def test_password_byte_limit():
+    assert user_roles.password_within_bcrypt_limit("a" * 72)
+    assert not user_roles.password_within_bcrypt_limit("a" * 73)
+    # multibyte (ASCII source via chr): U+20AC is 3 bytes in UTF-8, so 24 chars
+    # = 72 bytes (ok) and 25 chars = 75 bytes (over) -- even though both are
+    # under the 72-CHAR schema cap.
+    three_byte = chr(0x20AC)
+    assert user_roles.password_within_bcrypt_limit(three_byte * 24)
+    assert not user_roles.password_within_bcrypt_limit(three_byte * 25)
+
+
+# ===========================================================================
+# create_user privilege escalation
+# ===========================================================================
+
+
+def test_admin_cannot_create_superadmin(monkeypatch):
+    repo = _FakeUserRepo()
+    c = _client(repo, _ADMIN, monkeypatch)
+    r = c.post("/api/v1/users", json=dict(_BASE, roles=["SUPERADMIN"]))
+    assert r.status_code == 403, r.text
+    assert "above your own level" in r.json()["detail"]
+    # nothing persisted
+    assert repo.find_by_username("newbie") is None
+
+
+def test_area_manager_cannot_create_admin(monkeypatch):
+    repo = _FakeUserRepo()
+    c = _client(repo, _AREA, monkeypatch)
+    r = c.post("/api/v1/users", json=dict(_BASE, roles=["ADMIN"]))
+    assert r.status_code == 403, r.text
+
+
+def test_superadmin_can_create_admin(monkeypatch):
+    repo = _FakeUserRepo()
+    c = _client(repo, _SUPER, monkeypatch)
+    r = c.post("/api/v1/users", json=dict(_BASE, roles=["ADMIN"]))
+    assert r.status_code == 201, r.text
+
+
+def test_admin_can_create_store_manager(monkeypatch):
+    repo = _FakeUserRepo()
+    c = _client(repo, _ADMIN, monkeypatch)
+    r = c.post("/api/v1/users", json=dict(_BASE, roles=["STORE_MANAGER"]))
+    assert r.status_code == 201, r.text
+
+
+# ===========================================================================
+# create_user field validation
+# ===========================================================================
+
+
+def test_create_rejects_unknown_role(monkeypatch):
+    repo = _FakeUserRepo()
+    c = _client(repo, _SUPER, monkeypatch)
+    r = c.post("/api/v1/users", json=dict(_BASE, roles=["SUPER_ADMIN"]))  # typo
+    assert r.status_code == 422, r.text
+
+
+def test_create_rejects_empty_roles(monkeypatch):
+    repo = _FakeUserRepo()
+    c = _client(repo, _SUPER, monkeypatch)
+    r = c.post("/api/v1/users", json=dict(_BASE, roles=[]))
+    assert r.status_code == 422, r.text
+
+
+def test_create_rejects_bad_phone(monkeypatch):
+    repo = _FakeUserRepo()
+    c = _client(repo, _SUPER, monkeypatch)
+    r = c.post(
+        "/api/v1/users",
+        json=dict(_BASE, roles=["SALES_STAFF"], phone="12345"),
+    )
+    assert r.status_code == 422, r.text
+
+
+def test_create_accepts_and_normalizes_phone(monkeypatch):
+    repo = _FakeUserRepo()
+    c = _client(repo, _SUPER, monkeypatch)
+    r = c.post(
+        "/api/v1/users",
+        json=dict(_BASE, roles=["SALES_STAFF"], phone="+91 98765-43210"),
+    )
+    assert r.status_code == 201, r.text
+    # Normalized to the canonical bare 10-digit form (91 prefix + punctuation
+    # stripped), matching customers.py / validatePhone.
+    assert repo.find_by_username("newbie")["phone"] == "9876543210"
+
+
+def test_create_rejects_overlong_password(monkeypatch):
+    repo = _FakeUserRepo()
+    c = _client(repo, _SUPER, monkeypatch)
+    r = c.post(
+        "/api/v1/users",
+        json=dict(_BASE, roles=["SALES_STAFF"], password="A1!" + "a" * 70),
+    )
+    assert r.status_code == 422, r.text  # schema max_length=72
+
+
+def test_create_duplicate_email_case_insensitive(monkeypatch):
+    repo = _FakeUserRepo(
+        [
+            {
+                "user_id": "u0",
+                "username": "first",
+                "email": "dup@example.com",
+                "roles": ["SALES_STAFF"],
+                "is_active": True,
+            }
+        ]
+    )
+    c = _client(repo, _SUPER, monkeypatch)
+    r = c.post(
+        "/api/v1/users",
+        json=dict(_BASE, roles=["SALES_STAFF"], email="DUP@example.com"),
+    )
+    assert r.status_code == 400, r.text
+    assert "Email already exists" in r.json()["detail"]
+
+
+def test_create_must_change_password_honoured(monkeypatch):
+    # The duplicate-key bug forced this True regardless of input; now the field
+    # governs. Passing False provisions a permanent password.
+    repo = _FakeUserRepo()
+    c = _client(repo, _SUPER, monkeypatch)
+    r = c.post(
+        "/api/v1/users",
+        json=dict(_BASE, roles=["SALES_STAFF"], must_change_password=False),
+    )
+    assert r.status_code == 201, r.text
+    assert repo.find_by_username("newbie")["must_change_password"] is False
+
+
+def test_create_must_change_password_defaults_true(monkeypatch):
+    repo = _FakeUserRepo()
+    c = _client(repo, _SUPER, monkeypatch)
+    r = c.post("/api/v1/users", json=dict(_BASE, roles=["SALES_STAFF"]))
+    assert r.status_code == 201, r.text
+    assert repo.find_by_username("newbie")["must_change_password"] is True
+
+
+# ===========================================================================
+# update_user / add_role escalation
+# ===========================================================================
+
+
+def _seed_one(roles, user_id="u1", active=True):
+    return _FakeUserRepo(
+        [
+            {
+                "user_id": user_id,
+                "username": user_id,
+                "email": f"{user_id}@example.com",
+                "full_name": user_id,
+                "roles": list(roles),
+                "store_ids": ["S1"],
+                "is_active": active,
+            }
+        ]
+    )
+
+
+def test_admin_cannot_promote_user_to_superadmin_via_update(monkeypatch):
+    repo = _seed_one(["SALES_STAFF"])
+    c = _client(repo, _ADMIN, monkeypatch)
+    r = c.put("/api/v1/users/u1", json={"roles": ["SUPERADMIN"]})
+    assert r.status_code == 403, r.text
+    assert repo.find_by_id("u1")["roles"] == ["SALES_STAFF"]  # unchanged
+
+
+def test_admin_cannot_self_escalate_via_add_role(monkeypatch):
+    # actor IS u1 (an ADMIN) trying to grant themselves SUPERADMIN.
+    repo = _seed_one(["ADMIN"], user_id="admin-1")
+    c = _client(repo, _ADMIN, monkeypatch)
+    r = c.post("/api/v1/users/admin-1/roles/SUPERADMIN")
+    assert r.status_code == 403, r.text
+    assert "SUPERADMIN" not in repo.find_by_id("admin-1")["roles"]
+
+
+def test_add_role_rejects_unknown_role(monkeypatch):
+    repo = _seed_one(["SALES_STAFF"])
+    c = _client(repo, _SUPER, monkeypatch)
+    r = c.post("/api/v1/users/u1/roles/WIZARD")
+    assert r.status_code == 400, r.text
+
+
+def test_admin_can_add_allowed_role(monkeypatch):
+    repo = _seed_one(["SALES_STAFF"])
+    c = _client(repo, _ADMIN, monkeypatch)
+    r = c.post("/api/v1/users/u1/roles/STORE_MANAGER")
+    assert r.status_code == 200, r.text
+    assert "STORE_MANAGER" in repo.find_by_id("u1")["roles"]
+
+
+def test_admin_cannot_modify_higher_ranked_user(monkeypatch):
+    repo = _seed_one(["SUPERADMIN"])
+    c = _client(repo, _ADMIN, monkeypatch)
+    r = c.put("/api/v1/users/u1", json={"full_name": "Hacked"})
+    assert r.status_code == 403, r.text
+    assert repo.find_by_id("u1")["full_name"] == "u1"
+
+
+def test_superadmin_can_modify_anyone(monkeypatch):
+    repo = _seed_one(["SUPERADMIN"])
+    c = _client(repo, _SUPER, monkeypatch)
+    r = c.put("/api/v1/users/u1", json={"full_name": "Renamed"})
+    assert r.status_code == 200, r.text
+
+
+def test_update_module_access_sanitized_on_write(monkeypatch):
+    repo = _seed_one(["STORE_MANAGER"])
+    c = _client(repo, _SUPER, monkeypatch)
+    r = c.put(
+        "/api/v1/users/u1",
+        json={"module_access": {"pos": True, "finance": False, "junk": False}},
+    )
+    assert r.status_code == 200, r.text
+    assert repo.find_by_id("u1")["module_access"] == {"finance": False}
+
+
+def test_assign_store_role_escalation_blocked(monkeypatch):
+    repo = _seed_one(["SALES_STAFF"])
+    c = _client(repo, _ADMIN, monkeypatch)
+    r = c.post(
+        "/api/v1/users/u1/assign-store",
+        json={"store_id": "S2", "role": "SUPERADMIN"},
+    )
+    assert r.status_code == 403, r.text
+    # the store must NOT be added either (guard runs before any write)
+    assert "S2" not in repo.find_by_id("u1")["store_ids"]
+
+
+# ===========================================================================
+# last-admin / last-role / self guards
+# ===========================================================================
+
+
+def test_cannot_deactivate_self(monkeypatch):
+    repo = _seed_one(["ADMIN"], user_id="admin-1")
+    # add a second admin so last-admin guard isn't the one that fires
+    repo.create(
+        {"user_id": "admin-2", "roles": ["ADMIN"], "is_active": True, "username": "a2"}
+    )
+    c = _client(repo, _ADMIN, monkeypatch)
+    r = c.delete("/api/v1/users/admin-1")
+    assert r.status_code == 400, r.text
+    assert "yourself" in r.json()["detail"]
+
+
+def test_cannot_deactivate_last_admin(monkeypatch):
+    # Only one admin in the system; a SUPERADMIN actor (different user) tries to
+    # deactivate it -> blocked.
+    repo = _seed_one(["ADMIN"], user_id="only-admin")
+    c = _client(repo, _SUPER, monkeypatch)
+    r = c.delete("/api/v1/users/only-admin")
+    assert r.status_code == 400, r.text
+    assert "last active admin" in r.json()["detail"]
+    assert repo.find_by_id("only-admin")["is_active"] is True
+
+
+def test_can_deactivate_admin_when_another_exists(monkeypatch):
+    repo = _seed_one(["ADMIN"], user_id="admin-a")
+    repo.create(
+        {"user_id": "admin-b", "roles": ["ADMIN"], "is_active": True, "username": "b"}
+    )
+    c = _client(repo, _SUPER, monkeypatch)
+    r = c.delete("/api/v1/users/admin-a")
+    assert r.status_code == 200, r.text
+    assert repo.find_by_id("admin-a")["is_active"] is False
+
+
+def test_admin_cannot_deactivate_superadmin(monkeypatch):
+    repo = _seed_one(["SUPERADMIN"], user_id="su-target")
+    c = _client(repo, _ADMIN, monkeypatch)
+    r = c.delete("/api/v1/users/su-target")
+    assert r.status_code == 403, r.text
+
+
+def test_cannot_remove_users_only_role(monkeypatch):
+    repo = _seed_one(["SALES_STAFF"])
+    c = _client(repo, _SUPER, monkeypatch)
+    r = c.delete("/api/v1/users/u1/roles/SALES_STAFF")
+    assert r.status_code == 400, r.text
+    assert "only role" in r.json()["detail"]
+
+
+def test_cannot_remove_last_admin_role(monkeypatch):
+    # user has ADMIN + STORE_MANAGER; removing ADMIN would leave zero admins.
+    repo = _seed_one(["ADMIN", "STORE_MANAGER"], user_id="only-admin")
+    c = _client(repo, _SUPER, monkeypatch)
+    r = c.delete("/api/v1/users/only-admin/roles/ADMIN")
+    assert r.status_code == 400, r.text
+    assert "last active admin" in r.json()["detail"]
+
+
+def test_can_remove_role_when_multiple_present(monkeypatch):
+    repo = _seed_one(["STORE_MANAGER", "SALES_STAFF"])
+    c = _client(repo, _SUPER, monkeypatch)
+    r = c.delete("/api/v1/users/u1/roles/SALES_STAFF")
+    assert r.status_code == 200, r.text
+    assert repo.find_by_id("u1")["roles"] == ["STORE_MANAGER"]
+
+
+def test_admin_cannot_remove_superadmin_role(monkeypatch):
+    repo = _seed_one(["SUPERADMIN", "ADMIN"], user_id="su")
+    c = _client(repo, _ADMIN, monkeypatch)
+    r = c.delete("/api/v1/users/su/roles/SUPERADMIN")
+    assert r.status_code == 403, r.text
+
+
+# ===========================================================================
+# reset-password floor
+# ===========================================================================
+
+
+def test_reset_password_rejects_short(monkeypatch):
+    repo = _seed_one(["SALES_STAFF"])
+    c = _client(repo, _SUPER, monkeypatch)
+    r = c.post("/api/v1/users/u1/reset-password", json={"new_password": "abc12"})
+    assert r.status_code == 422, r.text  # below 8
+
+
+def test_reset_password_ok(monkeypatch):
+    repo = _seed_one(["SALES_STAFF"])
+    c = _client(repo, _SUPER, monkeypatch)
+    r = c.post(
+        "/api/v1/users/u1/reset-password", json={"new_password": "NewPass@123"}
+    )
+    assert r.status_code == 200, r.text
+    assert repo.find_by_id("u1")["must_change_password"] is True

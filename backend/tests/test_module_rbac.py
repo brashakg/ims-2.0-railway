@@ -132,13 +132,20 @@ def test_create_user_without_module_access_defaults_to_empty_dict(monkeypatch):
     assert repo.find_by_id("u-new")["module_access"] == {}
 
 
-def test_create_user_module_access_round_trips_multiple_keys(monkeypatch):
+def test_create_user_module_access_is_deny_only(monkeypatch):
+    # The override is DENY-ONLY: every False (restrict) entry round-trips, but a
+    # True (grant) entry is STRIPPED so the override can never escalate a user
+    # above their role ceiling. (Was previously stored verbatim incl. the grant
+    # -- a latent privilege-escalation vector.)
     repo = _FakeUserRepo()
     c = _admin_client(repo, monkeypatch)
     ma = {"reports": False, "finance": False, "pos": True}
     r = c.post("/api/v1/users", json=dict(_BASE_CREATE, module_access=ma))
     assert r.status_code == 201, r.text
-    assert repo.find_by_id("u-new")["module_access"] == ma
+    assert repo.find_by_id("u-new")["module_access"] == {
+        "reports": False,
+        "finance": False,
+    }
 
 
 # --- update_user updates module_access -------------------------------------
