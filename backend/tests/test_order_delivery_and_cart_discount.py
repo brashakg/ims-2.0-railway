@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import os
 import sys
-from datetime import date
+from datetime import date, timedelta
 
 import pytest
 
@@ -60,14 +60,17 @@ def test_order_create_defaults_phase_67_fields_when_omitted():
 
 
 def test_order_create_accepts_delivery_fields():
+    # Use a future date: C-8 now rejects delivery_date strictly before today,
+    # so a hardcoded past date would (correctly) fail validation.
+    future = date.today() + timedelta(days=7)
     order = OrderCreate(
         customer_id="C1",
         items=[OrderItemCreate(**_base_item())],
-        delivery_date=date(2026, 5, 15),
+        delivery_date=future,
         delivery_time_slot="14:00-16:00",
         delivery_priority="URGENT",
     )
-    assert order.delivery_date == date(2026, 5, 15)
+    assert order.delivery_date == future
     assert order.delivery_time_slot == "14:00-16:00"
     assert order.delivery_priority == "URGENT"
 

@@ -5,10 +5,11 @@ Sales order management endpoints
 """
 
 from fastapi import APIRouter, HTTPException, Depends, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from typing import Any, Dict, List, Optional
 from datetime import datetime, date, timedelta
 from enum import Enum
+import math
 import uuid
 import secrets
 
@@ -65,9 +66,30 @@ from ..services.gst_rates import resolve_gst_rate, gst_pricing_mode
 # the set of categories the canonical table bills at 5%.
 from ..services.gst_rates import GST_CATEGORY_TABLE as _GST_CATEGORY_TABLE
 
+# _normalize_category maps the many category spellings (FRAMES / FR / "frame")
+# to the canonical hint used as a GST_CATEGORY_TABLE key. Used by the C-2 guard
+# below to tell a KNOWN category from a junk/typo one.
+from ..services.gst_rates import _normalize_category as _normalize_gst_category
+
 LOW_GST_CATEGORIES = {
     cat for cat, (_hsn, rate) in _GST_CATEGORY_TABLE.items() if rate == 5.0
 }
+
+
+def _is_known_gst_category(value) -> bool:
+    """True if `value` resolves to a real GST_CATEGORY_TABLE entry (not the
+    optical-dominant DEFAULT_GST_RATE fallback). Mirrors the normalisation
+    resolve_gst_rate() uses, so 'WATCH' / 'WT' / 'frames' all count as known
+    while a junk string like 'FOOBAR' does not. Used by C-2 to decide whether
+    a provided category is trustworthy or we must fall back to item_type."""
+    if not value:
+        return False
+    norm = _normalize_gst_category(value)
+    if norm in _GST_CATEGORY_TABLE:
+        return True
+    # Defensive: also accept the plain upper form (covers any table key that
+    # is not itself in the _CATEGORY_HINT map, e.g. SMARTGLASSES / WALL_CLOCK).
+    return str(value).strip().upper() in _GST_CATEGORY_TABLE
 
 
 def _compute_per_category_gst(items: list, cart_discount_pct: float) -> dict:
@@ -101,6 +123,20 @@ def _compute_per_category_gst(items: list, cart_discount_pct: float) -> dict:
         subtotal += line_subtotal
         item_discount_sum += float(it.get("discount_amount") or 0.0)
         cat = it.get("category") or it.get("item_type") or ""
+        # C-2: guard against an UNKNOWN/typo `category` silently undercharging
+        # GST. Previously a junk category (e.g. an 18% WATCH sent with
+        # category="FOOBAR") fell through resolve_gst_rate to the 5% optical
+        # default. When `category` is NOT a real GST_CATEGORY_TABLE entry but
+        # `item_type` IS, bill the item_type's rate instead of the 5% default.
+        # An explicit HSN (most authoritative) and any VALID category are left
+        # exactly as before -- this only rescues the unknown-category case.
+        item_type_val = it.get("item_type") or ""
+        if (
+            it.get("category")
+            and not _is_known_gst_category(it.get("category"))
+            and _is_known_gst_category(item_type_val)
+        ):
+            cat = item_type_val
         hsn = it.get("hsn_code") or it.get("hsn") or None
         rate = resolve_gst_rate(hsn_code=hsn, category=cat)
         # GST mode (GST_PRICING_MODE, per-request):
@@ -341,8 +377,12 @@ class OrderItemCreate(BaseModel):
     brand: Optional[str] = None
     subbrand: Optional[str] = None
     category: Optional[str] = None
-    quantity: int = Field(default=1, ge=1)
-    unit_price: float = Field(..., ge=0)
+    # C-3: GENEROUS upper bounds that can never reject a real optical order but
+    # stop a malicious/garbage payload (e.g. unit_price=1.7e308 or quantity=1e9)
+    # from overflowing unit_price*quantity to Infinity and 500ing on JSON
+    # serialisation. 1 crore per unit / 1000 units is far above any real line.
+    quantity: int = Field(default=1, ge=1, le=1000)
+    unit_price: float = Field(..., ge=0, le=10_000_000)
     discount_percent: float = Field(default=0, ge=0, le=100)
     prescription_id: Optional[str] = None
     lens_options: Optional[dict] = None  # coating, tint, etc.
@@ -360,6 +400,16 @@ class OrderItemCreate(BaseModel):
     sph: Optional[float] = None
     cyl: Optional[float] = None
     add: Optional[float] = None
+
+    @field_validator("unit_price")
+    @classmethod
+    def _unit_price_finite(cls, v: float) -> float:
+        # C-3: explicitly reject NaN / +-Infinity so a non-finite price can
+        # never reach the money math (the le/ge bounds already catch these,
+        # but this is the contract the bound enforces -- belt and braces).
+        if not math.isfinite(v):
+            raise ValueError("unit_price must be a finite number")
+        return v
 
 
 class PaymentCreate(BaseModel):
@@ -410,6 +460,31 @@ class OrderCreate(BaseModel):
     salesperson_id: Optional[str] = None
     salesperson_name: Optional[str] = None
     visufit_id: Optional[str] = None
+
+    @field_validator("delivery_priority")
+    @classmethod
+    def _validate_delivery_priority(cls, v: Optional[str]) -> Optional[str]:
+        # C-7: only the three known priorities (matches posStore +
+        # the FE priority select). Absent/None is allowed (defaults NORMAL on
+        # the order doc). Reject any other string with a clean 422.
+        if v is None:
+            return v
+        allowed = {"NORMAL", "EXPRESS", "URGENT"}
+        upper = str(v).strip().upper()
+        if upper not in allowed:
+            raise ValueError(
+                "delivery_priority must be one of NORMAL, EXPRESS, URGENT"
+            )
+        return upper
+
+    @field_validator("delivery_date")
+    @classmethod
+    def _validate_delivery_date_not_past(cls, v: Optional[date]) -> Optional[date]:
+        # C-8: a delivery cannot be scheduled in the past. Today is allowed.
+        # Absent/None is allowed (falls back to expected_delivery_days).
+        if v is not None and v < date.today():
+            raise ValueError("delivery_date cannot be in the past")
+        return v
 
 
 class OrderUpdate(BaseModel):
@@ -636,9 +711,75 @@ def _resolve_product_doc(product_repo, pid: str):
                 product = coll.find_one({"_id": ObjectId(pid)})
             except Exception:
                 product = None
-        return product
+        if product is not None:
+            return product
     except Exception:
+        product = None
+    # C-1: seeded catalog products live in the `catalog_products` collection
+    # (served by GET /catalog/products), NOT in `products`. When the lookup
+    # above misses, fall back to catalog_products by the same id so a
+    # catalog-only product can still be ordered. Fail-soft: any error -> None.
+    return _resolve_catalog_product_doc(pid)
+
+
+def _get_catalog_collection():
+    """Return the `catalog_products` Mongo collection, or None if the DB is
+    unavailable. Mirrors catalog.py's accessor; module-level + import-light so
+    tests can monkeypatch it. Fail-soft."""
+    try:
+        from ..dependencies import get_db
+
+        db = get_db()
+        if db is not None and getattr(db, "is_connected", False):
+            return db.get_collection("catalog_products")
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
+def _resolve_catalog_product_doc(pid: str):
+    """C-1 fallback: look a product up in `catalog_products` by id/sku and map
+    its (nested) shape to the flat fields the order-create path reads
+    (product_id, name, mrp/offer_price/cost_price, category, gst_rate/hsn_code,
+    discount_category, item_type). Returns the mapped dict or None. Fail-soft.
+
+    The catalog doc stores pricing under a nested `pricing` block and the name
+    under `title`; the order path reads flat `cost_price` (COGS snapshot) and
+    `discount_category` (category-cap), so we surface those at the top level.
+    """
+    if not pid:
         return None
+    coll = _get_catalog_collection()
+    if coll is None:
+        return None
+    try:
+        doc = coll.find_one({"$or": [{"id": pid}, {"sku": pid}, {"_id": pid}]})
+    except Exception:  # noqa: BLE001
+        return None
+    if not doc:
+        return None
+    pricing = doc.get("pricing") or {}
+    category = doc.get("category")
+    mapped = {
+        "product_id": doc.get("id") or pid,
+        "id": doc.get("id") or pid,
+        "sku": doc.get("sku"),
+        "name": doc.get("title") or doc.get("name"),
+        "model": doc.get("title") or doc.get("name"),
+        "category": category,
+        "item_type": category,
+        "hsn_code": doc.get("hsn_code"),
+        "gst_rate": doc.get("gst_rate"),
+        "mrp": pricing.get("mrp"),
+        "offer_price": pricing.get("offer_price"),
+        "cost_price": pricing.get("cost_price"),
+        "discount_category": pricing.get("discount_category"),
+        "is_active": doc.get("is_active", True),
+        # Mark the source so any future caller can tell a catalog-resolved
+        # product from a `products` one without re-querying.
+        "_resolved_from": "catalog_products",
+    }
+    return mapped
 
 
 # Item types / product_id prefixes that have NO serialized stock to mark sold.
@@ -1176,6 +1317,31 @@ async def create_order(
             )
             lens_reserve_failed = True
 
+        # C-4: a fully-discounted / Rs 0 order (100% line or cart discount, or a
+        # grand_total that rounds to 0) is a sensitive action that must leave an
+        # approver + audit trail -- previously it was accepted with both
+        # *_approved_by fields null and NO audit row. We do NOT block the sale;
+        # we just ensure accountability: auto-stamp the acting user as approver
+        # when none was supplied and flag the order zero_total. The audit row is
+        # written after the order persists (below).
+        acting_user_id = current_user.get("user_id")
+        has_full_line_discount = any(
+            float((it or {}).get("discount_percent") or 0) >= 100.0
+            for it in items_data
+        )
+        is_zero_total = (
+            round(grand_total, 2) <= 0.0
+            or cart_discount_percent >= 100.0
+            or has_full_line_discount
+        )
+        cart_discount_approved_by = order.cart_discount_approved_by
+        zero_total_approved_by = None
+        if is_zero_total:
+            # Stamp the acting user as approver if the POS didn't supply one.
+            if not cart_discount_approved_by:
+                cart_discount_approved_by = acting_user_id
+            zero_total_approved_by = cart_discount_approved_by or acting_user_id
+
         order_data = {
             "order_id": precomputed_order_id,
             "order_number": generate_order_number(store_id),
@@ -1198,7 +1364,9 @@ async def create_order(
             "cart_discount_percent": cart_discount_percent,
             "cart_discount_amount": cart_discount_amount,
             "cart_discount_reason": order.cart_discount_reason,
-            "cart_discount_approved_by": order.cart_discount_approved_by,
+            # C-4: auto-stamped to the acting user for a zero-total order when
+            # the POS didn't supply an approver (otherwise unchanged).
+            "cart_discount_approved_by": cart_discount_approved_by,
             "tax_rate": tax_rate,
             "tax_amount": tax_amount,
             "total_discount": total_discount,
@@ -1218,6 +1386,10 @@ async def create_order(
             "payments": [],
             "lens_reservations": lens_reservations,
             "lens_reserve_failed": bool(lens_reserve_failed),
+            # C-4: zero-total accountability flags (persisted so reports + the
+            # order view can surface a Rs 0 sale and who approved it).
+            "zero_total": bool(is_zero_total),
+            "zero_total_approved_by": zero_total_approved_by,
         }
 
         try:
@@ -1254,6 +1426,41 @@ async def create_order(
 
         if created:
             created_order_id = created.get("order_id") or ""
+            # C-4: write an immutable audit row for a zero-total / fully
+            # discounted sale so a Rs 0 order is never silent. Uses the same
+            # append-only AuditRepository every other sensitive action uses
+            # (returns / payouts / price edits). Fail-soft: an audit failure
+            # must NEVER block the sale.
+            if is_zero_total:
+                try:
+                    from ..dependencies import get_audit_repository
+
+                    audit = get_audit_repository()
+                    if audit is not None:
+                        audit.create(
+                            {
+                                "action": "ORDER_ZERO_TOTAL_APPROVED",
+                                "entity_type": "order",
+                                "entity_id": created_order_id,
+                                "store_id": store_id,
+                                "user_id": acting_user_id,
+                                "severity": "WARNING",
+                                "details": {
+                                    "grand_total": grand_total,
+                                    "subtotal": subtotal,
+                                    "cart_discount_percent": cart_discount_percent,
+                                    "has_full_line_discount": has_full_line_discount,
+                                    "approved_by": zero_total_approved_by,
+                                    "approver_auto_stamped": (
+                                        not order.cart_discount_approved_by
+                                    ),
+                                },
+                                "created_at": datetime.now().isoformat(),
+                            }
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("[ORDERS] zero-total audit skipped: %s", exc)
+
             # Flip serialized stock units to SOLD with this order_id stamped on
             # them. This is what lets returns.py reactivate THE EXACT unit that
             # left (preferred path in _reactivate_original_unit; the fallback
@@ -1602,7 +1809,12 @@ async def add_payment(
             )
 
         balance_due = order.get("balance_due", order.get("grand_total", 0))
-        if payment.amount > balance_due:
+        # C-9: a CREDIT tender is a pay-later PROMISE, not cash collected, so it
+        # is exempt from the over-tender block -- matching OrderRepository.
+        # add_payment (which excludes CREDIT from its cash-collected/over-tender
+        # math). A real-money tender (CASH/UPI/CARD/etc.) still cannot exceed the
+        # balance due.
+        if payment.method != PaymentMethod.CREDIT and payment.amount > balance_due:
             raise HTTPException(
                 status_code=400,
                 detail=f"Payment amount exceeds balance due (₹{balance_due})",
