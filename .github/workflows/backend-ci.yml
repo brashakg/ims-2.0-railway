@@ -6,6 +6,10 @@ on:
   pull_request:
     branches: [main, develop]
 
+permissions:
+  contents: read
+  pull-requests: write
+
 defaults:
   run:
     working-directory: backend
@@ -66,11 +70,32 @@ jobs:
         continue-on-error: true  # gradual adoption
 
       - name: Run unit tests
-        run: pytest tests/ --cov=api --cov-report=xml --cov-report=term -x
+        run: |
+          set -o pipefail
+          pytest tests/ --cov=api --cov-report=xml --cov-report=term -x 2>&1 | tee /tmp/pytest_out.txt
         env:
           MONGODB_URL: mongodb://localhost:27017/ims_test
           JWT_SECRET_KEY: ci-test-secret-key
           ENVIRONMENT: test
+
+      # TEMP DIAGNOSTIC (remove once green): surface the exact failing test +
+      # assertion as a PR comment, because the failure does not reproduce off
+      # the CI runner. Only the push run on py3.11 posts, so it is a single comment.
+      - name: Surface failing tests (diagnostic)
+        if: failure() && matrix.python-version == '3.11' && github.event_name == 'push'
+        run: |
+          {
+            echo "### CI pytest failure diagnostic (py${{ matrix.python-version }}, sha ${{ github.sha }})"
+            echo ""
+            echo '```'
+            grep -nE "^FAILED|^ERROR|short test summary info|^E   |Traceback|Exception|assert " /tmp/pytest_out.txt | head -60 || true
+            echo "===== last 90 lines of pytest output ====="
+            tail -n 90 /tmp/pytest_out.txt
+            echo '```'
+          } > /tmp/comment.md
+          gh pr comment 382 -R brashakg/ims-2.0-railway --body-file /tmp/comment.md || true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Run integration tests
         run: pytest tests/ -m integration --cov=api --cov-append --cov-report=xml
