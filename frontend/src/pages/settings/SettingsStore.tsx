@@ -582,7 +582,7 @@ export function DiscountSection() {
       <div className="flex items-center justify-between mb-6">
         <div>
           <h2 className="text-lg font-semibold text-gray-900">Discount Rules</h2>
-          <p className="text-sm text-gray-500">Maximum discount by role and brand tier</p>
+          <p className="text-sm text-gray-500">Maximum discount percentage by role</p>
         </div>
         <button
           onClick={handleSaveRules}
@@ -599,9 +599,7 @@ export function DiscountSection() {
           <thead className="bg-white border-b border-gray-200">
             <tr>
               <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Role</th>
-              <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Mass</th>
-              <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Premium</th>
-              <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Luxury</th>
+              <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Max Discount %</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-200">
@@ -622,39 +620,16 @@ export function DiscountSection() {
                   />
                   %
                 </td>
-                <td className="px-4 py-3 text-center">
-                  <input
-                    type="number"
-                    value={row.premium}
-                    onChange={(e) => {
-                      const val = Math.min(100, Math.max(0, parseInt(e.target.value) || 0));
-                      setDiscounts(prev => prev.map((d, i) => i === idx ? { ...d, premium: val } : d));
-                    }}
-                    min="0"
-                    max="100"
-                    className="w-16 px-2 py-1 text-center border border-gray-200 rounded"
-                  />
-                  %
-                </td>
-                <td className="px-4 py-3 text-center">
-                  <input
-                    type="number"
-                    value={row.luxury}
-                    onChange={(e) => {
-                      const val = Math.min(100, Math.max(0, parseInt(e.target.value) || 0));
-                      setDiscounts(prev => prev.map((d, i) => i === idx ? { ...d, luxury: val } : d));
-                    }}
-                    min="0"
-                    max="100"
-                    className="w-16 px-2 py-1 text-center border border-gray-200 rounded"
-                  />
-                  %
-                </td>
               </tr>
             ))}
           </tbody>
         </table>
       </div>
+      <p className="mt-3 text-xs text-gray-500">
+        The maximum discount per role. Category caps (Mass 15%, Premium 20%, Luxury 5%,
+        Service 10%, Non-discountable 0%) and luxury brand caps apply on top and always
+        win when lower.
+      </p>
 
       <div className="mt-6 pt-6 border-t border-gray-200">
         <h3 className="text-sm font-medium text-gray-700 mb-3">MRP Rules (per SYSTEM_INTENT)</h3>
