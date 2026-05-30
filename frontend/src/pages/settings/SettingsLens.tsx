@@ -72,7 +72,7 @@ export function LensMasterSection() {
               Add Brand
             </button>
           </div>
-          <div className="grid grid-cols-4 gap-2">
+          <div className="grid grid-cols-2 tablet:grid-cols-4 gap-2">
             {lensBrands.length === 0 ? (
               <div className="col-span-4 text-center py-4 text-gray-500">$
                 No lens brands configured. Click "Add Brand" to add one.
@@ -128,7 +128,7 @@ export function LensMasterSection() {
               Add Index
             </button>
           </div>
-          <div className="grid grid-cols-4 gap-2">
+          <div className="grid grid-cols-2 tablet:grid-cols-4 gap-2">
             {lensIndices.length === 0 ? (
               <div className="col-span-4 text-center py-4 text-gray-500">$
                 No lens indices configured. Click "Add Index" to add one.
@@ -188,7 +188,7 @@ export function LensMasterSection() {
               Add Coating
             </button>
           </div>
-          <div className="grid grid-cols-3 gap-2">
+          <div className="grid grid-cols-2 tablet:grid-cols-3 gap-2">
             {lensCoatings.length === 0 ? (
               <div className="col-span-3 text-center py-4 text-gray-500">$
                 No coatings configured. Click "Add Coating" to add one.
@@ -252,7 +252,7 @@ export function LensMasterSection() {
               Add Add-on
             </button>
           </div>
-          <div className="grid grid-cols-3 gap-2">
+          <div className="grid grid-cols-2 tablet:grid-cols-3 gap-2">
             {lensAddons.length === 0 ? (
               <div className="col-span-3 text-center py-4 text-gray-500">$
                 No add-ons configured. Click "Add Add-on" to add one.

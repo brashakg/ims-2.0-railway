@@ -460,7 +460,7 @@ function TaxInvoiceSection({
               <ToggleLeft className="w-8 h-8 text-gray-500 cursor-pointer" onClick={() => setTaxSettings((prev: any) => prev ? { ...prev, gst_enabled: true } : null)} />
             )}
           </div>
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 tablet:grid-cols-2 gap-4">
             <div>
               <label className="block text-sm font-medium text-gray-600 mb-1">Company GSTIN</label>
               <input
@@ -509,7 +509,7 @@ function TaxInvoiceSection({
       <div className="card">
         <h2 className="text-lg font-semibold text-gray-900 mb-4">Invoice Settings</h2>
         <div className="space-y-4">
-          <div className="grid grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 tablet:grid-cols-2 lg:grid-cols-3 gap-4">
             <div>
               <label className="block text-sm font-medium text-gray-600 mb-1">Invoice Prefix</label>
               <input
@@ -547,7 +547,7 @@ function TaxInvoiceSection({
               className="input-field"
             />
           </div>
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 tablet:grid-cols-2 gap-4">
             <div>
               <label className="block text-sm font-medium text-gray-600 mb-1">Default Warranty (days)</label>
               <input
@@ -621,7 +621,7 @@ function PrinterSection({
       <div className="card">
         <h2 className="text-lg font-semibold text-gray-900 mb-4">Printer Configuration</h2>
         <div className="space-y-4">
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 tablet:grid-cols-2 gap-4">
             <div>
               <label className="block text-sm font-medium text-gray-600 mb-1">Receipt Printer</label>
               <select
@@ -828,7 +828,7 @@ function AuditLogSection({
 
       {/* Summary Cards */}
       {auditSummary && (
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+        <div className="grid grid-cols-1 tablet:grid-cols-2 lg:grid-cols-4 gap-4">
           <div className="card p-4">
             <div className="flex items-center gap-2 mb-1">
               <Shield className="w-4 h-4 text-gray-500" />
@@ -1053,7 +1053,7 @@ function SystemSection({ systemStatus }: { systemStatus: { database: string; api
     <div className="space-y-4">
       <div className="card">
         <h2 className="text-lg font-semibold text-gray-900 mb-4">System Status</h2>
-        <div className="grid grid-cols-3 gap-4">
+        <div className="grid grid-cols-1 tablet:grid-cols-2 lg:grid-cols-3 gap-4">
           <div className={clsx('p-4 rounded-lg', systemStatus?.database === 'connected' ? 'bg-green-50' : 'bg-yellow-50')}>
             <p className="text-sm text-gray-500">Database</p>
             <p className={clsx('font-medium', systemStatus?.database === 'connected' ? 'text-green-600' : 'text-yellow-600')}>

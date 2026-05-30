@@ -719,7 +719,7 @@ function StoreModal({
         </div>
 
         <div className="flex-1 overflow-y-auto p-4 space-y-4">
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 tablet:grid-cols-2 gap-4">
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">Store Code *</label>
               <input
@@ -742,7 +742,7 @@ function StoreModal({
             </div>
           </div>
 
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 tablet:grid-cols-2 gap-4">
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">GSTIN</label>
               <input
@@ -779,7 +779,7 @@ function StoreModal({
             />
           </div>
 
-          <div className="grid grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 tablet:grid-cols-2 lg:grid-cols-3 gap-4">
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">City *</label>
               <input
@@ -809,7 +809,7 @@ function StoreModal({
             </div>
           </div>
 
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 tablet:grid-cols-2 gap-4">
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">Phone</label>
               <input
@@ -830,7 +830,7 @@ function StoreModal({
             </div>
           </div>
 
-          <div className="grid grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 tablet:grid-cols-2 lg:grid-cols-3 gap-4">
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">Opening Time</label>
               <input
@@ -862,7 +862,7 @@ function StoreModal({
 
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-2">Enabled Categories</label>
-            <div className="grid grid-cols-3 gap-2">
+            <div className="grid grid-cols-2 tablet:grid-cols-3 gap-2">
               {categories.map(cat => (
                 <label key={cat.code} className="flex items-center gap-2 p-2 bg-white rounded cursor-pointer hover:bg-gray-100">
                   <input
@@ -937,7 +937,7 @@ function BrandModal({
         </div>
 
         <div className="flex-1 overflow-y-auto p-4 space-y-4">
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 tablet:grid-cols-2 gap-4">
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">Brand Name *</label>
               <input
@@ -975,7 +975,7 @@ function BrandModal({
 
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-2">Categories *</label>
-            <div className="grid grid-cols-3 gap-2">
+            <div className="grid grid-cols-2 tablet:grid-cols-3 gap-2">
               {categories.map(cat => (
                 <label key={cat.code} className="flex items-center gap-2 p-2 bg-white rounded cursor-pointer hover:bg-gray-100">
                   <input

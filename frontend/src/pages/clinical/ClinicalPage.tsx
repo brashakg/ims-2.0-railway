@@ -497,7 +497,7 @@ export function ClinicalPage() {
       )}
 
       {/* 3-card stat strip */}
-      <div className="stat-strip" style={{ gridTemplateColumns: 'repeat(3, 1fr)' }}>
+      <div className="stat-strip grid grid-cols-1 tablet:grid-cols-3 gap-4">
         <div>
           <div className="l">Waiting</div>
           <div className="v" style={{ color: waitingCount > 0 ? 'var(--warn)' : 'var(--ink)' }}>{waitingCount}</div>
