@@ -29,8 +29,17 @@ export const orderApi = {
     return response.data;
   },
 
-  createOrder: async (data: Partial<import('../../types').Order>) => {
-    const response = await api.post('/orders', data);
+  // C-5 (DELTA 3): optional `idempotencyKey` -> sent as the `Idempotency-Key`
+  // request header so a double-clicked / retried "Pay now" reuses the key and
+  // the backend returns the SAME order instead of creating a duplicate.
+  createOrder: async (
+    data: Partial<import('../../types').Order>,
+    idempotencyKey?: string,
+  ) => {
+    const config = idempotencyKey
+      ? { headers: { 'Idempotency-Key': idempotencyKey } }
+      : undefined;
+    const response = await api.post('/orders', data, config);
     return response.data;
   },
 

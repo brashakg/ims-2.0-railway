@@ -144,7 +144,7 @@ def test_c8_delivery_date_none_allowed():
 
 
 # ============================================================================
-# C-2 - unknown category falls back to item_type rate (pure helper)
+# C-2 - item_type is AUTHORITATIVE for GST ("item_type wins") (pure helper)
 # ============================================================================
 
 
@@ -161,7 +161,7 @@ def test_c2_watch_with_junk_category_bills_18pct():
 
 
 def test_c2_sunglass_no_category_bills_18pct():
-    """item_type SUNGLASS + no category -> 18% (already worked; lock it in)."""
+    """item_type SUNGLASS + no category -> 18% (lock it in)."""
     from api.routers.orders import _compute_per_category_gst
 
     items = [{"item_total": 1000.0, "item_type": "SUNGLASS"}]
@@ -170,16 +170,49 @@ def test_c2_sunglass_no_category_bills_18pct():
     assert out["dominant_rate"] == 18.0
 
 
-def test_c2_valid_category_unchanged_even_if_item_type_differs():
-    """When `category` IS a valid table entry, it stays authoritative even if
-    item_type would resolve differently. FRAME (5%) category wins over a
-    SUNGLASS item_type -> 5% (no behaviour change for valid categories)."""
+def test_c2_item_type_wins_over_valid_category():
+    """DELTA 1: item_type is AUTHORITATIVE -- a SUNGLASS (18%) item_type beats a
+    VALID but conflicting FRAMES (5%) category. The catalog category is a
+    merchandising bucket; the item_type is the line's true tax nature, so the
+    bill must be 18%, not 5%."""
     from api.routers.orders import _compute_per_category_gst
 
-    items = [{"item_total": 1000.0, "category": "FRAME", "item_type": "SUNGLASS"}]
+    items = [{"item_total": 1000.0, "category": "FRAMES", "item_type": "SUNGLASS"}]
+    out = _compute_per_category_gst(items, 0)
+    assert items[0]["gst_rate"] == 18.0
+    assert out["dominant_rate"] == 18.0
+
+
+def test_c2_frame_item_type_no_category_bills_5pct():
+    """FRAME item_type + no category -> 5% (the frame rate via item_type)."""
+    from api.routers.orders import _compute_per_category_gst
+
+    items = [{"item_total": 1000.0, "item_type": "FRAME"}]
     out = _compute_per_category_gst(items, 0)
     assert items[0]["gst_rate"] == 5.0
     assert out["dominant_rate"] == 5.0
+
+
+def test_c2_known_category_only_still_correct():
+    """When there is NO item_type, a known `category` still resolves correctly.
+    WATCH category alone -> 18%."""
+    from api.routers.orders import _compute_per_category_gst
+
+    items = [{"item_total": 1000.0, "category": "WATCH"}]
+    out = _compute_per_category_gst(items, 0)
+    assert items[0]["gst_rate"] == 18.0
+    assert out["dominant_rate"] == 18.0
+
+
+def test_c2_unknown_item_type_falls_back_to_valid_category():
+    """When item_type is junk but `category` is valid, the category wins (the
+    item_type-authoritative rule only applies when item_type is a KNOWN GST
+    type). SUNGLASS category (18%) + junk item_type -> 18%."""
+    from api.routers.orders import _compute_per_category_gst
+
+    items = [{"item_total": 1000.0, "category": "SUNGLASS", "item_type": "BAR"}]
+    out = _compute_per_category_gst(items, 0)
+    assert items[0]["gst_rate"] == 18.0
 
 
 def test_c2_junk_category_and_junk_item_type_falls_to_default():
@@ -212,6 +245,35 @@ def test_c2_explicit_hsn_still_authoritative_over_item_type(monkeypatch):
     ]
     out = _compute_per_category_gst(items, 0)
     assert items[0]["gst_rate"] == 18.0
+
+
+def test_c2_wellformed_single_rate_cart_grand_total_unchanged():
+    """A well-formed order (item_type and category AGREE) is unaffected by the
+    item_type-wins rule: FRAME+FRAME bills 5% with the same money math."""
+    from api.routers.orders import _compute_per_category_gst
+
+    items = [{"item_total": 1000.0, "category": "FRAME", "item_type": "FRAME"}]
+    out = _compute_per_category_gst(items, 0)
+    assert items[0]["gst_rate"] == 5.0
+    assert out["tax"] == 47.62  # 1000 incl @ 5% -> 952.38 + 47.62
+    assert round(out["taxable"] + out["tax"], 2) == 1000.0  # grand_total intact
+
+
+def test_c2_wellformed_mixed_rate_cart_grand_total_unchanged():
+    """A well-formed MIXED cart (each line's item_type agrees with its category)
+    bills exactly as before: FRAME (5%) + SUNGLASS (18%); grand_total intact."""
+    from api.routers.orders import _compute_per_category_gst
+
+    items = [
+        {"item_total": 1000.0, "category": "FRAME", "item_type": "FRAME"},
+        {"item_total": 500.0, "category": "SUNGLASS", "item_type": "SUNGLASS"},
+    ]
+    out = _compute_per_category_gst(items, 0)
+    assert items[0]["gst_rate"] == 5.0
+    assert items[1]["gst_rate"] == 18.0
+    # Identical to test_helper_mixed_categories in test_orders_gst_recompute.
+    assert out["tax"] == 123.89
+    assert round(out["taxable"] + out["tax"], 2) == 1500.0
 
 
 # ============================================================================
@@ -478,16 +540,53 @@ def test_c1_order_create_unknown_product_still_404s(
 # ---- C-4 end-to-end -------------------------------------------------------
 
 
-def test_c4_zero_total_order_audited_and_approver_stamped(
+def test_c4_zero_total_without_approver_rejected_400(
     client, auth_headers, hardening_orders
 ):
-    """A 100% cart discount -> Rs 0 order persists an approver + audit entry,
-    and is NOT blocked."""
+    """DELTA 2: a 100% cart discount -> Rs 0 order with NO approver/reason is
+    REJECTED with 400 (no longer silently auto-stamped). Nothing persists."""
     resp = _post_order(
         client,
         auth_headers,
         [_frame_item(1000.0)],
         cart_discount_percent=100.0,
+    )
+    assert resp.status_code == 400, resp.text
+    assert "approver" in resp.text.lower() and "reason" in resp.text.lower()
+
+    # No order row was created.
+    assert not [
+        d
+        for d in hardening_orders["order_repo"].collection.docs
+        if d.get("status") == "DRAFT"
+    ]
+
+
+def test_c4_zero_total_reason_without_approver_rejected_400(
+    client, auth_headers, hardening_orders
+):
+    """A reason alone is not enough -- an approver is also required."""
+    resp = _post_order(
+        client,
+        auth_headers,
+        [_frame_item(1000.0)],
+        cart_discount_percent=100.0,
+        cart_discount_reason="Full comp - warranty replacement",
+    )
+    assert resp.status_code == 400, resp.text
+
+
+def test_c4_zero_total_with_approver_and_reason_allowed_and_audited(
+    client, auth_headers, hardening_orders
+):
+    """DELTA 2: a Rs 0 order WITH both an approver and a reason is ALLOWED
+    (201) and writes the immutable ORDER_ZERO_TOTAL_APPROVED audit row."""
+    resp = _post_order(
+        client,
+        auth_headers,
+        [_frame_item(1000.0)],
+        cart_discount_percent=100.0,
+        cart_discount_approved_by="mgr-007",
         cart_discount_reason="Full comp - warranty replacement",
     )
     assert resp.status_code in (200, 201), resp.text
@@ -500,42 +599,60 @@ def test_c4_zero_total_order_audited_and_approver_stamped(
         if d.get("status") == "DRAFT"
     )
     assert saved["zero_total"] is True
-    # No approver supplied -> acting user (the SUPERADMIN test token) stamped.
-    assert saved["cart_discount_approved_by"] == "test-admin-001"
-    assert saved["zero_total_approved_by"] == "test-admin-001"
+    # The supplied approver + reason are preserved (never overwritten).
+    assert saved["cart_discount_approved_by"] == "mgr-007"
+    assert saved["zero_total_approved_by"] == "mgr-007"
+    assert saved["cart_discount_reason"] == "Full comp - warranty replacement"
 
     # An immutable audit row was written for the zero-total approval.
     audit_docs = hardening_orders["audit_repo"].collection.docs
     zt = [a for a in audit_docs if a.get("action") == "ORDER_ZERO_TOTAL_APPROVED"]
     assert len(zt) == 1
     assert zt[0]["entity_id"] == saved["order_id"]
-    assert zt[0]["details"]["approver_auto_stamped"] is True
+    assert zt[0]["details"]["approved_by"] == "mgr-007"
+    assert zt[0]["details"]["reason"] == "Full comp - warranty replacement"
 
 
-def test_c4_zero_total_keeps_supplied_approver(
+def test_c4_full_line_discount_needs_line_approver_and_reason(
     client, auth_headers, hardening_orders
 ):
-    """When the POS DOES supply an approver, it is preserved (not overwritten),
-    and the audit marks it as not auto-stamped."""
+    """A 100% LINE discount may be approved via the line's own approver +
+    reason ('whichever applies'); the order is then allowed + audited."""
     resp = _post_order(
         client,
         auth_headers,
-        [_frame_item(1000.0, discount_percent=100.0)],
-        cart_discount_approved_by="mgr-007",
+        [
+            _frame_item(
+                1000.0,
+                discount_percent=100.0,
+                discount_approved_by="mgr-009",
+                discount_reason="Staff replacement frame",
+            )
+        ],
     )
     assert resp.status_code in (200, 201), resp.text
-
     saved = next(
         d
         for d in hardening_orders["order_repo"].collection.docs
         if d.get("status") == "DRAFT"
     )
     assert saved["zero_total"] is True
-    assert saved["cart_discount_approved_by"] == "mgr-007"
+    assert saved["zero_total_approved_by"] == "mgr-009"
     audit_docs = hardening_orders["audit_repo"].collection.docs
     zt = [a for a in audit_docs if a.get("action") == "ORDER_ZERO_TOTAL_APPROVED"]
     assert len(zt) == 1
-    assert zt[0]["details"]["approver_auto_stamped"] is False
+
+
+def test_c4_full_line_discount_without_approval_rejected_400(
+    client, auth_headers, hardening_orders
+):
+    """A 100% LINE discount with no approver/reason anywhere -> 400."""
+    resp = _post_order(
+        client,
+        auth_headers,
+        [_frame_item(1000.0, discount_percent=100.0)],
+    )
+    assert resp.status_code == 400, resp.text
 
 
 def test_c4_normal_order_no_zero_total_flag_or_audit(
@@ -649,3 +766,238 @@ def test_c3_math_isfinite_contract():
     assert math.isfinite(5000.0)
     assert not math.isfinite(float("inf"))
     assert not math.isfinite(float("nan"))
+
+
+# ============================================================================
+# C-5 (DELTA 3) - order-create idempotency via the Idempotency-Key header
+# ============================================================================
+
+
+def _post_order_idem(client, auth_headers, items, key=None, **extra):
+    """POST /orders with an optional Idempotency-Key header."""
+    headers = dict(auth_headers)
+    if key is not None:
+        headers["Idempotency-Key"] = key
+    payload = {"customer_id": "cust-x", "items": items, **extra}
+    return client.post("/api/v1/orders", json=payload, headers=headers)
+
+
+def _draft_orders(hardening_orders):
+    return [
+        d
+        for d in hardening_orders["order_repo"].collection.docs
+        if d.get("status") == "DRAFT"
+    ]
+
+
+def test_c5_same_key_returns_existing_single_order(
+    client, auth_headers, hardening_orders
+):
+    """Two POSTs with the SAME Idempotency-Key create ONE order; the 2nd call
+    returns the 1st order's envelope (same order_id / order_number)."""
+    r1 = _post_order_idem(client, auth_headers, [_frame_item(1000.0)], key="K-1")
+    assert r1.status_code in (200, 201), r1.text
+    r2 = _post_order_idem(client, auth_headers, [_frame_item(1000.0)], key="K-1")
+    assert r2.status_code in (200, 201), r2.text
+
+    b1, b2 = r1.json(), r2.json()
+    assert b1["order_id"] == b2["order_id"]
+    assert b1["order_number"] == b2["order_number"]
+    assert b1["grand_total"] == b2["grand_total"]
+    # Exactly ONE order persisted despite two POSTs.
+    assert len(_draft_orders(hardening_orders)) == 1
+    # The key is persisted on the order doc.
+    assert _draft_orders(hardening_orders)[0]["idempotency_key"] == "K-1"
+
+
+def test_c5_different_keys_create_two_orders(
+    client, auth_headers, hardening_orders
+):
+    """Distinct Idempotency-Keys create distinct orders."""
+    r1 = _post_order_idem(client, auth_headers, [_frame_item(1000.0)], key="K-A")
+    r2 = _post_order_idem(client, auth_headers, [_frame_item(1000.0)], key="K-B")
+    assert r1.status_code in (200, 201), r1.text
+    assert r2.status_code in (200, 201), r2.text
+    assert r1.json()["order_id"] != r2.json()["order_id"]
+    assert len(_draft_orders(hardening_orders)) == 2
+
+
+def test_c5_no_key_creates_each_time(client, auth_headers, hardening_orders):
+    """No Idempotency-Key header -> behaviour unchanged: each POST is a new
+    order (two POSTs -> two orders)."""
+    r1 = _post_order_idem(client, auth_headers, [_frame_item(1000.0)])
+    r2 = _post_order_idem(client, auth_headers, [_frame_item(1000.0)])
+    assert r1.status_code in (200, 201), r1.text
+    assert r2.status_code in (200, 201), r2.text
+    assert r1.json()["order_id"] != r2.json()["order_id"]
+    assert len(_draft_orders(hardening_orders)) == 2
+    # No key persisted on a header-less create.
+    assert all(d.get("idempotency_key") is None for d in _draft_orders(hardening_orders))
+
+
+def test_c5_empty_key_treated_as_absent(client, auth_headers, hardening_orders):
+    """An empty Idempotency-Key string is treated as no key (two new orders)."""
+    r1 = _post_order_idem(client, auth_headers, [_frame_item(1000.0)], key="")
+    r2 = _post_order_idem(client, auth_headers, [_frame_item(1000.0)], key="")
+    assert r1.status_code in (200, 201), r1.text
+    assert r2.status_code in (200, 201), r2.text
+    assert r1.json()["order_id"] != r2.json()["order_id"]
+    assert len(_draft_orders(hardening_orders)) == 2
+
+
+# ============================================================================
+# C-6 (DELTA 4) - invoice CGST/SGST/IGST split (pure helper)
+# ============================================================================
+
+# Two stored lines: a 5% frame + an 18% sunglass, inclusive-mode taxable/tax
+# (the shape _compute_per_category_gst stamps onto each line at create).
+_SPLIT_ITEMS = [
+    {"gst_rate": 5.0, "taxable_value": 952.38, "tax_amount": 47.62, "hsn_code": "900311"},
+    {"gst_rate": 18.0, "taxable_value": 423.73, "tax_amount": 76.27, "hsn_code": "900410"},
+]
+_STORE_JH = {"state_code": "20", "gstin": "20ABCDE1234F1Z5"}  # Jharkhand
+
+
+def test_c6_intrastate_when_customer_state_absent_defaults_cgst_sgst():
+    """No customer state -> safe default INTRA: CGST+SGST (each rate/2), no
+    IGST, and the assumption is flagged."""
+    from api.routers.orders import _build_invoice_gst_split
+
+    out = _build_invoice_gst_split(_SPLIT_ITEMS, _STORE_JH, None)
+    assert out["interstate"] is False
+    assert out["place_of_supply_assumed"] is True
+    assert out["totals"]["igst"] == 0.0
+    # Each row's cgst + sgst == that row's tax; cgst == round(rate-tax / 2).
+    for row in out["rows"]:
+        assert round(row["cgst"] + row["sgst"], 2) == row["tax"]
+        assert row["igst"] == 0.0
+        assert row["cgst"] == round(row["tax"] / 2.0, 2)
+    # GSTINs surfaced.
+    assert out["store_gstin"] == "20ABCDE1234F1Z5"
+
+
+def test_c6_intrastate_explicit_same_state_cgst_sgst():
+    """Customer explicitly in the SAME state (via billing_address) -> INTRA,
+    NOT assumed."""
+    from api.routers.orders import _build_invoice_gst_split
+
+    customer = {"billing_address": {"state": "Jharkhand"}}
+    out = _build_invoice_gst_split(_SPLIT_ITEMS, _STORE_JH, customer)
+    assert out["interstate"] is False
+    assert out["place_of_supply_assumed"] is False
+    assert out["place_of_supply"] == "20"
+    assert out["totals"]["igst"] == 0.0
+    assert out["totals"]["cgst"] > 0 and out["totals"]["sgst"] > 0
+
+
+def test_c6_interstate_customer_other_state_uses_igst():
+    """Customer in a DIFFERENT state (GSTIN-derived) -> INTER: full tax as IGST,
+    no CGST/SGST."""
+    from api.routers.orders import _build_invoice_gst_split
+
+    customer = {"gstin": "27ABCDE1234F1Z5"}  # Maharashtra
+    out = _build_invoice_gst_split(_SPLIT_ITEMS, _STORE_JH, customer)
+    assert out["interstate"] is True
+    assert out["place_of_supply"] == "27"
+    assert out["customer_gstin"] == "27ABCDE1234F1Z5"
+    assert out["totals"]["cgst"] == 0.0
+    assert out["totals"]["sgst"] == 0.0
+    for row in out["rows"]:
+        assert row["igst"] == row["tax"]
+        assert row["cgst"] == 0.0 and row["sgst"] == 0.0
+
+
+def test_c6_cgst_sgst_sums_to_total_tax_intrastate():
+    """INTRA: CGST + SGST across all rates == the order's total tax."""
+    from api.routers.orders import _build_invoice_gst_split
+
+    out = _build_invoice_gst_split(_SPLIT_ITEMS, _STORE_JH, None)
+    t = out["totals"]
+    assert round(t["cgst"] + t["sgst"], 2) == t["tax"]
+    # And the split tax equals the sum of the stored per-line tax (123.89).
+    assert t["tax"] == 123.89
+
+
+def test_c6_igst_sums_to_total_tax_interstate():
+    """INTER: IGST across all rates == the order's total tax."""
+    from api.routers.orders import _build_invoice_gst_split
+
+    customer = {"gstin": "27ABCDE1234F1Z5"}
+    out = _build_invoice_gst_split(_SPLIT_ITEMS, _STORE_JH, customer)
+    assert out["totals"]["igst"] == out["totals"]["tax"] == 123.89
+
+
+def test_c6_totals_reconcile_to_grand_total():
+    """taxable + total tax == the order grand_total (1000 + 500 inclusive)."""
+    from api.routers.orders import _build_invoice_gst_split
+
+    out = _build_invoice_gst_split(_SPLIT_ITEMS, _STORE_JH, None)
+    t = out["totals"]
+    assert round(t["taxable"] + t["tax"], 2) == 1500.0
+
+
+def test_c6_invoice_endpoint_includes_gst_split(
+    client, auth_headers, hardening_orders, monkeypatch
+):
+    """End-to-end: GET /orders/{id}/invoice carries the CGST/SGST split, place
+    of supply, and both GSTINs -- while PRESERVING the existing fields."""
+    from api import dependencies as deps_module
+
+    # A store with a GSTIN + state so the invoice can be generated + split.
+    class _StoreRepo:
+        def find_by_id(self, sid):
+            return {
+                "store_id": sid,
+                "gstin": "20ABCDE1234F1Z5",
+                "state_code": "20",
+            }
+
+    monkeypatch.setattr(deps_module, "get_store_repository", lambda: _StoreRepo())
+
+    # Create a normal mixed-rate order, then flip it out of DRAFT so the
+    # invoice endpoint will serve it.
+    resp = _post_order(
+        client,
+        auth_headers,
+        [
+            _frame_item(1000.0),  # FRAME 5%
+            {
+                "product_id": "custom-sg",
+                "product_name": "Sunnies",
+                "item_type": "SUNGLASS",
+                "category": "SUNGLASS",
+                "quantity": 1,
+                "unit_price": 500.0,
+            },
+        ],
+    )
+    assert resp.status_code in (200, 201), resp.text
+    order_id = resp.json()["order_id"]
+    grand_total = resp.json()["grand_total"]
+
+    saved = next(
+        d
+        for d in hardening_orders["order_repo"].collection.docs
+        if d.get("order_id") == order_id
+    )
+    saved["status"] = "CONFIRMED"  # invoice refuses DRAFT
+
+    inv = client.get(f"/api/v1/orders/{order_id}/invoice", headers=auth_headers)
+    assert inv.status_code == 200, inv.text
+    body = inv.json()
+    # Preserved fields.
+    assert body["orderId"] == order_id
+    assert body["grandTotal"] == grand_total
+    assert "items" in body and body["invoiceNumber"]
+    # New C-6 fields.
+    assert body["storeGstin"] == "20ABCDE1234F1Z5"
+    assert body["interstate"] is False  # walk-in customer -> intra default
+    assert body["placeOfSupplyAssumed"] is True
+    totals = body["taxTotals"]
+    assert totals["igst"] == 0.0
+    assert round(totals["cgst"] + totals["sgst"], 2) == totals["tax"]
+    # The split reconciles to grand_total.
+    assert round(totals["taxable"] + totals["tax"], 2) == grand_total
+    # Per-rate rows present (5% + 18%).
+    rates = sorted(r["rate"] for r in body["taxSummary"])
+    assert rates == [5.0, 18.0]

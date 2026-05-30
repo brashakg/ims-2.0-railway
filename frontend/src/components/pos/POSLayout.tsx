@@ -5,7 +5,7 @@
 // Uses posStore (Zustand) for all state with localStorage persistence
 // Sub-components extracted to: POSCart, POSPayment, POSReceipt, POSInvoice
 
-import { useState, useEffect, useMemo, useCallback, startTransition } from 'react';
+import { useState, useEffect, useMemo, useCallback, useRef, startTransition } from 'react';
 import {
   ShoppingCart, User, Eye, Package, CreditCard, CheckCircle,
   ChevronRight, ChevronLeft, Plus, X,
@@ -131,6 +131,13 @@ export function POSLayout() {
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const toast = useToast();
 
+  // C-5 (DELTA 3): order-create idempotency key for the current submit attempt.
+  // Generated when the user initiates "Pay now"; reused on a double-click /
+  // retry of the SAME attempt (so the backend returns the same order instead
+  // of duplicating), and cleared on success / when a new order starts so a
+  // genuinely new order always gets a fresh key.
+  const idempotencyKeyRef = useRef<string | null>(null);
+
   // POS "+1 walk-in" — attributes footfall to the chosen salesperson.
   // Requires a salesperson to be picked first (the conversion engine
   // needs the attribution); otherwise nudges the cashier to pick one.
@@ -232,6 +239,8 @@ export function POSLayout() {
     setShowRecallPanel(false);
     setShowDayEnd(false);
     setErrorMsg(null);
+    // C-5: a brand-new order must not reuse the previous attempt's key.
+    idempotencyKeyRef.current = null;
     store.resetTransaction();
   };
 
@@ -301,6 +310,15 @@ export function POSLayout() {
 
     setErrorMsg(null);
     store.setProcessing(true);
+    // C-5: mint a key for this attempt if one isn't already in flight. A
+    // double-click / retry of the SAME attempt reuses it (idempotent); a new
+    // order resets it (on success below / on full reset).
+    if (!idempotencyKeyRef.current) {
+      idempotencyKeyRef.current =
+        typeof crypto !== 'undefined' && crypto.randomUUID
+          ? crypto.randomUUID()
+          : `idem-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    }
     try {
       const result = await orderApi.createOrder({
         customer_id: store.customer?.id,
@@ -333,8 +351,10 @@ export function POSLayout() {
         cart_discount_amount: store.cart_discount_amount || 0,
         cart_discount_reason: store.cart_discount_reason || undefined,
         cart_discount_approved_by: store.cart_discount_approved_by || undefined,
-      } as any);
+      } as any, idempotencyKeyRef.current || undefined);
       if (result?.order_id) {
+        // C-5: success -> drop the key so the next order gets a fresh one.
+        idempotencyKeyRef.current = null;
         for (const p of (store.payments || [])) {
           try {
             await orderApi.addPayment(result.order_id, { method: p.method, amount: p.amount, reference: p.reference, voucher_code: p.voucherCode } as any);
