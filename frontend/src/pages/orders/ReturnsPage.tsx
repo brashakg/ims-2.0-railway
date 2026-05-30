@@ -278,10 +278,10 @@ export default function ReturnsPage() {
         ]).map(t => (
           <button key={t.id} onClick={() => setReturnType(t.id)}
             className={clsx('flex-1 p-3 rounded-xl border-2 text-left transition-all',
-              returnType === t.id ? 'border-bv-red-600 bg-bv-gold-50' : 'border-gray-200 hover:border-gray-300')}>
+              returnType === t.id ? 'border-bv-red-600 bg-bv-red-50' : 'border-gray-200 hover:border-gray-300')}>
             <div className="flex items-center gap-2">
               <t.icon className={clsx('w-5 h-5', returnType === t.id ? 'text-bv-red-600' : 'text-gray-500')} />
-              <span className={clsx('text-sm font-medium', returnType === t.id ? 'text-bv-gold-700' : 'text-gray-700')}>{t.label}</span>
+              <span className={clsx('text-sm font-medium', returnType === t.id ? 'text-bv-red-700' : 'text-gray-700')}>{t.label}</span>
             </div>
             <p className="text-xs text-gray-500 mt-1 ml-7">{t.desc}</p>
           </button>
@@ -320,7 +320,7 @@ export default function ReturnsPage() {
             <div className="mt-4 space-y-2">
               {orders.map(order => (
                 <button key={order.id} onClick={() => selectOrder(order)}
-                  className="w-full flex items-center justify-between p-3 rounded-lg border border-gray-200 hover:border-bv-red-300 hover:bg-bv-gold-50 text-left transition-all">
+                  className="w-full flex items-center justify-between p-3 rounded-lg border border-gray-200 hover:border-bv-red-300 hover:bg-bv-red-50 text-left transition-all">
                   <div>
                     <p className="font-medium text-sm text-gray-900">{order.orderNumber}</p>
                     <p className="text-xs text-gray-500">{order.customerName} · {formatDateIST(order.createdAt)}</p>
@@ -351,7 +351,7 @@ export default function ReturnsPage() {
           <div className="space-y-3">
             {returnItems.map((item, i) => (
               <div key={i} className={clsx('border rounded-lg p-4 transition-all',
-                item.returnQty > 0 ? 'border-bv-red-300 bg-bv-gold-50' : 'border-gray-200')}>
+                item.returnQty > 0 ? 'border-bv-red-300 bg-bv-red-50' : 'border-gray-200')}>
                 <div className="flex items-start justify-between gap-4">
                   <div className="flex-1">
                     <p className="font-medium text-sm">{item.productName}</p>
@@ -423,7 +423,7 @@ export default function ReturnsPage() {
                 <div className="mt-2 space-y-1 max-h-48 overflow-auto">
                   {productResults.map((p, idx) => (
                     <button key={p.product_id || p.id || p._id || idx} onClick={() => addReplacementFromProduct(p)}
-                      className="w-full flex items-center justify-between p-2 rounded-lg border border-gray-200 hover:border-bv-red-300 hover:bg-bv-gold-50 text-left text-sm">
+                      className="w-full flex items-center justify-between p-2 rounded-lg border border-gray-200 hover:border-bv-red-300 hover:bg-bv-red-50 text-left text-sm">
                       <span>
                         <span className="font-medium">{p.name || p.model || 'Item'}</span>
                         <span className="text-xs text-gray-500 ml-2">{p.sku || ''}</span>

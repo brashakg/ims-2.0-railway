@@ -98,7 +98,7 @@ export function BaseModal({
     >
       <div
         className={clsx(
-          'bg-white dark:bg-white rounded-lg shadow-xl',
+          'bg-white rounded-lg shadow-xl',
           'w-full max-h-[90vh] overflow-hidden flex flex-col',
           MODAL_SIZES[size],
           className
@@ -108,23 +108,23 @@ export function BaseModal({
         {/* Header */}
         <div
           className={clsx(
-            'border-b border-gray-200 dark:border-gray-800',
+            'border-b border-gray-200',
             'px-6 py-4 flex items-center justify-between',
             headerClassName
           )}
         >
           <div className="flex items-center gap-3">
-            {Icon && <Icon className="w-5 h-5 text-gray-600 dark:text-gray-500" />}
-            <h2 className="text-lg font-bold text-gray-900 dark:text-gray-900">
+            {Icon && <Icon className="w-5 h-5 text-gray-600" />}
+            <h2 className="text-lg font-bold text-gray-900">
               {title}
             </h2>
           </div>
           <button
             onClick={onClose}
-            className="p-1 hover:bg-gray-100 dark:hover:bg-white rounded-lg transition-colors"
+            className="p-1 hover:bg-gray-100 rounded-lg transition-colors"
             aria-label="Close modal"
           >
-            <X className="w-5 h-5 text-gray-500 dark:text-gray-500" />
+            <X className="w-5 h-5 text-gray-500" />
           </button>
         </div>
 
@@ -142,8 +142,8 @@ export function BaseModal({
         {showFooter && (
           <div
             className={clsx(
-              'border-t border-gray-200 dark:border-gray-800',
-              'px-6 py-4 flex items-center justify-end gap-2 bg-gray-50 dark:bg-white/50',
+              'border-t border-gray-200',
+              'px-6 py-4 flex items-center justify-end gap-2 bg-gray-50',
               footerClassName
             )}
           >
@@ -153,9 +153,9 @@ export function BaseModal({
                 disabled={isLoading}
                 className={clsx(
                   'px-4 py-2 rounded-lg font-medium transition-colors',
-                  'border border-gray-300 dark:border-gray-200',
-                  'text-gray-700 dark:text-gray-700',
-                  'hover:bg-gray-100 dark:hover:bg-gray-100',
+                  'border border-gray-300',
+                  'text-gray-700',
+                  'hover:bg-gray-100',
                   'disabled:opacity-50 disabled:cursor-not-allowed'
                 )}
               >

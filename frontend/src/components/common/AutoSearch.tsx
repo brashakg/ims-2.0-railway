@@ -197,7 +197,7 @@ export function AutoSearch<T>({
           onFocus={() => { if (results.length > 0 && query.length >= minChars) setIsOpen(true); }}
           placeholder={placeholder}
           autoFocus={autoFocus}
-          className="w-full pl-10 pr-8 py-2.5 bg-white border border-gray-300 rounded-lg text-sm text-gray-900 placeholder:text-gray-500 focus:ring-2 focus:ring-bv-gold-500 focus:border-bv-red-600 transition-colors"
+          className="w-full pl-10 pr-8 py-2.5 bg-white border border-gray-300 rounded-lg text-sm text-gray-900 placeholder:text-gray-500 focus:ring-2 focus:ring-bv-red-500 focus:border-bv-red-600 transition-colors"
         />
         {query && (
           <button onClick={handleClear} className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-600">

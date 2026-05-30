@@ -114,7 +114,7 @@ export function AttendanceWidget() {
     <div className="bg-white border border-gray-200 rounded-xl p-5">
       <div className="flex items-center justify-between mb-4">
         <h3 className="font-semibold text-gray-900 flex items-center gap-2">
-          <Clock className="w-5 h-5 text-bv-gold-500" /> Attendance
+          <Clock className="w-5 h-5 text-bv-red-500" /> Attendance
         </h3>
         <span className="text-xs text-gray-500">{new Date().toLocaleDateString('en-IN', { weekday: 'long', day: '2-digit', month: 'short' })}</span>
       </div>

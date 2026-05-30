@@ -152,7 +152,7 @@ export default function DayEndReport() {
       </div>
 
       {isLoading ? (
-        <div className="text-center py-12"><div className="w-8 h-8 border-2 border-gray-200 border-t-bv-gold-500 rounded-full animate-spin mx-auto" /></div>
+        <div className="text-center py-12"><div className="w-8 h-8 border-2 border-gray-200 border-t-bv-red-500 rounded-full animate-spin mx-auto" /></div>
       ) : (
         <>
           {/* KPI Cards */}
@@ -161,7 +161,7 @@ export default function DayEndReport() {
               { label: 'Total Sales', value: fc(summary.totalSales), icon: TrendingUp, color: 'text-green-600 bg-green-50' },
               { label: 'Orders', value: String(summary.totalOrders), icon: Package, color: 'text-blue-600 bg-blue-50' },
               { label: 'Items Sold', value: String(summary.totalItems), icon: Package, color: 'text-purple-600 bg-purple-50' },
-              { label: 'Avg Bill Value', value: fc(summary.avgBillValue), icon: IndianRupee, color: 'text-bv-red-600 bg-bv-gold-50' },
+              { label: 'Avg Bill Value', value: fc(summary.avgBillValue), icon: IndianRupee, color: 'text-bv-red-600 bg-bv-red-50' },
             ].map(card => (
               <div key={card.label} className="bg-white border border-gray-200 rounded-xl p-4">
                 <div className="flex items-center justify-between mb-2">
@@ -244,7 +244,7 @@ export default function DayEndReport() {
                 {summary.staffSales.map((staff, i) => (
                   <div key={staff.name} className="flex items-center justify-between py-2 px-3 rounded-lg bg-gray-50">
                     <div className="flex items-center gap-3">
-                      <span className="w-6 h-6 rounded-full bg-bv-gold-100 text-bv-gold-700 text-xs font-bold flex items-center justify-center">{i + 1}</span>
+                      <span className="w-6 h-6 rounded-full bg-bv-red-100 text-bv-red-700 text-xs font-bold flex items-center justify-center">{i + 1}</span>
                       <span className="font-medium text-sm">{staff.name}</span>
                     </div>
                     <div className="text-right">

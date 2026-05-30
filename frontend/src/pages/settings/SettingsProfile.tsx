@@ -126,7 +126,7 @@ export function ProfileSection() {
         <h2 className="text-lg font-semibold text-gray-900 mb-4">My Profile</h2>
         <div className="space-y-4">
           <div className="flex items-center gap-4 p-4 bg-gray-50 rounded-lg">
-            <div className="w-16 h-16 rounded-full bg-bv-gold-100 flex items-center justify-center">
+            <div className="w-16 h-16 rounded-full bg-bv-red-100 flex items-center justify-center">
               <User className="w-8 h-8 text-bv-red-600" />
             </div>
             <div>
@@ -134,7 +134,7 @@ export function ProfileSection() {
               <p className="text-sm text-gray-500">@{user?.email?.split('@')[0]}</p>
               <div className="flex gap-2 mt-1">
                 {user?.roles?.map(role => (
-                  <span key={role} className="text-xs bg-bv-gold-100 text-bv-gold-700 px-2 py-0.5 rounded">
+                  <span key={role} className="text-xs bg-bv-red-100 text-bv-red-700 px-2 py-0.5 rounded">
                     {role.replace('_', ' ')}
                   </span>
                 ))}

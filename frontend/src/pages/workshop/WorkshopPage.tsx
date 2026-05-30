@@ -1037,12 +1037,12 @@ const loadJobs = async () => {
                     <div className="space-y-1.5 max-h-60 overflow-y-auto">
                       {createOrders.map((o: any) => (
                         <button key={o.id} onClick={() => setCreateSelectedOrder(o)}
-                          className="w-full flex items-center justify-between p-3 rounded-lg border border-gray-300 hover:border-bv-gold-400 hover:bg-gray-100 text-left text-gray-900 transition-colors">
+                          className="w-full flex items-center justify-between p-3 rounded-lg border border-gray-300 hover:border-bv-red-400 hover:bg-gray-100 text-left text-gray-900 transition-colors">
                           <div>
                             <p className="text-sm font-medium">{o.orderNumber}</p>
                             <p className="text-xs text-gray-500">{o.customerName} · {(o.items || []).length} items</p>
                           </div>
-                          <span className="text-sm font-bold text-bv-gold-300">₹{Math.round(o.grandTotal || 0).toLocaleString('en-IN')}</span>
+                          <span className="text-sm font-bold text-bv-red-300">₹{Math.round(o.grandTotal || 0).toLocaleString('en-IN')}</span>
                         </button>
                       ))}
                     </div>
@@ -1077,7 +1077,7 @@ const loadJobs = async () => {
                             createPriority === p
                               ? p === 'URGENT' ? 'border-red-500 bg-red-50 text-red-700'
                                 : p === 'EXPRESS' ? 'border-amber-500 bg-amber-50 text-amber-700'
-                                  : 'border-bv-red-600 bg-bv-gold-900 text-bv-gold-300'
+                                  : 'border-bv-red-600 bg-bv-red-900 text-bv-red-300'
                               : 'border-gray-300 text-gray-600 bg-white')}>
                           {p}
                         </button>

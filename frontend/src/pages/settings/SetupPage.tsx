@@ -334,7 +334,7 @@ function StoreFormModal({ store, onSave, onClose }: { store: StoreConfig | null;
                   ...p, categories: p.categories.includes(cat) ? p.categories.filter(c => c !== cat) : [...p.categories, cat]
                 }))}
                   className={clsx('text-xs px-3 py-1.5 rounded-lg border transition-colors',
-                    form.categories.includes(cat) ? 'bg-bv-gold-50 border-bv-red-300 text-bv-gold-700' : 'border-gray-200 text-gray-500 hover:border-gray-300')}>
+                    form.categories.includes(cat) ? 'bg-bv-red-50 border-bv-red-300 text-bv-red-700' : 'border-gray-200 text-gray-500 hover:border-gray-300')}>
                   {cat.replace(/_/g, ' ')}
                 </button>
               ))}
@@ -416,7 +416,7 @@ function EmployeeFormModal({ stores, onSave, onClose }: { stores: StoreConfig[];
                 {ROLES.map(role => (
                   <button key={role.id} onClick={() => toggleRole(role.id)}
                     className={clsx('p-3 rounded-lg border-2 text-left transition-all',
-                      form.roles.includes(role.id) ? 'border-bv-red-600 bg-bv-gold-50' : 'border-gray-200 hover:border-gray-300')}>
+                      form.roles.includes(role.id) ? 'border-bv-red-600 bg-bv-red-50' : 'border-gray-200 hover:border-gray-300')}>
                     <div className="flex items-center gap-2">
                       <div className={clsx('w-5 h-5 rounded border-2 flex items-center justify-center',
                         form.roles.includes(role.id) ? 'border-bv-red-600 bg-bv-red-600' : 'border-gray-300')}>
@@ -441,7 +441,7 @@ function EmployeeFormModal({ stores, onSave, onClose }: { stores: StoreConfig[];
                   {stores.map(s => (
                     <button key={s.id} onClick={() => toggleStore(s.id || '')}
                       className={clsx('w-full p-3 rounded-lg border-2 text-left flex items-center justify-between',
-                        form.assignedStores.includes(s.id || '') ? 'border-bv-red-600 bg-bv-gold-50' : 'border-gray-200')}>
+                        form.assignedStores.includes(s.id || '') ? 'border-bv-red-600 bg-bv-red-50' : 'border-gray-200')}>
                       <div>
                         <p className="text-sm font-medium">{s.name}</p>
                         <p className="text-xs text-gray-500">{s.city}</p>
