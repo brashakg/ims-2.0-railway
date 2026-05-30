@@ -2792,6 +2792,28 @@ main input[type="date"] { background-color: #fff; border-color: #d1d5db; color: 
     height: 100dvh;
   }
   .rail.rail-mobile-open .rail-spacer { display: none; }
+  /* Items must render icon-BESIDE-label (row), not stacked. A base rule computes
+     flex-direction:column on the drawer rows, so the icon+label stacked and
+     overflowed the 38px row box, overlapping the next row (the real "broken
+     drawer"). Force row + center so each row is a clean 38px line. */
+  .rail.rail-mobile-open .rail-item {
+    flex-direction: row;
+    align-items: center;
+    justify-content: flex-start;
+    gap: 12px;
+    height: 38px;
+    padding: 0 14px;
+  }
+  .rail.rail-mobile-open .rail-item svg { flex-shrink: 0; }
+  .rail.rail-mobile-open .rail-label {
+    position: static;
+    opacity: 1;
+    transform: none;
+    background: transparent;
+    box-shadow: none;
+    padding: 0;
+    font-size: 14px;
+  }
 }
 
 /* ====== Very small phones (< 390px, e.g. 360×640) ====== */
