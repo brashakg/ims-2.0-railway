@@ -60,6 +60,7 @@ from .lens_stock import router as lens_stock_router
 from .lens_enums import router as lens_enums_router
 from .product_templates import router as product_templates_router
 from .audit import router as audit_router
+from .budgets import router as budgets_router
 
 __all__ = [
     "auth_router",
@@ -119,4 +120,5 @@ __all__ = [
     "lens_enums_router",
     "product_templates_router",
     "audit_router",
+    "budgets_router",
 ]
