@@ -114,6 +114,19 @@ def _reset_churn_collections():
         pass
 
 
+def pytest_collection_modifyitems(items):
+    """Force a deterministic, machine-independent collection order. pytest's
+    default order follows the filesystem directory-scan order, which differs
+    between this container and the CI runner -- so an order-sensitive failure
+    can hit CI yet never reproduce locally (and vice versa). Sorting by file
+    path (Python's stable sort preserves each file's original in-file order)
+    makes the suite run in the SAME order everywhere: CI becomes reproducible
+    locally, and collection nondeterminism can no longer mask or unmask a
+    failure. Inert under pytest-randomly (only installed locally) when that
+    plugin is left active; pass -p no:randomly to honour this order."""
+    items.sort(key=lambda it: str(getattr(it, "fspath", "") or it.nodeid))
+
+
 def _noop_close(*_args, **_kwargs):
     """No-op replacement for close_db (see app fixture)."""
     return None
