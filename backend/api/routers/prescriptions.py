@@ -154,6 +154,11 @@ class PrescriptionCreate(BaseModel):
     source: str = "TESTED_AT_STORE"  # TESTED_AT_STORE, FROM_DOCTOR
     optometrist_id: Optional[str] = None
     validity_months: int = Field(default=12, ge=6, le=24)
+    # Optional back-date: when supplied the prescription is stamped with this
+    # date instead of utcnow(), and expiry_date is derived from it. Must not be
+    # in the future. Omitting it (or passing null) keeps the original behaviour
+    # (utcnow()). Accepts a full ISO-8601 datetime or a plain YYYY-MM-DD date.
+    prescription_date: Optional[datetime] = None
     # Spectacle eyes default to empty EyeData so a CONTACT_LENS payload need not
     # send them; a SPECTACLE payload still validates powers as before.
     right_eye: EyeData = Field(default_factory=EyeData)
@@ -420,9 +425,16 @@ def _add_months(dt: datetime, months: int) -> datetime:
 
 def _rx_validity(rx: dict):
     """(expiry_datetime | None, is_valid | None) for a prescription using
-    test_date + validity_months (defaults 12), tolerant of snake/camel fields."""
+    prescription_date / test_date + validity_months (defaults 12), tolerant of
+    snake/camel fields. prescription_date is checked first so that back-dated
+    prescriptions created via POST /prescriptions (which stores prescription_date)
+    compute the correct expiry rather than falling back to created_at."""
     td = _parse_dt(
-        rx.get("test_date") or rx.get("testDate") or rx.get("created_at") or rx.get("createdAt")
+        rx.get("prescription_date")
+        or rx.get("test_date")
+        or rx.get("testDate")
+        or rx.get("created_at")
+        or rx.get("createdAt")
     )
     months = rx.get("validity_months") or rx.get("validityMonths") or 12
     try:
@@ -463,7 +475,13 @@ async def family_prescriptions(
         rows, valid_count, latest = [], 0, None
         ordered = sorted(
             rx_list,
-            key=lambda r: str(r.get("test_date") or r.get("testDate") or r.get("created_at") or ""),
+            key=lambda r: str(
+                r.get("prescription_date")
+                or r.get("test_date")
+                or r.get("testDate")
+                or r.get("created_at")
+                or ""
+            ),
             reverse=True,
         )
         for rx in ordered:
@@ -608,8 +626,30 @@ async def create_prescription(
             if not customer and not is_walkin:
                 raise HTTPException(status_code=404, detail="Customer not found")
 
-        prescription_date = datetime.now()
-        expiry_date = prescription_date + timedelta(days=rx.validity_months * 30)
+        # Resolve the effective prescription date.
+        # If the caller supplies prescription_date, honour it (back-dated Rx).
+        # Guard: a prescription issued in the future makes no clinical sense.
+        # Today (midnight) is allowed so a prescription written earlier today
+        # is never rejected due to timezone rounding.
+        if rx.prescription_date is not None:
+            # Strip any timezone info so comparison stays naive throughout.
+            supplied = rx.prescription_date.replace(tzinfo=None)
+            # A date in the future is rejected.  "Today" is allowed: a
+            # prescription written earlier this morning must not be blocked by
+            # a sub-second clock skew, so we compare against end-of-today.
+            end_of_today = datetime.now().replace(
+                hour=23, minute=59, second=59, microsecond=999999
+            )
+            if supplied > end_of_today:
+                raise HTTPException(
+                    status_code=400,
+                    detail="prescription_date cannot be in the future",
+                )
+            prescription_date = supplied
+        else:
+            prescription_date = datetime.now()
+
+        expiry_date = _add_months(prescription_date, rx.validity_months)
 
         rx_data = {
             "prescription_number": generate_rx_number(),
@@ -620,6 +660,10 @@ async def create_prescription(
             "source": rx.source,
             "optometrist_id": rx.optometrist_id,
             "prescription_date": prescription_date.isoformat(),
+            # test_date mirrors prescription_date so legacy readers (clinical
+            # report queries, _rx_validity, family-view sort) that look for
+            # test_date before prescription_date still get the correct date.
+            "test_date": prescription_date.isoformat(),
             "expiry_date": expiry_date.isoformat(),
             "validity_months": rx.validity_months,
             # Spectacle eyes are always persisted (empty for a CL Rx) so any
