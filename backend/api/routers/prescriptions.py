@@ -857,8 +857,18 @@ async def validate_prescription(
                 issues.append(f"{eye_label} SPH {sph} out of range (-20..+20)")
             if cyl is not None and cyl != "" and not (-6.0 <= float(cyl) <= 6.0):
                 issues.append(f"{eye_label} CYL {cyl} out of range (-6..+6)")
-            if axis is not None and axis != "" and not (1 <= int(float(axis)) <= 180):
-                issues.append(f"{eye_label} AXIS {axis} out of range (1-180)")
+            if axis is not None and axis != "":
+                axis_f = float(axis)
+                # AXIS is a WHOLE degree 1..180. The old check used
+                # int(float(axis)), which truncated 90.5 -> 90 and let a
+                # non-integer axis pass silently. Flag both out-of-range AND
+                # fractional values, matching what create / PUT enforce.
+                if not (1 <= axis_f <= 180):
+                    issues.append(f"{eye_label} AXIS {axis} out of range (1-180)")
+                elif axis_f != int(axis_f):
+                    issues.append(
+                        f"{eye_label} AXIS {axis} must be a whole number (1-180)"
+                    )
             if add not in (None, "", 0) and float(add) != 0 and not (
                 0.75 <= float(add) <= 3.50
             ):

@@ -237,3 +237,72 @@ class TestEdgeCases:
         client = _client(["OPTOMETRIST"], None, monkeypatch)
         resp = client.put("/prescriptions/rx-1", json={"remarks": "x"})
         assert resp.status_code == 503
+
+
+# ---------------------------------------------------------------------------
+# Advisory /validate path (GET /prescriptions/{id}/validate)
+# ---------------------------------------------------------------------------
+# This path REPORTS issues on already-stored Rx values (it never blocks a
+# write). Bug: the AXIS check used int(float(axis)), truncating 90.5 -> 90 so a
+# non-whole axis slipped through as "valid". AXIS must be a whole degree 1..180.
+
+
+def _doc_with_eyes(right_eye, left_eye):
+    doc = _seed_doc()
+    doc["right_eye"] = right_eye
+    doc["left_eye"] = left_eye
+    return doc
+
+
+class TestValidateAdvisory:
+    def test_clean_rx_reports_valid(self, monkeypatch):
+        repo = _FakeRxRepo(_seed_doc())
+        client = _client(["OPTOMETRIST"], repo, monkeypatch)
+        resp = client.get("/prescriptions/rx-1/validate")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["valid"] is True
+        assert body["issues"] == []
+
+    def test_fractional_axis_flagged_as_non_whole(self, monkeypatch):
+        # 90.5 is in 1..180 but NOT a whole number -> must be flagged.
+        repo = _FakeRxRepo(
+            _doc_with_eyes(
+                {"sph": "-1.00", "cyl": "-0.50", "axis": 90.5, "add": "0"},
+                {"sph": "-1.00", "cyl": "-0.50", "axis": 85, "add": "0"},
+            )
+        )
+        client = _client(["OPTOMETRIST"], repo, monkeypatch)
+        resp = client.get("/prescriptions/rx-1/validate")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["valid"] is False
+        assert any("whole number" in iss for iss in body["issues"])
+
+    def test_axis_out_of_range_still_flagged(self, monkeypatch):
+        repo = _FakeRxRepo(
+            _doc_with_eyes(
+                {"sph": "-1.00", "cyl": "-0.50", "axis": 200, "add": "0"},
+                {"sph": "-1.00", "cyl": "-0.50", "axis": 85, "add": "0"},
+            )
+        )
+        client = _client(["OPTOMETRIST"], repo, monkeypatch)
+        resp = client.get("/prescriptions/rx-1/validate")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["valid"] is False
+        assert any("out of range (1-180)" in iss for iss in body["issues"])
+
+    def test_sph_out_of_range_flagged(self, monkeypatch):
+        repo = _FakeRxRepo(
+            _doc_with_eyes(
+                {"sph": "99", "cyl": "-0.50", "axis": 90, "add": "0"},
+                {"sph": "-1.00", "cyl": "-0.50", "axis": 85, "add": "0"},
+            )
+        )
+        client = _client(["OPTOMETRIST"], repo, monkeypatch)
+        resp = client.get("/prescriptions/rx-1/validate")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["valid"] is False
+        assert any("SPH" in iss for iss in body["issues"])

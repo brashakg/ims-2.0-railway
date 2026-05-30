@@ -121,14 +121,17 @@ def test_clinical_complete_rejects_bad_axis():
 
 def test_clinical_complete_accepts_valid_rx():
     # A clean in-range Rx (with a blank/zero cell + None axis on the left) must
-    # pass validation. No DB -> demo fallback returns 200.
+    # pass validation. complete_test now 404s an unknown test_id (it no longer
+    # mints an orphan Rx via a demo fallback), so a valid Rx on the synthetic
+    # "t1" yields 200 (if resolvable) or 404 (not found) -- never 422. Only a
+    # 422 would mean the valid Rx was wrongly rejected.
     body = _complete_body(
         right=_eye(sph="-1.25", cyl="-0.50", axis=90, add="0"),
         left={"sph": "0", "cyl": "", "axis": None, "add": "+2.00"},
     )
     r = _clinical_client().post("/api/v1/clinical/tests/t1/complete", json=body)
     assert r.status_code != 422
-    assert r.status_code == 200
+    assert r.status_code in (200, 404)
 
 
 # ============================================================================
