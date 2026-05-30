@@ -692,6 +692,60 @@ def generate_order_number(store_id: str) -> str:
     return f"ORD-{prefix}-{year}-{short_uuid}"
 
 
+def build_emi_schedule(principal: float, annual_rate: float, months: int) -> dict:
+    """Reconcile an EMI plan so the installments sum EXACTLY to total_payable.
+
+    P3-C. The equal monthly installment (standard amortization formula) is
+    rounded to paise for display, but `monthly_emi * months` then drifts from
+    the true cost of credit by up to a few paise. A customer paying N equal
+    rounded installments would under/over-pay the principal+interest.
+
+    Fix: `total_payable` is the AUTHORITATIVE total (unrounded EMI x months,
+    rounded once to paise). The schedule pays `monthly_emi` for the first
+    (months - 1) installments and a `last_installment` that absorbs the
+    rounding remainder, so:
+
+        monthly_emi * (months - 1) + last_installment == total_payable   (exact)
+
+    `interest_amount = total_payable - principal`. All values are display /
+    documentation only -- the recorded payment amount (and therefore what
+    reduces balance_due) is unchanged elsewhere.
+
+    Returns the dict embedded as `emi_details` (minus provider, which the
+    caller adds).
+    """
+    months = int(months)
+    principal = float(principal)
+    monthly_rate = annual_rate / 12 / 100
+    if monthly_rate > 0:
+        emi_amount = (
+            principal
+            * monthly_rate
+            * (1 + monthly_rate) ** months
+            / ((1 + monthly_rate) ** months - 1)
+        )
+    else:
+        emi_amount = principal / months
+
+    monthly_emi = round(emi_amount, 2)
+    # Authoritative total cost of credit (rounded once from the exact EMI).
+    total_payable = round(emi_amount * months, 2)
+    # Last installment absorbs the accumulated rounding so the schedule sums
+    # to total_payable to the paisa. round() tames float noise (e.g. a
+    # 4999.999999999 -> 5000.00).
+    last_installment = round(total_payable - monthly_emi * (months - 1), 2)
+    interest_amount = round(total_payable - principal, 2)
+
+    return {
+        "tenure_months": months,
+        "annual_rate": annual_rate,
+        "monthly_emi": monthly_emi,
+        "last_installment": last_installment,
+        "total_payable": total_payable,
+        "interest_amount": interest_amount,
+    }
+
+
 def _order_create_response(order: dict) -> dict:
     """The POST /orders success envelope. Shared by a fresh create and the C-5
     idempotency replay so a duplicated request gets a byte-identical response.
@@ -1495,7 +1549,18 @@ async def create_order(
         }
 
         try:
-            created = order_repo.create(order_data)
+            # P3-B: order_number carries a UNIQUE sparse index. Under
+            # concurrency two creates can mint the same value and the loser
+            # hits a Mongo E11000 -- which previously 500'd. create_unique
+            # regenerates JUST the order_number and retries (bounded), mirroring
+            # vouchers.issue_voucher. order_id / _id are stable UUIDs and never
+            # change across retries. Behaviour-preserving on the no-collision
+            # path: a single insert, identical doc.
+            created = order_repo.create_unique(
+                order_data,
+                number_field="order_number",
+                regenerate=lambda: generate_order_number(store_id),
+            )
         except Exception as create_exc:  # noqa: BLE001
             # Order persist failed AFTER reservations succeeded -- run
             # the compensating release so the cells don't leak.
@@ -2001,26 +2066,16 @@ async def add_payment(
             except Exception:
                 pass  # use default
 
-            monthly_rate = emi_annual_rate / 12 / 100
-            months = payment.emi_months
-            if monthly_rate > 0:
-                emi_amount = (
-                    payment.amount
-                    * monthly_rate
-                    * (1 + monthly_rate) ** months
-                    / ((1 + monthly_rate) ** months - 1)
-                )
-            else:
-                emi_amount = payment.amount / months
-
-            emi_details = {
-                "tenure_months": months,
-                "annual_rate": emi_annual_rate,
-                "monthly_emi": round(emi_amount, 2),
-                "total_payable": round(emi_amount * months, 2),
-                "interest_amount": round(emi_amount * months - payment.amount, 2),
-                "provider": payment.emi_provider or "STORE",
-            }
+            # P3-C: reconciled schedule -- installments sum EXACTLY to
+            # total_payable (the last one absorbs the rounding remainder),
+            # interest_amount = total_payable - principal. Display-only; the
+            # recorded payment.amount (what reduces balance_due) is unchanged.
+            emi_details = build_emi_schedule(
+                principal=payment.amount,
+                annual_rate=emi_annual_rate,
+                months=payment.emi_months,
+            )
+            emi_details["provider"] = payment.emi_provider or "STORE"
 
         payment_data = {
             "payment_id": str(uuid.uuid4()),
@@ -2440,12 +2495,23 @@ async def get_invoice(order_id: str, current_user: dict = Depends(get_current_us
         except Exception:
             customer_doc = None
 
-        # Return existing invoice or generate new one
+        # Return existing invoice or generate a new one.
+        #
+        # GST compliance (P3-A): a NEW invoice gets a consecutive serial that
+        # is unique per (store, financial year) -- BV/INV/2026-27/000123 --
+        # allocated atomically via a counters doc so two simultaneous bills
+        # can't share a serial (Rule 46(b)). OLD orders keep whatever
+        # invoice_number they already carry (including the legacy
+        # BV/INV/{year}/{order_id[:8]} format); we never rewrite a stored
+        # number, so historical invoices stay resolvable exactly as before.
         invoice_number = order.get("invoice_number")
         if not invoice_number:
-            year = datetime.now().year
-            short_id = order.get("order_id", "")[:8].upper()
-            invoice_number = f"BV/INV/{year}/{short_id}"
+            # Best-effort unique index (idempotent; no-op if already present).
+            try:
+                repo.ensure_invoice_index()
+            except Exception:  # noqa: BLE001 - index is defense-in-depth only
+                pass
+            invoice_number = repo.next_invoice_number(store_id)
             repo.set_invoice(order_id, invoice_number)
 
         # Convert items to camelCase
