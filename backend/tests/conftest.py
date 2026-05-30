@@ -67,6 +67,14 @@ _CHURN_COLLECTIONS = (
     "eye_tests",
     "sop_completions",
     "workshop_jobs",
+    # Settings singletons + HR transactional collections that tests write but
+    # that previously leaked across tests (not reset) -> intermittent CI flakes.
+    # `marketplace_channels` is the documented gstn_export TestMarketplaceChannels
+    # flake (an enable in one test bled into another's "default disabled" assert);
+    # `leaves`/`attendance` are now persisted by the hardened HR endpoints.
+    "marketplace_channels",
+    "leaves",
+    "attendance",
 )
 
 
