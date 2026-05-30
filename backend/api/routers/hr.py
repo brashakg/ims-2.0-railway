@@ -112,7 +112,11 @@ class AttendanceMarkRequest(BaseModel):
 
     @field_validator("date")
     @classmethod
-    def date_not_future(cls, v: date) -> date:
+    def date_not_future(cls, v: "date") -> "date":
+        # `v: "date"` is a forward-ref string: the field above is named `date`,
+        # which shadows the imported `date` type for static analysis (pylint
+        # E0602) -- the string annotation sidesteps the collision. `date.today()`
+        # below still resolves to the import at runtime.
         if v > date.today():
             raise ValueError("Attendance cannot be marked for a future date")
         return v
