@@ -660,7 +660,7 @@ export function GuidedAddProduct() {
           {/* Pricing */}
           <div className="card">
             <h3 className="font-semibold text-gray-900 mb-4">Pricing</h3>
-            <div className="grid grid-cols-3 gap-4 text-sm">
+            <div className="grid grid-cols-1 tablet:grid-cols-3 gap-4 text-sm">
               <div>
                 <span className="text-gray-500">MRP:</span>
                 <span className="ml-2 font-medium">₹{mrp}</span>
