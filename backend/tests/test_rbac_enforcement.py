@@ -289,3 +289,54 @@ def test_corrected_store_category_blocks_store_manager(client):
     )
     assert r.status_code == 403
     assert r.json().get("detail", "").startswith(_MW_FORBIDDEN_PREFIX)
+
+
+# ---------------------------------------------------------------------------
+# Empty/absent ``roles`` claim on a VALID token: the enforcer must DEFER (never
+# substitute a hard 403), so an AUTHENTICATED route still 200s and a role-gated
+# route is rejected by its OWN gate -- mirroring the route exactly. (Behavior-
+# preservation fix: a zero-role account previously lost AUTHENTICATED reads.)
+# ---------------------------------------------------------------------------
+
+_AUTHENTICATED_ROUTE = "/api/v1/notifications/unread-count"
+
+
+def test_empty_roles_token_defers_on_authenticated_route(client):
+    # A valid token whose roles == [] must reach an AUTHENTICATED route, NOT be
+    # 403'd by the enforcer. (No DB here -> the route may 200/empty/503, but it
+    # must never be the middleware's "Forbidden:" 403, and never 401 since the
+    # token is valid.)
+    r = client.get(_AUTHENTICATED_ROUTE, headers=_auth([]))
+    assert r.status_code != 401, r.text
+    assert not r.json().get("detail", "").startswith(_MW_FORBIDDEN_PREFIX), r.text
+
+
+def test_empty_roles_token_still_blocked_on_gated_route_by_the_route(client):
+    # On a ROLE-gated route, an empty-roles token is still rejected -- but by the
+    # ROUTE's own require_roles (deferred to), so the body is NOT the enforcer's
+    # generic "Forbidden:" prefix. Confirms defer != bypass.
+    r = client.get(_GATED, headers=_auth([]))
+    assert r.status_code in (401, 403), r.text
+    assert not r.json().get("detail", "").startswith(_MW_FORBIDDEN_PREFIX), r.text
+
+
+# ---------------------------------------------------------------------------
+# PUT /prescriptions/{id} is now self_enforced (parity with POST /prescriptions)
+# so a wrong role keeps the route's body-specific clinical 403, not the generic
+# enforcer 403.
+# ---------------------------------------------------------------------------
+
+def test_put_prescription_self_enforced_flag():
+    assert rbac_policy.is_self_enforced("PUT", "/api/v1/prescriptions/RX-1")
+
+
+def test_self_enforced_prescription_update_defers_to_route_clinical_403(client):
+    r = client.put(
+        "/api/v1/prescriptions/RX-1",
+        headers=_auth(["SALES_STAFF"]),
+        json={"right_eye": {"sph": "-2.00"}, "validity_months": 12},
+    )
+    assert r.status_code == 403, r.text
+    detail = r.json().get("detail", "")
+    assert "clinical" in detail.lower(), detail
+    assert not detail.startswith(_MW_FORBIDDEN_PREFIX)
