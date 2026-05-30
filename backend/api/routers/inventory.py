@@ -13,6 +13,7 @@ import logging
 
 from .auth import get_current_user, require_roles
 from ..services import power_grid
+from ..services import barcode as barcode_svc
 from ..dependencies import (
     get_stock_repository,
     get_product_repository,
@@ -583,10 +584,17 @@ async def add_stock(
         if product is None:
             raise HTTPException(status_code=404, detail="Product not found")
 
-        # Create stock entries for each unit
+        # Create stock entries for each unit. Each physical unit gets a UNIQUE
+        # barcode (unique per unit per purchase): mint an EAN-13 from the atomic
+        # counter, falling back to the legacy store+uuid scheme if no DB counter
+        # is reachable so a GRN/intake is never blocked.
+        _db = _get_db()
+        _counter = _db.get_collection("counters") if _db is not None else None
         stock_items = []
         for _ in range(request.quantity):
-            barcode = generate_barcode(active_store, request.product_id)
+            barcode = barcode_svc.next_unit_ean13(_counter) or generate_barcode(
+                active_store, request.product_id
+            )
             stock_data = {
                 "product_id": request.product_id,
                 "store_id": active_store,
