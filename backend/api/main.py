@@ -611,6 +611,24 @@ async def block_investor_writes(request: Request, call_next):
     return await call_next(request)
 
 
+# ── RBAC enforcement (defense-in-depth) ───────────────────────────────────
+# A SECOND, request-time enforcement layer built on the central policy registry
+# (api/services/rbac_policy.py), sitting ON TOP of the existing per-route gates
+# (Depends(require_roles(...)), router-level deps, inline handler checks) which
+# all remain in place. Registered AFTER CORS / investor-block so those still run;
+# fail-open + fail-soft so it can never change an endpoint's effective access:
+#   * only /api/v1/* is considered; openapi/docs + non-/api/v1 skipped
+#   * un-catalogued route -> ALLOW + warn (the coverage-lock test guarantees
+#     completeness, so a miss is a new/dynamic route the route's own gate covers)
+#   * PUBLIC -> allow; no/invalid/expired token -> PASS THROUGH so the route's
+#     own get_current_user returns the canonical 401 (error shape unchanged)
+#   * valid token failing check_access -> 403 (same answer the route gate gives)
+# See api/middleware/rbac_enforcement.py for the full contract + reasoning.
+from .middleware.rbac_enforcement import rbac_enforcement_middleware
+
+app.middleware("http")(rbac_enforcement_middleware)
+
+
 # HTTPException handler - handles authentication and validation errors
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):
