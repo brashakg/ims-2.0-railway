@@ -31,6 +31,7 @@ jobs:
           - 27017:27017
 
     strategy:
+      fail-fast: false  # TEMP: keep the 3.11 job alive so the diagnostic step can post even if 3.10 fails first
       matrix:
         python-version: ['3.10', '3.11']
 
