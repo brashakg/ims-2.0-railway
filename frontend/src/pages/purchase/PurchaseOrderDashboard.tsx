@@ -126,7 +126,7 @@ export function PurchaseOrderDashboard() {
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="text-3xl font-bold">Purchase Orders</h1>
           <p className="text-gray-500">Manage purchase orders and vendor supplies</p>
@@ -138,7 +138,7 @@ export function PurchaseOrderDashboard() {
       </div>
 
       {/* Summary Stats */}
-      <div className="grid grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 tablet:grid-cols-4 gap-4">
         <div className="bg-white border border-gray-200 rounded-lg p-4">
           <p className="text-gray-500 text-sm mb-1">Total POs</p>
           <p className="text-2xl font-bold text-gray-900">{purchaseOrders.length}</p>
@@ -176,7 +176,7 @@ export function PurchaseOrderDashboard() {
       </div>
 
       {/* Search and Filter */}
-      <div className="flex gap-4 items-center">
+      <div className="flex flex-wrap gap-4 items-center">
         <div className="flex-1 relative">
           <Search className="absolute left-3 top-3 w-5 h-5 text-gray-500" />
           <input
@@ -217,7 +217,8 @@ export function PurchaseOrderDashboard() {
               </span>
             </div>
 
-            <div className="grid grid-cols-5 gap-4 mb-3 pb-3 border-b border-gray-300">
+            <div className="overflow-x-auto">
+            <div className="grid grid-cols-5 gap-4 mb-3 pb-3 border-b border-gray-300 min-w-[480px]">
               <div>
                 <p className="text-gray-500 text-xs mb-1">Items</p>
                 <p className="text-gray-900 font-semibold">{po.items.length}</p>
@@ -238,6 +239,7 @@ export function PurchaseOrderDashboard() {
                 <p className="text-gray-500 text-xs mb-1">Created</p>
                 <p className="text-gray-900 font-semibold">{new Date(po.created_at).toLocaleDateString()}</p>
               </div>
+            </div>
             </div>
 
             <div className="flex gap-2">

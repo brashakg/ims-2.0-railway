@@ -114,7 +114,7 @@ export function VendorManagement() {
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="text-3xl font-bold">Vendor Management</h1>
           <p className="text-gray-500">Vendor directory and performance analytics</p>
@@ -126,7 +126,7 @@ export function VendorManagement() {
       </div>
 
       {/* Summary Stats */}
-      <div className="grid grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 tablet:grid-cols-4 gap-4">
         <div className="bg-white border border-gray-200 rounded-lg p-4">
           <p className="text-gray-500 text-sm mb-1">Total Vendors</p>
           <p className="text-2xl font-bold text-gray-900">{vendors.length}</p>
@@ -184,7 +184,7 @@ export function VendorManagement() {
           </div>
 
           {/* Vendor Cards */}
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 tablet:grid-cols-2 gap-4">
             {filteredVendors.map((vendor) => (
               <div key={vendor.id} className="bg-white border border-gray-200 rounded-lg p-6 hover:border-gray-300 transition-colors">
                 <div className="flex items-start justify-between mb-4">
