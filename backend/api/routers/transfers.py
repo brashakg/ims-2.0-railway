@@ -10,11 +10,23 @@ from pydantic import BaseModel, Field
 from typing import Optional, Dict, Any, List
 from datetime import datetime
 from enum import Enum
+import logging
 import uuid
 
 from .auth import get_current_user
+from ..dependencies import get_stock_repository
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+# Status a source unit is parked in once it leaves a store on a transfer. It is
+# deliberately NOT one of the on-hand statuses (AVAILABLE / IN_STOCK), so the
+# moment a transfer ships, the source store's on-hand for that product drops.
+# Mirrors the TRANSFERRED status already recognised as non-reactivatable in
+# returns.py (a transferred unit must never be resurrected by a return).
+STOCK_STATUS_TRANSFERRED = "TRANSFERRED"
+STOCK_STATUS_AVAILABLE = "AVAILABLE"
 
 
 # ============================================================================
@@ -182,6 +194,243 @@ def generate_transfer_number() -> str:
         return f"TRF-{datetime.now().strftime('%Y%m')}-{seq}"
     TRANSFER_COUNTER["count"] += 1
     return f"TRF-{datetime.now().strftime('%Y%m')}-{TRANSFER_COUNTER['count']}"
+
+
+# ============================================================================
+# REAL STOCK MOVEMENT  (SYSTEM_INTENT 5)
+# ============================================================================
+# The transfer lifecycle (ship / receive) must actually MOVE serialized
+# `stock_units`, not just flip a status string on the `stock_transfers` doc.
+# Otherwise a "completed" transfer leaves BOTH stores' on-hand wrong.
+#
+#   SHIP    -> reduce on-hand at the SOURCE store: take that many AVAILABLE
+#              source units and mark them TRANSFERRED (records transfer_id so
+#              they can be matched on receive + so re-ship is a no-op).
+#   RECEIVE -> raise on-hand at the DESTINATION store: create that many
+#              AVAILABLE units there (new store-local barcodes are a separate
+#              print step; the data layer just mints the units).
+#
+# Idempotency: a doc-level `stock_shipped` flag guards SHIP; each line tracks
+# `received_qty_committed` (units already minted at destination) so a re-/
+# partial receive only ever mints the DELTA. Fail-soft: no stock repo (DB
+# down / tests without Mongo) -> the lifecycle still advances the transfer doc
+# exactly as before, just without moving units.
+
+
+def _line_ship_qty(line: Dict) -> int:
+    """How many units a transfer line should move on SHIP.
+
+    Prefer an explicit picked/shipped quantity when the picking flow set one;
+    otherwise fall back to the originally requested quantity. Coerced to a
+    whole, non-negative int (serialized stock is one row per unit). Pure.
+    """
+    for key in ("quantity_shipped", "quantity_requested", "quantity"):
+        raw = line.get(key)
+        if raw in (None, 0):
+            continue
+        try:
+            n = int(float(raw))
+        except (TypeError, ValueError):
+            continue
+        if n > 0:
+            return n
+    # quantity_shipped may legitimately be 0 if nothing was picked; respect it
+    # only when it was explicitly set, else default to requested.
+    try:
+        return max(0, int(float(line.get("quantity_requested", 0) or 0)))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _audit_stock_move(prior_status, new_status, stock_id, transfer, extra=None):
+    """Write a best-effort stock_audit row for a transfer-driven status change.
+
+    Mirrors the per-unit audit trail the returns restock flow emits. Fail-soft:
+    no DB / any error -> skipped silently (audit is a side-channel, never the
+    reason a transfer fails)."""
+    db = _get_db()
+    if db is None:
+        return
+    try:
+        row = {
+            "stock_id": stock_id,
+            "prior_status": prior_status,
+            "new_status": new_status,
+            "source": "STOCK_TRANSFER",
+            "transfer_id": transfer.get("id"),
+            "transfer_number": transfer.get("transfer_number"),
+            "from_store_id": transfer.get("from_location_id"),
+            "to_store_id": transfer.get("to_location_id"),
+            "at": datetime.now().isoformat(),
+        }
+        if extra:
+            row.update(extra)
+        db.get_collection("stock_audit").insert_one(row)
+    except Exception as exc:  # noqa: BLE001 - audit is fail-soft
+        logger.warning("[TRANSFER] stock audit skipped: %s", exc)
+
+
+def _apply_ship_stock_move(transfer: Dict) -> Dict:
+    """Move source on-hand OUT when a transfer ships.
+
+    For each line, claim up to `_line_ship_qty` AVAILABLE units of that product
+    at the SOURCE store and flip them to TRANSFERRED, tagging each with the
+    transfer id. The moved unit ids are recorded on the line (`shipped_stock_ids`)
+    and the line's `quantity_shipped` is set to what was actually moved.
+
+    Idempotent: if the transfer is already flagged `stock_shipped`, this is a
+    no-op (returns the transfer untouched) so a double ship/POST cannot
+    double-decrement. Fail-soft: no stock repo -> transfer returned unchanged.
+    """
+    if transfer.get("stock_shipped"):
+        return transfer
+
+    stock_repo = get_stock_repository()
+    if stock_repo is None:
+        # DB down: advance the lifecycle without moving units (pre-fix behavior).
+        return transfer
+
+    from_store = transfer.get("from_location_id")
+    moved_total = 0
+    for line in transfer.get("items", []):
+        product_id = line.get("product_id")
+        want = _line_ship_qty(line)
+        if not product_id or want <= 0 or not from_store:
+            line.setdefault("shipped_stock_ids", [])
+            continue
+
+        # Claim AVAILABLE source units for this product (one row per unit).
+        try:
+            candidates = stock_repo.find_many(
+                {
+                    "product_id": product_id,
+                    "store_id": from_store,
+                    "status": STOCK_STATUS_AVAILABLE,
+                },
+                limit=want,
+            )
+        except TypeError:
+            # Some repo/mocks don't accept limit= -> fall back + slice.
+            candidates = stock_repo.find_many(
+                {
+                    "product_id": product_id,
+                    "store_id": from_store,
+                    "status": STOCK_STATUS_AVAILABLE,
+                }
+            )[:want]
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[TRANSFER] ship lookup failed: %s", exc)
+            candidates = []
+
+        moved_ids: List[str] = []
+        for unit in candidates[:want]:
+            sid = unit.get("stock_id") or unit.get("stock_unit_id") or unit.get("_id")
+            if not sid:
+                continue
+            ok = stock_repo.update(
+                sid,
+                {
+                    "status": STOCK_STATUS_TRANSFERRED,
+                    "transfer_id": transfer.get("id"),
+                    "transferred_at": datetime.now().isoformat(),
+                    "transfer_to_store_id": transfer.get("to_location_id"),
+                },
+            )
+            if ok:
+                moved_ids.append(str(sid))
+                _audit_stock_move(
+                    STOCK_STATUS_AVAILABLE,
+                    STOCK_STATUS_TRANSFERRED,
+                    str(sid),
+                    transfer,
+                    {"product_id": product_id},
+                )
+
+        line["shipped_stock_ids"] = moved_ids
+        # Reflect what actually left the floor (may be < requested if the source
+        # didn't hold enough AVAILABLE units - we never move phantom stock).
+        line["quantity_shipped"] = len(moved_ids)
+        moved_total += len(moved_ids)
+
+    transfer["stock_shipped"] = True
+    transfer["stock_units_moved_out"] = moved_total
+    return transfer
+
+
+def _apply_receive_stock_move(transfer: Dict) -> Dict:
+    """Raise destination on-hand when transfer units are received.
+
+    For each line, mint AVAILABLE units at the DESTINATION store up to the
+    line's `quantity_received`, minus whatever was already minted on a prior
+    (partial) receive. The delta is tracked per line in `received_qty_committed`
+    and the minted ids appended to `received_stock_ids`, so repeated or partial
+    receives only ever create the NEW units - never duplicates.
+
+    Fail-soft: no stock repo -> transfer returned unchanged (lifecycle still
+    advances, as before).
+    """
+    stock_repo = get_stock_repository()
+    if stock_repo is None:
+        return transfer
+
+    to_store = transfer.get("to_location_id")
+    if not to_store:
+        return transfer
+
+    minted_total = 0
+    for line in transfer.get("items", []):
+        product_id = line.get("product_id")
+        try:
+            received = int(float(line.get("quantity_received", 0) or 0))
+        except (TypeError, ValueError):
+            received = 0
+        already = int(line.get("received_qty_committed", 0) or 0)
+        delta = received - already
+        if not product_id or delta <= 0:
+            continue
+
+        minted_ids: List[str] = list(line.get("received_stock_ids", []))
+        for _ in range(delta):
+            barcode = f"{str(to_store)[:3]}-{uuid.uuid4().hex[:8].upper()}"
+            created = stock_repo.create(
+                {
+                    "product_id": product_id,
+                    "store_id": to_store,
+                    "barcode": barcode,
+                    "location_code": "DEFAULT",
+                    "status": STOCK_STATUS_AVAILABLE,
+                    "is_reserved": False,
+                    "barcode_printed": False,
+                    "source_type": "TRANSFER",
+                    "source_id": transfer.get("id"),
+                    "transfer_number": transfer.get("transfer_number"),
+                    "from_store_id": transfer.get("from_location_id"),
+                }
+            )
+            if created:
+                sid = (
+                    created.get("stock_id")
+                    or created.get("stock_unit_id")
+                    or created.get("_id")
+                )
+                if sid:
+                    minted_ids.append(str(sid))
+                    minted_total += 1
+                    _audit_stock_move(
+                        None,
+                        STOCK_STATUS_AVAILABLE,
+                        str(sid),
+                        transfer,
+                        {"product_id": product_id, "minted": True},
+                    )
+
+        line["received_stock_ids"] = minted_ids
+        line["received_qty_committed"] = already + delta
+
+    transfer["stock_units_moved_in"] = (
+        int(transfer.get("stock_units_moved_in", 0) or 0) + minted_total
+    )
+    return transfer
 
 
 # ============================================================================
@@ -641,6 +890,10 @@ async def ship_transfer(
     for item in transfer["items"]:
         item["status"] = "in_transit"
 
+    # SYSTEM_INTENT 5: actually reduce source-store on-hand. Idempotent via the
+    # `stock_shipped` flag set inside the helper, so a re-POST won't double-move.
+    transfer = _apply_ship_stock_move(transfer)
+
     transfer["status_history"].append(
         {
             "status": TransferStatus.IN_TRANSIT,
@@ -701,6 +954,12 @@ async def receive_transfer(
             item["damage_notes"] = received.damage_notes
             item["received_at"] = datetime.now().isoformat()
             item["status"] = "received"
+
+    # SYSTEM_INTENT 5: raise destination on-hand by creating AVAILABLE units at
+    # the receiving store. Tracks per-line committed qty so a partial/repeat
+    # receive only mints the delta - never double-creates. Runs after the line
+    # quantities above are set so it sees the final `quantity_received`.
+    transfer = _apply_receive_stock_move(transfer)
 
     for item in transfer["items"]:
         total_expected += item.get("quantity_shipped", 0)
