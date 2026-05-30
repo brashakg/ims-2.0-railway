@@ -14,6 +14,7 @@ import {
 import { entitiesApi, type Entity, type BankAccount, type OrgMeta } from '../../services/api/entities';
 import { orgStoreApi, type Store, type StorePayload } from '../../services/api/stores';
 import { useToast } from '../../context/ToastContext';
+import { validateGstin, validateIfsc, validatePincode, validatePhone, validateGeoRadius, firstError } from '../../utils/validators';
 
 const BRANDS = ['BETTER_VISION', 'WIZOPT'];
 const STORE_TYPES = ['RETAIL', 'HQ', 'WAREHOUSE'];
@@ -240,6 +241,12 @@ function EntityModal({
 
   const save = async () => {
     if (!form.name || form.name.trim().length < 2) { toast.error('Entity name is required'); return; }
+    const fieldErr = firstError(
+      ...(form.gstins || []).map((g) => validateGstin(g.gstin)),
+      ...(form.bank_accounts || []).map((b) => validateIfsc(b.ifsc)),
+      validatePhone(form.registered_phone),
+    );
+    if (fieldErr) { toast.error(fieldErr); return; }
     setSaving(true);
     try {
       if (entity) await entitiesApi.update(entity.entity_id, form);
@@ -349,6 +356,13 @@ function StoreModal({
   const save = async () => {
     if (!form.store_code || !form.store_name) { toast.error('Store code and name are required'); return; }
     if (!form.entity_id) { toast.error('Entity is required'); return; }
+    const fieldErr = firstError(
+      validatePincode(form.pincode),
+      validatePhone(form.phone),
+      validatePhone(form.whatsapp),
+      validateGeoRadius(form.geofence_radius_m),
+    );
+    if (fieldErr) { toast.error(fieldErr); return; }
     setSaving(true);
     try {
       if (store) await orgStoreApi.update(store.store_id, form);

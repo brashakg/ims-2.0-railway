@@ -6,6 +6,7 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import { useToast } from '../../context/ToastContext';
+import { validateGstin, validateIfsc, firstError } from '../../utils/validators';
 import { entitiesApi, type Entity, type GstinEntry } from '../../services/api/entities';
 import { storeApi } from '../../services/api';
 
@@ -106,6 +107,11 @@ export function EntitiesPage() {
       toast.error('Entity name is required');
       return;
     }
+    const fieldErr = firstError(
+      ...(form.gstins || []).map((g) => validateGstin(g.gstin)),
+      validateIfsc(form.bank_ifsc),
+    );
+    if (fieldErr) { toast.error(fieldErr); return; }
     setSaving(true);
     try {
       if (editing) {

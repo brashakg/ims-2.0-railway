@@ -74,7 +74,7 @@ export function LensMasterSection() {
           </div>
           <div className="grid grid-cols-2 tablet:grid-cols-4 gap-2">
             {lensBrands.length === 0 ? (
-              <div className="col-span-4 text-center py-4 text-gray-500">$
+              <div className="col-span-4 text-center py-4 text-gray-500">
                 No lens brands configured. Click "Add Brand" to add one.
               </div>
             ) : (
@@ -82,7 +82,21 @@ export function LensMasterSection() {
                 <div key={brand.id} className="p-3 bg-gray-50 border border-gray-200 rounded-lg flex items-center justify-between">
                   <span className="text-sm">{brand.name}</span>
                   <div className="flex items-center gap-1">
-                    <Edit2 className="w-3 h-3 text-gray-500 cursor-pointer hover:text-bv-red-600" />
+                    <Edit2
+                      className="w-3 h-3 text-gray-500 cursor-pointer hover:text-bv-red-600"
+                      onClick={async () => {
+                        const name = prompt('Rename lens brand:', brand.name);
+                        if (name && name.trim() && name.trim() !== brand.name) {
+                          try {
+                            await adminLensApi.updateLensBrand(brand.id, { name: name.trim() });
+                            toast.success('Lens brand renamed');
+                            loadLensData();
+                          } catch {
+                            toast.error('Failed to rename lens brand');
+                          }
+                        }
+                      }}
+                    />
                     <Trash2
                       className="w-3 h-3 text-gray-500 cursor-pointer hover:text-red-600"
                       onClick={async () => {
@@ -130,7 +144,7 @@ export function LensMasterSection() {
           </div>
           <div className="grid grid-cols-2 tablet:grid-cols-4 gap-2">
             {lensIndices.length === 0 ? (
-              <div className="col-span-4 text-center py-4 text-gray-500">$
+              <div className="col-span-4 text-center py-4 text-gray-500">
                 No lens indices configured. Click "Add Index" to add one.
               </div>
             ) : (
@@ -190,7 +204,7 @@ export function LensMasterSection() {
           </div>
           <div className="grid grid-cols-2 tablet:grid-cols-3 gap-2">
             {lensCoatings.length === 0 ? (
-              <div className="col-span-3 text-center py-4 text-gray-500">$
+              <div className="col-span-3 text-center py-4 text-gray-500">
                 No coatings configured. Click "Add Coating" to add one.
               </div>
             ) : (
@@ -201,7 +215,21 @@ export function LensMasterSection() {
                     <span className="text-xs text-gray-500 ml-2">Rs.{Number(coating.price).toFixed(2)}</span>
                   </div>
                   <div className="flex items-center gap-1">
-                    <Edit2 className="w-3 h-3 text-gray-500 cursor-pointer hover:text-bv-red-600" />
+                    <Edit2
+                      className="w-3 h-3 text-gray-500 cursor-pointer hover:text-bv-red-600"
+                      onClick={async () => {
+                        const name = prompt('Rename coating:', coating.name);
+                        if (name && name.trim() && name.trim() !== coating.name) {
+                          try {
+                            await adminLensApi.updateLensCoating(coating.id, { name: name.trim() });
+                            toast.success('Coating renamed');
+                            loadLensData();
+                          } catch {
+                            toast.error('Failed to rename coating');
+                          }
+                        }
+                      }}
+                    />
                     <Trash2
                       className="w-3 h-3 text-gray-500 cursor-pointer hover:text-red-600"
                       onClick={async () => {
@@ -254,7 +282,7 @@ export function LensMasterSection() {
           </div>
           <div className="grid grid-cols-2 tablet:grid-cols-3 gap-2">
             {lensAddons.length === 0 ? (
-              <div className="col-span-3 text-center py-4 text-gray-500">$
+              <div className="col-span-3 text-center py-4 text-gray-500">
                 No add-ons configured. Click "Add Add-on" to add one.
               </div>
             ) : (
@@ -265,7 +293,21 @@ export function LensMasterSection() {
                     <span className="text-xs text-gray-500 ml-2">Rs.{Number(addon.price).toFixed(2)}</span>
                   </div>
                   <div className="flex items-center gap-1">
-                    <Edit2 className="w-3 h-3 text-gray-500 cursor-pointer hover:text-bv-red-600" />
+                    <Edit2
+                      className="w-3 h-3 text-gray-500 cursor-pointer hover:text-bv-red-600"
+                      onClick={async () => {
+                        const name = prompt('Rename add-on:', addon.name);
+                        if (name && name.trim() && name.trim() !== addon.name) {
+                          try {
+                            await adminLensApi.updateLensAddon(addon.id, { name: name.trim() });
+                            toast.success('Add-on renamed');
+                            loadLensData();
+                          } catch {
+                            toast.error('Failed to rename add-on');
+                          }
+                        }
+                      }}
+                    />
                     <Trash2
                       className="w-3 h-3 text-gray-500 cursor-pointer hover:text-red-600"
                       onClick={async () => {
