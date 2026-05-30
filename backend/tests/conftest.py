@@ -28,7 +28,7 @@ from fastapi.testclient import TestClient
 # Fix: before each `client` test, clear the TRANSACTIONAL collections from the
 # app DB so every test starts from a known-empty state. We deliberately do NOT
 # touch reference / config / startup-seeded collections (stores, users,
-# entities, hsn_gst_master, agent_config, pt_slabs, ...) so store/user
+# entities, hsn_gst_master, agent_config, ...) so store/user
 # validation and the idempotent startup seeds keep working. Fail-soft: with no
 # DB connected (local runs), this is a no-op and DB-needing tests still skip.
 _CHURN_COLLECTIONS = (
@@ -75,6 +75,16 @@ _CHURN_COLLECTIONS = (
     "marketplace_channels",
     "leaves",
     "attendance",
+    # `pt_slabs` is NOT actually startup-seeded into the DB: GET
+    # /payroll/pt-slabs serves DEFAULT_PT_SLABS (JH + MH) ONLY while the
+    # collection is EMPTY, and returns just the stored rows the moment any
+    # exist. Tests that upsert a slab (settings_validation PUT /pt-slabs/27,
+    # the RBAC matrix PUT /pt-slabs/JH, POST /pt-slabs/seed) leave the
+    # collection non-empty -> the virtual defaults are suppressed -> the later
+    # `test_pt_slabs_list_includes_jh_and_mh` victim sees only the leaked row
+    # (e.g. {'27'}) and fails, but only in test orders where a polluter runs
+    # first (the CI flake). Resetting to empty restores the defaults baseline.
+    "pt_slabs",
 )
 
 
