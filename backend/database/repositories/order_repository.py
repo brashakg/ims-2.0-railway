@@ -3,10 +3,41 @@ IMS 2.0 - Order Repository
 ===========================
 Order data access operations
 """
+import logging
 from typing import List, Optional, Dict, Tuple
 from datetime import datetime, date, timedelta
 from decimal import Decimal
 from .base_repository import BaseRepository
+
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Indian financial-year helpers (GST: tax invoice serial is per FY Apr-Mar)
+# ---------------------------------------------------------------------------
+# Indian GST law (Rule 46(b) of the CGST Rules) requires a tax invoice to carry
+# a consecutive serial number, unique for a financial year. India's FY runs
+# 1 Apr -> 31 Mar, so an invoice dated 2026-03-31 belongs to FY 2025-26 while
+# one dated 2026-04-01 starts the fresh FY 2026-27 series.
+
+
+def fy_start_year(dt: datetime) -> int:
+    """Return the calendar year the financial year STARTS in for ``dt``.
+
+    Apr-Dec -> that year; Jan-Mar -> previous year. So both 2026-04-01 and
+    2027-03-31 return 2026 (they share FY 2026-27).
+    """
+    return dt.year if dt.month >= 4 else dt.year - 1
+
+
+def fy_label(dt: datetime) -> str:
+    """Indian financial-year label in 'YYYY-YY' form, e.g. '2026-27'.
+
+    Used as the year segment of a GST invoice number so the serial is
+    visibly scoped to its FY (BV/INV/2026-27/000123).
+    """
+    start = fy_start_year(dt)
+    return f"{start}-{(start + 1) % 100:02d}"
 
 
 class OrderRepository(BaseRepository):
@@ -249,7 +280,174 @@ class OrderRepository(BaseRepository):
             "invoice_number": invoice_number,
             "invoice_date": datetime.now()
         })
-    
+
+    # =========================================================================
+    # GST invoice numbering (consecutive serial per store + financial year)
+    # =========================================================================
+
+    @staticmethod
+    def _store_invoice_prefix(store_id: Optional[str]) -> str:
+        """Stable alnum key fragment for a store's invoice counter.
+
+        Mirrors the order-number convention: drop the chain prefix (BV/WO/BVO),
+        keep the store part, alnum-only, uppercase. "BV-BOK-01" -> "BOK01".
+        Falls back to "IMS" so a missing/garbage store_id can't collapse the
+        counter key to an empty string (which would silently merge every
+        store's series).
+        """
+        raw = (store_id or "").strip().upper()
+        parts = [p for p in raw.split("-") if p and p not in ("BV", "WO", "BVO")]
+        if len(parts) >= 2:
+            frag = (parts[0] + parts[1])[:8]
+        elif len(parts) == 1:
+            frag = parts[0][:8]
+        else:
+            frag = "IMS"
+        frag = "".join(c for c in frag if c.isalnum()) or "IMS"
+        return frag
+
+    def _counters_collection(self):
+        """Best-effort handle on the shared ``counters`` collection.
+
+        The order collection is a real pymongo Collection in production
+        (exposes ``.database``); in DB-less / mock modes it may not, in which
+        case we return None and the caller falls back to a non-atomic number.
+        Never raises.
+        """
+        try:
+            db = getattr(self.collection, "database", None)
+            if db is None:
+                return None
+            return db["counters"]
+        except Exception:  # noqa: BLE001 - fail-soft, invoicing must not 500
+            return None
+
+    def ensure_invoice_index(self) -> None:
+        """Best-effort UNIQUE index on ``invoice_number``.
+
+        PARTIAL so it only covers docs that actually carry a string
+        invoice_number -- the millions of legacy / DRAFT orders with no
+        invoice_number (field absent) are NOT indexed and therefore can't
+        collide with each other on a missing value. Defense in depth: the
+        per-(store, FY) counter already hands out unique serials; this index
+        is the backstop that makes a duplicate physically impossible.
+        Never raises (a missing index degrades safety, not correctness of a
+        single-worker allocation).
+        """
+        try:
+            self.collection.create_index(
+                "invoice_number",
+                unique=True,
+                partialFilterExpression={"invoice_number": {"$type": "string"}},
+                name="uniq_invoice_number",
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug("invoice_number index create skipped", exc_info=True)
+
+    def next_invoice_number(
+        self, store_id: Optional[str], when: Optional[datetime] = None
+    ) -> str:
+        """Allocate the next GST invoice number for ``store_id`` in its FY.
+
+        Atomic per (store, financial-year): a single ``find_one_and_update``
+        with ``$inc`` claims the next serial from a ``counters`` doc keyed
+        ``invoice:{store_prefix}:{fy_start_year}``. Mongo serialises the
+        increment, so two cashiers raising invoices at the same instant get
+        distinct serials -- no read-modify-write window, no duplicates.
+
+        Format: ``BV/INV/2026-27/000123`` -- FY-scoped, zero-padded to 6.
+
+        The serial RESETS for each new financial year (a fresh counter doc),
+        which is exactly what GST Rule 46(b) wants: a consecutive series
+        unique within the FY.
+
+        Fail-soft: with no counters collection (DB-less / mock), falls back to
+        a timestamp-derived suffix so the caller still gets a usable, unique
+        string rather than a 500. That fallback path is only hit when the DB
+        is unavailable, in which case nothing is persisted anyway.
+        """
+        now = when or datetime.now()
+        label = fy_label(now)
+        prefix = self._store_invoice_prefix(store_id)
+        counters = self._counters_collection()
+        if counters is not None:
+            try:
+                from pymongo import ReturnDocument
+
+                key = f"invoice:{prefix}:{fy_start_year(now)}"
+                doc = counters.find_one_and_update(
+                    {"_id": key},
+                    {"$inc": {"seq": 1}},
+                    upsert=True,
+                    return_document=ReturnDocument.AFTER,
+                )
+                seq = (doc or {}).get("seq")
+                if isinstance(seq, int) and seq > 0:
+                    return f"BV/INV/{label}/{seq:06d}"
+            except Exception:  # noqa: BLE001 - fall through to safe fallback
+                logger.warning(
+                    "invoice counter $inc failed; using fallback serial",
+                    exc_info=True,
+                )
+        # Fail-soft fallback (DB-less / counter error): time-derived, still
+        # unique and still FY-labelled so the format stays consistent.
+        suffix = now.strftime("%m%d%H%M%S")
+        return f"BV/INV/{label}/{suffix}"
+
+    def create_unique(
+        self, data: Dict, number_field: str, regenerate, max_retries: int = 6
+    ) -> Optional[Dict]:
+        """Insert ``data``, retrying ``number_field`` on a duplicate-key clash.
+
+        ``number_field`` (e.g. ``order_number``) carries a UNIQUE sparse index.
+        Under concurrency two requests can mint the same value; the loser hits
+        a Mongo E11000 on insert. Rather than 500, we regenerate JUST that
+        field via ``regenerate()`` and retry, bounded by ``max_retries``.
+        Mirrors ``vouchers.issue_voucher`` exactly.
+
+        Unlike ``BaseRepository.create`` (which swallows every exception into
+        None, so a dup-key is indistinguishable from a real DB error), this
+        re-raises any non-duplicate error and only loops on a genuine
+        duplicate-key. The success path is otherwise identical to ``create``:
+        same id_field defaulting, same timestamps, same ``_id`` mirroring.
+
+        Returns the created doc, or None when DB-less (insert returns falsy) or
+        after exhausting retries on persistent collisions.
+        """
+        from pymongo.errors import DuplicateKeyError
+
+        if self.id_field not in data:
+            data[self.id_field] = self._generate_id()
+        data = self._add_timestamps(data)
+        data["_id"] = data[self.id_field]
+
+        last_exc: Optional[Exception] = None
+        for _ in range(max(1, max_retries)):
+            try:
+                self.collection.insert_one(data)
+                return data
+            except Exception as exc:  # noqa: BLE001
+                is_dup = isinstance(exc, DuplicateKeyError) or (
+                    "e11000" in str(exc).lower()
+                    or "duplicate key" in str(exc).lower()
+                )
+                if not is_dup:
+                    raise
+                last_exc = exc
+                # Only the human-facing number collided -- regenerate it and
+                # retry. order_id / _id stay as-is (they're UUIDs, not the
+                # colliding key).
+                data[number_field] = regenerate()
+        logger.error(
+            "create_unique exhausted retries for %s on field %s",
+            self.entity_name,
+            number_field,
+        )
+        if last_exc is not None:
+            raise last_exc
+        return None
+
+
     # =========================================================================
     # Analytics
     # =========================================================================

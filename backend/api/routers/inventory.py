@@ -13,6 +13,7 @@ import logging
 
 from .auth import get_current_user, require_roles
 from ..services import power_grid
+from ..services import barcode as barcode_svc
 from ..dependencies import (
     get_stock_repository,
     get_product_repository,
@@ -583,14 +584,25 @@ async def add_stock(
         if product is None:
             raise HTTPException(status_code=404, detail="Product not found")
 
-        # Create stock entries for each unit
+        # Create stock entries for each unit. Each physical unit gets a UNIQUE
+        # barcode (unique per unit per purchase): mint an EAN-13 from the atomic
+        # counter, falling back to the legacy store+uuid scheme if no DB counter
+        # is reachable so a GRN/intake is never blocked.
+        _db = _get_db()
+        _counter = _db.get_collection("counters") if _db is not None else None
         stock_items = []
         for _ in range(request.quantity):
-            barcode = generate_barcode(active_store, request.product_id)
+            barcode = barcode_svc.next_unit_ean13(_counter) or generate_barcode(
+                active_store, request.product_id
+            )
             stock_data = {
                 "product_id": request.product_id,
                 "store_id": active_store,
                 "barcode": barcode,
+                # One serialized row == one physical unit. Persist quantity=1
+                # so aggregations that sum `$quantity` count this unit instead
+                # of summing a missing field (which silently yields 0).
+                "quantity": 1,
                 "location_code": request.location_code or "DEFAULT",
                 "batch_code": request.batch_code or request.lot,
                 "expiry_date": (
@@ -1166,7 +1178,8 @@ async def transfer_recommendations(
                     {
                         "$group": {
                             "_id": {"p": "$product_id", "s": "$store_id"},
-                            "qty": {"$sum": "$quantity"},
+                            # One row == one unit; missing quantity counts as 1.
+                            "qty": {"$sum": {"$ifNull": ["$quantity", 1]}},
                         }
                     },
                 ]
@@ -1360,6 +1373,26 @@ async def receive_transfer(
 # ADVANCED INVENTORY FEATURES (IMS 2.0)
 # ============================================================================
 
+# Broad "this order represents a real sale" status set (both cases seen in DB).
+# Defined here — before its first use in get_non_moving_stock — so it is
+# unambiguously initialised before ANY call-site (including the functions below
+# that also reference it: get_sell_through_analysis, get_overstock_analysis,
+# get_stock_alerts, _aggregate_sales_by_barcode).
+_SOLD_STATUSES = [
+    "DELIVERED",
+    "delivered",
+    "Delivered",
+    "COMPLETED",
+    "completed",
+    "Completed",
+    "PAID",
+    "paid",
+    "Paid",
+    "FULFILLED",
+    "fulfilled",
+    "Fulfilled",
+]
+
 # ============================================================================
 # 1. NON-MOVING STOCK IDENTIFICATION
 # ============================================================================
@@ -1413,12 +1446,20 @@ async def get_non_moving_stock(
         for product in products:
             product_id = str(product.get("_id"))
             if product_id not in sold_products:
-                # Get current stock (at the active store)
-                stock_filter = {"product_id": product_id}
+                # BUG FIX: count ONLY on-hand (AVAILABLE/RESERVED) units.
+                # Previously, ALL stock_units rows were counted regardless of
+                # status, so SOLD units inflated current_stock and a product
+                # with 10 sold and 0 available showed current_stock=10.
+                stock_filter = {
+                    "product_id": product_id,
+                    "status": {"$in": ["AVAILABLE", "RESERVED", "available", "reserved"]},
+                }
                 if active_store:
                     stock_filter["store_id"] = active_store
                 stock = stock_coll.find(stock_filter)
-                total_qty = sum(s.get("quantity", 0) for s in stock)
+                # One serialized stock row == one physical unit; rows with no
+                # `quantity` field still count as one unit on hand.
+                total_qty = sum(s.get("quantity", 1) for s in stock)
 
                 # Get last sold date (at the active store)
                 last_order_filter = {"items.product_id": product_id}
@@ -1430,6 +1471,27 @@ async def get_non_moving_stock(
                     sort=[("created_at", -1)],
                 )
 
+                # BUG FIX: days_since_sale was always set to the query
+                # parameter `days` instead of the actual days elapsed since
+                # the last sale. Products with a last_sold_date showed the
+                # wrong staleness figure in the non-moving report.
+                last_sold_dt = None
+                if last_order:
+                    raw_date = last_order.get("created_at")
+                    if isinstance(raw_date, datetime):
+                        last_sold_dt = raw_date
+                    elif isinstance(raw_date, str):
+                        try:
+                            last_sold_dt = datetime.fromisoformat(
+                                raw_date.replace("Z", "+00:00").split("+")[0]
+                            )
+                        except (ValueError, TypeError):
+                            pass
+                if last_sold_dt is not None:
+                    actual_days_since = (datetime.utcnow() - last_sold_dt).days
+                else:
+                    actual_days_since = None  # never sold
+
                 non_moving.append(
                     {
                         "product_id": product_id,
@@ -1437,9 +1499,9 @@ async def get_non_moving_stock(
                         "sku": product.get("sku", ""),
                         "current_stock": total_qty,
                         "last_sold_date": (
-                            last_order.get("created_at") if last_order else None
+                            last_sold_dt.isoformat() if last_sold_dt else None
                         ),
-                        "days_since_sale": days,
+                        "days_since_sale": actual_days_since,
                     }
                 )
 
@@ -1493,14 +1555,52 @@ async def scan_barcode_for_count(
         product_id = stock.get("product_id")
         product = products_coll.find_one({"_id": product_id})
 
-        system_count = stock.get("quantity", 0)
+        # The scanned barcode is one unit, but a stock count compares the
+        # PHYSICAL count of a product against its on-hand SYSTEM count at this
+        # store. Count the available serialized rows for the product (one row
+        # == one unit; legacy rows have no `quantity` field, so $ifNull treats
+        # a missing value as 1). Reading the scanned unit's raw `quantity`
+        # returned 0 and produced a false +physical_count variance.
+        count_match = {
+            "product_id": product_id,
+            "status": {"$in": ["AVAILABLE", "RESERVED"]},
+        }
+        unit_store = stock.get("store_id")
+        if unit_store:
+            count_match["store_id"] = unit_store
+        agg = list(
+            stock_coll.aggregate(
+                [
+                    {"$match": count_match},
+                    {"$group": {"_id": None, "n": {"$sum": {"$ifNull": ["$quantity", 1]}}}},
+                ]
+            )
+        )
+        system_count = int(agg[0]["n"]) if agg else 0
+
+        # Products store no `name` field -- reconstruct from brand + model,
+        # matching the convention used across aging / reports / serializer.
+        if product:
+            brand = product.get("brand", "")
+            model = product.get("model", "")
+            product_name = (
+                product.get("name")
+                or f"{brand} {model}".strip()
+                or product.get("sku", "")
+                or "Unknown"
+            )
+            sku = product.get("sku", "")
+        else:
+            product_name = "Unknown"
+            sku = ""
+
         variance = request.physical_count - system_count
 
         return {
             "barcode": request.barcode,
             "product_id": product_id,
-            "product_name": product.get("name") if product else "Unknown",
-            "sku": product.get("sku") if product else "",
+            "product_name": product_name,
+            "sku": sku,
             "system_count": system_count,
             "physical_count": request.physical_count,
             "variance": variance,
@@ -1926,7 +2026,9 @@ async def get_sell_through_analysis(
             product = products_coll.find_one({"_id": stock.get("product_id")})
             if product:
                 brand = product.get("brand", "Unknown")
-                qty = stock.get("quantity", 0)
+                # One serialized stock row == one physical unit; a row with no
+                # `quantity` field still represents one unit on hand.
+                qty = stock.get("quantity", 1)
                 stock_by_brand[brand] = stock_by_brand.get(brand, 0) + qty
 
         # Calculate sell-through %
@@ -2007,13 +2109,31 @@ async def get_overstock_analysis(
         months = max(days / 30, 1)
         avg_monthly_sales = {pid: qty / months for pid, qty in sales_by_product.items()}
 
-        # Get current stock and identify overstock
-        overstocked = []
-        all_stocks = list(stock_coll.find({}))
+        # Roll up on-hand per product. The serialized model stores ONE row per
+        # physical unit, so we must aggregate (count) rows -- iterating raw rows
+        # one-by-one compared a single unit against the threshold (which never
+        # flags) and emitted a duplicate entry per unit. $ifNull counts legacy
+        # rows that predate the `quantity` field as one unit each.
+        stock_match = {"status": {"$in": ["AVAILABLE", "RESERVED"]}}
+        stock_rows = list(
+            stock_coll.aggregate(
+                [
+                    {"$match": stock_match},
+                    {
+                        "$group": {
+                            "_id": "$product_id",
+                            "qty": {"$sum": {"$ifNull": ["$quantity", 1]}},
+                        }
+                    },
+                ]
+            )
+        )
 
-        for stock in all_stocks:
-            product_id = str(stock.get("product_id"))
-            current_qty = stock.get("quantity", 0)
+        # Identify overstock at the PRODUCT level.
+        overstocked = []
+        for row in stock_rows:
+            product_id = str(row.get("_id"))
+            current_qty = int(row.get("qty", 0) or 0)
             avg_monthly = avg_monthly_sales.get(product_id, 0)
 
             # Flag if current > threshold * average
@@ -2021,11 +2141,25 @@ async def get_overstock_analysis(
                 product = products_coll.find_one({"_id": product_id})
                 months_of_stock = current_qty / max(avg_monthly, 1)
 
+                if product:
+                    brand = product.get("brand", "")
+                    model = product.get("model", "")
+                    product_name = (
+                        product.get("name")
+                        or f"{brand} {model}".strip()
+                        or product.get("sku", "")
+                        or "Unknown"
+                    )
+                    sku = product.get("sku", "")
+                else:
+                    product_name = "Unknown"
+                    sku = ""
+
                 overstocked.append(
                     {
                         "product_id": product_id,
-                        "product_name": product.get("name") if product else "Unknown",
-                        "sku": product.get("sku") if product else "",
+                        "product_name": product_name,
+                        "sku": sku,
                         "current_stock": current_qty,
                         "avg_monthly_sales": round(avg_monthly, 2),
                         "months_of_stock": round(months_of_stock, 1),
@@ -2068,23 +2202,10 @@ async def get_overstock_analysis(
 # _SOLD_STATUSES set is now also used by /non-moving, /overstock-analysis
 # and /sell-through-analysis (previously lowercase-only, so they silently
 # missed every imported sale).
-
-
-# Broad "this order represents a real sale" status set (both cases seen in DB)
-_SOLD_STATUSES = [
-    "DELIVERED",
-    "delivered",
-    "Delivered",
-    "COMPLETED",
-    "completed",
-    "Completed",
-    "PAID",
-    "paid",
-    "Paid",
-    "FULFILLED",
-    "fulfilled",
-    "Fulfilled",
-]
+#
+# _SOLD_STATUSES is defined near the top of the ADVANCED INVENTORY FEATURES
+# section (before its first use in get_non_moving_stock) so it is always
+# initialised before any caller runs.
 
 
 def _empty_alert_stats() -> dict:

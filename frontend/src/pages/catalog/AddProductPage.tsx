@@ -184,7 +184,7 @@ export function GuidedAddProduct() {
       );
 
       toast.success('Product created successfully!');
-      navigate('/catalog/inventory');
+      navigate('/inventory');
     } catch {
       toast.error('Failed to create product. Please try again.');
     } finally {
@@ -213,7 +213,7 @@ export function GuidedAddProduct() {
             className={clsx(
               'p-6 rounded-xl border-2 transition-all text-center hover:shadow-md',
               selectedCategory === category.code
-                ? 'border-bv-red-600 bg-bv-gold-50'
+                ? 'border-bv-red-600 bg-bv-red-50'
                 : 'border-gray-200 hover:border-gray-300'
             )}
           >
@@ -315,7 +315,7 @@ export function GuidedAddProduct() {
                 type="checkbox"
                 checked={useAdvancedHSN}
                 onChange={(e) => setUseAdvancedHSN(e.target.checked)}
-                className="w-4 h-4 text-bv-gold-500 border-gray-300 rounded focus:ring-bv-gold-500"
+                className="w-4 h-4 text-bv-red-500 border-gray-300 rounded focus:ring-bv-red-500"
               />
               <span className="text-gray-600">Use 6-digit HSN (turnover &gt; ₹5 Cr)</span>
             </label>
@@ -560,7 +560,7 @@ export function GuidedAddProduct() {
               onChange={(e) => setSyncToShopify(e.target.checked)}
               className="sr-only peer"
             />
-            <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-bv-gold-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-bv-red-600"></div>
+            <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-bv-red-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-bv-red-600"></div>
           </label>
         </div>
 
@@ -578,7 +578,7 @@ export function GuidedAddProduct() {
                 type="checkbox"
                 checked={publishPOS}
                 onChange={(e) => setPublishPOS(e.target.checked)}
-                className="w-5 h-5 text-bv-gold-500 border-gray-300 rounded focus:ring-bv-gold-500"
+                className="w-5 h-5 text-bv-red-500 border-gray-300 rounded focus:ring-bv-red-500"
               />
             </div>
 
@@ -660,7 +660,7 @@ export function GuidedAddProduct() {
           {/* Pricing */}
           <div className="card">
             <h3 className="font-semibold text-gray-900 mb-4">Pricing</h3>
-            <div className="grid grid-cols-3 gap-4 text-sm">
+            <div className="grid grid-cols-1 tablet:grid-cols-3 gap-4 text-sm">
               <div>
                 <span className="text-gray-500">MRP:</span>
                 <span className="ml-2 font-medium">₹{mrp}</span>
@@ -730,7 +730,7 @@ export function GuidedAddProduct() {
                 className={clsx(
                   'flex items-center gap-2 px-3 py-2 rounded-lg transition-colors',
                   currentStep === step.id
-                    ? 'bg-bv-gold-100 text-bv-gold-700'
+                    ? 'bg-bv-red-100 text-bv-red-700'
                     : index < currentStepIndex
                     ? 'text-green-600 hover:bg-green-50'
                     : 'text-gray-500'

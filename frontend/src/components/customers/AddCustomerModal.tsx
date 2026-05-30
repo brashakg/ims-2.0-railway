@@ -386,7 +386,7 @@ export function AddCustomerModal({ isOpen, onClose, onSave, initialName }: AddCu
                 value={searchQuery}
                 onChange={(e) => handleSearch(e.target.value)}
                 placeholder="Type name or 10-digit phone..."
-                className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-bv-gold-500 focus:border-transparent"
+                className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-bv-red-500 focus:border-transparent"
               />
               {searching && <Loader2 className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 animate-spin text-gray-500" />}
             </div>
@@ -655,7 +655,7 @@ export function AddCustomerModal({ isOpen, onClose, onSave, initialName }: AddCu
                   className="input-field"
                 />
               </div>
-              <div className="grid grid-cols-3 gap-4">
+              <div className="grid grid-cols-1 tablet:grid-cols-3 gap-4">
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">
                     Pincode

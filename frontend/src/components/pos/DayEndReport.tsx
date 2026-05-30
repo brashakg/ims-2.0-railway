@@ -203,7 +203,7 @@ export function DayEndReport({ storeId, onClose, entity, store, overrides }: Day
         <div className="sticky top-0 bg-white border-b border-gray-200 px-6 py-4 flex items-center justify-between no-print z-10">
           <div>
             <h2 className="text-lg font-bold text-gray-900 flex items-center gap-2">
-              <Receipt className="w-5 h-5 text-bv-gold-500" /> Day-End Z-Report
+              <Receipt className="w-5 h-5 text-bv-red-500" /> Day-End Z-Report
             </h2>
             <p className="text-xs text-gray-500 mt-0.5">
               {user?.name} · {storeId} · Generated {new Date().toLocaleTimeString('en-IN')}

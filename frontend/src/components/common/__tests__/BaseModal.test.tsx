@@ -207,15 +207,4 @@ describe('BaseModal', () => {
       expect(confirmButton).toHaveClass('bg-green');
     });
   });
-
-  describe('Dark Mode', () => {
-    it('should apply dark mode classes', () => {
-      const { container } = render(
-        <BaseModal {...defaultProps} />
-      );
-
-      const dialog = container.querySelector('[role="dialog"]');
-      expect(dialog).toHaveClass('dark:bg-white');
-    });
-  });
 });

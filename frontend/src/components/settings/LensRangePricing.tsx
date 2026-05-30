@@ -293,6 +293,7 @@ export function LensRangePricingSection() {
                       <span className="font-mono uppercase">{sample.parameter}</span>
                     </span>
                   </div>
+                  <div className="overflow-x-auto">
                   <table className="w-full text-sm">
                     <thead className="bg-white">
                       <tr className="text-xs text-gray-500">
@@ -365,6 +366,7 @@ export function LensRangePricingSection() {
                       ))}
                     </tbody>
                   </table>
+                  </div>
                 </div>
               );
             })}

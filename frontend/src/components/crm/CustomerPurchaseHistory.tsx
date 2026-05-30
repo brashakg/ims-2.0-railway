@@ -96,7 +96,7 @@ export function CustomerPurchaseHistory({ customerId }: CustomerPurchaseHistoryP
     : null;
 
   return (
-    <div className="card border-2 border-bv-gold-200 bg-bv-gold-50">
+    <div className="card border-2 border-bv-red-200 bg-bv-red-50">
       <h3 className="text-lg font-bold text-gray-900 mb-4 flex items-center gap-2">
         <ShoppingBag className="w-5 h-5 text-bv-red-600" />
         Purchase History
@@ -104,13 +104,13 @@ export function CustomerPurchaseHistory({ customerId }: CustomerPurchaseHistoryP
 
       <div className="grid grid-cols-2 gap-4 mb-4">
         {/* Total Spend */}
-        <div className="bg-white rounded-lg p-3 border border-bv-gold-100">
+        <div className="bg-white rounded-lg p-3 border border-bv-red-100">
           <p className="text-xs text-gray-600 uppercase font-semibold">Total Spend</p>
           <p className="text-2xl font-bold text-bv-red-600">₹{data.totalSpend.toLocaleString('en-IN')}</p>
         </div>
 
         {/* Order Count */}
-        <div className="bg-white rounded-lg p-3 border border-bv-gold-100">
+        <div className="bg-white rounded-lg p-3 border border-bv-red-100">
           <p className="text-xs text-gray-600 uppercase font-semibold">Orders</p>
           <p className="text-2xl font-bold text-gray-900">{data.orderCount}</p>
         </div>

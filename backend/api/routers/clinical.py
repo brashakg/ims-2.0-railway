@@ -38,6 +38,11 @@ _REDO_ROLES = ("OPTOMETRIST", "STORE_MANAGER", "AREA_MANAGER", "ADMIN")
 # scorecard. SUPERADMIN auto-passes via require_roles.
 _ABUSE_VIEW_ROLES = ("STORE_MANAGER", "AREA_MANAGER", "ADMIN")
 
+# Canonical queue lifecycle states. Mirrors EyeTestQueueRepository.update_status'
+# allow-list so the router can reject an invalid status with a clean 400 BEFORE
+# the repo silently no-ops (which used to surface as a misleading 200 "updated").
+_VALID_QUEUE_STATUSES = ("WAITING", "IN_PROGRESS", "COMPLETED", "CANCELLED", "NO_SHOW")
+
 
 # ============================================================================
 # SCHEMAS
@@ -59,7 +64,7 @@ class QueueItemCreate(BaseModel):
 class EyeTestData(BaseModel):
     right_eye: dict = Field(..., alias="rightEye")
     left_eye: dict = Field(..., alias="leftEye")
-    pd: Optional[float] = None
+    pd: Optional[float] = Field(None, ge=0, le=120)
     # IPD + next-checkup so the clinical Final-Rx mirror writes the SAME parity
     # fields a POS-created prescription does. Kept as str -> no float-coercion
     # 422 on an empty value.
@@ -137,6 +142,60 @@ def format_axis_value(v) -> str:
         return str(int(round(float(v))))
     except (TypeError, ValueError):
         return ""
+
+
+def _validate_eye_test_rx(eye_label: str, eye: dict) -> None:
+    """Validate the Rx powers captured on an eye-test eye dict against the
+    canonical clinical ranges (SPH -20..+20, CYL -6..+6, AXIS 1-180 whole,
+    ADD +0.75..+3.50, all dioptric powers on the 0.25-diopter grid).
+
+    Reuses the SINGLE source-of-truth validator in prescriptions.py so the
+    eye-test capture path -- which auto-creates a prescription on completion --
+    can never persist an Rx the prescriptions endpoint would reject. Raises
+    HTTPException(422) on a violation. None / empty / "0" values are tolerated
+    (a blank cell is valid) exactly as the prescription validator does.
+
+    `eye` carries the frontend's loose shape: sphere/sph, cylinder/cyl, axis,
+    add. We normalise the alias pairs before checking.
+    """
+    from .prescriptions import _validate_rx_value
+
+    if not isinstance(eye, dict):
+        return
+
+    def _as_str(v):
+        # The shared validator takes Optional[str]; numbers stringify cleanly,
+        # None passes straight through (treated as "no value").
+        if v is None:
+            return None
+        return str(v)
+
+    pairs = (
+        ("sph", eye.get("sphere", eye.get("sph"))),
+        ("cyl", eye.get("cylinder", eye.get("cyl"))),
+        ("add", eye.get("add", eye.get("addition"))),
+    )
+    for field_name, raw in pairs:
+        try:
+            _validate_rx_value(_as_str(raw), field_name)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=f"{eye_label} {exc}")
+
+    # AXIS is a whole number 1..180. Tolerate None / "" (no value).
+    axis = eye.get("axis")
+    if axis is not None and str(axis).strip() != "":
+        try:
+            axis_int = int(round(float(axis)))
+        except (TypeError, ValueError):
+            raise HTTPException(
+                status_code=422,
+                detail=f"{eye_label} AXIS must be a whole number between 1 and 180",
+            )
+        if axis_int < 1 or axis_int > 180:
+            raise HTTPException(
+                status_code=422,
+                detail=f"{eye_label} AXIS must be a whole number between 1 and 180",
+            )
 
 
 def _to_camel_case(snake_str: str) -> str:
@@ -260,17 +319,33 @@ async def update_queue_status(
     body: StatusUpdate,
     current_user: dict = Depends(require_roles(*_CLINICAL_ROLES)),
 ):
-    """Update queue item status"""
+    """Update queue item status.
+
+    Validates the requested status against the canonical lifecycle states up
+    front. The repository silently no-ops on an unknown status, so the previous
+    handler returned a misleading 200 "Status updated" for garbage like
+    ``{"status": "BANANA"}`` -- a caller could believe a state change happened
+    that never did. We now reject an unknown status with 400.
+    """
+    status = (body.status or "").strip().upper()
+    if status not in _VALID_QUEUE_STATUSES:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Invalid queue status '{body.status}'. "
+                f"Allowed: {', '.join(_VALID_QUEUE_STATUSES)}"
+            ),
+        )
+
     queue_repo = get_eye_test_queue_repository()
 
     if queue_repo is not None:
-        success = queue_repo.update_status(queue_id, body.status)
-        if success:
-            return {"message": "Status updated", "status": body.status}
-        # Item may not exist, but still return success for compatibility
-        return {"message": "Status updated", "status": body.status}
+        # The item may legitimately be absent (sample/demo data); the repo
+        # no-ops in that case. We don't 404 -- the frontend treats this as a
+        # best-effort state sync -- but we DO echo the normalised status.
+        queue_repo.update_status(queue_id, status)
 
-    return {"message": "Status updated", "status": body.status}
+    return {"message": "Status updated", "status": status}
 
 
 @router.delete("/queue/{queue_id}")
@@ -402,10 +477,43 @@ async def complete_test(
     current_user: dict = Depends(require_roles(*_CLINICAL_ROLES)),
 ):
     """Complete an eye test with prescription data"""
+    # Validate the captured Rx powers against the canonical clinical ranges
+    # BEFORE anything is persisted. This path auto-creates a prescription on
+    # success, so an out-of-range SPH/CYL/AXIS/ADD here would otherwise be
+    # saved into an Rx the prescriptions endpoint would reject -- closing that
+    # write-path gap. Raises 422 on a violation.
+    _validate_eye_test_rx("Right eye", data.right_eye)
+    _validate_eye_test_rx("Left eye", data.left_eye)
+
     test_repo = get_eye_test_repository()
     queue_repo = get_eye_test_queue_repository()
 
     if test_repo is not None:
+        # Look the test up FIRST so completion is idempotent + ordered:
+        #   * unknown test_id  -> 404 (don't silently mint an orphan Rx)
+        #   * already COMPLETED -> return the EXISTING prescription, do NOT
+        #     write a second one. The previous code blind-updated and re-created
+        #     a prescription on every call, so a double-click / retry / page
+        #     reload produced duplicate Rx rows for one exam.
+        existing_test = test_repo.find_by_id(test_id)
+        if existing_test is None:
+            raise HTTPException(status_code=404, detail="Test not found")
+
+        rx_repo = get_prescription_repository()
+
+        if existing_test.get("status") == "COMPLETED":
+            existing_rx = (
+                rx_repo.find_by_eye_test(test_id) if rx_repo is not None else None
+            )
+            return {
+                "message": "Test already completed",
+                "testId": test_id,
+                "prescriptionId": (
+                    existing_rx.get("prescription_id") if existing_rx else None
+                ),
+                "alreadyCompleted": True,
+            }
+
         # Update test record
         success = test_repo.complete_test(
             test_id=test_id,
@@ -427,7 +535,20 @@ async def complete_test(
 
             # ── Auto-create prescription so POS can find it ──
             prescription_id = None
-            rx_repo = get_prescription_repository()
+            # Idempotency belt-and-braces: even if the test row's status didn't
+            # flip COMPLETED for some reason (or a concurrent request raced us),
+            # never create a duplicate Rx for an exam that already has one.
+            already_rx = (
+                rx_repo.find_by_eye_test(test_id)
+                if (rx_repo is not None and test)
+                else None
+            )
+            if already_rx:
+                return {
+                    "message": "Test completed",
+                    "testId": test_id,
+                    "prescriptionId": already_rx.get("prescription_id"),
+                }
             if rx_repo is not None and test:
                 from datetime import timedelta
 

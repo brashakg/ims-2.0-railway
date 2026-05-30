@@ -5,6 +5,7 @@
 
 import { createContext, useContext, useState, useCallback, type ReactNode } from 'react';
 import type { UserRole } from '../types';
+import { useAuth } from './AuthContext';
 import {
   ShoppingCart, Eye, Package, Users, Truck, DollarSign,
   Users2, BarChart3, Settings, Wrench,
@@ -52,8 +53,100 @@ interface ModuleContextType {
   setActiveModule: (module: ModuleId | null) => void;
   getModuleConfig: (moduleId: ModuleId) => ModuleConfig | undefined;
   getModulesForRole: (role: UserRole) => ModuleConfig[];
+  /** Map a route path to the canonical module key that owns it (or null when
+   *  the path belongs to no gateable module -- dashboard, settings, print,
+   *  jarvis, etc., which must never be deny-able). Used by ProtectedRoute and
+   *  the Rail to apply the per-user deny-only module override at the route +
+   *  nav level. Matches by longest path prefix. */
+  moduleForPath: (path: string) => ModuleKey | null;
   isModuleActive: boolean;
   goToDashboard: () => void;
+}
+
+// ============================================================================
+// Canonical module keys -- the SINGLE source of truth shared by SettingsAuth
+// (the admin checkboxes), the Rail nav, and ProtectedRoute. A per-user
+// `module_access` map (deny-only override on top of the role) is keyed on
+// EXACTLY these strings. They mirror the gateable MODULE_CONFIGS group ids.
+//
+// `settings` is deliberately NOT gateable: an admin must never be able to lock
+// a user (or themselves) out of User Management, which is the only place to
+// undo a bad module grant. Dashboard / print / jarvis / org are likewise
+// ungated (return null from moduleForPath).
+// ============================================================================
+
+export const MODULE_KEYS = [
+  'pos',
+  'clinic',
+  'inventory',
+  'customers',
+  'vendors',
+  'workshop',
+  'hr',
+  'reports',
+  'finance',
+] as const;
+
+export type ModuleKey = (typeof MODULE_KEYS)[number];
+
+/** Admin-facing label for each gateable module key, in the order shown in the
+ *  SettingsAuth "Module Access" grid. Keep keys === MODULE_KEYS so the
+ *  checkboxes, the Rail, and ProtectedRoute can never drift apart. */
+export const MODULE_ACCESS_OPTIONS: { key: ModuleKey; label: string }[] = [
+  { key: 'pos', label: 'POS' },
+  { key: 'clinic', label: 'Clinical' },
+  { key: 'inventory', label: 'Inventory' },
+  { key: 'customers', label: 'Customers (CRM)' },
+  { key: 'vendors', label: 'Supply Chain' },
+  { key: 'workshop', label: 'Workshop' },
+  { key: 'hr', label: 'HR & Tasks' },
+  { key: 'reports', label: 'Reports' },
+  { key: 'finance', label: 'Finance' },
+];
+
+// Route-prefix -> canonical module key. Ordered longest-prefix-first so a more
+// specific path wins (none currently overlap ambiguously, but the lookup is
+// written to be prefix-safe). Anything not matched here is ungated (null).
+//
+// Notes on shared paths:
+//  - /orders is surfaced by POS, Workshop, and Reports but is owned by POS, so
+//    denying `pos` also removes order views (acceptable: no POS => no orders).
+//  - /customers/campaigns (Marketing) sits under the `customers` module, so
+//    denying `customers` also hides Marketing -- correct, it's a CRM feature.
+//  - /catalog* is part of the Inventory module (Add Product / pricing live
+//    there in MODULE_CONFIGS).
+const PATH_MODULE_PREFIXES: { prefix: string; key: ModuleKey }[] = [
+  { prefix: '/pos', key: 'pos' },
+  { prefix: '/orders', key: 'pos' },
+  { prefix: '/returns', key: 'pos' },
+  { prefix: '/walkouts', key: 'pos' },
+  { prefix: '/clinical', key: 'clinic' },
+  { prefix: '/prescriptions', key: 'clinic' },
+  { prefix: '/inventory', key: 'inventory' },
+  { prefix: '/catalog', key: 'inventory' },
+  { prefix: '/customers', key: 'customers' },
+  { prefix: '/purchase', key: 'vendors' },
+  { prefix: '/workshop', key: 'workshop' },
+  { prefix: '/hr', key: 'hr' },
+  { prefix: '/tasks', key: 'hr' },
+  { prefix: '/incentive', key: 'hr' },
+  { prefix: '/reports', key: 'reports' },
+  { prefix: '/finance', key: 'finance' },
+];
+
+/** Resolve the canonical module key that owns `path`, or null if ungated.
+ *  Strips the query string and matches by the longest route prefix so e.g.
+ *  `/inventory/audit?tab=x` -> `inventory`. */
+export function moduleForPath(path: string): ModuleKey | null {
+  if (!path) return null;
+  const clean = path.split('?')[0].split('#')[0];
+  let best: { prefix: string; key: ModuleKey } | null = null;
+  for (const entry of PATH_MODULE_PREFIXES) {
+    if (clean === entry.prefix || clean.startsWith(entry.prefix + '/')) {
+      if (!best || entry.prefix.length > best.prefix.length) best = entry;
+    }
+  }
+  return best ? best.key : null;
 }
 
 // ============================================================================
@@ -76,7 +169,8 @@ export const MODULE_CONFIGS: ModuleConfig[] = [
       { id: 'pos-pending', label: 'Pending Orders', path: '/orders?status=PROCESSING' },
       { id: 'pos-deliveries', label: 'Ready for Delivery', path: '/orders?status=READY', roles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'CASHIER', 'SALES_CASHIER'] },
       { id: 'pos-dayend', label: 'Day-End Report', path: '/reports/day-end', roles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'CASHIER'] },
-      { id: 'pos-footfall', label: 'Footfall Tracking', path: '/pos/footfall' },
+      // Footfall Tracking — hidden until the feature is built (route is a "Coming soon" stub). Re-enable when /pos/footfall ships.
+      // { id: 'pos-footfall', label: 'Footfall Tracking', path: '/pos/footfall' },
     ],
   },
   {
@@ -91,6 +185,7 @@ export const MODULE_CONFIGS: ModuleConfig[] = [
       { id: 'clinic-queue', label: 'Patient Queue', path: '/clinical' },
       { id: 'clinic-history', label: 'Test History', path: '/clinical/history' },
       { id: 'clinic-prescriptions', label: 'Prescriptions', path: '/prescriptions' },
+      { id: 'clinic-family-rx', label: 'Family Rx', path: '/clinical/family-rx' },
     ],
   },
   {
@@ -218,6 +313,7 @@ export const MODULE_CONFIGS: ModuleConfig[] = [
     allowedRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'],
     sidebarItems: [
       { id: 'fin-dashboard', label: 'Finance Dashboard', path: '/finance/dashboard' },
+      { id: 'fin-budgeting', label: 'Budgeting (Planned vs Actual)', path: '/finance/budgeting', roles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'] },
       { id: 'fin-expenses', label: 'Expense Tracker', path: '/finance/expenses' },
       { id: 'fin-pending', label: 'Pending Approval', path: '/finance/expenses?tab=pending-approval' },
       { id: 'fin-summary', label: 'Category Summary', path: '/finance/expenses?tab=summary' },
@@ -261,6 +357,9 @@ const ModuleContext = createContext<ModuleContextType | undefined>(undefined);
 
 export function ModuleProvider({ children }: { children: ReactNode }) {
   const [activeModule, setActiveModuleState] = useState<ModuleId | null>(null);
+  // Per-user deny-only module gate. AuthProvider wraps ModuleProvider (App.tsx),
+  // so this is always available here.
+  const { hasModuleAccess } = useAuth();
 
   const setActiveModule = useCallback((module: ModuleId | null) => {
     setActiveModuleState(module);
@@ -270,11 +369,17 @@ export function ModuleProvider({ children }: { children: ReactNode }) {
     return MODULE_CONFIGS.find(m => m.id === moduleId);
   }, []);
 
+  // Visible module groups = role-allowed AND not denied for this user. The role
+  // filter runs FIRST and is the ceiling; hasModuleAccess can only further
+  // remove a group (deny-only), never add one the role lacks -- so there's no
+  // privilege-escalation path. A MODULE_CONFIGS id that isn't a gateable
+  // MODULE_KEY (e.g. `settings`) is never denied (hasModuleAccess returns true).
   const getModulesForRole = useCallback((role: UserRole): ModuleConfig[] => {
     return MODULE_CONFIGS.filter(m =>
-      m.allowedRoles.includes(role) || role === 'SUPERADMIN'
+      (m.allowedRoles.includes(role) || role === 'SUPERADMIN') &&
+      hasModuleAccess(m.id)
     );
-  }, []);
+  }, [hasModuleAccess]);
 
   const goToDashboard = useCallback(() => {
     setActiveModuleState(null);
@@ -285,6 +390,7 @@ export function ModuleProvider({ children }: { children: ReactNode }) {
     setActiveModule,
     getModuleConfig,
     getModulesForRole,
+    moduleForPath,
     isModuleActive: activeModule !== null,
     goToDashboard,
   };

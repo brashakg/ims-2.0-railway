@@ -495,6 +495,13 @@ async def login(request: LoginRequest, req: Request = None):
     # the app and it survives a browser refresh (via /auth/me + /refresh).
     must_change_password = bool(user.get("must_change_password", False))
 
+    # Per-user module access -- a DENY-ONLY override carried in the token so
+    # every store-scoped worker resolves the same restrictions from the JWT
+    # alone. Always a dict (absent on the user doc -> {}) for a stable,
+    # backward-compatible shape. The role remains the CEILING: this is only ever
+    # read by the frontend to HIDE/route-block modules, never to grant one.
+    module_access = user.get("module_access") or {}
+
     # Create token
     token_data = {
         "user_id": user.get("user_id", user.get("_id", "")),
@@ -505,6 +512,7 @@ async def login(request: LoginRequest, req: Request = None):
             active_store or (user_store_ids[0] if user_store_ids else None)
         ),
         "must_change_password": must_change_password,
+        "module_access": module_access,
     }
 
     access_token = create_access_token(token_data)
@@ -534,6 +542,7 @@ async def login(request: LoginRequest, req: Request = None):
             "active_store_id": token_data["active_store_id"],
             "discount_cap": eff_cap,
             "must_change_password": must_change_password,
+            "module_access": module_access,
         },
     )
 
@@ -565,10 +574,17 @@ async def get_me(current_user: dict = Depends(get_current_user)):
     Ensures `must_change_password` is present so the frontend gate survives a
     browser refresh. Tokens minted before this flag existed won't carry it, so
     fall back to the live DB record (fail-soft -> False) for those.
+
+    `module_access` (deny-only per-user module override) gets the same
+    treatment: tokens minted before it existed won't carry it, so fall back to
+    the live DB record (fail-soft -> {}) so the field is always present and the
+    frontend's hasModuleAccess never crashes on undefined.
     """
     me = dict(current_user)
-    if "must_change_password" not in me:
-        flag = False
+    needs_pwd = "must_change_password" not in me
+    needs_modules = "module_access" not in me
+    if needs_pwd or needs_modules:
+        rec = None
         try:
             from ..dependencies import get_user_repository
 
@@ -577,10 +593,12 @@ async def get_me(current_user: dict = Depends(get_current_user)):
                 rec = user_repo.find_by_id(me.get("user_id")) or (
                     user_repo.collection.find_one({"username": me.get("username")})
                 )
-                flag = bool((rec or {}).get("must_change_password", False))
         except Exception:
-            flag = False
-        me["must_change_password"] = flag
+            rec = None
+        if needs_pwd:
+            me["must_change_password"] = bool((rec or {}).get("must_change_password", False))
+        if needs_modules:
+            me["module_access"] = (rec or {}).get("module_access") or {}
     return me
 
 
@@ -668,7 +686,8 @@ async def refresh_token(request: RefreshTokenRequest):
     """
     payload = decode_token(request.token)
 
-    # Create new token (preserve the force-password-change flag across refresh)
+    # Create new token (preserve the force-password-change flag + the deny-only
+    # module override across refresh so the restriction survives a re-issue).
     token_data = {
         "user_id": payload["user_id"],
         "username": payload["username"],
@@ -676,6 +695,7 @@ async def refresh_token(request: RefreshTokenRequest):
         "store_ids": payload["store_ids"],
         "active_store_id": payload.get("active_store_id"),
         "must_change_password": bool(payload.get("must_change_password", False)),
+        "module_access": payload.get("module_access") or {},
     }
 
     new_token = create_access_token(token_data)
@@ -739,7 +759,8 @@ async def switch_store(store_id: str, current_user: dict = Depends(get_current_u
         if not any(r in ["ADMIN", "SUPERADMIN"] for r in current_user["roles"]):
             raise HTTPException(status_code=403, detail="No access to this store")
 
-    # Create new token with updated store (preserve force-password-change flag)
+    # Create new token with updated store (preserve force-password-change flag
+    # + the deny-only module override so switching stores can't drop it)
     token_data = {
         "user_id": current_user["user_id"],
         "username": current_user["username"],
@@ -747,6 +768,7 @@ async def switch_store(store_id: str, current_user: dict = Depends(get_current_u
         "store_ids": current_user["store_ids"],
         "active_store_id": store_id,
         "must_change_password": bool(current_user.get("must_change_password", False)),
+        "module_access": current_user.get("module_access") or {},
     }
 
     new_token = create_access_token(token_data)

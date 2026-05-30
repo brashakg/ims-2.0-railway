@@ -14,6 +14,7 @@ from ..dependencies import (
     get_store_repository,
     get_user_repository,
     get_order_repository,
+    validate_store_access,
 )
 from ..services import org_validation as ov
 
@@ -347,6 +348,8 @@ async def create_store(
 @router.get("/{store_id}")
 async def get_store(store_id: str, current_user: dict = Depends(get_current_user)):
     """Get store by ID"""
+    # Store-scope: a non-HQ user may only read a store they're assigned to.
+    validate_store_access(store_id, current_user)
     repo = get_store_repository()
 
     if repo is not None:
@@ -365,6 +368,7 @@ async def get_store_stats(
     """Quick store KPIs — order count + revenue + staff count. The
     frontend's storeApi.getStoreStats was 404'ing (no such route).
     Two-segment path, so it isn't shadowed by GET /{store_id}."""
+    validate_store_access(store_id, current_user)  # cross-store read guard
     order_repo = get_order_repository()
     user_repo = get_user_repository()
     stats = {
@@ -423,6 +427,7 @@ async def get_store_users(
     the POS salesperson picker passes the sales-attributable role set so it
     never shows accountants/optometrists/superadmins.
     """
+    validate_store_access(store_id, current_user)  # cross-store read guard (staff PII)
     user_repo = get_user_repository()
     if user_repo is None:
         return {"users": [], "total": 0}
@@ -457,6 +462,14 @@ async def update_store(
     store_id: str, store: StoreUpdate, current_user: dict = Depends(get_current_user)
 ):
     """Update store details"""
+    # SYSTEM_INTENT section 11: store configuration is HQ-only. This was open to
+    # any authenticated user, letting a cashier rewrite/disable any store's
+    # geo-fence. Restrict writes to Admin/Superadmin.
+    if not any(r in current_user.get("roles", []) for r in ("SUPERADMIN", "ADMIN")):
+        raise HTTPException(
+            status_code=403,
+            detail="Store configuration is restricted to HQ (Admin/Superadmin)",
+        )
     repo = get_store_repository()
 
     if repo is not None:
@@ -541,6 +554,12 @@ async def enable_category(
     store_id: str, category: str, current_user: dict = Depends(get_current_user)
 ):
     """Enable a category for the store"""
+    # SYSTEM_INTENT section 11: store configuration is HQ-only (Admin/Superadmin).
+    if not any(r in current_user.get("roles", []) for r in ("SUPERADMIN", "ADMIN")):
+        raise HTTPException(
+            status_code=403,
+            detail="Store configuration is restricted to HQ (Admin/Superadmin)",
+        )
     repo = get_store_repository()
 
     if repo is not None:
@@ -561,6 +580,12 @@ async def disable_category(
     store_id: str, category: str, current_user: dict = Depends(get_current_user)
 ):
     """Disable a category for the store"""
+    # SYSTEM_INTENT section 11: store configuration is HQ-only (Admin/Superadmin).
+    if not any(r in current_user.get("roles", []) for r in ("SUPERADMIN", "ADMIN")):
+        raise HTTPException(
+            status_code=403,
+            detail="Store configuration is restricted to HQ (Admin/Superadmin)",
+        )
     repo = get_store_repository()
 
     if repo is not None:

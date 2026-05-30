@@ -9,6 +9,7 @@ import {
 } from 'lucide-react';
 import clsx from 'clsx';
 import { useToast } from '../../context/ToastContext';
+import { validatePincode, validatePhone, validateGeoRadius, firstError } from '../../utils/validators';
 import {
   adminStoreApi,
   adminBrandApi,
@@ -99,6 +100,12 @@ export function StoreManagementSection() {
   };
 
   const handleSaveStore = async (storeData: Partial<StoreData>) => {
+    const fieldErr = firstError(
+      validatePincode(storeData.pincode),
+      validatePhone(storeData.phone),
+      validateGeoRadius(storeData.geoFenceRadius),
+    );
+    if (fieldErr) { toast.error(fieldErr); return; }
     try {
       setIsLoading(true);
       // Canonical store path: orgStoreApi -> POST/PUT /stores with the backend
@@ -537,10 +544,16 @@ export function DiscountSection() {
         adminDiscountApi.getRoleDiscountCaps().catch(() => null),
         adminDiscountApi.getTierDiscounts().catch(() => null),
       ]);
-      if (caps?.rules) {
+      // Backend returns { role_caps: { ROLE: max_discount_number } } — a single
+      // enforced cap per role (shown as the "Mass" column). The old code read
+      // caps.rules.{mass,premium,luxury}, which the endpoint never returns, so
+      // saved caps never reloaded. premium/luxury are not yet persisted/enforced
+      // server-side, so they keep their defaults until that's wired.
+      const capsMap = caps?.role_caps;
+      if (capsMap) {
         setDiscounts(prev => prev.map(d => {
-          const cap = caps.rules[d.roleKey];
-          return cap ? { ...d, mass: cap.mass ?? d.mass, premium: cap.premium ?? d.premium, luxury: cap.luxury ?? d.luxury } : d;
+          const m = capsMap[d.roleKey];
+          return typeof m === 'number' ? { ...d, mass: m } : d;
         }));
       }
     } catch {
@@ -569,7 +582,7 @@ export function DiscountSection() {
       <div className="flex items-center justify-between mb-6">
         <div>
           <h2 className="text-lg font-semibold text-gray-900">Discount Rules</h2>
-          <p className="text-sm text-gray-500">Maximum discount by role and brand tier</p>
+          <p className="text-sm text-gray-500">Maximum discount percentage by role</p>
         </div>
         <button
           onClick={handleSaveRules}
@@ -586,9 +599,7 @@ export function DiscountSection() {
           <thead className="bg-white border-b border-gray-200">
             <tr>
               <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Role</th>
-              <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Mass</th>
-              <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Premium</th>
-              <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Luxury</th>
+              <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Max Discount %</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-200">
@@ -609,39 +620,16 @@ export function DiscountSection() {
                   />
                   %
                 </td>
-                <td className="px-4 py-3 text-center">
-                  <input
-                    type="number"
-                    value={row.premium}
-                    onChange={(e) => {
-                      const val = Math.min(100, Math.max(0, parseInt(e.target.value) || 0));
-                      setDiscounts(prev => prev.map((d, i) => i === idx ? { ...d, premium: val } : d));
-                    }}
-                    min="0"
-                    max="100"
-                    className="w-16 px-2 py-1 text-center border border-gray-200 rounded"
-                  />
-                  %
-                </td>
-                <td className="px-4 py-3 text-center">
-                  <input
-                    type="number"
-                    value={row.luxury}
-                    onChange={(e) => {
-                      const val = Math.min(100, Math.max(0, parseInt(e.target.value) || 0));
-                      setDiscounts(prev => prev.map((d, i) => i === idx ? { ...d, luxury: val } : d));
-                    }}
-                    min="0"
-                    max="100"
-                    className="w-16 px-2 py-1 text-center border border-gray-200 rounded"
-                  />
-                  %
-                </td>
               </tr>
             ))}
           </tbody>
         </table>
       </div>
+      <p className="mt-3 text-xs text-gray-500">
+        The maximum discount per role. Category caps (Mass 15%, Premium 20%, Luxury 5%,
+        Service 10%, Non-discountable 0%) and luxury brand caps apply on top and always
+        win when lower.
+      </p>
 
       <div className="mt-6 pt-6 border-t border-gray-200">
         <h3 className="text-sm font-medium text-gray-700 mb-3">MRP Rules (per SYSTEM_INTENT)</h3>
@@ -719,7 +707,7 @@ function StoreModal({
         </div>
 
         <div className="flex-1 overflow-y-auto p-4 space-y-4">
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 tablet:grid-cols-2 gap-4">
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">Store Code *</label>
               <input
@@ -742,7 +730,7 @@ function StoreModal({
             </div>
           </div>
 
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 tablet:grid-cols-2 gap-4">
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">GSTIN</label>
               <input
@@ -779,7 +767,7 @@ function StoreModal({
             />
           </div>
 
-          <div className="grid grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 tablet:grid-cols-2 lg:grid-cols-3 gap-4">
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">City *</label>
               <input
@@ -809,7 +797,7 @@ function StoreModal({
             </div>
           </div>
 
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 tablet:grid-cols-2 gap-4">
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">Phone</label>
               <input
@@ -830,7 +818,7 @@ function StoreModal({
             </div>
           </div>
 
-          <div className="grid grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 tablet:grid-cols-2 lg:grid-cols-3 gap-4">
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">Opening Time</label>
               <input
@@ -862,7 +850,7 @@ function StoreModal({
 
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-2">Enabled Categories</label>
-            <div className="grid grid-cols-3 gap-2">
+            <div className="grid grid-cols-2 tablet:grid-cols-3 gap-2">
               {categories.map(cat => (
                 <label key={cat.code} className="flex items-center gap-2 p-2 bg-white rounded cursor-pointer hover:bg-gray-100">
                   <input
@@ -937,7 +925,7 @@ function BrandModal({
         </div>
 
         <div className="flex-1 overflow-y-auto p-4 space-y-4">
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 tablet:grid-cols-2 gap-4">
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">Brand Name *</label>
               <input
@@ -975,7 +963,7 @@ function BrandModal({
 
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-2">Categories *</label>
-            <div className="grid grid-cols-3 gap-2">
+            <div className="grid grid-cols-2 tablet:grid-cols-3 gap-2">
               {categories.map(cat => (
                 <label key={cat.code} className="flex items-center gap-2 p-2 bg-white rounded cursor-pointer hover:bg-gray-100">
                   <input

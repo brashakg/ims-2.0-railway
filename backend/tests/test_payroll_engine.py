@@ -182,3 +182,72 @@ def test_full_lwp_zeroes_earnings():
     assert r["earnings"]["earned_gross"] == 0
     assert r["deductions"]["pf_employee"] == 0
     assert r["net_pay"] == 0
+
+
+# ---------------------------------------------------------------------------
+# D-4 regression: negative earning components must be rejected loudly
+# ---------------------------------------------------------------------------
+
+import pytest
+from api.services.payroll_engine import _earnings
+
+
+def test_negative_basic_raises():
+    """Negative basic salary must raise ValueError (Fail Loudly rule)."""
+    with pytest.raises(ValueError, match="basic"):
+        _earnings({"employee_id": "EMP-X", "basic": -1000, "hra": 0})
+
+
+def test_negative_hra_raises():
+    with pytest.raises(ValueError, match="hra"):
+        _earnings({"employee_id": "EMP-X", "basic": 10000, "hra": -500})
+
+
+def test_negative_conveyance_raises():
+    with pytest.raises(ValueError, match="conveyance"):
+        _earnings({"basic": 10000, "conveyance": -200})
+
+
+def test_negative_medical_raises():
+    with pytest.raises(ValueError, match="medical"):
+        _earnings({"basic": 10000, "medical": -100})
+
+
+def test_negative_special_allowance_raises():
+    with pytest.raises(ValueError, match="special_allowance"):
+        _earnings({"basic": 10000, "special_allowance": -50})
+
+
+def test_negative_other_allowance_raises():
+    """Negative amount in other_allowances list must also raise."""
+    with pytest.raises(ValueError, match="other_allowances"):
+        _earnings({
+            "basic": 10000,
+            "other_allowances": [{"name": "Bad", "amount": -300}],
+        })
+
+
+def test_negative_basic_compute_payroll_propagates():
+    """compute_payroll must propagate the ValueError from _earnings."""
+    with pytest.raises(ValueError, match="basic"):
+        compute_payroll(
+            {"employee_id": "EMP-NEG", "basic": -5000},
+            month=6, year=2026,
+        )
+
+
+def test_zero_wages_allowed():
+    """Zero wage components must NOT raise -- zero is a valid config."""
+    result = _earnings({"basic": 0, "hra": 0, "special_allowance": 0})
+    assert result["gross"] == 0
+
+
+def test_zero_basic_compute_payroll_allowed():
+    """compute_payroll with zero basic must return zero net without error."""
+    r = compute_payroll(
+        {"employee_id": "EMP-ZERO", "basic": 0, "pf_applicable": False,
+         "esi_applicable": False, "pt_applicable": False},
+        month=6, year=2026,
+    )
+    assert r["net_pay"] == 0
+    assert r["earnings"]["full_gross"] == 0

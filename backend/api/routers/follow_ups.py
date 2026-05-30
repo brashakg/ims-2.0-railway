@@ -218,6 +218,22 @@ async def create_follow_up(
     if not db or not db.is_connected:
         raise HTTPException(status_code=500, detail="Database connection failed")
 
+    # Validate that scheduled_date is not in the past.  Follow-ups scheduled
+    # for yesterday would appear overdue immediately and never be worked — they
+    # should be rejected at creation time so staff notice the error.
+    try:
+        sched = date.fromisoformat(request.scheduled_date)
+    except ValueError:
+        raise HTTPException(
+            status_code=422,
+            detail=f"scheduled_date must be a valid YYYY-MM-DD date, got: {request.scheduled_date!r}",
+        )
+    if sched < date.today():
+        raise HTTPException(
+            status_code=422,
+            detail=f"scheduled_date cannot be in the past (got {request.scheduled_date})",
+        )
+
     collection = db.get_collection("follow_ups")
 
     # Generate follow-up ID

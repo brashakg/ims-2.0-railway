@@ -92,7 +92,7 @@ export function CustomerFeedback() {
       </div>
 
       {/* Summary Stats — real NPS figures from the backend dashboard */}
-      <div className="grid grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 tablet:grid-cols-4 gap-4">
         <div className="bg-white border border-gray-200 rounded-lg p-4">
           <p className="text-gray-500 text-sm mb-1">NPS Score</p>
           <p className="text-2xl font-bold text-blue-600">{npsScore.toFixed(0)}</p>

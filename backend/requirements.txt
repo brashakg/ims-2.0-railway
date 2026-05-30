@@ -15,7 +15,13 @@ bcrypt==4.2.0
 python-multipart==0.0.29
 # RSA-SHA256 signing for QZ Tray silent label printing (labels.py). The
 # import is lazy + fail-soft, so a missing wheel degrades to HTML printing.
-cryptography==44.0.0
+# 44.0.1 is a security patch (no API change) over 44.0.0: it ships an OpenSSL
+# fix for CVE-2024-12797 (the wheel statically links OpenSSL). The two later
+# CVEs in this package (PYSEC-2026-35 X.509 DNS name-constraint bypass,
+# CVE-2026-26007 EC public-key subgroup check) require a major bump to 46.x;
+# neither code path is exercised here (we only load our OWN PEM private key
+# and RSA-sign), so they are deferred to avoid a breaking upgrade.
+cryptography==44.0.1
 
 # Database
 pymongo==4.17.0

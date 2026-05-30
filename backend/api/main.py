@@ -71,12 +71,14 @@ from .routers import (
     marketing_router,
     analytics_v2_router,
     agents_router,
+    proposals_router,
     walkouts_router,
     points_router,
     payout_router,
     webhooks_router,
     loyalty_router,
     vendor_portal_router,
+    portal_router,
     techcherry_import_router,
     vouchers_router,
     entities_router,
@@ -90,6 +92,8 @@ from .routers import (
     lens_stock_router,
     lens_enums_router,
     product_templates_router,
+    audit_router,
+    budgets_router,
 )
 from .routers.auth import require_roles
 
@@ -607,6 +611,24 @@ async def block_investor_writes(request: Request, call_next):
     return await call_next(request)
 
 
+# ── RBAC enforcement (defense-in-depth) ───────────────────────────────────
+# A SECOND, request-time enforcement layer built on the central policy registry
+# (api/services/rbac_policy.py), sitting ON TOP of the existing per-route gates
+# (Depends(require_roles(...)), router-level deps, inline handler checks) which
+# all remain in place. Registered AFTER CORS / investor-block so those still run;
+# fail-open + fail-soft so it can never change an endpoint's effective access:
+#   * only /api/v1/* is considered; openapi/docs + non-/api/v1 skipped
+#   * un-catalogued route -> ALLOW + warn (the coverage-lock test guarantees
+#     completeness, so a miss is a new/dynamic route the route's own gate covers)
+#   * PUBLIC -> allow; no/invalid/expired token -> PASS THROUGH so the route's
+#     own get_current_user returns the canonical 401 (error shape unchanged)
+#   * valid token failing check_access -> 403 (same answer the route gate gives)
+# See api/middleware/rbac_enforcement.py for the full contract + reasoning.
+from .middleware.rbac_enforcement import rbac_enforcement_middleware
+
+app.middleware("http")(rbac_enforcement_middleware)
+
+
 # HTTPException handler - handles authentication and validation errors
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):
@@ -704,11 +726,20 @@ async def seed_database(secret: str = "", force: str = ""):
     Requires secret key. Only inserts into empty collections.
     Use force=users to drop and re-seed users (fixes password hashes).
     """
-    # Seed secret reads from env (rotatable on Railway) with a hardcoded
-    # fallback so existing scripts that pass `bv-seed-2026` keep working.
-    # Set SEED_SECRET on the backend service to override.
-    expected = os.getenv("SEED_SECRET", "bv-seed-2026")
-    if secret != expected:
+    # SECURITY: the seed secret MUST come from the environment. There is NO
+    # hardcoded fallback — this is a public repo, and a known secret on an
+    # endpoint that can `force`-drop the users collection (re-seeding accounts
+    # with known passwords) is a full unauthenticated account-takeover path.
+    # If SEED_SECRET is unset the endpoint is disabled. Constant-time compare.
+    import hmac as _hmac
+
+    expected = os.getenv("SEED_SECRET")
+    if not expected:
+        raise HTTPException(
+            status_code=403,
+            detail="DB seeding is disabled (SEED_SECRET not configured on the server).",
+        )
+    if not secret or not _hmac.compare_digest(secret, expected):
         raise HTTPException(status_code=403, detail="Invalid seed secret")
 
     if not DATABASE_AVAILABLE:
@@ -805,6 +836,7 @@ app.include_router(
 )
 app.include_router(workshop_router, prefix="/api/v1/workshop", tags=["Workshop"])
 app.include_router(reports_router, prefix="/api/v1/reports", tags=["Reports"])
+app.include_router(budgets_router, prefix="/api/v1/budgets", tags=["Budgets"])
 app.include_router(settings_router, prefix="/api/v1/settings", tags=["Settings"])
 app.include_router(clinical_router, prefix="/api/v1/clinical", tags=["Clinical"])
 app.include_router(admin_router, prefix="/api/v1/admin", tags=["Admin"])
@@ -873,6 +905,10 @@ app.include_router(
     analytics_v2_router, prefix="/api/v1/analytics-v2", tags=["Analytics V2"]
 )
 app.include_router(agents_router, prefix="/api/v1/jarvis", tags=["Agents"])
+# AI change-proposal workflow (SYSTEM_INTENT section 8) - SUPERADMIN-only.
+# Mounted at the same /api/v1/jarvis prefix; its paths (/proposals*) don't
+# collide with agents_router's (/agents*).
+app.include_router(proposals_router, prefix="/api/v1/jarvis", tags=["AI Proposals"])
 app.include_router(walkouts_router, prefix="/api/v1/walkouts", tags=["Walkouts"])
 app.include_router(
     points_router, prefix="/api/v1/incentive/points", tags=["Daily Points"]
@@ -887,6 +923,10 @@ app.include_router(vouchers_router, prefix="/api/v1/vouchers", tags=["Vouchers"]
 app.include_router(
     vendor_portal_router, prefix="/api/v1/vendor-portal", tags=["Vendor Portal"]
 )
+# Customer self-service portal — PUBLIC. Order tracking is a tokenized link
+# (no login); Rx viewing is OTP-gated (medical data). Mounted OUTSIDE the
+# JWT-protected family because real customers hit this without an IMS account.
+app.include_router(portal_router, prefix="/api/v1/portal", tags=["Customer Portal"])
 # TechCherry one-time migration — SUPERADMIN-only batch upsert endpoint.
 # Mounted under /admin/techcherry so it sits in the operator namespace
 # without inheriting the broader admin router (which is ADMIN+SUPERADMIN;
@@ -902,6 +942,14 @@ app.include_router(
     print_overrides_router,
     prefix="/api/v1/print-overrides",
     tags=["Print Overrides"],
+)
+# Audit trail integrity (SYSTEM_INTENT 10). READ-ONLY, SUPERADMIN-only:
+# GET /api/v1/audit/verify walks the tamper-evident hash-chain. The audit
+# collection is append-only -- this router exposes no mutation route.
+app.include_router(
+    audit_router,
+    prefix="/api/v1/audit",
+    tags=["Audit"],
 )
 
 

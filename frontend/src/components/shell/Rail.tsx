@@ -6,9 +6,11 @@ import { NavLink, useLocation } from 'react-router-dom';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { useAppearance } from '../../context/AppearanceContext';
+import { moduleForPath } from '../../context/ModuleContext';
 import { Icon, type IconName } from './Icon';
 import type { UserRole } from '../../types';
 import { ecommerceSsoApi } from '../../services/api/ecommerceSso';
+import { getBrandAssets } from '../../utils/brandAssets';
 
 const COLLAPSED_GROUPS_KEY = 'ims_rail_collapsed_groups';
 
@@ -151,24 +153,37 @@ function hasAnyRole(userRoles: readonly UserRole[] | undefined, required: UserRo
   return required.some((r) => userRoles.includes(r));
 }
 
-export function Rail({ brand = 'bv' }: { brand?: 'bv' | 'wizopt' }) {
-  const { user } = useAuth();
+export function Rail({ brand = 'bv', mobileOpen = false }: { brand?: 'bv' | 'wizopt'; mobileOpen?: boolean }) {
+  const { user, hasModuleAccess } = useAuth();
   const { railExpanded, toggleRailExpanded } = useAppearance();
+  // In the mobile drawer, always render the expanded layout (group headers +
+  // labels) regardless of the desktop icon-only collapse state.
+  const expanded = railExpanded || mobileOpen;
   const { pathname } = useLocation();
   const userRoles = user?.roles;
   const activeRole = user?.activeRole;
 
-  // Filter hidden items based on role
+  // Filter hidden items based on role AND the per-user deny-only module
+  // override. The role check is the ceiling; hasModuleAccess can only further
+  // hide an item whose route belongs to a denied module (moduleForPath maps the
+  // item's `to` to its canonical module key; external/SSO URLs and ungated
+  // paths -> null -> never hidden by the module gate). ProtectedRoute enforces
+  // the same gate at the route level so a direct URL is blocked too.
   const visibleGroups = useMemo(() => {
     return RAIL_GROUPS.map((group) => ({
       ...group,
       items: group.items.filter((item) => {
-        if (!item.requireRoles) return true;
-        // Check both stored roles[] and active role (covers role-switching)
-        return hasAnyRole(userRoles, item.requireRoles) || (activeRole && item.requireRoles.includes(activeRole));
+        const roleOk =
+          !item.requireRoles ||
+          // Check both stored roles[] and active role (covers role-switching)
+          hasAnyRole(userRoles, item.requireRoles) ||
+          (activeRole && item.requireRoles.includes(activeRole));
+        if (!roleOk) return false;
+        const mod = item.external ? null : moduleForPath(item.to);
+        return !mod || hasModuleAccess(mod);
       }),
     })).filter((group) => group.items.length > 0);
-  }, [userRoles, activeRole]);
+  }, [userRoles, activeRole, hasModuleAccess]);
 
   // Which group titles are collapsed. Untitled (Hub) groups can't collapse.
   // Persisted to localStorage so a user's collapse choices survive refresh
@@ -252,8 +267,8 @@ export function Rail({ brand = 'bv' }: { brand?: 'bv' | 'wizopt' }) {
     });
   }, []);
 
-  const glyph = brand === 'wizopt' ? 'W' : 'B';
-  const wordmark = brand === 'wizopt' ? 'WizOpt' : 'Better Vision';
+  const brandAssets = getBrandAssets(brand);
+  const wordmark = brandAssets.name;
   const userInitials = (user?.name ?? '')
     .split(/\s+/)
     .map((s) => s[0])
@@ -263,14 +278,28 @@ export function Rail({ brand = 'bv' }: { brand?: 'bv' | 'wizopt' }) {
     .toUpperCase() || '?';
 
   return (
-    <aside className={'rail' + (railExpanded ? ' expanded' : '')}>
+    <aside
+      className={'rail' + (expanded ? ' expanded' : '') + (mobileOpen ? ' rail-mobile-open' : '')}
+      role={mobileOpen ? 'dialog' : undefined}
+      aria-modal={mobileOpen ? true : undefined}
+      aria-label={mobileOpen ? 'Navigation menu' : undefined}
+    >
       {/* Header row — brand glyph + wordmark (expanded only) + toggle.
           Toggle moved up here so it's discoverable above the fold; the
           old position at the bottom was easy to miss. */}
       <div className="rail-header">
         <div className="rail-brand-row">
-          <div className="brand" title={wordmark}>{glyph}</div>
-          {railExpanded && (
+          {/* Real brand mark — white knockout so it reads on the dark rail */}
+          <div className="brand" title={wordmark}>
+            <img
+              src={brandAssets.markWhite}
+              alt={wordmark}
+              width={28}
+              height={28}
+              style={{ objectFit: 'contain', display: 'block' }}
+            />
+          </div>
+          {expanded && (
             <span className="rail-wordmark" aria-hidden="true">{wordmark}</span>
           )}
         </div>
@@ -286,7 +315,7 @@ export function Rail({ brand = 'bv' }: { brand?: 'bv' | 'wizopt' }) {
       </div>
 
       {visibleGroups.map((group, gi) => {
-        const isCollapsible = railExpanded && !!group.title;
+        const isCollapsible = expanded && !!group.title;
         const isCollapsed = isCollapsible && collapsedGroups.has(group.title!);
         const itemsHidden = isCollapsed;
         return (
@@ -359,14 +388,14 @@ export function Rail({ brand = 'bv' }: { brand?: 'bv' | 'wizopt' }) {
                 );
               })}
             </div>
-            {gi < visibleGroups.length - 1 && !railExpanded && <div className="rail-sep" />}
+            {gi < visibleGroups.length - 1 && !expanded && <div className="rail-sep" />}
           </div>
         );
       })}
       <div className="rail-spacer" />
       <div className="rail-avatar" title={user?.name ? `${user.name} • ${activeRole}` : 'User'}>
         <span className="rail-avatar-initials">{userInitials}</span>
-        {railExpanded && (
+        {expanded && (
           <span className="rail-avatar-name" aria-hidden="true">
             {user?.name?.split(' ')[0] || 'User'}
           </span>

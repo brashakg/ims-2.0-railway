@@ -6,7 +6,7 @@ Indian salary structure with PF, ESI, PT, TDS deductions
 """
 
 from fastapi import APIRouter, Depends, Query, HTTPException, Body
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from typing import Optional, List, Dict
 from datetime import datetime, date, timedelta
 from calendar import monthrange
@@ -1054,6 +1054,9 @@ async def get_pt_slab(state_code: str, current_user: dict = Depends(get_current_
         )
 
 
+_VALID_PT_BASIS = {"MONTHLY", "ANNUAL"}
+
+
 class PtSlabUpsert(BaseModel):
     """Create/replace a state's Professional Tax slab table."""
 
@@ -1063,6 +1066,28 @@ class PtSlabUpsert(BaseModel):
     slabs: List[dict] = Field(default_factory=list)
     notes: Optional[str] = None
 
+    @field_validator("basis")  # type: ignore[call-overload]
+    @classmethod
+    def _validate_basis(cls, v: str) -> str:
+        uv = v.strip().upper()
+        if uv not in _VALID_PT_BASIS:
+            raise ValueError(
+                f"basis must be one of {sorted(_VALID_PT_BASIS)}"
+            )
+        return uv
+
+    @field_validator("slabs")
+    @classmethod
+    def _validate_slabs(cls, v: List[dict]) -> List[dict]:
+        """Each slab entry must have a non-negative 'tax' amount."""
+        for i, slab in enumerate(v):
+            if not isinstance(slab, dict):
+                raise ValueError(f"slabs[{i}] must be an object")
+            tax = slab.get("tax")
+            if tax is not None and (not isinstance(tax, (int, float)) or tax < 0):
+                raise ValueError(f"slabs[{i}].tax must be a non-negative number")
+        return v
+
 
 @router.put("/pt-slabs/{state_code}")
 async def upsert_pt_slab(
@@ -1071,7 +1096,14 @@ async def upsert_pt_slab(
     current_user: dict = Depends(require_roles("ADMIN")),
 ):
     """Create or replace a state's PT slab (admin-only)."""
+    from ..services.org_validation import INDIAN_STATE_CODES
+
     state_code = state_code.upper()
+    if state_code not in INDIAN_STATE_CODES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown state_code '{state_code}'. Must be a 2-digit GST state code.",
+        )
     db = _get_db()
     if not db:
         raise HTTPException(status_code=503, detail="Database not available")

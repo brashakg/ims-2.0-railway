@@ -9,7 +9,9 @@ import {
 import clsx from 'clsx';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
+import { validatePhone } from '../../utils/validators';
 import { adminUserApi, adminStoreApi } from '../../services/api';
+import { MODULE_ACCESS_OPTIONS } from '../../context/ModuleContext';
 import type { StoreData, UserData } from './settingsTypes';
 import {
   ROLE_HIERARCHY,
@@ -54,6 +56,9 @@ const transformUser = (u: any): UserData => ({
   discountCap: u.discount_cap || u.discountCap || 10,
   isActive: u.is_active !== false,
   createdAt: u.created_at || u.createdAt || '',
+  // Load existing deny-only module override so editing a user preserves it
+  // (snake_case from the API; camelCase tolerated). Default {} = role defaults.
+  moduleAccess: u.module_access || u.moduleAccess || {},
 });
 
 // ============================================================================
@@ -102,6 +107,8 @@ export function UserManagementSection() {
   };
 
   const handleSaveUser = async (userData: Partial<UserData>, password?: string) => {
+    const phoneErr = validatePhone(userData.phone);
+    if (phoneErr) { toast.error(phoneErr); return; }
     try {
       setIsLoading(true);
       const apiData = {
@@ -118,6 +125,10 @@ export function UserManagementSection() {
         username: (userData as { username?: string }).username,
         password: password,
         status: userData.isActive ? 'ACTIVE' : 'INACTIVE',
+        // Deny-only per-user module override. Previously collected by the modal
+        // checkboxes but DROPPED here -- now forwarded so it actually persists
+        // (adminUserApi maps it to the backend `module_access` field).
+        moduleAccess: userData.moduleAccess,
       };
 
       if (editingUser?.id) {
@@ -401,7 +412,7 @@ function UserModal({
         </div>
 
         <div className="flex-1 overflow-y-auto p-4 space-y-4">
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 tablet:grid-cols-2 gap-4">
             <div>
               <label className="block text-sm font-medium text-gray-600 mb-1">Username *</label>
               <input
@@ -422,7 +433,7 @@ function UserModal({
             </div>
           </div>
 
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 tablet:grid-cols-2 gap-4">
             <div>
               <label className="block text-sm font-medium text-gray-600 mb-1">Email *</label>
               <input
@@ -460,7 +471,7 @@ function UserModal({
             {allowedRoles.length === 0 ? (
               <p className="text-sm text-gray-500">You don't have permission to assign roles.</p>
             ) : (
-              <div className="grid grid-cols-2 gap-2">
+              <div className="grid grid-cols-1 tablet:grid-cols-2 gap-2">
                 {allowedRoles.map(role => (
                   <label key={role} className="flex items-center gap-2 p-2 bg-gray-50 border border-gray-200 rounded cursor-pointer hover:bg-gray-100">
                     <input
@@ -491,7 +502,7 @@ function UserModal({
             {allowedStores.length === 0 ? (
               <p className="text-sm text-gray-500">No stores available.</p>
             ) : (
-              <div className="grid grid-cols-2 gap-2">
+              <div className="grid grid-cols-1 tablet:grid-cols-2 gap-2">
                 {allowedStores.map(store => (
                   <label key={store.id} className="flex items-center gap-2 p-2 bg-gray-50 border border-gray-200 rounded cursor-pointer hover:bg-gray-100">
                     <input
@@ -517,7 +528,7 @@ function UserModal({
             )}
           </div>
 
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 tablet:grid-cols-2 gap-4">
             <div>
               <label className="block text-sm font-medium text-gray-600 mb-1">Discount Cap (%)</label>
               <input
@@ -542,27 +553,30 @@ function UserModal({
             </div>
           </div>
 
-          {/* User-wise Module Access */}
+          {/* User-wise Module Access -- deny-only override on top of the role.
+              Keys come from MODULE_ACCESS_OPTIONS (the single canonical source
+              shared with the Rail nav + ProtectedRoute), so an unchecked box
+              maps to exactly the module key the gate enforces. Unchecking only
+              RESTRICTS -- it can never grant a module the role forbids. */}
           <div>
             <label className="block text-sm font-medium text-gray-600 mb-2">Module Access</label>
-            <p className="text-xs text-gray-500 mb-2">Control which modules this user can access (overrides role defaults)</p>
-            <div className="grid grid-cols-3 gap-2">
-              {['POS', 'Clinical', 'Workshop', 'Inventory', 'Reports', 'HR', 'Finance', 'CRM', 'Tasks'].map(mod => {
-                const moduleKey = mod.toLowerCase();
-                const userModules = (formData as any).moduleAccess || {};
+            <p className="text-xs text-gray-500 mb-2">Uncheck to hide a module from this user (only restricts within their role; cannot grant access their role lacks)</p>
+            <div className="grid grid-cols-2 tablet:grid-cols-3 gap-2">
+              {MODULE_ACCESS_OPTIONS.map(({ key: moduleKey, label }) => {
+                const userModules = formData.moduleAccess || {};
                 const isEnabled = userModules[moduleKey] !== false;
                 return (
-                  <label key={mod} className={clsx('flex items-center gap-2 p-2 rounded cursor-pointer', isEnabled ? 'bg-green-50 border border-green-200' : 'bg-gray-50 border border-gray-200')}>
+                  <label key={moduleKey} className={clsx('flex items-center gap-2 p-2 rounded cursor-pointer', isEnabled ? 'bg-green-50 border border-green-200' : 'bg-gray-50 border border-gray-200')}>
                     <input
                       type="checkbox"
                       checked={isEnabled}
                       onChange={e => {
-                        const current = (formData as any).moduleAccess || {};
-                        setFormData(prev => ({ ...prev, moduleAccess: { ...current, [moduleKey]: e.target.checked } } as any));
+                        const current = formData.moduleAccess || {};
+                        setFormData(prev => ({ ...prev, moduleAccess: { ...current, [moduleKey]: e.target.checked } }));
                       }}
                       className="rounded border-gray-300"
                     />
-                    <span className="text-sm text-gray-600">{mod}</span>
+                    <span className="text-sm text-gray-600">{label}</span>
                   </label>
                 );
               })}
@@ -572,7 +586,7 @@ function UserModal({
           {/* User-wise Permissions */}
           <div>
             <label className="block text-sm font-medium text-gray-600 mb-2">Individual Permissions</label>
-            <div className="grid grid-cols-2 gap-2">
+            <div className="grid grid-cols-1 tablet:grid-cols-2 gap-2">
               {[
                 { key: 'can_void_orders', label: 'Void/Cancel Orders' },
                 { key: 'can_process_returns', label: 'Process Returns' },

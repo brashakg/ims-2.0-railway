@@ -1,13 +1,28 @@
 // ============================================================================
 // IMS 2.0 - Prescription Select Modal for POS
 // ============================================================================
-// Allows selecting from patient's existing prescriptions
-// Shows prescription history with validity status
+// Two-step attach flow:
+//   STEP 1 - pick the PATIENT (family member) on the customer account
+//   STEP 2 - pick the specific PRESCRIPTION for that patient
+// Reuses GET /prescriptions/family/{customer_id} (grouped by patient) so the
+// cashier always attaches the right person's Rx, not just "the latest on the
+// account". If the account has a single patient it's auto-selected, but the Rx
+// list is still shown so the operator confirms which prescription to attach.
 
 import { useState, useEffect } from 'react';
-import { X, Eye, AlertTriangle, Check, Calendar, User, Clock, FileText, Plus } from 'lucide-react';
+import { X, Eye, AlertTriangle, Check, Calendar, User, Users, Clock, FileText, Plus, ChevronLeft } from 'lucide-react';
 import type { Prescription, Patient } from '../../types';
 import { prescriptionApi } from '../../services/api';
+import { mapRx } from '../../services/api/sales';
+
+interface FamilyMember {
+  patient_id: string | null;
+  name: string | null;
+  relation: string | null;
+  prescription_count: number;
+  valid_count: number;
+  prescriptions: Prescription[];
+}
 
 interface PrescriptionSelectModalProps {
   onClose: () => void;
@@ -23,34 +38,48 @@ export function PrescriptionSelectModal({
   onSelect,
   onCreateNew,
   patient,
-  customerId: _customerId,
+  customerId,
   currentPrescriptionId,
 }: PrescriptionSelectModalProps) {
-  const [prescriptions, setPrescriptions] = useState<Prescription[]>([]);
+  const [members, setMembers] = useState<FamilyMember[]>([]);
+  const [selectedPatientId, setSelectedPatientId] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
-  // Use patient ID if available, otherwise fall back to customer ID
-  const lookupId = patient?.id || _customerId;
-
   useEffect(() => {
-    if (lookupId) {
-      loadPrescriptions();
+    if (customerId) {
+      loadFamily();
     }
-  }, [lookupId]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [customerId]);
 
-  const loadPrescriptions = async () => {
-    if (!lookupId) return;
-
+  const loadFamily = async () => {
+    if (!customerId) return;
     setIsLoading(true);
     setErrorMsg(null);
-
     try {
-      const response = await prescriptionApi.getPrescriptions(lookupId);
-      setPrescriptions(response.prescriptions || response || []);
+      const res = await prescriptionApi.getFamilyRx(customerId);
+      const mapped: FamilyMember[] = (res.members || []).map((m) => ({
+        patient_id: m.patient_id,
+        name: m.name,
+        relation: m.relation,
+        prescription_count: m.prescription_count,
+        valid_count: m.valid_count,
+        // Normalise each Rx to the camelCase Prescription shape onSelect expects.
+        prescriptions: (m.prescriptions || []).map(mapRx) as Prescription[],
+      }));
+      setMembers(mapped);
+
+      // Pre-select: the patient passed in from POS (if it matches a member),
+      // otherwise the lone member when there's only one. Always still show the
+      // Rx list so the operator confirms which prescription to attach.
+      const preferred =
+        (patient?.id && mapped.find((m) => m.patient_id === patient.id)?.patient_id) ||
+        (mapped.length === 1 ? mapped[0].patient_id : null);
+      setSelectedPatientId(preferred ?? null);
     } catch {
       setErrorMsg('Failed to load prescriptions. Please try again.');
-      setPrescriptions([]);
+      setMembers([]);
     } finally {
       setIsLoading(false);
     }
@@ -61,30 +90,44 @@ export function PrescriptionSelectModal({
     return value >= 0 ? `+${value.toFixed(2)}` : value.toFixed(2);
   };
 
-  const isExpired = (prescription: Prescription) => {
+  // The /family payload already annotates each Rx with expiry_date + is_valid
+  // (mapRx preserves them as snake_case). Prefer those; fall back to the
+  // testDate + validity recompute for any row that lacks them.
+  const expiryDateOf = (prescription: any): Date => {
+    const serverExpiry = prescription.expiry_date || prescription.expiryDate;
+    if (serverExpiry) {
+      const d = new Date(serverExpiry);
+      if (!isNaN(d.getTime())) return d;
+    }
     const testDate = new Date(prescription.testDate);
     const validityMonths = prescription.validityMonths || 12;
     const expiryDate = new Date(testDate);
     expiryDate.setMonth(expiryDate.getMonth() + validityMonths);
-    return new Date() > expiryDate;
+    return expiryDate;
   };
 
-  const getDaysUntilExpiry = (prescription: Prescription) => {
-    const testDate = new Date(prescription.testDate);
-    const validityMonths = prescription.validityMonths || 12;
-    const expiryDate = new Date(testDate);
-    expiryDate.setMonth(expiryDate.getMonth() + validityMonths);
-    const diff = expiryDate.getTime() - new Date().getTime();
+  const isExpired = (prescription: any) => {
+    if (prescription.is_valid === false) return true;
+    return new Date() > expiryDateOf(prescription);
+  };
+
+  const getDaysUntilExpiry = (prescription: any) => {
+    const diff = expiryDateOf(prescription).getTime() - new Date().getTime();
     return Math.ceil(diff / (1000 * 60 * 60 * 24));
   };
 
   const formatDate = (dateString: string) => {
-    return new Date(dateString).toLocaleDateString('en-IN', {
+    if (!dateString) return '—';
+    const d = new Date(dateString);
+    if (isNaN(d.getTime())) return '—';
+    return d.toLocaleDateString('en-IN', {
       day: '2-digit',
       month: 'short',
       year: 'numeric',
     });
   };
+
+  const selectedMember = members.find((m) => m.patient_id === selectedPatientId) || null;
 
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
@@ -92,14 +135,29 @@ export function PrescriptionSelectModal({
         {/* Header */}
         <div className="flex items-center justify-between p-4 border-b border-gray-200 bg-gray-50">
           <div className="flex items-center gap-3">
+            {/* Back to patient picker from the Rx list (only when more than one
+                patient exists — a single-patient account has nothing to go back to). */}
+            {selectedPatientId && members.length > 1 && (
+              <button
+                onClick={() => setSelectedPatientId(null)}
+                className="p-2 hover:bg-gray-200 rounded-lg transition-colors"
+                title="Back to patient list"
+              >
+                <ChevronLeft className="w-5 h-5 text-gray-500" />
+              </button>
+            )}
             <div className="p-2 bg-blue-100 rounded-lg">
-              <Eye className="w-5 h-5 text-blue-600" />
+              {selectedPatientId ? <Eye className="w-5 h-5 text-blue-600" /> : <Users className="w-5 h-5 text-blue-600" />}
             </div>
             <div>
-              <h2 className="text-lg font-semibold text-gray-900">Select Prescription</h2>
-              {patient && (
-                <p className="text-xs text-gray-500">for {patient.name}</p>
-              )}
+              <h2 className="text-lg font-semibold text-gray-900">
+                {selectedPatientId ? 'Select Prescription' : 'Select Patient'}
+              </h2>
+              <p className="text-xs text-gray-500">
+                {selectedPatientId
+                  ? `for ${selectedMember?.name || 'patient'}${selectedMember?.relation ? ` · ${selectedMember.relation}` : ''}`
+                  : 'Which family member is this prescription for?'}
+              </p>
             </div>
           </div>
           <button onClick={onClose} className="p-2 hover:bg-gray-200 rounded-lg transition-colors">
@@ -109,12 +167,7 @@ export function PrescriptionSelectModal({
 
         {/* Content */}
         <div className="flex-1 overflow-y-auto p-4">
-          {/* The earlier short-circuit on `!patient` blocked anyone whose
-              POS flow only set the customer (no per-patient pick yet) —
-              the modal said "select a patient first" with no picker.
-              Customer-id lookup already covers the patient-less case, so
-              fall through unless we have neither. */}
-          {!lookupId ? (
+          {!customerId ? (
             <div className="flex flex-col items-center justify-center h-48 text-gray-500">
               <User className="w-12 h-12 mb-3 opacity-50" />
               <p>No customer selected</p>
@@ -129,20 +182,46 @@ export function PrescriptionSelectModal({
               <AlertTriangle className="w-12 h-12 mb-3 opacity-50" />
               <p>{errorMsg}</p>
             </div>
-          ) : prescriptions.length === 0 ? (
-            <div className="flex flex-col items-center justify-center h-48 text-gray-500">
-              <FileText className="w-12 h-12 mb-3 opacity-50" />
-              <p>No prescriptions found</p>
-              <p className="text-sm mb-4">Create a new prescription for this patient</p>
-              <button
-                onClick={onCreateNew}
-                className="btn-primary flex items-center gap-2"
-              >
-                <Plus className="w-4 h-4" />
-                Create New Prescription
-              </button>
-            </div>
-          ) : (
+          ) : !selectedPatientId ? (
+            /* ---------- STEP 1: PATIENT PICKER ---------- */
+            members.length === 0 ? (
+              <div className="flex flex-col items-center justify-center h-48 text-gray-500">
+                <Users className="w-12 h-12 mb-3 opacity-50" />
+                <p>No family members on this account</p>
+                <p className="text-sm mb-4">Create a new prescription for this customer</p>
+                <button onClick={onCreateNew} className="btn-primary flex items-center gap-2">
+                  <Plus className="w-4 h-4" />
+                  Create New Prescription
+                </button>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {members.map((member) => (
+                  <button
+                    key={member.patient_id || 'unlinked'}
+                    onClick={() => setSelectedPatientId(member.patient_id)}
+                    className="w-full flex items-center justify-between gap-3 p-4 border border-gray-200 rounded-lg hover:border-bv-red-300 hover:bg-gray-50 transition-colors text-left"
+                  >
+                    <div className="flex items-center gap-3">
+                      <div className="w-10 h-10 rounded-full bg-blue-100 flex items-center justify-center">
+                        <User className="w-5 h-5 text-blue-600" />
+                      </div>
+                      <div>
+                        <p className="font-medium text-gray-900">{member.name || 'Unlinked patient'}</p>
+                        <p className="text-xs text-gray-500">
+                          {member.relation || 'Patient'} · {member.prescription_count} Rx
+                          {member.valid_count > 0 && (
+                            <span className="text-green-600"> · {member.valid_count} valid</span>
+                          )}
+                        </p>
+                      </div>
+                    </div>
+                    <ChevronLeft className="w-4 h-4 text-gray-400 rotate-180" />
+                  </button>
+                ))}
+              </div>
+            )
+          ) : /* ---------- STEP 2: PRESCRIPTION PICKER ---------- */ (
             <div className="space-y-3">
               {/* Create New Option */}
               <button
@@ -158,129 +237,138 @@ export function PrescriptionSelectModal({
                 </div>
               </button>
 
-              {/* Existing Prescriptions */}
-              {prescriptions.map((prescription) => {
-                const expired = isExpired(prescription);
-                const daysLeft = getDaysUntilExpiry(prescription);
-                const isSelected = prescription.id === currentPrescriptionId;
-                const nearExpiry = !expired && daysLeft <= 30;
+              {(selectedMember?.prescriptions.length || 0) === 0 ? (
+                <div className="flex flex-col items-center justify-center py-10 text-gray-500">
+                  <FileText className="w-12 h-12 mb-3 opacity-50" />
+                  <p>No prescriptions for {selectedMember?.name || 'this patient'}</p>
+                  <p className="text-sm">Create a new one above.</p>
+                </div>
+              ) : (
+                (selectedMember?.prescriptions || []).map((prescription) => {
+                  const expired = isExpired(prescription);
+                  const daysLeft = getDaysUntilExpiry(prescription);
+                  const isSelected = prescription.id === currentPrescriptionId;
+                  const nearExpiry = !expired && daysLeft <= 30;
+                  const rightEye = prescription.rightEye || ({} as Prescription['rightEye']);
+                  const leftEye = prescription.leftEye || ({} as Prescription['leftEye']);
 
-                return (
-                  <button
-                    key={prescription.id}
-                    onClick={() => !expired && onSelect(prescription)}
-                    disabled={expired}
-                    className={`w-full p-4 border rounded-lg text-left transition-all ${
-                      expired
-                        ? 'border-gray-200 bg-gray-50 opacity-60 cursor-not-allowed'
-                        : isSelected
-                        ? 'border-bv-red-500 bg-bv-red-50 ring-2 ring-bv-red-200'
-                        : 'border-gray-200 hover:border-bv-red-300 hover:bg-gray-50'
-                    }`}
-                  >
-                    {/* Header */}
-                    <div className="flex items-start justify-between mb-3">
-                      <div className="flex items-center gap-2">
-                        <Calendar className="w-4 h-4 text-gray-500" />
-                        <span className="font-medium text-gray-900">{formatDate(prescription.testDate)}</span>
-                        {prescription.isExternal ? (
-                          <span className="px-2 py-0.5 text-xs bg-purple-100 text-purple-700 rounded">External</span>
-                        ) : (
-                          <span className="px-2 py-0.5 text-xs bg-blue-100 text-blue-700 rounded">In-Store</span>
-                        )}
-                      </div>
-                      <div className="flex items-center gap-2">
-                        {expired ? (
-                          <span className="flex items-center gap-1 text-xs text-red-600">
-                            <AlertTriangle className="w-3 h-3" />
-                            Expired
-                          </span>
-                        ) : nearExpiry ? (
-                          <span className="flex items-center gap-1 text-xs text-amber-600">
-                            <Clock className="w-3 h-3" />
-                            Expires in {daysLeft} days
-                          </span>
-                        ) : (
-                          <span className="flex items-center gap-1 text-xs text-green-600">
-                            <Check className="w-3 h-3" />
-                            Valid
-                          </span>
-                        )}
-                      </div>
-                    </div>
-
-                    {/* Prescription Details */}
-                    <div className="grid grid-cols-2 gap-4 mb-3">
-                      {/* Right Eye */}
-                      <div className="bg-gray-50 rounded-lg p-3">
-                        <p className="text-xs text-gray-500 mb-1">Right Eye (OD)</p>
-                        <div className="flex gap-3 text-sm">
-                          <div>
-                            <span className="text-gray-500 text-xs">SPH</span>
-                            <p className="font-medium">{formatPower(prescription.rightEye.sphere)}</p>
-                          </div>
-                          <div>
-                            <span className="text-gray-500 text-xs">CYL</span>
-                            <p className="font-medium">{formatPower(prescription.rightEye.cylinder)}</p>
-                          </div>
-                          <div>
-                            <span className="text-gray-500 text-xs">AXIS</span>
-                            <p className="font-medium">{prescription.rightEye.axis || '-'}</p>
-                          </div>
-                          {prescription.rightEye.add && (
-                            <div>
-                              <span className="text-gray-500 text-xs">ADD</span>
-                              <p className="font-medium">{formatPower(prescription.rightEye.add)}</p>
-                            </div>
+                  return (
+                    <button
+                      key={prescription.id}
+                      onClick={() => !expired && onSelect(prescription)}
+                      disabled={expired}
+                      className={`w-full p-4 border rounded-lg text-left transition-all ${
+                        expired
+                          ? 'border-gray-200 bg-gray-50 opacity-60 cursor-not-allowed'
+                          : isSelected
+                          ? 'border-bv-red-500 bg-bv-red-50 ring-2 ring-bv-red-200'
+                          : 'border-gray-200 hover:border-bv-red-300 hover:bg-gray-50'
+                      }`}
+                    >
+                      {/* Header */}
+                      <div className="flex items-start justify-between mb-3">
+                        <div className="flex items-center gap-2">
+                          <Calendar className="w-4 h-4 text-gray-500" />
+                          <span className="font-medium text-gray-900">{formatDate(prescription.testDate)}</span>
+                          {prescription.isExternal ? (
+                            <span className="px-2 py-0.5 text-xs bg-purple-100 text-purple-700 rounded">External</span>
+                          ) : (
+                            <span className="px-2 py-0.5 text-xs bg-blue-100 text-blue-700 rounded">In-Store</span>
+                          )}
+                        </div>
+                        <div className="flex items-center gap-2">
+                          {expired ? (
+                            <span className="flex items-center gap-1 text-xs text-red-600">
+                              <AlertTriangle className="w-3 h-3" />
+                              Expired
+                            </span>
+                          ) : nearExpiry ? (
+                            <span className="flex items-center gap-1 text-xs text-amber-600">
+                              <Clock className="w-3 h-3" />
+                              Expires in {daysLeft} days
+                            </span>
+                          ) : (
+                            <span className="flex items-center gap-1 text-xs text-green-600">
+                              <Check className="w-3 h-3" />
+                              Valid
+                            </span>
                           )}
                         </div>
                       </div>
 
-                      {/* Left Eye */}
-                      <div className="bg-gray-50 rounded-lg p-3">
-                        <p className="text-xs text-gray-500 mb-1">Left Eye (OS)</p>
-                        <div className="flex gap-3 text-sm">
-                          <div>
-                            <span className="text-gray-500 text-xs">SPH</span>
-                            <p className="font-medium">{formatPower(prescription.leftEye.sphere)}</p>
-                          </div>
-                          <div>
-                            <span className="text-gray-500 text-xs">CYL</span>
-                            <p className="font-medium">{formatPower(prescription.leftEye.cylinder)}</p>
-                          </div>
-                          <div>
-                            <span className="text-gray-500 text-xs">AXIS</span>
-                            <p className="font-medium">{prescription.leftEye.axis || '-'}</p>
-                          </div>
-                          {prescription.leftEye.add && (
+                      {/* Prescription Details */}
+                      <div className="grid grid-cols-2 gap-4 mb-3">
+                        {/* Right Eye */}
+                        <div className="bg-gray-50 rounded-lg p-3">
+                          <p className="text-xs text-gray-500 mb-1">Right Eye (OD)</p>
+                          <div className="flex gap-3 text-sm">
                             <div>
-                              <span className="text-gray-500 text-xs">ADD</span>
-                              <p className="font-medium">{formatPower(prescription.leftEye.add)}</p>
+                              <span className="text-gray-500 text-xs">SPH</span>
+                              <p className="font-medium">{formatPower(rightEye.sphere)}</p>
                             </div>
-                          )}
+                            <div>
+                              <span className="text-gray-500 text-xs">CYL</span>
+                              <p className="font-medium">{formatPower(rightEye.cylinder)}</p>
+                            </div>
+                            <div>
+                              <span className="text-gray-500 text-xs">AXIS</span>
+                              <p className="font-medium">{rightEye.axis || '-'}</p>
+                            </div>
+                            {rightEye.add && (
+                              <div>
+                                <span className="text-gray-500 text-xs">ADD</span>
+                                <p className="font-medium">{formatPower(rightEye.add)}</p>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* Left Eye */}
+                        <div className="bg-gray-50 rounded-lg p-3">
+                          <p className="text-xs text-gray-500 mb-1">Left Eye (OS)</p>
+                          <div className="flex gap-3 text-sm">
+                            <div>
+                              <span className="text-gray-500 text-xs">SPH</span>
+                              <p className="font-medium">{formatPower(leftEye.sphere)}</p>
+                            </div>
+                            <div>
+                              <span className="text-gray-500 text-xs">CYL</span>
+                              <p className="font-medium">{formatPower(leftEye.cylinder)}</p>
+                            </div>
+                            <div>
+                              <span className="text-gray-500 text-xs">AXIS</span>
+                              <p className="font-medium">{leftEye.axis || '-'}</p>
+                            </div>
+                            {leftEye.add && (
+                              <div>
+                                <span className="text-gray-500 text-xs">ADD</span>
+                                <p className="font-medium">{formatPower(leftEye.add)}</p>
+                              </div>
+                            )}
+                          </div>
                         </div>
                       </div>
-                    </div>
 
-                    {/* Footer Info */}
-                    <div className="flex items-center justify-between text-xs text-gray-500">
-                      <span>
-                        {prescription.isExternal
-                          ? `Source: ${prescription.externalSource}`
-                          : `By: ${prescription.optometristName}`}
-                      </span>
-                      <span>PD: {prescription.rightEye.pd}/{prescription.leftEye.pd}</span>
-                    </div>
+                      {/* Footer Info */}
+                      <div className="flex items-center justify-between text-xs text-gray-500">
+                        <span>
+                          {prescription.isExternal
+                            ? `Source: ${prescription.externalSource}`
+                            : `By: ${prescription.optometristName}`}
+                        </span>
+                        <span>PD: {rightEye.pd}/{leftEye.pd}</span>
+                      </div>
 
-                    {/* Recommendation */}
-                    {prescription.recommendation && (
-                      <p className="mt-2 text-xs text-gray-600 bg-yellow-50 p-2 rounded">
-                        💡 {prescription.recommendation}
-                      </p>
-                    )}
-                  </button>
-                );
-              })}
+                      {/* Recommendation */}
+                      {prescription.recommendation && (
+                        <p className="mt-2 text-xs text-gray-600 bg-yellow-50 p-2 rounded">
+                          {prescription.recommendation}
+                        </p>
+                      )}
+                    </button>
+                  );
+                })
+              )}
             </div>
           )}
         </div>

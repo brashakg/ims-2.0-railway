@@ -6,6 +6,7 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import { useToast } from '../../context/ToastContext';
+import { validateGstin, validateIfsc, firstError } from '../../utils/validators';
 import { entitiesApi, type Entity, type GstinEntry } from '../../services/api/entities';
 import { storeApi } from '../../services/api';
 
@@ -106,6 +107,11 @@ export function EntitiesPage() {
       toast.error('Entity name is required');
       return;
     }
+    const fieldErr = firstError(
+      ...(form.gstins || []).map((g) => validateGstin(g.gstin)),
+      validateIfsc(form.bank_ifsc),
+    );
+    if (fieldErr) { toast.error(fieldErr); return; }
     setSaving(true);
     try {
       if (editing) {
@@ -167,6 +173,7 @@ export function EntitiesPage() {
         ) : entities.length === 0 ? (
           <div className="p-6 text-center text-gray-500">No entities yet. Add your first legal entity.</div>
         ) : (
+          <div className="overflow-x-auto">
           <table className="min-w-full text-sm">
             <thead className="bg-gray-50 text-gray-600">
               <tr>
@@ -199,6 +206,7 @@ export function EntitiesPage() {
               ))}
             </tbody>
           </table>
+          </div>
         )}
       </div>
 

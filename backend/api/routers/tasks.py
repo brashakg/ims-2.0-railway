@@ -5,7 +5,7 @@ Complete task management with auto-escalation and SOP templates
 """
 
 from fastapi import APIRouter, HTTPException, Depends, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from typing import Optional, List, Dict
 from datetime import datetime, timedelta
 import uuid
@@ -43,6 +43,15 @@ from ..services.sop_checklist import (
 
 router = APIRouter()
 
+# Valid priority codes (P0=critical, P4=low).
+VALID_PRIORITIES = {"P0", "P1", "P2", "P3", "P4"}
+
+# Valid task statuses.
+VALID_STATUSES = {"OPEN", "IN_PROGRESS", "COMPLETED", "ESCALATED", "CANCELLED"}
+
+# Statuses from which no further lifecycle transitions are allowed.
+TERMINAL_STATUSES = {"COMPLETED", "CANCELLED"}
+
 
 # ============================================================================
 # SCHEMAS
@@ -54,7 +63,7 @@ class TaskCreate(BaseModel):
     description: Optional[str] = None
     category: str = Field(default="General")
     priority: str = Field(default="P3")  # P0-P4
-    assigned_to: str
+    assigned_to: str = Field(..., min_length=1)
     # Canonical field is `due_at`; `due_date` accepted for backwards compat.
     due_date: Optional[datetime] = None
     due_at: Optional[datetime] = None
@@ -62,6 +71,26 @@ class TaskCreate(BaseModel):
     # accepted for backwards compat.
     type: Optional[str] = None
     source: Optional[str] = None
+
+    @model_validator(mode="after")
+    def _validate_fields(self) -> "TaskCreate":
+        # Priority must be one of P0-P4.
+        if self.priority and self.priority.upper() not in VALID_PRIORITIES:
+            raise ValueError(
+                f"Invalid priority '{self.priority}'. Must be one of {sorted(VALID_PRIORITIES)}"
+            )
+        # due_at must not be before the current moment — creating a task that is
+        # already overdue by days/weeks is almost certainly a client bug.  A
+        # 5-minute grace covers minor clock drift and quick unit-test runs.
+        due = self.due_at or self.due_date
+        if due is not None:
+            due_naive = due.replace(tzinfo=None) if due.tzinfo else due
+            if due_naive < datetime.now() - timedelta(minutes=5):
+                raise ValueError(
+                    "due_at must not be in the past. "
+                    "Use a future date/time for the task deadline."
+                )
+        return self
 
 
 class TaskUpdate(BaseModel):
@@ -73,9 +102,23 @@ class TaskUpdate(BaseModel):
     assigned_to: Optional[str] = None
     due_at: Optional[datetime] = None
 
+    @model_validator(mode="after")
+    def _validate_fields(self) -> "TaskUpdate":
+        if self.priority and self.priority.upper() not in VALID_PRIORITIES:
+            raise ValueError(
+                f"Invalid priority '{self.priority}'. Must be one of {sorted(VALID_PRIORITIES)}"
+            )
+        if self.status:
+            norm = canon_status(self.status)
+            if norm not in VALID_STATUSES:
+                raise ValueError(
+                    f"Invalid status '{self.status}'. Must be one of {sorted(VALID_STATUSES)}"
+                )
+        return self
+
 
 class TaskComplete(BaseModel):
-    completion_notes: str
+    completion_notes: str = Field(..., min_length=3)
 
 
 class ChecklistItemComplete(BaseModel):
@@ -427,7 +470,13 @@ async def update_task(
     update: TaskUpdate,
     current_user: dict = Depends(get_current_user),
 ):
-    """Update task (status, notes, reassign)"""
+    """Update task (status, notes, reassign).
+
+    Lifecycle guards:
+    * Terminal tasks (COMPLETED / CANCELLED) cannot be modified at all.
+    * Reassignment via PATCH is blocked on terminal tasks.
+    * Backward status transitions (e.g. COMPLETED -> OPEN) are rejected.
+    """
     repo = get_task_repository()
 
     if repo is None:
@@ -438,6 +487,15 @@ async def update_task(
     if not existing:
         raise HTTPException(status_code=404, detail="Task not found")
 
+    current_status = canon_status(existing.get("status"))
+
+    # Block ALL modifications to terminal tasks to prevent history rewriting.
+    if current_status in TERMINAL_STATUSES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot modify a task in '{current_status}' status.",
+        )
+
     update_data = {}
 
     if update.title:
@@ -447,7 +505,30 @@ async def update_task(
     if update.priority:
         update_data["priority"] = update.priority
     if update.status:
-        update_data["status"] = canon_status(update.status)
+        new_status = canon_status(update.status)
+        # Enforce valid forward-only transitions.
+        # Allowed: any non-terminal -> any other non-terminal (e.g. OPEN->IN_PROGRESS,
+        # ESCALATED->IN_PROGRESS after de-escalation), or non-terminal -> terminal.
+        # Blocked: moving OUT of a terminal status (caught above) or setting a
+        # terminal status without going through the dedicated /complete endpoint
+        # (which records completed_at / completed_by).  COMPLETED is routed to
+        # POST /{id}/complete; CANCELLED is allowed here (manager can cancel).
+        if new_status == "COMPLETED":
+            raise HTTPException(
+                status_code=400,
+                detail="Use POST /{task_id}/complete to complete a task (records "
+                "completion notes, completed_by, completed_at).",
+            )
+        update_data["status"] = new_status
+        update_data["history"] = (existing.get("history") or []) + [
+            {
+                "action": "status_change",
+                "from": current_status,
+                "to": new_status,
+                "by": current_user.get("user_id"),
+                "at": datetime.now(),
+            }
+        ]
     if update.notes:
         update_data["notes"] = update.notes
     if update.assigned_to:
@@ -480,8 +561,14 @@ async def complete_task(
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
 
-    if canon_status(task.get("status")) == "COMPLETED":
-        raise HTTPException(status_code=400, detail="Task already completed")
+    current_status = canon_status(task.get("status"))
+
+    # Block re-completing or completing a cancelled task.
+    if current_status in TERMINAL_STATUSES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Task is already in '{current_status}' status and cannot be completed.",
+        )
 
     now = datetime.now()
     result = repo.update(
@@ -492,6 +579,16 @@ async def complete_task(
             "updated_at": now,
             "completion_notes": completion.completion_notes,
             "completed_by": current_user.get("user_id"),
+            "history": (task.get("history") or [])
+            + [
+                {
+                    "action": "completed",
+                    "from": current_status,
+                    "by": current_user.get("user_id"),
+                    "notes": completion.completion_notes,
+                    "at": now,
+                }
+            ],
         },
     )
 
@@ -664,6 +761,21 @@ async def acknowledge_task(
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
 
+    current_status = canon_status(task.get("status"))
+
+    # Only OPEN tasks need to be acknowledged (idempotent for IN_PROGRESS).
+    if current_status in TERMINAL_STATUSES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot acknowledge a task in '{current_status}' status.",
+        )
+    if current_status == "IN_PROGRESS":
+        return {
+            "task_id": task_id,
+            "status": "IN_PROGRESS",
+            "message": "Task already acknowledged",
+        }
+
     now = datetime.now()
     if repo.update(
         task_id,
@@ -700,6 +812,13 @@ async def escalate_task(
     task = repo.find_by_id(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
+
+    current_status = canon_status(task.get("status"))
+    if current_status in TERMINAL_STATUSES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot escalate a task in '{current_status}' status.",
+        )
 
     now = datetime.now()
     by = current_user.get("user_id")
@@ -1089,10 +1208,29 @@ async def update_sla_config(
 # /sop-checklist endpoints further below.
 
 
+VALID_SOP_CATEGORIES = {"Operations", "Finance", "Sales", "Clinical", "Workshop"}
+VALID_SOP_FREQUENCIES = {"DAILY", "WEEKLY", "MONTHLY", "AD_HOC"}
+
+
 class SopStep(BaseModel):
     step_number: int = Field(..., ge=1)
     instruction: str = Field(..., min_length=1)
     warning: Optional[str] = None
+
+
+def _validate_sop_steps(steps: Optional[List[SopStep]]) -> Optional[List[SopStep]]:
+    """Raise ValueError if any step_numbers are duplicated."""
+    if not steps:
+        return steps
+    seen = set()
+    for s in steps:
+        if s.step_number in seen:
+            raise ValueError(
+                f"Duplicate step_number {s.step_number} in SOP steps. "
+                "Each step must have a unique step_number."
+            )
+        seen.add(s.step_number)
+    return steps
 
 
 class SopTemplateCreate(BaseModel):
@@ -1106,6 +1244,21 @@ class SopTemplateCreate(BaseModel):
     assigned_users: List[str] = []
     store_id: Optional[str] = None
 
+    @model_validator(mode="after")
+    def _validate_fields(self) -> "SopTemplateCreate":
+        if self.category not in VALID_SOP_CATEGORIES:
+            raise ValueError(
+                f"Invalid category '{self.category}'. "
+                f"Must be one of {sorted(VALID_SOP_CATEGORIES)}"
+            )
+        if self.frequency.upper() not in VALID_SOP_FREQUENCIES:
+            raise ValueError(
+                f"Invalid frequency '{self.frequency}'. "
+                f"Must be one of {sorted(VALID_SOP_FREQUENCIES)}"
+            )
+        _validate_sop_steps(self.steps)
+        return self
+
 
 class SopTemplateUpdate(BaseModel):
     title: Optional[str] = None
@@ -1117,6 +1270,21 @@ class SopTemplateUpdate(BaseModel):
     assigned_roles: Optional[List[str]] = None
     assigned_users: Optional[List[str]] = None
     is_active: Optional[bool] = None
+
+    @model_validator(mode="after")
+    def _validate_fields(self) -> "SopTemplateUpdate":
+        if self.category is not None and self.category not in VALID_SOP_CATEGORIES:
+            raise ValueError(
+                f"Invalid category '{self.category}'. "
+                f"Must be one of {sorted(VALID_SOP_CATEGORIES)}"
+            )
+        if self.frequency is not None and self.frequency.upper() not in VALID_SOP_FREQUENCIES:
+            raise ValueError(
+                f"Invalid frequency '{self.frequency}'. "
+                f"Must be one of {sorted(VALID_SOP_FREQUENCIES)}"
+            )
+        _validate_sop_steps(self.steps)
+        return self
 
 
 def _sop_collection():
@@ -1423,6 +1591,17 @@ async def toggle_sop_checklist_item(
     now = datetime.now()
     steps = tpl.get("steps") or []
 
+    # Validate that the requested step_number actually exists in this template.
+    valid_step_numbers = {s.get("step_number") for s in steps}
+    if payload.step_number not in valid_step_numbers:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"step_number {payload.step_number} does not exist in template "
+                f"'{payload.template_id}'. Valid steps: {sorted(valid_step_numbers)}"
+            ),
+        )
+
     existing = ccol.find_one(
         {"template_id": payload.template_id, "store_id": active_store, "date": day}
     )
@@ -1537,7 +1716,7 @@ router.add_api_route("/{task_id}", get_task, methods=["GET"])
 
 
 class TaskReassign(BaseModel):
-    assigned_to: str
+    assigned_to: str = Field(..., min_length=1)
     reason: Optional[str] = None
 
 
@@ -1570,8 +1749,12 @@ async def start_task(
             "status": "IN_PROGRESS",
             "message": "Already in progress",
         }
-    if existing == "COMPLETED":
-        raise HTTPException(status_code=400, detail="Task already completed")
+    # Block starting a task that is already terminal (COMPLETED or CANCELLED).
+    if existing in TERMINAL_STATUSES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot start a task in '{existing}' status.",
+        )
     now = datetime.now()
     repo.update(
         task_id,
@@ -1598,8 +1781,12 @@ async def reassign_task(
     task = repo.find_by_id(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
-    if canon_status(task.get("status")) == "COMPLETED":
-        raise HTTPException(status_code=400, detail="Cannot reassign a completed task")
+    task_status = canon_status(task.get("status"))
+    if task_status in TERMINAL_STATUSES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot reassign a task in '{task_status}' status.",
+        )
     history_entry = {
         "action": "reassigned",
         "from": task.get("assigned_to"),

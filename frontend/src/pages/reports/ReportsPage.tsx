@@ -1177,7 +1177,7 @@ export function ReportsPage() {
                 {discountAnalysis.by_category?.slice(0, 3).map((cat: any, idx: number) => (
                   <div key={idx} className="flex items-center justify-between text-sm">
                     <span className="text-gray-600">{cat.category}</span>
-                    <span className="text-bv-red-400">₹{(cat.total_discount / 1000).toFixed(1)}K</span>
+                    <span className="text-bv-red-600">₹{(cat.total_discount / 1000).toFixed(1)}K</span>
                   </div>
                 ))}
               </div>

@@ -6,7 +6,8 @@ import { useState, useEffect, useContext } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import AuthContext from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
-import { Eye, EyeOff, Store, AlertCircle, RefreshCw } from 'lucide-react';
+import { Eye, EyeOff, AlertCircle, RefreshCw } from 'lucide-react';
+import { getBrandAssets } from '../../utils/brandAssets';
 
 export function LoginPage() {
   const authContext = useContext(AuthContext);
@@ -101,18 +102,22 @@ export function LoginPage() {
   return (
     <div className="min-h-screen bg-gradient-to-br from-gray-50 to-gray-100 flex items-center justify-center p-4">
       <div className="w-full max-w-md">
-        {/* Logo */}
+        {/* Real brand lockup — Better Vision (house brand). Hi-res source so it
+            stays crisp at a prominent size; ~h-24 fills the card better than the
+            old h-14 which left the page looking empty. */}
         <div className="text-center mb-8">
-          <div className="inline-flex items-center justify-center w-16 h-16 bg-bv-red-600 rounded-2xl mb-4">
-            <Store className="w-8 h-8 text-gray-900" />
-          </div>
-          <h1 className="text-2xl font-bold text-gray-900">IMS 2.0</h1>
-          <p className="text-gray-500 mt-1">Retail Operating System</p>
+          <img
+            src={getBrandAssets('bv').lockupHiRes}
+            alt="Better Vision"
+            className="h-20 sm:h-24 w-auto max-w-[280px] mx-auto mb-4"
+            style={{ objectFit: 'contain' }}
+          />
+          <p className="text-gray-500 text-sm tracking-wide">Retail Operating System</p>
         </div>
 
         {/* Login Card */}
         <div className="card">
-          <h1 className="text-2xl font-semibold text-gray-900 mb-6">IMS 2.0 Login</h1>
+          <h1 className="text-2xl font-semibold text-gray-900 mb-6">Sign in</h1>
           <p className="text-sm text-gray-600 mb-6">Enter your credentials to sign in to your account</p>
 
           {/* Error message */}

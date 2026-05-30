@@ -355,7 +355,7 @@ export function LensPowerGridWidget() {
   return (
     <div className="bg-white rounded-lg border border-gray-200 shadow-sm overflow-x-auto p-4">
       <h3 className="font-semibold text-gray-900 mb-4 flex items-center gap-2">
-        <Grid3x3 className="w-5 h-5 text-bv-gold-500" />
+        <Grid3x3 className="w-5 h-5 text-bv-red-500" />
         Lens Power Grid (SPH × CYL)
       </h3>
 

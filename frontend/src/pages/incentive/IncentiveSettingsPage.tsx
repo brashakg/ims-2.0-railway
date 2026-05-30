@@ -658,7 +658,7 @@ export function IncentiveSettingsPage() {
             <div className="grid grid-cols-2 gap-6">
               <div>
                 <div className="text-xs font-medium text-gray-700 mb-2">Growth Targets</div>
-                <div className="grid grid-cols-3 gap-3">
+                <div className="grid grid-cols-1 tablet:grid-cols-3 gap-3">
                   {LEVELS.map(lvl => (
                     <label key={lvl} className="block">
                       <div className="text-xs text-gray-500 mb-1">{lvl}</div>
@@ -680,7 +680,7 @@ export function IncentiveSettingsPage() {
               </div>
               <div>
                 <div className="text-xs font-medium text-gray-700 mb-2">Base Rates</div>
-                <div className="grid grid-cols-3 gap-3">
+                <div className="grid grid-cols-1 tablet:grid-cols-3 gap-3">
                   {LEVELS.map(lvl => (
                     <label key={lvl} className="block">
                       <div className="text-xs text-gray-500 mb-1">{lvl}</div>

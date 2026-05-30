@@ -170,11 +170,11 @@ export default function OutstandingPaymentsReport() {
         </div>
 
         {/* Age buckets */}
-        <div className="grid grid-cols-5 gap-2">
+        <div className="grid grid-cols-3 tablet:grid-cols-5 gap-2">
           {(Object.entries(buckets) as [AgeBucket, { count: number; total: number }][]).map(([bucket, data]) => (
             <button key={bucket} onClick={() => setSelectedBucket(selectedBucket === bucket ? 'ALL' : bucket)}
               className={clsx('p-2.5 rounded-lg border text-center transition-all',
-                selectedBucket === bucket ? 'ring-2 ring-bv-gold-500' : '',
+                selectedBucket === bucket ? 'ring-2 ring-bv-red-500' : '',
                 BUCKET_COLORS[bucket])}>
               <p className="text-[10px] font-medium">{bucket} days</p>
               <p className="text-sm font-bold">{fc(data.total)}</p>
@@ -200,7 +200,7 @@ export default function OutstandingPaymentsReport() {
           ]).map(s => (
             <button key={s.id} onClick={() => toggleSort(s.id)}
               className={clsx('px-3 py-2 rounded-lg text-xs font-medium border transition-all flex items-center gap-1',
-                sortBy === s.id ? 'bg-bv-gold-50 border-bv-red-300 text-bv-gold-700' : 'border-gray-200 text-gray-500')}>
+                sortBy === s.id ? 'bg-bv-red-50 border-bv-red-300 text-bv-red-700' : 'border-gray-200 text-gray-500')}>
               {s.label}
               {sortBy === s.id && (sortDir === 'desc' ? <ChevronDown className="w-3 h-3" /> : <ChevronUp className="w-3 h-3" />)}
             </button>
@@ -210,7 +210,7 @@ export default function OutstandingPaymentsReport() {
 
       {/* Orders List */}
       {isLoading ? (
-        <div className="text-center py-12"><div className="w-8 h-8 border-2 border-gray-200 border-t-bv-gold-500 rounded-full animate-spin mx-auto" /></div>
+        <div className="text-center py-12"><div className="w-8 h-8 border-2 border-gray-200 border-t-bv-red-500 rounded-full animate-spin mx-auto" /></div>
       ) : filtered.length === 0 ? (
         <div className="text-center py-12 text-gray-500">
           <IndianRupee className="w-12 h-12 mx-auto mb-2 opacity-50" />
@@ -254,7 +254,7 @@ export default function OutstandingPaymentsReport() {
                 </div>
 
                 {/* Action */}
-                <a href={`tel:${order.customerPhone}`} className="p-2 text-gray-500 hover:text-bv-red-600 hover:bg-bv-gold-50 rounded-lg flex-shrink-0 print:hidden">
+                <a href={`tel:${order.customerPhone}`} className="p-2 text-gray-500 hover:text-bv-red-600 hover:bg-bv-red-50 rounded-lg flex-shrink-0 print:hidden">
                   <Phone className="w-5 h-5" />
                 </a>
               </div>

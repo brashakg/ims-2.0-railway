@@ -29,8 +29,17 @@ export const orderApi = {
     return response.data;
   },
 
-  createOrder: async (data: Partial<import('../../types').Order>) => {
-    const response = await api.post('/orders', data);
+  // C-5 (DELTA 3): optional `idempotencyKey` -> sent as the `Idempotency-Key`
+  // request header so a double-clicked / retried "Pay now" reuses the key and
+  // the backend returns the SAME order instead of creating a duplicate.
+  createOrder: async (
+    data: Partial<import('../../types').Order>,
+    idempotencyKey?: string,
+  ) => {
+    const config = idempotencyKey
+      ? { headers: { 'Idempotency-Key': idempotencyKey } }
+      : undefined;
+    const response = await api.post('/orders', data, config);
     return response.data;
   },
 
@@ -86,7 +95,7 @@ function mapEye(eye: any): any {
   };
 }
 
-function mapRx(rx: any): any {
+export function mapRx(rx: any): any {
   if (!rx || typeof rx !== 'object') return rx;
   return {
     ...rx,
@@ -197,6 +206,19 @@ export const prescriptionApi = {
     return response.data;
   },
 
+  // Edit an existing prescription (clinic Edit flow). PUT updates only the
+  // mutable Rx fields; identity/provenance (patient_id/customer_id/store_id)
+  // is immutable server-side. Accepts the SAME flat PrescriptionForm keys as
+  // createPrescription and normalises them to nested right_eye/left_eye.
+  updatePrescription: async (prescriptionId: string, data: any) => {
+    const payload = toPrescriptionCreatePayload(data);
+    // PrescriptionUpdate doesn't take identity fields; strip them so an edit
+    // never tries (and silently no-ops) to reassign the Rx.
+    const { patient_id: _p, customer_id: _c, store_id: _s, source: _src, rx_kind: _k, ...editable } = payload || {};
+    const response = await api.put(`/prescriptions/${prescriptionId}`, editable);
+    return response.data;
+  },
+
   validatePrescription: async (prescriptionId: string) => {
     const response = await api.get(`/prescriptions/${prescriptionId}/validate`);
     return response.data;
@@ -252,7 +274,57 @@ export const prescriptionApi = {
       visits: number;
     };
   },
+
+  // Family Rx view: a customer account's prescriptions grouped by family member
+  // (patient), each row annotated with expiry_date + is_valid. Patients with no
+  // Rx are still listed; legacy/imported Rx whose patient_id isn't on the account
+  // surface under an "Unlinked patient" group. Backend ships raw snake_case
+  // prescription docs (right_eye.sph / left_eye.sph etc.) — the FamilyRxPage
+  // tolerates both snake/camel via its own reader, so we pass them through as-is.
+  getFamilyRx: async (customerId: string) => {
+    const response = await api.get(`/prescriptions/family/${customerId}`);
+    return response.data as FamilyRxResponse;
+  },
 };
+
+// ---- Family Rx response shape (GET /prescriptions/family/{customer_id}) ------
+export interface FamilyRxPrescription {
+  prescription_id?: string;
+  patient_id?: string | null;
+  patient_name?: string | null;
+  test_date?: string | null;
+  created_at?: string | null;
+  optometrist_name?: string | null;
+  doctor_name?: string | null;
+  validity_months?: number | null;
+  expiry_date: string | null;
+  is_valid: boolean | null;
+  // Eye blocks arrive snake_case from Mongo; keys vary (sph/sphere, cyl/cylinder,
+  // add/addition). Kept loose so the renderer can read whichever is present.
+  right_eye?: Record<string, unknown> | null;
+  left_eye?: Record<string, unknown> | null;
+  pd?: string | number | null;
+  [key: string]: unknown;
+}
+
+export interface FamilyRxMember {
+  patient_id: string | null;
+  name: string | null;
+  relation: string | null;
+  dob: string | null;
+  prescription_count: number;
+  valid_count: number;
+  latest: FamilyRxPrescription | null;
+  prescriptions: FamilyRxPrescription[];
+}
+
+export interface FamilyRxResponse {
+  customer_id: string;
+  customer_name?: string | null;
+  members: FamilyRxMember[];
+  member_count: number;
+  total_prescriptions: number;
+}
 
 export interface PrescriptionEyeData {
   sphere?: number | null;
@@ -404,6 +476,69 @@ export const workshopApi = {
       fitting_details: fittingDetails,
     });
     return response.data;
+  },
+
+  // QC a COMPLETED (or re-QC a QC_FAILED) job. passed=true -> READY,
+  // passed=false -> QC_FAILED. The notes carry the checklist outcome.
+  // Backend reads `passed` + `notes` as query params (POST, no body).
+  qcJob: async (jobId: string, passed: boolean, notes?: string) => {
+    const response = await api.post(`/workshop/jobs/${jobId}/qc`, null, {
+      params: { passed, ...(notes ? { notes } : {}) },
+    });
+    return response.data as {
+      job_id: string;
+      status: 'READY' | 'QC_FAILED';
+      qc_passed: boolean;
+      message: string;
+    };
+  },
+
+  // Phase 6.9 — structured per-item QC checklist. Sends each check item
+  // (key, label, passed, optional note) to the dedicated /qc-checklist
+  // endpoint which stores them with reviewer identity + timestamps.
+  qcChecklist: async (
+    jobId: string,
+    checklist: Array<{ key: string; label: string; passed: boolean; note?: string }>,
+    overallNotes?: string,
+    waived?: boolean,
+    waiveReason?: string,
+  ) => {
+    const response = await api.post(`/workshop/jobs/${jobId}/qc-checklist`, {
+      checklist,
+      overall_notes: overallNotes,
+      waived: waived ?? false,
+      waive_reason: waiveReason,
+    });
+    return response.data as {
+      job_id: string;
+      status: 'READY' | 'QC_FAILED';
+      qc_passed: boolean;
+      all_items_passed: boolean;
+      waived: boolean;
+      checklist: Array<{
+        key: string;
+        label: string;
+        passed: boolean;
+        note: string;
+        checked_by: string;
+        checked_at: string;
+      }>;
+      message: string;
+    };
+  },
+
+  // Send a QC_FAILED job back to the bench (QC_FAILED -> IN_PROGRESS).
+  // Backend reads `notes` as a query param.
+  reworkJob: async (jobId: string, notes?: string) => {
+    const response = await api.post(`/workshop/jobs/${jobId}/rework`, null, {
+      params: notes ? { notes } : {},
+    });
+    return response.data as {
+      job_id: string;
+      status: 'IN_PROGRESS';
+      rework_count: number;
+      message: string;
+    };
   },
 
   // Phase 6.4 — pending jobs report with aging buckets + per-tech breakdown.

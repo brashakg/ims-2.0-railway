@@ -14,6 +14,7 @@ import {
 import { entitiesApi, type Entity, type BankAccount, type OrgMeta } from '../../services/api/entities';
 import { orgStoreApi, type Store, type StorePayload } from '../../services/api/stores';
 import { useToast } from '../../context/ToastContext';
+import { validateGstin, validateIfsc, validatePincode, validatePhone, validateGeoRadius, firstError } from '../../utils/validators';
 
 const BRANDS = ['BETTER_VISION', 'WIZOPT'];
 const STORE_TYPES = ['RETAIL', 'HQ', 'WAREHOUSE'];
@@ -240,6 +241,12 @@ function EntityModal({
 
   const save = async () => {
     if (!form.name || form.name.trim().length < 2) { toast.error('Entity name is required'); return; }
+    const fieldErr = firstError(
+      ...(form.gstins || []).map((g) => validateGstin(g.gstin)),
+      ...(form.bank_accounts || []).map((b) => validateIfsc(b.ifsc)),
+      validatePhone(form.registered_phone),
+    );
+    if (fieldErr) { toast.error(fieldErr); return; }
     setSaving(true);
     try {
       if (entity) await entitiesApi.update(entity.entity_id, form);
@@ -253,7 +260,7 @@ function EntityModal({
 
   return (
     <Modal title={entity ? `Edit ${entity.name}` : 'New legal entity'} onClose={onClose}>
-      <div className="grid grid-cols-2 gap-3">
+      <div className="grid grid-cols-1 tablet:grid-cols-2 gap-3">
         <Field label="Display name *"><input className={inputCls} value={form.name || ''} onChange={(e) => set('name', e.target.value)} /></Field>
         <Field label="Legal name"><input className={inputCls} value={form.legal_name || ''} onChange={(e) => set('legal_name', e.target.value)} /></Field>
         <Field label="Entity type">
@@ -274,7 +281,7 @@ function EntityModal({
       <SectionHeader icon={<FileText className="w-3.5 h-3.5" />} title="GSTINs (one per state)"
         onAdd={() => set('gstins', [...gstins, { gstin: '', state_code: '', is_primary: gstins.length === 0 }])} />
       {gstins.map((g, i) => (
-        <div key={i} className="grid grid-cols-12 gap-2 mb-2 items-center">
+        <div key={i} className="grid grid-cols-1 tablet:grid-cols-12 gap-2 mb-2 items-center">
           <input className={`${inputCls} col-span-5 font-mono`} placeholder="15-digit GSTIN" value={g.gstin}
             onChange={(e) => updateArr(setForm, 'gstins', i, { gstin: e.target.value.toUpperCase() })} />
           <select className={`${inputCls} col-span-4`} value={g.state_code}
@@ -293,7 +300,7 @@ function EntityModal({
       <SectionHeader icon={<Landmark className="w-3.5 h-3.5" />} title="Bank accounts"
         onAdd={() => set('bank_accounts', [...banks, { account_no: '', ifsc: '' } as BankAccount])} />
       {banks.map((b, i) => (
-        <div key={i} className="grid grid-cols-12 gap-2 mb-2 items-center">
+        <div key={i} className="grid grid-cols-1 tablet:grid-cols-12 gap-2 mb-2 items-center">
           <input className={`${inputCls} col-span-3`} placeholder="Account no" value={b.account_no} onChange={(e) => updateArr(setForm, 'bank_accounts', i, { account_no: e.target.value })} />
           <input className={`${inputCls} col-span-3`} placeholder="IFSC" value={b.ifsc} onChange={(e) => updateArr(setForm, 'bank_accounts', i, { ifsc: e.target.value.toUpperCase() })} />
           <input className={`${inputCls} col-span-3`} placeholder="Bank name" value={b.bank_name || ''} onChange={(e) => updateArr(setForm, 'bank_accounts', i, { bank_name: e.target.value })} />
@@ -307,7 +314,7 @@ function EntityModal({
 
       {/* Invoice identity */}
       <SectionHeader icon={<FileText className="w-3.5 h-3.5" />} title="Invoice identity (entity default)" />
-      <div className="grid grid-cols-2 gap-3">
+      <div className="grid grid-cols-1 tablet:grid-cols-2 gap-3">
         <Field label="Signatory name"><input className={inputCls} value={form.invoice?.signatory_name || ''} onChange={(e) => set('invoice', { ...form.invoice, signatory_name: e.target.value })} /></Field>
         <Field label="Signatory designation"><input className={inputCls} value={form.invoice?.signatory_designation || ''} onChange={(e) => set('invoice', { ...form.invoice, signatory_designation: e.target.value })} /></Field>
         <div className="col-span-2"><Field label="Invoice footer"><input className={inputCls} value={form.invoice?.footer_text || ''} onChange={(e) => set('invoice', { ...form.invoice, footer_text: e.target.value })} /></Field></div>
@@ -349,6 +356,13 @@ function StoreModal({
   const save = async () => {
     if (!form.store_code || !form.store_name) { toast.error('Store code and name are required'); return; }
     if (!form.entity_id) { toast.error('Entity is required'); return; }
+    const fieldErr = firstError(
+      validatePincode(form.pincode),
+      validatePhone(form.phone),
+      validatePhone(form.whatsapp),
+      validateGeoRadius(form.geofence_radius_m),
+    );
+    if (fieldErr) { toast.error(fieldErr); return; }
     setSaving(true);
     try {
       if (store) await orgStoreApi.update(store.store_id, form);
@@ -362,7 +376,7 @@ function StoreModal({
 
   return (
     <Modal title={store ? `Edit ${store.store_name}` : `New store under ${entity.name}`} onClose={onClose}>
-      <div className="grid grid-cols-2 gap-3">
+      <div className="grid grid-cols-1 tablet:grid-cols-2 gap-3">
         <Field label="Store code *"><input className={inputCls} value={form.store_code || ''} onChange={(e) => set('store_code', e.target.value.toUpperCase())} /></Field>
         <Field label="Store name *"><input className={inputCls} value={form.store_name || ''} onChange={(e) => set('store_name', e.target.value)} /></Field>
         <Field label="Brand">
@@ -392,14 +406,14 @@ function StoreModal({
       </div>
 
       <SectionHeader icon={<MapPin className="w-3.5 h-3.5" />} title="Geo-fence (staff log in within radius)" />
-      <div className="grid grid-cols-3 gap-3">
+      <div className="grid grid-cols-1 tablet:grid-cols-2 lg:grid-cols-3 gap-3">
         <Field label="Latitude"><input className={inputCls} type="number" step="any" value={form.latitude ?? ''} onChange={(e) => set('latitude', e.target.value === '' ? null : parseFloat(e.target.value))} /></Field>
         <Field label="Longitude"><input className={inputCls} type="number" step="any" value={form.longitude ?? ''} onChange={(e) => set('longitude', e.target.value === '' ? null : parseFloat(e.target.value))} /></Field>
         <Field label="Radius (m)"><input className={inputCls} type="number" value={form.geofence_radius_m ?? 500} onChange={(e) => set('geofence_radius_m', e.target.value === '' ? null : parseInt(e.target.value, 10))} /></Field>
       </div>
 
       <SectionHeader icon={<StoreIcon className="w-3.5 h-3.5" />} title="Operations" />
-      <div className="grid grid-cols-3 gap-3">
+      <div className="grid grid-cols-1 tablet:grid-cols-2 lg:grid-cols-3 gap-3">
         <Field label="Working hours"><input className={inputCls} placeholder="10:00-20:00" value={form.working_hours || ''} onChange={(e) => set('working_hours', e.target.value)} /></Field>
         <Field label="Weekly off"><input className={inputCls} placeholder="TUESDAY" value={form.weekly_off || ''} onChange={(e) => set('weekly_off', e.target.value.toUpperCase())} /></Field>
         <Field label="Opening date"><input className={inputCls} type="date" value={form.opening_date || ''} onChange={(e) => set('opening_date', e.target.value)} /></Field>

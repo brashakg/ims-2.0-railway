@@ -1020,9 +1020,19 @@ function humanizeMinutes(min: number): string {
   return `${Math.round(min / 60 / 24 / 365)}y`;
 }
 
+// QA F15 guard: a due_at more than ~120 days out (or missing/unparseable, where
+// minutesUntil returns +/-Infinity) is corrupt data, not a real SLA window — the
+// widest SLA grace is 7 days. Treat those as "no countdown" so the UI shows a
+// neutral dash instead of a nonsense "4y left".
+const MAX_SANE_DUE_MIN = 120 * 24 * 60;
+function isSaneDue(min: number): boolean {
+  return Number.isFinite(min) && Math.abs(min) <= MAX_SANE_DUE_MIN;
+}
+
 function TaskDetailPanel({ task, onClose }: { task: Task; onClose: () => void }) {
-  const minLeft = Math.max(0, task.dueInMin);
-  const minLeftLabel = humanizeMinutes(minLeft);
+  const dueSane = isSaneDue(task.dueInMin);
+  const minLeft = dueSane ? Math.max(0, task.dueInMin) : 0;
+  const minLeftLabel = dueSane ? humanizeMinutes(minLeft) : '—';
   const showTimer = task.pCode === 'P0' || task.pCode === 'P1';
   const created = task.createdDate
     ? new Date(task.createdDate).toLocaleString('en-IN', {
@@ -1104,9 +1114,11 @@ function TaskDetailPanel({ task, onClose }: { task: Task; onClose: () => void })
               <div className="rung">2</div>
               <div className="who">{task.assignedToName || 'Owner'} (current)</div>
               <div className="when">
-                {task.dueInMin < 0
-                  ? `${humanizeMinutes(Math.abs(task.dueInMin))} overdue`
-                  : `${minLeftLabel} left`}
+                {!dueSane
+                  ? '—'
+                  : task.dueInMin < 0
+                    ? `${humanizeMinutes(Math.abs(task.dueInMin))} overdue`
+                    : `${minLeftLabel} left`}
               </div>
             </div>
             <div className="ladder-step">
@@ -1170,6 +1182,13 @@ function Countdown({ minutes }: { minutes: number }) {
     }, 60_000);
     return () => window.clearInterval(id);
   }, [minutes]);
+
+  // QA F15: a missing/corrupt due_at (minutesUntil -> +/-Infinity, or a value
+  // hundreds of days out) is not a real countdown — show a neutral dash rather
+  // than "4y left". Guard on the prop (source of truth), not the ticking state.
+  if (!isSaneDue(minutes)) {
+    return <span className="count-pill">—</span>;
+  }
 
   const late = m < 0;
   const hot = !late && m < 10;

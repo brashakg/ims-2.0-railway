@@ -81,6 +81,16 @@ def _validate_rx_value(value: Optional[str], field_name: str) -> Optional[str]:
             f"{field_name} value {num} is outside the valid range ({lo} to {hi}). "
             f"Please double-check the prescription."
         )
+    # SYSTEM_INTENT section 4: dioptric powers move in 0.25 steps. Reject
+    # off-step values (e.g. +1.30, +0.10) that no lens is ground to. AXIS is
+    # integer-checked elsewhere; linear measures (PD/base_curve/diameter) are
+    # exempt from the 0.25 grid.
+    if field_name in ("sph", "cyl", "add", "cl_power", "cl_cyl", "cl_add"):
+        if round(num * 100) % 25 != 0:
+            raise ValueError(
+                f"{field_name} value {num} must be in 0.25-diopter steps "
+                f"(e.g. -1.25, 0.00, +2.50)."
+            )
     return value
 
 
@@ -144,6 +154,11 @@ class PrescriptionCreate(BaseModel):
     source: str = "TESTED_AT_STORE"  # TESTED_AT_STORE, FROM_DOCTOR
     optometrist_id: Optional[str] = None
     validity_months: int = Field(default=12, ge=6, le=24)
+    # Optional back-date: when supplied the prescription is stamped with this
+    # date instead of utcnow(), and expiry_date is derived from it. Must not be
+    # in the future. Omitting it (or passing null) keeps the original behaviour
+    # (utcnow()). Accepts a full ISO-8601 datetime or a plain YYYY-MM-DD date.
+    prescription_date: Optional[datetime] = None
     # Spectacle eyes default to empty EyeData so a CONTACT_LENS payload need not
     # send them; a SPECTACLE payload still validates powers as before.
     right_eye: EyeData = Field(default_factory=EyeData)
@@ -165,6 +180,59 @@ class PrescriptionCreate(BaseModel):
     ipd: Optional[str] = None
     next_checkup: Optional[str] = None
     remarks: Optional[str] = None
+
+
+class EyeDataEdit(BaseModel):
+    """Same shape as EyeData but WITHOUT the field-level validators.
+
+    On an edit we want a clean 400 (a deliberate business-rule rejection) for an
+    out-of-range power, not Pydantic's 422 body-parse error. So the eye is
+    accepted as-is here, then the handler runs the SAME `_validate_rx_value`
+    ranges explicitly and raises HTTPException(400). axis stays Field-bounded
+    (1-180) because that's a structural constraint, identical to EyeData.
+    """
+
+    sph: Optional[str] = None
+    cyl: Optional[str] = None
+    axis: Optional[int] = Field(None, ge=1, le=180)
+    add: Optional[str] = None
+    pd: Optional[str] = None
+    prism: Optional[str] = None
+    base: Optional[str] = None
+    acuity: Optional[str] = None
+
+
+class PrescriptionUpdate(BaseModel):
+    """Editable fields of an existing prescription (clinic Edit flow).
+
+    Every field is optional: the handler patches ONLY the keys the caller sends
+    (exclude_unset), so a partial edit never blanks out fields it didn't touch.
+    The eye blocks are range-checked by the SAME `_validate_rx_value` ranges
+    (SPH -20..+20, CYL -6..+6, AXIS 1-180, ADD +0.75..+3.50, 0.25 steps) that
+    guard create -- an out-of-range Rx can't be saved here (rejected 400).
+
+    Identity / provenance fields (patient_id, customer_id, store_id, source,
+    rx_kind, prescription_number, created_by) are intentionally NOT editable:
+    editing a prescription must never silently re-assign it to another patient
+    or rewrite who/where it came from. Create a new Rx for that instead.
+    """
+
+    right_eye: Optional[EyeDataEdit] = None
+    left_eye: Optional[EyeDataEdit] = None
+    cl_right: Optional[CLEyeData] = None
+    cl_left: Optional[CLEyeData] = None
+    cl_brand: Optional[str] = None
+    cl_series: Optional[str] = None
+    modality: Optional[str] = None
+    color: Optional[str] = None
+    lens_recommendation: Optional[str] = None
+    coating_recommendation: Optional[str] = None
+    ipd: Optional[str] = None
+    next_checkup: Optional[str] = None
+    remarks: Optional[str] = None
+    optometrist_id: Optional[str] = None
+    # Re-dating an edit: when validity_months changes we recompute expiry_date.
+    validity_months: Optional[int] = Field(default=None, ge=6, le=24)
 
 
 # ============================================================================
@@ -329,6 +397,144 @@ async def list_prescriptions(
     return {"prescriptions": [], "total": 0}
 
 
+# ---- Family Rx view helpers --------------------------------------------
+
+def _parse_dt(value):
+    """Best-effort parse of an ISO date/datetime (or passthrough) -> datetime, else None."""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, date):
+        return datetime(value.year, value.month, value.day)
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "").split(".")[0])
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _add_months(dt: datetime, months: int) -> datetime:
+    """Add whole months to a datetime, clamping the day to the target month."""
+    m = dt.month - 1 + months
+    year = dt.year + m // 12
+    month = m % 12 + 1
+    leap = year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)
+    dim = [31, 29 if leap else 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1]
+    return dt.replace(year=year, month=month, day=min(dt.day, dim))
+
+
+def _rx_validity(rx: dict):
+    """(expiry_datetime | None, is_valid | None) for a prescription using
+    prescription_date / test_date + validity_months (defaults 12), tolerant of
+    snake/camel fields. prescription_date is checked first so that back-dated
+    prescriptions created via POST /prescriptions (which stores prescription_date)
+    compute the correct expiry rather than falling back to created_at."""
+    td = _parse_dt(
+        rx.get("prescription_date")
+        or rx.get("test_date")
+        or rx.get("testDate")
+        or rx.get("created_at")
+        or rx.get("createdAt")
+    )
+    months = rx.get("validity_months") or rx.get("validityMonths") or 12
+    try:
+        months = int(months)
+    except (TypeError, ValueError):
+        months = 12
+    if td is None:
+        return None, None
+    expiry = _add_months(td, months)
+    return expiry, datetime.now() < expiry
+
+
+@router.get("/family/{customer_id}")
+async def family_prescriptions(
+    customer_id: str, current_user: dict = Depends(get_current_user)
+):
+    """Family Rx view: a customer account's prescriptions grouped by family
+    member (patient), each annotated with expiry + validity. Lets POS / clinical
+    see the whole household's prescriptions in one place. Patients with no Rx are
+    still listed; any prescription whose patient_id isn't on the account surfaces
+    under an 'Unlinked patient' group (legacy/imported data)."""
+    repo = get_prescription_repository()
+    customer_repo = get_customer_repository()
+    if repo is None:
+        return {"customer_id": customer_id, "members": [], "member_count": 0, "total_prescriptions": 0}
+
+    customer = customer_repo.find_by_id(customer_id) if customer_repo is not None else None
+    if customer is None:
+        raise HTTPException(status_code=404, detail="Customer not found")
+    patients = customer.get("patients", []) or []
+
+    all_rx = repo.find_by_customer(customer_id) or []
+    by_patient: dict = {}
+    for rx in all_rx:
+        by_patient.setdefault(rx.get("patient_id"), []).append(rx)
+
+    def _enrich(rx_list):
+        rows, valid_count, latest = [], 0, None
+        ordered = sorted(
+            rx_list,
+            key=lambda r: str(
+                r.get("prescription_date")
+                or r.get("test_date")
+                or r.get("testDate")
+                or r.get("created_at")
+                or ""
+            ),
+            reverse=True,
+        )
+        for rx in ordered:
+            expiry, is_valid = _rx_validity(rx)
+            row = dict(rx)
+            row["expiry_date"] = expiry.isoformat() if expiry else None
+            row["is_valid"] = bool(is_valid) if is_valid is not None else None
+            rows.append(row)
+            if is_valid:
+                valid_count += 1
+            if latest is None:
+                latest = row
+        return rows, valid_count, latest
+
+    members, seen = [], set()
+    for p in patients:
+        pid = p.get("patient_id")
+        seen.add(pid)
+        rows, valid_count, latest = _enrich(by_patient.get(pid, []))
+        members.append({
+            "patient_id": pid,
+            "name": p.get("name"),
+            "relation": p.get("relation"),
+            "dob": p.get("dob"),
+            "prescription_count": len(rows),
+            "valid_count": valid_count,
+            "latest": latest,
+            "prescriptions": rows,
+        })
+    for pid, rx_list in by_patient.items():
+        if pid in seen:
+            continue
+        rows, valid_count, latest = _enrich(rx_list)
+        members.append({
+            "patient_id": pid,
+            "name": (latest or {}).get("patient_name") or "Unlinked patient",
+            "relation": None,
+            "dob": None,
+            "prescription_count": len(rows),
+            "valid_count": valid_count,
+            "latest": latest,
+            "prescriptions": rows,
+        })
+
+    return {
+        "customer_id": customer_id,
+        "customer_name": customer.get("name"),
+        "members": members,
+        "member_count": len(members),
+        "total_prescriptions": len(all_rx),
+    }
+
+
 @router.post("", status_code=201)
 @router.post("/", status_code=201, include_in_schema=False)
 async def create_prescription(
@@ -375,10 +581,14 @@ async def create_prescription(
         if eye.cyl:
             try:
                 cyl_val = float(eye.cyl)
-                if cyl_val < -10.0 or cyl_val > 10.0:
+                # SYSTEM_INTENT section 4 + the canonical RANGES table both bound
+                # spectacle CYL to -6.00..+6.00. This path previously allowed
+                # +/-10.00, so a high-cyl Rx could be saved here yet fail the
+                # /validate check. Reconciled to +/-6.00.
+                if cyl_val < -6.0 or cyl_val > 6.0:
                     raise HTTPException(
                         status_code=422,
-                        detail=f"{eye_label} CYL must be between -10.00 and +10.00",
+                        detail=f"{eye_label} CYL must be between -6.00 and +6.00",
                     )
             except ValueError:
                 raise HTTPException(
@@ -416,8 +626,30 @@ async def create_prescription(
             if not customer and not is_walkin:
                 raise HTTPException(status_code=404, detail="Customer not found")
 
-        prescription_date = datetime.now()
-        expiry_date = prescription_date + timedelta(days=rx.validity_months * 30)
+        # Resolve the effective prescription date.
+        # If the caller supplies prescription_date, honour it (back-dated Rx).
+        # Guard: a prescription issued in the future makes no clinical sense.
+        # Today (midnight) is allowed so a prescription written earlier today
+        # is never rejected due to timezone rounding.
+        if rx.prescription_date is not None:
+            # Strip any timezone info so comparison stays naive throughout.
+            supplied = rx.prescription_date.replace(tzinfo=None)
+            # A date in the future is rejected.  "Today" is allowed: a
+            # prescription written earlier this morning must not be blocked by
+            # a sub-second clock skew, so we compare against end-of-today.
+            end_of_today = datetime.now().replace(
+                hour=23, minute=59, second=59, microsecond=999999
+            )
+            if supplied > end_of_today:
+                raise HTTPException(
+                    status_code=400,
+                    detail="prescription_date cannot be in the future",
+                )
+            prescription_date = supplied
+        else:
+            prescription_date = datetime.now()
+
+        expiry_date = _add_months(prescription_date, rx.validity_months)
 
         rx_data = {
             "prescription_number": generate_rx_number(),
@@ -428,6 +660,10 @@ async def create_prescription(
             "source": rx.source,
             "optometrist_id": rx.optometrist_id,
             "prescription_date": prescription_date.isoformat(),
+            # test_date mirrors prescription_date so legacy readers (clinical
+            # report queries, _rx_validity, family-view sort) that look for
+            # test_date before prescription_date still get the correct date.
+            "test_date": prescription_date.isoformat(),
             "expiry_date": expiry_date.isoformat(),
             "validity_months": rx.validity_months,
             # Spectacle eyes are always persisted (empty for a CL Rx) so any
@@ -471,6 +707,103 @@ async def create_prescription(
         "prescription_id": str(uuid.uuid4()),
         "prescription_number": generate_rx_number(),
         "message": "Prescription created",
+    }
+
+
+@router.put("/{prescription_id}")
+async def update_prescription(
+    prescription_id: str,
+    rx: PrescriptionUpdate,
+    current_user: dict = Depends(get_current_user),
+):
+    """Edit an existing prescription's mutable Rx fields (clinic Edit flow).
+
+    Gated identically to create_prescription (OPTOMETRIST / STORE_MANAGER /
+    ADMIN / SUPERADMIN). Re-runs the canonical Rx-range validation
+    (`_validate_rx_value`: SPH -20..+20, CYL -6..+6, ADD +0.75..+3.50 in 0.25
+    steps; AXIS 1-180) so an edit can never persist an invalid Rx. Only the keys
+    the caller sends are written (PATCH-style merge), so a partial edit never
+    blanks fields it didn't touch. Identity/provenance fields are immutable.
+    """
+    # --- Role gate (same set create_prescription uses) ---
+    user_roles = current_user.get("roles", [])
+    CLINICAL_ROLES = {"SUPERADMIN", "ADMIN", "STORE_MANAGER", "OPTOMETRIST"}
+    if not (set(user_roles) & CLINICAL_ROLES):
+        raise HTTPException(
+            status_code=403,
+            detail="Only optometrists and managers can edit prescriptions. "
+            "Your role does not have clinical access.",
+        )
+
+    repo = get_prescription_repository()
+    if repo is None:
+        raise HTTPException(status_code=503, detail="Database not available")
+
+    existing = repo.find_by_id(prescription_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="Prescription not found")
+
+    # Only the explicitly-supplied keys are touched (PATCH-style merge).
+    body = rx.model_dump(exclude_unset=True)
+    if not body:
+        raise HTTPException(status_code=400, detail="No fields to update")
+
+    # Re-validate spectacle powers against the canonical clinical ranges. We
+    # call the SAME `_validate_rx_value` the create path / EyeData validators
+    # use, but surface a 400 (deliberate business rejection) instead of 422.
+    def _validate_eye(eye_label: str, eye: dict):
+        if not isinstance(eye, dict):
+            return
+        try:
+            _validate_rx_value(eye.get("sph"), "sph")
+            _validate_rx_value(eye.get("cyl"), "cyl")
+            _validate_rx_value(eye.get("add"), "add")
+            _validate_rx_value(eye.get("pd"), "pd")
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=f"{eye_label}: {exc}")
+        axis = eye.get("axis")
+        if axis is not None and (not isinstance(axis, int) or axis < 1 or axis > 180):
+            raise HTTPException(
+                status_code=400,
+                detail=f"{eye_label} AXIS must be a whole number between 1 and 180",
+            )
+
+    if "right_eye" in body:
+        _validate_eye("Right eye", body["right_eye"])
+    if "left_eye" in body:
+        _validate_eye("Left eye", body["left_eye"])
+
+    # Contact-lens block (only when the edit touches CL fields).
+    if body.get("modality") and body["modality"] not in CL_MODALITIES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid modality. Allowed: {', '.join(CL_MODALITIES)}",
+        )
+    if "cl_right" in body:
+        _validate_cl_eye("Right eye", rx.cl_right)
+    if "cl_left" in body:
+        _validate_cl_eye("Left eye", rx.cl_left)
+
+    # If validity changed, recompute expiry off the original test/created date
+    # so the edit stays internally consistent (expiry = test_date + N months).
+    update_doc = dict(body)
+    if rx.validity_months is not None:
+        base_dt = _parse_dt(
+            existing.get("prescription_date")
+            or existing.get("test_date")
+            or existing.get("created_at")
+        ) or datetime.now()
+        update_doc["expiry_date"] = _add_months(base_dt, rx.validity_months).isoformat()
+
+    update_doc["updated_by"] = current_user.get("user_id")
+    update_doc["updated_at"] = datetime.now().isoformat()
+
+    repo.update(prescription_id, update_doc)
+    refreshed = repo.find_by_id(prescription_id) or {**existing, **update_doc}
+    return {
+        "prescription_id": prescription_id,
+        "message": "Prescription updated",
+        "prescription": refreshed,
     }
 
 
@@ -524,9 +857,21 @@ async def validate_prescription(
                 issues.append(f"{eye_label} SPH {sph} out of range (-20..+20)")
             if cyl is not None and cyl != "" and not (-6.0 <= float(cyl) <= 6.0):
                 issues.append(f"{eye_label} CYL {cyl} out of range (-6..+6)")
-            if axis is not None and axis != "" and not (1 <= int(float(axis)) <= 180):
-                issues.append(f"{eye_label} AXIS {axis} out of range (1-180)")
-            if add not in (None, "", 0) and not (0.75 <= float(add) <= 3.50):
+            if axis is not None and axis != "":
+                axis_f = float(axis)
+                # AXIS is a WHOLE degree 1..180. The old check used
+                # int(float(axis)), which truncated 90.5 -> 90 and let a
+                # non-integer axis pass silently. Flag both out-of-range AND
+                # fractional values, matching what create / PUT enforce.
+                if not (1 <= axis_f <= 180):
+                    issues.append(f"{eye_label} AXIS {axis} out of range (1-180)")
+                elif axis_f != int(axis_f):
+                    issues.append(
+                        f"{eye_label} AXIS {axis} must be a whole number (1-180)"
+                    )
+            if add not in (None, "", 0) and float(add) != 0 and not (
+                0.75 <= float(add) <= 3.50
+            ):
                 issues.append(f"{eye_label} ADD {add} out of range (+0.75..+3.50)")
         except (ValueError, TypeError):
             issues.append(f"{eye_label} has a non-numeric Rx value")

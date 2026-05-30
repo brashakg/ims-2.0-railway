@@ -53,7 +53,7 @@ export default function FinanceFilters({
     <>
       {/* Header */}
       <div className="mb-8">
-        <div className="flex items-center justify-between mb-6">
+        <div className="flex flex-wrap items-center justify-between gap-4 mb-6">
           <div>
             <h1 className="text-3xl font-bold text-gray-900 flex items-center gap-3">
               <BarChart3 className="w-8 h-8 text-blue-600" />

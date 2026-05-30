@@ -21,9 +21,14 @@ import {
   ChevronRight,
   ArrowUpRight,
   ArrowDownRight,
+  Check,
+  X,
+  ShieldCheck,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
+import { useToast } from '../../context/ToastContext';
 import api from '../../services/api/client';
+import { proposalsApi, type AIProposal } from '../../services/api/proposals';
 import { IntegrationStatusCard } from '../../components/integrations/IntegrationStatusCard';
 
 // Types
@@ -100,6 +105,7 @@ interface LiveAgent {
 
 export function JarvisPage() {
   const { hasRole } = useAuth();
+  const toast = useToast();
   const [messages, setMessages] = useState<Message[]>([]);
   const [inputValue, setInputValue] = useState('');
   const [isLoading, setIsLoading] = useState(false);
@@ -121,6 +127,9 @@ export function JarvisPage() {
   // Activity feed (Phase 5)
   const [activity, setActivity] = useState<ActivityEvent[] | null>(null);
   const [activityFilter, setActivityFilter] = useState<string>('all');
+  // AI change-proposals (SYSTEM_INTENT section 8 review loop)
+  const [proposals, setProposals] = useState<AIProposal[] | null>(null);
+  const [proposalBusyId, setProposalBusyId] = useState<string | null>(null);
   // PIXEL audit history — last N audit runs from ui_audits
   const [pixelAudits, setPixelAudits] = useState<{
     audits: Array<{
@@ -226,6 +235,7 @@ export function JarvisPage() {
     loadRecommendations();
     loadAgents();
     loadActivity();
+    loadProposals();
     loadPixelAudits();
     loadSentinelHealth();
     // Add initial greeting
@@ -283,6 +293,76 @@ export function JarvisPage() {
       // eslint-disable-next-line no-console
       console.error('[JARVIS] activity fetch failed:', e);
       setActivity(null);
+    }
+  };
+
+  // ── AI change-proposals ────────────────────────────────────────────
+  // Pull the PENDING queue. Approving a reversible (Tier-1) proposal
+  // auto-executes server-side; an advisory one just records approval.
+  const loadProposals = async () => {
+    try {
+      const data = await proposalsApi.list({ status: 'PENDING', limit: 50 });
+      setProposals(data.proposals ?? []);
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.error('[JARVIS] proposals fetch failed:', e);
+      setProposals(null);
+    }
+  };
+
+  const handleApproveProposal = async (p: AIProposal) => {
+    // Reversible proposals warn that approval will EXECUTE; advisory ones
+    // make clear approval is recorded but no change happens automatically.
+    const ok = window.confirm(
+      p.reversible
+        ? `Approve and EXECUTE this reversible action?\n\n` +
+            `"${p.title}"\n\n` +
+            `The system will perform the change now (e.g. create a DRAFT — ` +
+            `nothing is sent to a vendor/customer) and write a full ` +
+            `before/after audit entry.`
+        : `Approve this ADVISORY proposal?\n\n` +
+            `"${p.title}"\n\n` +
+            `This records your approval and audits it, but the system will ` +
+            `NOT act automatically — someone still has to make this change.`
+    );
+    if (!ok) return;
+    setProposalBusyId(p.proposal_id);
+    try {
+      const res = await proposalsApi.approve(p.proposal_id);
+      if (res.executed) {
+        toast.success(`Executed: ${p.title}`);
+      } else if (res.advisory) {
+        toast.info(`Approved (advisory): ${p.title}`);
+      } else {
+        toast.error(`Approval recorded but execution failed: ${res.error ?? 'unknown error'}`);
+      }
+      await loadProposals();
+      // Side-effects land in the activity/agent feeds — refresh them too.
+      loadActivity().catch(() => {});
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.error('[JARVIS] approve failed:', e);
+      toast.error('Could not approve proposal.');
+    } finally {
+      setProposalBusyId(null);
+    }
+  };
+
+  const handleRejectProposal = async (p: AIProposal) => {
+    const reason = window.prompt(`Reject "${p.title}"?\n\nOptional reason:`, '');
+    // prompt returns null on Cancel — treat that as "don't reject".
+    if (reason === null) return;
+    setProposalBusyId(p.proposal_id);
+    try {
+      await proposalsApi.reject(p.proposal_id, reason);
+      toast.info(`Rejected: ${p.title}`);
+      await loadProposals();
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.error('[JARVIS] reject failed:', e);
+      toast.error('Could not reject proposal.');
+    } finally {
+      setProposalBusyId(null);
     }
   };
 
@@ -677,7 +757,8 @@ Is there a specific aspect you'd like me to dive deeper into? I can provide deta
 
   const enabledCount = agentsForGrid.filter((a) => a.enabled).length;
   const totalActs24h = agentsForGrid.reduce((s, a) => s + (a.run_count || 0), 0);
-  const awaitingApproval = 0; // Phase 4: count from agent_audit_log where tier=2 requires_approval=true
+  // Real count of pending AI change-proposals awaiting Superadmin review.
+  const awaitingApproval = proposals?.length ?? 0;
 
   // STRICT ACCESS CONTROL — render nothing for non-SUPERADMIN.
   // This guard MUST live after every hook declaration above; an
@@ -743,6 +824,7 @@ Is there a specific aspect you'd like me to dive deeper into? I can provide deta
               loadRecommendations();
               loadAgents();
               loadActivity();
+              loadProposals();
             }}
           >
             <RefreshCw className="w-3.5 h-3.5" /> Refresh
@@ -1152,6 +1234,118 @@ Is there a specific aspect you'd like me to dive deeper into? I can provide deta
                     always on
                   </span>
                 )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* ── Change proposals (SYSTEM_INTENT section 8 review loop) ── */}
+      <div className="eyebrow" style={{ marginBottom: 10, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+        <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <ShieldCheck className="w-3 h-3" /> Change proposals · {awaitingApproval} pending
+        </span>
+        <button
+          type="button"
+          onClick={loadProposals}
+          className="btn sm ghost"
+          style={{ marginLeft: 'auto', fontSize: 10, height: 22, padding: '0 10px' }}
+        >
+          Refresh
+        </button>
+      </div>
+      <div
+        style={{
+          background: 'var(--surface)',
+          border: '1px solid var(--line)',
+          borderRadius: 'var(--r-lg)',
+          marginBottom: 24,
+          overflow: 'hidden',
+        }}
+      >
+        {proposals === null && (
+          <div style={{ padding: 20, color: 'var(--ink-4)', fontSize: 12.5, textAlign: 'center' }}>
+            Loading proposals…
+          </div>
+        )}
+        {proposals !== null && proposals.length === 0 && (
+          <div style={{ padding: 20, color: 'var(--ink-4)', fontSize: 12.5, textAlign: 'center' }}>
+            No proposals awaiting review. Agents enqueue suggestions here for your approval.
+          </div>
+        )}
+        {proposals !== null && proposals.length > 0 && proposals.map((p, i) => {
+          const busy = proposalBusyId === p.proposal_id;
+          return (
+            <div
+              key={p.proposal_id}
+              style={{
+                padding: '14px 16px',
+                borderBottom: i === proposals.length - 1 ? 'none' : '1px solid var(--line-soft)',
+                display: 'grid',
+                gridTemplateColumns: '1fr auto',
+                gap: 16,
+                alignItems: 'flex-start',
+              }}
+            >
+              <div style={{ minWidth: 0 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4, flexWrap: 'wrap' }}>
+                  {/* Reversible -> will auto-execute on approve; Advisory -> records only */}
+                  <span
+                    className={'chip ' + (p.reversible ? 'ok' : 'neutral')}
+                    style={{ height: 18, fontSize: 9.5, fontFamily: 'var(--font-mono)' }}
+                    title={
+                      p.reversible
+                        ? 'Reversible Tier-1 — approving will auto-execute the change'
+                        : 'Advisory — approving records your decision; a human still makes the change'
+                    }
+                  >
+                    {p.reversible ? 'reversible · auto-executes' : 'advisory · manual'}
+                  </span>
+                  <span style={{
+                    fontFamily: 'var(--font-mono)',
+                    fontSize: 10,
+                    color: '#fff',
+                    background: 'var(--ink)',
+                    padding: '3px 6px',
+                    borderRadius: 3,
+                    textTransform: 'uppercase',
+                    letterSpacing: '.06em',
+                  }}>
+                    {p.created_by_agent} · {p.type}
+                  </span>
+                </div>
+                <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--ink)', marginBottom: 3 }}>
+                  {p.title}
+                </div>
+                <div style={{ fontSize: 12, color: 'var(--ink-3)', lineHeight: 1.5 }}>
+                  {p.rationale}
+                </div>
+                {p.created_at && (
+                  <div style={{ fontSize: 10.5, color: 'var(--ink-5)', marginTop: 4, fontFamily: 'var(--font-mono)' }}>
+                    {new Date(p.created_at).toLocaleString([], { month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit' })}
+                  </div>
+                )}
+              </div>
+              <div style={{ display: 'flex', gap: 6, alignItems: 'flex-start' }}>
+                <button
+                  type="button"
+                  onClick={() => handleApproveProposal(p)}
+                  disabled={busy}
+                  className="btn sm primary"
+                  style={{ fontSize: 11, opacity: busy ? 0.5 : 1 }}
+                  title={p.reversible ? 'Approve and execute' : 'Approve (advisory)'}
+                >
+                  <Check className="w-3.5 h-3.5" /> Approve
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleRejectProposal(p)}
+                  disabled={busy}
+                  className="btn sm ghost"
+                  style={{ fontSize: 11, opacity: busy ? 0.5 : 1 }}
+                >
+                  <X className="w-3.5 h-3.5" /> Reject
+                </button>
               </div>
             </div>
           );

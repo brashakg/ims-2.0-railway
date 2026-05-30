@@ -295,7 +295,7 @@ export function MultiStorePerformanceTable({ stores, onStoreClick, loading }: Mu
       {/* Summary Footer */}
       {stores.length > 0 && (
         <div className="px-4 py-3 bg-gray-50 border-t border-gray-200">
-          <div className="grid grid-cols-2 sm:grid-cols-5 gap-4 text-sm">
+          <div className="grid grid-cols-2 tablet:grid-cols-5 gap-4 text-sm">
             <div>
               <p className="text-gray-600">Total Stores</p>
               <p className="text-lg font-semibold text-gray-900">{stores.length}</p>

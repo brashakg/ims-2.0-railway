@@ -17,6 +17,7 @@ from ..dependencies import (
     get_task_repository,
     get_attendance_repository,
     get_db,
+    validate_store_access,
 )
 
 router = APIRouter()
@@ -410,10 +411,10 @@ async def sales_by_salesperson(
     store_id: Optional[str] = Query(None),
     from_date: date = Query(...),
     to_date: date = Query(...),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_roles(*_REPORT_FINANCE_ROLES)),
 ):
-    """Get sales grouped by salesperson"""
-    active_store = store_id or current_user.get("active_store_id")
+    """Get sales grouped by salesperson (management report; store-scoped)."""
+    active_store = validate_store_access(store_id, current_user)
     order_repo = get_order_repository()
 
     if order_repo is None:
@@ -522,10 +523,10 @@ async def inventory_summary(
 @router.get("/inventory/valuation")
 async def inventory_valuation(
     store_id: Optional[str] = Query(None),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_roles(*_REPORT_FINANCE_ROLES)),
 ):
-    """Get inventory valuation by category"""
-    active_store = store_id or current_user.get("active_store_id")
+    """Get inventory valuation by category (management report; store-scoped)."""
+    active_store = validate_store_access(store_id, current_user)
     stock_repo = get_stock_repository()
 
     if stock_repo is None:
@@ -730,14 +731,33 @@ async def gst_report(
     store_id: Optional[str] = Query(None),
     current_user: dict = Depends(require_roles(*_REPORT_FINANCE_ROLES)),
 ):
-    """Get GST report for date range"""
+    """GST report for a date range.
+
+    Orders persist `grand_total` + `tax_amount` (and per-line taxable/tax),
+    NOT `cgst_amount` / `sgst_amount` / `igst_amount` / `taxable_amount` /
+    `final_amount` -- those legacy field names never landed, so the old loop
+    summed all-zeros. Taxable is derived as grand_total - tax_amount (via
+    _order_taxable_and_tax) and the total tax is split CGST/SGST (intra-state)
+    vs IGST (inter-state) by comparing the store's home state with the
+    customer's state -- the same rule GSTR-1 / GSTR-3B use.
+
+    The `created_at` filter uses real datetime objects: BaseRepository writes
+    `created_at` as a BSON datetime, so the previous `.isoformat()` STRING
+    filter never matched a single order.
+    """
     active_store = store_id or current_user.get("active_store_id")
     order_repo = get_order_repository()
 
     if order_repo is None:
         return {
             "data": [],
-            "summary": {"total_cgst": 0, "total_sgst": 0, "total_igst": 0},
+            "summary": {
+                "total_cgst": 0,
+                "total_sgst": 0,
+                "total_igst": 0,
+                "total_taxable": 0,
+                "total_tax": 0,
+            },
         }
 
     from_dt = datetime.combine(from_date, datetime.min.time())
@@ -746,33 +766,85 @@ async def gst_report(
     orders = order_repo.find_many(
         {
             "store_id": active_store,
-            "created_at": {"$gte": from_dt.isoformat(), "$lte": to_dt.isoformat()},
-            "status": {"$nin": ["CANCELLED", "DRAFT"]},
-        }
+            # Datetime objects, NOT .isoformat() strings -- created_at is a
+            # BSON datetime and a string comparison never matches.
+            "created_at": {"$gte": from_dt, "$lte": to_dt},
+            "status": {"$nin": ["CANCELLED", "DRAFT", "cancelled", "draft"]},
+        },
+        limit=0,  # 0 -> no cap: a GST report must include every invoice.
     )
 
-    total_cgst = sum(o.get("cgst_amount", 0) for o in orders)
-    total_sgst = sum(o.get("sgst_amount", 0) for o in orders)
-    total_igst = sum(o.get("igst_amount", 0) for o in orders)
+    # Resolve the store's home state + a customer_id -> state map so we can
+    # split intra-state (CGST+SGST) from inter-state (IGST) tax, matching
+    # the GSTR-1 / GSTR-3B logic.
+    store_state = ""
+    cust_state_map: dict = {}
+    raw_db = _get_raw_db()
+    if raw_db is not None:
+        try:
+            store_doc = raw_db["stores"].find_one({"store_id": active_store})
+            if store_doc:
+                store_state = str(store_doc.get("state", "") or "")
+        except Exception:
+            pass
+        try:
+            for cust in raw_db["customers"].find({}, {"customer_id": 1, "state": 1}):
+                cust_state_map[str(cust.get("customer_id", ""))] = str(
+                    cust.get("state", "") or ""
+                )
+        except Exception:
+            pass
+
+    rows = []
+    total_cgst = 0.0
+    total_sgst = 0.0
+    total_igst = 0.0
+    total_taxable = 0.0
+
+    for o in orders:
+        taxable, tax = _order_taxable_and_tax(o)
+        customer_state = cust_state_map.get(str(o.get("customer_id", ""))) or store_state
+        is_inter_state = bool(
+            store_state
+            and customer_state
+            and store_state.strip().lower() != customer_state.strip().lower()
+        )
+        if is_inter_state:
+            cgst = sgst = 0.0
+            igst = round(tax, 2)
+        else:
+            cgst = sgst = round(tax / 2, 2)
+            igst = 0.0
+
+        total_cgst += cgst
+        total_sgst += sgst
+        total_igst += igst
+        total_taxable += taxable
+
+        rows.append(
+            {
+                "order_number": o.get("order_number") or o.get("order_id"),
+                # created_at is a BSON datetime; str(...)[:10] -> 'YYYY-MM-DD'
+                # and is also safe for legacy ISO-string rows.
+                "date": str(o.get("created_at", ""))[:10],
+                "taxable_amount": taxable,
+                "cgst": cgst,
+                "sgst": sgst,
+                "igst": igst,
+                "total": float(
+                    o.get("grand_total", o.get("total_amount", 0)) or 0
+                ),
+            }
+        )
 
     return {
-        "data": [
-            {
-                "order_number": o.get("order_number"),
-                "date": to_date_str(o.get("created_at")),
-                "taxable_amount": o.get("taxable_amount", 0),
-                "cgst": o.get("cgst_amount", 0),
-                "sgst": o.get("sgst_amount", 0),
-                "igst": o.get("igst_amount", 0),
-                "total": o.get("final_amount", 0),
-            }
-            for o in orders
-        ],
+        "data": rows,
         "summary": {
-            "total_cgst": total_cgst,
-            "total_sgst": total_sgst,
-            "total_igst": total_igst,
-            "total_tax": total_cgst + total_sgst + total_igst,
+            "total_taxable": round(total_taxable, 2),
+            "total_cgst": round(total_cgst, 2),
+            "total_sgst": round(total_sgst, 2),
+            "total_igst": round(total_igst, 2),
+            "total_tax": round(total_cgst + total_sgst + total_igst, 2),
         },
     }
 
@@ -1170,10 +1242,10 @@ async def staff_ranking(
     store_id: Optional[str] = Query(None),
     from_date: date = Query(...),
     to_date: date = Query(...),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_roles(*_REPORT_FINANCE_ROLES)),
 ):
-    """Staff performance ranking (sales, orders, avg bill)"""
-    active_store = store_id or current_user.get("active_store_id")
+    """Staff performance ranking (sales, orders, avg bill); store-scoped."""
+    active_store = validate_store_access(store_id, current_user)
     order_repo = get_order_repository()
 
     if order_repo is None:
@@ -1710,6 +1782,87 @@ def _get_raw_db():
     return None
 
 
+def _order_taxable_and_tax(order: dict) -> tuple:
+    """Derive (taxable_value, total_tax) for GST returns from an order doc.
+
+    Persisted order docs carry `subtotal` (the PRE-cart-discount GROSS sum,
+    NOT the taxable base), `tax_amount` (total GST), and `grand_total` (what
+    the customer actually pays). `orders._compute_per_category_gst` guarantees
+    `taxable + tax == grand_total` in BOTH inclusive and exclusive modes, so
+    the correct GST taxable value is `grand_total - tax_amount` -- NOT
+    `subtotal`, which overstates when a cart discount applies or under
+    inclusive pricing.
+
+    Real orders have NO top-level `taxable` / `taxable_amount` field (those
+    legacy names never landed) -- reading them returned 0 and zeroed out every
+    GSTR-1 / GSTR-3B / GST-report taxable value. This was the bug. Resolution
+    order (first usable signal wins):
+      Tax total: explicit top-level `tax` (authoritative when present) ->
+        `tax_amount` (what orders.py persists) -> `tax_total`.
+      Taxable:
+        1. Explicit top-level `taxable` / `taxable_amount` if present -- kept
+           for backward compatibility with any doc / fixture that stamps them;
+           for a well-formed order this equals grand_total - tax.
+        2. grand_total - tax (the canonical derivation for real orders).
+        3. Per-line `taxable_value` / `tax_amount` sums when the top-level
+           totals are absent (e.g. partial legacy rows).
+    """
+
+    def _f(v):
+        try:
+            return float(v or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    # Total GST. An explicit top-level `tax` (the sibling of an explicit
+    # `taxable`) is authoritative when present; real orders don't carry it and
+    # fall through to `tax_amount` (what orders.py persists) then `tax_total`.
+    if order.get("tax") is not None:
+        total_tax = _f(order.get("tax"))
+    elif order.get("tax_amount") is not None:
+        total_tax = _f(order.get("tax_amount"))
+    else:
+        total_tax = _f(order.get("tax_total"))
+
+    # (1) Explicit top-level taxable wins when present (legacy / fixtures).
+    if order.get("taxable") is not None or order.get("taxable_amount") is not None:
+        explicit = order.get("taxable")
+        if explicit is None:
+            explicit = order.get("taxable_amount")
+        return round(_f(explicit), 2), round(total_tax, 2)
+
+    grand_total = (
+        _f(order.get("grand_total"))
+        if order.get("grand_total") is not None
+        else _f(order.get("total_amount"))
+    )
+
+    # Per-line fallback data.
+    line_taxable = 0.0
+    line_tax = 0.0
+    has_line_data = False
+    for it in order.get("items") or []:
+        if not isinstance(it, dict):
+            continue
+        if it.get("taxable_value") is not None or it.get("tax_amount") is not None:
+            has_line_data = True
+            line_taxable += _f(it.get("taxable_value"))
+            line_tax += _f(it.get("tax_amount"))
+
+    # (2) Canonical derivation: taxable = grand_total - tax_amount.
+    if grand_total > 0:
+        # If top-level tax is missing but the lines carry it, trust the lines.
+        if total_tax <= 0 and has_line_data and line_tax > 0:
+            total_tax = line_tax
+        return round(grand_total - total_tax, 2), round(total_tax, 2)
+
+    # (3) No grand_total -> per-line sums.
+    if has_line_data:
+        return round(line_taxable, 2), round(line_tax, 2)
+
+    return 0.0, round(total_tax, 2)
+
+
 def _compute_gstr1(month: str, active_store: str) -> dict:
     """Compute the IMS GSTR-1 report dict for a (month, store).
 
@@ -1723,11 +1876,14 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
       - B2CL : orders to consumers with invoice value > 250000
       - B2CS : consolidated summary of remaining consumer invoices
 
-    Field-name fixes (Phase I-5):
-      - Reads `grand_total` (not legacy `total_amount`), `taxable` (not
-        `taxable_amount`), `tax` (not `cgst_amount + sgst_amount + igst_amount`).
-        The `_compute_per_category_gst` helper in orders.py stamps these
-        on every order; the legacy field names never landed.
+    Field-name fixes:
+      - Reads `grand_total` (not legacy `total_amount`) and `tax_amount`
+        (total GST) off the order; there is NO top-level `taxable` /
+        `taxable_amount` field, so the taxable value is derived as
+        grand_total - tax_amount (with a per-line `taxable_value` fallback)
+        via _order_taxable_and_tax. orders._compute_per_category_gst
+        guarantees taxable + tax == grand_total in inclusive AND exclusive
+        modes, so this is exact.
       - Stores carry their own `state` + `gstin` in the `stores`
         collection — used to derive intra-state (CGST+SGST) vs
         inter-state (IGST) splits and to fill the GSTIN/legalName
@@ -1813,15 +1969,15 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
                     or "Walk-in Customer"
                 )
 
-                # PRIMARY field map (Phase I-5 fix). Fall through legacy
-                # names for backwards-compat with any pre-Phase-6.15 rows.
+                # PRIMARY field map. Orders persist `grand_total` (what the
+                # customer pays) + `tax_amount` (total GST); there is NO
+                # top-level `taxable` / `taxable_amount` field, so the taxable
+                # value is derived as grand_total - tax_amount (with a per-line
+                # taxable_value fallback). See _order_taxable_and_tax.
                 invoice_value = float(
                     order.get("grand_total", order.get("total_amount", 0)) or 0
                 )
-                taxable_value = float(
-                    order.get("taxable", order.get("taxable_amount", 0)) or 0
-                )
-                total_tax = float(order.get("tax", order.get("tax_amount", 0)) or 0)
+                taxable_value, total_tax = _order_taxable_and_tax(order)
 
                 # Intra vs inter-state split. We don't have CGST/SGST/IGST
                 # split on the order doc, so derive it from store_state vs
@@ -2113,10 +2269,9 @@ def _compute_gstr3b(month: str, active_store: str) -> dict:
                     "created_at": {"$gte": from_dt, "$lte": to_dt},
                 }
             ):
-                taxable = float(
-                    order.get("taxable", order.get("taxable_amount", 0)) or 0
-                )
-                tax = float(order.get("tax", order.get("tax_amount", 0)) or 0)
+                # Orders carry `tax_amount` + `grand_total`, NOT `taxable` /
+                # `taxable_amount`; derive taxable = grand_total - tax_amount.
+                taxable, tax = _order_taxable_and_tax(order)
                 if taxable <= 0 and tax <= 0:
                     continue
                 out_taxable += taxable

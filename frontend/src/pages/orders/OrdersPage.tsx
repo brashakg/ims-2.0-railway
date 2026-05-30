@@ -32,6 +32,7 @@ import clsx from 'clsx';
 import { OrderNotificationTracker } from '../../components/orders/OrderNotificationTracker';
 import { OrderStatusTimeline } from '../../components/orders/OrderStatusTimeline';
 import { OrderShippingCard } from '../../components/orders/OrderShippingCard';
+import { OrderTrackingQR } from '../../components/orders/OrderTrackingQR';
 
 // Status configurations
 const ORDER_STATUS_CONFIG: Record<OrderStatus, { label: string; color: string; bgColor: string; icon: typeof Clock }> = {
@@ -57,6 +58,10 @@ export function OrdersPage() {
   // Data state
   const [orders, setOrders] = useState<Order[]>([]);
   const [selectedOrder, setSelectedOrder] = useState<Order | null>(null);
+  // Public tracking token for the open order's QR. New orders already carry it
+  // in the list payload; for older orders we lazily fetch the full order (the
+  // backend mints + persists a token on GET) so the QR can still render.
+  const [trackingToken, setTrackingToken] = useState<string | null>(null);
 
   // UI state
   const [searchQuery, setSearchQuery] = useState('');
@@ -115,6 +120,34 @@ export function OrdersPage() {
   useEffect(() => {
     loadOrders();
   }, [statusFilter, dateFilter, currentPage, user?.activeStoreId]);
+
+  // Resolve the open order's public tracking token for the QR. Use the value
+  // already on the row if present; otherwise fetch the full order (the backend
+  // mints a token on GET for orders that predate the feature). Fail-soft.
+  useEffect(() => {
+    if (!selectedOrder) {
+      setTrackingToken(null);
+      return;
+    }
+    const onRow = selectedOrder.trackingToken || selectedOrder.tracking_token;
+    if (onRow) {
+      setTrackingToken(onRow);
+      return;
+    }
+    let cancelled = false;
+    setTrackingToken(null);
+    orderApi
+      .getOrder(selectedOrder.id)
+      .then((full: { trackingToken?: string; tracking_token?: string }) => {
+        if (!cancelled) setTrackingToken(full?.trackingToken || full?.tracking_token || null);
+      })
+      .catch(() => {
+        /* fail-soft: QR just won't render */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedOrder]);
 
   const loadOrders = async () => {
     setIsLoading(true);
@@ -341,7 +374,7 @@ export function OrdersPage() {
                   const sc = ORDER_STATUS_CONFIG[order.orderStatus as OrderStatus];
                   return (
                     <button key={order.id} onClick={() => { setSelectedOrder(order); setSearchQuery(''); }}
-                      className="w-full text-left px-3 py-2.5 hover:bg-bv-gold-50 border-b border-gray-50 last:border-0 flex items-center gap-3">
+                      className="w-full text-left px-3 py-2.5 hover:bg-bv-red-50 border-b border-gray-50 last:border-0 flex items-center gap-3">
                       <div className="flex-1 min-w-0">
                         <p className="text-sm font-medium text-gray-900 truncate">{order.orderNumber}</p>
                         <p className="text-xs text-gray-500">{order.customerName} {order.customerPhone ? `· ${order.customerPhone}` : ''}</p>
@@ -622,6 +655,12 @@ export function OrdersPage() {
                   storeId={selectedOrder.storeId}
                 />
 
+                {/* Customer order-tracking QR — public, no-login link. */}
+                <OrderTrackingQR
+                  trackingToken={trackingToken}
+                  orderNumber={selectedOrder.orderNumber}
+                />
+
                 <div className="flex gap-2 pt-4 flex-wrap">
                   <button
                     onClick={() => printOrder(selectedOrder)}
@@ -723,7 +762,7 @@ export function OrdersPage() {
                 <label className="block text-sm font-medium text-gray-700 mb-1">
                   Payment Method
                 </label>
-                <div className="grid grid-cols-4 gap-2">
+                <div className="grid grid-cols-2 tablet:grid-cols-4 gap-2">
                   {(['CASH', 'CARD', 'UPI', 'BANK_TRANSFER'] as const).map(method => (
                     <button
                       key={method}
@@ -732,7 +771,7 @@ export function OrdersPage() {
                       className={clsx(
                         'p-2 text-xs rounded-lg border transition-colors',
                         paymentMethod === method
-                          ? 'border-bv-red-600 bg-bv-gold-50 text-bv-gold-700'
+                          ? 'border-bv-red-600 bg-bv-red-50 text-bv-red-700'
                           : 'border-gray-200 hover:border-gray-300'
                       )}
                     >

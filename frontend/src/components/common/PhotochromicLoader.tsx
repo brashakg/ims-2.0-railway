@@ -218,7 +218,7 @@ export function PhotochromicLoader({
       {!isIndeterminate && (
         <div className="w-full max-w-32 h-1.5 bg-gray-200 rounded-full overflow-hidden">
           <div
-            className="h-full bg-gradient-to-r from-bv-gold-400 to-bv-gold-600 rounded-full transition-all duration-300"
+            className="h-full bg-gradient-to-r from-bv-red-400 to-bv-red-600 rounded-full transition-all duration-300"
             style={{ width: `${animatedProgress}%` }}
           />
         </div>

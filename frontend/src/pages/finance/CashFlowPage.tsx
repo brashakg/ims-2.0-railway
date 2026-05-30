@@ -181,7 +181,7 @@ function Forecast({ forecast, openingCash, setOpeningCash, onApply }: { forecast
         </div>
       )}
 
-      <div className="grid grid-cols-3 gap-3">
+      <div className="grid grid-cols-1 tablet:grid-cols-3 gap-3">
         <Card label="Expected inflow (90d)" value={inr(forecast.totals.inflow)} tone="good" />
         <Card label="Expected outflow (90d)" value={inr(forecast.totals.outflow)} tone="bad" />
         <Card label="Projected closing" value={inr(forecast.totals.closing_balance)} tone={forecast.totals.closing_balance >= 0 ? 'good' : 'bad'} />
@@ -286,7 +286,7 @@ function VendorLedgerDrawer({ vendorId, vendorName, onClose, onChanged }: { vend
             <div className="flex items-center gap-2 text-gray-500"><Loader2 className="w-4 h-4 animate-spin" /> Loading...</div>
           ) : ledger ? (
             <>
-              <div className="grid grid-cols-3 gap-2 mb-4">
+              <div className="grid grid-cols-1 tablet:grid-cols-3 gap-2 mb-4">
                 <Card label="Payable balance" value={inr(ledger.ledger.closing_balance)} tone="bad" />
                 <Card label="Billed" value={inr(ledger.ledger.total_billed)} />
                 <Card label="Paid" value={inr(ledger.ledger.total_paid)} sub={`TDS ${inr(ledger.ledger.total_tds)}`} />

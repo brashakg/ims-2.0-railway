@@ -6,7 +6,36 @@ Self-contained context for any Claude session (local CLI or web) picking up this
 
 ## 👋 IF YOU ARE A FRESH SESSION TAKING OVER — READ THIS FIRST
 
-**Last session summary** (ended 2026-04-21, 42 commits):
+**Last session summary** (2026-05-30 — QA-fleet hardening, 12 PRs):
+
+A QA + hardening session: stood up a local test stack, ran a fleet of parallel QA + code-audit agents, and fixed what they found. Shipped to `main`:
+- **#362** customer search now matches family members (`patients[].name/.mobile` via Mongo dot-notation) — searching a patient surfaces the parent account.
+- **#363** clinic + POS prescription flow: per-customer Rx history/edit modal (`ClinicPrescriptionHistory.tsx`), new ≠ edit-last, POS two-step patient→Rx pick (`PrescriptionSelectModal`), new validated `PUT /prescriptions/{id}`.
+- **#365** back-dated prescriptions: optional `prescription_date` (future-guarded), expiry via `_add_months`.
+- **#364** RBAC enforcement middleware (`backend/api/middleware/rbac_enforcement.py`): request-time defense-in-depth from the #358 policy registry; fail-open un-catalogued, reuses `auth.decode_token`, `self_enforced` defer (jarvis-404 / clinical-403). Behavior-preserving.
+- **#366** RBAC follow-up: middleware defers on empty/absent-roles token (was 403'ing zero-role accounts on AUTHENTICATED routes); `PUT /prescriptions/{id}` flagged `self_enforced`.
+- **#369** per-role RBAC access-matrix test (`test_rbac_access_matrix.py`, 455 cases) + reconciled payroll policy rows to match their route gates.
+- **#367** customer data integrity: nested-patient `relation` no longer overwritten to "Other" (P1 corruption); `upload-bill` returns 503 (not false-200) on storage-down; customer_type/GSTIN/email/future-DOB validation; **B2B requires GSTIN** + **Indian mobile (leading 6-9)**.
+- **#368** orders/POS hardening (QA stress C-1..C-9 + audit D-1/D-2): orderable `catalog_products`, GST **item_type-wins**, Infinity-price guard, **require-approval** on ₹0/100%-discount, CREDIT over-tender fix, **Idempotency-Key** on order-create (BE+FE), invoice **CGST/SGST/IGST split**, delivery validation, and **POS discount caps via canonical `pricing_caps`** (the local table under-capped PREMIUM/MASS/LUXURY + skipped luxury brand caps, 403'ing legit discounts).
+- **#370** audit P3: ITC CGST/SGST paisa-exact residual split; payroll `_earnings()` raises on negative wage (fail-loudly).
+- **#371** QA investigation record (`docs/reference/QA_INVESTIGATION_2026-05-30.md`).
+
+**In-flight at session end:** branch `claude/fix-money-integrity` — CRITICAL: P1-A returns had NO qty cap / already-returned linkage (unlimited + repeatable over-refund); P2-A loyalty + P2-B store-credit redeem were non-atomic read-modify-write (double-spend). Fix mirrors the concurrency-safe `vouchers.redeem_voucher_atomic` (guarded `find_one_and_update`).
+
+**Remaining (audit + backlog):**
+- **P2-C** loyalty expiry over-expires already-spent lots (needs per-lot FIFO) — `loyalty.py` ~565.
+- **P3-A** invoice numbering NOT GST-compliant (random hex, calendar-year, no unique index; law wants a consecutive serial per *financial* year — atomic counter + unique index + care for Tally/receipt refs) — **needs sign-off** (format/accounting change).
+- **P3-B** `generate_order_number` no retry-on-collision (`orders.py` ~664, ~1.6e-7 odds, self-recovering); **P3-C** EMI installment rounding display drift (`orders.py` ~2016).
+- **Blocked in the web container:** live-stack QA on untested modules (clinical/workshop/finance/HR/purchase/marketing) — no `mongod` here; run against deployed Railway or restore Mongo. Frontend live responsiveness/visual checks (Claude-in-Chrome on Vercel).
+- PR **#337** (Playwright E2E nightly CI) still open from a prior session — rebase + green.
+- Unmerged prior-session branches to triage: `work-datetime/-catalog-guard/-button-sweep/-fe-p1/-fe-sweep/-inventory-qty/-rbac-foundation/-transfers`, locked `wip-*`.
+- **User env action:** set `JWT_SECRET_KEY` + `SEED_SECRET` (+ optional `CREDENTIAL_ENCRYPTION_KEY`) on Railway.
+
+Full QA findings + repros: [`docs/reference/QA_INVESTIGATION_2026-05-30.md`](docs/reference/QA_INVESTIGATION_2026-05-30.md).
+
+---
+
+**Earlier session summary** (ended 2026-04-21, 42 commits):
 
 Shipped phases:
 - **Phase 0–1.9**: all 9 design-prototype screens ported (Hub, Store Setup, Inventory, Reports, Clinical, POS, Tasks, Print, Jarvis). Design tokens + shell chrome (64px rail + 52px topbar) in `frontend/src/components/shell/`.

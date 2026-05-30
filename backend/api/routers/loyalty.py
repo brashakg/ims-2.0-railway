@@ -343,6 +343,43 @@ async def redeem(
     capped_points = int(result["capped_points"])
     rupee_value = float(result["rupee_value"])
 
+    # ATOMIC GUARDED DEBIT (no double-spend). The Python balance check above
+    # (calc_redeem) is advisory only -- two concurrent redeems can both pass it.
+    # The authoritative debit is a single find_one_and_update whose FILTER
+    # requires balance_points >= capped_points, so only one of two racing
+    # redemptions for the same last points can match. On no-match the balance is
+    # insufficient (or another redeem won the race) -> 409, and we DON'T write a
+    # ledger row, so the immutable ledger never records a redeem that didn't
+    # actually decrement the balance.
+    debited = accounts.try_debit(
+        body.customer_id,
+        capped_points,
+        delta_lifetime_redeemed=capped_points,
+    )
+    if debited is None:
+        # Re-read for an accurate "available" in the message (best-effort).
+        try:
+            current = int(
+                (accounts.find_by_id(body.customer_id) or {}).get(
+                    "balance_points", 0
+                )
+            )
+        except Exception:  # noqa: BLE001
+            current = int(account.get("balance_points", 0))
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "ok": False,
+                "reason": "insufficient_balance",
+                "requested_points": capped_points,
+                "available_points": current,
+                "message": (
+                    "Insufficient points balance -- the balance changed before "
+                    "this redemption could be applied."
+                ),
+            },
+        )
+
     txn_id = str(uuid.uuid4())
     txns.create(
         {
@@ -360,12 +397,6 @@ async def redeem(
             "created_by": current_user.get("user_id"),
             "created_at": datetime.now(),
         }
-    )
-
-    accounts.adjust_balance(
-        body.customer_id,
-        delta_points=-capped_points,
-        delta_lifetime_redeemed=capped_points,
     )
 
     _audit(
@@ -407,12 +438,37 @@ async def adjust(
     settings = _settings_safe()
     account = accounts.find_or_create(body.customer_id)
     points = int(body.points)
-    if points < 0 and abs(points) > int(account.get("balance_points", 0)):
-        raise HTTPException(
-            status_code=400,
-            detail="cannot debit below zero balance",
+
+    delta_lifetime_earned = points if points > 0 else 0
+    new_lifetime = int(account.get("lifetime_earned", 0)) + delta_lifetime_earned
+    new_tier = compute_tier(new_lifetime, settings)
+    tier_to_set = new_tier if new_tier != account.get("tier") else None
+
+    updated_account: Optional[Dict[str, Any]] = None
+    if points < 0:
+        # DEBIT -> atomic guarded decrement (no negative balance / double-spend).
+        # Same guard-in-filter as redeem: only succeeds while balance covers it.
+        updated_account = accounts.try_debit(
+            body.customer_id,
+            abs(points),
+            new_tier=tier_to_set,
+        )
+        if updated_account is None:
+            raise HTTPException(
+                status_code=400,
+                detail="cannot debit below zero balance",
+            )
+    else:
+        # CREDIT is safe to apply unconditionally.
+        updated_account = accounts.adjust_balance(
+            body.customer_id,
+            delta_points=points,
+            delta_lifetime_earned=delta_lifetime_earned,
+            new_tier=tier_to_set,
         )
 
+    # Ledger row only AFTER the balance actually moved -> the immutable ledger
+    # never records a debit that didn't decrement the balance.
     txn_id = str(uuid.uuid4())
     txns.create(
         {
@@ -430,16 +486,6 @@ async def adjust(
         }
     )
 
-    delta_lifetime_earned = points if points > 0 else 0
-    new_lifetime = int(account.get("lifetime_earned", 0)) + delta_lifetime_earned
-    new_tier = compute_tier(new_lifetime, settings)
-    accounts.adjust_balance(
-        body.customer_id,
-        delta_points=points,
-        delta_lifetime_earned=delta_lifetime_earned,
-        new_tier=new_tier if new_tier != account.get("tier") else None,
-    )
-
     _audit(
         "loyalty.adjust",
         current_user,
@@ -447,10 +493,16 @@ async def adjust(
         body.customer_id,
     )
 
+    # Prefer the authoritative post-update balance; fall back to the snapshot.
+    if isinstance(updated_account, dict) and "balance_points" in updated_account:
+        balance_after = int(updated_account.get("balance_points", 0))
+    else:
+        balance_after = int(account.get("balance_points", 0)) + points
+
     return {
         "txn_id": txn_id,
         "delta": points,
-        "balance_after": int(account.get("balance_points", 0)) + points,
+        "balance_after": balance_after,
         "tier": new_tier,
     }
 

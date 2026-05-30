@@ -38,12 +38,14 @@ from .payroll import router as payroll_router
 from .marketing import router as marketing_router
 from .analytics_v2 import router as analytics_v2_router
 from .agents import router as agents_router
+from .proposals import router as proposals_router
 from .walkouts import router as walkouts_router
 from .points import router as points_router
 from .payout import router as payout_router
 from .webhooks import router as webhooks_router
 from .loyalty import router as loyalty_router
 from .vendor_portal import router as vendor_portal_router
+from .portal import router as portal_router
 from .techcherry_import import router as techcherry_import_router
 from .vouchers import router as vouchers_router
 from .entities import router as entities_router
@@ -57,6 +59,8 @@ from .lens_catalog import router as lens_catalog_router
 from .lens_stock import router as lens_stock_router
 from .lens_enums import router as lens_enums_router
 from .product_templates import router as product_templates_router
+from .audit import router as audit_router
+from .budgets import router as budgets_router
 
 __all__ = [
     "auth_router",
@@ -94,12 +98,14 @@ __all__ = [
     "marketing_router",
     "analytics_v2_router",
     "agents_router",
+    "proposals_router",
     "walkouts_router",
     "points_router",
     "payout_router",
     "webhooks_router",
     "loyalty_router",
     "vendor_portal_router",
+    "portal_router",
     "techcherry_import_router",
     "vouchers_router",
     "entities_router",
@@ -113,4 +119,6 @@ __all__ = [
     "lens_stock_router",
     "lens_enums_router",
     "product_templates_router",
+    "audit_router",
+    "budgets_router",
 ]

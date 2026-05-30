@@ -116,25 +116,41 @@ class FakeCollection:
     def count_documents(self, filter=None):
         return sum(1 for d in self.docs if _doc_matches(d, filter))
 
+    def _apply_update(self, d, update):
+        set_block = (update or {}).get("$set", {}) or {}
+        inc_block = (update or {}).get("$inc", {}) or {}
+        push_block = (update or {}).get("$push", {}) or {}
+        d.update(set_block)
+        for k, v in inc_block.items():
+            d[k] = (d.get(k) or 0) + v
+        for k, v in push_block.items():
+            arr = d.get(k)
+            if not isinstance(arr, list):
+                arr = []
+            arr.append(v)
+            d[k] = arr
+
     def update_one(self, filter, update):
         modified = 0
         for d in self.docs:
             if _doc_matches(d, filter):
-                set_block = (update or {}).get("$set", {}) or {}
-                inc_block = (update or {}).get("$inc", {}) or {}
-                push_block = (update or {}).get("$push", {}) or {}
-                d.update(set_block)
-                for k, v in inc_block.items():
-                    d[k] = (d.get(k) or 0) + v
-                for k, v in push_block.items():
-                    arr = d.get(k)
-                    if not isinstance(arr, list):
-                        arr = []
-                    arr.append(v)
-                    d[k] = arr
+                self._apply_update(d, update)
                 modified += 1
                 break
         return type("R", (), {"modified_count": modified, "matched_count": modified})()
+
+    def find_one_and_update(self, filter, update, return_document=None, **_kw):
+        """Atomic match-then-modify on the first matching doc, mirroring Mongo's
+        per-document atomicity. Returns the post-update doc when return_document
+        is truthy (ReturnDocument.AFTER == True), else the pre-update doc; None
+        when nothing matches -- exactly what the guarded
+        balance_points >= points filter relies on to reject an overspend."""
+        for d in self.docs:
+            if _doc_matches(d, filter):
+                before = dict(d)
+                self._apply_update(d, update)
+                return dict(d) if return_document else before
+        return None
 
 
 class FakeDB:

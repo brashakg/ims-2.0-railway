@@ -58,6 +58,10 @@ export interface UserData {
   discountCap: number;
   isActive: boolean;
   createdAt: string;
+  /** Per-user deny-only module override (canonical module key -> bool). A key
+   *  set to false hides + route-blocks that module for the user on top of their
+   *  role. Loaded from the backend `module_access` field; sent back on save. */
+  moduleAccess?: Record<string, boolean>;
 }
 
 export interface Category {

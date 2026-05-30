@@ -4,12 +4,14 @@ IMS 2.0 - Orders Router
 Sales order management endpoints
 """
 
-from fastapi import APIRouter, HTTPException, Depends, Query
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, HTTPException, Depends, Query, Header
+from pydantic import BaseModel, Field, field_validator
 from typing import Any, Dict, List, Optional
 from datetime import datetime, date, timedelta
 from enum import Enum
+import math
 import uuid
+import secrets
 
 import logging
 
@@ -22,15 +24,27 @@ from ..dependencies import (
     get_stock_repository,
     get_product_repository,
     get_walkin_counter_repository,
+    validate_store_access,
 )
 
-# Discount cap by product discount_category (mirrors billing.py caps)
-CATEGORY_DISCOUNT_CAPS = {
-    "LUXURY": 2.0,
-    "PREMIUM": 5.0,
-    "MASS": 10.0,
-    "NON_DISCOUNTABLE": 0.0,
-}
+# Discount caps (category + luxury brand) come from the canonical
+# api.services.pricing_caps -- NEVER re-implement them here. The old local
+# table under-capped PREMIUM (5% vs 20%) / MASS (10% vs 15%) / LUXURY (2% vs 5%)
+# and applied no luxury BRAND cap at all, contradicting SYSTEM_INTENT 3 and
+# blocking legitimate discounts at POS.
+
+# Roles permitted to create / modify POS orders. Excludes ACCOUNTANT,
+# CATALOG_MANAGER, OPTOMETRIST, WORKSHOP_STAFF (out of POS scope) and INVESTOR
+# (read-only, also blocked by middleware). CASHIER is payment-only -> may record
+# payments but not create orders, so it is intentionally NOT in this set.
+POS_WRITE_ROLES = (
+    "SUPERADMIN",
+    "ADMIN",
+    "AREA_MANAGER",
+    "STORE_MANAGER",
+    "SALES_CASHIER",
+    "SALES_STAFF",
+)
 
 # Per-category GST is sourced from the canonical table in
 # api/services/gst_rates.py (single source of truth, shared with the product
@@ -50,9 +64,30 @@ from ..services.gst_rates import resolve_gst_rate, gst_pricing_mode
 # the set of categories the canonical table bills at 5%.
 from ..services.gst_rates import GST_CATEGORY_TABLE as _GST_CATEGORY_TABLE
 
+# _normalize_category maps the many category spellings (FRAMES / FR / "frame")
+# to the canonical hint used as a GST_CATEGORY_TABLE key. Used by the C-2 guard
+# below to tell a KNOWN category from a junk/typo one.
+from ..services.gst_rates import _normalize_category as _normalize_gst_category
+
 LOW_GST_CATEGORIES = {
     cat for cat, (_hsn, rate) in _GST_CATEGORY_TABLE.items() if rate == 5.0
 }
+
+
+def _is_known_gst_category(value) -> bool:
+    """True if `value` resolves to a real GST_CATEGORY_TABLE entry (not the
+    optical-dominant DEFAULT_GST_RATE fallback). Mirrors the normalisation
+    resolve_gst_rate() uses, so 'WATCH' / 'WT' / 'frames' all count as known
+    while a junk string like 'FOOBAR' does not. Used by C-2 to decide whether
+    a provided category is trustworthy or we must fall back to item_type."""
+    if not value:
+        return False
+    norm = _normalize_gst_category(value)
+    if norm in _GST_CATEGORY_TABLE:
+        return True
+    # Defensive: also accept the plain upper form (covers any table key that
+    # is not itself in the _CATEGORY_HINT map, e.g. SMARTGLASSES / WALL_CLOCK).
+    return str(value).strip().upper() in _GST_CATEGORY_TABLE
 
 
 def _compute_per_category_gst(items: list, cart_discount_pct: float) -> dict:
@@ -85,7 +120,23 @@ def _compute_per_category_gst(items: list, cart_discount_pct: float) -> dict:
         line_subtotal = float(it.get("item_total") or 0.0)
         subtotal += line_subtotal
         item_discount_sum += float(it.get("discount_amount") or 0.0)
-        cat = it.get("category") or it.get("item_type") or ""
+        # C-2: `item_type` is AUTHORITATIVE for GST. Resolution order for a line:
+        #   1. explicit per-item HSN / gst_rate    (most authoritative -- handled
+        #      inside resolve_gst_rate, which checks the HSN before any category)
+        #   2. the item_type's table rate          (when item_type maps to a known
+        #      GST_CATEGORY_TABLE entry -- WINS even over a VALID `category`)
+        #   3. the category's table rate           (when item_type is unknown)
+        #   4. the optical-dominant DEFAULT          (both unknown)
+        # Rationale: item_type is the line's true tax nature at POS. A
+        # SUNGLASS sold under a FRAMES category must bill 18% (the sunglass
+        # rate), not 5% -- the catalog `category` is a merchandising bucket and
+        # must not undercharge GST. An explicit HSN still trumps everything
+        # because resolve_gst_rate consults `by_hsn` first.
+        item_type_val = it.get("item_type") or ""
+        if _is_known_gst_category(item_type_val):
+            cat = item_type_val
+        else:
+            cat = it.get("category") or item_type_val or ""
         hsn = it.get("hsn_code") or it.get("hsn") or None
         rate = resolve_gst_rate(hsn_code=hsn, category=cat)
         # GST mode (GST_PRICING_MODE, per-request):
@@ -326,9 +377,19 @@ class OrderItemCreate(BaseModel):
     brand: Optional[str] = None
     subbrand: Optional[str] = None
     category: Optional[str] = None
-    quantity: int = Field(default=1, ge=1)
-    unit_price: float = Field(..., ge=0)
+    # C-3: GENEROUS upper bounds that can never reject a real optical order but
+    # stop a malicious/garbage payload (e.g. unit_price=1.7e308 or quantity=1e9)
+    # from overflowing unit_price*quantity to Infinity and 500ing on JSON
+    # serialisation. 1 crore per unit / 1000 units is far above any real line.
+    quantity: int = Field(default=1, ge=1, le=1000)
+    unit_price: float = Field(..., ge=0, le=10_000_000)
     discount_percent: float = Field(default=0, ge=0, le=100)
+    # C-4 (DELTA 2): per-line discount accountability. The POS already sends
+    # these (posStore CartLineItem.discount_approved_by / discount_reason);
+    # they were silently dropped before. Captured here so a 100%-line-discount
+    # order can carry its own approver + reason for the required-approval gate.
+    discount_approved_by: Optional[str] = None
+    discount_reason: Optional[str] = None
     prescription_id: Optional[str] = None
     lens_options: Optional[dict] = None  # coating, tint, etc.
     lens_details: Optional[dict] = None  # type, material, coatings
@@ -345,6 +406,16 @@ class OrderItemCreate(BaseModel):
     sph: Optional[float] = None
     cyl: Optional[float] = None
     add: Optional[float] = None
+
+    @field_validator("unit_price")
+    @classmethod
+    def _unit_price_finite(cls, v: float) -> float:
+        # C-3: explicitly reject NaN / +-Infinity so a non-finite price can
+        # never reach the money math (the le/ge bounds already catch these,
+        # but this is the contract the bound enforces -- belt and braces).
+        if not math.isfinite(v):
+            raise ValueError("unit_price must be a finite number")
+        return v
 
 
 class PaymentCreate(BaseModel):
@@ -396,6 +467,31 @@ class OrderCreate(BaseModel):
     salesperson_name: Optional[str] = None
     visufit_id: Optional[str] = None
 
+    @field_validator("delivery_priority")
+    @classmethod
+    def _validate_delivery_priority(cls, v: Optional[str]) -> Optional[str]:
+        # C-7: only the three known priorities (matches posStore +
+        # the FE priority select). Absent/None is allowed (defaults NORMAL on
+        # the order doc). Reject any other string with a clean 422.
+        if v is None:
+            return v
+        allowed = {"NORMAL", "EXPRESS", "URGENT"}
+        upper = str(v).strip().upper()
+        if upper not in allowed:
+            raise ValueError(
+                "delivery_priority must be one of NORMAL, EXPRESS, URGENT"
+            )
+        return upper
+
+    @field_validator("delivery_date")
+    @classmethod
+    def _validate_delivery_date_not_past(cls, v: Optional[date]) -> Optional[date]:
+        # C-8: a delivery cannot be scheduled in the past. Today is allowed.
+        # Absent/None is allowed (falls back to expected_delivery_days).
+        if v is not None and v < date.today():
+            raise ValueError("delivery_date cannot be in the past")
+        return v
+
 
 class OrderUpdate(BaseModel):
     notes: Optional[str] = None
@@ -420,7 +516,7 @@ async def list_orders(
 ):
     """List orders with filters"""
     repo = get_order_repository()
-    active_store = store_id or current_user.get("active_store_id")
+    active_store = validate_store_access(store_id, current_user)
 
     if repo is not None:
         if customer_id:
@@ -463,7 +559,7 @@ async def get_pending_deliveries(
 ):
     """Get orders pending delivery"""
     repo = get_order_repository()
-    active_store = store_id or current_user.get("active_store_id")
+    active_store = validate_store_access(store_id, current_user)
 
     if repo is not None:
         orders = repo.find_ready_for_delivery(active_store)
@@ -480,7 +576,7 @@ async def get_unpaid_orders(
 ):
     """Get unpaid/partially paid orders"""
     repo = get_order_repository()
-    active_store = store_id or current_user.get("active_store_id")
+    active_store = validate_store_access(store_id, current_user)
 
     if repo is not None:
         orders = repo.find_unpaid(active_store)
@@ -497,7 +593,7 @@ async def get_overdue_orders(
 ):
     """Get overdue orders (past expected delivery)"""
     repo = get_order_repository()
-    active_store = store_id or current_user.get("active_store_id")
+    active_store = validate_store_access(store_id, current_user)
 
     if repo is not None:
         orders = repo.find_overdue(active_store)
@@ -515,7 +611,7 @@ async def search_orders(
 ):
     """Search orders by number, customer name, or phone"""
     repo = get_order_repository()
-    active_store = store_id or current_user.get("active_store_id")
+    active_store = validate_store_access(store_id, current_user)
 
     if repo is not None:
         orders = repo.search_orders(q, active_store)
@@ -534,7 +630,7 @@ async def get_sales_summary(
 ):
     """Get sales summary for a date range"""
     repo = get_order_repository()
-    active_store = store_id or current_user.get("active_store_id")
+    active_store = validate_store_access(store_id, current_user)
 
     if repo and active_store:
         summary = repo.get_sales_summary(active_store, from_date, to_date)
@@ -556,7 +652,7 @@ async def get_status_counts(
 ):
     """Get order counts by status"""
     repo = get_order_repository()
-    active_store = store_id or current_user.get("active_store_id")
+    active_store = validate_store_access(store_id, current_user)
 
     if repo is not None:
         counts = repo.get_status_counts(active_store)
@@ -596,6 +692,73 @@ def generate_order_number(store_id: str) -> str:
     return f"ORD-{prefix}-{year}-{short_uuid}"
 
 
+def build_emi_schedule(principal: float, annual_rate: float, months: int) -> dict:
+    """Reconcile an EMI plan so the installments sum EXACTLY to total_payable.
+
+    P3-C. The equal monthly installment (standard amortization formula) is
+    rounded to paise for display, but `monthly_emi * months` then drifts from
+    the true cost of credit by up to a few paise. A customer paying N equal
+    rounded installments would under/over-pay the principal+interest.
+
+    Fix: `total_payable` is the AUTHORITATIVE total (unrounded EMI x months,
+    rounded once to paise). The schedule pays `monthly_emi` for the first
+    (months - 1) installments and a `last_installment` that absorbs the
+    rounding remainder, so:
+
+        monthly_emi * (months - 1) + last_installment == total_payable   (exact)
+
+    `interest_amount = total_payable - principal`. All values are display /
+    documentation only -- the recorded payment amount (and therefore what
+    reduces balance_due) is unchanged elsewhere.
+
+    Returns the dict embedded as `emi_details` (minus provider, which the
+    caller adds).
+    """
+    months = int(months)
+    principal = float(principal)
+    monthly_rate = annual_rate / 12 / 100
+    if monthly_rate > 0:
+        emi_amount = (
+            principal
+            * monthly_rate
+            * (1 + monthly_rate) ** months
+            / ((1 + monthly_rate) ** months - 1)
+        )
+    else:
+        emi_amount = principal / months
+
+    monthly_emi = round(emi_amount, 2)
+    # Authoritative total cost of credit (rounded once from the exact EMI).
+    total_payable = round(emi_amount * months, 2)
+    # Last installment absorbs the accumulated rounding so the schedule sums
+    # to total_payable to the paisa. round() tames float noise (e.g. a
+    # 4999.999999999 -> 5000.00).
+    last_installment = round(total_payable - monthly_emi * (months - 1), 2)
+    interest_amount = round(total_payable - principal, 2)
+
+    return {
+        "tenure_months": months,
+        "annual_rate": annual_rate,
+        "monthly_emi": monthly_emi,
+        "last_installment": last_installment,
+        "total_payable": total_payable,
+        "interest_amount": interest_amount,
+    }
+
+
+def _order_create_response(order: dict) -> dict:
+    """The POST /orders success envelope. Shared by a fresh create and the C-5
+    idempotency replay so a duplicated request gets a byte-identical response.
+    Reads from a persisted order doc (snake_case)."""
+    return {
+        "order_id": order.get("order_id"),
+        "order_number": order.get("order_number"),
+        "status": order.get("status") or "DRAFT",
+        "grand_total": order.get("grand_total"),
+        "message": "Order created successfully",
+    }
+
+
 def _resolve_product_doc(product_repo, pid: str):
     """Tolerant product existence lookup for order-create.
 
@@ -621,9 +784,75 @@ def _resolve_product_doc(product_repo, pid: str):
                 product = coll.find_one({"_id": ObjectId(pid)})
             except Exception:
                 product = None
-        return product
+        if product is not None:
+            return product
     except Exception:
+        product = None
+    # C-1: seeded catalog products live in the `catalog_products` collection
+    # (served by GET /catalog/products), NOT in `products`. When the lookup
+    # above misses, fall back to catalog_products by the same id so a
+    # catalog-only product can still be ordered. Fail-soft: any error -> None.
+    return _resolve_catalog_product_doc(pid)
+
+
+def _get_catalog_collection():
+    """Return the `catalog_products` Mongo collection, or None if the DB is
+    unavailable. Mirrors catalog.py's accessor; module-level + import-light so
+    tests can monkeypatch it. Fail-soft."""
+    try:
+        from ..dependencies import get_db
+
+        db = get_db()
+        if db is not None and getattr(db, "is_connected", False):
+            return db.get_collection("catalog_products")
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
+def _resolve_catalog_product_doc(pid: str):
+    """C-1 fallback: look a product up in `catalog_products` by id/sku and map
+    its (nested) shape to the flat fields the order-create path reads
+    (product_id, name, mrp/offer_price/cost_price, category, gst_rate/hsn_code,
+    discount_category, item_type). Returns the mapped dict or None. Fail-soft.
+
+    The catalog doc stores pricing under a nested `pricing` block and the name
+    under `title`; the order path reads flat `cost_price` (COGS snapshot) and
+    `discount_category` (category-cap), so we surface those at the top level.
+    """
+    if not pid:
         return None
+    coll = _get_catalog_collection()
+    if coll is None:
+        return None
+    try:
+        doc = coll.find_one({"$or": [{"id": pid}, {"sku": pid}, {"_id": pid}]})
+    except Exception:  # noqa: BLE001
+        return None
+    if not doc:
+        return None
+    pricing = doc.get("pricing") or {}
+    category = doc.get("category")
+    mapped = {
+        "product_id": doc.get("id") or pid,
+        "id": doc.get("id") or pid,
+        "sku": doc.get("sku"),
+        "name": doc.get("title") or doc.get("name"),
+        "model": doc.get("title") or doc.get("name"),
+        "category": category,
+        "item_type": category,
+        "hsn_code": doc.get("hsn_code"),
+        "gst_rate": doc.get("gst_rate"),
+        "mrp": pricing.get("mrp"),
+        "offer_price": pricing.get("offer_price"),
+        "cost_price": pricing.get("cost_price"),
+        "discount_category": pricing.get("discount_category"),
+        "is_active": doc.get("is_active", True),
+        # Mark the source so any future caller can tell a catalog-resolved
+        # product from a `products` one without re-querying.
+        "_resolved_from": "catalog_products",
+    }
+    return mapped
 
 
 # Item types / product_id prefixes that have NO serialized stock to mark sold.
@@ -745,9 +974,26 @@ def _mark_units_sold(
 
 @router.post("", status_code=201)
 async def create_order(
-    order: OrderCreate, current_user: dict = Depends(get_current_user)
+    order: OrderCreate,
+    current_user: dict = Depends(get_current_user),
+    idempotency_key: Optional[str] = Header(None, alias="Idempotency-Key"),
 ):
-    """Create new sales order"""
+    """Create new sales order.
+
+    C-5 (DELTA 3): supports an OPTIONAL `Idempotency-Key` request header. When a
+    non-empty key is supplied and an order with that key already exists for this
+    store, the EXISTING order is returned (same response shape as a fresh
+    create) instead of creating a duplicate -- this makes a double-clicked /
+    retried "Pay now" safe. The key is persisted on the order doc. Fail-soft:
+    with no DB (or no header) the behaviour is identical to before.
+    """
+    # RBAC: only POS-facing roles may create orders. This was relying on the
+    # frontend alone -> ACCOUNTANT / OPTOMETRIST / CATALOG_MANAGER / WORKSHOP_STAFF
+    # could all POST an order. Enforce server-side.
+    if not any(r in current_user.get("roles", []) for r in POS_WRITE_ROLES):
+        raise HTTPException(
+            status_code=403, detail="Your role is not permitted to create orders."
+        )
     order_repo = get_order_repository()
     customer_repo = get_customer_repository()
     store_id = current_user.get("active_store_id")
@@ -808,6 +1054,22 @@ async def create_order(
             )
 
     if order_repo is not None and customer_repo is not None:
+        # C-5 (DELTA 3): order-create idempotency. If the request carries a
+        # non-empty Idempotency-Key and an order with that key already exists
+        # for this store, return THAT order rather than creating a duplicate.
+        # Looked up before any work so a retried "Pay now" is a cheap no-op.
+        # Fail-soft: any lookup error falls through to a normal create.
+        idem_key = (idempotency_key or "").strip()
+        if idem_key:
+            try:
+                existing = order_repo.find_one(
+                    {"idempotency_key": idem_key, "store_id": store_id}
+                )
+                if existing:
+                    return _order_create_response(existing)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[ORDERS] idempotency lookup skipped: %s", exc)
+
         # Verify customer exists (allow walk-in with generated IDs)
         customer = customer_repo.find_by_id(order.customer_id)
         is_walkin = not customer and (
@@ -860,9 +1122,10 @@ async def create_order(
         user_discount_cap = effective_discount_cap(
             user_roles, current_user.get("discount_cap")
         )
-        is_admin = any(
-            r in user_roles for r in ["SUPERADMIN", "ADMIN", "STORE_MANAGER"]
-        )
+        # Only HQ roles bypass discount caps. STORE_MANAGER has a real 20%
+        # cap (SYSTEM_INTENT discount matrix) and MUST flow through the
+        # effective_cap + category-cap path -- it was incorrectly bypassing.
+        is_admin = any(r in user_roles for r in ["SUPERADMIN", "ADMIN"])
 
         for item in order.items:
             item_total = item.unit_price * item.quantity
@@ -885,13 +1148,20 @@ async def create_order(
                     ):
                         product = pr.find_by_id(item.product_id)
                         if product:
-                            cat = (
-                                product.get("discount_category")
-                                or product.get("category")
-                                or "MASS"
+                            # Canonical category + luxury-brand cap (SYSTEM_INTENT
+                            # discount matrix). Pass the real discount_category
+                            # (NOT product `category`, which is an item-type, not a
+                            # discount tier); pricing_caps defaults unknown/missing
+                            # to MASS and applies the lower luxury brand cap.
+                            from api.services.pricing_caps import (
+                                effective_discount_cap as product_discount_cap,
                             )
-                            category_cap = CATEGORY_DISCOUNT_CAPS.get(cat, 10.0)
-                            effective_cap = min(user_discount_cap, category_cap)
+
+                            cat_brand_cap = product_discount_cap(
+                                product.get("discount_category"),
+                                product.get("brand"),
+                            )
+                            effective_cap = min(user_discount_cap, cat_brand_cap)
                 except Exception:
                     pass  # fall back to user cap only
 
@@ -1022,6 +1292,10 @@ async def create_order(
                     "unit_price": item.unit_price,
                     "discount_percent": item.discount_percent,
                     "discount_amount": discount_amount,
+                    # C-4 (DELTA 2): per-line approver + reason (consumed by the
+                    # required-approval gate for a 100%-line-discount order).
+                    "discount_approved_by": item.discount_approved_by,
+                    "discount_reason": item.discount_reason,
                     "item_total": item_subtotal,
                     # COGS-freeze: snapshot the product cost at sale time so
                     # historical P&L stays stable when cost_price is edited.
@@ -1052,6 +1326,15 @@ async def create_order(
         # built with key "item_total". The per-category math is now in
         # `_compute_per_category_gst`, used by create + add + remove.
         cart_discount_percent = max(0.0, min(100.0, order.cart_discount_percent or 0.0))
+        # Order-level cart discount must honour the SAME role cap as per-item
+        # discounts. It was only clamped to [0,100], so any role could apply up
+        # to 100% off via the cart discount, bypassing the per-item cap above.
+        if not is_admin and cart_discount_percent > user_discount_cap:
+            raise HTTPException(
+                status_code=403,
+                detail=f"Cart discount {cart_discount_percent}% exceeds your limit of "
+                f"{user_discount_cap}%. Contact a manager for approval.",
+            )
         gst = _compute_per_category_gst(items_data, cart_discount_percent)
         taxable_after_cart_discount = gst["taxable"]
         tax_amount = gst["tax"]
@@ -1144,9 +1427,82 @@ async def create_order(
             )
             lens_reserve_failed = True
 
+        # C-4 (DELTA 2): a fully-discounted / Rs 0 order (100% line or cart
+        # discount, or a grand_total that rounds to 0) is a sensitive giveaway
+        # that REQUIRES explicit approval -- it is no longer silently
+        # auto-stamped. When the order triggers the zero-total condition, the
+        # request MUST carry an approver AND a non-empty reason at the level
+        # that triggered it ("whichever applies"):
+        #   * cart-level trigger (cart_discount 100% / grand_total 0)
+        #       -> cart_discount_approved_by + cart_discount_reason
+        #   * a 100% LINE discount
+        #       -> that line's discount_approved_by + discount_reason
+        #          (the order-wide cart_discount_* fields are accepted as a
+        #          fallback so a single order-level sign-off still works)
+        # Missing approver or empty reason -> HTTP 400. When approval IS
+        # present we ALLOW the sale and still write the immutable
+        # ORDER_ZERO_TOTAL_APPROVED audit row (below).
+        acting_user_id = current_user.get("user_id")
+
+        def _nonempty(value) -> bool:
+            return bool(value is not None and str(value).strip())
+
+        full_line_items = [
+            it
+            for it in items_data
+            if float((it or {}).get("discount_percent") or 0) >= 100.0
+        ]
+        has_full_line_discount = bool(full_line_items)
+        cart_level_zero = (
+            round(grand_total, 2) <= 0.0 or cart_discount_percent >= 100.0
+        )
+        is_zero_total = cart_level_zero or has_full_line_discount
+
+        cart_discount_approved_by = order.cart_discount_approved_by
+        cart_discount_reason = order.cart_discount_reason
+        zero_total_approved_by = None
+        if is_zero_total:
+            # Resolve the effective approver + reason from whichever level
+            # supplied them: cart-level first, then any 100%-discount line.
+            approver = (
+                cart_discount_approved_by
+                if _nonempty(cart_discount_approved_by)
+                else None
+            )
+            reason = (
+                cart_discount_reason if _nonempty(cart_discount_reason) else None
+            )
+            if approver is None and has_full_line_discount:
+                for it in full_line_items:
+                    if _nonempty((it or {}).get("discount_approved_by")):
+                        approver = it["discount_approved_by"]
+                        break
+            if reason is None and has_full_line_discount:
+                for it in full_line_items:
+                    if _nonempty((it or {}).get("discount_reason")):
+                        reason = it["discount_reason"]
+                        break
+
+            if approver is None or reason is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "Zero-total or 100% discount requires an approver and a "
+                        "reason."
+                    ),
+                )
+
+            zero_total_approved_by = approver
+
         order_data = {
             "order_id": precomputed_order_id,
             "order_number": generate_order_number(store_id),
+            # Public order-tracking token — long, unguessable, customer-facing.
+            # Powers the no-login /portal/track/{token} link + QR. Additive;
+            # does not touch any POS pricing/tax logic. Backfill-safe: orders
+            # created before this field get a token lazily minted on lookup
+            # (see portal.ensure_tracking_token).
+            "tracking_token": secrets.token_urlsafe(24),
             "store_id": store_id,
             "customer_id": order.customer_id,
             "customer_name": customer_name,
@@ -1159,8 +1515,10 @@ async def create_order(
             "subtotal": subtotal,
             "cart_discount_percent": cart_discount_percent,
             "cart_discount_amount": cart_discount_amount,
-            "cart_discount_reason": order.cart_discount_reason,
-            "cart_discount_approved_by": order.cart_discount_approved_by,
+            "cart_discount_reason": cart_discount_reason,
+            # C-4 (DELTA 2): the approver the POS supplied (now REQUIRED for a
+            # zero-total / 100%-discount order -- never auto-stamped).
+            "cart_discount_approved_by": cart_discount_approved_by,
             "tax_rate": tax_rate,
             "tax_amount": tax_amount,
             "total_discount": total_discount,
@@ -1180,10 +1538,29 @@ async def create_order(
             "payments": [],
             "lens_reservations": lens_reservations,
             "lens_reserve_failed": bool(lens_reserve_failed),
+            # C-4: zero-total accountability flags (persisted so reports + the
+            # order view can surface a Rs 0 sale and who approved it).
+            "zero_total": bool(is_zero_total),
+            "zero_total_approved_by": zero_total_approved_by,
+            # C-5 (DELTA 3): the request's Idempotency-Key (None when absent).
+            # A repeat POST with the same key returns this order rather than
+            # creating a duplicate (store-scoped lookup at the top of create).
+            "idempotency_key": (idem_key or None),
         }
 
         try:
-            created = order_repo.create(order_data)
+            # P3-B: order_number carries a UNIQUE sparse index. Under
+            # concurrency two creates can mint the same value and the loser
+            # hits a Mongo E11000 -- which previously 500'd. create_unique
+            # regenerates JUST the order_number and retries (bounded), mirroring
+            # vouchers.issue_voucher. order_id / _id are stable UUIDs and never
+            # change across retries. Behaviour-preserving on the no-collision
+            # path: a single insert, identical doc.
+            created = order_repo.create_unique(
+                order_data,
+                number_field="order_number",
+                regenerate=lambda: generate_order_number(store_id),
+            )
         except Exception as create_exc:  # noqa: BLE001
             # Order persist failed AFTER reservations succeeded -- run
             # the compensating release so the cells don't leak.
@@ -1216,6 +1593,42 @@ async def create_order(
 
         if created:
             created_order_id = created.get("order_id") or ""
+            # C-4: write an immutable audit row for a zero-total / fully
+            # discounted sale so a Rs 0 order is never silent. Uses the same
+            # append-only AuditRepository every other sensitive action uses
+            # (returns / payouts / price edits). Fail-soft: an audit failure
+            # must NEVER block the sale.
+            if is_zero_total:
+                try:
+                    from ..dependencies import get_audit_repository
+
+                    audit = get_audit_repository()
+                    if audit is not None:
+                        audit.create(
+                            {
+                                "action": "ORDER_ZERO_TOTAL_APPROVED",
+                                "entity_type": "order",
+                                "entity_id": created_order_id,
+                                "store_id": store_id,
+                                "user_id": acting_user_id,
+                                "severity": "WARNING",
+                                "details": {
+                                    "grand_total": grand_total,
+                                    "subtotal": subtotal,
+                                    "cart_discount_percent": cart_discount_percent,
+                                    "has_full_line_discount": has_full_line_discount,
+                                    # C-4 (DELTA 2): approval is now REQUIRED,
+                                    # so the approver + reason are always real
+                                    # (never auto-stamped).
+                                    "approved_by": zero_total_approved_by,
+                                    "reason": cart_discount_reason,
+                                },
+                                "created_at": datetime.now().isoformat(),
+                            }
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("[ORDERS] zero-total audit skipped: %s", exc)
+
             # Flip serialized stock units to SOLD with this order_id stamped on
             # them. This is what lets returns.py reactivate THE EXACT unit that
             # left (preferred path in _reactivate_original_unit; the fallback
@@ -1261,13 +1674,9 @@ async def create_order(
             except Exception:
                 pass  # fail-soft — loyalty must never block POS
 
-            return {
-                "order_id": created["order_id"],
-                "order_number": created["order_number"],
-                "status": "DRAFT",
-                "grand_total": grand_total,
-                "message": "Order created successfully",
-            }
+            # C-5 (DELTA 3): same envelope the idempotency replay returns, so a
+            # retried request is indistinguishable from the original create.
+            return _order_create_response(created)
 
         raise HTTPException(status_code=500, detail="Failed to create order")
 
@@ -1287,6 +1696,19 @@ async def get_order(order_id: str, current_user: dict = Depends(get_current_user
     if repo is not None:
         order = repo.find_by_id(order_id)
         if order is not None:
+            # Store-scope: only view an order in a store the user can access
+            # (raises 403 otherwise; SUPERADMIN/ADMIN pass through).
+            validate_store_access(order.get("store_id"), current_user)
+            # Backfill-safe: ensure a public tracking token exists so the
+            # staff-facing order view can render the customer-tracking QR
+            # even for orders created before that field existed. Fail-soft.
+            if not order.get("tracking_token"):
+                try:
+                    from .portal import ensure_tracking_token
+
+                    order["tracking_token"] = ensure_tracking_token(repo, order)
+                except Exception:  # noqa: BLE001
+                    pass
             return order_to_frontend(order)
         raise HTTPException(status_code=404, detail="Order not found")
 
@@ -1367,6 +1789,48 @@ async def add_order_item(
         if order.get("status") != "DRAFT":
             raise HTTPException(
                 status_code=400, detail="Can only add items to DRAFT orders"
+            )
+
+        # Enforce role + category + luxury-brand discount cap on items added to a
+        # DRAFT order. This path previously checked ONLY the role cap (a bypass of
+        # the category/brand caps); now consistent with create_order's per-item gate.
+        from api.services.role_caps import effective_discount_cap
+
+        _role_cap = effective_discount_cap(
+            current_user.get("roles", []), current_user.get("discount_cap")
+        )
+        _is_admin = any(
+            r in current_user.get("roles", []) for r in ("SUPERADMIN", "ADMIN")
+        )
+        _cap = _role_cap
+        if not _is_admin and item.discount_percent > 0:
+            try:
+                pr = get_product_repository()
+                if (
+                    pr is not None
+                    and item.product_id
+                    and not item.product_id.startswith(("custom-", "lens-", "lens-sug-"))
+                ):
+                    product = pr.find_by_id(item.product_id)
+                    if product:
+                        from api.services.pricing_caps import (
+                            effective_discount_cap as product_discount_cap,
+                        )
+
+                        _cap = min(
+                            _role_cap,
+                            product_discount_cap(
+                                product.get("discount_category"),
+                                product.get("brand"),
+                            ),
+                        )
+            except Exception:
+                pass  # fall back to role cap only
+        if not _is_admin and item.discount_percent > _cap:
+            raise HTTPException(
+                status_code=403,
+                detail=f"Discount {item.discount_percent}% exceeds your limit of "
+                f"{_cap}%. Contact a manager for approval.",
             )
 
         # Calculate item totals
@@ -1534,7 +1998,12 @@ async def add_payment(
             )
 
         balance_due = order.get("balance_due", order.get("grand_total", 0))
-        if payment.amount > balance_due:
+        # C-9: a CREDIT tender is a pay-later PROMISE, not cash collected, so it
+        # is exempt from the over-tender block -- matching OrderRepository.
+        # add_payment (which excludes CREDIT from its cash-collected/over-tender
+        # math). A real-money tender (CASH/UPI/CARD/etc.) still cannot exceed the
+        # balance due.
+        if payment.method != PaymentMethod.CREDIT and payment.amount > balance_due:
             raise HTTPException(
                 status_code=400,
                 detail=f"Payment amount exceeds balance due (₹{balance_due})",
@@ -1597,26 +2066,16 @@ async def add_payment(
             except Exception:
                 pass  # use default
 
-            monthly_rate = emi_annual_rate / 12 / 100
-            months = payment.emi_months
-            if monthly_rate > 0:
-                emi_amount = (
-                    payment.amount
-                    * monthly_rate
-                    * (1 + monthly_rate) ** months
-                    / ((1 + monthly_rate) ** months - 1)
-                )
-            else:
-                emi_amount = payment.amount / months
-
-            emi_details = {
-                "tenure_months": months,
-                "annual_rate": emi_annual_rate,
-                "monthly_emi": round(emi_amount, 2),
-                "total_payable": round(emi_amount * months, 2),
-                "interest_amount": round(emi_amount * months - payment.amount, 2),
-                "provider": payment.emi_provider or "STORE",
-            }
+            # P3-C: reconciled schedule -- installments sum EXACTLY to
+            # total_payable (the last one absorbs the rounding remainder),
+            # interest_amount = total_payable - principal. Display-only; the
+            # recorded payment.amount (what reduces balance_due) is unchanged.
+            emi_details = build_emi_schedule(
+                principal=payment.amount,
+                annual_rate=emi_annual_rate,
+                months=payment.emi_months,
+            )
+            emi_details["provider"] = payment.emi_provider or "STORE"
 
         payment_data = {
             "payment_id": str(uuid.uuid4()),
@@ -1813,6 +2272,179 @@ async def cancel_order(
     return {"order_id": order_id, "status": "CANCELLED"}
 
 
+def _invoice_state_code(*candidates) -> str:
+    """Best-effort 2-digit GST state code from the first usable candidate.
+    Accepts a 2-digit code, a 2-letter / full state name, or a 15-char GSTIN
+    (state = first two chars). ASCII-only; never raises."""
+    try:
+        from ..services.org_validation import (
+            normalize_state_code,
+            INDIAN_STATE_CODES,
+        )
+    except Exception:  # noqa: BLE001
+        normalize_state_code = None
+        INDIAN_STATE_CODES = {}
+
+    def _valid_code(code) -> str:
+        """Accept a 2-digit string only if it's a real GST state code."""
+        c = str(code or "").strip()
+        if len(c) == 2 and c.isdigit() and (not INDIAN_STATE_CODES or c in INDIAN_STATE_CODES):
+            return c
+        return ""
+
+    for cand in candidates:
+        if cand is None:
+            continue
+        s = str(cand).strip()
+        if not s:
+            continue
+        # A full GSTIN -> first two chars are the state code.
+        if len(s) == 15 and s[:2].isdigit():
+            code = _valid_code(s[:2])
+            if code:
+                return code
+        # 2-digit code / 2-letter abbreviation / full state name.
+        if normalize_state_code is not None:
+            code = _valid_code(normalize_state_code(s))
+            if code:
+                return code
+        # Bare 2-digit code (when org_validation is unavailable).
+        code = _valid_code(s[:2])
+        if code:
+            return code
+    return ""
+
+
+def _customer_state_code(customer: Optional[dict]) -> str:
+    """Resolve the customer's place-of-supply state code from (in order):
+    customer GSTIN -> billing_address.state_code -> billing_address.state.
+    Empty string when nothing usable is present."""
+    if not isinstance(customer, dict):
+        return ""
+    addr = customer.get("billing_address") or {}
+    if not isinstance(addr, dict):
+        addr = {}
+    return _invoice_state_code(
+        customer.get("gstin"),
+        addr.get("state_code"),
+        addr.get("state"),
+        customer.get("state_code"),
+        customer.get("state"),
+    )
+
+
+def _build_invoice_gst_split(
+    items: list, store: Optional[dict], customer: Optional[dict]
+) -> dict:
+    """C-6 (DELTA 4): per-rate CGST/SGST/IGST breakup for an order invoice.
+
+    Place of supply = the CUSTOMER's state; supplier state = the STORE's state.
+      * intra-state (or customer state unknown -> safe default for a single-
+        state retailer): each rate's tax splits into CGST + SGST (each rate/2).
+      * inter-state (both states known and different): the full tax is IGST.
+
+    The split is computed from the order's ALREADY-STORED per-line
+    `taxable_value` + `tax_amount`, so it reconciles to grand_total in BOTH
+    pricing modes (inclusive / exclusive) without re-deriving tax. Never raises.
+
+    Returns:
+      {
+        "place_of_supply": "<2-digit code or ''>",
+        "place_of_supply_assumed": bool,   # True when defaulted to intra
+        "interstate": bool,
+        "store_gstin": "<gstin or ''>",
+        "customer_gstin": "<gstin or ''>",
+        "rows": [{"rate", "taxable", "cgst", "sgst", "igst", "tax"}],
+        "totals": {"taxable", "cgst", "sgst", "igst", "tax"},
+      }
+    """
+    store = store if isinstance(store, dict) else {}
+    store_gstin = str(store.get("gstin") or "").strip()
+    customer_gstin = (
+        str((customer or {}).get("gstin") or "").strip()
+        if isinstance(customer, dict)
+        else ""
+    )
+
+    supplier_state = _invoice_state_code(store.get("state_code"), store_gstin)
+    customer_state = _customer_state_code(customer)
+
+    # Inter-state only when BOTH states are known and differ. Missing customer
+    # state -> assume intra (CGST+SGST), the safe default for a single-state
+    # retailer; flag it so the caller/print layer can note the assumption.
+    if customer_state and supplier_state:
+        interstate = customer_state != supplier_state
+        assumed = False
+    else:
+        interstate = False
+        assumed = True
+
+    place_of_supply = customer_state or supplier_state
+
+    # Aggregate stored per-line taxable + tax by GST rate.
+    per_rate: dict = {}
+    for it in items or []:
+        if not isinstance(it, dict):
+            continue
+        try:
+            rate = round(float(it.get("gst_rate") or 0.0), 2)
+        except (TypeError, ValueError):
+            rate = 0.0
+        try:
+            taxable = float(it.get("taxable_value") or 0.0)
+        except (TypeError, ValueError):
+            taxable = 0.0
+        try:
+            tax = float(it.get("tax_amount") or 0.0)
+        except (TypeError, ValueError):
+            tax = 0.0
+        agg = per_rate.setdefault(rate, {"taxable": 0.0, "tax": 0.0})
+        agg["taxable"] = round(agg["taxable"] + taxable, 2)
+        agg["tax"] = round(agg["tax"] + tax, 2)
+
+    rows = []
+    for rate in sorted(per_rate.keys()):
+        taxable = round(per_rate[rate]["taxable"], 2)
+        tax = round(per_rate[rate]["tax"], 2)
+        if interstate:
+            cgst = 0.0
+            sgst = 0.0
+            igst = tax
+        else:
+            cgst = round(tax / 2.0, 2)
+            # Residual on SGST so a half-paisa never drifts one-sided; keeps
+            # cgst + sgst == the stored line tax exactly.
+            sgst = round(tax - cgst, 2)
+            igst = 0.0
+        rows.append(
+            {
+                "rate": rate,
+                "taxable": taxable,
+                "cgst": cgst,
+                "sgst": sgst,
+                "igst": igst,
+                "tax": tax,
+            }
+        )
+
+    totals = {
+        "taxable": round(sum(r["taxable"] for r in rows), 2),
+        "cgst": round(sum(r["cgst"] for r in rows), 2),
+        "sgst": round(sum(r["sgst"] for r in rows), 2),
+        "igst": round(sum(r["igst"] for r in rows), 2),
+        "tax": round(sum(r["tax"] for r in rows), 2),
+    }
+    return {
+        "place_of_supply": place_of_supply,
+        "place_of_supply_assumed": assumed,
+        "interstate": interstate,
+        "store_gstin": store_gstin,
+        "customer_gstin": customer_gstin,
+        "rows": rows,
+        "totals": totals,
+    }
+
+
 @router.get("/{order_id}/invoice")
 async def get_invoice(order_id: str, current_user: dict = Depends(get_current_user)):
     """Get/generate invoice for order"""
@@ -1830,14 +2462,15 @@ async def get_invoice(order_id: str, current_user: dict = Depends(get_current_us
 
         # GST compliance: store must have GSTIN configured before generating invoice
         store_id = order.get("store_id") or current_user.get("active_store_id")
+        store_doc = None
         if store_id:
             try:
                 from ..dependencies import get_store_repository
 
                 store_repo = get_store_repository()
                 if store_repo:
-                    store = store_repo.find_by_id(store_id)
-                    if store and not store.get("gstin"):
+                    store_doc = store_repo.find_by_id(store_id)
+                    if store_doc and not store_doc.get("gstin"):
                         raise HTTPException(
                             status_code=400,
                             detail="Cannot generate invoice: store GSTIN is not configured. "
@@ -1848,16 +2481,47 @@ async def get_invoice(order_id: str, current_user: dict = Depends(get_current_us
             except Exception:
                 pass  # don't block invoice if store lookup fails
 
-        # Return existing invoice or generate new one
+        # C-6 (DELTA 4): resolve the customer so the CGST/SGST/IGST split can
+        # use the customer's state as the place of supply. Fail-soft: a missing
+        # customer (e.g. walk-in) just leaves the customer state unknown, which
+        # the split defaults to intra-state.
+        customer_doc = None
+        try:
+            customer_id = order.get("customer_id")
+            if customer_id:
+                customer_repo = get_customer_repository()
+                if customer_repo is not None:
+                    customer_doc = customer_repo.find_by_id(customer_id)
+        except Exception:
+            customer_doc = None
+
+        # Return existing invoice or generate a new one.
+        #
+        # GST compliance (P3-A): a NEW invoice gets a consecutive serial that
+        # is unique per (store, financial year) -- BV/INV/2026-27/000123 --
+        # allocated atomically via a counters doc so two simultaneous bills
+        # can't share a serial (Rule 46(b)). OLD orders keep whatever
+        # invoice_number they already carry (including the legacy
+        # BV/INV/{year}/{order_id[:8]} format); we never rewrite a stored
+        # number, so historical invoices stay resolvable exactly as before.
         invoice_number = order.get("invoice_number")
         if not invoice_number:
-            year = datetime.now().year
-            short_id = order.get("order_id", "")[:8].upper()
-            invoice_number = f"BV/INV/{year}/{short_id}"
+            # Best-effort unique index (idempotent; no-op if already present).
+            try:
+                repo.ensure_invoice_index()
+            except Exception:  # noqa: BLE001 - index is defense-in-depth only
+                pass
+            invoice_number = repo.next_invoice_number(store_id)
             repo.set_invoice(order_id, invoice_number)
 
         # Convert items to camelCase
         items_formatted = [item_to_frontend(item) for item in order.get("items", [])]
+
+        # C-6 (DELTA 4): per-rate CGST/SGST/IGST tax summary + place of supply.
+        gst_split = _build_invoice_gst_split(
+            order.get("items", []), store_doc, customer_doc
+        )
+
         return {
             "invoiceNumber": invoice_number,
             "orderId": order_id,
@@ -1868,6 +2532,15 @@ async def get_invoice(order_id: str, current_user: dict = Depends(get_current_us
             "balanceDue": order.get("balance_due"),
             "items": items_formatted,
             "invoiceDate": order.get("invoice_date") or datetime.now().isoformat(),
+            # C-6 (DELTA 4): GST place-of-supply split. All ADDITIVE -- existing
+            # fields above are untouched.
+            "placeOfSupply": gst_split["place_of_supply"],
+            "placeOfSupplyAssumed": gst_split["place_of_supply_assumed"],
+            "interstate": gst_split["interstate"],
+            "storeGstin": gst_split["store_gstin"],
+            "customerGstin": gst_split["customer_gstin"],
+            "taxSummary": gst_split["rows"],
+            "taxTotals": gst_split["totals"],
         }
 
     return {"invoiceNumber": "BV/INV/2024/0001", "orderId": order_id}

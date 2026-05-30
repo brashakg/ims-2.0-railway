@@ -1,18 +1,19 @@
 // ============================================================================
 // IMS 2.0 — Hub (landing page / launcher)
-// Ported from docs/design/hub.html. Operational tone, not marketing.
-// Hero + meta grid (real data where available) + news strip + module grid.
+// Operational, not marketing: greeting + live snapshot + priority work
+// (tasks + SOP checklists) + notifications + handoff inbox + module grid.
 // ============================================================================
 
 import { useEffect, useMemo, useState } from 'react';
-import { Link } from 'react-router-dom';
-import { Send } from 'lucide-react';
+import { Link, useNavigate } from 'react-router-dom';
+import { Send, AlertTriangle, ListChecks, Clock, CheckCircle2, ChevronRight } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { Icon } from '../../components/shell';
 import { analyticsApi, tasksApi, clinicalApi } from '../../services/api';
 import HandoffInboxCard from '../../components/handoffs/HandoffInboxCard';
 import HandoffUploadModal from '../../components/handoffs/HandoffUploadModal';
 import DashboardNotifications from '../../components/notifications/DashboardNotifications';
+import './HubPage.css';
 
 interface HeroMeta {
   salesToday: string;
@@ -23,7 +24,24 @@ interface HeroMeta {
   queueDetail: string;
 }
 
+interface PriorityTask {
+  id: string;
+  title: string;
+  priority: string;
+  due_at?: string | null;
+}
+
+interface SopTemplate {
+  template_id: string;
+  title: string;
+  frequency?: string;
+  estimated_time?: number;
+}
+
 const INR = new Intl.NumberFormat('en-IN', { maximumFractionDigits: 0 });
+
+// Priority rank for sorting (P0 = most urgent).
+const PRIORITY_RANK: Record<string, number> = { P0: 0, P1: 1, P2: 2, P3: 3, P4: 4 };
 
 function formatINR(amount: number | undefined | null): string {
   if (!amount && amount !== 0) return '—';
@@ -33,6 +51,28 @@ function formatINR(amount: number | undefined | null): string {
 
 function humanDate(d: Date = new Date()): string {
   return d.toLocaleDateString('en-GB', { weekday: 'short', day: '2-digit', month: 'short', year: 'numeric' });
+}
+
+// Human label for a due timestamp. Guards against absurd/missing values
+// (bad stored due_at can otherwise render "4y left") -> returns null so the
+// chip is simply hidden rather than showing a nonsense countdown.
+function dueLabel(dueAt?: string | null): { text: string; overdue: boolean } | null {
+  if (!dueAt) return null;
+  const due = new Date(dueAt).getTime();
+  if (Number.isNaN(due)) return null;
+  const diffMin = Math.round((due - Date.now()) / 60000);
+  // Clamp out clearly-bad data: anything more than ~120 days out is treated
+  // as unset (SLA windows top out at 1 week; months/years = corrupt data).
+  if (diffMin > 120 * 24 * 60) return null;
+  if (diffMin < 0) {
+    const od = -diffMin;
+    if (od < 60) return { text: `${od}m overdue`, overdue: true };
+    if (od < 24 * 60) return { text: `${Math.round(od / 60)}h overdue`, overdue: true };
+    return { text: `${Math.round(od / (60 * 24))}d overdue`, overdue: true };
+  }
+  if (diffMin < 60) return { text: `${diffMin}m left`, overdue: false };
+  if (diffMin < 24 * 60) return { text: `${Math.round(diffMin / 60)}h left`, overdue: false };
+  return { text: `${Math.round(diffMin / (60 * 24))}d left`, overdue: false };
 }
 
 interface ModuleCard {
@@ -50,6 +90,7 @@ interface ModuleCard {
 
 export default function HubPage() {
   const { user, hasRole } = useAuth();
+  const navigate = useNavigate();
   const [meta, setMeta] = useState<HeroMeta>({
     salesToday: '—',
     salesDelta: '',
@@ -58,6 +99,11 @@ export default function HubPage() {
     queue: '—',
     queueDetail: '',
   });
+
+  // Priority work surfaced above the fold.
+  const [priorityTasks, setPriorityTasks] = useState<PriorityTask[]>([]);
+  const [sopTemplates, setSopTemplates] = useState<SopTemplate[]>([]);
+  const [loadingWork, setLoadingWork] = useState(true);
 
   // Handoff feature state — modal visibility + a tick that the inbox
   // card listens to for a fresh refetch after a successful send.
@@ -119,6 +165,55 @@ export default function HubPage() {
         })
         .catch(() => {});
     }
+
+    // Priority work: top open tasks (most-urgent first) + SOP checklists.
+    setLoadingWork(true);
+    Promise.allSettled([
+      tasksApi.getTasks(
+        user?.activeStoreId
+          ? { store_id: user.activeStoreId, status: 'OPEN' }
+          : { status: 'OPEN' }
+      ),
+      tasksApi.getSopTemplates(
+        user?.activeStoreId
+          ? { storeId: user.activeStoreId, activeOnly: true }
+          : { activeOnly: true }
+      ),
+    ]).then(([tRes, sRes]) => {
+      if (cancelled) return;
+      if (tRes.status === 'fulfilled') {
+        const data: any = tRes.value;
+        const list: any[] = Array.isArray(data) ? data : data?.tasks ?? [];
+        const mapped: PriorityTask[] = list.map((t) => ({
+          id: t.id ?? t.task_id ?? '',
+          title: t.title ?? 'Untitled task',
+          priority: String(t.priority ?? 'P3').toUpperCase(),
+          due_at: t.due_at ?? null,
+        }));
+        mapped.sort((a, b) => {
+          const ra = PRIORITY_RANK[a.priority] ?? 9;
+          const rb = PRIORITY_RANK[b.priority] ?? 9;
+          if (ra !== rb) return ra - rb;
+          const da = a.due_at ? new Date(a.due_at).getTime() : Infinity;
+          const db = b.due_at ? new Date(b.due_at).getTime() : Infinity;
+          return da - db;
+        });
+        setPriorityTasks(mapped.slice(0, 5));
+      }
+      if (sRes.status === 'fulfilled') {
+        const data: any = sRes.value;
+        const list: any[] = data?.templates ?? (Array.isArray(data) ? data : []);
+        setSopTemplates(
+          list.slice(0, 5).map((s: any) => ({
+            template_id: s.template_id ?? s.id ?? '',
+            title: s.title ?? 'Checklist',
+            frequency: s.frequency,
+            estimated_time: s.estimated_time,
+          }))
+        );
+      }
+      setLoadingWork(false);
+    });
 
     return () => {
       cancelled = true;
@@ -222,14 +317,10 @@ export default function HubPage() {
       <section className="hub-hero">
         <div>
           <div className="eyebrow">Better Vision · IMS 2.0 · {today}</div>
-          <h1 className="hub-h1">
-            Run the floor.<br />
-            Close the <em>day</em>.
+          <h1 className="hub-h1 hub-h1-compact">
+            {firstName ? <>Welcome back, <em>{firstName}</em>.</> : 'Welcome back.'}
           </h1>
-          <p className="hub-sub">
-            Every Better Vision store is one shift, one queue, one ledger. IMS 2.0 is the single surface your team opens at 10 AM and closes at 9 PM — checkout, exam, stock, tasks, and the agents that quietly keep everything in line.
-            {firstName && <> Welcome back, {firstName}.</>}
-          </p>
+          <p className="hub-sub">Here's what needs you today.</p>
           <div style={{ marginTop: 14 }}>
             <button
               type="button"
@@ -261,6 +352,78 @@ export default function HubPage() {
             </div>
             <div className="sm">Clinical</div>
           </div>
+        </div>
+      </section>
+
+      {/* Priority work: tasks + SOP checklists */}
+      <section className="hub-work-row">
+        <div className="hub-work-card">
+          <div className="hub-work-head">
+            <span className="hub-work-title">
+              <AlertTriangle size={16} /> Priority tasks
+            </span>
+            <button className="hub-work-link" onClick={() => navigate('/tasks')}>
+              View all <ChevronRight size={14} />
+            </button>
+          </div>
+          {loadingWork ? (
+            <p className="hub-work-empty">Loading…</p>
+          ) : priorityTasks.length === 0 ? (
+            <p className="hub-work-empty">
+              <CheckCircle2 size={16} /> Nothing urgent — you're all caught up.
+            </p>
+          ) : (
+            <ul className="hub-task-list">
+              {priorityTasks.map((t) => {
+                const due = dueLabel(t.due_at);
+                return (
+                  <li key={t.id || t.title}>
+                    <button className="hub-task-row" onClick={() => navigate('/tasks')}>
+                      <span className={`hub-prio hub-prio-${t.priority.toLowerCase()}`}>
+                        {t.priority}
+                      </span>
+                      <span className="hub-task-name">{t.title}</span>
+                      {due && (
+                        <span className={`hub-task-due${due.overdue ? ' is-overdue' : ''}`}>
+                          <Clock size={12} /> {due.text}
+                        </span>
+                      )}
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </div>
+
+        <div className="hub-work-card">
+          <div className="hub-work-head">
+            <span className="hub-work-title">
+              <ListChecks size={16} /> Today's checklists
+            </span>
+            <button className="hub-work-link" onClick={() => navigate('/tasks/checklists')}>
+              Open <ChevronRight size={14} />
+            </button>
+          </div>
+          {loadingWork ? (
+            <p className="hub-work-empty">Loading…</p>
+          ) : sopTemplates.length === 0 ? (
+            <p className="hub-work-empty">No checklists assigned to this store yet.</p>
+          ) : (
+            <ul className="hub-sop-list">
+              {sopTemplates.map((s) => (
+                <li key={s.template_id || s.title}>
+                  <button className="hub-sop-row" onClick={() => navigate('/tasks/checklists')}>
+                    <span className="hub-sop-name">{s.title}</span>
+                    <span className="hub-sop-meta">
+                      {s.frequency ? s.frequency.toLowerCase() : ''}
+                      {s.estimated_time ? ` · ${s.estimated_time}m` : ''}
+                    </span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
         </div>
       </section>
 
@@ -315,10 +478,7 @@ export default function HubPage() {
         isOpen={showSendFile}
         onClose={() => setShowSendFile(false)}
         onSent={() => {
-          // Bumping the refresh key triggers a refetch in the inbox
-          // card (the sender is also a recipient if they sent to
-          // themselves, but more importantly we want any other state
-          // changes to surface immediately).
+          // Bumping the refresh key triggers a refetch in the inbox card.
           setInboxRefreshKey((k) => k + 1);
         }}
       />

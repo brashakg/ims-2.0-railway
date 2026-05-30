@@ -19,6 +19,8 @@ import {
   RefreshCw,
   Printer,
   Tag,
+  ClipboardCheck,
+  X,
 } from 'lucide-react';
 import { WorkshopJobCardPrint } from '../../components/print/WorkshopJobCardPrint';
 import type { JobStatus, JobPriority } from '../../types';
@@ -83,6 +85,7 @@ function resolveLensConfig(status: unknown) {
 const UNKNOWN_STATUS = { label: 'Unknown', class: 'bg-gray-100 text-gray-700', step: 0 };
 const STATUS_CONFIG: Record<JobStatus, { label: string; class: string; step: number }> = {
   PENDING: { label: 'Pending', class: 'bg-gray-100 text-gray-700', step: 1 },
+  IN_PROGRESS: { label: 'In Progress', class: 'bg-yellow-50 text-yellow-700', step: 2 },
   PROCESSING: { label: 'Fitting', class: 'bg-yellow-50 text-yellow-700', step: 2 },
   COMPLETED: { label: 'Completed', class: 'bg-blue-50 text-blue-700', step: 3 },
   QC_FAILED: { label: 'QC Failed', class: 'bg-red-50 text-red-700', step: 2 },
@@ -138,6 +141,13 @@ export function WorkshopPage() {
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<JobStatus | 'ALL' | 'ACTIVE'>('ACTIVE');
   const [priorityFilter, setPriorityFilter] = useState<JobPriority | 'ALL'>('ALL');
+
+  // QC checklist modal — opened from a COMPLETED / QC_FAILED job's detail panel.
+  const [qcModalJob, setQcModalJob] = useState<Job | null>(null);
+  // Who may run QC. Workshop floor + store/area management + optometrist
+  // (power verification is optometry-adjacent). Plain cashiers/sales don't.
+  const QC_ROLES = ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'OPTOMETRIST', 'WORKSHOP_STAFF'];
+  const canRunQc = QC_ROLES.includes(user?.activeRole || '');
 
   // Loading state
   const [isLoading, setIsLoading] = useState(true);
@@ -328,6 +338,73 @@ const loadJobs = async () => {
       }
     } catch {
       toast.error('Failed to update job status');
+    }
+  };
+
+  // Submit a structured QC checklist via the /qc-checklist endpoint (Phase 6.9).
+  // Each checklist item (key, label, passed, note) is stored server-side with
+  // reviewer identity + timestamp. Pass -> READY, fail -> QC_FAILED.
+  const [qcBusy, setQcBusy] = useState(false);
+  const handleQcSubmit = async (
+    jobId: string,
+    passed: boolean,
+    notes: string,
+    checklistItems?: Array<{ key: string; label: string; passed: boolean; note?: string }>,
+  ) => {
+    setQcBusy(true);
+    try {
+      let res;
+      if (checklistItems && checklistItems.length > 0) {
+        // Use the structured /qc-checklist endpoint when items are provided.
+        res = await workshopApi.qcChecklist(
+          jobId,
+          checklistItems,
+          notes || undefined,
+        );
+      } else {
+        // Fallback to the simple /qc endpoint (no structured items).
+        res = await workshopApi.qcJob(jobId, passed, notes);
+      }
+      toast.success(passed ? 'QC passed — job ready for pickup' : 'QC failed — job flagged for rework');
+      setQcModalJob(null);
+      setSelectedJob(null);
+      await loadJobs();
+      // On a pass the job is now READY — auto-print the pickup label, honouring
+      // the auto_print_stage_sticker setting (fail-soft, mirrors handleStatusChange).
+      if (res?.status === 'READY') {
+        try {
+          const s = await settingsApi.getPrinterSettings();
+          if ((s as any)?.auto_print_stage_sticker !== false) {
+            printJobLabel(jobId, 'ready').catch(() => { /* fail-soft */ });
+          }
+        } catch {
+          /* settings unavailable -> skip auto-print, never block */
+        }
+      }
+    } catch (err) {
+      const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+        ?? 'Failed to record QC';
+      toast.error(msg);
+    } finally {
+      setQcBusy(false);
+    }
+  };
+
+  // Send a QC-failed job back to the bench via the dedicated /rework endpoint
+  // (increments rework_count; QC_FAILED -> IN_PROGRESS).
+  const handleRework = async (jobId: string) => {
+    setQcBusy(true);
+    try {
+      const res = await workshopApi.reworkJob(jobId);
+      toast.success(res?.rework_count ? `Sent for rework (attempt #${res.rework_count})` : 'Job sent for rework');
+      setSelectedJob(null);
+      await loadJobs();
+    } catch (err) {
+      const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+        ?? 'Failed to send job for rework';
+      toast.error(msg);
+    } finally {
+      setQcBusy(false);
     }
   };
 
@@ -819,19 +896,39 @@ const loadJobs = async () => {
                 {/* Status Transition Buttons */}
                 <div className="flex gap-2 flex-wrap">
                   {selectedJob.status === 'PENDING' && (
-                    <button onClick={() => handleStatusChange(selectedJob.id, 'PROCESSING')} className="btn-primary text-sm">Start Processing</button>
+                    // Bug fix: was sending 'PROCESSING' which the backend state machine
+                    // doesn't recognise (it uses 'IN_PROGRESS'). Backend now also
+                    // aliases PROCESSING -> IN_PROGRESS for backward compat, but the
+                    // frontend should send the canonical value.
+                    <button onClick={() => handleStatusChange(selectedJob.id, 'IN_PROGRESS')} className="btn-primary text-sm">Start Processing</button>
                   )}
-                  {selectedJob.status === 'PROCESSING' && (
+                  {(selectedJob.status === 'IN_PROGRESS' || selectedJob.status === 'PROCESSING') && (
                     <button onClick={() => handleStatusChange(selectedJob.id, 'COMPLETED')} className="btn-primary text-sm">Mark Completed</button>
                   )}
-                  {selectedJob.status === 'COMPLETED' && (
-                    <>
-                      <button onClick={() => handleStatusChange(selectedJob.id, 'READY')} className="btn-success text-sm">QC Passed - Ready</button>
-                      <button onClick={() => handleStatusChange(selectedJob.id, 'QC_FAILED')} className="btn-outline text-sm text-red-600 border-red-600">QC Failed</button>
-                    </>
+                  {selectedJob.status === 'COMPLETED' && canRunQc && (
+                    <button
+                      onClick={() => setQcModalJob(selectedJob)}
+                      className="btn-primary text-sm flex items-center gap-1"
+                    >
+                      <ClipboardCheck className="w-4 h-4" /> Run QC checklist
+                    </button>
                   )}
-                  {selectedJob.status === 'QC_FAILED' && (
-                    <button onClick={() => handleStatusChange(selectedJob.id, 'PROCESSING')} className="btn-primary text-sm">Rework</button>
+                  {selectedJob.status === 'QC_FAILED' && canRunQc && (
+                    <>
+                      <button
+                        onClick={() => setQcModalJob(selectedJob)}
+                        className="btn-primary text-sm flex items-center gap-1"
+                      >
+                        <ClipboardCheck className="w-4 h-4" /> Re-run QC
+                      </button>
+                      <button
+                        onClick={() => handleRework(selectedJob.id)}
+                        disabled={qcBusy}
+                        className="btn-outline text-sm disabled:opacity-50"
+                      >
+                        Send for rework
+                      </button>
+                    </>
                   )}
                   {selectedJob.status === 'READY' && (
                     <button onClick={() => handleStatusChange(selectedJob.id, 'DELIVERED')} className="btn-success text-sm">Mark Delivered</button>
@@ -925,6 +1022,18 @@ const loadJobs = async () => {
         <LabelPreviewModal spec={labelSpec} onClose={() => setLabelSpec(null)} />
       )}
 
+      {/* QC checklist modal — posts to /qc-checklist (structured items) -> READY or QC_FAILED */}
+      {qcModalJob && (
+        <QcChecklistModal
+          job={qcModalJob}
+          busy={qcBusy}
+          onCancel={() => setQcModalJob(null)}
+          onSubmit={(passed, notes, checklistItems) =>
+            handleQcSubmit(qcModalJob.id, passed, notes, checklistItems)
+          }
+        />
+      )}
+
       {/* CREATE JOB MODAL */}
       {showCreateJob && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
@@ -952,12 +1061,12 @@ const loadJobs = async () => {
                     <div className="space-y-1.5 max-h-60 overflow-y-auto">
                       {createOrders.map((o: any) => (
                         <button key={o.id} onClick={() => setCreateSelectedOrder(o)}
-                          className="w-full flex items-center justify-between p-3 rounded-lg border border-gray-300 hover:border-bv-gold-400 hover:bg-gray-100 text-left text-gray-900 transition-colors">
+                          className="w-full flex items-center justify-between p-3 rounded-lg border border-gray-300 hover:border-bv-red-400 hover:bg-gray-100 text-left text-gray-900 transition-colors">
                           <div>
                             <p className="text-sm font-medium">{o.orderNumber}</p>
                             <p className="text-xs text-gray-500">{o.customerName} · {(o.items || []).length} items</p>
                           </div>
-                          <span className="text-sm font-bold text-bv-gold-300">₹{Math.round(o.grandTotal || 0).toLocaleString('en-IN')}</span>
+                          <span className="text-sm font-bold text-bv-red-700">₹{Math.round(o.grandTotal || 0).toLocaleString('en-IN')}</span>
                         </button>
                       ))}
                     </div>
@@ -992,7 +1101,7 @@ const loadJobs = async () => {
                             createPriority === p
                               ? p === 'URGENT' ? 'border-red-500 bg-red-50 text-red-700'
                                 : p === 'EXPRESS' ? 'border-amber-500 bg-amber-50 text-amber-700'
-                                  : 'border-bv-red-600 bg-bv-gold-900 text-bv-gold-300'
+                                  : 'border-bv-red-600 bg-bv-red-50 text-bv-red-700'
                               : 'border-gray-300 text-gray-600 bg-white')}>
                           {p}
                         </button>
@@ -1041,6 +1150,209 @@ const loadJobs = async () => {
 }
 
 export default WorkshopPage;
+
+
+// ============================================================================
+// QC checklist modal — power verification / fitting / cosmetic check + notes.
+// The backend /qc endpoint only stores `passed` + a free-text `notes`, so the
+// checklist outcome is folded into the notes string. "Pass" requires every
+// item ticked; "Fail" needs a reason.
+// ============================================================================
+
+const QC_CHECKLIST_ITEMS: Array<{ key: string; label: string; hint: string }> = [
+  { key: 'power', label: 'Power verification', hint: 'Lensmeter reading matches the prescription' },
+  { key: 'fitting', label: 'Fitting check', hint: 'Lenses seated, frame aligned, screws tight' },
+  { key: 'cosmetic', label: 'Cosmetic check', hint: 'No scratches, chips, coating defects or marks' },
+];
+
+// Phase 6.9: per-item structured check state: each item has a pass/fail + optional note.
+type CheckState = Record<string, { passed: boolean; note: string }>;
+
+function QcChecklistModal({
+  job,
+  busy,
+  onCancel,
+  onSubmit,
+}: {
+  job: Job;
+  busy: boolean;
+  onCancel: () => void;
+  // checklistItems carries the structured per-item results for /qc-checklist.
+  onSubmit: (
+    passed: boolean,
+    notes: string,
+    checklistItems: Array<{ key: string; label: string; passed: boolean; note?: string }>,
+  ) => void;
+}) {
+  const [checks, setChecks] = useState<CheckState>({});
+  const [overallNotes, setOverallNotes] = useState('');
+
+  const allChecked = QC_CHECKLIST_ITEMS.every((item) => checks[item.key]?.passed === true);
+  const anyFailed = QC_CHECKLIST_ITEMS.some((item) => checks[item.key]?.passed === false);
+  // A submit is enabled once every item has been explicitly set (pass or fail)
+  const allAnswered = QC_CHECKLIST_ITEMS.every((item) => checks[item.key] !== undefined);
+
+  const buildChecklistItems = () =>
+    QC_CHECKLIST_ITEMS.map((item) => ({
+      key: item.key,
+      label: item.label,
+      passed: checks[item.key]?.passed ?? false,
+      note: checks[item.key]?.note || undefined,
+    }));
+
+  const handlePassItem = (key: string, passed: boolean) => {
+    setChecks((prev) => ({
+      ...prev,
+      [key]: { passed, note: prev[key]?.note || '' },
+    }));
+  };
+
+  const handleItemNote = (key: string, note: string) => {
+    setChecks((prev) => ({
+      ...prev,
+      [key]: { passed: prev[key]?.passed ?? false, note },
+    }));
+  };
+
+  const handlePass = () => {
+    if (!allChecked || busy) return;
+    onSubmit(true, overallNotes, buildChecklistItems());
+  };
+
+  const handleFail = () => {
+    if (busy) return;
+    if (!overallNotes.trim()) return; // a failure must say why
+    onSubmit(false, overallNotes, buildChecklistItems());
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+      <div className="bg-white rounded-xl shadow-2xl w-full max-w-md max-h-[90vh] overflow-y-auto">
+        <div className="p-5 border-b border-gray-200 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <ClipboardCheck className="w-5 h-5 text-bv-red-600" />
+            <div>
+              <h3 className="font-semibold text-gray-900">Quality check</h3>
+              <p className="text-xs text-gray-500">Job {job.jobNumber || job.id}</p>
+            </div>
+          </div>
+          <button
+            onClick={onCancel}
+            className="p-1 hover:bg-gray-100 rounded text-gray-500 hover:text-gray-700"
+            aria-label="Close"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+
+        <div className="p-5 space-y-4">
+          {/* Per-item checklist — pass/fail toggle + optional note per item */}
+          <div className="space-y-3">
+            {QC_CHECKLIST_ITEMS.map((item) => {
+              const state = checks[item.key];
+              const isPassed = state?.passed === true;
+              const isFailed = state?.passed === false;
+              return (
+                <div
+                  key={item.key}
+                  className={`rounded-lg border p-3 ${
+                    isPassed
+                      ? 'border-green-200 bg-green-50/40'
+                      : isFailed
+                      ? 'border-red-200 bg-red-50/40'
+                      : 'border-gray-200'
+                  }`}
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="flex-1">
+                      <p className="text-sm font-medium text-gray-900">{item.label}</p>
+                      <p className="text-xs text-gray-500">{item.hint}</p>
+                    </div>
+                    <div className="flex gap-1 shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => handlePassItem(item.key, true)}
+                        className={`px-2.5 py-1 text-xs font-semibold rounded border transition-colors ${
+                          isPassed
+                            ? 'bg-green-600 text-white border-green-600'
+                            : 'bg-white text-green-700 border-green-300 hover:bg-green-50'
+                        }`}
+                      >
+                        Pass
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handlePassItem(item.key, false)}
+                        className={`px-2.5 py-1 text-xs font-semibold rounded border transition-colors ${
+                          isFailed
+                            ? 'bg-red-600 text-white border-red-600'
+                            : 'bg-white text-red-700 border-red-300 hover:bg-red-50'
+                        }`}
+                      >
+                        Fail
+                      </button>
+                    </div>
+                  </div>
+                  {isFailed && (
+                    <input
+                      type="text"
+                      value={state?.note || ''}
+                      onChange={(e) => handleItemNote(item.key, e.target.value)}
+                      placeholder="Describe the defect..."
+                      className="mt-2 w-full px-2 py-1.5 text-xs border border-red-200 rounded bg-white text-gray-900 placeholder-gray-400"
+                    />
+                  )}
+                </div>
+              );
+            })}
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              Overall notes
+              {anyFailed && <span className="text-red-500 ml-1">(required to fail QC)</span>}
+            </label>
+            <textarea
+              value={overallNotes}
+              onChange={(e) => setOverallNotes(e.target.value)}
+              rows={3}
+              placeholder="Rework instructions, defect summary, or any additional context..."
+              className="input-field text-sm w-full"
+            />
+          </div>
+
+          {!allAnswered && (
+            <p className="text-xs text-gray-400">
+              Mark every item pass or fail to submit.
+            </p>
+          )}
+          {allAnswered && !allChecked && (
+            <p className="text-xs text-orange-600">
+              One or more items failed. Add overall notes describing what needs rework, then click &quot;Fail QC&quot;.
+            </p>
+          )}
+        </div>
+
+        <div className="p-5 border-t border-gray-200 flex gap-2">
+          <button
+            onClick={handlePass}
+            disabled={!allChecked || busy}
+            className="btn-success text-sm flex-1 disabled:opacity-50"
+          >
+            {busy ? 'Saving…' : 'Pass — mark ready'}
+          </button>
+          <button
+            onClick={handleFail}
+            disabled={busy || !anyFailed || !overallNotes.trim()}
+            className="btn-outline text-sm flex-1 text-red-600 border-red-600 disabled:opacity-50"
+          >
+            Fail QC
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 
 // ============================================================================
@@ -1171,7 +1483,7 @@ function VendorCaptureBlock({ job, onSaved }: { job: Job; onSaved: () => void })
         )}
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-2 mb-2">
+      <div className="grid grid-cols-1 tablet:grid-cols-3 gap-2 mb-2">
         <div>
           <label className="block text-xs font-medium text-gray-500 mb-0.5">Lens lab</label>
           <select

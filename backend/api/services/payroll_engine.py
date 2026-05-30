@@ -138,15 +138,37 @@ def pt_for(
 
 
 def _earnings(config: dict) -> dict:
-    """Full (un-prorated) monthly earning components + gross."""
+    """Full (un-prorated) monthly earning components + gross.
+
+    Raises ValueError if any named earning component is negative -- negative
+    wages indicate bad data and must be caught at the source rather than
+    silently producing a negative gross/net ("Fail Loudly" rule from
+    SYSTEM_INTENT). Zero is allowed (e.g. zero-allowance structures).
+    """
     basic = float(config.get("basic", 0) or 0)
     hra = float(config.get("hra", 0) or 0)
     conveyance = float(config.get("conveyance", 0) or 0)
     medical = float(config.get("medical", 0) or 0)
     special = float(config.get("special_allowance", 0) or 0)
-    other = sum(
-        float(a.get("amount", 0) or 0) for a in (config.get("other_allowances") or [])
-    )
+    other_list = config.get("other_allowances") or []
+    other = sum(float(a.get("amount", 0) or 0) for a in other_list)
+
+    _components = {
+        "basic": basic,
+        "hra": hra,
+        "conveyance": conveyance,
+        "medical": medical,
+        "special_allowance": special,
+        "other_allowances": other,
+    }
+    for name, val in _components.items():
+        if val < 0:
+            raise ValueError(
+                "Negative earning component rejected: %s=%.2f for employee '%s'. "
+                "Fix the salary config before running payroll."
+                % (name, val, config.get("employee_id", "unknown"))
+            )
+
     return {
         "basic": basic,
         "hra": hra,

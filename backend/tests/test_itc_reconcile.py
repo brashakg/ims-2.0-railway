@@ -162,3 +162,56 @@ def test_reconcile_all_matched():
     assert s["itc_in_mismatch"] == 0.0
     assert s["itc_at_risk"] == 0.0
     assert s["total_book_itc"] == 100.0
+
+
+# ---------------------------------------------------------------------------
+# D-3 regression: odd-paise tax must not drift (cgst + sgst == tax exactly)
+# ---------------------------------------------------------------------------
+
+
+def test_cgst_sgst_exact_sum_odd_paise_tax_501():
+    """tax=5.01 (odd paise) -- pre-fix: 2.50+2.50=5.00 (drift -0.01).
+    Post-fix residual trick: half=2.50, sgst=5.01-2.50=2.51, sum=5.01 exact."""
+    bills = [{"bill_date": "2026-04-10", "taxable_amount": 100, "tax_amount": 5.01}]
+    reg = build_itc_register(bills)
+    period = reg["periods"][0]
+    assert period["cgst"] + period["sgst"] == 5.01, (
+        "cgst+sgst must equal tax exactly (no paisa drift)"
+    )
+    assert reg["total_cgst"] + reg["total_sgst"] == reg["total_itc"]
+
+
+def test_cgst_sgst_exact_sum_odd_paise_tax_101():
+    """tax=1.01 -- pre-fix: 0.51+0.51=1.02 (drift +0.01).
+    Post-fix: half=0.51, sgst=1.01-0.51=0.50, sum=1.01 exact."""
+    bills = [{"bill_date": "2026-04-10", "taxable_amount": 20, "tax_amount": 1.01}]
+    reg = build_itc_register(bills)
+    period = reg["periods"][0]
+    assert period["cgst"] + period["sgst"] == 1.01, (
+        "cgst+sgst must equal tax exactly (no paisa drift)"
+    )
+    assert reg["total_cgst"] + reg["total_sgst"] == reg["total_itc"]
+
+
+def test_cgst_sgst_exact_even_paise_unaffected():
+    """Even-paise tax (5.00) must still split exactly 2.50 + 2.50."""
+    bills = [{"bill_date": "2026-04-10", "taxable_amount": 100, "tax_amount": 5.00}]
+    reg = build_itc_register(bills)
+    period = reg["periods"][0]
+    assert period["cgst"] == 2.50
+    assert period["sgst"] == 2.50
+    assert period["cgst"] + period["sgst"] == 5.00
+
+
+def test_cgst_sgst_accumulation_no_drift_multi_bills():
+    """Multiple odd-paise bills -- accumulated cgst+sgst must equal total_itc."""
+    bills = [
+        {"bill_date": "2026-04-10", "taxable_amount": 100, "tax_amount": 5.01},
+        {"bill_date": "2026-04-15", "taxable_amount": 20, "tax_amount": 1.01},
+        {"bill_date": "2026-04-20", "taxable_amount": 50, "tax_amount": 2.55},
+    ]
+    reg = build_itc_register(bills)
+    # Total tax = 5.01 + 1.01 + 2.55 = 8.57
+    assert reg["total_itc"] == 8.57
+    # Accumulated cgst+sgst must equal total_itc exactly.
+    assert round(reg["total_cgst"] + reg["total_sgst"], 2) == reg["total_itc"]

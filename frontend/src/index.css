@@ -131,29 +131,15 @@
   --font-display: 'Inter', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
   --font-mono:    'JetBrains Mono', ui-monospace, Menlo, monospace;
 
-  /* ——— Legacy brand palette — now MAPPED to BV red (Phase 2.5) ———
-     The old bv-gold / bv-red scales (~63 call sites across 15 files) used to
-     render as warm gold. Gold was retired in Phase 0 design refresh. Instead
-     of touching every call site, we redirect the 50→950 scale to the new
-     BV red palette so any `bg-bv-gold-500`, `text-bv-red-600`, etc. renders
-     as BV red #CD201A ± shades. Design says BV red is a RARE accent; using
-     it here where legacy code signaled "brand" is the right mapping —
-     those locations were already semantically brand-level. Future re-skin
-     can selectively replace `bv-gold-500` → `ink` or `--bg-sunk` where
-     red intensity is too loud. */
-  --color-bv-gold-50:  #fbe8e6;
-  --color-bv-gold-100: #fad1cf;
-  --color-bv-gold-200: #f5a8a4;
-  --color-bv-gold-300: #eb7b75;
-  --color-bv-gold-400: #dd4c45;
-  --color-bv-gold-500: #CD201A;
-  --color-bv-gold-600: #B81A15;
-  --color-bv-gold-700: #9e1611;
-  --color-bv-gold-800: #7d110d;
-  --color-bv-gold-900: #5d0d0a;
-  --color-bv-gold-950: #3e0806;
-
-  /* bv-red alias — same palette as the gold scale now that gold is retired */
+  /* ——— Better Vision brand palette (BV red) ———
+     The legacy `bv-gold-*` scale was retired in the Phase 0 design refresh and
+     every call site has now been renamed to `bv-red-*` (palette unification
+     sweep). The old `--color-bv-gold-*` token block was a same-hex alias kept
+     only to keep stale `bv-gold-*` utilities rendering; with zero such call
+     sites left it has been removed. `bv-red` is the single source of truth.
+     Design says BV red is a RARE accent — these were already brand-level
+     locations. Future re-skin can selectively swap `bv-red-500` → `ink` or
+     `--bg-sunk` where the red intensity is too loud. */
   --color-bv-red-50:  #fbe8e6;
   --color-bv-red-100: #fad1cf;
   --color-bv-red-200: #f5a8a4;
@@ -1279,6 +1265,44 @@
 .section-head .line { flex: 1; height: 1px; background: var(--line); }
 .section-head .sub { font-size: 12px; color: var(--ink-4); }
 
+/* Hub — tablet + phone. The desktop layout is a 1.2fr/1fr hero with a 3-col
+   meta panel and a 12-col module grid (span-4 cards) at 48px padding — all of
+   which overflow / cram on a phone. Collapse progressively. */
+@media (max-width: 1024px) {
+  .hub-hero {
+    grid-template-columns: 1fr;
+    gap: 24px;
+    padding: 32px 24px 20px;
+  }
+  .hub-meta-grid {
+    border-left: 0;
+    padding-left: 0;
+    border-top: 1px solid var(--line);
+    padding-top: 24px;
+  }
+  .hub-h1 { font-size: 40px; }
+  .modules { padding: 24px; gap: 14px; }
+  .mod-card { grid-column: span 6; }       /* 2-up */
+  .mod-card.feature { grid-column: span 12; }
+}
+@media (max-width: 640px) {
+  .hub-bg { min-height: calc(100dvh - 52px); }
+  .hub-hero { padding: 24px 16px 16px; gap: 16px; }
+  .hub-h1 { font-size: clamp(28px, 8vw, 40px); }
+  .hub-sub { font-size: 13px; }
+  .hub-meta-grid { grid-template-columns: repeat(2, 1fr); gap: 16px; padding-top: 16px; }
+  .hub-meta-grid .v { font-size: 26px; }
+  .modules {
+    grid-template-columns: 1fr;            /* single column = no overflow */
+    padding: 16px;
+    gap: 12px;
+  }
+  .mod-card,
+  .mod-card.feature { grid-column: auto; min-height: 0; padding: 18px; }
+  .mod-title { font-size: 22px; }
+  .section-head { margin: 12px 0 0; }
+}
+
 /* ============================================================================
    Store Setup — 240px nav + content.
    Ported from docs/design/setup.html
@@ -2006,6 +2030,9 @@
   display: grid;
   grid-template-columns: 220px 1fr;
   height: calc(100vh - 52px);
+  /* dvh keeps the footer + last product row reachable under mobile browser
+     chrome (the old 100vh got clipped by the phone URL bar). */
+  height: calc(100dvh - 52px);
   min-height: 0;
   background: var(--bg);
 }
@@ -2033,19 +2060,54 @@
 }
 .steps-rail .eyebrow { margin-bottom: 14px; display: block; }
 @media (max-width: 768px) {
-  /* On mobile, stepper collapses to a compact horizontal scroller at top */
+  /* On mobile, stepper + actions collapse to one compact horizontal scroller */
   .steps-rail {
     flex-direction: row;
+    align-items: stretch;
     overflow-x: auto;
     overflow-y: hidden;
-    padding: 10px 12px;
+    -webkit-overflow-scrolling: touch;
+    padding: 8px 12px;
     border-right: 0;
     border-bottom: 1px solid var(--line);
     gap: 8px;
     min-height: 0;
     height: auto;
+    flex-shrink: 0;
   }
-  .steps-rail .eyebrow, .steps-rail .rail-actions, .steps-rail .held-list { display: none; }
+  /* Eyebrow + held-bill preview don't fit the strip; Recall (kept in
+     rail-actions below) still reaches held bills. */
+  .steps-rail .eyebrow,
+  .steps-rail .held-list { display: none; }
+  /* Compact step chips — number/icon + short title only; drop the sub-text and
+     the vertical connector (positioned for the desktop vertical stack). */
+  .steps-rail .step {
+    width: auto;
+    flex-direction: row;
+    align-items: center;
+    padding: 8px 12px;
+    gap: 8px;
+    white-space: nowrap;
+  }
+  .steps-rail .step .step-sub { display: none; }
+  .steps-rail .step + .step::before { display: none; }
+  /* Keep Hold / Recall / New / +walk-in / Walkout reachable on phones as a
+     horizontal button group instead of hiding the whole actions strip (the
+     old rule made these impossible to use on mobile). */
+  .steps-rail .rail-actions {
+    flex-direction: row;
+    align-items: center;
+    margin-top: 0;
+    padding-top: 0;
+    border-top: 0;
+    gap: 6px;
+    flex-shrink: 0;
+  }
+  .steps-rail .rail-actions .btn { width: auto; white-space: nowrap; }
+  .steps-rail .rail-actions .kbd-row { display: none; }
+  /* Tighter work-surface + footer gutters on a phone. */
+  .pos-work { padding: 16px 14px 110px; }
+  .pos-footer { padding: 10px 14px calc(10px + env(safe-area-inset-bottom, 0)); }
 }
 
 .step {
@@ -2234,7 +2296,7 @@
 
   /* Legacy focus override — overridden by :focus-visible above for new components */
   .legacy-focus *:focus-visible {
-    @apply outline-none ring-2 ring-bv-gold-500 ring-offset-2;
+    @apply outline-none ring-2 ring-bv-red-500 ring-offset-2;
   }
 }
 
@@ -2613,3 +2675,181 @@ main input[type="date"] { background-color: #fff; border-color: #d1d5db; color: 
   border: 1px solid var(--line, #e5e7eb);
   border-radius: 4px;
 }
+
+/* ============================================================================
+   Mobile shell — hamburger drawer (< 768px)
+   ============================================================================
+   On small screens:
+   1. The left rail column collapses to 0 (hidden).
+   2. A hamburger button in the Topbar opens a full-height left drawer overlay
+      re-using the existing Rail markup (rendered with mobileOpen=true).
+   3. A semi-transparent backdrop closes the drawer on tap.
+   4. Safe-area padding keeps content + POS action bars above notch/home bar.
+   ============================================================================ */
+
+/* ---- Hamburger button — visible on mobile only ---- */
+.topbar-hamburger {
+  display: none;               /* hidden on desktop */
+  align-items: center;
+  justify-content: center;
+  width: 40px; height: 40px;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  border-radius: 8px;
+  cursor: pointer;
+  flex-shrink: 0;
+  color: var(--ink-2, #555550);
+}
+.topbar-hamburger:hover { background: var(--bg-sunk, #f1f1ec); }
+.topbar-hamburger:focus-visible {
+  outline: 2px solid var(--bv, #b42318);
+  outline-offset: 2px;
+}
+.topbar-hamburger-icon {
+  display: flex; flex-direction: column; gap: 4px;
+}
+.topbar-hamburger-icon span {
+  display: block; width: 18px; height: 2px;
+  background: currentColor; border-radius: 2px;
+}
+
+/* ---- Topbar row: min-width clamp so children don't wrap ---- */
+.topbar {
+  min-width: 0;
+  /* Must stay overflow:visible: the store / role / notification dropdowns are
+     absolutely-positioned descendants that open BELOW the 52px bar, so any
+     overflow != visible here CLIPS them (the store switcher was invisible on
+     mobile). Horizontal bleed is prevented per-child instead (crumbs truncate,
+     store-pill is width-clamped). */
+  overflow: visible;
+}
+.crumbs { min-width: 0; }
+.crumbs .cur { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ---- Store pill: responsive truncation ---- */
+.store-pill {
+  max-width: 200px;       /* desktop cap */
+  min-width: 0;
+}
+.store-pill .store-pill-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+/* Mobile: hide the long name, show the code (e.g. BV-BOK-01) */
+.store-pill .store-pill-code { display: none; }
+
+/* ---- Backdrop ---- */
+.mobile-nav-backdrop {
+  display: none;           /* hidden on desktop */
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  z-index: 29;             /* just below the rail (z-index:20 + portal) */
+}
+
+/* ---- Safe-area bottom padding for main content + POS bars ---- */
+.page-body {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+/* POS sticky action bars (Continue / Pay / Complete) */
+.pos-action-bar {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+/* ====== MOBILE BREAKPOINT (< 768px) ====== */
+@media (max-width: 767px) {
+  /* 1. Collapse the left rail column from the grid */
+  .app-shell {
+    --rail-width: 0px;
+    grid-template-columns: 0 1fr;
+  }
+  .app-shell.rail-expanded { --rail-width: 0px; }
+
+  /* 2. Show hamburger, hide the desktop ⌘K label + KBD */
+  .topbar-hamburger { display: flex; }
+  .topbar .cmdk span:not([class]) { display: none; }  /* hide "Search or jump to…" text */
+  .topbar .cmdk .kbd { display: none; }               /* hide ⌘K badge */
+
+  /* 3. Show store code, hide full name on small screens */
+  .store-pill .store-pill-name { display: none; }
+  .store-pill .store-pill-code { display: inline; }
+
+  /* 4. Show backdrop when drawer is open */
+  .mobile-nav-backdrop { display: block; }
+
+  /* 5. Rail becomes a fixed left drawer overlay */
+  .rail {
+    position: fixed;
+    top: 0; left: 0;
+    width: 264px;
+    height: 100dvh;           /* 100dvh respects mobile browser chrome */
+    z-index: 30;
+    transform: translateX(-100%);
+    transition: transform .22s cubic-bezier(.4, 0, .2, 1);
+    overflow-y: auto;
+    box-shadow: none;
+  }
+
+  /* The rail-mobile-open class is set by Shell when navOpen=true */
+  .rail.rail-mobile-open {
+    transform: translateX(0);
+    box-shadow: 4px 0 24px rgba(0, 0, 0, 0.25);
+  }
+
+  /* 6. Topbar: ensure one-line layout */
+  .topbar {
+    gap: 6px;
+    padding: 0 8px;
+  }
+  .topbar .crumbs {
+    flex: 1;
+    overflow: hidden;
+  }
+
+  /* 7. Drawer scroll fix (verified headless @ 375x667): 25+ nav rows don't fit a
+     phone's height. As a fixed-height FLEX column the rows compressed and
+     OVERLAPPED (Chromium won't honor flex-shrink on the display:contents
+     .rail-group children, so the column couldn't grow + scroll). Switch the OPEN
+     drawer to a plain block scroll container: rows stack at natural height and
+     the drawer scrolls (scrollHeight 1059 vs 666 viewport, 0 overlapping rows). */
+  .rail.rail-mobile-open {
+    display: block;
+    overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
+    height: 100vh;            /* fallback for browsers without dvh */
+    height: 100dvh;
+  }
+  .rail.rail-mobile-open .rail-spacer { display: none; }
+  /* Items must render icon-BESIDE-label (row), not stacked. A base rule computes
+     flex-direction:column on the drawer rows, so the icon+label stacked and
+     overflowed the 38px row box, overlapping the next row (the real "broken
+     drawer"). Force row + center so each row is a clean 38px line. */
+  .rail.rail-mobile-open .rail-item {
+    flex-direction: row;
+    align-items: center;
+    justify-content: flex-start;
+    gap: 12px;
+    height: 38px;
+    padding: 0 14px;
+  }
+  .rail.rail-mobile-open .rail-item svg { flex-shrink: 0; }
+  .rail.rail-mobile-open .rail-label {
+    position: static;
+    opacity: 1;
+    transform: none;
+    background: transparent;
+    box-shadow: none;
+    padding: 0;
+    font-size: 14px;
+  }
+}
+
+/* ====== Very small phones (< 390px, e.g. 360×640) ====== */
+@media (max-width: 389px) {
+  .store-pill { max-width: 80px; }
+  .role-pill .k { display: none; }   /* hide "Role" label */
+}
+

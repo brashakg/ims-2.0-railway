@@ -16,6 +16,8 @@ import {
   FileText,
   Loader2,
   RefreshCw,
+  Settings,
+  CalendarSync,
 } from 'lucide-react';
 import { hrApi, storeApi } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
@@ -23,6 +25,8 @@ import { useToast } from '../../context/ToastContext';
 import clsx from 'clsx';
 import { MonthlyAttendanceGrid } from '../../components/hr/MonthlyAttendanceGrid';
 import { EmployeeSelfService } from '../../components/hr/EmployeeSelfService';
+import { ShiftSetup } from '../../components/hr/ShiftSetup';
+import { WeekOffSwap } from '../../components/hr/WeekOffSwap';
 
 type AttendanceStatus = 'PRESENT' | 'ABSENT' | 'HALF_DAY' | 'LEAVE' | 'LATE';
 type LeaveStatus = 'PENDING' | 'APPROVED' | 'REJECTED';
@@ -81,7 +85,9 @@ export function HRPage() {
   const [leaveRequests, setLeaveRequests] = useState<LeaveRequest[]>([]);
 
   // UI state
-  const [activeTab, setActiveTab] = useState<'attendance' | 'leave' | 'monthly_grid' | 'self_service'>('attendance');
+  const [activeTab, setActiveTab] = useState<
+    'attendance' | 'leave' | 'monthly_grid' | 'shifts' | 'weekoff_swaps' | 'self_service'
+  >('attendance');
 
   // Sync active tab from URL query params (e.g. /hr?tab=leave)
   useEffect(() => {
@@ -98,6 +104,8 @@ export function HRPage() {
 
   // Role-based permissions
   const canApproveLeave = hasRole(['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER']);
+  // Shift config is manager-tier (matches the backend require_roles gate).
+  const canConfigureShifts = hasRole(['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER']);
 
   // Load data on mount
   useEffect(() => {
@@ -356,6 +364,32 @@ export function HRPage() {
           Monthly View
         </button>
         <button
+          onClick={() => setActiveTab('weekoff_swaps')}
+          className={clsx(
+            'flex items-center gap-2 px-4 py-3 text-sm font-medium border-b-2 transition-colors',
+            activeTab === 'weekoff_swaps'
+              ? 'border-bv-red-600 text-bv-red-600'
+              : 'border-transparent text-gray-500 hover:text-gray-700'
+          )}
+        >
+          <CalendarSync className="w-4 h-4" />
+          Week-off Swaps
+        </button>
+        {canConfigureShifts && (
+          <button
+            onClick={() => setActiveTab('shifts')}
+            className={clsx(
+              'flex items-center gap-2 px-4 py-3 text-sm font-medium border-b-2 transition-colors',
+              activeTab === 'shifts'
+                ? 'border-bv-red-600 text-bv-red-600'
+                : 'border-transparent text-gray-500 hover:text-gray-700'
+            )}
+          >
+            <Settings className="w-4 h-4" />
+            Shifts
+          </button>
+        )}
+        <button
           onClick={() => setActiveTab('self_service')}
           className={clsx(
             'flex items-center gap-2 px-4 py-3 text-sm font-medium border-b-2 transition-colors',
@@ -524,10 +558,24 @@ export function HRPage() {
         </div>
       )}
 
-      {/* Monthly Attendance Grid Tab */}
+      {/* Monthly Attendance Grid Tab (late marks + LWP) */}
       {activeTab === 'monthly_grid' && (
         <div>
           <MonthlyAttendanceGrid />
+        </div>
+      )}
+
+      {/* Week-off Swap Tab */}
+      {activeTab === 'weekoff_swaps' && (
+        <div>
+          <WeekOffSwap />
+        </div>
+      )}
+
+      {/* Shift Setup Tab (manager-tier) */}
+      {activeTab === 'shifts' && canConfigureShifts && (
+        <div>
+          <ShiftSetup />
         </div>
       )}
 

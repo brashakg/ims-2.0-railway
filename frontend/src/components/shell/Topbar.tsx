@@ -19,6 +19,10 @@ export interface Crumb {
 interface TopbarProps {
   crumbs?: Crumb[];
   actions?: ReactNode;
+  /** Called when the mobile hamburger is tapped. */
+  onHamburgerClick?: () => void;
+  /** Whether the mobile nav drawer is open (controls aria-expanded). */
+  navOpen?: boolean;
 }
 
 function useClickOutside(ref: React.RefObject<HTMLElement | null>, onOutside: () => void) {
@@ -31,7 +35,7 @@ function useClickOutside(ref: React.RefObject<HTMLElement | null>, onOutside: ()
   }, [ref, onOutside]);
 }
 
-export function Topbar({ crumbs = [], actions }: TopbarProps) {
+export function Topbar({ crumbs = [], actions, onHamburgerClick, navOpen = false }: TopbarProps) {
   const navigate = useNavigate();
   const { user, setActiveRole, setActiveStore, hasRole } = useAuth();
   const [storeNames, setStoreNames] = useState<Record<string, string>>({});
@@ -88,6 +92,21 @@ export function Topbar({ crumbs = [], actions }: TopbarProps) {
 
   return (
     <header className="topbar no-print">
+      {/* Mobile-only hamburger — hidden on ≥768px via CSS */}
+      <button
+        type="button"
+        className="topbar-hamburger"
+        aria-label={navOpen ? 'Close navigation' : 'Open navigation'}
+        aria-expanded={navOpen}
+        aria-controls="rail-drawer"
+        onClick={onHamburgerClick}
+      >
+        {/* Three horizontal lines, no external deps */}
+        <span className="topbar-hamburger-icon">
+          <span /><span /><span />
+        </span>
+      </button>
+
       <nav className="crumbs" aria-label="Breadcrumb">
         {crumbs.map((c, i) => (
           <span key={i} style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
@@ -134,8 +153,10 @@ export function Topbar({ crumbs = [], actions }: TopbarProps) {
             aria-expanded={storeOpen}
           >
             <span className="dot" />
-            <span>{activeStoreName}</span>
-            {user?.activeStoreId && <span className="code">· {user.activeStoreId}</span>}
+            {/* On mobile (<sm) show just the store code to prevent wrapping;
+                on desktop show the full store name + code. */}
+            <span className="store-pill-name">{activeStoreName}</span>
+            <span className="store-pill-code">{user?.activeStoreId || ''}</span>
             <Icon.chevronDown width={12} height={12} />
           </button>
           {storeOpen && (
@@ -147,6 +168,9 @@ export function Topbar({ crumbs = [], actions }: TopbarProps) {
                 right: 0,
                 marginTop: 6,
                 width: 240,
+                maxWidth: 'calc(100vw - 16px)',
+                maxHeight: 'min(70vh, 360px)',
+                overflowY: 'auto',
                 background: 'var(--surface)',
                 border: '1px solid var(--line)',
                 borderRadius: 'var(--r-md)',
@@ -167,6 +191,7 @@ export function Topbar({ crumbs = [], actions }: TopbarProps) {
                     width: '100%',
                     textAlign: 'left',
                     padding: '8px 10px',
+                    minHeight: 40,
                     borderRadius: 6,
                     border: 0,
                     background: id === user?.activeStoreId ? 'var(--bv-50)' : 'transparent',
