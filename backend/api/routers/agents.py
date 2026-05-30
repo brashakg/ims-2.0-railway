@@ -812,14 +812,45 @@ async def get_agent_activity(
 
     events: List[Dict[str, Any]] = []
 
-    def _safe_find(coll_name: str, ts_field: str, match_extra: Dict = None):
-        """Find docs with ts >= since. Tolerates missing collection."""
+    def _recent_clause(ts_fields) -> Dict[str, Any]:
+        """Build an $or matching ts >= since across mixed persistence types.
+
+        Agents are inconsistent: some persist timestamps as ISO STRINGS
+        (oracle.detected_at, nexus.ran_at, pixel.ran_at, taskmaster.executed_at,
+        megaphone.queued_at/dispatched_at) and some as BSON DATETIME
+        (base.log_action -> agent_audit_log.timestamp, sentinel.health_checks
+        .timestamp). Mongo's BSON type-bracketing means a datetime $gte bound
+        never matches a string field and vice-versa, so we union both
+        representations across every candidate timestamp field. ISO strings the
+        agents write are tz-aware UTC (".../+00:00"), so they sort
+        lexicographically consistently with since_iso.
+        """
+        if isinstance(ts_fields, str):
+            ts_fields = [ts_fields]
+        clauses: List[Dict[str, Any]] = []
+        for f in ts_fields:
+            clauses.append({f: {"$gte": since}})       # BSON datetime rows
+            clauses.append({f: {"$gte": since_iso}})   # ISO string rows
+        return {"$or": clauses}
+
+    def _safe_find(coll_name: str, ts_field, match_extra: Dict = None,
+                   sort_field: str = None):
+        """Find docs with ts >= since. Tolerates missing collection.
+
+        `ts_field` may be a single field name or a list of candidate fields
+        (an agent that writes more than one timestamp shape). `sort_field`
+        defaults to the first candidate; the final feed is re-sorted in Python
+        by the coerced ISO timestamp anyway, so this only governs the per-
+        collection .limit() pre-cut.
+        """
+        fields = [ts_field] if isinstance(ts_field, str) else list(ts_field)
+        sort_on = sort_field or fields[0]
         try:
             coll = db.get_collection(coll_name)
-            q: Dict[str, Any] = {ts_field: {"$gte": since_iso}}
+            q: Dict[str, Any] = _recent_clause(fields)
             if match_extra:
-                q.update(match_extra)
-            return list(coll.find(q, {"_id": 0}).sort(ts_field, -1).limit(limit))
+                q = {"$and": [q, match_extra]}
+            return list(coll.find(q, {"_id": 0}).sort(sort_on, -1).limit(limit))
         except Exception as e:
             logger.debug(f"[ACTIVITY] {coll_name} read failed: {e}")
             return []
@@ -864,41 +895,58 @@ async def get_agent_activity(
             )
 
     # --- TASKMASTER audit log ---------------------------------------------
+    # agent_audit_log is written two ways: taskmaster._audit_log uses
+    # `executed_at` (ISO string) + target/safety_tier, while base.log_action
+    # (used by every agent, incl. taskmaster) uses `timestamp` (BSON datetime)
+    # + details. The old query only matched `executed_at`, so datetime
+    # `timestamp` rows were invisible. Match both fields and read whichever the
+    # row actually carries.
     if not agent_id or agent_id == "taskmaster":
         for t in _safe_find(
-            "agent_audit_log", "executed_at", match_extra={"agent_id": "taskmaster"}
+            "agent_audit_log",
+            ["executed_at", "timestamp"],
+            match_extra={"agent_id": "taskmaster"},
         ):
             action = t.get("action", "action")
             target = t.get("target", "")
             tier = t.get("safety_tier", "?")
+            ts = t.get("executed_at") or t.get("timestamp")
+            summary = (
+                f"{action} → {target} (tier {tier})"
+                if target
+                else f"{action} (tier {tier})"
+            )
             events.append(
                 {
                     "agent_id": "taskmaster",
                     "kind": "task_execution",
-                    "timestamp": _iso(t.get("executed_at")),
-                    "summary": f"{action} → {target} (tier {tier})"[:200],
+                    "timestamp": _iso(ts),
+                    "summary": summary[:200],
                     "details": t,
                 }
             )
 
-    # --- MEGAPHONE notifications (dispatched only, not queued) ------------
+    # --- MEGAPHONE notifications (queued + dispatched) -------------------
+    # Queued rows only carry `queued_at` + status PENDING (no dispatched_at).
+    # With DISPATCH_MODE defaulting to "off" nothing is ever dispatched, so the
+    # old `dispatched_at` + SENT/SIMULATED/FAILED filter hid all real activity.
+    # Match on agent_id only (always present) and order by whichever timestamp
+    # the row has - dispatched_at when sent, else queued_at.
     if not agent_id or agent_id == "megaphone":
         for n in _safe_find(
             "notification_logs",
-            "dispatched_at",
-            match_extra={
-                "agent_id": "megaphone",
-                "status": {"$in": ["SENT", "SIMULATED", "FAILED"]},
-            },
+            ["dispatched_at", "queued_at"],
+            match_extra={"agent_id": "megaphone"},
         ):
             kind = n.get("kind", "message")
             channel = n.get("channel", "?")
             status = n.get("status", "?")
+            ts = n.get("dispatched_at") or n.get("queued_at")
             events.append(
                 {
                     "agent_id": "megaphone",
                     "kind": "notification",
-                    "timestamp": _iso(n.get("dispatched_at")),
+                    "timestamp": _iso(ts),
                     "status": status.lower() if isinstance(status, str) else "ok",
                     "summary": f"{kind} via {channel}: {status}"[:200],
                     "details": n,

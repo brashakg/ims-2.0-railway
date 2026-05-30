@@ -13,6 +13,7 @@ import hashlib
 
 from .auth import get_current_user
 from ..dependencies import get_user_repository
+from ..services.role_caps import role_baseline_cap
 
 router = APIRouter()
 
@@ -31,7 +32,12 @@ class UserCreate(BaseModel):
     roles: List[str] = Field(default=["SALES_STAFF"])
     store_ids: List[str] = Field(default=[])
     primary_store_id: Optional[str] = None
-    discount_cap: float = Field(default=10.0, ge=0, le=100)
+    # Per-user discount OVERRIDE. None = use the role baseline (services/
+    # role_caps.py). A hardcoded default of 10 used to ELEVATE zero-privilege
+    # roles (an Accountant -> effective 10% via max(baseline, override)); leaving
+    # this None keeps every new user at their role-correct cap unless an admin
+    # deliberately grants more.
+    discount_cap: Optional[float] = Field(default=None, ge=0, le=100)
     # When True (admin created the account with a temporary password), the user
     # must change it on first login instead of it becoming the permanent one.
     must_change_password: bool = Field(default=False)
@@ -225,7 +231,14 @@ async def create_user(user: UserCreate, current_user: dict = Depends(require_adm
             "store_ids": user.store_ids,
             "primary_store_id": user.primary_store_id
             or (user.store_ids[0] if user.store_ids else None),
-            "discount_cap": user.discount_cap,
+            # Store a concrete, role-appropriate cap: an admin-supplied override
+            # wins; otherwise fall back to the role baseline (0 for non-discount
+            # roles) instead of a blanket 10.
+            "discount_cap": (
+                user.discount_cap
+                if user.discount_cap is not None
+                else role_baseline_cap(user.roles)
+            ),
             "is_active": True,
             "must_change_password": user.must_change_password,
             "created_by": current_user.get("user_id"),
