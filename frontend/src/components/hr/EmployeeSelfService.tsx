@@ -240,7 +240,7 @@ export function EmployeeSelfService() {
           Incentive (Month to Date)
         </h2>
         {incentive ? (
-          <div className="grid grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 tablet:grid-cols-3 gap-4">
             <div className="bg-white rounded-lg p-4 border border-gray-200">
               <p className="text-sm text-gray-500 mb-2">Avg Daily Score</p>
               <p className="text-3xl font-bold text-bv-red-600">{incentive.avgTotal}</p>

@@ -130,7 +130,7 @@ export function ShiftSetup() {
               onChange={(e) => setName(e.target.value)}
             />
           </div>
-          <div className="grid grid-cols-3 gap-3">
+          <div className="grid grid-cols-1 tablet:grid-cols-3 gap-3">
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">Start</label>
               <input

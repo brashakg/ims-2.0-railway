@@ -415,7 +415,7 @@ export function PromotionEngine() {
                 </div>
 
                 {/* Discount Value & Constraints */}
-                <div className="grid grid-cols-3 gap-3">
+                <div className="grid grid-cols-1 tablet:grid-cols-3 gap-3">
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-1">
                       {form.type === 'PERCENTAGE' ? 'Discount %' :
