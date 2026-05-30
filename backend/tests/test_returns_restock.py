@@ -261,9 +261,89 @@ class _FakeCustomerRepo:
         return True
 
 
+# Every order_item_id / product_id that the HTTP tests in this file return
+# against. The returns router now REQUIRES the return line to resolve to a real
+# original order line (over-refund guard), so each fake order is auto-seeded
+# with a generous line per identity (qty 100, returned_qty 0) unless the test
+# supplied its own items. Resolution prefers order_item_id, so product-id swaps
+# (PRD-NOPRIOR / PRD-FRESH-MINT keeping order_item_id=li1) still resolve.
+_DEFAULT_ORDER_ITEMS = [
+    {"item_id": "li1", "product_id": "PRD-1", "quantity": 100, "returned_qty": 0},
+    {"item_id": "li9", "product_id": "PRD-9", "quantity": 100, "returned_qty": 0},
+    {"item_id": "li10", "product_id": "PRD-10", "quantity": 100, "returned_qty": 0},
+]
+
+
+class _FakeOrdersColl:
+    """Fake `orders` collection that models just enough of Mongo's array-update
+    semantics for the returns atomic returnable-qty claim: a filter using
+    items.$elemMatch (identity + a returned_qty cap) plus a positional
+    items.$.returned_qty $inc on the matched element."""
+
+    def __init__(self, orders):
+        self.docs = [dict(o) for o in orders]
+
+    @staticmethod
+    def _elem_matches(elem, cond):
+        for key, c in cond.items():
+            if key == "$or":
+                if not any(_FakeOrdersColl._elem_matches(elem, sub) for sub in c):
+                    return False
+                continue
+            val = elem.get(key)
+            if isinstance(c, dict):
+                for op, operand in c.items():
+                    if op == "$lte" and not (val is not None and val <= operand):
+                        return False
+                    if op == "$lt" and not (val is not None and val < operand):
+                        return False
+                    if op == "$gte" and not (val is not None and val >= operand):
+                        return False
+                    if op == "$exists":
+                        present = key in elem
+                        if bool(operand) != present:
+                            return False
+            elif val != c:
+                return False
+        return True
+
+    def find_one(self, query=None, projection=None):
+        for d in self.docs:
+            if d.get("order_id") == (query or {}).get("order_id"):
+                out = dict(d)
+                out.pop("_id", None)
+                return out
+        return None
+
+    def find_one_and_update(self, query, update, return_document=None):
+        order_id = (query or {}).get("order_id")
+        elem_cond = ((query or {}).get("items") or {}).get("$elemMatch") or {}
+        inc = (update or {}).get("$inc", {}) or {}
+        for d in self.docs:
+            if d.get("order_id") != order_id:
+                continue
+            for line in d.get("items") or []:
+                if self._elem_matches(line, elem_cond):
+                    for field, delta in inc.items():
+                        # positional path "items.$.returned_qty"
+                        leaf = field.split(".")[-1]
+                        line[leaf] = (line.get(leaf) or 0) + delta
+                    out = dict(d)
+                    out.pop("_id", None)
+                    return out
+            return None  # order found but no element satisfied the guard
+        return None
+
+
 class _FakeOrderRepo:
     def __init__(self, order):
+        order = dict(order)
+        if "items" not in order:
+            order["items"] = [dict(li) for li in _DEFAULT_ORDER_ITEMS]
         self._order = order
+        # Expose a bound `orders` collection so the returns atomic claim runs
+        # against the SAME order doc the repo serves.
+        self.collection = _FakeOrdersColl([order])
 
     def find_by_id(self, oid):
         return self._order if self._order.get("order_id") == oid else None

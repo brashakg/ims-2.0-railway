@@ -212,6 +212,197 @@ def _order_line_index(order: Optional[Dict[str, Any]]) -> Dict[str, Dict[str, An
     return {"by_item": by_item, "by_product": by_product}
 
 
+def _line_purchased_qty(line: Dict[str, Any]) -> float:
+    """Purchased quantity on an original order line. Defensive -> 0 on bad input."""
+    try:
+        return float(line.get("quantity") or line.get("qty") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _resolve_original_line(
+    ret_line: ReturnLine, idx: Dict[str, Dict[str, Any]]
+) -> Optional[Dict[str, Any]]:
+    """Resolve the ORIGINAL order line a return line refers to.
+
+    Match order (most-specific first): by `order_item_id` against the order
+    line's `item_id`, else by `product_id`. Returns the matched original line
+    dict, or None when it cannot be resolved -- the caller rejects with 400 so
+    we never refund against a line that wasn't actually sold.
+    """
+    by_item = idx["by_item"]
+    by_product = idx["by_product"]
+    if ret_line.order_item_id and str(ret_line.order_item_id) in by_item:
+        return by_item[str(ret_line.order_item_id)]
+    if ret_line.product_id and str(ret_line.product_id) in by_product:
+        return by_product[str(ret_line.product_id)]
+    return None
+
+
+def _already_returned_qty(
+    order_id: Optional[str],
+    item_id: Optional[str],
+    product_id: Optional[str],
+) -> float:
+    """Sum the quantities ALREADY returned for one (order, line) across the
+    `returns` collection.
+
+    A line is identified by its original order `item_id` when known, otherwise
+    by `product_id`. We scan completed return docs for the same order and add up
+    the `return_qty` of every prior return line that targets the same line. This
+    is the human-facing cumulative cap (clear 400) and also works when the DB
+    has no atomic find_one_and_update. Fail-soft -> 0.0 when the returns
+    collection is unavailable (the atomic order-line claim is the second guard).
+    """
+    if not order_id:
+        return 0.0
+    coll = _returns_coll()
+    if coll is None:
+        return 0.0
+    total = 0.0
+    try:
+        for doc in coll.find({"order_id": order_id}, {"_id": 0}):
+            for prior in doc.get("items") or []:
+                if not isinstance(prior, dict):
+                    continue
+                # Prefer item-level identity; fall back to product identity so a
+                # legacy return recorded without order_item_id still counts.
+                p_item = prior.get("order_item_id")
+                p_prod = prior.get("product_id")
+                if item_id and p_item:
+                    same_line = str(p_item) == str(item_id)
+                elif product_id and p_prod:
+                    same_line = str(p_prod) == str(product_id)
+                else:
+                    same_line = False
+                if not same_line:
+                    continue
+                try:
+                    total += float(prior.get("return_qty") or 0)
+                except (TypeError, ValueError):
+                    continue
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[RETURNS] already-returned scan failed: %s", exc)
+        return 0.0
+    return round(total, 4)
+
+
+def _orders_coll():
+    """Raw `orders` collection for the atomic per-line returnable-qty claim.
+
+    Prefers the order repository's bound collection (so tests that patch the
+    repo share the same fake), falling back to the DB handle. None when neither
+    is available -> the caller relies on the pre-validation scan only.
+    """
+    repo = get_order_repository()
+    coll = getattr(repo, "collection", None) if repo is not None else None
+    if coll is not None:
+        return coll
+    db = _get_db()
+    if db is None:
+        return None
+    try:
+        return db.get_collection("orders")
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _claim_returnable_qty(
+    order_id: Optional[str],
+    orig_line: Dict[str, Any],
+    return_qty: float,
+) -> bool:
+    """Atomically reserve `return_qty` units against an order line's remaining
+    returnable quantity -- the same guard-in-the-filter pattern as the voucher
+    redeem.
+
+    The filter matches the order doc only when the targeted array element still
+    has enough un-returned units left: returned_qty(default 0) <= purchased -
+    return_qty. The SAME write increments that element's `returned_qty` by
+    `return_qty` via the positional `$`. Two concurrent returns of the same last
+    unit cannot both match the filter, so neither can drive returned_qty past
+    purchased -> no repeatable / double refund.
+
+    Identity uses the line's `item_id` when present (exact element), else
+    `product_id` (first line for that product). `$elemMatch` keeps the filter
+    predicate and the positional `$inc` on the SAME element.
+
+    Returns True when the claim succeeded, False on no-match (already returned /
+    over-cap / concurrent loser). Fail-soft: returns True when no orders
+    collection is available, or the driver lacks find_one_and_update, so the
+    pre-validation scan stays the guard rather than blocking a valid return.
+    """
+    if not order_id or return_qty <= 0:
+        return True
+    coll = _orders_coll()
+    if coll is None:
+        return True
+    if not hasattr(coll, "find_one_and_update"):
+        return True
+
+    item_id = orig_line.get("item_id") or orig_line.get("id")
+    product_id = orig_line.get("product_id")
+    purchased = _line_purchased_qty(orig_line)
+    # Remaining-returnable cap: an element is claimable only if the units already
+    # returned leave room for this return_qty.
+    cap = round(purchased - return_qty, 4)
+
+    if item_id:
+        elem: Dict[str, Any] = {"item_id": item_id}
+    else:
+        elem = {"product_id": product_id}
+    # returned_qty may be absent on legacy lines; treat missing as 0 by matching
+    # either "<= cap" or "field absent" (only valid when cap >= 0).
+    if cap >= 0:
+        elem["$or"] = [
+            {"returned_qty": {"$lte": cap}},
+            {"returned_qty": {"$exists": False}},
+            {"returned_qty": None},
+        ]
+    else:
+        # cap < 0 means even a single unit over-returns -> never claimable.
+        elem["returned_qty"] = {"$lt": -1}  # impossible: forces no-match
+
+    match = {"order_id": order_id, "items": {"$elemMatch": elem}}
+    update = {"$inc": {"items.$.returned_qty": return_qty}}
+    try:
+        updated = coll.find_one_and_update(
+            match, update, return_document=ReturnDocument.AFTER
+        )
+    except Exception as exc:  # noqa: BLE001
+        # Driver lacks positional update / find_one_and_update filter support ->
+        # fall back to the pre-validation scan rather than block the return.
+        logger.warning("[RETURNS] returnable-qty claim errored: %s", exc)
+        return True
+    return updated is not None
+
+
+def _release_returnable_qty(
+    order_id: Optional[str],
+    orig_line: Dict[str, Any],
+    return_qty: float,
+) -> None:
+    """Undo a successful _claim_returnable_qty (decrement the element's
+    returned_qty) when a later step of the SAME request fails and we must not
+    leave a phantom reservation. Best-effort + fail-soft -> never raises."""
+    if not order_id or return_qty <= 0:
+        return
+    coll = _orders_coll()
+    if coll is None or not hasattr(coll, "find_one_and_update"):
+        return
+    item_id = orig_line.get("item_id") or orig_line.get("id")
+    product_id = orig_line.get("product_id")
+    elem: Dict[str, Any] = {"item_id": item_id} if item_id else {"product_id": product_id}
+    try:
+        coll.find_one_and_update(
+            {"order_id": order_id, "items": {"$elemMatch": elem}},
+            {"$inc": {"items.$.returned_qty": -return_qty}},
+            return_document=ReturnDocument.AFTER,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[RETURNS] returnable-qty release failed: %s", exc)
+
+
 def _billed_unit_gross(line: Dict[str, Any]) -> Optional[float]:
     """Per-unit GST-INCLUSIVE gross a customer was actually billed for a line.
 
@@ -692,6 +883,64 @@ async def create_return(
 
     order = _resolve_order(body)
 
+    # 0. QUANTITY INTEGRITY (the over-refund guard). A return must trace to a
+    #    real original sale line, and the returned qty can never exceed what is
+    #    still returnable (purchased - already_returned). This blocks both the
+    #    "return_qty 100 on a qty-1 line" over-refund AND the "submit the same
+    #    return 3x" repeat over-refund. Applies to RETURN / CREDIT_NOTE /
+    #    EXCHANGE alike. Two layers, mirroring the voucher redeem:
+    #      (a) a pre-validation scan over prior `returns` -> clear 400 with the
+    #          cumulative cap, and the only guard in DB-less / no-atomic mode;
+    #      (b) an atomic find_one_and_update claim on the order line's remaining
+    #          returnable qty -> closes the concurrent double-submit race.
+    #    We must resolve the order to do (a)+(b); an unresolvable order or line
+    #    is a hard 400 -- we never blind-refund.
+    if order is None:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Original order could not be resolved -- a return must reference "
+                "the order it is against (order_id or order_number)."
+            ),
+        )
+
+    line_idx = _order_line_index(order)
+    resolved_order_id = body.order_id or order.get("order_id")
+
+    # Resolve every line + validate the cumulative cap BEFORE touching money or
+    # claiming anything, so a bad line rejects with nothing reserved. Resolution
+    # is stashed for the atomic claim that runs only AFTER every 400/422 input
+    # check passes (so a validation error never leaves a phantom reservation).
+    resolved_lines: List[Dict[str, Any]] = []
+    for ret_line in active_lines:
+        orig_line = _resolve_original_line(ret_line, line_idx)
+        if orig_line is None:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Return line does not match any line on the original order "
+                    f"(order_item_id={ret_line.order_item_id!r}, "
+                    f"product_id={ret_line.product_id!r}). Cannot refund an "
+                    "item that was not on this sale."
+                ),
+            )
+        purchased = _line_purchased_qty(orig_line)
+        item_id = orig_line.get("item_id") or orig_line.get("id")
+        product_id = orig_line.get("product_id")
+        already = _already_returned_qty(resolved_order_id, item_id, product_id)
+        remaining = round(purchased - already, 4)
+        if ret_line.return_qty > remaining + 1e-9:
+            name = ret_line.product_name or orig_line.get("product_name") or product_id
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Return quantity {ret_line.return_qty:g} exceeds the "
+                    f"returnable quantity {remaining:g} for '{name}' "
+                    f"(purchased {purchased:g}, already returned {already:g})."
+                ),
+            )
+        resolved_lines.append({"ret_line": ret_line, "orig_line": orig_line})
+
     # 1. Money math (pure engine; validates negatives). returned_value is the
     #    GST-INCLUSIVE gross the customer paid: the original order line's
     #    `gst_rate` is recovered (see _priced_return_lines) and the NET
@@ -742,6 +991,49 @@ async def create_return(
     credit_entry: Optional[Dict[str, Any]] = None
     replacement_dump = [r.model_dump() for r in body.replacement_items]
 
+    # For an EXCHANGE, compute (and validate) the settlement up front so its 400
+    # fires BEFORE we reserve any returnable qty -- a validation error must never
+    # leave a phantom reservation on the order line.
+    if body.return_type == "EXCHANGE":
+        try:
+            settlement = engine.exchange_settlement(ret_value, replacement_dump)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+    # 2b. ATOMIC QUANTITY CLAIM (the concurrency belt-and-suspenders, mirroring
+    #     the voucher redeem guard). All 400/422 input validation has now passed,
+    #     so this is the LAST thing that can fail before side effects. Each line
+    #     reserves its returnable qty atomically; if any claim loses the race to
+    #     a concurrent double-submit we release the ones already taken and reject
+    #     (all-or-nothing) so a partial reservation never lingers, and so we
+    #     never issue store credit / persist a return that lost the race.
+    claimed: List[Dict[str, Any]] = []
+    for rl in resolved_lines:
+        ok = _claim_returnable_qty(
+            resolved_order_id, rl["orig_line"], float(rl["ret_line"].return_qty)
+        )
+        if not ok:
+            for done in claimed:
+                _release_returnable_qty(
+                    resolved_order_id,
+                    done["orig_line"],
+                    float(done["ret_line"].return_qty),
+                )
+            name = (
+                rl["ret_line"].product_name
+                or rl["orig_line"].get("product_name")
+                or rl["orig_line"].get("product_id")
+            )
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Return for '{name}' could not be reserved -- it was just "
+                    "returned by another transaction. Re-check the returnable "
+                    "quantity and retry."
+                ),
+            )
+        claimed.append(rl)
+
     if body.return_type == "RETURN":
         # Net of any restocking fee = the cash actually given back.
         refund_amount = net_amount
@@ -760,12 +1052,8 @@ async def create_return(
             restocking_fee=restocking_fee,
         )
 
-    else:  # EXCHANGE
+    else:  # EXCHANGE (settlement already computed + validated above)
         refund_method = body.refund_method or _order_payment_method(order)
-        try:
-            settlement = engine.exchange_settlement(ret_value, replacement_dump)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc))
         if settlement["direction"] == engine.COLLECT:
             collect_amount = settlement["difference"]
         elif settlement["direction"] == engine.REFUND:
@@ -780,7 +1068,7 @@ async def create_return(
             )
 
     # 3. Restock resellable (GOOD) units back into serialized stock (fail-soft).
-    resolved_order_id = body.order_id or (order or {}).get("order_id")
+    #    (resolved_order_id already computed during the quantity-integrity guard.)
     restock_result: Dict[str, Any] = {
         "restocked": [],
         "restock_stock_ids": [],
