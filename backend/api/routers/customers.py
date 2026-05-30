@@ -5,7 +5,7 @@ Customer and patient management endpoints
 """
 
 from fastapi import APIRouter, HTTPException, Depends, Query, Path, Body
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from typing import Any, Dict, List, Optional
 from datetime import date, datetime
 import uuid
@@ -41,9 +41,9 @@ _GSTIN_RE = re.compile(
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 # Allowed customer types.
-# NOTE: mobile leading-digit restriction (e.g. must start with 6-9 for Indian
-# numbers) is deferred -- policy call for the user.
-# NOTE: requiring GSTIN for B2B customers is deferred -- policy call for the user.
+# India-specific customer-create rules (enabled per product decision):
+#  - mobile must be a valid Indian mobile: 10 digits with a leading 6-9
+#  - a B2B customer must carry a valid GSTIN (Indian B2B invoicing requires it)
 _VALID_CUSTOMER_TYPES = {"B2C", "B2B"}
 
 
@@ -81,7 +81,7 @@ class PatientCreate(BaseModel):
 class CustomerCreate(BaseModel):
     customer_type: str = "B2C"  # B2C, B2B
     name: str = Field(..., min_length=2)
-    mobile: str = Field(..., pattern=r"^\d{10}$")
+    mobile: str = Field(..., pattern=r"^[6-9]\d{9}$")
     email: Optional[str] = None
     dob: Optional[date] = None
     anniversary: Optional[date] = None
@@ -111,10 +111,11 @@ class CustomerCreate(BaseModel):
     @field_validator("gstin", mode="after")
     @classmethod
     def validate_gstin(cls, v):
-        """Validate 15-char Indian GSTIN format when a non-empty value is supplied.
+        """Validate 15-char Indian GSTIN FORMAT when a non-empty value is supplied.
 
-        Absent (None) or blank GSTIN is accepted -- GSTIN is optional for all
-        customer types; requiring it for B2B is a policy call deferred to the user.
+        Absent/blank is accepted at this (format-only) layer; B2C may omit GSTIN
+        entirely. PRESENCE of a GSTIN for B2B customers is enforced separately by
+        the b2b_requires_gstin model validator.
         """
         if v and not _GSTIN_RE.match(v):
             raise ValueError(
@@ -142,6 +143,15 @@ class CustomerCreate(BaseModel):
         if v is not None and v > date.today():
             raise ValueError("Date of birth cannot be in the future")
         return v
+
+    @model_validator(mode="after")
+    def b2b_requires_gstin(self):
+        """A B2B customer must carry a GSTIN -- Indian B2B invoicing requires it.
+        Format is already checked by validate_gstin; this enforces PRESENCE for
+        B2B (B2C remains free to omit it)."""
+        if self.customer_type == "B2B" and not (self.gstin and self.gstin.strip()):
+            raise ValueError("A B2B customer requires a valid GSTIN")
+        return self
 
 
 class CustomerUpdate(BaseModel):

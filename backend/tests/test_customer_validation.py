@@ -86,7 +86,13 @@ class TestCustomerTypeValidation:
         assert c.customer_type == "B2C"
 
     def test_b2b_accepted(self):
-        c = CustomerCreate(name="Test User", mobile="9876543210", customer_type="B2B")
+        # B2B now requires a GSTIN, so supply one to isolate the type check.
+        c = CustomerCreate(
+            name="Test User",
+            mobile="9876543210",
+            customer_type="B2B",
+            gstin="27AAPFU0939F1ZV",
+        )
         assert c.customer_type == "B2B"
 
     def test_default_is_b2c(self):
@@ -152,11 +158,20 @@ class TestGSTINValidation:
         with pytest.raises(ValidationError):
             CustomerCreate(name="Test", mobile="9876543210", gstin=bad)
 
-    def test_b2b_without_gstin_accepted(self):
-        # GSTIN is NOT required for B2B -- that is a policy call deferred to the user.
+    def test_b2b_without_gstin_rejected(self):
+        # A B2B customer must carry a GSTIN (Indian B2B invoicing requires it).
+        with pytest.raises(ValidationError):
+            CustomerCreate(name="ABC Corp", mobile="9876543210", customer_type="B2B")
+
+    def test_b2b_with_gstin_accepted(self):
         c = CustomerCreate(
-            name="ABC Corp", mobile="9876543210", customer_type="B2B"
+            name="ABC Corp", mobile="9876543210", customer_type="B2B", gstin=self._VALID
         )
+        assert c.gstin == self._VALID and c.customer_type == "B2B"
+
+    def test_b2c_without_gstin_still_fine(self):
+        # B2C never requires a GSTIN.
+        c = CustomerCreate(name="Walk In", mobile="9876543210", customer_type="B2C")
         assert c.gstin is None
 
     def test_another_valid_gstin(self):
@@ -279,3 +294,24 @@ class TestFutureDOBRejected:
                 mobile="9876543210",
                 patients=[PatientCreate(name="Baby", dob=self._TOMORROW)],
             )
+
+
+# ---------------------------------------------------------------------------
+# Indian mobile format (leading 6-9, 10 digits) -- B-6 policy
+# ---------------------------------------------------------------------------
+
+
+class TestMobileValidation:
+    def test_valid_indian_mobiles_accepted(self):
+        for m in ("9876543210", "6000000000", "7123456789", "8999999999"):
+            assert CustomerCreate(name="Test", mobile=m).mobile == m
+
+    def test_leading_0_to_5_rejected(self):
+        for m in ("0123456789", "1234567890", "5234567890"):
+            with pytest.raises(ValidationError):
+                CustomerCreate(name="Test", mobile=m)
+
+    def test_wrong_length_or_nonnumeric_rejected(self):
+        for m in ("98765", "98765432101", "9876abc210"):
+            with pytest.raises(ValidationError):
+                CustomerCreate(name="Test", mobile=m)
