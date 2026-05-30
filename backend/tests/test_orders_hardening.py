@@ -1001,3 +1001,120 @@ def test_c6_invoice_endpoint_includes_gst_split(
     # Per-rate rows present (5% + 18%).
     rates = sorted(r["rate"] for r in body["taxSummary"])
     assert rates == [5.0, 18.0]
+
+
+# ============================================================================
+# D-1 / D-2 -- POS discount caps via canonical pricing_caps (not the old wrong
+# local table). The local CATEGORY_DISCOUNT_CAPS under-capped PREMIUM(5 vs 20)/
+# MASS(10 vs 15)/LUXURY(2 vs 5) and applied NO luxury brand cap, blocking legit
+# discounts (SYSTEM_INTENT s3). create_order (D-1) + add-to-draft (D-2) now both
+# call pricing_caps.effective_discount_cap(discount_category, brand).
+# ============================================================================
+
+
+def _role_headers(role, cap):
+    from api.routers.auth import create_access_token
+
+    tok = create_access_token(
+        {
+            "user_id": "cap-" + role.lower(),
+            "username": "captest",
+            "roles": [role],
+            "store_ids": ["BV-TEST-01"],
+            "active_store_id": "BV-TEST-01",
+            "discount_cap": cap,
+        }
+    )
+    return {"Authorization": "Bearer " + tok}
+
+
+def _seed_capped_product(hardening_orders, monkeypatch, pid, discount_category=None, brand=None, price=2000.0):
+    from api.routers import orders as orders_module
+    from database.repositories.product_repository import ProductRepository
+
+    repo = ProductRepository(hardening_orders["db"].get_collection("products"))
+    repo.create(
+        {
+            "product_id": pid,
+            "name": "Cap Test",
+            "item_type": "FRAME",
+            "category": "FRAME",
+            "discount_category": discount_category,
+            "brand": brand,
+            "offer_price": price,
+            "mrp": price,
+            "gst_rate": 5.0,
+            "is_active": True,
+        }
+    )
+    monkeypatch.setattr(orders_module, "get_product_repository", lambda: repo)
+    return pid
+
+
+def _capped_item(pid, price, pct):
+    return {
+        "product_id": pid,
+        "product_name": "Cap Test",
+        "item_type": "FRAME",
+        "category": "FRAME",
+        "quantity": 1,
+        "unit_price": price,
+        "discount_percent": pct,
+    }
+
+
+def test_d1_premium_18pct_now_allowed(client, hardening_orders, monkeypatch):
+    # PREMIUM canonical cap = 20%, StoreMgr role cap = 20%. 18% was WRONGLY
+    # blocked at the old table's 5%; now allowed.
+    pid = _seed_capped_product(hardening_orders, monkeypatch, "PROD-PREM-1", discount_category="PREMIUM")
+    r = _post_order(client, _role_headers("STORE_MANAGER", 20.0), [_capped_item(pid, 2000.0, 18.0)])
+    assert r.status_code in (200, 201), r.text
+
+
+def test_d1_premium_over_cap_blocked(client, hardening_orders, monkeypatch):
+    pid = _seed_capped_product(hardening_orders, monkeypatch, "PROD-PREM-2", discount_category="PREMIUM")
+    r = _post_order(client, _role_headers("STORE_MANAGER", 20.0), [_capped_item(pid, 2000.0, 22.0)])
+    assert r.status_code == 403 and "exceeds" in r.text.lower(), r.text
+
+
+def test_d1_luxury_cap_5pct(client, hardening_orders, monkeypatch):
+    pid = _seed_capped_product(hardening_orders, monkeypatch, "PROD-LUX-1", discount_category="LUXURY", price=5000.0)
+    ok = _post_order(client, _role_headers("STORE_MANAGER", 20.0), [_capped_item(pid, 5000.0, 4.0)])
+    assert ok.status_code in (200, 201), ok.text
+    bad = _post_order(client, _role_headers("STORE_MANAGER", 20.0), [_capped_item(pid, 5000.0, 6.0)])
+    assert bad.status_code == 403, bad.text
+
+
+def test_d1_luxury_brand_cap_dominates(client, hardening_orders, monkeypatch):
+    # Cartier brand cap = 2%, even on a MASS discount_category + 10% role cap.
+    pid = _seed_capped_product(hardening_orders, monkeypatch, "PROD-CART-1", discount_category="MASS", brand="Cartier", price=3000.0)
+    bad = _post_order(client, _role_headers("SALES_STAFF", 10.0), [_capped_item(pid, 3000.0, 3.0)])
+    assert bad.status_code == 403, bad.text
+    ok = _post_order(client, _role_headers("SALES_STAFF", 10.0), [_capped_item(pid, 3000.0, 1.0)])
+    assert ok.status_code in (200, 201), ok.text
+
+
+def test_d1_missing_discount_category_defaults_mass_15(client, hardening_orders, monkeypatch):
+    # No discount_category (only item-type category=FRAME). Old code keyed the
+    # table on "FRAME" -> 10% default -> 14% blocked. Canonical defaults MASS 15%
+    # -> StoreMgr min(20,15)=15% -> 14% allowed.
+    pid = _seed_capped_product(hardening_orders, monkeypatch, "PROD-NOCAT-1", discount_category=None)
+    r = _post_order(client, _role_headers("STORE_MANAGER", 20.0), [_capped_item(pid, 2000.0, 14.0)])
+    assert r.status_code in (200, 201), r.text
+
+
+def test_d2_add_to_draft_applies_brand_cap(client, hardening_orders, monkeypatch):
+    # D-2: add-item-to-draft now composes category/brand caps (was role-cap only).
+    pid = _seed_capped_product(hardening_orders, monkeypatch, "PROD-CART-2", discount_category="MASS", brand="Cartier", price=3000.0)
+    hdr = _role_headers("SALES_STAFF", 10.0)
+    created = _post_order(
+        client, hdr,
+        [{"product_id": "custom-x", "item_type": "FRAME", "category": "FRAME", "quantity": 1, "unit_price": 100.0}],
+    )
+    assert created.status_code in (200, 201), created.text
+    body = created.json()
+    oid = body.get("order_id") or body.get("id")
+    assert oid, body
+    add = client.post("/api/v1/orders/" + str(oid) + "/items", json=_capped_item(pid, 3000.0, 5.0), headers=hdr)
+    # 5% > Cartier 2% brand cap -> blocked (previously allowed under the 10% role cap)
+    assert add.status_code == 403 and "exceeds" in add.text.lower(), add.text

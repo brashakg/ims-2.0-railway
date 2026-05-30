@@ -27,13 +27,11 @@ from ..dependencies import (
     validate_store_access,
 )
 
-# Discount cap by product discount_category (mirrors billing.py caps)
-CATEGORY_DISCOUNT_CAPS = {
-    "LUXURY": 2.0,
-    "PREMIUM": 5.0,
-    "MASS": 10.0,
-    "NON_DISCOUNTABLE": 0.0,
-}
+# Discount caps (category + luxury brand) come from the canonical
+# api.services.pricing_caps -- NEVER re-implement them here. The old local
+# table under-capped PREMIUM (5% vs 20%) / MASS (10% vs 15%) / LUXURY (2% vs 5%)
+# and applied no luxury BRAND cap at all, contradicting SYSTEM_INTENT 3 and
+# blocking legitimate discounts at POS.
 
 # Roles permitted to create / modify POS orders. Excludes ACCOUNTANT,
 # CATALOG_MANAGER, OPTOMETRIST, WORKSHOP_STAFF (out of POS scope) and INVESTOR
@@ -1096,13 +1094,20 @@ async def create_order(
                     ):
                         product = pr.find_by_id(item.product_id)
                         if product:
-                            cat = (
-                                product.get("discount_category")
-                                or product.get("category")
-                                or "MASS"
+                            # Canonical category + luxury-brand cap (SYSTEM_INTENT
+                            # discount matrix). Pass the real discount_category
+                            # (NOT product `category`, which is an item-type, not a
+                            # discount tier); pricing_caps defaults unknown/missing
+                            # to MASS and applies the lower luxury brand cap.
+                            from api.services.pricing_caps import (
+                                effective_discount_cap as product_discount_cap,
                             )
-                            category_cap = CATEGORY_DISCOUNT_CAPS.get(cat, 10.0)
-                            effective_cap = min(user_discount_cap, category_cap)
+
+                            cat_brand_cap = product_discount_cap(
+                                product.get("discount_category"),
+                                product.get("brand"),
+                            )
+                            effective_cap = min(user_discount_cap, cat_brand_cap)
                 except Exception:
                     pass  # fall back to user cap only
 
@@ -1721,16 +1726,41 @@ async def add_order_item(
                 status_code=400, detail="Can only add items to DRAFT orders"
             )
 
-        # Enforce the role discount cap on items added to a DRAFT order — this
-        # path was unchecked, a cap bypass parallel to create_order's per-item gate.
+        # Enforce role + category + luxury-brand discount cap on items added to a
+        # DRAFT order. This path previously checked ONLY the role cap (a bypass of
+        # the category/brand caps); now consistent with create_order's per-item gate.
         from api.services.role_caps import effective_discount_cap
 
-        _cap = effective_discount_cap(
+        _role_cap = effective_discount_cap(
             current_user.get("roles", []), current_user.get("discount_cap")
         )
         _is_admin = any(
             r in current_user.get("roles", []) for r in ("SUPERADMIN", "ADMIN")
         )
+        _cap = _role_cap
+        if not _is_admin and item.discount_percent > 0:
+            try:
+                pr = get_product_repository()
+                if (
+                    pr is not None
+                    and item.product_id
+                    and not item.product_id.startswith(("custom-", "lens-", "lens-sug-"))
+                ):
+                    product = pr.find_by_id(item.product_id)
+                    if product:
+                        from api.services.pricing_caps import (
+                            effective_discount_cap as product_discount_cap,
+                        )
+
+                        _cap = min(
+                            _role_cap,
+                            product_discount_cap(
+                                product.get("discount_category"),
+                                product.get("brand"),
+                            ),
+                        )
+            except Exception:
+                pass  # fall back to role cap only
         if not _is_admin and item.discount_percent > _cap:
             raise HTTPException(
                 status_code=403,
