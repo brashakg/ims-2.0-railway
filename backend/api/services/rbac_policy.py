@@ -1,6 +1,6 @@
 """
-IMS 2.0 - Central RBAC Policy Registry (FOUNDATION / non-enforcing)
-===================================================================
+IMS 2.0 - Central RBAC Policy Registry (request-time enforced)
+==============================================================
 
 A single declarative table of every API endpoint and the role set that may
 reach it, derived from the CURRENT enforcement in the routers (hardening dim 4).
@@ -20,11 +20,16 @@ Access control today is spread across four mechanisms:
   4. Implicit (no role check) - ``Depends(get_current_user)`` only.
 
 That scattering makes it hard to answer "who can call X?" and easy to ship a
-new endpoint with the wrong gate. This module is the FOUNDATION for collapsing
-all four into one enforcer. It is intentionally NON-ENFORCING right now: nothing
-imports ``check_access`` into request handling yet. The registry mirrors the
-*current* behavior EXACTLY so that, when wired in later, it can become the single
-source of truth with zero behavior change.
+new endpoint with the wrong gate. This module collapses all four into one
+enforcer. ``check_access`` is now consumed at request time by the middleware in
+``api/middleware/rbac_enforcement.py`` as a SECOND, defense-in-depth layer that
+sits ON TOP of the per-route gates (which remain in place). The registry mirrors
+the route gates EXACTLY, so the enforcer is behavior-preserving: no endpoint's
+effective access changes. The middleware fails OPEN on un-catalogued routes and
+PASSES THROUGH on missing/invalid tokens (so the route's own ``get_current_user``
+returns the canonical 401); only an authenticated caller who genuinely lacks the
+role is 403'd one layer earlier. The coverage-lock test
+(``tests/test_rbac_policy.py``) guarantees the table stays complete.
 
 HOW THE TABLE WAS BUILT
 -----------------------
@@ -56,8 +61,8 @@ SUPERADMIN, ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT, CATALOG_MANAGER,
 OPTOMETRIST, SALES_CASHIER, SALES_STAFF, CASHIER, WORKSHOP_STAFF, plus the
 read-only INVESTOR role.
 
-CAVEATS (read before wiring this in as the enforcer)
-----------------------------------------------------
+CAVEATS (the request-time enforcer relies on these holding true)
+----------------------------------------------------------------
   * INVESTOR write-block is a MIDDLEWARE in ``api/main.py``
     (``block_investor_writes``): an INVESTOR-only user is 403'd on every
     non-safe method app-wide, regardless of this table. INVESTOR is therefore
@@ -131,7 +136,7 @@ POLICY: List[Dict[str, object]] = [
     {"method": 'GET', "path": '/api/v1/admin/discounts/rules', "allowed": ['ADMIN', 'SUPERADMIN']},
     {"method": 'GET', "path": '/api/v1/admin/discounts/tier-discounts', "allowed": ['ADMIN', 'SUPERADMIN']},
     {"method": 'POST', "path": '/api/v1/admin/discounts/tier-discounts', "allowed": ['ADMIN', 'SUPERADMIN']},
-    {"method": 'GET', "path": '/api/v1/admin/escalations', "allowed": 'AUTHENTICATED'},
+    {"method": 'GET', "path": '/api/v1/admin/escalations', "allowed": ['ADMIN']},
     {"method": 'GET', "path": '/api/v1/admin/hsn', "allowed": ['ADMIN', 'SUPERADMIN']},
     {"method": 'POST', "path": '/api/v1/admin/hsn', "allowed": ['ADMIN', 'SUPERADMIN']},
     {"method": 'DELETE', "path": '/api/v1/admin/hsn/{hsn_id}', "allowed": ['ADMIN', 'SUPERADMIN']},
@@ -192,7 +197,7 @@ POLICY: List[Dict[str, object]] = [
     {"method": 'POST', "path": '/api/v1/admin/products/generate-sku', "allowed": ['ADMIN', 'SUPERADMIN']},
     {"method": 'GET', "path": '/api/v1/admin/products/{product_id}', "allowed": ['ADMIN', 'SUPERADMIN']},
     {"method": 'POST', "path": '/api/v1/admin/seed-database', "allowed": 'PUBLIC'},
-    {"method": 'GET', "path": '/api/v1/admin/system-health', "allowed": 'AUTHENTICATED'},
+    {"method": 'GET', "path": '/api/v1/admin/system-health', "allowed": ['ADMIN']},
     {"method": 'GET', "path": '/api/v1/admin/system/audit-logs', "allowed": ['ADMIN', 'SUPERADMIN']},
     {"method": 'GET', "path": '/api/v1/admin/system/backups', "allowed": ['ADMIN', 'SUPERADMIN']},
     {"method": 'POST', "path": '/api/v1/admin/system/backups', "allowed": ['ADMIN', 'SUPERADMIN']},
@@ -312,11 +317,11 @@ POLICY: List[Dict[str, object]] = [
     {"method": 'GET', "path": '/api/v1/customers/search/phone', "allowed": 'AUTHENTICATED'},
     {"method": 'GET', "path": '/api/v1/customers/{customer_id}', "allowed": 'AUTHENTICATED'},
     {"method": 'PUT', "path": '/api/v1/customers/{customer_id}', "allowed": 'AUTHENTICATED'},
-    {"method": 'POST', "path": '/api/v1/customers/{customer_id}/loyalty/add', "allowed": 'AUTHENTICATED'},
+    {"method": 'POST', "path": '/api/v1/customers/{customer_id}/loyalty/add', "allowed": ['ACCOUNTANT', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER']},
     {"method": 'GET', "path": '/api/v1/customers/{customer_id}/orders', "allowed": 'AUTHENTICATED'},
     {"method": 'POST', "path": '/api/v1/customers/{customer_id}/patients', "allowed": 'AUTHENTICATED'},
     {"method": 'GET', "path": '/api/v1/customers/{customer_id}/prescriptions', "allowed": 'AUTHENTICATED'},
-    {"method": 'POST', "path": '/api/v1/customers/{customer_id}/store-credit/add', "allowed": 'AUTHENTICATED'},
+    {"method": 'POST', "path": '/api/v1/customers/{customer_id}/store-credit/add', "allowed": ['ACCOUNTANT', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER']},
     {"method": 'POST', "path": '/api/v1/customers/{customer_id}/store-credit/issue', "allowed": ['ACCOUNTANT', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER']},
     {"method": 'GET', "path": '/api/v1/customers/{customer_id}/store-credit/ledger', "allowed": 'AUTHENTICATED'},
     {"method": 'POST', "path": '/api/v1/customers/{customer_id}/store-credit/redeem', "allowed": ['ACCOUNTANT', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER']},
@@ -576,7 +581,7 @@ POLICY: List[Dict[str, object]] = [
     {"method": 'PUT', "path": '/api/v1/loyalty/settings', "allowed": ['SUPERADMIN']},
     # --- /api/v1/marketing ---
     {"method": 'GET', "path": '/api/v1/marketing/notifications/logs', "allowed": 'AUTHENTICATED'},
-    {"method": 'POST', "path": '/api/v1/marketing/notifications/send', "allowed": 'AUTHENTICATED'},
+    {"method": 'POST', "path": '/api/v1/marketing/notifications/send', "allowed": ['ADMIN', 'AREA_MANAGER', 'STORE_MANAGER']},
     {"method": 'POST', "path": '/api/v1/marketing/notifications/send-bulk', "allowed": ['ADMIN', 'AREA_MANAGER', 'STORE_MANAGER']},
     {"method": 'GET', "path": '/api/v1/marketing/nps-dashboard', "allowed": 'AUTHENTICATED'},
     {"method": 'POST', "path": '/api/v1/marketing/nps-response', "allowed": 'AUTHENTICATED'},
@@ -661,9 +666,9 @@ POLICY: List[Dict[str, object]] = [
     {"method": 'GET', "path": '/api/v1/portal/track/{token}', "allowed": 'PUBLIC'},
     # --- /api/v1/prescriptions ---
     {"method": 'GET', "path": '/api/v1/prescriptions', "allowed": 'AUTHENTICATED'},
-    {"method": 'POST', "path": '/api/v1/prescriptions', "allowed": ['ADMIN', 'OPTOMETRIST', 'STORE_MANAGER', 'SUPERADMIN']},
+    {"method": 'POST', "path": '/api/v1/prescriptions', "allowed": ['ADMIN', 'OPTOMETRIST', 'STORE_MANAGER', 'SUPERADMIN'], "self_enforced": True},
     {"method": 'GET', "path": '/api/v1/prescriptions/', "allowed": 'AUTHENTICATED'},
-    {"method": 'POST', "path": '/api/v1/prescriptions/', "allowed": ['ADMIN', 'OPTOMETRIST', 'STORE_MANAGER', 'SUPERADMIN']},
+    {"method": 'POST', "path": '/api/v1/prescriptions/', "allowed": ['ADMIN', 'OPTOMETRIST', 'STORE_MANAGER', 'SUPERADMIN'], "self_enforced": True},
     {"method": 'GET', "path": '/api/v1/prescriptions/customer/{customer_id}/progression', "allowed": 'AUTHENTICATED'},
     {"method": 'GET', "path": '/api/v1/prescriptions/expiring', "allowed": 'AUTHENTICATED'},
     {"method": 'GET', "path": '/api/v1/prescriptions/optometrist/{optometrist_id}/stats', "allowed": 'AUTHENTICATED'},
@@ -810,8 +815,8 @@ POLICY: List[Dict[str, object]] = [
     {"method": 'DELETE', "path": '/api/v1/stores/{store_id}', "allowed": ['ADMIN', 'SUPERADMIN']},
     {"method": 'GET', "path": '/api/v1/stores/{store_id}', "allowed": 'AUTHENTICATED', "store_scoped": True},
     {"method": 'PUT', "path": '/api/v1/stores/{store_id}', "allowed": ['ADMIN', 'SUPERADMIN']},
-    {"method": 'DELETE', "path": '/api/v1/stores/{store_id}/categories/{category}', "allowed": 'AUTHENTICATED'},
-    {"method": 'POST', "path": '/api/v1/stores/{store_id}/categories/{category}', "allowed": 'AUTHENTICATED'},
+    {"method": 'DELETE', "path": '/api/v1/stores/{store_id}/categories/{category}', "allowed": ['ADMIN']},
+    {"method": 'POST', "path": '/api/v1/stores/{store_id}/categories/{category}', "allowed": ['ADMIN']},
     {"method": 'GET', "path": '/api/v1/stores/{store_id}/stats', "allowed": 'AUTHENTICATED', "store_scoped": True},
     {"method": 'GET', "path": '/api/v1/stores/{store_id}/users', "allowed": 'AUTHENTICATED', "store_scoped": True},
     # --- /api/v1/tasks ---
@@ -953,7 +958,13 @@ POLICY: List[Dict[str, object]] = [
     {"method": 'GET', "path": '/api/v1/walkouts/walkins/today', "allowed": 'AUTHENTICATED'},
     {"method": 'DELETE', "path": '/api/v1/walkouts/{walkout_id}', "allowed": 'AUTHENTICATED'},
     {"method": 'GET', "path": '/api/v1/walkouts/{walkout_id}', "allowed": 'AUTHENTICATED'},
-    {"method": 'PATCH', "path": '/api/v1/walkouts/{walkout_id}', "allowed": ['ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'SUPERADMIN']},
+    # Edit is OWNERSHIP-gated in-handler (_check_edit_permission): SUPERADMIN/
+    # ADMIN any row, STORE/AREA manager their store, and SALES_STAFF/SALES_CASHIER/
+    # CASHIER their OWN rows. That is a data-conditional gate the role table can't
+    # express (like store_scoped), so the role-class is AUTHENTICATED -- a static
+    # role list here would be STRICTER than the real route (it 403'd sales staff
+    # editing their own walkout, which the handler actually allows).
+    {"method": 'PATCH', "path": '/api/v1/walkouts/{walkout_id}', "allowed": 'AUTHENTICATED'},
     {"method": 'POST', "path": '/api/v1/walkouts/{walkout_id}/followups', "allowed": 'AUTHENTICATED'},
     {"method": 'PATCH', "path": '/api/v1/walkouts/{walkout_id}/followups/{round_num}', "allowed": 'AUTHENTICATED'},
     {"method": 'POST', "path": '/api/v1/walkouts/{walkout_id}/followups/{round_num}/approve', "allowed": ['ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'SUPERADMIN']},
@@ -998,6 +1009,37 @@ POLICY: List[Dict[str, object]] = [
     {"method": 'GET', "path": '/api/v1/budgets/variance', "allowed": ['ACCOUNTANT', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER'], "store_scoped": True},
     {"method": 'DELETE', "path": '/api/v1/budgets/{budget_id}', "allowed": ['ACCOUNTANT', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER'], "store_scoped": True},
 ]
+
+
+# ---------------------------------------------------------------------------
+# self_enforced - rows whose route DELIBERATELY denies with a non-generic
+# response the enforcer must NOT override.
+# ---------------------------------------------------------------------------
+# Most role-gated routes reject a wrong role with a plain 403, which the
+# request-time enforcer can mirror byte-for-behaviour. A few routes reject
+# differently and that difference is INTENTIONAL + relied upon:
+#
+#   * /api/v1/jarvis/** and /api/v1/admin/techcherry/** reject non-SUPERADMIN
+#     with a 404 ("Not found") to HIDE the endpoint's existence (a deliberate
+#     security feature; their tests assert 404, not 403). A generic 403 here
+#     would both break those tests AND leak that the path is a real route.
+#   * POST /api/v1/prescriptions[/] rejects non-clinical roles with a 403 whose
+#     BODY ("...does not have clinical access") is asserted by callers/tests.
+#
+# For these, the enforcer does the role check but, on DENY, DEFERS to the route
+# (lets the request through) so the route's own gate returns its canonical
+# response. ``allowed`` is unchanged (the role-class is still correct + the
+# coverage-lock / jarvis-superadmin tests still pass); only the *rejection
+# delivery* is left to the route. ``self_enforced`` is auto-applied by prefix
+# below for the 404-hiding families; prescription rows carry it inline.
+for _entry in POLICY:
+    _p = str(_entry["path"])
+    if (
+        _p == "/api/v1/jarvis"
+        or _p.startswith("/api/v1/jarvis/")
+        or _p.startswith("/api/v1/admin/techcherry/")
+    ):
+        _entry.setdefault("self_enforced", True)
 
 
 # ---------------------------------------------------------------------------
@@ -1061,6 +1103,16 @@ def is_store_scoped(method: str, path: str) -> bool:
     caller's store(s) via validate_store_access."""
     entry = policy_for(method, path)
     return bool(entry and entry.get("store_scoped"))
+
+
+def is_self_enforced(method: str, path: str) -> bool:
+    """Whether the matched endpoint rejects with a non-generic response the
+    request-time enforcer must NOT override (404 existence-hiding, or a
+    body-specific 403). On a role denial the enforcer DEFERS to the route for
+    these so its canonical response is preserved. See the ``self_enforced``
+    section above for the rationale + which families carry it."""
+    entry = policy_for(method, path)
+    return bool(entry and entry.get("self_enforced"))
 
 
 def check_access(method: str, path: str, user_roles) -> bool:
