@@ -4,8 +4,10 @@ IMS 2.0 - Vendors Router
 Real database queries for vendor and purchase order management
 """
 
+import re
+
 from fastapi import APIRouter, HTTPException, Depends, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 from typing import List, Optional
 from datetime import datetime
 import uuid
@@ -57,18 +59,40 @@ def _get_db():
 # ============================================================================
 
 
+# Indian GSTIN format: 2-digit state code + 10-char PAN + 1 entity + Z + 1 check
+_GSTIN_RE = re.compile(r"^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][0-9A-Z]Z[0-9A-Z]$")
+
+
 class VendorCreate(BaseModel):
     legal_name: str
     trade_name: str
     vendor_type: str = "INDIAN"
     gstin_status: str
+    # GSTIN must match the 15-character Indian format when the vendor is
+    # REGISTERED. An UNREGISTERED / COMPOSITION / OVERSEAS vendor may omit it.
     gstin: Optional[str] = None
     address: str
     city: str
     state: str
     mobile: str
     email: Optional[str] = None
-    credit_days: int = 30
+    # Credit terms must be non-negative. 0 = COD (immediate payment), which is
+    # legitimate; negative days would produce a due date BEFORE the bill date
+    # and poison the AP aging calculation.
+    credit_days: int = Field(30, ge=0)
+
+    @field_validator("gstin", mode="before")
+    @classmethod
+    def _validate_gstin(cls, v):
+        if v is None or v == "":
+            return None
+        cleaned = v.strip().upper()
+        if not _GSTIN_RE.match(cleaned):
+            raise ValueError(
+                "GSTIN must be 15 characters in the format "
+                "NN-AAAAA-9999A-9Z9 (e.g. 27ABCDE1234F1Z5)"
+            )
+        return cleaned
 
 
 class VendorUpdate(BaseModel):
@@ -79,7 +103,8 @@ class VendorUpdate(BaseModel):
     state: Optional[str] = None
     mobile: Optional[str] = None
     email: Optional[str] = None
-    credit_days: Optional[int] = None
+    # credit_days must be non-negative on update too.
+    credit_days: Optional[int] = Field(default=None, ge=0)
     is_active: Optional[bool] = None
 
 
@@ -97,7 +122,10 @@ class POItemCreate(BaseModel):
 class POCreate(BaseModel):
     vendor_id: str
     delivery_store_id: str
-    items: List[POItemCreate]
+    # An empty items list would store a PO with subtotal=0/tax=0/total=0 --
+    # a corrupt record that passes all downstream checks but means nothing.
+    # Enforce at least one line item.
+    items: List[POItemCreate] = Field(..., min_length=1)
     expected_date: Optional[str] = None
     notes: Optional[str] = None
 
@@ -116,12 +144,42 @@ class GRNItemCreate(BaseModel):
     # to "DEFAULT" on the stock unit). Lets the receiver bin goods at post time.
     location_code: Optional[str] = None
 
+    @model_validator(mode="after")
+    def _validate_qty_coherence(self):
+        """Cross-field quantity guard.
+
+        Two physical invariants that Pydantic field bounds alone cannot enforce:
+
+        1. accepted_qty <= received_qty -- you cannot accept more units than
+           arrived. An accepted_qty > received_qty would produce a positive
+           stock write larger than the physical receipt and corrupt inventory.
+
+        2. accepted_qty + rejected_qty == received_qty -- every received unit
+           must be either accepted (added to stock) or rejected (returned /
+           debit-noted). A mismatch silently discards or double-counts units.
+        """
+        rec = self.received_qty
+        acc = self.accepted_qty
+        rej = self.rejected_qty
+        if acc > rec:
+            raise ValueError(
+                f"accepted_qty ({acc}) cannot exceed received_qty ({rec})"
+            )
+        if acc + rej != rec:
+            raise ValueError(
+                f"accepted_qty ({acc}) + rejected_qty ({rej}) must equal "
+                f"received_qty ({rec})"
+            )
+        return self
+
 
 class GRNCreate(BaseModel):
     po_id: str
     vendor_invoice_no: str
     vendor_invoice_date: str
-    items: List[GRNItemCreate]
+    # A GRN with zero items is meaningless and would mark a PO as having
+    # been received without actually recording any goods.
+    items: List[GRNItemCreate] = Field(..., min_length=1)
     notes: Optional[str] = None
 
 
@@ -632,8 +690,24 @@ async def cancel_po(
         if not po:
             raise HTTPException(status_code=404, detail="Purchase order not found")
 
-        if po.get("status") in ["RECEIVED", "CANCELLED"]:
-            raise HTTPException(status_code=400, detail="Cannot cancel this PO")
+        # A PARTIALLY_RECEIVED PO has stock already in the warehouse. Cancelling
+        # it would orphan those stock units (no live PO to trace back to) and
+        # leave the GRN with a reference to a cancelled order. Block it -- the
+        # operator must raise a debit note for the unreceived portion instead.
+        if po.get("status") in [
+            "RECEIVED",
+            "CANCELLED",
+            "PARTIALLY_RECEIVED",
+            "PARTIAL",
+        ]:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Cannot cancel this PO. A fully or partially received PO "
+                    "cannot be cancelled because stock has already been posted "
+                    "against it. Raise a debit note for any unreceived portion."
+                ),
+            )
 
         po_repo.update(
             po_id,
@@ -1318,6 +1392,29 @@ async def create_vendor_bill(
             status_code=400,
             detail="taxable_amount + tax_amount must equal total_amount",
         )
+
+    # Duplicate bill guard: the same vendor invoice number must not be recorded
+    # twice for the same vendor. A double-entry would double the outstanding
+    # payable and produce a duplicate payment row in the ledger.
+    db_early = _get_db()
+    if db_early is not None:
+        try:
+            dup = db_early.get_collection("vendor_bills").find_one(
+                {"vendor_id": vendor_id, "bill_number": bill.bill_number},
+                {"_id": 0, "bill_id": 1},
+            )
+            if dup:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"Bill number '{bill.bill_number}' is already recorded "
+                        f"for this vendor. Duplicate vendor invoices are not allowed."
+                    ),
+                )
+        except HTTPException:
+            raise
+        except Exception:
+            pass  # fail-soft: skip dup check on DB error, proceed with insert
 
     credit_days = int((vendor or {}).get("credit_days", 30) or 30)
     due_date = ap_engine.compute_due_date(bill.bill_date, credit_days)
